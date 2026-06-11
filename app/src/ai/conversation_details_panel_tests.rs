@@ -58,7 +58,7 @@ fn create_test_task(task_id: &str) -> AmbientAgentTask {
 fn test_from_conversation_prefers_server_creator_profile() {
     App::test((), |mut app| async move {
         app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
-        app.add_singleton_model(|_| AgentConversationsModel::new_for_test());
+        app.add_singleton_model(AgentConversationsModel::new);
         let conversation_id = AIConversationId::new();
         let mut conversation = create_restored_conversation(
             conversation_id,
@@ -219,7 +219,7 @@ fn test_from_task_includes_linked_directory_when_run_id_matches() {
     App::test((), |mut app| async move {
         let history_model =
             app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
-        app.add_singleton_model(|_| AgentConversationsModel::new_for_test());
+        app.add_singleton_model(AgentConversationsModel::new);
 
         let conversation_id = AIConversationId::new();
         let task_id = "550e8400-e29b-41d4-a716-000000004000";
@@ -302,7 +302,7 @@ fn test_from_task_resolves_harness() {
     App::test((), |mut app| async move {
         let _history_model =
             app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
-        app.add_singleton_model(|_| AgentConversationsModel::new_for_test());
+        app.add_singleton_model(AgentConversationsModel::new);
 
         // Base task has `agent_config_snapshot: None`; cloning lets us mutate per case.
         let base_task = create_test_task("550e8400-e29b-41d4-a716-000000004020");
@@ -342,8 +342,7 @@ fn test_from_task_aggregates_child_run_artifacts() {
     App::test((), |mut app| async move {
         let _history_model =
             app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
-        let conversations_model =
-            app.add_singleton_model(|_| AgentConversationsModel::new_for_test());
+        let conversations_model = app.add_singleton_model(AgentConversationsModel::new);
 
         let pr_artifact = |url: &str| Artifact::PullRequest {
             url: url.to_string(),
@@ -378,7 +377,7 @@ fn test_from_task_populates_executor() {
     App::test((), |mut app| async move {
         let _history_model =
             app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
-        app.add_singleton_model(|_| AgentConversationsModel::new_for_test());
+        app.add_singleton_model(AgentConversationsModel::new);
         let mut task = create_test_task("550e8400-e29b-41d4-a716-000000004030");
         task.executor = Some(TaskPrincipalInfo {
             creator_type: "service_account".to_string(),
@@ -406,7 +405,7 @@ fn test_from_conversation_populates_local_conversation_fields() {
     App::test((), |mut app| async move {
         let history_model =
             app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
-        app.add_singleton_model(|_| AgentConversationsModel::new_for_test());
+        app.add_singleton_model(AgentConversationsModel::new);
 
         let conversation_id = AIConversationId::new();
         let directory = "/tmp/local-conversation-directory";
@@ -480,7 +479,7 @@ fn test_oz_run_url_present_for_task_and_absent_for_conversation() {
     App::test((), |mut app| async move {
         let _history_model =
             app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
-        app.add_singleton_model(|_| AgentConversationsModel::new_for_test());
+        app.add_singleton_model(AgentConversationsModel::new);
         let task_id = "550e8400-e29b-41d4-a716-000000004050";
         let task = create_test_task(task_id);
 
@@ -520,7 +519,7 @@ fn test_from_task_includes_linked_directory_when_server_token_matches() {
     App::test((), |mut app| async move {
         let history_model =
             app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
-        app.add_singleton_model(|_| AgentConversationsModel::new_for_test());
+        app.add_singleton_model(AgentConversationsModel::new);
 
         let conversation_id = AIConversationId::new();
         let server_token = "server-token-123";
@@ -573,7 +572,7 @@ fn test_from_task_includes_linked_directory_when_server_token_matches() {
 fn test_from_task_carries_the_runner_the_run_named() {
     App::test((), |mut app| async move {
         app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
-        app.add_singleton_model(|_| AgentConversationsModel::new_for_test());
+        app.add_singleton_model(AgentConversationsModel::new);
 
         let mut task = create_test_task("550e8400-e29b-41d4-a716-000000005001");
         task.agent_config_snapshot = Some(AgentConfigSnapshot {
@@ -599,7 +598,7 @@ fn test_from_task_carries_the_runner_the_run_named() {
 fn test_from_task_leaves_the_runner_absent_when_the_run_names_none() {
     App::test((), |mut app| async move {
         app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
-        app.add_singleton_model(|_| AgentConversationsModel::new_for_test());
+        app.add_singleton_model(AgentConversationsModel::new);
 
         let mut task = create_test_task("550e8400-e29b-41d4-a716-000000005002");
         task.agent_config_snapshot = Some(AgentConfigSnapshot {
@@ -626,7 +625,7 @@ fn test_from_task_leaves_the_runner_absent_when_the_run_names_none() {
 fn test_conversation_mode_carries_no_runner() {
     App::test((), |mut app| async move {
         app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
-        app.add_singleton_model(|_| AgentConversationsModel::new_for_test());
+        app.add_singleton_model(AgentConversationsModel::new);
         let conversation_id = AIConversationId::new();
         let conversation = create_restored_conversation(
             conversation_id,
