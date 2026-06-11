@@ -21,7 +21,8 @@ use crate::ai::ambient_agents::{
 use crate::ai::artifacts::{Artifact, merge_artifacts};
 use crate::ai::blocklist::history_model::{AIConversationMetadata, BlocklistAIHistoryModel};
 use crate::ai::blocklist::orchestration_topology::{
-    aggregated_conversation_artifacts, orchestration_aware_conversation_status,
+    aggregated_conversation_artifacts, conversation_subtree_artifact_lists,
+    orchestration_aware_conversation_status,
 };
 use crate::ai::conversation_navigation::ConversationNavigationData;
 use crate::auth::{AuthStateProvider, UserUid};
@@ -418,14 +419,14 @@ fn conversation_request_usage(
         })
 }
 
-/// Artifact lists for a run and its transitive child runs, reading only
-/// in-memory task data. Child runs that aren't loaded contribute nothing.
-fn run_subtree_artifact_lists(
-    root: &AmbientAgentTask,
-    tasks: &HashMap<AmbientAgentTaskId, AmbientAgentTask>,
-) -> Vec<Vec<Artifact>> {
+/// Borrowed artifact slices for a run and its transitive child runs, reading
+/// only in-memory task data. Child runs that aren't loaded contribute nothing.
+fn run_subtree_artifact_lists<'a>(
+    root: &'a AmbientAgentTask,
+    tasks: &'a HashMap<AmbientAgentTaskId, AmbientAgentTask>,
+) -> Vec<&'a [Artifact]> {
     let mut visited = HashSet::from([root.task_id]);
-    let mut lists = vec![root.artifacts.clone()];
+    let mut lists: Vec<&[Artifact]> = vec![&root.artifacts];
     let mut queue: VecDeque<&String> = root.children.iter().collect();
     while let Some(run_id) = queue.pop_front() {
         let Ok(task_id) = run_id.parse::<AmbientAgentTaskId>() else {
@@ -437,7 +438,7 @@ fn run_subtree_artifact_lists(
         let Some(task) = tasks.get(&task_id) else {
             continue;
         };
-        lists.push(task.artifacts.clone());
+        lists.push(&task.artifacts);
         queue.extend(task.children.iter());
     }
     lists
@@ -454,7 +455,7 @@ pub(super) fn aggregated_run_artifacts(
 ) -> Vec<Artifact> {
     let mut lists = run_subtree_artifact_lists(task, tasks);
     if let Some(conversation_id) = local_conversation_id {
-        lists.push(aggregated_conversation_artifacts(
+        lists.extend(conversation_subtree_artifact_lists(
             history_model,
             tasks,
             conversation_id,
