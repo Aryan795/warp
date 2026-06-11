@@ -95,7 +95,7 @@ fn pr_artifact(url: &str) -> Artifact {
 }
 
 #[test]
-fn aggregated_conversation_artifacts_merges_subtree_and_dedupes() {
+fn aggregated_subtree_artifacts_merges_conversation_subtree_and_dedupes() {
     App::test((), |mut app| async move {
         initialize_history_persistence_for_tests(&mut app);
         let history_model = app.add_singleton_model(|_| BlocklistAIHistoryModel::new_for_test());
@@ -124,12 +124,20 @@ fn aggregated_conversation_artifacts_merges_subtree_and_dedupes() {
         history_model.read(&app, |history_model, _| {
             let tasks = HashMap::new();
             assert_eq!(
-                aggregated_conversation_artifacts(history_model, &tasks, orchestrator_id),
+                aggregated_subtree_artifacts(
+                    history_model,
+                    &tasks,
+                    OrchestrationRoot::Conversation(orchestrator_id)
+                ),
                 vec![parent_pr.clone(), child_a_pr.clone(), child_b_pr],
             );
             // A child's aggregation only covers its own subtree.
             assert_eq!(
-                aggregated_conversation_artifacts(history_model, &tasks, child_a),
+                aggregated_subtree_artifacts(
+                    history_model,
+                    &tasks,
+                    OrchestrationRoot::Conversation(child_a)
+                ),
                 vec![child_a_pr, parent_pr],
             );
         });
