@@ -31,7 +31,7 @@ use warpui::{
     WindowId, duration_with_jitter,
 };
 
-use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
+use crate::ai::active_agent_views_model::{ActiveAgentViewsModel, ConversationOrTaskId};
 use crate::ai::agent::api::ServerConversationToken;
 use crate::ai::agent::conversation::{AIConversationId, ConversationStatus};
 use crate::ai::ambient_agents::{
@@ -647,9 +647,7 @@ pub struct AgentConversationsModel {
     dirty_since: Option<DateTime<Utc>>,
     /// Parent run IDs whose child runs we have already requested from the
     /// server this session. Like `task_fetch_state`, this exists purely to
-    /// dedupe requests: `ensure_child_tasks_loaded` issues at most one
-    /// `ancestor_run_id` list request per parent, even across repeated panel
-    /// refreshes or after a failed request.
+    /// dedupe requests and ensure we don't try to fetch the same child run repeatedly.
     requested_child_runs_for: HashSet<AmbientAgentTaskId>,
 }
 
@@ -1855,7 +1853,7 @@ impl AgentConversationsModel {
         orchestration_topology::aggregated_subtree_artifacts(
             BlocklistAIHistoryModel::as_ref(app),
             &self.tasks,
-            orchestration_topology::OrchestrationRoot::Run(task),
+            ConversationOrTaskId::TaskId(task.task_id),
         )
     }
 
@@ -1870,7 +1868,7 @@ impl AgentConversationsModel {
         orchestration_topology::aggregated_subtree_artifacts(
             BlocklistAIHistoryModel::as_ref(app),
             &self.tasks,
-            orchestration_topology::OrchestrationRoot::Conversation(root_id),
+            ConversationOrTaskId::ConversationId(root_id),
         )
     }
 

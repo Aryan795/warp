@@ -21,7 +21,7 @@ use crate::ai::ambient_agents::{
 use crate::ai::artifacts::Artifact;
 use crate::ai::blocklist::history_model::{AIConversationMetadata, BlocklistAIHistoryModel};
 use crate::ai::blocklist::orchestration_topology::{
-    OrchestrationRoot, aggregated_subtree_artifacts, conversation_id_shadowed_by_task,
+    aggregated_subtree_artifacts, conversation_id_shadowed_by_task,
     orchestration_aware_conversation_status,
 };
 use crate::ai::conversation_navigation::ConversationNavigationData;
@@ -518,7 +518,7 @@ pub(super) fn entry_for_task(
             artifacts: aggregated_subtree_artifacts(
                 history_model,
                 tasks,
-                OrchestrationRoot::Run(task),
+                ConversationOrTaskId::TaskId(task.task_id),
             ),
         },
         backing: AgentConversationBackingData {
@@ -637,7 +637,7 @@ fn entry_for_conversation_parts(
             artifacts: aggregated_subtree_artifacts(
                 history_model,
                 tasks,
-                OrchestrationRoot::Conversation(conversation_id),
+                ConversationOrTaskId::ConversationId(conversation_id),
             ),
         },
         backing: AgentConversationBackingData {

@@ -8,6 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::ai::active_agent_views_model::ConversationOrTaskId;
 use crate::ai::agent::api::ServerConversationToken;
 use crate::ai::agent::conversation::{AIConversation, AIConversationId, ConversationStatus};
 use crate::ai::ambient_agents::{AmbientAgentTask, AmbientAgentTaskId};
@@ -488,31 +489,25 @@ fn aggregate_loaded_subtree(
     (loaded_descendant_count, status)
 }
 
-/// A root of an orchestration tree: either a server run record or a local
-/// conversation. The same tree is stored from two sides — run records link
-/// children via [`AmbientAgentTask::children`], conversations via the
-/// parent → children index — and either side may be missing nodes (remote
-/// children often have no local conversation; local children may have no
-/// loaded run record), so artifact aggregation walks both edge types.
-pub(crate) enum OrchestrationRoot<'a> {
-    Run(&'a AmbientAgentTask),
-    Conversation(AIConversationId),
-}
-
 /// Returns the artifacts for the orchestration tree rooted at `root`, in
 /// pre-order and deduped by artifact identity (first occurrence wins).
 ///
-/// Each node contributes its conversation artifacts (falling back to cached
-/// historical metadata when not loaded) followed by the artifacts on its run
-/// record in `tasks`. The run record matters for remote children: their
-/// artifact events are never applied to the local placeholder conversation,
-/// so the run is the only local source. Reads only in-memory state — never
-/// fetches. For non-orchestration roots this degrades to the root's own
-/// artifacts.
+/// The same tree is stored from two sides — run records link children via
+/// [`AmbientAgentTask::children`], conversations via the parent → children
+/// index — and either side may be missing nodes (remote children often have
+/// no local conversation; local children may have no loaded run record), so
+/// the walk follows both edge types. Each node contributes its conversation
+/// artifacts (falling back to cached historical metadata when not loaded)
+/// followed by the artifacts on its run record in `tasks`. The run record
+/// matters for remote children: their artifact events are never applied to
+/// the local placeholder conversation, so the run is the only local source.
+/// Reads only in-memory state — never fetches; a `TaskId` root not present
+/// in `tasks` contributes nothing. For non-orchestration roots this degrades
+/// to the root's own artifacts.
 pub(crate) fn aggregated_subtree_artifacts<'a>(
     history: &'a BlocklistAIHistoryModel,
     tasks: &'a HashMap<AmbientAgentTaskId, AmbientAgentTask>,
-    root: OrchestrationRoot<'a>,
+    root: ConversationOrTaskId,
 ) -> Vec<Artifact> {
     let mut walker = SubtreeArtifactWalker {
         history,
@@ -522,8 +517,8 @@ pub(crate) fn aggregated_subtree_artifacts<'a>(
         artifact_lists: Vec::new(),
     };
     match root {
-        OrchestrationRoot::Run(task) => walker.visit(Some(task), None),
-        OrchestrationRoot::Conversation(conversation_id) => {
+        ConversationOrTaskId::TaskId(task_id) => walker.visit(tasks.get(&task_id), None),
+        ConversationOrTaskId::ConversationId(conversation_id) => {
             walker.visit(None, Some(conversation_id))
         }
     }

@@ -1359,9 +1359,10 @@ impl AgentManagementView {
         });
     }
 
-    /// Update just the artifact buttons for a specific conversation.
-    /// Also refreshes cards for the conversation's orchestration ancestors,
-    /// since parent cards display aggregated subtree artifacts.
+    /// Update the artifact buttons for a specific conversation and its
+    /// orchestration ancestors (parent cards display aggregated subtree
+    /// artifacts). Each card is updated at most once per call, and cards
+    /// whose artifacts are unchanged no-op in `update_artifacts`.
     fn update_artifacts_for_conversation(
         &mut self,
         conversation_id: AIConversationId,

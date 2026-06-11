@@ -127,7 +127,7 @@ fn aggregated_subtree_artifacts_merges_conversation_subtree_and_dedupes() {
                 aggregated_subtree_artifacts(
                     history_model,
                     &tasks,
-                    OrchestrationRoot::Conversation(orchestrator_id)
+                    ConversationOrTaskId::ConversationId(orchestrator_id)
                 ),
                 vec![parent_pr.clone(), child_a_pr.clone(), child_b_pr],
             );
@@ -136,7 +136,7 @@ fn aggregated_subtree_artifacts_merges_conversation_subtree_and_dedupes() {
                 aggregated_subtree_artifacts(
                     history_model,
                     &tasks,
-                    OrchestrationRoot::Conversation(child_a)
+                    ConversationOrTaskId::ConversationId(child_a)
                 ),
                 vec![child_a_pr, parent_pr],
             );
