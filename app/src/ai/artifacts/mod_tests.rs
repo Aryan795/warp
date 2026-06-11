@@ -163,6 +163,51 @@ fn download_success_message_includes_filename_and_directory() {
 }
 
 #[test]
+fn merge_artifacts_dedupes_by_identity_and_preserves_order() {
+    let plan = Artifact::Plan {
+        document_uid: "doc-1".to_string(),
+        notebook_uid: None,
+        title: Some("Plan".to_string()),
+    };
+    // Same plan identity, different metadata: the first occurrence must win.
+    let plan_with_notebook = Artifact::Plan {
+        document_uid: "doc-1".to_string(),
+        notebook_uid: None,
+        title: Some("Plan (synced)".to_string()),
+    };
+    let pr = Artifact::PullRequest {
+        url: "https://github.com/o/r/pull/1".to_string(),
+        branch: "main".to_string(),
+        repo: None,
+        number: None,
+    };
+    let screenshot = Artifact::Screenshot {
+        artifact_uid: "shot-1".to_string(),
+        mime_type: "image/png".to_string(),
+        description: None,
+    };
+    let external_reference = Artifact::ExternalReference {
+        reference_type: "linear_issue".to_string(),
+        url: "https://linear.app/warp/issue/QUALITY-696".to_string(),
+        title: Some("Aggregate artifacts".to_string()),
+        metadata: None,
+    };
+    let updated_external_reference = Artifact::ExternalReference {
+        reference_type: "linear_issue".to_string(),
+        url: "https://linear.app/warp/issue/QUALITY-696".to_string(),
+        title: Some("Updated title".to_string()),
+        metadata: None,
+    };
+
+    let merged = merge_artifacts([
+        vec![plan.clone(), pr.clone(), external_reference.clone()],
+        vec![pr.clone(), screenshot.clone()],
+        vec![plan_with_notebook, updated_external_reference],
+    ]);
+    assert_eq!(merged, vec![plan, pr, external_reference, screenshot]);
+}
+
+#[test]
 fn converts_graphql_file_artifact() {
     let artifact = Artifact::try_from(warp_graphql::ai::AIConversationArtifact::FileArtifact(
         warp_graphql::ai::FileArtifact {
