@@ -21,7 +21,7 @@ use crate::ai::ambient_agents::{
 use crate::ai::artifacts::Artifact;
 use crate::ai::blocklist::history_model::{AIConversationMetadata, BlocklistAIHistoryModel};
 use crate::ai::blocklist::orchestration_topology::{
-    SubtreeRoot, aggregated_subtree_artifacts, conversation_id_shadowed_by_task,
+    SubtreeRoot, aggregated_subtree_artifacts, local_conversation_id_for_task,
     orchestration_aware_conversation_status,
 };
 use crate::ai::conversation_navigation::ConversationNavigationData;
@@ -445,7 +445,7 @@ pub(super) fn entry_for_task(
     history_model: &BlocklistAIHistoryModel,
     app: &AppContext,
 ) -> AgentConversationEntry {
-    let local_conversation_id = conversation_id_shadowed_by_task(task, history_model);
+    let local_conversation_id = local_conversation_id_for_task(task, history_model);
     let conversation_metadata =
         local_conversation_id.and_then(|id| history_model.get_conversation_metadata(&id));
     let server_conversation_token = task

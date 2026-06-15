@@ -543,7 +543,7 @@ impl<'a> SubtreeArtifactWalker<'a> {
         let history = self.history;
         let tasks = self.tasks;
         let conversation_id = conversation_id
-            .or_else(|| task.and_then(|task| conversation_id_shadowed_by_task(task, history)));
+            .or_else(|| task.and_then(|task| local_conversation_id_for_task(task, history)));
         let conversation = conversation_id.and_then(|id| history.conversation(&id));
         let task = task.or_else(|| {
             conversation
@@ -591,13 +591,13 @@ impl<'a> SubtreeArtifactWalker<'a> {
     }
 }
 
-/// Returns the local conversation ID represented by the given task, if this task and a
+/// Returns the local conversation ID that backs the given task, if this task and a
 /// conversation entry both point at the same underlying local run.
 ///
 /// We first match using the orchestration agent ID (task ID / run ID under v2), and fall back
 /// to the server conversation token for cases where the task only carries conversation identity
 /// through `conversation_id`.
-pub(crate) fn conversation_id_shadowed_by_task(
+pub(crate) fn local_conversation_id_for_task(
     task: &AmbientAgentTask,
     history_model: &BlocklistAIHistoryModel,
 ) -> Option<AIConversationId> {
