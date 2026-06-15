@@ -31,7 +31,7 @@ use warpui::{
     WindowId, duration_with_jitter,
 };
 
-use crate::ai::active_agent_views_model::{ActiveAgentViewsModel, ConversationOrTaskId};
+use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
 use crate::ai::agent::api::ServerConversationToken;
 use crate::ai::agent::conversation::{AIConversationId, ConversationStatus};
 use crate::ai::ambient_agents::{
@@ -77,6 +77,27 @@ const TRANSIENT_FETCH_FAILURE_COOLDOWN: Duration = Duration::from_secs(2);
 /// (e.g. an ACL grant) — but we wait long enough that streaming bursts and rapid re-entries
 /// can't cause a flood.
 const PERMANENT_FETCH_FAILURE_COOLDOWN: Duration = Duration::from_secs(60);
+
+/// How long to wait before retrying a failed child-run fetch. Unlike per-task
+/// fetches, child-run fetches aren't driven by streaming bursts, so a single
+/// modest cooldown (rather than a transient/permanent split) is enough to keep
+/// a persistent failure from hammering the server.
+const CHILD_RUNS_FETCH_FAILURE_COOLDOWN: Duration = Duration::from_secs(30);
+
+/// Upper bound on the number of child runs fetched for a single parent across
+/// pagination, so a pathological topology can't drive unbounded paging.
+const MAX_CHILD_RUNS_PER_PARENT: usize = 1_000;
+
+/// Dedup + backoff state for the one-shot child-run fetch, keyed per parent run.
+enum ChildRunsFetchState {
+    /// A paginating fetch is currently outstanding for this parent.
+    InFlight,
+    /// The full child-run set was loaded; not refetched again this session.
+    Loaded,
+    /// The last fetch failed; remember when so we can back off for
+    /// [`CHILD_RUNS_FETCH_FAILURE_COOLDOWN`] before retrying.
+    FailedAt(Instant),
+}
 
 /// Error details for a failed ambient-agent task metadata fetch.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -645,10 +666,10 @@ pub struct AgentConversationsModel {
     /// Earliest RTC timestamp received while no list surface was open.
     /// On next `register_view_open`, triggers a single `fetch_tasks_updated_after`.
     dirty_since: Option<DateTime<Utc>>,
-    /// Parent run IDs whose child runs we have already requested from the
-    /// server this session. Like `task_fetch_state`, this exists purely to
-    /// dedupe requests and ensure we don't try to fetch the same child run repeatedly.
-    requested_child_runs_for: HashSet<AmbientAgentTaskId>,
+    /// Per-parent dedup + backoff state for the one-shot child-run fetch. A
+    /// `Loaded` parent is never refetched this session; a `FailedAt` parent is
+    /// retried only after [`CHILD_RUNS_FETCH_FAILURE_COOLDOWN`] elapses.
+    requested_child_runs_for: HashMap<AmbientAgentTaskId, ChildRunsFetchState>,
 }
 
 pub enum AgentConversationsModelEvent {
@@ -699,7 +720,7 @@ impl AgentConversationsModel {
                 task_fetch_state: HashMap::new(),
                 rtc_task_refresh_throttle_state: RtcTaskRefreshThrottleState::default(),
                 dirty_since: None,
-                requested_child_runs_for: HashSet::new(),
+                requested_child_runs_for: HashMap::new(),
             };
         }
 
@@ -739,7 +760,7 @@ impl AgentConversationsModel {
             task_fetch_state: HashMap::new(),
             rtc_task_refresh_throttle_state: RtcTaskRefreshThrottleState::default(),
             dirty_since: None,
-            requested_child_runs_for: HashSet::new(),
+            requested_child_runs_for: HashMap::new(),
         };
 
         // Only sync local conversations if we're not in CLI mode. Server-side data
@@ -1684,8 +1705,10 @@ impl AgentConversationsModel {
             } => {
                 let history_model = BlocklistAIHistoryModel::as_ref(ctx);
                 for task in self.tasks.values_mut() {
-                    if orchestration_topology::conversation_id_shadowed_by_task(task, history_model)
-                        == Some(*conversation_id)
+                    if orchestration_topology::conversation_id_shadowed_by_task(
+                        task,
+                        history_model,
+                    ) == Some(*conversation_id)
                     {
                         task.title = title.clone();
                     }
@@ -1853,7 +1876,7 @@ impl AgentConversationsModel {
         orchestration_topology::aggregated_subtree_artifacts(
             BlocklistAIHistoryModel::as_ref(app),
             &self.tasks,
-            ConversationOrTaskId::TaskId(task.task_id),
+            orchestration_topology::SubtreeRoot::Task(task.task_id),
         )
     }
 
@@ -1868,18 +1891,19 @@ impl AgentConversationsModel {
         orchestration_topology::aggregated_subtree_artifacts(
             BlocklistAIHistoryModel::as_ref(app),
             &self.tasks,
-            ConversationOrTaskId::ConversationId(root_id),
+            orchestration_topology::SubtreeRoot::Conversation(root_id),
         )
     }
 
     /// Fetches child runs of `parent_task_id` that aren't loaded yet into the
-    /// model with a single `ancestor_run_id` list request, then emits a task
+    /// model with a paginated `ancestor_run_id` list request, then emits a task
     /// update event.
     ///
-    /// Runs at most once per parent run per session: when every child is
-    /// already loaded this short-circuits before consulting the guard, and
-    /// otherwise `requested_child_runs_for` ensures repeated panel refreshes
-    /// (or a failed request) never issue another one.
+    /// Fetches at most once per parent run per session on success: when every
+    /// child is already loaded this short-circuits before consulting the guard,
+    /// and otherwise `requested_child_runs_for` dedupes repeated panel
+    /// refreshes. A failed fetch is retried after
+    /// [`CHILD_RUNS_FETCH_FAILURE_COOLDOWN`].
     pub fn ensure_child_tasks_loaded(
         &mut self,
         parent_task_id: &AmbientAgentTaskId,
@@ -1934,35 +1958,68 @@ impl AgentConversationsModel {
         self.fetch_child_runs_once(parent_task_id, ctx);
     }
 
-    /// Issues the one-per-parent-run `ancestor_run_id` list request, deduped
-    /// via `requested_child_runs_for`. Failures are not retried.
+    /// Issues the per-parent-run `ancestor_run_id` list request, paging through
+    /// all descendants (up to [`MAX_CHILD_RUNS_PER_PARENT`]) in a single spawned
+    /// task. Deduped via `requested_child_runs_for`: a successful fetch is not
+    /// repeated this session, while a failed fetch is retried once
+    /// [`CHILD_RUNS_FETCH_FAILURE_COOLDOWN`] elapses.
     fn fetch_child_runs_once(
         &mut self,
         parent_task_id: AmbientAgentTaskId,
         ctx: &mut ModelContext<Self>,
     ) {
-        if !self.requested_child_runs_for.insert(parent_task_id) {
-            return;
+        match self.requested_child_runs_for.get(&parent_task_id) {
+            Some(ChildRunsFetchState::InFlight | ChildRunsFetchState::Loaded) => return,
+            Some(ChildRunsFetchState::FailedAt(at))
+                if at.elapsed() < CHILD_RUNS_FETCH_FAILURE_COOLDOWN =>
+            {
+                return;
+            }
+            _ => {}
         }
+        self.requested_child_runs_for
+            .insert(parent_task_id, ChildRunsFetchState::InFlight);
 
         let ai_client = ServerApiProvider::as_ref(ctx).get_ai_client();
         let ancestor_run_id = parent_task_id.to_string();
         ctx.spawn(
             async move {
-                ai_client
-                    .list_ambient_agent_tasks(
-                        INITIAL_TASK_AMOUNT,
-                        TaskListFilter {
-                            ancestor_run_id: Some(ancestor_run_id),
-                            ..Default::default()
-                        },
-                    )
-                    .await
+                let mut all_tasks = Vec::new();
+                let mut cursor = None;
+                loop {
+                    let (tasks, next_cursor) = ai_client
+                        .list_ambient_agent_tasks_page(
+                            INITIAL_TASK_AMOUNT,
+                            TaskListFilter {
+                                ancestor_run_id: Some(ancestor_run_id.clone()),
+                                cursor,
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
+                    all_tasks.extend(tasks);
+                    match next_cursor {
+                        Some(next) if all_tasks.len() < MAX_CHILD_RUNS_PER_PARENT => {
+                            cursor = Some(next);
+                        }
+                        _ => break,
+                    }
+                }
+                anyhow::Ok(all_tasks)
             },
             move |model, result, ctx| match result {
-                Ok(tasks) => model.update_model_with_new_tasks(tasks, ctx),
+                Ok(tasks) => {
+                    model
+                        .requested_child_runs_for
+                        .insert(parent_task_id, ChildRunsFetchState::Loaded);
+                    model.update_model_with_new_tasks(tasks, ctx);
+                }
                 Err(e) => {
                     log::warn!("Failed to fetch child runs for {parent_task_id}: {e:#}");
+                    model.requested_child_runs_for.insert(
+                        parent_task_id,
+                        ChildRunsFetchState::FailedAt(Instant::now()),
+                    );
                 }
             },
         );
@@ -2192,6 +2249,7 @@ impl AgentConversationsModel {
         self.abort_rtc_task_refresh_throttle();
         self.active_data_consumers_per_window.clear();
         self.task_fetch_state.clear();
+        self.requested_child_runs_for.clear();
         self.dirty_since = None;
         self.initial_load_state = InitialConversationLoadState::WaitingForCloud;
     }

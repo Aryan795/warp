@@ -8,7 +8,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ai::active_agent_views_model::ConversationOrTaskId;
 use crate::ai::agent::api::ServerConversationToken;
 use crate::ai::agent::conversation::{AIConversation, AIConversationId, ConversationStatus};
 use crate::ai::ambient_agents::{AmbientAgentTask, AmbientAgentTaskId};
@@ -165,23 +164,12 @@ pub fn descendant_conversation_ids_in_spawn_order(
     parent_id: AIConversationId,
 ) -> Vec<AIConversationId> {
     let mut descendants = Vec::new();
-    collect_descendant_conversation_ids_in_spawn_order(history, parent_id, &mut descendants);
+    let mut visited = HashSet::from([parent_id]);
+    collect_descendants_guarded(history, parent_id, &mut visited, &mut descendants);
     descendants
 }
 
-/// Recursive worker for [`descendant_conversation_ids_in_spawn_order`]. Kept
-/// separate so it can be invoked from existing call sites that already own a
-/// buffer.
-pub fn collect_descendant_conversation_ids_in_spawn_order(
-    history: &BlocklistAIHistoryModel,
-    parent_id: AIConversationId,
-    descendants: &mut Vec<AIConversationId>,
-) {
-    let mut visited = HashSet::from([parent_id]);
-    collect_descendants_guarded(history, parent_id, &mut visited, descendants);
-}
-
-/// Recursive worker for [`collect_descendant_conversation_ids_in_spawn_order`].
+/// Recursive worker for [`descendant_conversation_ids_in_spawn_order`].
 /// `visited` guards against cycles and diamonds in the parent/child index so a
 /// corrupted topology can't cause infinite recursion or duplicate entries.
 fn collect_descendants_guarded(
@@ -489,6 +477,14 @@ fn aggregate_loaded_subtree(
     (loaded_descendant_count, status)
 }
 
+/// Root of an orchestration subtree for [`aggregated_subtree_artifacts`]: either
+/// a local conversation or an ambient run record. Scoped to this helper so the
+/// low-level topology utilities don't depend on view-model identity types.
+pub(crate) enum SubtreeRoot {
+    Conversation(AIConversationId),
+    Task(AmbientAgentTaskId),
+}
+
 /// Returns the artifacts for the orchestration tree rooted at `root`, in
 /// pre-order and deduped by artifact identity (first occurrence wins).
 ///
@@ -501,13 +497,13 @@ fn aggregate_loaded_subtree(
 /// followed by the artifacts on its run record in `tasks`. The run record
 /// matters for remote children: their artifact events are never applied to
 /// the local placeholder conversation, so the run is the only local source.
-/// Reads only in-memory state — never fetches; a `TaskId` root not present
+/// Reads only in-memory state — never fetches; a `Task` root not present
 /// in `tasks` contributes nothing. For non-orchestration roots this degrades
 /// to the root's own artifacts.
 pub(crate) fn aggregated_subtree_artifacts<'a>(
     history: &'a BlocklistAIHistoryModel,
     tasks: &'a HashMap<AmbientAgentTaskId, AmbientAgentTask>,
-    root: ConversationOrTaskId,
+    root: SubtreeRoot,
 ) -> Vec<Artifact> {
     let mut walker = SubtreeArtifactWalker {
         history,
@@ -517,10 +513,8 @@ pub(crate) fn aggregated_subtree_artifacts<'a>(
         artifact_lists: Vec::new(),
     };
     match root {
-        ConversationOrTaskId::TaskId(task_id) => walker.visit(tasks.get(&task_id), None),
-        ConversationOrTaskId::ConversationId(conversation_id) => {
-            walker.visit(None, Some(conversation_id))
-        }
+        SubtreeRoot::Task(task_id) => walker.visit(tasks.get(&task_id), None),
+        SubtreeRoot::Conversation(conversation_id) => walker.visit(None, Some(conversation_id)),
     }
     merge_artifacts(walker.artifact_lists)
 }

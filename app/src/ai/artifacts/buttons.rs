@@ -15,6 +15,11 @@ use crate::view_components::action_button::{
 const BUTTON_SPACING: f32 = 8.;
 const BUTTON_MAX_TEXT_WIDTH: f32 = 200.;
 
+/// Maximum number of artifact pills rendered before collapsing the remainder
+/// into a single "+N more" indicator, so an orchestration tree with many
+/// artifacts (e.g. 100 PRs) doesn't flood the row.
+const MAX_VISIBLE_ARTIFACT_BUTTONS: usize = 25;
+
 /// A view that renders a set of artifact buttons (plans, branches, PRs)
 pub struct ArtifactButtonsRow {
     artifacts: Vec<Artifact>,
@@ -212,7 +217,26 @@ fn collect_buttons(
         }));
     }
 
+    if buttons.len() > MAX_VISIBLE_ARTIFACT_BUTTONS {
+        let hidden_count = buttons.len() - MAX_VISIBLE_ARTIFACT_BUTTONS;
+        buttons.truncate(MAX_VISIBLE_ARTIFACT_BUTTONS);
+        let theme = theme.clone();
+        buttons.push(ctx.add_typed_action_view(move |_| make_overflow_button(hidden_count, theme)));
+    }
+
     buttons
+}
+
+/// Builds the non-interactive "+N more" pill shown when the artifact count
+/// exceeds [`MAX_VISIBLE_ARTIFACT_BUTTONS`]. Has no click handler; users open
+/// the run itself to see the full artifact set.
+fn make_overflow_button(hidden_count: usize, theme: Arc<dyn ActionButtonTheme>) -> ActionButton {
+    ActionButton::new_with_boxed_theme(format!("+{hidden_count} more"), theme)
+        .with_size(ButtonSize::Small)
+        .with_tooltip("Open this run to see all artifacts")
+        .with_tooltip_alignment(TooltipAlignment::Center)
+        .with_tooltip_positioning_provider(Arc::new(MenuPositioning::BelowInputBox))
+        .with_max_label_width(BUTTON_MAX_TEXT_WIDTH)
 }
 
 fn make_plan_button(
