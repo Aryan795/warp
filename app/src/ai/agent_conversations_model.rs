@@ -1280,16 +1280,9 @@ impl AgentConversationsModel {
         let mut has_updated_tasks = false;
 
         for task in tasks {
-            let task_id = task.task_id;
-            match self.tasks.get(&task_id) {
-                Some(existing_task) => {
-                    if existing_task != &task {
-                        has_updated_tasks = true
-                    }
-                }
-                None => has_new_tasks = true,
-            };
-            self.tasks.insert(task_id, task);
+            let (is_new, is_updated) = self.merge_task(task);
+            has_new_tasks |= is_new;
+            has_updated_tasks |= is_updated;
         }
 
         if has_new_tasks {
@@ -1297,6 +1290,30 @@ impl AgentConversationsModel {
         } else if has_updated_tasks {
             ctx.emit(AgentConversationsModelEvent::TasksUpdated);
         }
+    }
+
+    /// Merges one task and invalidates stale child-run fetch state on topology changes.
+    fn merge_task(&mut self, task: AmbientAgentTask) -> (bool, bool) {
+        let task_id = task.task_id;
+        let mut is_new = false;
+        let mut is_updated = false;
+        match self.tasks.get(&task_id) {
+            Some(existing_task) => {
+                let children_changed = existing_task.children != task.children;
+                is_updated = existing_task != &task;
+                if children_changed
+                    && matches!(
+                        self.requested_child_runs_for.get(&task_id),
+                        Some(ChildRunsFetchState::Loaded)
+                    )
+                {
+                    self.requested_child_runs_for.remove(&task_id);
+                }
+            }
+            None => is_new = true,
+        }
+        self.tasks.insert(task_id, task);
+        (is_new, is_updated)
     }
 
     /// Returns whether the unfiltered conversation list contains any entries.
@@ -2185,16 +2202,9 @@ impl AgentConversationsModel {
                     let mut has_updated_tasks = false;
 
                     for task in tasks {
-                        let task_id = task.task_id;
-                        match model.tasks.get(&task_id) {
-                            Some(existing_task) => {
-                                if existing_task != &task {
-                                    has_updated_tasks = true;
-                                }
-                            }
-                            None => has_new_tasks = true,
-                        };
-                        model.tasks.insert(task_id, task);
+                        let (is_new, is_updated) = model.merge_task(task);
+                        has_new_tasks |= is_new;
+                        has_updated_tasks |= is_updated;
                     }
 
                     // Enforce task cap

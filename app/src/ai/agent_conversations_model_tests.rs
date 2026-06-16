@@ -16,10 +16,11 @@ use super::entry::{
 use super::query::{DEFAULT_RESULT_COUNT, MAX_SEARCH_RESULTS};
 use super::{
     AgentConversationsModel, AgentConversationsModelEvent, AgentManagementFilters,
-    AgentRunDisplayStatus, ArtifactFilter, ConversationMetadata, ConversationUpdateKind,
-    EnvironmentFilter, HarnessFilter, InitialConversationLoadState, MAX_PERSONAL_TASKS,
-    MAX_TEAM_TASKS, OwnerFilter, RtcTaskRefreshThrottleState, StatusFilter, TaskFetchError,
-    TaskFetchState, query_conversation_entries, record_earliest_rtc_task_refresh_timestamp,
+    AgentRunDisplayStatus, ArtifactFilter, ChildRunsFetchState, ConversationMetadata,
+    ConversationUpdateKind, EnvironmentFilter, HarnessFilter, InitialConversationLoadState,
+    MAX_PERSONAL_TASKS, MAX_TEAM_TASKS, OwnerFilter, RtcTaskRefreshThrottleState, StatusFilter,
+    TaskFetchError, TaskFetchState, query_conversation_entries,
+    record_earliest_rtc_task_refresh_timestamp,
 };
 use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
 use crate::ai::agent::api::ServerConversationToken;
@@ -672,6 +673,152 @@ fn create_test_model() -> AgentConversationsModel {
         dirty_since: None,
         requested_child_runs_for: Default::default(),
     }
+}
+#[test]
+fn loaded_child_run_fetch_state_is_cleared_when_direct_children_change() {
+    App::test((), |mut app| async move {
+        let now = Utc::now();
+        let mut parent = create_test_task(&make_uuid(8200), "user-a", now);
+        let child_a = create_test_task(&make_uuid(8201), "user-a", now);
+        let child_b = create_test_task(&make_uuid(8202), "user-a", now);
+        parent.children = vec![child_a.task_id.to_string()];
+        let parent_task_id = parent.task_id;
+        let model_handle = app.add_singleton_model(|_| {
+            let mut model = create_test_model();
+            model.tasks.insert(parent_task_id, parent.clone());
+            model
+                .requested_child_runs_for
+                .insert(parent_task_id, ChildRunsFetchState::Loaded);
+            model
+        });
+
+        let mut updated_parent = parent.clone();
+        updated_parent.children.push(child_b.task_id.to_string());
+        model_handle.update(&mut app, |model, ctx| {
+            model.update_model_with_new_tasks(vec![updated_parent], ctx);
+        });
+
+        model_handle.read(&app, |model, _| {
+            assert!(!model.requested_child_runs_for.contains_key(&parent_task_id));
+        });
+    });
+}
+
+#[test]
+fn loaded_child_run_fetch_state_survives_non_topology_updates() {
+    App::test((), |mut app| async move {
+        let now = Utc::now();
+        let mut parent = create_test_task(&make_uuid(8210), "user-a", now);
+        let child = create_test_task(&make_uuid(8211), "user-a", now);
+        parent.children = vec![child.task_id.to_string()];
+        let parent_task_id = parent.task_id;
+        let model_handle = app.add_singleton_model(|_| {
+            let mut model = create_test_model();
+            model.tasks.insert(parent_task_id, parent.clone());
+            model
+                .requested_child_runs_for
+                .insert(parent_task_id, ChildRunsFetchState::Loaded);
+            model
+        });
+
+        let mut updated_parent = parent.clone();
+        updated_parent.title = "updated title".to_string();
+        model_handle.update(&mut app, |model, ctx| {
+            model.update_model_with_new_tasks(vec![updated_parent], ctx);
+        });
+
+        model_handle.read(&app, |model, _| {
+            assert!(matches!(
+                model.requested_child_runs_for.get(&parent_task_id),
+                Some(ChildRunsFetchState::Loaded)
+            ));
+        });
+    });
+}
+
+#[test]
+fn loaded_child_run_fetch_state_survives_child_task_updates() {
+    App::test((), |mut app| async move {
+        let now = Utc::now();
+        let mut parent = create_test_task(&make_uuid(8220), "user-a", now);
+        let child = create_test_task(&make_uuid(8221), "user-a", now);
+        parent.children = vec![child.task_id.to_string()];
+        let parent_task_id = parent.task_id;
+        let model_handle = app.add_singleton_model(|_| {
+            let mut model = create_test_model();
+            model.tasks.insert(parent_task_id, parent.clone());
+            model.tasks.insert(child.task_id, child.clone());
+            model
+                .requested_child_runs_for
+                .insert(parent_task_id, ChildRunsFetchState::Loaded);
+            model
+        });
+
+        let mut updated_child = child.clone();
+        updated_child.title = "updated child title".to_string();
+        model_handle.update(&mut app, |model, ctx| {
+            model.update_model_with_new_tasks(vec![updated_child], ctx);
+        });
+
+        model_handle.read(&app, |model, _| {
+            assert!(matches!(
+                model.requested_child_runs_for.get(&parent_task_id),
+                Some(ChildRunsFetchState::Loaded)
+            ));
+        });
+    });
+}
+
+#[test]
+fn topology_changes_preserve_non_loaded_child_run_fetch_state() {
+    App::test((), |mut app| async move {
+        let now = Utc::now();
+        let mut parent = create_test_task(&make_uuid(8240), "user-a", now);
+        let child_a = create_test_task(&make_uuid(8241), "user-a", now);
+        let child_b = create_test_task(&make_uuid(8242), "user-a", now);
+        parent.children = vec![child_a.task_id.to_string()];
+        let parent_task_id = parent.task_id;
+        let model_handle = app.add_singleton_model(|_| {
+            let mut model = create_test_model();
+            model.tasks.insert(parent_task_id, parent.clone());
+            model
+                .requested_child_runs_for
+                .insert(parent_task_id, ChildRunsFetchState::InFlight);
+            model
+        });
+
+        let mut updated_parent = parent.clone();
+        updated_parent.children.push(child_b.task_id.to_string());
+        model_handle.update(&mut app, |model, ctx| {
+            model.update_model_with_new_tasks(vec![updated_parent.clone()], ctx);
+        });
+
+        model_handle.read(&app, |model, _| {
+            assert!(matches!(
+                model.requested_child_runs_for.get(&parent_task_id),
+                Some(ChildRunsFetchState::InFlight)
+            ));
+        });
+
+        model_handle.update(&mut app, |model, _| {
+            model.requested_child_runs_for.insert(
+                parent_task_id,
+                ChildRunsFetchState::FailedAt(Instant::now()),
+            );
+        });
+        let mut updated_parent_again = updated_parent;
+        updated_parent_again.children.push(make_uuid(8243));
+        model_handle.update(&mut app, |model, ctx| {
+            model.update_model_with_new_tasks(vec![updated_parent_again], ctx);
+        });
+
+        model_handle.read(&app, |model, _| {
+            assert!(matches!(
+                model.requested_child_runs_for.get(&parent_task_id),
+                Some(ChildRunsFetchState::FailedAt(_))
+            ));
+        });
+    });
 }
 
 /// Convenience: a PR artifact with the given URL (the URL is the dedupe identity).
