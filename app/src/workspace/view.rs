@@ -30088,7 +30088,7 @@ fn shell_command_with_optional_timeout(command: String, timeout_seconds: Option<
         return command;
     };
     let timeout_bin = ["timeout", "gtimeout"].into_iter().find(|bin| {
-        std::process::Command::new("which")
+        command::blocking::Command::new("which")
             .arg(bin)
             .output()
             .ok()
