@@ -84,9 +84,8 @@ timeout_seconds = 1800
 - Command palette: “Open Settings: Automations”.
 
 ### 4. Skills
-Add bundled skills (mirror tab-config split):
-- `local-automations` — schema, paths, examples, validation rules, Slice A limitations (no cron fire).
-- `create-local-automation` — NL → write TOML workflow; optional “run now” instructions for the agent (invoke palette / tell user to click Run now if agent cannot trigger UI yet).
+Add bundled skill:
+- `create-automation` — routes local / cloud / GitHub-trigger automation requests; local plane covers schema, paths, validation, and NL → write TOML (see `LOCAL.md`); optional “run now” instructions for the agent (invoke palette / tell user to click Run now if agent cannot trigger UI yet).
 
 Until client Run now exists, the create skill can still write files for dogfood; ship skill in the same PR as loader if possible so list populates immediately.
 
@@ -106,7 +105,7 @@ Until client Run now exists, the create skill can still write files for dogfood;
 - Unattended profile: `AIExecutionProfilesModel` gained ephemeral client-only profiles (`register_ephemeral_profile`); Run now registers a renamed `AIExecutionProfile::create_default_cli_profile(false, Some(false))` and sets it as the active profile for the new session only. Permission checks flow through `get_profile_by_id`, so no AlwaysAsk hangs and the user's default profile is untouched.
 - Run now: `WorkspaceAction::RunLocalAutomation` resolves cwd/worktree on a background task (`git worktree add` when needed, with fallback to checking out an existing branch of the same name), then opens a tab via `add_tab_with_pane_layout`. Shell runner uses a terminal pane template with the command; agent runner opens a terminal pane and enters the agent view with the prompt auto-submitted (`AgentViewEntryOrigin::LocalAutomation`, `AutoTriggerBehavior::Always`).
 - List surface: Settings → Automations (`SettingsSection::LocalAutomations`), opened via Command Palette "Open Settings: Automations" (`workspace:open_local_automations_list` / `ShowSettingsPage(LocalAutomations)`), the header toolbar Automations button, or the new-session menu. Rows show name, runner, schedule, home-relative path, and a disabled tag, with Run now / Open config actions; parse failures render as error rows; empty state explains how to create one. Run / Open config keep Settings open.
-- Skills: bundled `local-automations` (schema reference) + `create-local-automation` (NL → TOML workflow), activation-gated on the feature flag.
+- Skills: bundled `create-automation` (routes local/cloud/GitHub-trigger; local schema + NL → TOML in `LOCAL.md`), activation-gated on the feature flag.
 ## Testing and validation
 Map to PRODUCT.md Behavior numbers:
 
