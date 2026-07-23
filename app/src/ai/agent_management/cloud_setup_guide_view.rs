@@ -528,7 +528,7 @@ impl CloudSetupGuideView {
             .finish();
 
         let sub_description = Container::new(Self::render_description_with_link(
-            "Integrate Slack or Linear to assign Warp's Agent tasks with @Warp. ",
+            "Integrate Slack or Linear to assign Warp Agent tasks with @Warp. ",
             "Visit docs",
             self.integration_docs_link_mouse_state.clone(),
             SetupGuideDocs::Integration,
