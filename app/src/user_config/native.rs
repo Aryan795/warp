@@ -238,6 +238,35 @@ impl super::WarpConfig {
             .map_err(|e| anyhow::anyhow!("could not delete router file: {e}"))
     }
 
+    /// Sets `enabled` on a local automation TOML file, preserving the rest of
+    /// the file (comments, ordering, unrelated fields) when possible.
+    ///
+    /// The filesystem watcher in [`Self::handle_warp_managed_paths_event`] will
+    /// pick up the write and reload `local_automations`.
+    #[cfg(feature = "local_fs")]
+    pub fn set_local_automation_enabled(
+        source_path: &std::path::Path,
+        enabled: bool,
+    ) -> anyhow::Result<()> {
+        let contents = std::fs::read_to_string(source_path)
+            .map_err(|e| anyhow::anyhow!("could not read automation file: {e}"))?;
+        let updated = set_enabled_in_toml_contents(&contents, enabled);
+        if updated == contents {
+            return Ok(());
+        }
+        std::fs::write(source_path, updated)
+            .map_err(|e| anyhow::anyhow!("could not write automation file: {e}"))
+    }
+
+    /// Deletes a local automation TOML file from disk.
+    /// The filesystem watcher in [`Self::handle_warp_managed_paths_event`] will
+    /// pick up the deletion and reload `local_automations`.
+    #[cfg(feature = "local_fs")]
+    pub fn delete_local_automation(source_path: &std::path::Path) -> anyhow::Result<()> {
+        std::fs::remove_file(source_path)
+            .map_err(|e| anyhow::anyhow!("could not delete automation file: {e}"))
+    }
+
     /// This method takes a file name candidate (appends .yaml if missing) and a LaunchConfig as
     /// arguments. It saves the file and returns the filename used if successful.
     #[cfg(feature = "local_fs")]
@@ -363,6 +392,107 @@ pub fn load_tab_configs(tab_config_path: &Path) -> (Vec<TabConfig>, Vec<TabConfi
         a_name.cmp(&b_name).then_with(|| a.name.cmp(&b.name))
     });
     (configs, errors)
+}
+
+/// Updates or inserts the top-level `enabled = …` assignment in a local
+/// automation TOML body. Prefers rewriting an existing assignment so comments
+/// and other fields stay put; when missing and `enabled` is false, inserts
+/// `enabled = false` after the `name` line (or at the top of the file).
+/// When missing and `enabled` is true, leaves the file unchanged (default).
+#[cfg(feature = "local_fs")]
+fn set_enabled_in_toml_contents(contents: &str, enabled: bool) -> String {
+    let target = if enabled { "true" } else { "false" };
+    let ends_with_newline = contents.ends_with('\n');
+    let mut lines: Vec<String> = contents.lines().map(|line| line.to_string()).collect();
+    let mut found = false;
+
+    for line in &mut lines {
+        let trimmed = line.trim_start();
+        // Only rewrite a bare top-level `enabled = …` key (not table keys or
+        // comments). Indentation is preserved via the leading whitespace slice.
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        let Some(rest) = trimmed.strip_prefix("enabled") else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        if !rest.starts_with('=') {
+            continue;
+        }
+        let indent_len = line.len() - trimmed.len();
+        *line = format!("{}enabled = {target}", &line[..indent_len]);
+        found = true;
+        break;
+    }
+
+    if !found {
+        if enabled {
+            // Default is true; no need to write the field.
+            return contents.to_string();
+        }
+        let insert_at = lines
+            .iter()
+            .position(|line| {
+                let trimmed = line.trim_start();
+                !trimmed.starts_with('#')
+                    && trimmed
+                        .strip_prefix("name")
+                        .is_some_and(|rest| rest.trim_start().starts_with('='))
+            })
+            .map(|idx| idx + 1)
+            .unwrap_or(0);
+        lines.insert(insert_at, format!("enabled = {target}"));
+    }
+
+    let mut updated = lines.join("\n");
+    if ends_with_newline || contents.is_empty() {
+        updated.push('\n');
+    }
+    updated
+}
+
+#[cfg(all(test, feature = "local_fs"))]
+mod set_enabled_in_toml_contents_tests {
+    use super::set_enabled_in_toml_contents;
+
+    #[test]
+    fn rewrites_existing_enabled_false_to_true() {
+        let input = "name = \"Demo\"\nenabled = false\nschedule = \"@daily\"\n";
+        let output = set_enabled_in_toml_contents(input, true);
+        assert_eq!(
+            output,
+            "name = \"Demo\"\nenabled = true\nschedule = \"@daily\"\n"
+        );
+    }
+
+    #[test]
+    fn inserts_enabled_false_after_name_when_missing() {
+        let input = "name = \"Demo\"\nschedule = \"@daily\"\n";
+        let output = set_enabled_in_toml_contents(input, false);
+        assert_eq!(
+            output,
+            "name = \"Demo\"\nenabled = false\nschedule = \"@daily\"\n"
+        );
+    }
+
+    #[test]
+    fn leaves_file_unchanged_when_enabling_and_field_missing() {
+        let input = "name = \"Demo\"\nschedule = \"@daily\"\n";
+        let output = set_enabled_in_toml_contents(input, true);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn preserves_comments_and_trailing_newline() {
+        let input =
+            "# morning brief\nname = \"Demo\"\nenabled = true\n# keep me\nschedule = \"@daily\"\n";
+        let output = set_enabled_in_toml_contents(input, false);
+        assert_eq!(
+            output,
+            "# morning brief\nname = \"Demo\"\nenabled = false\n# keep me\nschedule = \"@daily\"\n"
+        );
+    }
 }
 
 fn update_touches_dir(update: &RepositoryUpdate, path: &Path) -> bool {
