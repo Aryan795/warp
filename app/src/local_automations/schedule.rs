@@ -157,7 +157,7 @@ pub fn decide_schedule(input: &ScheduleEvalInput) -> ScheduleDecision {
     if input.last_missed_at == Some(due_at)
         && input
             .last_scheduled_fire_at
-            .map_or(true, |last| last < due_at)
+            .is_none_or(|last| last < due_at)
     {
         // If we marked missed for this due_at and never fired it, stay waiting
         // for a *future* tick rather than re-emitting Missed every 30s.
@@ -184,34 +184,85 @@ pub struct AutomationScheduleStatus {
 }
 
 impl AutomationScheduleStatus {
-    /// Compact subtitle fragment (without leading separator).
-    pub fn subtitle_fragment(&self) -> Option<String> {
-        if self.disabled {
-            return None; // caller already shows "disabled"
-        }
-        if self.invalid_schedule {
-            return Some("invalid schedule".to_string());
-        }
-        let mut parts = Vec::new();
-        if self.missed {
-            parts.push("Missed while Warp was closed".to_string());
-        }
-        if let Some(next) = self.next_at {
-            parts.push(format!("Next {}", format_local_short(next)));
-        }
-        if let Some(last) = self.last_scheduled_fire_at {
-            parts.push(format!("Last ran {}", format_local_short(last)));
-        }
-        if parts.is_empty() {
-            None
-        } else {
-            Some(parts.join(" · "))
-        }
+    /// "Next Jul 23 6:30pm" when the next fire time is known.
+    pub fn next_fragment(&self) -> Option<String> {
+        self.next_at
+            .map(|next| format!("Next {}", format_local_short(next)))
+    }
+
+    /// "Last ran Jul 22 6:30pm" when a scheduled run has fired before.
+    pub fn last_ran_fragment(&self) -> Option<String> {
+        self.last_scheduled_fire_at
+            .map(|last| format!("Last ran {}", format_local_short(last)))
     }
 }
 
 fn format_local_short(dt: DateTime<Local>) -> String {
     dt.format("%b %-d %-I:%M%P").to_string()
+}
+
+/// Human-readable schedule description for list UIs.
+///
+/// Presets and common fixed-time cron shapes become plain English ("Daily",
+/// "Daily 6:30pm", "Weekdays 9:00am", "Sundays 8:00am"); anything more
+/// complex falls back to the raw expression.
+pub fn humanize_schedule(raw: &str) -> String {
+    let trimmed = raw.trim();
+    match trimmed.to_ascii_lowercase().as_str() {
+        "@hourly" => return "Hourly".to_string(),
+        "@daily" => return "Daily".to_string(),
+        "@weekly" => return "Weekly".to_string(),
+        "@monthly" => return "Monthly".to_string(),
+        "@yearly" | "@annually" => return "Yearly".to_string(),
+        _ => {}
+    }
+
+    let fields: Vec<&str> = trimmed.split_whitespace().collect();
+    let [minute, hour, day_of_month, month, day_of_week] = fields.as_slice() else {
+        return trimmed.to_string();
+    };
+    let (Ok(minute), Ok(hour)) = (minute.parse::<u32>(), hour.parse::<u32>()) else {
+        return trimmed.to_string();
+    };
+    if minute > 59 || hour > 23 || *day_of_month != "*" || *month != "*" {
+        return trimmed.to_string();
+    }
+
+    let days = match *day_of_week {
+        "*" => "Daily".to_string(),
+        "1-5" => "Weekdays".to_string(),
+        "0,6" | "6,0" => "Weekends".to_string(),
+        other => match weekday_name(other) {
+            Some(day) => format!("{day}s"),
+            None => return trimmed.to_string(),
+        },
+    };
+    format!("{days} {}", format_time_short(hour, minute))
+}
+
+/// Weekday name for a single numeric cron day-of-week field (0/7 = Sunday).
+fn weekday_name(field: &str) -> Option<&'static str> {
+    match field {
+        "0" | "7" => Some("Sunday"),
+        "1" => Some("Monday"),
+        "2" => Some("Tuesday"),
+        "3" => Some("Wednesday"),
+        "4" => Some("Thursday"),
+        "5" => Some("Friday"),
+        "6" => Some("Saturday"),
+        _ => None,
+    }
+}
+
+/// "6:30pm"-style 12-hour time.
+fn format_time_short(hour: u32, minute: u32) -> String {
+    let (hour_12, suffix) = match hour {
+        0 => (12, "am"),
+        1..=11 => (hour, "am"),
+        12 => (12, "pm"),
+        _ => (hour - 12, "pm"),
+    };
+    format!("{hour_12}:{minute:02}{suffix}")
 }
 
 #[cfg(test)]

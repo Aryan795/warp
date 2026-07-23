@@ -17,9 +17,9 @@ use super::{
     AISettings, AccessibilitySettings, AliasExpansionSettings, AppEditorSettings,
     BlockVisibilitySettings, ChangelogSettings, CodeSettings, DebugSettings, EmacsBindingsSettings,
     FontSettings, FontSettingsChangedEvent, GPUSettings, InputBoxType, InputModeSettings,
-    InputSettings, LocalControlSettings, PaneSettings, SameLinePromptBlockSettings, ScrollSettings,
-    SelectionSettings, SshSettings, ThemeSettings, TuiAutoupdateSettings, VimBannerSettings,
-    WarpDrivePrivacySettings,
+    InputSettings, LocalAutomationsSettings, LocalControlSettings, PaneSettings,
+    SameLinePromptBlockSettings, ScrollSettings, SelectionSettings, SshSettings, ThemeSettings,
+    TuiAutoupdateSettings, VimBannerSettings, WarpDrivePrivacySettings,
 };
 use crate::ai::cloud_agent_settings::CloudAgentSettings;
 use crate::appearance;
@@ -101,6 +101,9 @@ pub fn register_all_settings(ctx: &mut AppContext) {
     SemanticSelection::register(ctx);
     if FeatureFlag::WarpControlCli.is_enabled() {
         LocalControlSettings::register(ctx);
+    }
+    if FeatureFlag::LocalAutomations.is_enabled() {
+        LocalAutomationsSettings::register(ctx);
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]

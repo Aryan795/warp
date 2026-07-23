@@ -1910,6 +1910,7 @@ pub(crate) fn initialize_app(
     env_vars::view::env_var_collection::init(ctx);
     ai::agent::todos::popup::init(ctx);
     terminal::view::init_environment::mode_selector::init(ctx);
+    local_automations::agent_modal::init(ctx);
     coding_entrypoints::project_buttons::init(ctx);
     if FeatureFlag::CodeReviewSaveChanges.is_enabled() {
         code_review::init(ctx);

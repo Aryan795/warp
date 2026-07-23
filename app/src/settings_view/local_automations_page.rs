@@ -9,6 +9,7 @@ use super::settings_page::{
 use super::SettingsSection;
 use crate::appearance::Appearance;
 use crate::features::FeatureFlag;
+use crate::local_automations::list_view::LocalAutomationsViewEvent;
 use crate::local_automations::LocalAutomationsView;
 
 const PAGE_TITLE_TEXT: &str = "Automations";
@@ -21,6 +22,12 @@ pub struct LocalAutomationsSettingsPageView {
 impl LocalAutomationsSettingsPageView {
     pub fn new(ctx: &mut ViewContext<Self>) -> Self {
         let list_view = ctx.add_typed_action_view(LocalAutomationsView::new);
+        // Bubble modal open/close up to the hosting settings view so it
+        // re-renders the modal overlay from `get_modal_content`.
+        ctx.subscribe_to_view(&list_view, |_, _, event, ctx| {
+            ctx.emit(*event);
+            ctx.notify();
+        });
         Self {
             page: PageType::new_monolith(
                 LocalAutomationsSettingsWidget,
@@ -30,10 +37,16 @@ impl LocalAutomationsSettingsPageView {
             list_view,
         }
     }
+
+    /// The Automations agent modal overlay when it is open, rendered by the
+    /// hosting settings view above the whole settings surface.
+    pub fn get_modal_content(&self, app: &AppContext) -> Option<Box<dyn Element>> {
+        self.list_view.as_ref(app).agent_modal_content(app)
+    }
 }
 
 impl Entity for LocalAutomationsSettingsPageView {
-    type Event = ();
+    type Event = LocalAutomationsViewEvent;
 }
 
 impl View for LocalAutomationsSettingsPageView {

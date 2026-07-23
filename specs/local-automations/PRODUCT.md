@@ -70,8 +70,14 @@ Figma: none provided
     - See `name`, runner type, schedule string, enabled flag, and source path (home-relative).
     - Open the TOML config (in Warp’s editor or OS default).
     - Trigger **Run now**.
-20. Empty state: if `automations/` is missing or empty, the list explains how to create one (skill / natural language / drop a TOML file) and does not error.
+20. Empty state: if `automations/` is missing or empty, the list explains how to create one (skill / natural language / suggestion / drop a TOML file) and does not error.
 21. Parse errors for a single file: that row shows an error state and Open config; other valid automations still list and run.
+
+### Suggested automations
+21a. The list always shows a **Suggested** section beneath the user's automations (including the empty state). It is not an empty-state-only surface; it remains available after automations exist.
+21b. Suggested recipes in this slice: **Stale branch cleanup**, **PR babysitter**, and **Mini software factory**.
+21c. Each recipe row shows a title and one-line description with a **Set up** dropdown mirroring **New**: "Create with Warp Agent" opens a new tab with a Warp agent conversation seeded with the recipe prompt; "Copy agent prompt" copies the same prompt for use with a non-Warp agent. Recipe prompts defer all mechanics to the create-automation skill (assumed installed) and state only the recipe: the first two create a local automation TOML; Mini software factory sets up GitHub-trigger agents (triage / implement / review) and checks with the user before billable runs.
+21d. The section header toggles collapse. Collapse state persists across restarts (GUI-only, not synced); the section is expanded by default.
 
 ### Run now
 22. **Run now** always requires an explicit user action (button, command palette, or agent-invoked run after confirmation). It does not wait for cron.

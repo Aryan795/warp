@@ -1180,6 +1180,11 @@ impl SettingsView {
         // Local Automations page
         let local_automations_page_handle = ctx
             .add_typed_action_view(local_automations_page::LocalAutomationsSettingsPageView::new);
+        // Re-render when the Automations agent modal toggles so the overlay
+        // from `get_modal_content_for_page` is shown/hidden.
+        ctx.subscribe_to_view(&local_automations_page_handle, |_, _, _event, ctx| {
+            ctx.notify();
+        });
 
         // Shared blocks page
         let block_client = ServerApiProvider::as_ref(ctx).get_block_client();
@@ -2372,6 +2377,9 @@ impl SettingsView {
                 view.read(app, |view, _| view.get_modal_content(app))
             }
             SettingsPageViewHandle::AI(view) => {
+                view.read(app, |view, _| view.get_modal_content(app))
+            }
+            SettingsPageViewHandle::LocalAutomations(view) => {
                 view.read(app, |view, _| view.get_modal_content(app))
             }
             _ => None,

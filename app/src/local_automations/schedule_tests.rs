@@ -170,7 +170,7 @@ fn first_seen_can_catch_up_recent_tick() {
 }
 
 #[test]
-fn subtitle_fragment_missed_and_next() {
+fn status_fragments_next_and_last() {
     let status = AutomationScheduleStatus {
         next_at: Some(at(2026, 7, 23, 9, 0)),
         last_scheduled_fire_at: Some(at(2026, 7, 22, 9, 0)),
@@ -178,8 +178,39 @@ fn subtitle_fragment_missed_and_next() {
         invalid_schedule: false,
         disabled: false,
     };
-    let frag = status.subtitle_fragment().unwrap();
-    assert!(frag.contains("Missed while Warp was closed"));
-    assert!(frag.contains("Next"));
-    assert!(frag.contains("Last ran"));
+    assert_eq!(status.next_fragment().unwrap(), "Next Jul 23 9:00am");
+    assert_eq!(
+        status.last_ran_fragment().unwrap(),
+        "Last ran Jul 22 9:00am"
+    );
+
+    let empty = AutomationScheduleStatus::default();
+    assert_eq!(empty.next_fragment(), None);
+    assert_eq!(empty.last_ran_fragment(), None);
+}
+
+#[test]
+fn humanize_schedule_presets_and_common_crons() {
+    assert_eq!(humanize_schedule("@hourly"), "Hourly");
+    assert_eq!(humanize_schedule("@daily"), "Daily");
+    assert_eq!(humanize_schedule("@weekly"), "Weekly");
+    assert_eq!(humanize_schedule("@monthly"), "Monthly");
+    assert_eq!(humanize_schedule("@annually"), "Yearly");
+
+    assert_eq!(humanize_schedule("30 18 * * *"), "Daily 6:30pm");
+    assert_eq!(humanize_schedule("0 9 * * 1-5"), "Weekdays 9:00am");
+    assert_eq!(humanize_schedule("0 10 * * 0,6"), "Weekends 10:00am");
+    assert_eq!(humanize_schedule("0 8 * * 0"), "Sundays 8:00am");
+    assert_eq!(humanize_schedule("15 0 * * 3"), "Wednesdays 12:15am");
+    assert_eq!(humanize_schedule("0 12 * * *"), "Daily 12:00pm");
+}
+
+#[test]
+fn humanize_schedule_falls_back_to_raw() {
+    // Anything with ranges/steps/fixed dates keeps the raw expression.
+    assert_eq!(humanize_schedule("*/5 * * * *"), "*/5 * * * *");
+    assert_eq!(humanize_schedule("0 9 1 * *"), "0 9 1 * *");
+    assert_eq!(humanize_schedule("0 9 * 6 *"), "0 9 * 6 *");
+    assert_eq!(humanize_schedule("0 9 * * 1,3"), "0 9 * * 1,3");
+    assert_eq!(humanize_schedule("whenever"), "whenever");
 }

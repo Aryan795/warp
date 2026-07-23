@@ -869,11 +869,31 @@ pub enum WorkspaceAction {
     /// Opens Settings → Automations. Gated on `FeatureFlag::LocalAutomations`.
     OpenLocalAutomationsList,
     /// Opens a new tab with a Warp agent conversation that creates a local
-    /// automation with the user (the Automations page's "New" action).
+    /// automation with the user (the Automations page's "New" modal).
     NewLocalAutomationWithWarpAgent,
     /// Copies a self-contained automation-creation prompt to the clipboard
     /// for use with a non-Warp agent (Claude Code, Codex, ...).
     CopyLocalAutomationPrompt,
+    /// Opens a new tab with a Warp agent conversation seeded with a suggested
+    /// automation recipe (the Automations page's "Suggested" section).
+    NewLocalAutomationFromSuggestion {
+        suggestion: crate::local_automations::SuggestedAutomation,
+    },
+    /// Copies a suggested automation recipe's creation prompt to the
+    /// clipboard for use with a non-Warp agent.
+    CopyLocalAutomationSuggestionPrompt {
+        suggestion: crate::local_automations::SuggestedAutomation,
+    },
+    /// Opens a new tab with a Warp agent conversation that recreates a local
+    /// automation as an Oz cloud schedule (a row's "Move to cloud" modal).
+    PromoteLocalAutomationToCloud {
+        automation: crate::local_automations::LocalAutomation,
+    },
+    /// Copies a local automation's move-to-cloud prompt to the clipboard
+    /// for use with a non-Warp agent (Claude Code, Codex, ...).
+    CopyLocalAutomationPromotionPrompt {
+        automation: crate::local_automations::LocalAutomation,
+    },
     /// Runs a local automation immediately in a new tab (agent or shell),
     /// resolving its cwd/worktree first. Gated on
     /// `FeatureFlag::LocalAutomations`.
@@ -1217,6 +1237,10 @@ impl WorkspaceAction {
             | OpenLocalAutomationsList
             | NewLocalAutomationWithWarpAgent
             | CopyLocalAutomationPrompt
+            | NewLocalAutomationFromSuggestion { .. }
+            | CopyLocalAutomationSuggestionPrompt { .. }
+            | PromoteLocalAutomationToCloud { .. }
+            | CopyLocalAutomationPromotionPrompt { .. }
             | RunLocalAutomation { .. }
             | OpenLocalAutomationConfig { .. }
             | ToggleAutomationsPlaceholderCollapsed

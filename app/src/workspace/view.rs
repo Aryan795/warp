@@ -10767,9 +10767,22 @@ impl Workspace {
     }
 
     /// Opens a new tab and starts a Warp agent conversation that walks the
-    /// user through creating a local automation (the list view's "New → Warp
-    /// agent" action).
+    /// user through creating a local automation (the "New" modal's "Use Warp
+    /// Agent" option).
     fn new_local_automation_with_warp_agent(&mut self, ctx: &mut ViewContext<Self>) {
+        self.start_local_automation_agent_conversation(
+            crate::local_automations::new_automation_agent_prompt(),
+            ctx,
+        );
+    }
+
+    /// Opens a new tab and starts a Warp agent conversation seeded with the
+    /// given automation-related prompt ("New" action and Suggested recipes).
+    fn start_local_automation_agent_conversation(
+        &mut self,
+        prompt: String,
+        ctx: &mut ViewContext<Self>,
+    ) {
         if !FeatureFlag::LocalAutomations.is_enabled() {
             return;
         }
@@ -10786,7 +10799,7 @@ impl Workspace {
             if let Some(terminal_view) = pane_group.active_session_view(ctx) {
                 terminal_view.update(ctx, |view, ctx| {
                     view.enter_agent_view_for_new_conversation(
-                        Some(crate::local_automations::new_automation_agent_prompt()),
+                        Some(prompt),
                         AgentViewEntryOrigin::LocalAutomation,
                         ctx,
                     );
@@ -10796,14 +10809,22 @@ impl Workspace {
     }
 
     /// Copies a self-contained automation-creation prompt to the clipboard for
-    /// use with a non-Warp agent (the list view's "New → Copy prompt" action).
+    /// use with a non-Warp agent (the "New" modal's "Copy agent prompt"
+    /// option).
     fn copy_local_automation_prompt(&mut self, ctx: &mut ViewContext<Self>) {
+        self.copy_automation_prompt_to_clipboard(
+            crate::local_automations::new_automation_external_prompt(),
+            ctx,
+        );
+    }
+
+    /// Copies an automation-creation prompt to the clipboard with a
+    /// confirmation toast (the agent modal's "Copy agent prompt" option).
+    fn copy_automation_prompt_to_clipboard(&mut self, prompt: String, ctx: &mut ViewContext<Self>) {
         if !FeatureFlag::LocalAutomations.is_enabled() {
             return;
         }
-        ctx.clipboard().write(ClipboardContent::plain_text(
-            crate::local_automations::new_automation_external_prompt(),
-        ));
+        ctx.clipboard().write(ClipboardContent::plain_text(prompt));
         self.toast_stack.update(ctx, |toast_stack, ctx| {
             toast_stack.add_ephemeral_toast(
                 DismissibleToast::success("Agent prompt copied".to_string()),
@@ -24641,6 +24662,27 @@ impl TypedActionView for Workspace {
             }
             CopyLocalAutomationPrompt => {
                 self.copy_local_automation_prompt(ctx);
+            }
+            NewLocalAutomationFromSuggestion { suggestion } => {
+                self.start_local_automation_agent_conversation(
+                    suggestion.prompt().to_string(),
+                    ctx,
+                );
+            }
+            CopyLocalAutomationSuggestionPrompt { suggestion } => {
+                self.copy_automation_prompt_to_clipboard(suggestion.prompt().to_string(), ctx);
+            }
+            PromoteLocalAutomationToCloud { automation } => {
+                self.start_local_automation_agent_conversation(
+                    crate::local_automations::promote_automation_agent_prompt(automation),
+                    ctx,
+                );
+            }
+            CopyLocalAutomationPromotionPrompt { automation } => {
+                self.copy_automation_prompt_to_clipboard(
+                    crate::local_automations::promote_automation_external_prompt(automation),
+                    ctx,
+                );
             }
             RunLocalAutomation { automation } => {
                 if FeatureFlag::LocalAutomations.is_enabled() {
