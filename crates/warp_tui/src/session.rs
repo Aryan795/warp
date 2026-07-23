@@ -171,6 +171,9 @@ fn create_terminal_session_after_login(
         std::env::current_dir().ok(),
         ctx,
     );
+    // Dev-only: seed mock conversations for the WARP_TUI_CONVO_NAV prototype
+    // when WARP_TUI_MOCK_CONVOS is set.
+    crate::convo_nav::seed_mock_conversations_if_requested(surface.id(), ctx);
     if let Some(token) = resume_token {
         surface.update(ctx, |view, ctx| {
             view.restore_conversation(

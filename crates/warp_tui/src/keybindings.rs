@@ -27,6 +27,7 @@ use warpui_core::{Action, AppContext, TuiView};
 
 use crate::attachment_bar::TuiAttachmentBar;
 use crate::cloud_run_view::TuiCloudRunView;
+use crate::convo_nav::ConvoNavView;
 use crate::editor_interaction::{TuiEditorBindingTarget, TuiEditorCommand, editor_binding_specs};
 use crate::editor_view::{TuiEditorView, TuiEditorViewAction};
 use crate::input::TuiInputView;
@@ -90,6 +91,7 @@ pub(crate) fn init(app: &mut AppContext) {
     crate::tui_ask_question_view::init(app);
     crate::tui_permission_prompt::init(app);
     crate::tui_shell_command_view::init(app);
+    crate::convo_nav::init(app);
 
     register_binding_validators(app);
 }
@@ -148,6 +150,7 @@ fn register_binding_validators(app: &mut AppContext) {
     app.register_tui_binding_validator::<TuiTranscriptView>(is_tui_owned_binding);
     app.register_tui_binding_validator::<TuiOrchestrationBlock>(is_tui_owned_binding);
     app.register_tui_binding_validator::<TuiOptionSelector>(is_tui_owned_binding);
+    app.register_tui_binding_validator::<ConvoNavView>(is_tui_owned_binding);
 }
 
 pub(crate) fn is_tui_owned_binding(binding: BindingLens) -> IsBindingValid {

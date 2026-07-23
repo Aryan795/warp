@@ -26,6 +26,7 @@ mod ui;
 
 mod conversation_menu;
 mod conversation_selection;
+mod convo_nav;
 mod editor_element;
 mod editor_interaction;
 mod editor_view;

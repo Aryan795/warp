@@ -65,6 +65,7 @@ use crate::attachment_bar::{
 use crate::clipboard::copy_to_clipboard;
 use crate::conversation_menu::{TuiConversationMenuEvent, TuiConversationMenuModel};
 use crate::conversation_selection::TuiConversationSelection;
+use crate::convo_nav::{ConvoNavEvent, ConvoNavStyle, ConvoNavView, ModalOverlay, VerticalDivider};
 use crate::editor_interaction::TuiEditorCommand;
 use crate::exit_confirmation::{CTRL_C_EXIT_WINDOW, ExitConfirmation};
 use crate::inline_menu::{MAX_INLINE_MENU_ROWS, TuiInlineMenu, active_inline_menu};
@@ -479,6 +480,12 @@ pub(crate) struct TuiTerminalSessionView {
     orchestration_tab_bar: ViewHandle<TuiTabBarView>,
     orchestration_tabs_focused: bool,
     zero_state_view: ViewHandle<TuiZeroStateView>,
+    /// Prototype conversation navigator (`WARP_TUI_CONVO_NAV`), if enabled.
+    convo_nav: Option<ViewHandle<ConvoNavView>>,
+    /// Whether the prototype navigator is currently visible.
+    convo_nav_open: bool,
+    /// Which prototype layout to use when the navigator is open.
+    convo_nav_style: Option<ConvoNavStyle>,
 }
 
 /// Registers the session surface's keybindings. Called once at TUI startup
@@ -1224,6 +1231,9 @@ impl TuiTerminalSessionView {
             TuiInputViewEvent::MoveFocusUp => {
                 view.focus_orchestration_tabs(ctx);
             }
+            TuiInputViewEvent::OpenConvoNavPrototype => {
+                view.open_convo_nav(ctx);
+            }
         });
         ctx.subscribe_to_model(&action_model, |view, action_model, event, ctx| {
             let BlocklistAIActionEvent::FinishedAction { action_id, .. } = event else {
@@ -1415,6 +1425,27 @@ impl TuiTerminalSessionView {
         ctx.spawn_stream_local(terminal_resize_rx, Self::handle_terminal_resize, |_, _| {});
         let zero_state_view =
             ctx.add_tui_view(|ctx| TuiZeroStateView::new(active_session.clone(), ctx));
+
+        // Prototype conversation navigator (WARP_TUI_CONVO_NAV). Created only
+        // when the env var selects a variant; closing or selecting returns
+        // focus to the input.
+        let convo_nav_style = crate::convo_nav::prototype_style();
+        let convo_nav = convo_nav_style.map(|style| {
+            let nav = ctx.add_typed_action_tui_view(|ctx| {
+                ConvoNavView::new(
+                    terminal_surface_id,
+                    conversation_selection.clone(),
+                    style,
+                    ctx,
+                )
+            });
+            ctx.subscribe_to_view(&nav, |view, _, event, ctx| match event {
+                ConvoNavEvent::Selected(_) | ConvoNavEvent::Closed => {
+                    view.close_convo_nav(ctx);
+                }
+            });
+            nav
+        });
         Self {
             transcript,
             input_view,
@@ -1457,7 +1488,29 @@ impl TuiTerminalSessionView {
             orchestration_tab_bar,
             orchestration_tabs_focused: false,
             zero_state_view,
+            convo_nav,
+            convo_nav_open: false,
+            convo_nav_style,
         }
+    }
+
+    /// Opens the prototype conversation navigator (no-op when the
+    /// `WARP_TUI_CONVO_NAV` prototype is disabled).
+    fn open_convo_nav(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(nav) = self.convo_nav.clone() else {
+            return;
+        };
+        self.convo_nav_open = true;
+        nav.update(ctx, |nav, _| nav.reset_selection());
+        ctx.focus(&nav);
+        ctx.notify();
+    }
+
+    /// Closes the prototype navigator and returns focus to the input.
+    fn close_convo_nav(&mut self, ctx: &mut ViewContext<Self>) {
+        self.convo_nav_open = false;
+        ctx.focus(&self.input_view);
+        ctx.notify();
     }
 
     /// Starts the first request for a child conversation hosted by this
@@ -3194,13 +3247,17 @@ impl TuiView for TuiTerminalSessionView {
     }
 
     fn child_view_ids(&self, _ctx: &AppContext) -> Vec<EntityId> {
-        vec![
+        let mut ids = vec![
             self.transcript.id(),
             self.input_view.id(),
             self.orchestration_tab_bar.id(),
             self.attachment_bar.id(),
             self.zero_state_view.id(),
-        ]
+        ];
+        if self.convo_nav_open && let Some(nav) = &self.convo_nav {
+            ids.push(nav.id());
+        }
+        ids
     }
 
     fn keymap_context(&self, ctx: &AppContext) -> keymap::Context {
@@ -3287,10 +3344,45 @@ impl TuiView for TuiTerminalSessionView {
         // slot; the first accepted submission produces a visible block, which
         // swaps the transcript back in.
         let mut content = TuiFlex::column();
-        if self.transcript.as_ref(ctx).is_empty() {
-            content = content.flex_child(TuiChildView::new(&self.zero_state_view).finish());
-        } else {
-            content = content.flex_child(TuiChildView::new(&self.transcript).finish());
+        let prototype_nav = self
+            .convo_nav_open
+            .then(|| self.convo_nav.as_ref().zip(self.convo_nav_style))
+            .flatten();
+        match prototype_nav {
+            // Page prototype: the navigator fills the transcript slot; the
+            // input box and footer below stay untouched.
+            Some((nav, ConvoNavStyle::Page)) => {
+                content = content.flex_child(TuiChildView::new(nav).finish());
+            }
+            // SidePane prototype: narrow nav column + divider + transcript.
+            Some((nav, ConvoNavStyle::SidePane)) => {
+                let sidebar = TuiConstrainedBox::new(TuiChildView::new(nav).finish())
+                    .with_max_cols(38)
+                    .finish();
+                let divider = VerticalDivider::new(builder.muted_text_style()).finish();
+                let transcript_slot = if self.transcript.as_ref(ctx).is_empty() {
+                    TuiChildView::new(&self.zero_state_view).finish()
+                } else {
+                    TuiChildView::new(&self.transcript).finish()
+                };
+                content = content.flex_child(
+                    TuiFlex::row()
+                        .child(sidebar)
+                        .child(divider)
+                        .flex_child(transcript_slot)
+                        .finish(),
+                );
+            }
+            // Modal (wrapped at the end of render) or prototype disabled:
+            // normal transcript / zero-state slot.
+            Some((_, ConvoNavStyle::Modal)) | None => {
+                if self.transcript.as_ref(ctx).is_empty() {
+                    content =
+                        content.flex_child(TuiChildView::new(&self.zero_state_view).finish());
+                } else {
+                    content = content.flex_child(TuiChildView::new(&self.transcript).finish());
+                }
+            }
         }
 
         // While a `RunAgents` card (or another blocking interaction) is the
@@ -3464,14 +3556,28 @@ impl TuiView for TuiTerminalSessionView {
             .with_padding_top(2)
             .with_padding_bottom(1)
             .finish();
-        if orchestration_tabs_available {
+        let full = if orchestration_tabs_available {
             TuiFlex::column()
                 .child(TuiChildView::new(&self.orchestration_tab_bar).finish())
                 .flex_child(session)
                 .finish()
         } else {
             session
+        };
+        // Modal prototype: the centred navigator dialog renders over the live
+        // session (the modal clears only its own cells, so the session shows
+        // through around it).
+        if self.convo_nav_open
+            && self.convo_nav_style == Some(ConvoNavStyle::Modal)
+            && let Some(nav) = &self.convo_nav
+        {
+            return ModalOverlay {
+                background: full,
+                overlay: TuiChildView::new(nav).finish(),
+            }
+            .finish();
         }
+        full
     }
 }
 

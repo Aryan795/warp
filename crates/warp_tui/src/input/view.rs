@@ -125,6 +125,10 @@ pub enum TuiInputViewEvent {
     /// The user accepted a prompt from the up-arrow prompt-history menu. Carries
     /// the prompt text to fill into the input and submit.
     AcceptedPromptHistory(String),
+    /// The user pressed ← at position 0 of the empty input while a
+    /// `WARP_TUI_CONVO_NAV` prototype is active. The session view opens the
+    /// prototype conversation navigator instead of the built-in inline menu.
+    OpenConvoNavPrototype,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -568,7 +572,15 @@ impl TypedActionView for TuiInputView {
                     && self.plain_text(ctx).is_empty()
                     && self.is_cursor_at_start(ctx)
                 {
-                    self.open_inline_menu(TuiInputSuggestionsMode::ConversationMenu, ctx);
+                    // When a WARP_TUI_CONVO_NAV prototype is active, the
+                    // session view owns the navigator; suppress the built-in
+                    // inline conversation menu so the prototypes can be
+                    // compared against it in isolation.
+                    if crate::convo_nav::prototype_style().is_some() {
+                        ctx.emit(TuiInputViewEvent::OpenConvoNavPrototype);
+                    } else {
+                        self.open_inline_menu(TuiInputSuggestionsMode::ConversationMenu, ctx);
+                    }
                     TuiEditorInteractionOutcome::FollowCursor
                 } else if matches!(*command, TuiEditorCommand::MoveUp)
                     && !self.is_shell_mode(ctx)

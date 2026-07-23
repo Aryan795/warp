@@ -16,6 +16,18 @@
 #
 # Extra arguments are forwarded to `cargo` (e.g. `--release`); use `--` to
 # pass arguments through to the binary itself.
+#
+# ── Conversation navigator prototype ─────────────────────────────────────────
+# Press ← at position 0 of the empty input to open the navigator (this
+# replaces the built-in inline conversation menu while a variant is active).
+# Select the layout with WARP_TUI_CONVO_NAV before running:
+#
+#   WARP_TUI_CONVO_NAV=modal    ./script/run-tui   # centred overlay + preview
+#   WARP_TUI_CONVO_NAV=page     ./script/run-tui   # transcript-slot list
+#   WARP_TUI_CONVO_NAV=sidebar  ./script/run-tui   # left panel beside session
+#
+# Add WARP_TUI_MOCK_CONVOS=1 to seed mock conversations for layout testing.
+# ─────────────────────────────────────────────────────────────────────────────
 
 set -e
 
