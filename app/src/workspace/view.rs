@@ -496,7 +496,7 @@ use crate::workspace::header_toolbar_editor::{HeaderToolbarEditorEvent, HeaderTo
 use crate::workspace::header_toolbar_item::HeaderToolbarItemKind;
 use crate::workspace::one_time_modal_model::OneTimeModalModel;
 use crate::workspace::sync_inputs::SyncedInputState;
-use crate::workspace::tab_group::{TabGroup, TabGroupId};
+use crate::workspace::tab_group::{TabGroup, TabGroupId, AUTOMATIONS_TAB_GROUP_NAME};
 use crate::workspace::tab_settings::TabCloseButtonPosition;
 use crate::workspace::toast_stack::{
     ToastStack, ToastStack as WorkspaceToastStack, ToastStackEvent as WorkspaceToastStackEvent,
@@ -987,6 +987,19 @@ struct HorizontalTabGroupMouseStates {
     header: MouseStateHandle,
 }
 
+/// Mouse states for the placeholder "Automations" tab group rendered in both
+/// tab bars before any automation run tabs exist.
+#[derive(Clone, Default)]
+pub(crate) struct AutomationsPlaceholderMouseStates {
+    pub(crate) header: MouseStateHandle,
+    pub(crate) chevron: MouseStateHandle,
+    pub(crate) close: MouseStateHandle,
+    pub(crate) setup_row: MouseStateHandle,
+    pub(crate) horizontal_header: MouseStateHandle,
+    pub(crate) horizontal_close: MouseStateHandle,
+    pub(crate) horizontal_setup_row: MouseStateHandle,
+}
+
 /// A unit the horizontal tab bar renders: either a single ungrouped tab or a
 /// contiguous run of same-group tabs collapsed into one group container.
 enum TabBarSlot {
@@ -1015,6 +1028,11 @@ pub struct Workspace {
     pub(crate) tab_groups: HashMap<TabGroupId, TabGroup>,
     /// Per-group hover state for the horizontal tab bar.
     horizontal_tab_group_mouse_states: RefCell<HashMap<TabGroupId, HorizontalTabGroupMouseStates>>,
+    /// Collapsed state of the placeholder "Automations" tab group. In-memory
+    /// only: each launch starts collapsed to keep the placeholder unobtrusive.
+    automations_placeholder_collapsed: bool,
+    /// Mouse states for the placeholder "Automations" tab group.
+    pub(crate) automations_placeholder_mouse_states: AutomationsPlaceholderMouseStates,
     tab_rename_editor: ViewHandle<EditorView>,
     pane_rename_editor: ViewHandle<EditorView>,
     tab_group_rename_editor: ViewHandle<EditorView>,
@@ -3378,6 +3396,8 @@ impl Workspace {
             traffic_light_mouse_states: Default::default(),
             tab_groups: HashMap::new(),
             horizontal_tab_group_mouse_states: RefCell::default(),
+            automations_placeholder_collapsed: true,
+            automations_placeholder_mouse_states: Default::default(),
             tab_rename_editor: Self::tab_rename_editor(ctx),
             pane_rename_editor: Self::pane_rename_editor(ctx),
             tab_group_rename_editor: Self::tab_group_rename_editor(ctx),
@@ -10915,8 +10935,90 @@ impl Workspace {
         self.run_local_automation(automation, ctx);
     }
 
+    /// Finds or creates the named tab group that collects local automation
+    /// run tabs. Returns `None` when tab groups are unavailable (the
+    /// `GroupedTabs` flag is off), in which case run tabs open ungrouped.
+    fn automations_tab_group_id(&mut self, ctx: &mut ViewContext<Self>) -> Option<TabGroupId> {
+        if !FeatureFlag::GroupedTabs.is_enabled() {
+            return None;
+        }
+        // A run landing in the group brings it back for users who dismissed
+        // the empty placeholder.
+        if *GeneralSettings::as_ref(ctx).automations_group_placeholder_dismissed {
+            GeneralSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings
+                    .automations_group_placeholder_dismissed
+                    .set_value(false, ctx));
+            });
+        }
+        let existing = self
+            .tab_groups
+            .values()
+            .find(|group| group.name.as_deref() == Some(AUTOMATIONS_TAB_GROUP_NAME))
+            .map(|group| group.id);
+        if let Some(group_id) = existing {
+            return Some(group_id);
+        }
+        let mut group = TabGroup::new();
+        group.name = Some(AUTOMATIONS_TAB_GROUP_NAME.to_string());
+        let group_id = group.id;
+        self.tab_groups.insert(group_id, group);
+        ctx.notify();
+        Some(group_id)
+    }
+
+    /// True when the placeholder "Automations" tab group should render in the
+    /// tab bars: local automations and tab groups are enabled, no real
+    /// Automations group exists yet, and the user hasn't dismissed it.
+    pub(crate) fn should_show_automations_placeholder(&self, app: &AppContext) -> bool {
+        FeatureFlag::LocalAutomations.is_enabled()
+            && FeatureFlag::GroupedTabs.is_enabled()
+            && !*GeneralSettings::as_ref(app).automations_group_placeholder_dismissed
+            && !self
+                .tab_groups
+                .values()
+                .any(|group| group.name.as_deref() == Some(AUTOMATIONS_TAB_GROUP_NAME))
+    }
+
+    /// Collapsed state of the placeholder "Automations" tab group.
+    pub(crate) fn automations_placeholder_collapsed(&self) -> bool {
+        self.automations_placeholder_collapsed
+    }
+
+    /// Whether the placeholder header shows the attention dot. Cleared
+    /// permanently the first time the user expands the group.
+    pub(crate) fn automations_placeholder_shows_dot(&self, app: &AppContext) -> bool {
+        !*GeneralSettings::as_ref(app).automations_group_placeholder_expanded
+    }
+
+    /// Toggles the placeholder "Automations" group between collapsed and
+    /// expanded; the first expansion clears the attention dot.
+    fn toggle_automations_placeholder_collapsed(&mut self, ctx: &mut ViewContext<Self>) {
+        self.automations_placeholder_collapsed = !self.automations_placeholder_collapsed;
+        if !self.automations_placeholder_collapsed {
+            GeneralSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings
+                    .automations_group_placeholder_expanded
+                    .set_value(true, ctx));
+            });
+        }
+        ctx.notify();
+    }
+
+    /// Hides the placeholder "Automations" group. It returns when the next
+    /// automation run recreates the real group.
+    fn dismiss_automations_placeholder(&mut self, ctx: &mut ViewContext<Self>) {
+        GeneralSettings::handle(ctx).update(ctx, |settings, ctx| {
+            report_if_error!(settings
+                .automations_group_placeholder_dismissed
+                .set_value(true, ctx));
+        });
+        ctx.notify();
+    }
+
     /// Opens the tab for a local automation run once its working directory is
-    /// resolved.
+    /// resolved. The tab opens in the background (the user's active tab keeps
+    /// focus) inside the "Automations" tab group.
     ///
     /// - Shell runner: a terminal tab at the resolved cwd running the command.
     /// - Warp agent runner: an agent tab at the resolved cwd. The session gets
@@ -10932,6 +11034,7 @@ impl Workspace {
         use crate::local_automations::LocalAutomationRunner;
 
         let tab_title = Some(automation.name.clone());
+        let group_id = self.automations_tab_group_id(ctx);
         match automation.runner {
             LocalAutomationRunner::Shell { command } => {
                 let exec = shell_command_with_optional_timeout(command, automation.timeout_seconds);
@@ -10942,10 +11045,11 @@ impl Workspace {
                     pane_mode: PaneMode::Terminal,
                     shell: None,
                 };
-                self.add_tab_with_pane_layout(
+                self.add_background_tab_with_pane_layout(
                     PanesLayout::Template(template),
                     Arc::new(HashMap::new()),
                     tab_title,
+                    group_id,
                     ctx,
                 );
             }
@@ -10963,13 +11067,14 @@ impl Workspace {
                     pane_mode: PaneMode::Terminal,
                     shell: None,
                 };
-                self.add_tab_with_pane_layout(
+                let new_pane_group = self.add_background_tab_with_pane_layout(
                     PanesLayout::Template(template),
                     Arc::new(HashMap::new()),
                     tab_title,
+                    group_id,
                     ctx,
                 );
-                self.active_tab_pane_group().update(ctx, |pane_group, ctx| {
+                new_pane_group.update(ctx, |pane_group, ctx| {
                     let Some(terminal_view) = pane_group.active_session_view(ctx) else {
                         log::warn!("No terminal view found after opening local automation tab");
                         return;
@@ -10996,6 +11101,10 @@ impl Workspace {
                         );
                     });
                 });
+                // Entering agent view on the background tab can pull global
+                // focus (`redetermine_global_focus`); hand it back to the
+                // tab the user was working in.
+                self.focus_active_tab(ctx);
             }
         }
     }
@@ -12919,6 +13028,73 @@ impl Workspace {
                 pg.set_left_panel_open(true, ctx);
             });
         }
+    }
+
+    /// Adds a new tab without activating or focusing it, optionally placing
+    /// it in a tab group. The tab lands at the end of the group's contiguous
+    /// run (or at the end of the tab bar when ungrouped), and the user's
+    /// active tab stays active, so the new tab runs in the background.
+    /// Returns the new tab's pane group so callers can set up its contents.
+    pub fn add_background_tab_with_pane_layout(
+        &mut self,
+        panes_layout: PanesLayout,
+        block_lists: Arc<HashMap<PaneUuid, Vec<SerializedBlockListItem>>>,
+        custom_tab_title: Option<String>,
+        group_id: Option<TabGroupId>,
+        ctx: &mut ViewContext<Self>,
+    ) -> ViewHandle<PaneGroup> {
+        let new_pane_group = ctx.add_typed_action_view(|ctx| {
+            let mut pane_group = PaneGroup::new_with_panes_layout(
+                self.tips_completed.clone(),
+                self.user_default_shell_unsupported_banner_model_handle
+                    .clone(),
+                self.server_api.clone(),
+                panes_layout,
+                block_lists,
+                self.model_event_sender.clone(),
+                ctx,
+            );
+            if let Some(title) = custom_tab_title {
+                pane_group.set_title(&title, ctx);
+            }
+            pane_group
+        });
+
+        ctx.subscribe_to_view(&new_pane_group, move |me, pane_group, event, ctx| {
+            me.handle_file_tree_event(pane_group, event, ctx)
+        });
+
+        // Only honor a group that actually exists; groups must stay
+        // contiguous, so a grouped tab is appended after the group's last
+        // member. A newly created (still empty) group anchors at the start of
+        // the bar — just past any pinned tabs — matching the placeholder
+        // Automations group's leading position. Ungrouped tabs land at the
+        // end of the bar, which is always outside the pinned region.
+        let group_id = group_id.filter(|gid| self.tab_groups.contains_key(gid));
+        let insert_idx = match group_id {
+            Some(gid) => self
+                .index_after_group(gid)
+                .unwrap_or_else(|| self.clamp_to_unpinned_region(&self.tabs, 0)),
+            None => self.tab_count(),
+        };
+
+        let mut tab = TabData::new(new_pane_group.clone());
+        tab.group_id = group_id;
+        self.tabs.insert(insert_idx, tab);
+        // Append (not front-insert) so the background tab is the least
+        // recently used and doesn't hijack ctrl-tab ordering.
+        self.tab_mru_order.push(new_pane_group.id());
+
+        // Keep the same tab visually active after the insertion shifts
+        // indices. When the workspace was empty, the new tab (index 0) is
+        // necessarily the active one.
+        if self.tab_count() > 1 && insert_idx <= self.active_tab_index {
+            self.active_tab_index += 1;
+        }
+
+        ctx.dispatch_global_action("workspace:save_app", ());
+        ctx.notify();
+        new_pane_group
     }
 
     pub fn add_tab_from_existing_pane(
@@ -20424,6 +20600,174 @@ impl Workspace {
         header.finish()
     }
 
+    /// Renders the placeholder "Automations" tab group in the horizontal tab
+    /// bar: a group-style header (clock icon + name, attention dot until
+    /// first expanded, close button on hover) and, when expanded, a single
+    /// "Set up an automation" pseudo-tab that opens Settings → Automations.
+    /// Click on the header toggles collapse.
+    fn render_automations_placeholder_in_tab_bar(
+        &self,
+        appearance: &Appearance,
+        ctx: &AppContext,
+    ) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let font_family = appearance.ui_font_family();
+        let main_text_color = theme.main_text_color(theme.background());
+        let sub_text_color = theme.sub_text_color(theme.background());
+        let is_collapsed = self.automations_placeholder_collapsed();
+        let shows_dot = self.automations_placeholder_shows_dot(ctx);
+        let mouse_states = &self.automations_placeholder_mouse_states;
+
+        let header_hover_bg = internal_colors::fg_overlay_1(theme);
+        let header_border_fill = internal_colors::fg_overlay_3(theme);
+        let close_mouse_state = mouse_states.horizontal_close.clone();
+        let header = Hoverable::new(mouse_states.horizontal_header.clone(), move |state| {
+            let icon =
+                ConstrainedBox::new(Icon::ClockRefresh.to_warpui_icon(sub_text_color).finish())
+                    .with_width(TAB_INDICATOR_HEIGHT)
+                    .with_height(TAB_INDICATOR_HEIGHT)
+                    .finish();
+            let mut content_row = Flex::row()
+                .with_main_axis_size(MainAxisSize::Max)
+                .with_main_axis_alignment(MainAxisAlignment::Center)
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_spacing(6.)
+                .with_child(icon)
+                .with_child(
+                    Shrinkable::new(
+                        1.0,
+                        Text::new_inline(AUTOMATIONS_TAB_GROUP_NAME, font_family, 12.)
+                            .with_clip(ClipConfig::end())
+                            .with_color(main_text_color.into())
+                            .finish(),
+                    )
+                    .finish(),
+                );
+            if shows_dot {
+                content_row =
+                    content_row.with_child(vertical_tabs::render_automations_attention_dot(theme));
+            }
+            if state.is_hovered() {
+                content_row =
+                    content_row.with_child(vertical_tabs::render_tab_group_header_icon_button(
+                        Icon::X,
+                        TAB_INDICATOR_HEIGHT,
+                        sub_text_color,
+                        internal_colors::fg_overlay_3(theme),
+                        close_mouse_state.clone(),
+                        Some(WorkspaceAction::DismissAutomationsPlaceholder),
+                    ));
+            }
+
+            let bg: ElementFill = if state.is_hovered() {
+                header_hover_bg.into()
+            } else {
+                ElementFill::None
+            };
+            // Tab-style border: left edge always (the placeholder trails the
+            // real tabs), right edge only when collapsed; expanded groups end
+            // with the setup pseudo-tab's right border instead.
+            Container::new(
+                Container::new(content_row.finish())
+                    .with_padding_left(8.)
+                    .with_padding_right(8.)
+                    .finish(),
+            )
+            .with_vertical_padding(6.)
+            .with_background(bg)
+            .with_border(
+                Border::all(1.)
+                    .with_sides(false, true, false, is_collapsed)
+                    .with_border_fill(header_border_fill),
+            )
+            .finish()
+        })
+        .with_cursor(Cursor::PointingHand)
+        .with_defer_events_to_children()
+        .on_click(|ctx, _, _| {
+            ctx.dispatch_typed_action(WorkspaceAction::ToggleAutomationsPlaceholderCollapsed);
+        })
+        .finish();
+
+        let mut row = Flex::row().with_cross_axis_alignment(CrossAxisAlignment::Center);
+        // Header fills one slot like a member tab, capped at a tab's 200px.
+        row.add_child(
+            Shrinkable::new(
+                1.0,
+                ConstrainedBox::new(header).with_max_width(200.).finish(),
+            )
+            .finish(),
+        );
+
+        if !is_collapsed {
+            let setup_tab =
+                Hoverable::new(mouse_states.horizontal_setup_row.clone(), move |state| {
+                    let plus_icon =
+                        ConstrainedBox::new(Icon::Plus.to_warpui_icon(sub_text_color).finish())
+                            .with_width(TAB_INDICATOR_HEIGHT)
+                            .with_height(TAB_INDICATOR_HEIGHT)
+                            .finish();
+                    let label_row = Flex::row()
+                        .with_main_axis_size(MainAxisSize::Max)
+                        .with_main_axis_alignment(MainAxisAlignment::Center)
+                        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                        .with_spacing(6.)
+                        .with_child(plus_icon)
+                        .with_child(
+                            Shrinkable::new(
+                                1.0,
+                                Text::new_inline(
+                                    vertical_tabs::AUTOMATIONS_SETUP_ROW_LABEL,
+                                    font_family,
+                                    12.,
+                                )
+                                .with_clip(ClipConfig::end())
+                                .with_color(sub_text_color.into())
+                                .finish(),
+                            )
+                            .finish(),
+                        )
+                        .finish();
+                    let bg: ElementFill = if state.is_hovered() {
+                        internal_colors::fg_overlay_1(theme).into()
+                    } else {
+                        ElementFill::None
+                    };
+                    Container::new(
+                        Container::new(label_row)
+                            .with_padding_left(8.)
+                            .with_padding_right(8.)
+                            .finish(),
+                    )
+                    .with_vertical_padding(6.)
+                    .with_background(bg)
+                    .with_border(
+                        Border::all(1.)
+                            .with_sides(false, false, false, true)
+                            .with_border_fill(internal_colors::fg_overlay_3(theme)),
+                    )
+                    .finish()
+                })
+                .with_cursor(Cursor::PointingHand)
+                .on_click(|ctx, _, _| {
+                    ctx.dispatch_typed_action(WorkspaceAction::OpenLocalAutomationsList);
+                })
+                .finish();
+            row.add_child(
+                Shrinkable::new(
+                    1.0,
+                    ConstrainedBox::new(setup_tab).with_max_width(200.).finish(),
+                )
+                .finish(),
+            );
+        }
+
+        // One flex slot per rendered element so the placeholder's tabs match
+        // regular tab widths.
+        let flex = if is_collapsed { 1.0 } else { 2.0 };
+        Shrinkable::new(flex, row.finish()).finish()
+    }
+
     /// Returns up to 4 distinct pane-kind icons for the group's collage.
     ///
     /// Icons are drawn from the same pool each member tab's Summary view
@@ -21178,6 +21522,12 @@ impl Workspace {
             // `Single`, and each contiguous run of same-group tabs is one
             // `Group`.
             let slots = self.tab_bar_slots();
+
+            // Placeholder "Automations" group advertising local automations
+            // until a real run tab exists. Leads the tab bar.
+            if self.should_show_automations_placeholder(ctx) {
+                tab_bar.add_child(self.render_automations_placeholder_in_tab_bar(appearance, ctx));
+            }
 
             // Render each slot in the tab bar, either an individual tab or tab group.
             for slot in &slots {
@@ -24301,6 +24651,12 @@ impl TypedActionView for Workspace {
                 if FeatureFlag::LocalAutomations.is_enabled() {
                     self.open_local_automation_config(path.clone(), ctx);
                 }
+            }
+            ToggleAutomationsPlaceholderCollapsed => {
+                self.toggle_automations_placeholder_collapsed(ctx);
+            }
+            DismissAutomationsPlaceholder => {
+                self.dismiss_automations_placeholder(ctx);
             }
             OpenTabConfigErrorFile {
                 #[cfg_attr(not(feature = "local_fs"), allow(unused_variables))]

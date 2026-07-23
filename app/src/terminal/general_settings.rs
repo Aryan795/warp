@@ -185,4 +185,25 @@ define_settings_group!(GeneralSettings, settings: [
         surface: settings::SettingSurfaces::GUI,
         private: true,
     },
+    // Whether the user explicitly closed the placeholder "Automations" tab
+    // group (shown before any automation runs exist). Cleared when an
+    // automation run opens so the group reappears with real content.
+    automations_group_placeholder_dismissed: AutomationsGroupPlaceholderDismissed {
+        type: bool,
+        default: false,
+        supported_platforms: SupportedPlatforms::DESKTOP,
+        sync_to_cloud: SyncToCloud::Never,
+        surface: settings::SettingSurfaces::GUI,
+        private: true,
+    },
+    // Whether the user has expanded the placeholder "Automations" tab group
+    // at least once. Gates the attention dot on the group header.
+    automations_group_placeholder_expanded: AutomationsGroupPlaceholderExpanded {
+        type: bool,
+        default: false,
+        supported_platforms: SupportedPlatforms::DESKTOP,
+        sync_to_cloud: SyncToCloud::Never,
+        surface: settings::SettingSurfaces::GUI,
+        private: true,
+    },
 ]);

@@ -5,6 +5,11 @@ use warpui::elements::DraggableState;
 
 use crate::tab::SelectedTabColor;
 
+/// Name of the auto-created tab group that collects local automation run
+/// tabs, and of the placeholder group advertising the feature before any
+/// runs exist.
+pub(crate) const AUTOMATIONS_TAB_GROUP_NAME: &str = "Automations";
+
 /// Stable identity for a tab group.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TabGroupId(pub Uuid);

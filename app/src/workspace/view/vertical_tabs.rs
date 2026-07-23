@@ -70,7 +70,7 @@ use crate::util::color::Opacity;
 use crate::workspace::action::{NewSessionMenuAnchor, WorkspaceAction};
 use crate::workspace::cross_window_tab_drag::CrossWindowTabDrag;
 use crate::workspace::hoa_onboarding::HoaOnboardingStep;
-use crate::workspace::tab_group::{TabGroup, TabGroupId};
+use crate::workspace::tab_group::{TabGroup, TabGroupId, AUTOMATIONS_TAB_GROUP_NAME};
 use crate::workspace::tab_settings::{
     TabSettings, VerticalTabsCompactSubtitle, VerticalTabsDisplayGranularity,
     VerticalTabsPrimaryInfo, VerticalTabsTabItemMode, VerticalTabsViewMode,
@@ -1912,6 +1912,17 @@ fn render_groups(
         groups = groups.with_spacing(TABS_MODE_ITEM_SPACING);
     }
 
+    // Placeholder "Automations" group advertising local automations until a
+    // real run tab exists. Leads the tab list so it's always visible without
+    // scrolling. Hidden while a search query filters the list.
+    if query.is_empty() && workspace.should_show_automations_placeholder(app) {
+        groups.add_child(render_automations_placeholder_group(
+            workspace,
+            uses_outer_group_container,
+            app,
+        ));
+    }
+
     // Consecutive tabs sharing a group_id collapse into a single group container.
     // TODO(johnturcoo) adopt horizontal tabs 'tab slot' pattern to remove this while loop.
     let total_visible = visible_tabs.len();
@@ -2694,7 +2705,7 @@ pub(crate) fn render_tab_group_for_drag_ghost(
 }
 
 /// Small icon button for the tab-group header; consumes clicks so they don't bubble.
-fn render_tab_group_header_icon_button(
+pub(crate) fn render_tab_group_header_icon_button(
     icon: WarpIcon,
     icon_size: f32,
     icon_color: WarpThemeFill,
@@ -2945,6 +2956,215 @@ fn render_grouped_tabs_header(
         });
     });
     hoverable.finish()
+}
+
+/// Terse value proposition rendered under the placeholder group's setup
+/// CTA label ("Set up an automation").
+const AUTOMATIONS_SETUP_ROW_DESCRIPTION: &str = "Run agents & commands on a schedule";
+
+/// Label of the placeholder group's single body row. Shared with the
+/// horizontal tab bar rendering in `workspace/view.rs`.
+pub(crate) const AUTOMATIONS_SETUP_ROW_LABEL: &str = "Set up an automation";
+
+/// Small accent-colored dot marking the placeholder "Automations" group as
+/// new. Shown until the user expands the group once.
+pub(crate) fn render_automations_attention_dot(theme: &WarpTheme) -> Box<dyn Element> {
+    const DOT_DIAMETER: f32 = 6.;
+    Container::new(
+        ConstrainedBox::new(Empty::new().finish())
+            .with_width(DOT_DIAMETER)
+            .with_height(DOT_DIAMETER)
+            .finish(),
+    )
+    .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
+    .with_background(theme.accent())
+    .finish()
+}
+
+/// Renders the placeholder "Automations" tab group shown before any
+/// automation run tabs exist. The header mirrors a real group header
+/// (chevron, title, close-on-hover, attention dot until first expanded);
+/// the expanded body is a single "Set up an automation" CTA row with a
+/// short description that opens Settings → Automations.
+fn render_automations_placeholder_group(
+    workspace: &Workspace,
+    needs_outer_horizontal_padding: bool,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    let appearance = Appearance::as_ref(app);
+    let theme = appearance.theme();
+    let font_family = appearance.ui_font_family();
+    let main_text_color = theme.main_text_color(theme.background());
+    let sub_text_color = theme.sub_text_color(theme.background());
+    let mouse_states = &workspace.automations_placeholder_mouse_states;
+    let is_collapsed = workspace.automations_placeholder_collapsed();
+    let shows_dot = workspace.automations_placeholder_shows_dot(app);
+
+    let chevron_mouse_state = mouse_states.chevron.clone();
+    let close_mouse_state = mouse_states.close.clone();
+    let header = Hoverable::new(mouse_states.header.clone(), move |state| {
+        let chevron_icon = if is_collapsed {
+            WarpIcon::ChevronRight
+        } else {
+            WarpIcon::ChevronDown
+        };
+        let chevron_button = render_tab_group_header_icon_button(
+            chevron_icon,
+            TAB_GROUP_ICON_SIZE,
+            main_text_color,
+            internal_colors::fg_overlay_2(theme),
+            chevron_mouse_state.clone(),
+            Some(WorkspaceAction::ToggleAutomationsPlaceholderCollapsed),
+        );
+        // Center the chevron in a `VERTICAL_TABS_ICON_SIZE` slot so the
+        // title aligns with real group headers.
+        let group_icon = ConstrainedBox::new(
+            Flex::row()
+                .with_main_axis_size(MainAxisSize::Max)
+                .with_main_axis_alignment(MainAxisAlignment::Center)
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_child(chevron_button)
+                .finish(),
+        )
+        .with_width(VERTICAL_TABS_ICON_SIZE)
+        .with_height(VERTICAL_TABS_ICON_SIZE)
+        .finish();
+
+        let mut title_row = Flex::row()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(6.)
+            .with_child(
+                Text::new_inline(AUTOMATIONS_TAB_GROUP_NAME, font_family, 12.)
+                    .with_clip(ClipConfig::ellipsis())
+                    .with_color(main_text_color.into())
+                    .finish(),
+            );
+        if shows_dot {
+            title_row = title_row.with_child(render_automations_attention_dot(theme));
+        }
+        let title = title_row.finish();
+
+        let close_button: Box<dyn Element> = if state.is_hovered() {
+            render_tab_group_header_icon_button(
+                WarpIcon::X,
+                TAB_GROUP_HEADER_ACTION_ICON_SIZE,
+                sub_text_color,
+                internal_colors::fg_overlay_3(theme),
+                close_mouse_state.clone(),
+                Some(WorkspaceAction::DismissAutomationsPlaceholder),
+            )
+        } else {
+            Empty::new().finish()
+        };
+
+        let row = Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(
+                Shrinkable::new(
+                    1.,
+                    Flex::row()
+                        .with_main_axis_size(MainAxisSize::Max)
+                        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                        .with_spacing(ICON_WITH_STATUS_GAP)
+                        .with_child(group_icon)
+                        .with_child(Shrinkable::new(1., title).finish())
+                        .finish(),
+                )
+                .finish(),
+            )
+            .with_child(close_button)
+            .finish();
+
+        let mut container = Container::new(row)
+            .with_padding(Padding::uniform(GROUP_HORIZONTAL_PADDING))
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS)));
+        if state.is_hovered() {
+            container = container.with_background(internal_colors::fg_overlay_2(theme));
+        }
+        container.finish()
+    })
+    .with_cursor(Cursor::PointingHand)
+    .with_defer_events_to_children()
+    .on_click(|ctx, _, _| {
+        ctx.dispatch_typed_action(WorkspaceAction::ToggleAutomationsPlaceholderCollapsed);
+    })
+    .finish();
+
+    let mut content = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_spacing(TABS_MODE_ITEM_SPACING)
+        .with_child(header);
+
+    if !is_collapsed {
+        let setup_row = Hoverable::new(mouse_states.setup_row.clone(), move |state| {
+            let icon = ConstrainedBox::new(WarpIcon::Plus.to_warpui_icon(sub_text_color).finish())
+                .with_width(TAB_GROUP_ICON_SIZE)
+                .with_height(TAB_GROUP_ICON_SIZE)
+                .finish();
+            let label = Text::new_inline(AUTOMATIONS_SETUP_ROW_LABEL, font_family, 12.)
+                .with_clip(ClipConfig::ellipsis())
+                .with_color(main_text_color.into())
+                .finish();
+            let description = Text::new_inline(AUTOMATIONS_SETUP_ROW_DESCRIPTION, font_family, 10.)
+                .with_clip(ClipConfig::ellipsis())
+                .with_color(sub_text_color.into())
+                .finish();
+            let text_column = Flex::column()
+                .with_main_axis_size(MainAxisSize::Min)
+                .with_cross_axis_alignment(CrossAxisAlignment::Start)
+                .with_spacing(1.)
+                .with_child(label)
+                .with_child(description)
+                .finish();
+            let row = Flex::row()
+                .with_main_axis_size(MainAxisSize::Max)
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_spacing(ICON_WITH_STATUS_GAP)
+                .with_child(icon)
+                .with_child(Shrinkable::new(1., text_column).finish())
+                .finish();
+            let mut container = Container::new(row)
+                .with_padding(Padding::uniform(GROUP_HORIZONTAL_PADDING))
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS)));
+            if state.is_hovered() {
+                container = container.with_background(internal_colors::fg_overlay_2(theme));
+            }
+            container.finish()
+        })
+        .with_cursor(Cursor::PointingHand)
+        .on_click(|ctx, _, _| {
+            ctx.dispatch_typed_action(WorkspaceAction::OpenLocalAutomationsList);
+        })
+        .finish();
+        content = content.with_child(
+            Container::new(setup_row)
+                .with_padding(
+                    Padding::uniform(0.)
+                        .with_left(TAB_GROUP_MEMBER_INDENT)
+                        .with_right(TAB_GROUP_CONTENT_INSET),
+                )
+                .finish(),
+        );
+    }
+
+    // Outer padding mirrors `render_grouped_tab_container` so the placeholder
+    // sits flush with real groups in both display granularities.
+    let mut padding = Padding::uniform(0.);
+    if needs_outer_horizontal_padding {
+        padding = Padding::uniform(GROUP_HORIZONTAL_PADDING);
+        if !is_collapsed {
+            padding = padding.with_bottom(GROUP_HORIZONTAL_PADDING + TAB_GROUP_CONTENT_INSET);
+        }
+    } else if !is_collapsed {
+        padding = padding.with_bottom(TAB_GROUP_CONTENT_INSET);
+    }
+    Container::new(content.finish())
+        .with_padding(padding)
+        .finish()
 }
 
 /// Renders a tab group: pane-like header followed by indented member rows. A colored group tints the

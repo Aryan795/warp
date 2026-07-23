@@ -885,6 +885,12 @@ pub enum WorkspaceAction {
     OpenLocalAutomationConfig {
         path: PathBuf,
     },
+    /// Toggles the collapsed state of the placeholder "Automations" tab
+    /// group (shown before any automation runs exist).
+    ToggleAutomationsPlaceholderCollapsed,
+    /// Hides the placeholder "Automations" tab group until the next
+    /// automation run recreates the real group.
+    DismissAutomationsPlaceholder,
     /// Opens the settings.toml file in a code editor pane.
     OpenSettingsFile,
     /// Opens a new agent session to fix settings.toml errors using the modify-settings skill.
@@ -1213,6 +1219,8 @@ impl WorkspaceAction {
             | CopyLocalAutomationPrompt
             | RunLocalAutomation { .. }
             | OpenLocalAutomationConfig { .. }
+            | ToggleAutomationsPlaceholderCollapsed
+            | DismissAutomationsPlaceholder
             | OpenSettingsFile
             | FixSettingsWithOz { .. }
             | OpenLocalToCloudHandoffPane { .. }
