@@ -135,6 +135,7 @@ where
         ctx.notify();
     }
 
+    #[allow(dead_code)]
     pub fn add_items(&mut self, items: Vec<DropdownItem<A>>, ctx: &mut ViewContext<Self>) {
         self.dropdown.update(ctx, |dropdown, ctx| {
             dropdown.add_items(items.iter().map(|item| item.into()));
@@ -151,6 +152,7 @@ where
         ctx.notify();
     }
 
+    #[allow(dead_code)]
     pub fn set_selected_by_name(
         &mut self,
         selected_item: impl AsRef<str>,
@@ -162,6 +164,7 @@ where
         self.sync_selected_item(ctx);
     }
 
+    #[allow(dead_code)]
     pub fn set_selected_by_index(&mut self, selected_index: usize, ctx: &mut ViewContext<Self>) {
         self.dropdown.update(ctx, |dropdown, ctx| {
             dropdown.set_selected_by_index(selected_index, ctx);
