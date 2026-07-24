@@ -155,6 +155,26 @@ pub fn apply_setup_command_operations(
     Ok(())
 }
 
+/// Render the setup-commands section of `oz environment get`/update output as a
+/// single string (with a trailing newline), numbering commands **zero-based**
+/// so the displayed index matches the index a user types for
+/// `--insert-setup-command` / `--edit-setup-command` (REMOTE-1063).
+///
+/// An empty list renders `Setup commands: None\n` (no numbering). This is the
+/// user-facing display change and is unit-tested in `lib_tests.rs`; the app
+/// crate's `print_environment_details` delegates here for the setup-commands
+/// block.
+pub fn format_setup_commands_listing(setup_commands: &[String]) -> String {
+    if setup_commands.is_empty() {
+        return "Setup commands: None\n".to_string();
+    }
+    let mut out = String::from("Setup commands:\n");
+    for (i, cmd) in setup_commands.iter().enumerate() {
+        out.push_str(&format!("  {}. {}\n", i, cmd));
+    }
+    out
+}
+
 /// Environment-related subcommands.
 #[derive(Debug, Clone, Subcommand)]
 #[command(group(ArgGroup::new("scope").required(false)))]

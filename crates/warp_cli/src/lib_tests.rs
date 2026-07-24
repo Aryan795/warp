@@ -6,8 +6,8 @@ use super::*;
 use crate::agent::{AgentCommand, Harness, OutputFormat};
 use crate::artifact::ArtifactCommand;
 use crate::environment::{
-    EnvironmentCommand, ImageCommand, apply_setup_command_operations, parse_indexed_setup_commands,
-    validate_setup_command,
+    EnvironmentCommand, ImageCommand, apply_setup_command_operations,
+    format_setup_commands_listing, parse_indexed_setup_commands, validate_setup_command,
 };
 use crate::harness_support::{HarnessSupportCommand, TaskStatus};
 use crate::integration::IntegrationCommand;
@@ -2249,6 +2249,39 @@ fn apply_rejects_too_many_runes_command() {
     assert!(
         !err.contains("SECRET"),
         "error must not leak command text, got: {err}"
+    );
+}
+
+#[test]
+fn format_setup_commands_listing_numbers_zero_based() {
+    // The `oz environment get`/update display numbers setup commands zero-based
+    // so the index a user types for --insert-setup-command / --edit-setup-command
+    // matches the number they see (REMOTE-1063). This is the user-facing display
+    // change; `print_environment_details` delegates here for the setup-commands
+    // block, so this test is the deterministic CI proof of the changed display.
+    let rendered = format_setup_commands_listing(&[
+        "make build".to_string(),
+        "pip install -e .".to_string(),
+        "make test".to_string(),
+    ]);
+    assert_eq!(
+        rendered, "Setup commands:\n  0. make build\n  1. pip install -e .\n  2. make test\n",
+        "got: {rendered}"
+    );
+    // The legacy 1-based first line must NOT appear.
+    assert!(
+        !rendered.contains("  1. make build\n"),
+        "must not be 1-based: {rendered}"
+    );
+}
+
+#[test]
+fn format_setup_commands_listing_empty_renders_none() {
+    let rendered = format_setup_commands_listing(&[]);
+    assert_eq!(rendered, "Setup commands: None\n", "got: {rendered}");
+    assert!(
+        !rendered.contains("  0."),
+        "no numbering when empty: {rendered}"
     );
 }
 
