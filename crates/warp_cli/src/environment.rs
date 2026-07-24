@@ -62,8 +62,12 @@ pub fn validate_setup_command(cmd: &str) -> Result<(), String> {
     }
     let runes = cmd.chars().count();
     if runes > MAX_SETUP_COMMAND_RUNES {
+        // Report only the configured limit and the observed length — never the
+        // command text itself. Setup commands may contain secrets, and this
+        // error is surfaced via `report_fatal_error` (logged at error level),
+        // so interpolating `{cmd}` would leak sensitive content (REMOTE-1063).
         return Err(format!(
-            "setup command must be at most {} runes (got {}): {cmd}",
+            "setup command must be at most {} runes (got {})",
             MAX_SETUP_COMMAND_RUNES, runes
         ));
     }

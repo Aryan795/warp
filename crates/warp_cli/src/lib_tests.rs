@@ -2102,9 +2102,22 @@ fn validate_setup_command_rejects_empty_and_whitespace() {
 fn validate_setup_command_rejects_too_many_runes() {
     let exactly_limit = "a".repeat(4096);
     assert!(validate_setup_command(&exactly_limit).is_ok());
-    let over_limit = "a".repeat(4097);
+    // Use a distinctive sentinel so we can prove the command text is not leaked
+    // into the user-facing / logged error. Setup commands may contain secrets,
+    // and this error is surfaced via `report_fatal_error` (logged at error
+    // level), so only the limit and observed length are safe to report
+    // (REMOTE-1063). 4091 'a's + 6-char sentinel = 4097 runes total.
+    let over_limit = format!("{}SECRET", "a".repeat(4091));
     let err = validate_setup_command(&over_limit).expect_err(">4096 runes should be rejected");
     assert!(err.contains("4096"), "got: {err}");
+    assert!(
+        err.contains("4097"),
+        "error should report the observed length, got: {err}"
+    );
+    assert!(
+        !err.contains("SECRET"),
+        "error must not leak command text, got: {err}"
+    );
 }
 
 #[test]
@@ -2225,12 +2238,18 @@ fn apply_rejects_result_exceeding_100_total() {
 
 #[test]
 fn apply_rejects_too_many_runes_command() {
-    let over_limit = "a".repeat(4097);
+    // Use a distinctive sentinel so we can prove the command text is not leaked
+    // into the user-facing / logged error (REMOTE-1063).
+    let over_limit = format!("{}SECRET", "a".repeat(4091));
     let mut cmds = vec!["a".to_string()];
     let err =
         apply_setup_command_operations(&mut cmds, false, &[], &[(0, over_limit.clone())], &[], &[])
             .expect_err(">4096-rune command should be rejected");
     assert!(err.contains("4096"), "got: {err}");
+    assert!(
+        !err.contains("SECRET"),
+        "error must not leak command text, got: {err}"
+    );
 }
 
 #[test]
