@@ -668,10 +668,12 @@ fn coordination_root_dir() -> PathBuf {
         return PathBuf::from(base).join("Warp").join("mcp-oauth");
     }
     #[cfg(not(windows))]
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    home.join(".warp").join("mcp-oauth")
+    {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        home.join(".warp").join("mcp-oauth")
+    }
 }
 
 /// Creates and canonicalizes the per-user coordination root. The canonical
