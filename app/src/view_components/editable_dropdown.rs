@@ -52,7 +52,7 @@ pub struct EditableDropdown<A: DropdownItemAction = ()> {
     revert_text: Option<RevertText>,
     _action_type: PhantomData<A>,
     #[cfg(test)]
-    last_dispatched_action: Option<A>,
+    last_dispatched_action: Option<Box<dyn DropdownItemAction>>,
 }
 
 pub enum EditableDropdownEvent {
@@ -225,7 +225,7 @@ where
     fn dispatch_action(&mut self, action: &dyn DropdownItemAction, ctx: &mut ViewContext<Self>) {
         #[cfg(test)]
         {
-            self.last_dispatched_action = action.as_any().downcast_ref::<A>().cloned();
+            self.last_dispatched_action = Some(action.clone_box());
         }
         ctx.dispatch_typed_action(action);
     }
@@ -401,6 +401,13 @@ where
                 _ => None,
             })
             .collect()
+    }
+
+    #[cfg(test)]
+    fn last_dispatched_action(&self) -> Option<&A> {
+        self.last_dispatched_action
+            .as_ref()
+            .and_then(|action| action.as_any().downcast_ref())
     }
 }
 
