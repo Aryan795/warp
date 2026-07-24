@@ -1,5 +1,13 @@
 *Proposed change: CloudMode recording artifacts in the Artifacts sidebar*
 
+*Scope update (post-review):* Root cause #1 (missing WASM sidebar pill) has been
+descoped from the implementation PR and its `merge_artifacts` change reverted.
+The merge is a no-op for WASM CloudMode viewers, which typically have no linked
+local conversation, and recording pills now appear in that sidebar (the original
+symptom looks flaky). The shipped PR covers only #2 (title label) and #3
+(recording open behavior). Re-fix #1 separately once there is a reliable repro
+of the true drop point.
+
 *Summary:* Fix the three reported recording-artifact behaviors in the Warp
 client: a missing WASM sidebar pill, a native pill that loses the recording
 title, and a native click that opens a save-file picker instead of the
@@ -35,7 +43,7 @@ upstream in artifact population, not by adding a rendering-only WASM gate.
 
 *Root cause / approach:*
 
-1. *WASM population (#1).* At Warp `0b07f7c2e371f6ced4287ffbdaa17f50fb129dde`,
+1. *WASM population (#1) — DESCOPED (reverted; see scope update above).* At Warp `0b07f7c2e371f6ced4287ffbdaa17f50fb129dde`,
    `ArtifactButtonsRow::collect_buttons` handles `Artifact::File` without a
    WASM cfg gate (`app/src/ai/artifacts/buttons.rs:127-194`). Therefore a
    missing recording pill means the recording is absent from the data supplied

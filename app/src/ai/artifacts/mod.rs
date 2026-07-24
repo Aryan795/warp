@@ -407,58 +407,6 @@ pub fn open_recording_artifact<V: warpui::View>(
     );
 }
 
-/// Merge artifacts from a task payload with the corresponding conversation/event
-/// stream, retaining the richer artifact when both sources contain the same UID.
-pub fn merge_artifacts(
-    primary: Vec<Artifact>,
-    supplemental: impl IntoIterator<Item = Artifact>,
-) -> Vec<Artifact> {
-    let mut merged = primary;
-    for candidate in supplemental {
-        let Some(candidate_uid) = artifact_uid(&candidate) else {
-            if !merged.contains(&candidate) {
-                merged.push(candidate);
-            }
-            continue;
-        };
-
-        if let Some(existing) = merged
-            .iter_mut()
-            .find(|existing| artifact_uid(existing) == Some(candidate_uid))
-        {
-            if let (
-                Artifact::File {
-                    title: existing_title,
-                    ..
-                },
-                Artifact::File {
-                    title: candidate_title,
-                    ..
-                },
-            ) = (&mut *existing, &candidate)
-                && existing_title.is_none()
-                && candidate_title.is_some()
-            {
-                *existing_title = candidate_title.clone();
-            }
-            continue;
-        }
-        merged.push(candidate);
-    }
-    merged
-}
-
-fn artifact_uid(artifact: &Artifact) -> Option<&str> {
-    match artifact {
-        Artifact::File { artifact_uid, .. } | Artifact::Screenshot { artifact_uid, .. } => {
-            Some(artifact_uid)
-        }
-        Artifact::Plan { .. }
-        | Artifact::PullRequest { .. }
-        | Artifact::ExternalReference { .. } => None,
-    }
-}
-
 pub fn open_screenshot_lightbox<V: warpui::View>(
     artifact_uids: &[String],
     ctx: &mut warpui::ViewContext<V>,

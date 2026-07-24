@@ -176,46 +176,6 @@ fn recording_view_url_contains_encoded_artifact_uid() {
 }
 
 #[test]
-fn merge_artifacts_preserves_supplemental_title_and_deduplicates_uid() {
-    let merged = merge_artifacts(
-        vec![Artifact::File {
-            artifact_uid: "artifact-file-1".to_string(),
-            filepath: "outputs/report.mp4".to_string(),
-            filename: Some("report.mp4".to_string()),
-            title: None,
-            mime_type: "video/mp4".to_string(),
-            description: None,
-            size_bytes: None,
-        }],
-        vec![
-            Artifact::File {
-                artifact_uid: "artifact-file-1".to_string(),
-                filepath: "outputs/report.mp4".to_string(),
-                filename: Some("report.mp4".to_string()),
-                title: Some("Recorded run".to_string()),
-                mime_type: "video/mp4".to_string(),
-                description: None,
-                size_bytes: None,
-            },
-            Artifact::Screenshot {
-                artifact_uid: "screenshot-1".to_string(),
-                mime_type: "image/png".to_string(),
-                description: None,
-            },
-        ],
-    );
-
-    assert_eq!(merged.len(), 2);
-    assert!(matches!(
-        &merged[0],
-        Artifact::File {
-            title: Some(title),
-            ..
-        } if title == "Recorded run"
-    ));
-}
-
-#[test]
 #[cfg(feature = "local_fs")]
 fn default_download_filename_prefers_server_filename() {
     assert_eq!(

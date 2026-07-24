@@ -46,9 +46,7 @@ use crate::ai::agent_management::details_action_buttons::{
 use crate::ai::agent_management::telemetry::{AgentManagementTelemetryEvent, OpenedFrom};
 use crate::ai::ambient_agents::task::TaskPrincipalInfo;
 use crate::ai::ambient_agents::{AmbientAgentTaskId, cancel_task_with_toast};
-use crate::ai::artifacts::{
-    Artifact, ArtifactButtonsRow, ArtifactButtonsRowEvent, merge_artifacts,
-};
+use crate::ai::artifacts::{Artifact, ArtifactButtonsRow, ArtifactButtonsRowEvent};
 use crate::ai::blocklist::BlocklistAIHistoryModel;
 use crate::ai::cloud_environments::{AmbientAgentEnvironment, CloudAmbientAgentEnvironment};
 use crate::ai::harness_availability::HarnessAvailabilityModel;
@@ -397,23 +395,6 @@ impl ConversationDetailsData {
                 .map(|h| h.harness_type)
                 .or(Some(Harness::Oz))
         });
-        let history_model = BlocklistAIHistoryModel::as_ref(app);
-        let linked_conversation_id = Some(task.run_id())
-            .map(|run_id| run_id.to_string())
-            .and_then(|run_id| history_model.conversation_id_for_agent_id(&run_id))
-            .or_else(|| {
-                task.conversation_id().and_then(|conversation_id| {
-                    let token = ServerConversationToken::new(conversation_id.to_string());
-                    history_model.find_conversation_id_by_server_token(&token)
-                })
-            });
-        let linked_artifacts = linked_conversation_id
-            .and_then(|conversation_id| {
-                history_model
-                    .conversation(&conversation_id)
-                    .map(|conversation| conversation.artifacts().to_vec())
-            })
-            .unwrap_or_default();
 
         ConversationDetailsData {
             mode: PanelMode::Task {
@@ -428,7 +409,7 @@ impl ConversationDetailsData {
             // whether to also show the short orchestrator label here.
             title: task.title.clone(),
             created_at: Some(task.created_at.with_timezone(&Local)),
-            artifacts: merge_artifacts(task.artifacts.clone(), linked_artifacts),
+            artifacts: task.artifacts.clone(),
             credits,
             run_time: task.run_time(),
             open_action,
