@@ -14,7 +14,34 @@ use uuid::Uuid;
 use warp_core::channel::ChannelState;
 use warp_errors::report_error;
 use warpui_extras::secure_storage::AppContextExt as _;
+mod coordinator;
 mod loopback;
+
+pub use coordinator::{
+    AuthLease, CoordinatorConfig, CredentialKey, CredentialNamespace, OAuthCoordinator,
+    OwnerMetadata, ResolveOutcome, SecureCredentialBackend, WaiterNotifier as WaiterCallback,
+    forwarded_callback_looks_valid,
+};
+
+/// A desktop callback relay owned by the elected leader. The leader starts it
+/// once the CSRF state is known and publishes its endpoint as owner metadata so
+/// other processes can forward `warp://mcp/...` callbacks to the leader. The
+/// relay validates the callback through the existing `handle_oauth_callback`
+/// path and delivers exactly one result to the leader's local OAuth channel.
+///
+/// Methods are synchronous so cleanup can run from a `Drop` guard on every
+/// terminal path (success, error, timeout, shutdown).
+pub trait OwnerRelay: Send + Sync + 'static {
+    /// Starts the relay for this leader flow and returns the endpoint address
+    /// to publish as owner metadata. Returning an error fails closed: the
+    /// leader still runs its own local callback path, but callbacks delivered
+    /// to other processes will not be forwarded.
+    fn start(&self, csrf_state: String) -> anyhow::Result<String>;
+
+    /// Stops the relay and releases its resources. Called when the leader flow
+    /// ends; idempotent.
+    fn stop(&self);
+}
 
 pub const TEMPLATABLE_MCP_CREDENTIALS_KEY: &str = "TemplatableMcpCredentials";
 pub const FILE_BASED_MCP_CREDENTIALS_KEY: &str = "FileBasedMcpCredentials";
@@ -49,8 +76,6 @@ pub type PersistedCredentialsMap = HashMap<Uuid, PersistedCredentials>;
 
 // Maps a consistent hash of the installation to its persisted credentials
 pub type FileBasedPersistedCredentialsMap = HashMap<u64, PersistedCredentials>;
-pub type PersistCredentialsCallback =
-    Box<dyn Fn(Uuid, PersistedCredentials) -> BoxFuture<'static, anyhow::Result<()>> + Send>;
 pub type RequiresAuthenticationCallback =
     Box<dyn Fn(Uuid, String, String) -> BoxFuture<'static, anyhow::Result<()>> + Send>;
 pub type AuthenticatedCallback =
@@ -199,8 +224,7 @@ impl CredentialStore for PersistingCredentialStore {
 async fn install_persisting_credential_store(
     auth_manager: &mut AuthorizationManager,
     persisted_credentials: Option<PersistedCredentials>,
-    persist_credentials: PersistCredentialsCallback,
-    installation_uuid: Uuid,
+    coordinator: std::sync::Arc<OAuthCoordinator>,
 ) {
     let client_secret = persisted_credentials
         .as_ref()
@@ -221,10 +245,14 @@ async fn install_persisting_credential_store(
 
     auth_manager.set_credential_store(store);
 
+    // Every credential update — the initial OAuth exchange and runtime
+    // auto-refresh — goes through the coordinator's serialized read/merge/write
+    // so concurrent processes and concurrent installations never overwrite one
+    // another's entries in the shared secure-storage map.
     tokio::spawn(async move {
         while let Ok(credentials) = persist_rx.recv().await {
-            if let Err(err) = persist_credentials(installation_uuid, credentials).await {
-                log::warn!("Failed to persist auto-refreshed MCP credentials: {err:?}");
+            if let Err(err) = coordinator.merge_and_write(credentials).await {
+                log::warn!("Failed to persist MCP credentials to shared storage: {err:#}");
             }
         }
     });
@@ -239,8 +267,24 @@ pub struct AuthContext {
     pub is_headless: bool,
     /// Whether this server was auto-discovered from a repo MCP configuration file.
     pub is_file_based: bool,
-    pub persist_credentials: PersistCredentialsCallback,
+    /// Which shared secure-storage namespace this installation's credentials
+    /// live in, and the key that identifies it inside that namespace's map.
+    /// Used to build the cross-process coordinator and serialize credential
+    /// writes.
+    pub credential_namespace: CredentialNamespace,
+    pub credential_key: CredentialKey,
+    /// Access to the shared secure-storage map for this namespace, used by the
+    /// coordinator for serialized read/merge/write.
+    pub credential_backend: std::sync::Arc<dyn SecureCredentialBackend>,
     pub requires_authentication: RequiresAuthenticationCallback,
+    /// Invoked when this process becomes a follower (waits for another instance
+    /// to publish credentials) so the app can show the waiting state with no
+    /// authorization URL.
+    pub became_waiter: Option<WaiterCallback>,
+    /// Optional desktop callback relay owned by the elected leader. `None` for
+    /// the TUI loopback path (callbacks arrive on the leader's own loopback
+    /// socket) and for headless/CLI flows.
+    pub owner_relay: Option<std::sync::Arc<dyn OwnerRelay>>,
     pub authenticated: Option<AuthenticatedCallback>,
 }
 
@@ -251,82 +295,152 @@ pub enum CallbackResult {
     Error { error: Option<String> },
 }
 
-/// Makes an authenticated client for the given authorization server.
-///
-/// This takes in the URL of the resource to authenticate for, and uses that
-/// to determine the authorization server.
-///
-/// Upon success, returns the client and a boolean indicating whether the user was required to
-/// re-authenticate (e.g. re-log in).
-pub async fn make_authenticated_client(
+/// A stable redirect URI used only to configure the OAuth client for token
+/// refresh after loading shared credentials. The authorization-code grant
+/// requires a real redirect URI, but token refresh (RFC 6749 §6) does not send
+/// one, so a process that loads another instance's credentials (a follower)
+/// never needs to bind a callback receiver.
+fn stable_refresh_redirect_uri() -> String {
+    format!("{}://mcp/oauth2callback", ChannelState::url_scheme())
+}
+
+/// Attempts to build an authenticated client from cached credentials without
+/// any cross-process coordination. Returns `None` when the cached credentials
+/// are absent or do not yield a valid (possibly refreshed) access token, so the
+/// caller falls through to the coordinated interactive flow.
+async fn try_cached_client(
     resource_url: &str,
     http_client: reqwest::Client,
-    auth_context: AuthContext,
+    credentials: PersistedCredentials,
+    coordinator: std::sync::Arc<OAuthCoordinator>,
+) -> Option<AuthClient<reqwest::Client>> {
+    let client_id = credentials.credentials.client_id.clone();
+    let client_secret = credentials.client_secret.clone();
+    let mut auth_manager = AuthorizationManager::new(resource_url).await.ok()?;
+    install_persisting_credential_store(&mut auth_manager, Some(credentials), coordinator).await;
+    if auth_manager.initialize_from_store().await.ok()?
+        && auth_manager.get_access_token().await.is_ok()
+    {
+        if let Some(client_secret) = client_secret {
+            let _ = auth_manager.configure_client(
+                OAuthClientConfig::new(client_id, stable_refresh_redirect_uri())
+                    .with_client_secret(client_secret),
+            );
+        }
+        return Some(AuthClient::new(http_client, auth_manager));
+    }
+    None
+}
+
+/// Builds a fresh authenticated client from shared credentials published by
+/// another process (the follower path). Installs the persisting store so later
+/// auto-refresh writes also go through the serialized merge. Returns
+/// `did_require_login = true` so the app fires the authenticated notification
+/// once for this process.
+async fn build_client_from_credentials(
+    resource_url: &str,
+    http_client: reqwest::Client,
+    credentials: PersistedCredentials,
+    coordinator: std::sync::Arc<OAuthCoordinator>,
 ) -> Result<(AuthClient<reqwest::Client>, bool), AuthError> {
-    let AuthContext {
+    let client_id = credentials.credentials.client_id.clone();
+    let client_secret = credentials.client_secret.clone();
+    let mut auth_manager = AuthorizationManager::new(resource_url).await?;
+    install_persisting_credential_store(&mut auth_manager, Some(credentials), coordinator).await;
+    if auth_manager.initialize_from_store().await? && auth_manager.get_access_token().await.is_ok()
+    {
+        if let Some(client_secret) = client_secret {
+            auth_manager.configure_client(
+                OAuthClientConfig::new(client_id, stable_refresh_redirect_uri())
+                    .with_client_secret(client_secret),
+            )?;
+        }
+        return Ok((AuthClient::new(http_client, auth_manager), true));
+    }
+    // The shared credentials did not yield a valid token (e.g. they were
+    // revoked). Surface a controlled error so the spawn fails and the user can
+    // retry, which re-acquires the lease and re-authenticates.
+    Err(AuthError::AuthorizationFailed(
+        "MCP OAuth credentials loaded from another Warp instance were not usable; \
+         please retry authentication"
+            .to_string(),
+    ))
+}
+
+/// RAII guard that releases the auth lease, stops the desktop callback relay,
+/// and removes the owner metadata on every leader terminal path (success,
+/// OAuth error, callback timeout, token-exchange error, cancellation). The OS
+/// also releases the lease on crash, but this guard handles the normal paths
+/// and any `?` early return.
+struct LeaderGuard {
+    lease: Option<AuthLease>,
+    coordinator: std::sync::Arc<OAuthCoordinator>,
+    owner_relay: Option<std::sync::Arc<dyn OwnerRelay>>,
+    relay_started: bool,
+}
+
+impl LeaderGuard {
+    /// Releases all leader-held resources. Idempotent.
+    fn release(&mut self) {
+        if self.relay_started
+            && let Some(relay) = self.owner_relay.take()
+        {
+            relay.stop();
+        } else {
+            self.owner_relay.take();
+        }
+        self.coordinator.remove_owner_metadata();
+        self.lease.take();
+    }
+}
+
+impl Drop for LeaderGuard {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// Inputs for the leader's interactive OAuth flow, bundled to keep
+/// [`run_leader_oauth`] under clippy's argument-count limit.
+struct LeaderFlow {
+    callback_mode: OAuthCallbackMode,
+    uuid: Uuid,
+    requires_authentication: RequiresAuthenticationCallback,
+    owner_relay: Option<std::sync::Arc<dyn OwnerRelay>>,
+}
+
+/// Runs the interactive OAuth flow as the elected leader. The lease, relay, and
+/// owner metadata are released by `LeaderGuard` on every return path.
+async fn run_leader_oauth(
+    resource_url: &str,
+    http_client: reqwest::Client,
+    coordinator: std::sync::Arc<OAuthCoordinator>,
+    lease: AuthLease,
+    flow: LeaderFlow,
+) -> Result<(AuthClient<reqwest::Client>, bool), AuthError> {
+    let LeaderFlow {
         callback_mode,
         uuid,
-        persisted_credentials,
-        is_headless,
-        is_file_based,
-        persist_credentials,
         requires_authentication,
-        ..
-    } = auth_context;
+        owner_relay,
+    } = flow;
+    let mut guard = LeaderGuard {
+        lease: Some(lease),
+        coordinator: coordinator.clone(),
+        owner_relay,
+        relay_started: false,
+    };
 
+    // Only the leader prepares the callback receiver. A follower never binds a
+    // loopback port or creates a callback channel.
     let PreparedOAuthCallback {
         redirect_uri,
         receiver: callback_receiver,
         uses_loopback,
     } = callback_mode.prepare().await?;
 
-    // Create the auth manager and initialize it with a backing credential store that persists
-    // new credentials to secure storage.
-    let client_id = persisted_credentials
-        .as_ref()
-        .map(|c| c.credentials.client_id.clone());
-    let client_secret = persisted_credentials
-        .as_ref()
-        .and_then(|c| c.client_secret.clone());
     let mut auth_manager = AuthorizationManager::new(resource_url).await?;
-    install_persisting_credential_store(
-        &mut auth_manager,
-        persisted_credentials,
-        persist_credentials,
-        uuid,
-    )
-    .await;
-
-    // If we loaded persisted credentials from the store, and we have a valid access token
-    // (or successfully refreshed a valid refresh token), we're already authorized and good
-    // to go.
-    if auth_manager.initialize_from_store().await? && auth_manager.get_access_token().await.is_ok()
-    {
-        if let (Some(client_id), Some(client_secret)) = (client_id, client_secret) {
-            auth_manager.configure_client(
-                OAuthClientConfig::new(client_id, redirect_uri.clone())
-                    .with_client_secret(client_secret),
-            )?;
-        }
-        return Ok((AuthClient::new(http_client, auth_manager), false));
-    }
-
-    // If we're in headless mode and we reach here, it means we either have no credentials
-    // or the cached credentials failed to refresh. Block interactive OAuth in headless mode.
-    if is_headless {
-        if is_file_based {
-            log::warn!(
-                "File-based MCP server {uuid} requires OAuth authentication; \
-                 skipping in headless mode. To use this server, authenticate it \
-                 in the Warp desktop app first."
-            );
-        }
-        return Err(AuthError::AuthorizationFailed(
-            "MCP server requires OAuth authentication. Please authenticate this server in the \
-             Warp desktop app first, then try again."
-                .to_string(),
-        ));
-    }
+    install_persisting_credential_store(&mut auth_manager, None, coordinator.clone()).await;
 
     let metadata = auth_manager.discover_metadata().await?;
 
@@ -400,6 +514,28 @@ pub async fn make_authenticated_client(
         })
         .unwrap_or_default();
 
+    // Start the desktop callback relay (if configured) and publish owner
+    // metadata so other processes can forward callbacks to this leader. The
+    // relay reuses the existing `handle_oauth_callback` CSRF validation.
+    if let Some(relay) = guard.owner_relay.as_ref() {
+        match relay.start(csrf_state.clone()) {
+            Ok(address) => {
+                let owner_metadata = OwnerMetadata::new(uuid, address);
+                if let Err(err) = coordinator.publish_owner_metadata(&owner_metadata) {
+                    log::warn!("Failed to publish MCP OAuth owner metadata: {err:#}");
+                } else {
+                    guard.relay_started = true;
+                }
+            }
+            Err(err) => {
+                log::warn!(
+                    "Failed to start MCP OAuth callback relay; callbacks delivered to other \
+                     processes will not be forwarded: {err:#}"
+                );
+            }
+        }
+    }
+
     if let Err(err) = requires_authentication(uuid, csrf_state.clone(), auth_url).await {
         log::warn!("Failed to emit RequiresAuthentication state: {err:?}");
     }
@@ -408,7 +544,7 @@ pub async fn make_authenticated_client(
     let oauth_result = callback_receiver.receive(&csrf_state).await?;
 
     let (code, csrf_token) = match &oauth_result {
-        CallbackResult::Success { code, csrf_token } => (code, csrf_token),
+        CallbackResult::Success { code, csrf_token } => (code.clone(), csrf_token.clone()),
         CallbackResult::Error { error } => {
             return Err(AuthError::AuthorizationFailed(
                 error.as_deref().unwrap_or("unknown error").to_string(),
@@ -417,13 +553,153 @@ pub async fn make_authenticated_client(
     };
 
     // Handle the callback with the received authorization code and CSRF token.
-    oauth_state.handle_callback(code, csrf_token).await?;
+    oauth_state.handle_callback(&code, &csrf_token).await?;
 
     let auth_manager = oauth_state.into_authorization_manager().ok_or_else(|| {
         AuthError::InternalError("Failed to create authorization manager".to_string())
     })?;
 
+    // Release the lease, relay, and owner metadata now that the flow succeeded.
+    // The persisting store's background task will publish credentials through
+    // the coordinator's serialized merge.
+    guard.release();
     Ok((AuthClient::new(http_client, auth_manager), true))
+}
+
+/// Makes an authenticated client for the given authorization server, coordinating
+/// across concurrent Warp processes so exactly one opens an OAuth authorization
+/// page.
+///
+/// This takes in the URL of the resource to authenticate for, and uses that
+/// to determine the authorization server.
+///
+/// Upon success, returns the client and a boolean indicating whether the user
+/// was required to re-authenticate (e.g. re-log in), including the follower case
+/// where another instance completed authentication and this process loaded the
+/// shared credentials.
+pub async fn make_authenticated_client(
+    resource_url: &str,
+    http_client: reqwest::Client,
+    auth_context: AuthContext,
+) -> Result<(AuthClient<reqwest::Client>, bool), AuthError> {
+    let AuthContext {
+        callback_mode,
+        uuid,
+        persisted_credentials,
+        is_headless,
+        is_file_based,
+        credential_namespace,
+        credential_key,
+        credential_backend,
+        requires_authentication,
+        became_waiter,
+        owner_relay,
+        authenticated: _,
+    } = auth_context;
+
+    // Build the cross-process coordinator. Failing to build it fails closed for
+    // interactive OAuth (a controlled error) rather than letting every process
+    // open its own page.
+    let channel = format!("{:?}", ChannelState::channel());
+    let coordinator = std::sync::Arc::new(
+        OAuthCoordinator::new(
+            &channel,
+            credential_namespace,
+            uuid,
+            credential_key,
+            credential_backend,
+            CoordinatorConfig::default(),
+            became_waiter,
+        )
+        .map_err(|err| AuthError::InternalError(err.to_string()))?,
+    );
+
+    // 1. Fast path: usable cached credentials bypass coordination entirely.
+    if let Some(credentials) = persisted_credentials
+        && let Some(client) = try_cached_client(
+            resource_url,
+            http_client.clone(),
+            credentials,
+            coordinator.clone(),
+        )
+        .await
+    {
+        return Ok((client, false));
+    }
+
+    // 2. Headless mode never runs interactive OAuth or waits on another
+    //    instance; it returns the existing non-interactive error so a later
+    //    headless retry can consume credentials written by an interactive leader.
+    if is_headless {
+        if is_file_based {
+            log::warn!(
+                "File-based MCP server {uuid} requires OAuth authentication; \
+                 skipping in headless mode. To use this server, authenticate it \
+                 in the Warp desktop app first."
+            );
+        }
+        return Err(AuthError::AuthorizationFailed(
+            "MCP server requires OAuth authentication. Please authenticate this server in the \
+             Warp desktop app first, then try again."
+                .to_string(),
+        ));
+    }
+
+    // 3. Coordinate: re-check shared credentials, elect a leader, or wait for
+    //    another instance to publish credentials (with promotion if it fails).
+    let outcome = coordinator
+        .resolve_or_wait()
+        .await
+        .map_err(|err| AuthError::InternalError(err.to_string()))?;
+    match outcome {
+        ResolveOutcome::Credentials(credentials) => {
+            // Another process published credentials while we were starting or
+            // while we were waiting. Build a client from them; no page opened.
+            build_client_from_credentials(resource_url, http_client, *credentials, coordinator)
+                .await
+        }
+        ResolveOutcome::Timeout => Err(AuthError::AuthorizationFailed(
+            "MCP authentication in another Warp instance did not complete within the timeout; \
+             please retry"
+                .to_string(),
+        )),
+        ResolveOutcome::Leader(lease) => {
+            // Re-check shared credentials under the lease: another process may
+            // have published just before we acquired it. Its credentials win
+            // over our stale in-memory snapshot, so we do not open a page.
+            match coordinator
+                .read_latest()
+                .await
+                .map_err(|err| AuthError::InternalError(err.to_string()))?
+            {
+                Some(credentials) => {
+                    drop(lease);
+                    build_client_from_credentials(
+                        resource_url,
+                        http_client,
+                        credentials,
+                        coordinator,
+                    )
+                    .await
+                }
+                None => {
+                    run_leader_oauth(
+                        resource_url,
+                        http_client,
+                        coordinator,
+                        lease,
+                        LeaderFlow {
+                            callback_mode,
+                            uuid,
+                            requires_authentication,
+                            owner_relay,
+                        },
+                    )
+                    .await
+                }
+            }
+        }
+    }
 }
 
 /// Loads credentials from secure storage at the provided key.
@@ -465,6 +741,19 @@ pub fn write_to_secure_storage<T: Serialize>(
             );
         }
     }
+}
+
+/// Acquires the shared test lock that serializes tests setting the
+/// `WARP_MCP_OAUTH_COORDINATION_DIR` env var, since `cargo test` runs tests in
+/// parallel and process env vars are global. Hold the returned guard for the
+/// lifetime of any test that touches the coordination directory. Uses
+/// `tokio::sync::Mutex` so the guard may be held across `.await` points.
+#[cfg(test)]
+pub(crate) async fn env_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
 }
 
 #[cfg(test)]

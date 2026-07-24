@@ -24,10 +24,16 @@ pub enum TuiMcpTransport {
 pub enum TuiMcpServerStatus {
     Offline,
     Starting,
+    /// Another Warp instance is running the interactive OAuth flow; this
+    /// instance is waiting for the shared credentials it publishes and has no
+    /// reopenable authorization URL.
+    WaitingForAuthentication,
     Authenticating,
     Running,
     Stopping,
-    Failed { message: String },
+    Failed {
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -137,6 +143,9 @@ impl TuiMcpManager {
                 });
             }
             TuiMcpAction::ReopenAuthorization(id) => {
+                // A follower has no authorization URL (another instance owns the
+                // interactive flow), so reopening is a no-op. Only the leader's
+                // snapshot carries a URL; reopening it re-opens the same page.
                 if let Some(url) = self
                     .snapshot
                     .servers
@@ -205,6 +214,9 @@ impl TuiMcpManager {
                 let status = match runtime_manager.get_server_state(uuid) {
                     None | Some(MCPServerState::NotRunning) => TuiMcpServerStatus::Offline,
                     Some(MCPServerState::Starting) => TuiMcpServerStatus::Starting,
+                    Some(MCPServerState::WaitingForAuthentication) => {
+                        TuiMcpServerStatus::WaitingForAuthentication
+                    }
                     Some(MCPServerState::Authenticating) => TuiMcpServerStatus::Authenticating,
                     Some(MCPServerState::Running) => TuiMcpServerStatus::Running,
                     Some(MCPServerState::ShuttingDown) => TuiMcpServerStatus::Stopping,

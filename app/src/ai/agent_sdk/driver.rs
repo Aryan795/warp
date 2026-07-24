@@ -1427,6 +1427,7 @@ impl AgentDriver {
                 }
                 MCPServerState::NotRunning
                 | MCPServerState::Starting
+                | MCPServerState::WaitingForAuthentication
                 | MCPServerState::Authenticating
                 | MCPServerState::ShuttingDown => return,
             }
