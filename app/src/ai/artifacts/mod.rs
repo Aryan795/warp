@@ -66,8 +66,7 @@ pub enum Artifact {
     File {
         artifact_uid: String,
         filepath: String,
-        #[serde(default)]
-        filename: Option<String>,
+        filename: String,
         #[serde(default)]
         title: Option<String>,
         mime_type: String,
@@ -104,8 +103,7 @@ enum ArtifactHelper {
     File {
         artifact_uid: String,
         filepath: String,
-        #[serde(default)]
-        filename: Option<String>,
+        filename: String,
         #[serde(default)]
         title: Option<String>,
         mime_type: String,
@@ -169,13 +167,8 @@ impl<'de> serde::Deserialize<'de> for Artifact {
                 size_bytes,
             } => Artifact::File {
                 artifact_uid,
-                filepath: filepath.clone(),
-                filename: Some(
-                    filename
-                        .filter(|filename| !filename.trim().is_empty())
-                        .or_else(|| sanitized_basename(&filepath))
-                        .unwrap_or_else(|| "File".to_string()),
-                ),
+                filepath,
+                filename,
                 title: title.filter(|title| !title.trim().is_empty()),
                 mime_type,
                 description,
@@ -216,14 +209,12 @@ impl From<api::message::artifact_event::FileArtifact> for Artifact {
         Artifact::File {
             artifact_uid: file.artifact_uid,
             filepath: file.filepath.clone(),
-            filename: Some(
-                Path::new(&file.filepath)
-                    .file_name()
-                    .and_then(|file_name| file_name.to_str())
-                    .filter(|file_name| !file_name.trim().is_empty())
-                    .unwrap_or("File")
-                    .to_string(),
-            ),
+            filename: Path::new(&file.filepath)
+                .file_name()
+                .and_then(|file_name| file_name.to_str())
+                .filter(|file_name| !file_name.trim().is_empty())
+                .unwrap_or("File")
+                .to_string(),
             title: None,
             mime_type: file.mime_type,
             description: if file.description.is_empty() {
@@ -285,7 +276,7 @@ impl TryFrom<warp_graphql::ai::AIConversationArtifact> for Artifact {
             warp_graphql::ai::AIConversationArtifact::FileArtifact(file) => Ok(Artifact::File {
                 artifact_uid: file.artifact_uid.into_inner(),
                 filepath: file.filepath.clone(),
-                filename: Some(sanitized_basename(&file.filepath).unwrap_or(file.filepath)),
+                filename: sanitized_basename(&file.filepath).unwrap_or(file.filepath),
                 title: file.title.filter(|title| !title.trim().is_empty()),
                 mime_type: file.mime_type,
                 description: file.description,
@@ -330,7 +321,7 @@ where
         .collect())
 }
 
-pub fn file_button_label_with_title(title: Option<&str>, filename: &str, filepath: &str) -> String {
+pub fn file_button_label(title: Option<&str>, filename: &str, filepath: &str) -> String {
     if let Some(title) = title.and_then(non_empty_trimmed) {
         return title.to_string();
     }

@@ -308,7 +308,7 @@ impl ConversationEndedTombstoneView {
                 ArtifactButtonsRowEvent::OpenRecording { artifact_uid } => {
                     send_telemetry_from_ctx!(
                         AgentManagementTelemetryEvent::TombstoneArtifactClicked {
-                            artifact_type: ArtifactType::File
+                            artifact_type: ArtifactType::Video
                         },
                         ctx
                     );

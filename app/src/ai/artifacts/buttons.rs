@@ -5,7 +5,7 @@ use warp_core::ui::theme::AnsiColorIdentifier;
 use warpui::elements::{ChildView, Element, Empty, ParentElement, Wrap};
 use warpui::{AppContext, Entity, TypedActionView, View, ViewContext, ViewHandle};
 
-use super::{Artifact, file_button_label_with_title, is_recording_mime_type};
+use super::{Artifact, file_button_label, is_recording_mime_type};
 use crate::notebooks::NotebookId;
 use crate::terminal::input::MenuPositioning;
 use crate::view_components::action_button::{
@@ -192,11 +192,7 @@ fn collect_buttons(
                 mime_type,
                 ..
             } => {
-                let button_text = file_button_label_with_title(
-                    title.as_deref(),
-                    filename.as_deref().unwrap_or_default(),
-                    filepath,
-                );
+                let button_text = file_button_label(title.as_deref(), filename, filepath);
                 let theme = theme.clone();
                 let action = file_artifact_action(artifact_uid, mime_type);
                 buttons.push(

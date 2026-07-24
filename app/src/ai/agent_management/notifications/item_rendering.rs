@@ -501,7 +501,7 @@ pub(crate) fn handle_notification_artifact_buttons_event(
         ArtifactButtonsRowEvent::OpenRecording { artifact_uid } => {
             send_telemetry_from_ctx!(
                 AgentManagementTelemetryEvent::ArtifactClicked {
-                    artifact_type: ArtifactType::File
+                    artifact_type: ArtifactType::Video
                 },
                 ctx
             );

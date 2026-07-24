@@ -268,7 +268,7 @@ fn test_from_task_and_conversation_preserve_recording_artifacts() {
         let recording = Artifact::File {
             artifact_uid: "recording-task".to_string(),
             filepath: "outputs/recording.mp4".to_string(),
-            filename: Some("recording.mp4".to_string()),
+            filename: "recording.mp4".to_string(),
             title: Some("Task recording".to_string()),
             mime_type: "video/mp4".to_string(),
             description: None,

@@ -91,7 +91,7 @@ fn resolves_lightbox_image_for_screenshot_artifact() {
 #[test]
 fn file_button_label_prefers_filename() {
     assert_eq!(
-        file_button_label_with_title(None, "report.txt", "outputs/other.txt"),
+        file_button_label(None, "report.txt", "outputs/other.txt"),
         "report.txt"
     );
 }
@@ -99,23 +99,23 @@ fn file_button_label_prefers_filename() {
 #[test]
 fn file_button_label_falls_back_to_filepath_basename() {
     assert_eq!(
-        file_button_label_with_title(None, "", "outputs/report.txt"),
+        file_button_label(None, "", "outputs/report.txt"),
         "report.txt"
     );
 }
 
 #[test]
 fn file_button_label_falls_back_to_generic_label() {
-    assert_eq!(file_button_label_with_title(None, "", ""), "File");
+    assert_eq!(file_button_label(None, "", ""), "File");
 }
 #[test]
 fn file_button_label_prefers_title_and_ignores_whitespace() {
     assert_eq!(
-        file_button_label_with_title(Some("  Report title  "), "report.txt", "outputs/report.txt"),
+        file_button_label(Some("  Report title  "), "report.txt", "outputs/report.txt"),
         "Report title"
     );
     assert_eq!(
-        file_button_label_with_title(Some("  "), "report.txt", "outputs/report.txt"),
+        file_button_label(Some("  "), "report.txt", "outputs/report.txt"),
         "report.txt"
     );
 }
@@ -141,29 +141,6 @@ fn file_artifact_action_opens_video_recordings_and_downloads_other_files() {
         }
     );
 }
-#[test]
-fn deserializes_file_without_filename_using_filepath_basename() {
-    let artifact: Artifact = serde_json::from_value(serde_json::json!({
-        "artifact_type": "FILE",
-        "data": {
-            "artifact_uid": "artifact-file-1",
-            "filepath": "outputs/report.mp4",
-            "mime_type": "video/mp4",
-            "description": null,
-            "size_bytes": 42
-        }
-    }))
-    .expect("expected file artifact conversion");
-
-    assert!(matches!(
-        artifact,
-        Artifact::File {
-            filename: Some(ref filename),
-            ..
-        } if filename == "report.mp4"
-    ));
-}
-
 #[test]
 fn recording_view_url_contains_encoded_artifact_uid() {
     let task_id = "00000000-0000-0000-0000-000000000001"
@@ -251,7 +228,7 @@ fn converts_graphql_file_artifact() {
         Artifact::File {
             artifact_uid: "artifact-file-1".to_string(),
             filepath: "outputs/report.txt".to_string(),
-            filename: Some("report.txt".to_string()),
+            filename: "report.txt".to_string(),
             title: Some("Daily report".to_string()),
             mime_type: "text/plain".to_string(),
             description: Some("Daily summary".to_string()),
