@@ -1,11 +1,18 @@
+#[cfg(feature = "voice_input")]
+use voice_input::VoiceInput;
 use warp_core::ui::appearance::Appearance;
 use warpui::platform::WindowStyle;
 use warpui::{App, View};
 
 use super::EditableDropdown;
+use crate::auth::AuthStateProvider;
 use crate::editor::{EditOrigin, Event as EditorEvent};
+use crate::settings_view::keybindings::KeybindingChangedNotifier;
 use crate::test_util::settings::initialize_settings_for_tests;
 use crate::view_components::DropdownItem;
+use crate::vim_registers::VimRegisters;
+use crate::workspace::ToastStack;
+use crate::workspace::sync_inputs::SyncedInputState;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -14,6 +21,13 @@ struct TestAction(u16);
 fn initialize_test_app(app: &mut App) {
     initialize_settings_for_tests(app);
     app.add_singleton_model(|_| Appearance::mock());
+    app.add_singleton_model(|_| ToastStack);
+    app.add_singleton_model(|_| SyncedInputState::mock());
+    app.add_singleton_model(|_| VimRegisters::new());
+    app.add_singleton_model(|_| KeybindingChangedNotifier::mock());
+    app.add_singleton_model(|_| AuthStateProvider::new_for_test());
+    #[cfg(feature = "voice_input")]
+    app.add_singleton_model(VoiceInput::new);
     app.add_singleton_model(UserWorkspaces::default_mock);
 }
 
