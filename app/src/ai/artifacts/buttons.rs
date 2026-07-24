@@ -297,7 +297,7 @@ fn make_file_button(
     theme: Arc<dyn ActionButtonTheme>,
 ) -> ActionButton {
     let (icon, tooltip) = if matches!(&action, ArtifactButtonAction::OpenRecording { .. }) {
-        (Icon::Play, "Open recording")
+        (Icon::VideoRecorder, "Open recording")
     } else {
         (Icon::File, "Download file")
     };
