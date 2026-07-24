@@ -65,8 +65,6 @@ fn snapshot_with(servers: Vec<TuiMcpServerSnapshot>) -> TuiMcpSnapshot {
 /// Opens the MCP menu model against a seeded `TuiMcpManager` snapshot and
 /// returns the rendered inline-menu lines plus the produced snapshot rows.
 fn render_menu(snapshot: TuiMcpSnapshot) -> (Vec<String>, TuiInlineMenuSnapshot) {
-    let mut lines = Vec::new();
-    let mut captured = None;
     App::test((), |mut app| async move {
         app.update(|ctx| {
             ctx.add_singleton_model(|_| Appearance::mock());
@@ -84,11 +82,9 @@ fn render_menu(snapshot: TuiMcpSnapshot) -> (Vec<String>, TuiInlineMenuSnapshot)
                 TuiRect::new(0, 0, 72, 14),
                 ctx,
             );
-            lines = frame.buffer.to_lines();
-            captured = Some(snap);
-        });
-    });
-    (lines, captured.expect("snapshot captured"))
+            (frame.buffer.to_lines(), snap)
+        })
+    })
 }
 
 #[test]
