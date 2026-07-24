@@ -119,7 +119,6 @@ enum TuiAIBlockSection {
     },
     Summarization {
         message_id: MessageId,
-        finished: bool,
         body: Vec<TuiRichTextSection>,
     },
     /// The agent's task list (todo list), rendered as a collapsible block.
@@ -513,7 +512,7 @@ impl TuiAIBlock {
         let status = self.block_model.status(ctx);
         let output_streaming = status.is_streaming();
         let mut ask_question_actions = Vec::new();
-        let mut file_edit_action_ids = Vec::new();
+        let mut file_edit_actions = Vec::new();
         let mut generic_actions = Vec::new();
         let mut plan_actions = Vec::new();
         let mut shell_command_actions = Vec::new();
@@ -530,8 +529,10 @@ impl TuiAIBlock {
                 self.action_ids.insert(action.id.clone());
                 if let AIAgentActionType::AskUserQuestion { questions } = &action.action {
                     ask_question_actions.push((action.id.clone(), questions.clone()));
-                } else if matches!(&action.action, AIAgentActionType::RequestFileEdits { .. }) {
-                    file_edit_action_ids.push(action.id.clone());
+                } else if let AIAgentActionType::RequestFileEdits { file_edits, .. } =
+                    &action.action
+                {
+                    file_edit_actions.push((action.id.clone(), file_edits.clone()));
                 } else if matches!(
                     &action.action,
                     AIAgentActionType::CreateDocuments(_) | AIAgentActionType::EditDocuments(_)
@@ -629,14 +630,21 @@ impl TuiAIBlock {
                 .insert(action_id, TuiToolCallView::Generic(view));
             ctx.notify();
         }
-        for action_id in file_edit_action_ids {
+        for (action_id, file_edits) in file_edit_actions {
             if self.action_views.contains_key(&action_id) {
                 continue;
             }
             let view_action_id = action_id.clone();
             let conversation_id = self.conversation_id;
+            let file_edits = file_edits.clone();
             let view = ctx.add_typed_action_tui_view(move |ctx| {
-                TuiFileEditsView::new(view_action_id, conversation_id, action_model, ctx)
+                TuiFileEditsView::new(
+                    view_action_id,
+                    conversation_id,
+                    file_edits,
+                    action_model,
+                    ctx,
+                )
             });
             ctx.subscribe_to_view(&view, |me, _, event, ctx| match event {
                 TuiFileEditsViewEvent::BlockingStateChanged => {
@@ -1212,15 +1220,10 @@ impl TuiAIBlock {
                 self.render_rich_text_sections(body, true, app),
                 app,
             ),
-            TuiAIBlockSection::Summarization {
-                message_id,
-                finished,
-                body,
-            } => render_summarization_section(
+            TuiAIBlockSection::Summarization { message_id, body } => render_summarization_section(
                 &self.collapsible_states,
                 message_id,
-                *finished,
-                self.render_rich_text_sections(body, false, app),
+                self.render_rich_text_sections(body, true, app),
                 app,
             ),
             TuiAIBlockSection::TodoList { message_id, todos } => {
@@ -1335,7 +1338,6 @@ impl TuiAIBlock {
                     }
                     AIAgentOutputMessageType::Summarization {
                         text,
-                        finished_duration,
                         summarization_type: SummarizationType::ConversationSummary,
                         ..
                     } => {
@@ -1343,7 +1345,6 @@ impl TuiAIBlock {
                         if !body.is_empty() {
                             sections.push(TuiAIBlockSection::Summarization {
                                 message_id: message.id.clone(),
-                                finished: finished_duration.is_some(),
                                 body,
                             });
                         }
@@ -1582,17 +1583,14 @@ impl TuiAIBlock {
                     self.render_rich_text_sections(body, true, app),
                     app,
                 ),
-                TuiAIBlockSection::Summarization {
-                    message_id,
-                    finished,
-                    body,
-                } => render_summarization_section(
-                    &self.collapsible_states,
-                    message_id,
-                    *finished,
-                    self.render_rich_text_sections(body, false, app),
-                    app,
-                ),
+                TuiAIBlockSection::Summarization { message_id, body } => {
+                    render_summarization_section(
+                        &self.collapsible_states,
+                        message_id,
+                        self.render_rich_text_sections(body, true, app),
+                        app,
+                    )
+                }
                 TuiAIBlockSection::TodoList { message_id, todos } => {
                     // Statuses resolve against the conversation's todo
                     // history at render time, so superseded lists restyle
