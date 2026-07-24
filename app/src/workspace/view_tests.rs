@@ -3549,16 +3549,15 @@ fn test_close_tab_shows_reopen_toast_and_reopen_restores_tab() {
         });
 
         // The toast's "Reopen" link dispatches WorkspaceAction::ReopenClosedSession,
-        // which routes through the shared `app:undo_close` global action. Drive
-        // that same global action here (at the app level, so the action's
-        // internal workspace update isn't nested) to mirror clicking the link,
-        // and confirm the just-closed tab is restored via the existing
-        // UndoCloseStack -> restore_closed_tab path.
-        app.update(|ctx| {
-            ctx.dispatch_global_action("app:undo_close", ());
+        // which dismisses the one-shot toast before routing through the shared
+        // `app:undo_close` global action. Drive the typed action here to mirror
+        // clicking the link, and confirm the just-closed tab is restored via the
+        // existing UndoCloseStack -> restore_closed_tab path.
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::ReopenClosedSession, ctx);
         });
 
-        workspace.read(&app, |workspace, _| {
+        workspace.read(&app, |workspace, ctx| {
             assert_eq!(workspace.tab_count(), 2);
             assert!(
                 workspace
@@ -3566,6 +3565,12 @@ fn test_close_tab_shows_reopen_toast_and_reopen_restores_tab() {
                     .iter()
                     .any(|tab| tab.pane_group.id() == closed_tab_id),
                 "the closed tab should be restored"
+            );
+            assert!(
+                !workspace
+                    .toast_stack
+                    .read(ctx, |stack, _| stack.has_toasts()),
+                "the Reopen toast should be dismissed after restoring the tab"
             );
         });
     });

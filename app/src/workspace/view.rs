@@ -25179,6 +25179,10 @@ impl TypedActionView for Workspace {
                 self.show_header_toolbar_context_menu(*position, ctx);
             }
             ReopenClosedSession => {
+                // The inline reopen affordance is one-shot: remove it before
+                // dispatching the restore action so a stale link cannot invoke
+                // `app:undo_close` again for an older closed tab.
+                self.dismiss_older_toasts(REOPEN_CLOSED_TAB_TOAST_ID, ctx);
                 // While we could grab the UndoCloseStack singleton entity and
                 // directly call undo_close(), it would fail when attempting to
                 // restore a closed tab as we would attempt to update the
