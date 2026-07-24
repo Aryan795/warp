@@ -5,6 +5,7 @@ use warpui::{App, View};
 use super::EditableDropdown;
 use crate::editor::{EditOrigin, Event as EditorEvent};
 use crate::view_components::DropdownItem;
+use crate::workspaces::user_workspaces::UserWorkspaces;
 
 #[derive(Clone, Debug, PartialEq)]
 struct TestAction(u16);
@@ -25,6 +26,7 @@ fn add_dropdown(app: &mut App) -> warpui::ViewHandle<EditableDropdown<TestAction
 fn typed_values_validate_commit_and_revert() {
     App::test((), |mut app| async move {
         app.add_singleton_model(|_| Appearance::mock());
+        app.add_singleton_model(UserWorkspaces::default_mock);
         let dropdown = add_dropdown(&mut app);
 
         dropdown.update(&mut app, |dropdown, ctx| {
@@ -69,6 +71,7 @@ fn typed_values_validate_commit_and_revert() {
 fn presets_and_external_values_stay_synchronized() {
     App::test((), |mut app| async move {
         app.add_singleton_model(|_| Appearance::mock());
+        app.add_singleton_model(UserWorkspaces::default_mock);
         let dropdown = add_dropdown(&mut app);
 
         dropdown.update(&mut app, |dropdown, ctx| {
