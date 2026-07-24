@@ -665,7 +665,7 @@ fn coordination_root_dir() -> PathBuf {
                 Some(PathBuf::from(drive).join(path).into_os_string())
             })
             .unwrap_or_else(|| std::env::temp_dir().into_os_string());
-        return PathBuf::from(base).join("Warp").join("mcp-oauth");
+        PathBuf::from(base).join("Warp").join("mcp-oauth")
     }
     #[cfg(not(windows))]
     {
