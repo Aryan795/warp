@@ -165,6 +165,44 @@ async fn exactly_one_leader_is_elected_for_one_installation() {
     drop(lease0);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn symlinked_coordination_root_is_canonicalized_without_escape() {
+    // macOS's default temporary directory is commonly reached through a
+    // `/var` symlink. The coordinator must normalize that harmless indirection
+    // rather than rejecting the path because its spelling differs from the
+    // canonical form.
+    let env_guard = crate::oauth::env_lock().await;
+    let real_root = TempDir::with_prefix("mcp-oauth-real").expect("real temp dir");
+    let alias_parent = TempDir::with_prefix("mcp-oauth-alias").expect("alias parent");
+    let alias = alias_parent.path().join("runtime");
+    std::os::unix::fs::symlink(real_root.path(), &alias).expect("symlink temp root");
+    // SAFETY: the shared environment lock serializes all coordinator tests.
+    unsafe {
+        std::env::set_var("WARP_MCP_OAUTH_COORDINATION_DIR", &alias);
+    }
+
+    let backend = Arc::new(FakeBackend::default());
+    let uuid = Uuid::new_v4();
+    let coordinator = templatable_coordinator(uuid, backend);
+    let canonical_root = fs::canonicalize(real_root.path()).expect("canonical root");
+    let canonical_dir = fs::canonicalize(coordinator.dir()).expect("canonical dir");
+    assert_eq!(
+        coordinator.dir(),
+        canonical_dir,
+        "coordinator stores canonical paths"
+    );
+    assert!(
+        coordinator.dir().starts_with(&canonical_root),
+        "coordination artifacts remain inside the trusted root"
+    );
+
+    // SAFETY: the shared environment lock is still held.
+    unsafe {
+        std::env::remove_var("WARP_MCP_OAUTH_COORDINATION_DIR");
+    }
+    drop(env_guard);
+}
 #[tokio::test]
 async fn follower_waits_then_loads_published_credentials() {
     let _scope = CoordinationDirScope::new().await;

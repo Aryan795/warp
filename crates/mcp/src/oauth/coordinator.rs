@@ -152,6 +152,10 @@ impl Default for CoordinatorConfig {
 /// coordination key.
 #[derive(Clone, Debug)]
 struct CoordinationPaths {
+    /// Canonical per-user root trusted for coordination artifacts. Both this
+    /// root and `dir` use the platform's canonical representation (including
+    /// macOS `/private` and Windows verbatim/long-path prefixes).
+    trusted_root: PathBuf,
     /// Owner-only (`0700`) directory holding every coordination artifact for
     /// this channel/namespace.
     dir: PathBuf,
@@ -165,8 +169,30 @@ struct CoordinationPaths {
 
 impl CoordinationPaths {
     fn new(channel: &str, namespace: CredentialNamespace, installation_uuid: Uuid) -> Result<Self> {
-        let base = coordination_root_dir();
-        let dir = base.join(channel).join(namespace.dir_name());
+        // Canonicalize the root once before deriving any child paths. This
+        // normalizes harmless platform indirection such as macOS's `/var`
+        // symlink and Windows short/verbatim path forms.
+        let trusted_root = canonicalize_coordination_root()?;
+        let requested_dir = trusted_root.join(channel).join(namespace.dir_name());
+        fs::create_dir_all(&requested_dir).with_context(|| {
+            format!(
+                "failed to create MCP OAuth coordination directory {:?}",
+                requested_dir
+            )
+        })?;
+        let dir = fs::canonicalize(&requested_dir).with_context(|| {
+            format!(
+                "failed to resolve MCP OAuth coordination directory {:?}",
+                requested_dir
+            )
+        })?;
+        if !dir.starts_with(&trusted_root) {
+            bail!(
+                "MCP OAuth coordination directory {:?} resolves outside trusted root {:?}",
+                requested_dir,
+                trusted_root
+            );
+        }
         // Derive a stable, filesystem-safe suffix from the installation UUID.
         // The UUID is already a constrained character set; use the simple form
         // so paths are predictable and contain no separators.
@@ -175,6 +201,7 @@ impl CoordinationPaths {
         let owner_metadata_file = dir.join(format!("owner-{uuid_suffix}.json"));
         let cred_store_lock_file = dir.join("cred-store.lock");
         let paths = Self {
+            trusted_root,
             dir,
             auth_lease_file,
             owner_metadata_file,
@@ -185,30 +212,18 @@ impl CoordinationPaths {
     }
 
     /// Creates the coordination directory with owner-only permissions and
-    /// refuses to operate on a world-writable or symlinked location.
+    /// refuses to operate outside the canonical trusted root. A symlink is
+    /// allowed when it remains inside that root; the stored paths are already
+    /// canonical, so platform path aliases do not cause a false rejection.
     fn ensure(&self) -> Result<()> {
-        if self.dir.exists() {
-            // Refuse to use a symlinked or otherwise suspicious coordination
-            // directory: a symlink could redirect lock/metadata writes to an
-            // attacker-controlled location.
-            let canonical = fs::canonicalize(&self.dir).with_context(|| {
-                format!("failed to resolve coordination directory {:?}", self.dir)
-            })?;
-            if canonical != self.dir {
-                bail!(
-                    "MCP OAuth coordination directory {:?} resolves to {:?}; refusing to follow \
-                     a redirected path",
-                    self.dir,
-                    canonical
-                );
-            }
-        } else {
-            fs::create_dir_all(&self.dir).with_context(|| {
-                format!(
-                    "failed to create MCP OAuth coordination directory {:?}",
-                    self.dir
-                )
-            })?;
+        let canonical = fs::canonicalize(&self.dir)
+            .with_context(|| format!("failed to resolve coordination directory {:?}", self.dir))?;
+        if canonical != self.dir || !canonical.starts_with(&self.trusted_root) {
+            bail!(
+                "MCP OAuth coordination directory {:?} changed or escaped trusted root {:?}",
+                self.dir,
+                self.trusted_root
+            );
         }
         set_owner_only_dir(&self.dir)?;
         Ok(())
@@ -548,7 +563,7 @@ impl OAuthCoordinator {
         namespace: CredentialNamespace,
         installation_uuid: Uuid,
     ) -> Option<OwnerMetadata> {
-        let base = coordination_root_dir();
+        let base = canonicalize_coordination_root().ok()?;
         let path = base
             .join(channel)
             .join(namespace.dir_name())
@@ -565,9 +580,10 @@ impl OAuthCoordinator {
         channel: &str,
         namespace: CredentialNamespace,
     ) -> Vec<OwnerMetadata> {
-        let dir = coordination_root_dir()
-            .join(channel)
-            .join(namespace.dir_name());
+        let Ok(base) = canonicalize_coordination_root() else {
+            return Vec::new();
+        };
+        let dir = base.join(channel).join(namespace.dir_name());
         let Ok(entries) = fs::read_dir(&dir) else {
             return Vec::new();
         };
@@ -630,11 +646,45 @@ fn coordination_root_dir() -> PathBuf {
     if let Some(path) = std::env::var_os(COORDINATION_DIR_ENV) {
         return PathBuf::from(path);
     }
+    #[cfg(not(windows))]
     if let Some(path) = std::env::var_os("XDG_RUNTIME_DIR") {
         return PathBuf::from(path).join("warp").join("mcp-oauth");
     }
-    let home = std::env::var_os("HOME").unwrap_or_else(|| ".".into());
-    PathBuf::from(home).join(".warp").join("mcp-oauth")
+    #[cfg(windows)]
+    {
+        // `HOME` is not a standard Windows environment variable. Prefer the
+        // per-user local application directory, then the user profile (and
+        // finally the split drive/profile variables), never a CWD-relative
+        // path. `temp_dir` is the last-resort per-user location used by the OS
+        // when profile variables are unavailable.
+        let base = std::env::var_os("LOCALAPPDATA")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .or_else(|| {
+                let drive = std::env::var_os("HOMEDRIVE")?;
+                let path = std::env::var_os("HOMEPATH")?;
+                Some(PathBuf::from(drive).join(path).into_os_string())
+            })
+            .unwrap_or_else(|| std::env::temp_dir().into_os_string());
+        return PathBuf::from(base).join("Warp").join("mcp-oauth");
+    }
+    #[cfg(not(windows))]
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    home.join(".warp").join("mcp-oauth")
+}
+
+/// Creates and canonicalizes the per-user coordination root. The canonical
+/// value is stored in each `CoordinationPaths` so all child paths use one
+/// platform-normalized representation.
+fn canonicalize_coordination_root() -> Result<PathBuf> {
+    let root = coordination_root_dir();
+    fs::create_dir_all(&root)
+        .with_context(|| format!("failed to create MCP OAuth coordination root {:?}", root))?;
+    let canonical = fs::canonicalize(&root)
+        .with_context(|| format!("failed to resolve MCP OAuth coordination root {:?}", root))?;
+    set_owner_only_dir(&canonical)?;
+    Ok(canonical)
 }
 
 /// Opens or creates `path` with owner-only permissions and returns the file
