@@ -10,10 +10,11 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use instant::Instant;
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -65,6 +66,11 @@ struct FakeBackend {
     notify_count: Arc<AtomicU32>,
     /// When set, `write_raw` fails to simulate a backend write failure.
     fail_writes: Arc<Mutex<bool>>,
+    /// When set, `write_raw` blocks on `write_release` before completing, so a
+    /// test can hold the credential-store lock open and exercise
+    /// contention/timeout against a second coordinator.
+    pause_writes: Arc<AtomicBool>,
+    write_release: Arc<tokio::sync::Notify>,
 }
 
 #[async_trait::async_trait]
@@ -76,6 +82,9 @@ impl SecureCredentialBackend for FakeBackend {
     async fn write_raw(&self, json: &str) -> anyhow::Result<()> {
         if *self.fail_writes.lock().expect("fail lock") {
             anyhow::bail!("injected backend write failure");
+        }
+        if self.pause_writes.load(Ordering::SeqCst) {
+            self.write_release.notified().await;
         }
         *self.map_json.lock().expect("map lock") = Some(json.to_string());
         Ok(())
@@ -529,4 +538,115 @@ async fn a_leftover_empty_lock_file_is_reusable() {
         matches!(outcome, ResolveOutcome::Leader(_)),
         "successor must acquire the lease on a leftover empty lock file"
     );
+}
+
+#[tokio::test]
+async fn remove_and_write_preserves_other_installations_in_the_shared_map() {
+    // Logout/deletion must go through the serialized remove-and-merge path so a
+    // concurrent leader's just-published entry for another installation is not
+    // clobbered by a whole-map write from a stale in-memory cache (spec
+    // invariant #9).
+    let _scope = CoordinationDirScope::new().await;
+    let backend = Arc::new(FakeBackend::default());
+    let uuid_a = Uuid::new_v4();
+    let uuid_b = Uuid::new_v4();
+
+    let coord_a = templatable_coordinator(uuid_a, backend.clone());
+    let coord_b = templatable_coordinator(uuid_b, backend.clone());
+    coord_a
+        .merge_and_write(make_credentials(uuid_a))
+        .await
+        .expect("write A");
+    coord_b
+        .merge_and_write(make_credentials(uuid_b))
+        .await
+        .expect("write B");
+
+    // Remove A's entry; B's entry must survive the serialized remove-and-write.
+    coord_a.remove_and_write().await.expect("remove A");
+
+    let raw = backend
+        .map_json
+        .lock()
+        .expect("map lock")
+        .clone()
+        .expect("map written");
+    let map: HashMap<Uuid, PersistedCredentials> =
+        serde_json::from_str(&raw).expect("map deserializes");
+    assert!(!map.contains_key(&uuid_a), "installation A must be removed");
+    assert!(
+        map.contains_key(&uuid_b),
+        "installation B must survive A's removal (no whole-map clobber)"
+    );
+    assert!(
+        coord_a.read_latest().await.expect("read A").is_none(),
+        "A's own credentials are gone after removal"
+    );
+    assert!(
+        coord_b.read_latest().await.expect("read B").is_some(),
+        "B's credentials remain readable after A's removal"
+    );
+}
+
+#[tokio::test]
+async fn cred_store_lock_timeout_is_honored_under_contention() {
+    // The credential-store lock must use non-blocking `try_lock_*` so a
+    // contended lock returns within `cred_store_lock_timeout` instead of
+    // blocking the async runtime indefinitely (the blocking `lock_*` bug).
+    let _scope = CoordinationDirScope::new().await;
+    let backend = Arc::new(FakeBackend::default());
+    let uuid = Uuid::new_v4();
+
+    // Coordinator A holds the exclusive lock open inside `write_raw` (writes are
+    // paused). Coordinator B uses a short lock timeout and must time out quickly
+    // rather than hang.
+    let coord_a = templatable_coordinator(uuid, backend.clone());
+    let mut config_b = test_config();
+    config_b.cred_store_lock_timeout = Duration::from_millis(40);
+    let coord_b = OAuthCoordinator::new(
+        "test-channel",
+        CredentialNamespace::Templatable,
+        uuid,
+        CredentialKey::Uuid(uuid),
+        backend.clone(),
+        config_b,
+        None,
+    )
+    .expect("coord B");
+
+    backend.pause_writes.store(true, Ordering::SeqCst);
+    let backend_a = backend.clone();
+    let write_task =
+        tokio::spawn(async move { coord_a.merge_and_write(make_credentials(uuid)).await });
+    // Give A time to acquire the exclusive lock and enter the paused write.
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    let start = Instant::now();
+    let outcome_b = tokio::time::timeout(
+        Duration::from_secs(2),
+        coord_b.merge_and_write(make_credentials(uuid)),
+    )
+    .await;
+    let elapsed = start.elapsed();
+
+    // Release A so the spawned task can finish and the test can clean up.
+    backend_a.write_release.notify_waiters();
+    write_task.await.expect("A joins").expect("A write");
+
+    match outcome_b {
+        Ok(Err(err)) => {
+            assert!(
+                err.to_string().contains("timed out"),
+                "B must report a credential-store lock timeout, got {err:#}"
+            );
+            assert!(
+                elapsed < Duration::from_secs(1),
+                "B must honor the short timeout (non-blocking try_lock), took {elapsed:?}"
+            );
+        }
+        Ok(Ok(())) => panic!("B must not acquire the lock while A holds it exclusively"),
+        Err(_) => {
+            panic!("B hung — the credential-store lock is blocking the async runtime (regression)")
+        }
+    }
 }

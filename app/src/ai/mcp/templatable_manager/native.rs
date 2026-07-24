@@ -4,10 +4,11 @@ use std::sync::Arc;
 use async_compat::CompatExt as _;
 use async_trait::async_trait;
 use mcp::oauth::{
-    self, AuthContext, CallbackResult, CredentialKey, CredentialNamespace,
+    self, AuthContext, CallbackResult, CoordinatorConfig, CredentialKey, CredentialNamespace,
     FILE_BASED_MCP_CREDENTIALS_KEY, FileBasedPersistedCredentialsMap, OAuthCallbackMode,
-    OwnerRelay, PersistedCredentialsMap, SecureCredentialBackend, TEMPLATABLE_MCP_CREDENTIALS_KEY,
-    WaiterCallback, load_credentials_from_secure_storage, write_to_secure_storage,
+    OAuthCoordinator, OwnerRelay, PersistedCredentialsMap, SecureCredentialBackend,
+    TEMPLATABLE_MCP_CREDENTIALS_KEY, WaiterCallback, load_credentials_from_secure_storage,
+    write_to_secure_storage,
 };
 use mcp::runtime::{error_to_user_message, spawn_server};
 use parking_lot::Mutex;
@@ -239,34 +240,72 @@ impl TemplatableMCPServerManager {
         installation_uuid: Uuid,
         app: &mut ModelContext<Self>,
     ) {
-        if let Some(hash) = FileBasedMCPManager::as_ref(app).get_hash_by_uuid(installation_uuid) {
+        // Update the in-memory credential cache immediately so the UI reflects
+        // the removal without waiting for the async durable write. The durable
+        // removal goes through the cross-process coordinator's serialized
+        // `remove_and_write` (read → remove → serialize → secure write under the
+        // exclusive credential-store lock) so a concurrent leader's
+        // just-published entry for another installation is not clobbered by a
+        // whole-map write from this process's stale in-memory cache (spec
+        // invariant #9). The coordinator's `notify_changed` reloads the
+        // durable map into the in-memory cache and emits `CredentialsChanged`
+        // once the shared write succeeds.
+        let (namespace, key, secure_storage_key) = if let Some(hash) =
+            FileBasedMCPManager::as_ref(app).get_hash_by_uuid(installation_uuid)
+        {
             self.file_based_server_credentials.remove(&hash);
-            write_to_secure_storage(
-                app,
+            (
+                CredentialNamespace::FileBased,
+                CredentialKey::Hash(hash),
                 FILE_BASED_MCP_CREDENTIALS_KEY,
-                &self.file_based_server_credentials,
-            );
-            app.emit(TemplatableMCPServerManagerEvent::CredentialsChanged {
-                uuid: installation_uuid,
-            });
-            return;
-        }
-        if let Some(template_uuid) = self.get_template_uuid(installation_uuid) {
+            )
+        } else if let Some(template_uuid) = self.get_template_uuid(installation_uuid) {
             self.server_credentials.remove(&template_uuid);
-            write_to_secure_storage(
-                app,
+            (
+                CredentialNamespace::Templatable,
+                CredentialKey::Uuid(template_uuid),
                 TEMPLATABLE_MCP_CREDENTIALS_KEY,
-                &self.server_credentials,
-            );
-            app.emit(TemplatableMCPServerManagerEvent::CredentialsChanged {
-                uuid: installation_uuid,
-            });
+            )
         } else {
             report_error!(
                 "No template UUID found for installation UUID",
                 extra: { "installation_uuid" => %installation_uuid }
             );
-        }
+            return;
+        };
+
+        let channel = format!("{:?}", ChannelState::channel());
+        let backend = Arc::new(ManagerCredentialBackend {
+            spawner: app.spawner(),
+            namespace,
+            secure_storage_key,
+            installation_uuid,
+        }) as Arc<dyn SecureCredentialBackend>;
+        let executor = app.background_executor().clone();
+        executor
+            .spawn(async move {
+                match OAuthCoordinator::new(
+                    &channel,
+                    namespace,
+                    installation_uuid,
+                    key,
+                    backend,
+                    CoordinatorConfig::default(),
+                    None,
+                ) {
+                    Ok(coordinator) => {
+                        if let Err(err) = coordinator.remove_and_write().await {
+                            log::warn!(
+                                "Failed to remove MCP credentials from shared storage: {err:#}"
+                            );
+                        }
+                    }
+                    Err(err) => log::warn!(
+                        "Failed to build MCP OAuth coordinator for credential removal: {err:#}"
+                    ),
+                }
+            })
+            .detach();
     }
 
     /// Creates a new [`TemplatableMCPServerManager`] instance.

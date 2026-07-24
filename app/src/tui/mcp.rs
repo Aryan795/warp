@@ -100,6 +100,18 @@ impl TuiMcpManager {
         }
     }
 
+    /// Test-only constructor that seeds the aggregate with `snapshot` so TUI
+    /// render/menu fixtures can exercise specific server states (e.g.
+    /// `WaitingForAuthentication`, leader `Authenticating`, `Running`) without
+    /// spinning up the full MCP manager and file-based config watcher. The
+    /// `refresh_rows` mapping and `render_inline_menu` path then render the
+    /// real surface a user would see. Available only when `warp` is built with
+    /// `test-util` (used by `warp_tui` render fixtures).
+    #[cfg(any(test, all(feature = "tui", feature = "test-util")))]
+    pub fn for_test(_ctx: &mut ModelContext<Self>, snapshot: TuiMcpSnapshot) -> Self {
+        Self { snapshot }
+    }
+
     pub fn new(ctx: &mut ModelContext<Self>) -> Self {
         ctx.subscribe_to_model(&FileBasedMCPManager::handle(ctx), |me, _, _, ctx| {
             me.refresh(ctx);

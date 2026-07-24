@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use futures::future::BoxFuture;
 use oauth2::{RefreshToken, TokenResponse as _};
@@ -210,12 +211,41 @@ impl CredentialStore for PersistingCredentialStore {
     }
 }
 
+/// Handle returned by [`install_persisting_credential_store`] that resolves
+/// when the first credential publish through the coordinator's serialized
+/// merge completes (success or failure). The leader awaits it before releasing
+/// its auth lease so a follower cannot acquire the freed lease and open a
+/// second OAuth page before the shared write is visible (spec invariants
+/// #1/#5). Non-leader callers (cached/follower paths) simply drop it.
+pub(crate) struct CredentialPublish {
+    rx: tokio::sync::oneshot::Receiver<Result<(), String>>,
+}
+
+impl CredentialPublish {
+    /// Waits for the first credential publish to complete, or for `timeout` to
+    /// elapse. Returns `Ok(())` when the publish succeeded, `Err(msg)` when it
+    /// failed, and `Err` with a timeout message when no publish happened within
+    /// `timeout` (e.g. the token exchange produced no `token_response`). In
+    /// every case the caller may then release the lease: the race window is
+    /// closed because the publish attempt is no longer pending.
+    async fn wait_for_publish(self, timeout: Duration) -> Result<(), String> {
+        match tokio::time::timeout(timeout, self.rx).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(msg))) => Err(msg),
+            Ok(Err(_)) => Err("credential publish task ended before publishing".to_string()),
+            Err(_) => Err("timed out waiting for the credential publish".to_string()),
+        }
+    }
+}
+
 /// Installs a [`PersistingCredentialStore`] on the given auth manager so that
 /// runtime token auto-refreshes are written back to Warp's secure storage.
 ///
 /// A background tokio task is spawned to receive credential updates and persist
 /// them via the provided callback. The task terminates when the auth manager (and
-/// thus the credential store's sender) is dropped.
+/// thus the credential store's sender) is dropped. Returns a [`CredentialPublish`]
+/// that resolves when the first serialized merge/write completes, so the leader
+/// can hold its lease until the credentials are durable.
 ///
 /// Note: this store is not responsible for the initial population of credentials.
 /// Instead, the caller seeds the inner store with any existing credentials prior
@@ -225,7 +255,7 @@ async fn install_persisting_credential_store(
     auth_manager: &mut AuthorizationManager,
     persisted_credentials: Option<PersistedCredentials>,
     coordinator: std::sync::Arc<OAuthCoordinator>,
-) {
+) -> CredentialPublish {
     let client_secret = persisted_credentials
         .as_ref()
         .and_then(|c| c.client_secret.clone());
@@ -237,6 +267,8 @@ async fn install_persisting_credential_store(
     }
 
     let (persist_tx, persist_rx) = async_channel::unbounded();
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    let mut completion_tx = Some(completion_tx);
     let store = PersistingCredentialStore {
         inner: in_memory_store,
         client_secret,
@@ -248,14 +280,27 @@ async fn install_persisting_credential_store(
     // Every credential update — the initial OAuth exchange and runtime
     // auto-refresh — goes through the coordinator's serialized read/merge/write
     // so concurrent processes and concurrent installations never overwrite one
-    // another's entries in the shared secure-storage map.
+    // another's entries in the shared secure-storage map. The first publish
+    // also signals the leader's [`CredentialPublish`] so it can release its
+    // lease only after the shared write is durable; subsequent refresh writes
+    // do not need to signal (the leader has already released by then).
     tokio::spawn(async move {
         while let Ok(credentials) = persist_rx.recv().await {
-            if let Err(err) = coordinator.merge_and_write(credentials).await {
+            let result = coordinator.merge_and_write(credentials).await;
+            if let Some(tx) = completion_tx.take() {
+                let payload: Result<(), String> = match &result {
+                    Ok(()) => Ok(()),
+                    Err(err) => Err(format!("{err:#}")),
+                };
+                let _ = tx.send(payload);
+            }
+            if let Err(err) = result {
                 log::warn!("Failed to persist MCP credentials to shared storage: {err:#}");
             }
         }
     });
+
+    CredentialPublish { rx: completion_rx }
 }
 
 /// Context for OAuth authentication flows.
@@ -317,7 +362,12 @@ async fn try_cached_client(
     let client_id = credentials.credentials.client_id.clone();
     let client_secret = credentials.client_secret.clone();
     let mut auth_manager = AuthorizationManager::new(resource_url).await.ok()?;
-    install_persisting_credential_store(&mut auth_manager, Some(credentials), coordinator).await;
+    // The cached path never leads an interactive flow, so the publish handle is
+    // unused; dropping it just means the background task's first-publish signal
+    // is discarded.
+    let _publish =
+        install_persisting_credential_store(&mut auth_manager, Some(credentials), coordinator)
+            .await;
     if auth_manager.initialize_from_store().await.ok()?
         && auth_manager.get_access_token().await.is_ok()
     {
@@ -346,7 +396,11 @@ async fn build_client_from_credentials(
     let client_id = credentials.credentials.client_id.clone();
     let client_secret = credentials.client_secret.clone();
     let mut auth_manager = AuthorizationManager::new(resource_url).await?;
-    install_persisting_credential_store(&mut auth_manager, Some(credentials), coordinator).await;
+    // The follower path loaded credentials another instance published; it never
+    // leads an interactive flow, so the publish handle is unused.
+    let _publish =
+        install_persisting_credential_store(&mut auth_manager, Some(credentials), coordinator)
+            .await;
     if auth_manager.initialize_from_store().await? && auth_manager.get_access_token().await.is_ok()
     {
         if let Some(client_secret) = client_secret {
@@ -440,7 +494,10 @@ async fn run_leader_oauth(
     } = callback_mode.prepare().await?;
 
     let mut auth_manager = AuthorizationManager::new(resource_url).await?;
-    install_persisting_credential_store(&mut auth_manager, None, coordinator.clone()).await;
+    // The leader holds its lease until the credential publish is durable, so it
+    // keeps the [`CredentialPublish`] handle and awaits it before `guard.release()`.
+    let publish =
+        install_persisting_credential_store(&mut auth_manager, None, coordinator.clone()).await;
 
     let metadata = auth_manager.discover_metadata().await?;
 
@@ -517,23 +574,27 @@ async fn run_leader_oauth(
     // Start the desktop callback relay (if configured) and publish owner
     // metadata so other processes can forward callbacks to this leader. The
     // relay reuses the existing `handle_oauth_callback` CSRF validation.
+    //
+    // For the desktop (custom-scheme) path, a relay/metadata failure fails
+    // closed *before* `requires_authentication` opens the page: if a callback is
+    // later delivered to a follower, it would have no published endpoint to
+    // forward to and the flow would hang (spec invariants #6/#7). The TUI
+    // loopback path passes `owner_relay = None`, so this only affects desktop.
+    // The `?` early-return drops `LeaderGuard`, which stops the relay, removes
+    // any partial metadata, and releases the lease.
     if let Some(relay) = guard.owner_relay.as_ref() {
-        match relay.start(csrf_state.clone()) {
-            Ok(address) => {
-                let owner_metadata = OwnerMetadata::new(uuid, address);
-                if let Err(err) = coordinator.publish_owner_metadata(&owner_metadata) {
-                    log::warn!("Failed to publish MCP OAuth owner metadata: {err:#}");
-                } else {
-                    guard.relay_started = true;
-                }
-            }
-            Err(err) => {
-                log::warn!(
-                    "Failed to start MCP OAuth callback relay; callbacks delivered to other \
-                     processes will not be forwarded: {err:#}"
-                );
-            }
-        }
+        let address = relay.start(csrf_state.clone()).map_err(|err| {
+            AuthError::InternalError(format!("failed to start MCP OAuth callback relay: {err:#}"))
+        })?;
+        let owner_metadata = OwnerMetadata::new(uuid, address);
+        coordinator
+            .publish_owner_metadata(&owner_metadata)
+            .map_err(|err| {
+                AuthError::InternalError(format!(
+                    "failed to publish MCP OAuth owner metadata: {err:#}"
+                ))
+            })?;
+        guard.relay_started = true;
     }
 
     if let Err(err) = requires_authentication(uuid, csrf_state.clone(), auth_url).await {
@@ -559,9 +620,24 @@ async fn run_leader_oauth(
         AuthError::InternalError("Failed to create authorization manager".to_string())
     })?;
 
-    // Release the lease, relay, and owner metadata now that the flow succeeded.
-    // The persisting store's background task will publish credentials through
-    // the coordinator's serialized merge.
+    // Wait for the credential publish to become durable *before* releasing the
+    // lease, relay, and owner metadata. `handle_callback` only queues the
+    // credential save onto the persisting store's background task; if we
+    // released here, a follower polling in `wait_for_credentials_or_promotion`
+    // could acquire the now-free lease and open a second OAuth page before the
+    // shared write lands — a racy form of the exact N-page bug this flow fixes
+    // (spec invariants #1/#5). The publish timeout is bounded so a stuck write
+    // cannot hold the lease forever; on timeout the leader still releases (its
+    // own in-memory client is valid), and the failure is logged for retry.
+    let publish_timeout = coordinator
+        .config()
+        .cred_store_lock_timeout
+        .saturating_mul(4);
+    if let Err(msg) = publish.wait_for_publish(publish_timeout).await {
+        log::warn!(
+            "MCP OAuth leader credential publish did not complete before lease release: {msg}"
+        );
+    }
     guard.release();
     Ok((AuthClient::new(http_client, auth_manager), true))
 }

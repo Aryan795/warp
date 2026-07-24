@@ -28,13 +28,13 @@ use warpui::{AppContext, ModelSpawner};
 
 use crate::ai::mcp::TemplatableMCPServerManager;
 
-/// IPC service that the leader hosts to receive forwarded OAuth callbacks.
-/// The request is the full callback URL string; the response is `true` when the
-/// leader accepted and consumed it (CSRF matched).
+/// Marker type for the IPC `Service` trait that routes forwarded MCP OAuth
+/// callbacks to the leader's relay. It carries no data — `service_caller::<McpCallbackRelay>`
+/// uses it only as the compile-time service key, and [`McpCallbackRelayServiceImpl`]
+/// provides the actual request handling. Kept as a unit struct so the app crate
+/// compiles clean under `-D warnings` (a single-variant enum would be dead code).
 #[derive(Debug, Clone, Copy)]
-pub enum McpCallbackRelay {
-    Forward,
-}
+pub struct McpCallbackRelay;
 
 impl Service for McpCallbackRelay {
     type Request = String;

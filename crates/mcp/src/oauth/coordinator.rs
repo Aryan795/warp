@@ -300,26 +300,43 @@ impl Drop for AuthLease {
 }
 
 /// RAII wrapper around a credential-store file lock (shared or exclusive).
-/// Dropping it releases the OS lock.
+/// Dropping it releases the OS lock. Acquisition uses fs4's *non-blocking*
+/// `try_lock_*` so the retry loop in [`OAuthCoordinator::acquire_cred_store_lock`]
+/// can honor `cred_store_lock_timeout` without stalling the async runtime.
 struct CredentialStoreLock {
     _file: fs::File,
 }
 
 impl CredentialStoreLock {
-    fn try_acquire_shared(paths: &CoordinationPaths) -> Result<Self> {
+    /// Tries to acquire a shared (read) lock without blocking. Returns
+    /// `Ok(Some(_))` on success, `Ok(None)` when the lock is contended (so the
+    /// caller retries), or `Err` for a real I/O/permission failure (fail
+    /// closed).
+    fn try_acquire_shared(paths: &CoordinationPaths) -> Result<Option<Self>> {
         let file = paths.open_cred_store_lock()?;
-        fs4::fs_std::FileExt::lock_shared(&file).map_err(|err| {
-            anyhow::Error::new(err).context("failed to lock MCP credential store")
-        })?;
-        Ok(Self { _file: file })
+        match fs4::fs_std::FileExt::try_lock_shared(&file) {
+            Ok(true) => Ok(Some(Self { _file: file })),
+            Ok(false) => Ok(None),
+            Err(err) => {
+                Err(anyhow::Error::new(err).context("failed to lock MCP credential store (shared)"))
+            }
+        }
     }
 
-    fn try_acquire_exclusive(paths: &CoordinationPaths) -> Result<Self> {
+    /// Tries to acquire an exclusive (write) lock without blocking. Returns
+    /// `Ok(Some(_))` on success, `Ok(None)` when the lock is contended (so the
+    /// caller retries), or `Err` for a real I/O/permission failure (fail
+    /// closed).
+    fn try_acquire_exclusive(paths: &CoordinationPaths) -> Result<Option<Self>> {
         let file = paths.open_cred_store_lock()?;
-        fs4::fs_std::FileExt::lock_exclusive(&file).map_err(|err| {
-            anyhow::Error::new(err).context("failed to lock MCP credential store exclusively")
-        })?;
-        Ok(Self { _file: file })
+        match fs4::fs_std::FileExt::try_lock_exclusive(&file) {
+            Ok(true) => Ok(Some(Self { _file: file })),
+            Ok(false) => Ok(None),
+            Err(err) => {
+                Err(anyhow::Error::new(err)
+                    .context("failed to lock MCP credential store (exclusive)"))
+            }
+        }
     }
 }
 
@@ -399,6 +416,24 @@ impl OAuthCoordinator {
         Ok(())
     }
 
+    /// Removes this installation's entry from the latest shared map and writes
+    /// it back under the exclusive credential-store lock
+    /// (read → remove → serialize → secure write). Used by logout/deletion so a
+    /// concurrent leader's just-published entry for another installation is not
+    /// clobbered by a whole-map write from this process's stale in-memory cache
+    /// (spec invariant #9). On a serialization or backend write failure the
+    /// previous valid value is left untouched. Emits the change notification
+    /// only after the shared write succeeds, which also reloads this process's
+    /// in-memory cache from the durable map.
+    pub async fn remove_and_write(&self) -> Result<()> {
+        let _lock = self.acquire_cred_store_lock(true).await?;
+        let raw = self.backend.read_raw().await?;
+        let json = remove_entry(raw, self.key)?;
+        self.backend.write_raw(&json).await?;
+        self.backend.notify_changed().await;
+        Ok(())
+    }
+
     /// Resolves this process's role: re-reads shared credentials first (another
     /// process may have just published them), then tries to acquire the lease.
     /// If neither yields credentials, waits — polling for credentials and
@@ -457,7 +492,9 @@ impl OAuthCoordinator {
     /// Acquires the credential-store file lock, retrying with a short backoff
     /// up to `cred_store_lock_timeout` so concurrent writers serialize without
     /// blocking the async runtime. `exclusive` selects an exclusive (write) or
-    /// shared (read) lock.
+    /// shared (read) lock. Uses fs4's non-blocking `try_lock_*` so a contended
+    /// lock returns `Ok(None)` and the timeout is actually honored; a real
+    /// I/O/permission error fails closed immediately (retrying it cannot help).
     async fn acquire_cred_store_lock(&self, exclusive: bool) -> Result<CredentialStoreLock> {
         let deadline = Instant::now() + self.config.cred_store_lock_timeout;
         loop {
@@ -467,17 +504,23 @@ impl OAuthCoordinator {
                 CredentialStoreLock::try_acquire_shared(&self.paths)
             };
             match lock {
-                Ok(lock) => return Ok(lock),
-                Err(err) => {
-                    // A contended lock returns a WouldBlock-ish error from the
-                    // blocking fs4 call; retry until the timeout. Any other
-                    // error (permissions, missing dir) fails closed.
+                Ok(Some(lock)) => return Ok(lock),
+                Ok(None) => {
+                    // Contended: a concurrent reader/writer holds the lock.
+                    // Retry after a short backoff until the timeout, so the
+                    // async runtime is never blocked on a synchronous fs4 call.
                     if Instant::now() >= deadline {
-                        return Err(
-                            err.context("timed out waiting for the MCP credential-store lock")
-                        );
+                        return Err(anyhow::anyhow!(
+                            "timed out waiting for the MCP credential-store lock"
+                        ));
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(err) => {
+                    // A real I/O, permissions, or missing-directory failure.
+                    // Fail closed rather than spinning: retrying a permission
+                    // error cannot succeed within the timeout.
+                    return Err(err);
                 }
             }
         }
@@ -734,6 +777,37 @@ fn merge_entry(
                     .context("malformed file-based MCP credential map; refusing to overwrite")?,
             };
             map.insert(k, credentials);
+            serde_json::to_string(&map)
+                .context("failed to serialize merged file-based MCP credential map")
+        }
+    }
+}
+
+/// Reads the latest map from `raw`, removes the entry for `key`, and returns
+/// the serialized merged map. A malformed existing map is an error so the prior
+/// valid value is left untouched. An empty/absent map starts fresh (the entry
+/// is already gone, so the write is a no-op that preserves the empty map).
+fn remove_entry(raw: Option<String>, key: CredentialKey) -> Result<String> {
+    match key {
+        CredentialKey::Uuid(k) => {
+            let mut map: HashMap<Uuid, PersistedCredentials> = match raw {
+                None => HashMap::new(),
+                Some(s) if s.is_empty() => HashMap::new(),
+                Some(s) => serde_json::from_str(&s)
+                    .context("malformed templatable MCP credential map; refusing to overwrite")?,
+            };
+            map.remove(&k);
+            serde_json::to_string(&map)
+                .context("failed to serialize merged templatable MCP credential map")
+        }
+        CredentialKey::Hash(k) => {
+            let mut map: HashMap<u64, PersistedCredentials> = match raw {
+                None => HashMap::new(),
+                Some(s) if s.is_empty() => HashMap::new(),
+                Some(s) => serde_json::from_str(&s)
+                    .context("malformed file-based MCP credential map; refusing to overwrite")?,
+            };
+            map.remove(&k);
             serde_json::to_string(&map)
                 .context("failed to serialize merged file-based MCP credential map")
         }
