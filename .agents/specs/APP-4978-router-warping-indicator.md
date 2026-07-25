@@ -102,4 +102,3 @@ All criteria below must pass before the implementation PR is marked ready.
 12. **GUI negative paths.** Capture evidence for a direct-model turn showing unchanged `Warping...`, a router turn before `ModelUsed` arrives showing a safe loading state, and a router turn with missing/pathless local configuration showing no broken link. Capture one flag-off run proving the pre-feature display and fallback messaging are unchanged.
 13. **Visual evidence attachment.** Attach the computer-use screenshots/video from criteria 9–12 to both Linear issue `APP-4978` and the implementation PR. The PR description must state which evidence maps to each criterion; visual proof is required in addition to automated tests.
 14. **Scope audit.** Before merge, review the diff to confirm it changes only the warp client GUI/feature plumbing/tests, contains no warp-server/proto/TUI changes, and does not expose local filesystem paths in rendered footer text.
-

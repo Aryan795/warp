@@ -106,7 +106,9 @@ fn resolve_router_warping_direct_model_returns_none() {
         )
         .is_none()
     );
-    assert!(resolve_router_warping(true, None, Some(info("X", "x")), false, None, None).is_none());
+    assert!(
+        resolve_router_warping(true, None, Some(info("X", "x")), None, false, None, None).is_none()
+    );
 }
 
 #[test]
