@@ -7572,7 +7572,7 @@ fn select_rename_conversation_prefills_active_title_and_selects_only_the_title()
         // Seed an active conversation and give it a known title so the prefill has
         // something to populate.
         let conversation_id = seed_active_conversation(&mut app, terminal_view_id);
-        BlocklistAIHistoryModel::handle(&app).update(&mut app, |history, ctx| {
+        BlocklistAIHistoryModel::handle(&app).update(&mut app, |history, _ctx| {
             history
                 .conversation_mut(&conversation_id)
                 .expect("seeded conversation should exist")
