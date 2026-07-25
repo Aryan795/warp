@@ -267,6 +267,12 @@ const DRAG_FADE_TAIL_HEADROOM: Duration = Duration::from_millis(400);
 const DRAG_DRAW_DURATION_TARGET: Duration = Duration::from_millis(600);
 #[cfg(any(linux, test))]
 const DRAG_DRAW_TAIL_HEADROOM: Duration = Duration::from_millis(100);
+/// Bound each revealed trail quad so a long, single-event drag does not expose
+/// the entire future path when the press begins. The quads are timed by
+/// distance across the synthetic draw interval, keeping the line visually
+/// attached to the moving held indicator.
+#[cfg(any(linux, test))]
+const DRAG_TRAIL_REVEAL_MAX_LENGTH: f64 = 32.0;
 
 #[cfg(any(linux, test))]
 fn click_ring_duration() -> Duration {
@@ -736,10 +742,12 @@ fn append_click_ring(
 
 /// A drag's trail (a stroked polyline), start anchor, and held indicator (a dot
 /// that moves along the path). Pointer dispatch is effectively instantaneous, so
-/// the trail and dot are paced over [`drag_draw_duration`] and each non-zero
-/// path segment gets its own staggered dialogue. On release the complete trail
-/// and anchor fade over the (capped) fade duration; a held press with no release
-/// stays through the end of its retained window.
+/// the trail and dot are paced over [`drag_draw_duration`]. Each path segment is
+/// subdivided into short, distance-weighted quads so a long segment reveals
+/// behind the moving dot rather than exposing its full future geometry at press
+/// time. On release the complete trail and anchor fade over the (capped) fade
+/// duration; a held press with no release stays through the end of its retained
+/// window.
 #[cfg(any(linux, test))]
 fn append_drag(
     script: &mut String,
@@ -805,28 +813,48 @@ fn append_drag(
         .collect::<Vec<_>>();
     let total_length = path_segments.iter().map(|(_, length)| *length).sum::<f64>();
 
-    // Trail dialogues are staggered by cumulative path length. Each one remains
-    // visible through the synthetic release and then receives the normal fade.
+    // Trail dialogues are staggered by cumulative path length. Long source
+    // segments are subdivided into short quads so a one-move drag reveals the
+    // line continuously behind the held indicator. Each quad remains visible
+    // through the synthetic release and then receives the normal fade.
     let mut cumulative_length = 0.0;
     for (index, length) in &path_segments {
-        let segment_start = start_off
-            + Duration::from_secs_f64(
-                draw_duration.as_secs_f64() * cumulative_length / total_length,
-            );
+        let chunk_count = (*length / DRAG_TRAIL_REVEAL_MAX_LENGTH).ceil() as usize;
+        let (from_x, from_y) = clamped[*index];
+        let (to_x, to_y) = clamped[*index + 1];
+        for chunk_index in 0..chunk_count {
+            let chunk_start_ratio = chunk_index as f64 / chunk_count as f64;
+            let chunk_end_ratio = (chunk_index + 1) as f64 / chunk_count as f64;
+            let chunk_start_length = cumulative_length + *length * chunk_start_ratio;
+            let segment_start = start_off
+                + Duration::from_secs_f64(
+                    draw_duration.as_secs_f64() * chunk_start_length / total_length,
+                );
+            let point_at = |ratio: f64| {
+                (
+                    (from_x as f64 + (to_x - from_x) as f64 * ratio).round() as i32,
+                    (from_y as f64 + (to_y - from_y) as f64 * ratio).round() as i32,
+                )
+            };
+            let quads = ass_trail_quads(&[point_at(chunk_start_ratio), point_at(chunk_end_ratio)]);
+            if quads.is_empty() {
+                continue;
+            }
+            let Some((out_start, out_end)) =
+                remap_source_interval(segment_start, vis_end, segments)
+            else {
+                continue;
+            };
+            let fade_tag = fade_tag(out_start, out_end);
+            script.push_str(&format!(
+                "Dialogue: 1,{start},{end},Cursor,,0,0,0,,\
+                 {{\\an7\\pos(0,0)\\clip(0,0,{width},{height})\
+                 \\1c&H{POINTER_COLOR_BGR}&\\1a&H73&\\bord0{fade_tag}\\p1}}{quads}{{\\p0}}\n",
+                start = format_ass_timecode(out_start),
+                end = format_ass_timecode(out_end),
+            ));
+        }
         cumulative_length += length;
-        let Some((out_start, out_end)) = remap_source_interval(segment_start, vis_end, segments)
-        else {
-            continue;
-        };
-        let fade_tag = fade_tag(out_start, out_end);
-        let quads = ass_trail_quads(&clamped[*index..=*index + 1]);
-        script.push_str(&format!(
-            "Dialogue: 1,{start},{end},Cursor,,0,0,0,,\
-             {{\\an7\\pos(0,0)\\clip(0,0,{width},{height})\
-             \\1c&H{POINTER_COLOR_BGR}&\\1a&H73&\\bord0{fade_tag}\\p1}}{quads}{{\\p0}}\n",
-            start = format_ass_timecode(out_start),
-            end = format_ass_timecode(out_end),
-        ));
     }
 
     // The anchor is visible for the same interval as the trail. It remains

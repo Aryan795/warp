@@ -558,7 +558,38 @@ fn drag_emits_trail_anchor_held_and_no_ring() {
 }
 
 #[test]
-fn multi_segment_drag_trail_has_a_quad_per_nonzero_segment() {
+fn single_segment_drag_reveals_short_quads_behind_the_dot() {
+    let drag = pointer_entry(
+        1000,
+        2000,
+        &[],
+        vec![down(1000, 0, 0), mv(1100, 256, 0), up(1200, 256, 0)],
+    );
+    let ass = build_overlay_ass(&[drag], (1280, 720), SOURCE_TEN_SECS, FRAME_RATE_15);
+    let trails = cursor_dialogues(&ass)
+        .into_iter()
+        .filter(|line| line.contains("\\1a&H73&"))
+        .collect::<Vec<_>>();
+
+    // A single press/move/release is one source segment, but its long line is
+    // subdivided so the first dialogue only contains the geometry reached at
+    // the start of the synthetic drag interval. Later quads reveal in order.
+    assert!(trails.len() > 1, "{ass}");
+    assert!(trails[0].contains("Dialogue: 1,0:00:00.25,"), "{ass}");
+    assert!(trails[0].contains("l 32 2"), "{ass}");
+    assert!(!trails[0].contains("l 256 2"), "{ass}");
+    assert!(
+        trails.windows(2).all(|window| window[0] < window[1]),
+        "{ass}"
+    );
+    assert!(
+        trails.iter().all(|line| line.matches("m ").count() == 1),
+        "{ass}"
+    );
+}
+
+#[test]
+fn multi_segment_drag_trail_is_subdivided_into_short_quads() {
     let drag = pointer_entry(
         1000,
         2000,
@@ -576,8 +607,8 @@ fn multi_segment_drag_trail_has_a_quad_per_nonzero_segment() {
         .filter(|line| line.contains("\\1a&H73&"))
         .collect::<Vec<_>>();
     // Points (0,0)->(100,0)->(100,100)->(100,100): the final zero-length segment
-    // is dropped, leaving two dialogues with one quad each.
-    assert_eq!(trails.len(), 2, "{ass}");
+    // is dropped, while each non-zero segment is subdivided into short quads.
+    assert!(trails.len() > 2, "{ass}");
     assert!(
         trails.iter().all(|trail| trail.matches("m ").count() == 1),
         "{ass}"
@@ -603,16 +634,19 @@ fn multi_segment_drag_reveals_trail_progressively() {
         .filter(|line| line.contains("\\1a&H73&"))
         .collect::<Vec<_>>();
 
-    // Each non-zero path segment gets its own dialogue. The second segment starts
-    // later, so the trail is revealed behind the dot rather than appearing whole.
-    assert_eq!(trails.len(), 2, "{ass}");
+    // Each non-zero path segment is subdivided into ordered dialogues. The
+    // second segment starts later, so the trail is revealed behind the dot
+    // rather than appearing whole at press time.
+    assert!(trails.len() > 2, "{ass}");
     assert!(trails[0] < trails[1], "{ass}");
     assert!(
         trails[0].contains("Dialogue: 1,0:00:00.25,0:00:01.45,Cursor,"),
         "{ass}"
     );
     assert!(
-        trails[1].contains("Dialogue: 1,0:00:00.55,0:00:01.45,Cursor,"),
+        trails
+            .iter()
+            .any(|line| { line.contains("Dialogue: 1,0:00:00.55,0:00:01.45,Cursor,") }),
         "{ass}"
     );
     assert!(trails[0].contains("\\clip(0,0,1280,720)"), "{ass}");
@@ -839,9 +873,32 @@ fn split_call_drag_renders_one_trail_like_a_canonical_drag() {
         cursor_dialogues(&canonical_ass),
         "split:\n{split_ass}\ncanonical:\n{canonical_ass}"
     );
-    // Sanity: that is one trail, one anchor, one held indicator.
+    // Sanity: that is one subdivided trail, one anchor, one held indicator.
     let cursor = cursor_dialogues(&split_ass);
-    assert_eq!(cursor.len(), 3, "{split_ass}");
+    assert!(
+        cursor
+            .iter()
+            .filter(|line| line.contains("\\1a&H73&"))
+            .count()
+            > 1,
+        "{split_ass}"
+    );
+    assert_eq!(
+        cursor
+            .iter()
+            .filter(|line| line.contains("\\1a&H87&"))
+            .count(),
+        1,
+        "{split_ass}"
+    );
+    assert_eq!(
+        cursor
+            .iter()
+            .filter(|line| line.contains("\\1a&H4B&"))
+            .count(),
+        1,
+        "{split_ass}"
+    );
     assert!(
         cursor.iter().any(|l| l.contains("\\1a&H73&")),
         "{split_ass}"
@@ -870,12 +927,13 @@ fn split_call_drag_with_moves_across_two_entries_renders_one_trail() {
     let ass = build_overlay_ass(&split, (1280, 720), SOURCE_TEN_SECS, FRAME_RATE_15);
     assert!(ring_dialogues(&ass).is_empty(), "{ass}");
     // Two non-zero segments: (0,0)->(100,0) and (100,0)->(100,100); the final
-    // move-to-release segment is zero-length and dropped, leaving two dialogues.
+    // move-to-release segment is zero-length and dropped. Both real segments
+    // are subdivided into short quads.
     let trails = cursor_dialogues(&ass)
         .into_iter()
         .filter(|line| line.contains("\\1a&H73&"))
         .collect::<Vec<_>>();
-    assert_eq!(trails.len(), 2, "{ass}");
+    assert!(trails.len() > 2, "{ass}");
     assert!(
         trails.iter().all(|trail| trail.matches("m ").count() == 1),
         "{ass}"
@@ -977,10 +1035,9 @@ fn unmatched_release_for_a_different_button_does_not_close_a_drag() {
     let ass = build_overlay_ass(&[entry], (1280, 720), SOURCE_TEN_SECS, FRAME_RATE_15);
     assert!(ring_dialogues(&ass).is_empty(), "{ass}");
     let cursor = cursor_dialogues(&ass);
-    // One drag: a single trail, anchor, and held indicator.
-    assert_eq!(
-        cursor.iter().filter(|l| l.contains("\\1a&H73&")).count(),
-        1,
+    // One drag: a subdivided trail, anchor, and held indicator.
+    assert!(
+        cursor.iter().filter(|l| l.contains("\\1a&H73&")).count() > 1,
         "{ass}"
     );
     assert_eq!(
