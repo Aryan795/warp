@@ -67,7 +67,6 @@ pub enum Artifact {
         artifact_uid: String,
         filepath: String,
         filename: String,
-        #[serde(default)]
         title: Option<String>,
         mime_type: String,
         description: Option<String>,
@@ -104,7 +103,6 @@ enum ArtifactHelper {
         artifact_uid: String,
         filepath: String,
         filename: String,
-        #[serde(default)]
         title: Option<String>,
         mime_type: String,
         description: Option<String>,

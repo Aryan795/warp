@@ -568,7 +568,7 @@ impl From<Icon> for &'static str {
             Icon::PlusCircle => "bundled/svg/plus-circle.svg",
             Icon::Dataflow => "bundled/svg/dataflow.svg",
             Icon::Play => "bundled/svg/play-white.svg",
-            Icon::VideoRecorder => "bundled/svg/video-recorder-01.svg",
+            Icon::VideoRecorder => "bundled/svg/video-recorder.svg",
             Icon::MessageText => "bundled/svg/message-text-square-02.svg",
             Icon::NewConversation => "bundled/svg/new-conversation.svg",
             Icon::Image => "bundled/svg/image-01.svg",
