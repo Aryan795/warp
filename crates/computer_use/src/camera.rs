@@ -303,7 +303,7 @@ fn target_zoom_for_points(
         .max(1.0)
 }
 
-fn latest_pointer_at<'a>(pointers: &'a [MappedPointer], t: Duration) -> Option<&'a MappedPointer> {
+fn latest_pointer_at(pointers: &[MappedPointer], t: Duration) -> Option<&MappedPointer> {
     pointers.iter().rev().find(|pointer| pointer.t <= t)
 }
 

@@ -56,6 +56,15 @@ async fn zoom_cut(
     dimensions: (u32, u32),
     frame_rate: u32,
 ) -> Result<PathBuf, RecordingError> {
+    #[cfg(test)]
+    if input
+        .file_name()
+        .is_some_and(|name| name == "force-auto-zoom-failure.mp4")
+    {
+        return Err(RecordingError::Finalize {
+            reason: "test-forced auto-zoom failure".to_string(),
+        });
+    }
     let output_path = input.with_extension("zoom.mp4");
     let filter = build_zoompan_filter(track, dimensions, frame_rate);
     let status = Command::new("ffmpeg")
