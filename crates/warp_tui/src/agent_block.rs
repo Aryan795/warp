@@ -874,7 +874,9 @@ impl TuiAIBlock {
                     | AIAgentOutputMessageType::ArtifactCreated(_)
                     | AIAgentOutputMessageType::SkillInvoked(_)
                     | AIAgentOutputMessageType::MessagesReceivedFromAgents { .. }
-                    | AIAgentOutputMessageType::EventsFromAgents { .. } => None,
+                    | AIAgentOutputMessageType::EventsFromAgents { .. }
+                    | AIAgentOutputMessageType::IntentSpanStart { .. }
+                    | AIAgentOutputMessageType::IntentSpanOutcome { .. } => None,
                 };
                 let Some(text) = text else {
                     continue;
@@ -1384,7 +1386,9 @@ impl TuiAIBlock {
                     | AIAgentOutputMessageType::CommentsAddressed { .. }
                     | AIAgentOutputMessageType::DebugOutput { .. }
                     | AIAgentOutputMessageType::ArtifactCreated(_)
-                    | AIAgentOutputMessageType::SkillInvoked(_) => {}
+                    | AIAgentOutputMessageType::SkillInvoked(_)
+                    | AIAgentOutputMessageType::IntentSpanStart { .. }
+                    | AIAgentOutputMessageType::IntentSpanOutcome { .. } => {}
                 }
             }
         }
