@@ -49,7 +49,7 @@ use crate::ai::blocklist::{
     BlocklistAIContextModel, BlocklistAIController, BlocklistAIHistoryEvent, BlocklistAIInputEvent,
     BlocklistAIInputModel, QueuedQueryEvent, QueuedQueryModel, ResponseStreamId, ai_brand_color,
 };
-use crate::ai::llms::LLMPreferences;
+use crate::ai::llms::{LLMInfo, LLMPreferences};
 use crate::ai::{AgentTip, custom_model_routers};
 use crate::server::server_api::ServerApiProvider;
 use crate::server::telemetry::TelemetryEvent;
@@ -1295,6 +1295,25 @@ fn resolve_router_warping(
     Some(RouterWarpingResolution { label, link })
 }
 
+/// Derives the Warp Agent settings search query for a cloud/team custom router
+/// from its resolved [`LLMInfo`] display name. Returns `None` when the info is
+/// missing or the display name is empty/whitespace, so the pure resolver falls
+/// back to the raw config-key id (spec invariant 3: the router name/ID is
+/// supplied as the settings search query where supported).
+///
+/// Cloud/team routers arrive as server-synced `LLMInfo` entries surfaced by
+/// [`LLMPreferences::get_llm_info`] (they live in `models_by_feature`, not the
+/// local custom-router registry), so this must use `get_llm_info` rather than
+/// `custom_model_router_for_id` — the latter only knows local YAML routers and
+/// returns `None` for every cloud router, which previously made the `Configure
+/// router` link search for the raw `custom-router:cloud:<id>` key instead of
+/// the visible router name.
+fn cloud_router_search_query(info: Option<&LLMInfo>) -> Option<String> {
+    info.map(|i| i.display_name.as_str())
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_string)
+}
+
 /// Gathers live exchange/app state and delegates to [`resolve_router_warping`].
 /// Returns `None` unless the new flag is enabled and the active turn is
 /// router-selected with a resolved model.
@@ -1317,9 +1336,7 @@ fn resolve_router_warping_for_exchange<V: View>(
         ),
         RouterKind::CustomCloud => (
             None,
-            LLMPreferences::as_ref(app)
-                .custom_model_router_for_id(base_id)
-                .map(|router| router.info.display_name.clone()),
+            cloud_router_search_query(LLMPreferences::as_ref(app).get_llm_info(base_id)),
         ),
     };
     let new_query = is_new_user_query(model, app);

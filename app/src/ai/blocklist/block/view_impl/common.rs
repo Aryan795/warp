@@ -602,7 +602,13 @@ pub fn render_warping_indicator_base(
         }
 
         if let Some(router_link) = router_config_link {
-            row = row.with_child(Shrinkable::new(1., router_link).finish());
+            row = row.with_child(
+                Shrinkable::new(
+                    1.,
+                    Container::new(router_link).with_margin_left(4.).finish(),
+                )
+                .finish(),
+            );
         }
 
         row.finish()

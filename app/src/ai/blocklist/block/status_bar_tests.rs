@@ -1,25 +1,54 @@
 //! Unit tests for the router warping indicator resolver (APP-4978).
 //!
 //! These cover the pure resolver seam ([`super::resolve_router_warping`],
-//! [`super::classify_router`], [`super::ModelInfoSnapshot`]) with synthetic
-//! model ids and output metadata, avoiding a live server or `AppContext`.
-//! The live `resolve_router_warping_for_exchange` wrapper is exercised
-//! end-to-end by the repo's integration/visual checks; here we lock down the
-//! classification, display-label, stale-data, link-target, and feature-gate
-//! behavior deterministically.
+//! [`super::classify_router`], [`super::cloud_router_search_query`],
+//! [`super::ModelInfoSnapshot`]) with synthetic model ids and output
+//! metadata, avoiding a live server or `AppContext`. The live
+//! `resolve_router_warping_for_exchange` wrapper is exercised end-to-end by
+//! the repo's integration/visual checks; here we lock down the
+//! classification, display-label, stale-data, link-target, cloud-query
+//! derivation, and feature-gate behavior deterministically.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use super::{
     ModelInfoSnapshot, RouterConfigLink, RouterKind, RouterWarpingResolution, classify_router,
-    resolve_router_warping,
+    cloud_router_search_query, resolve_router_warping,
 };
 use crate::ai::custom_model_routers::{CLOUD_CUSTOM_ROUTER_PREFIX, LOCAL_CUSTOM_ROUTER_PREFIX};
+use crate::ai::llms::{LLMContextWindow, LLMInfo, LLMProvider, LLMUsageMetadata};
 
 fn info(display_name: &str, model_id: &str) -> ModelInfoSnapshot {
     ModelInfoSnapshot {
         display_name: display_name.to_string(),
         model_id: model_id.to_string(),
+    }
+}
+
+/// Minimal server-style [`LLMInfo`] with the given display name, mirroring the
+/// fixtures in `llms_tests.rs`. Used to exercise [`cloud_router_search_query`]
+/// — the helper the live wrapper calls with `LLMPreferences::get_llm_info`'s
+/// result, so the test type-signature enforces that the query is derived from
+/// an `LLMInfo` (what `get_llm_info` returns), not from a local registry entry.
+fn llm_info(display_name: &str) -> LLMInfo {
+    LLMInfo {
+        display_name: display_name.to_string(),
+        base_model_name: display_name.to_string(),
+        id: format!("{CLOUD_CUSTOM_ROUTER_PREFIX}team-router").into(),
+        reasoning_level: None,
+        usage_metadata: LLMUsageMetadata {
+            request_multiplier: 1,
+            credit_multiplier: None,
+        },
+        description: None,
+        disable_reason: None,
+        vision_supported: false,
+        spec: None,
+        provider: LLMProvider::Unknown,
+        host_configs: HashMap::new(),
+        discount_percentage: None,
+        context_window: LLMContextWindow::default(),
     }
 }
 
@@ -292,4 +321,82 @@ fn router_warping_resolution_link_is_not_displayed_for_builtin_auto() {
     let RouterWarpingResolution { label, link } = res;
     assert!(label.starts_with("Warping with "));
     assert_eq!(link, RouterConfigLink::None);
+}
+
+// ── Cloud-query derivation (live wrapper seam) ───────────────────────────────
+
+#[test]
+fn cloud_router_search_query_uses_llm_info_display_name() {
+    // The live wrapper `resolve_router_warping_for_exchange` derives the cloud
+    // settings search query from `LLMPreferences::get_llm_info(base_id)`'s
+    // display name (cloud/team routers are server-synced `LLMInfo` entries, not
+    // local custom-router registry entries). This is the case the previous
+    // `custom_model_router_for_id` lookup missed: it returned `None` for every
+    // cloud router, so the `Configure router` link searched for the raw
+    // `custom-router:cloud:<id>` key instead of the visible router name.
+    assert_eq!(
+        cloud_router_search_query(Some(&llm_info("Team Router"))),
+        Some("Team Router".to_string())
+    );
+}
+
+#[test]
+fn cloud_router_search_query_none_when_llm_info_missing() {
+    // `get_llm_info` returns `None` when the router isn't a known model -> the
+    // query is `None` and the pure resolver falls back to the config-key id
+    // (spec invariant 3: router name/ID supplied as the search query).
+    assert_eq!(cloud_router_search_query(None), None);
+}
+
+#[test]
+fn cloud_router_search_query_none_when_display_name_empty_or_whitespace() {
+    // An empty or whitespace-only display name would search for nothing useful,
+    // so the helper returns `None` and the pure resolver falls back to the id.
+    assert_eq!(cloud_router_search_query(Some(&llm_info(""))), None);
+    assert_eq!(cloud_router_search_query(Some(&llm_info("   "))), None);
+    assert_eq!(cloud_router_search_query(Some(&llm_info("\t\n"))), None);
+}
+
+#[test]
+fn cloud_router_search_query_trims_only_for_the_emptiness_check() {
+    // A display name with surrounding whitespace is still used as-is (only
+    // all-whitespace names are rejected); the resolver does not strip visible
+    // padding from a legitimate name.
+    assert_eq!(
+        cloud_router_search_query(Some(&llm_info("  Team Router  "))),
+        Some("  Team Router  ".to_string())
+    );
+}
+
+// ── Feature-gate regression (spec criterion 5) ──────────────────────────────
+
+#[test]
+fn resolve_router_warping_flag_disabled_returns_none_for_every_router_kind() {
+    // Spec criterion 5: with `RouterWarpingIndicator` disabled, no router
+    // display/link is returned for any router kind (local, cloud, or built-in
+    // auto). The router resolver is gated solely by `RouterWarpingIndicator`
+    // and never consults `FallbackModelLoadOutputMessaging`, so the existing
+    // fallback messaging (`resolve_fallback_warping_message`) remains the only
+    // source of warping text when this flag is off — unchanged across all four
+    // combinations of the two flags. The wrapper
+    // `resolve_router_warping_for_exchange` mirrors this with an early `None`
+    // return when the flag is off.
+    let local = format!("{LOCAL_CUSTOM_ROUTER_PREFIX}my-router");
+    let cloud = format!("{CLOUD_CUSTOM_ROUTER_PREFIX}team-router");
+    let path = PathBuf::from("/r.yaml");
+    for id in [local.as_str(), cloud.as_str(), "auto"] {
+        assert!(
+            resolve_router_warping(
+                false, // router flag off
+                Some(id),
+                Some(info("Claude Sonnet", "claude-sonnet-4-5")),
+                None,
+                false,
+                Some(&path),
+                Some("Team Router"),
+            )
+            .is_none(),
+            "router flag off => no router display for {id}"
+        );
+    }
 }
