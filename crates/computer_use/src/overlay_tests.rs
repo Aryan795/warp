@@ -529,31 +529,32 @@ fn drag_emits_trail_anchor_held_and_no_ring() {
     let cursor = cursor_dialogues(&ass);
     // Exclusivity: a drag release emits no click ring.
     assert!(ring_dialogues(&ass).is_empty(), "{ass}");
-    // Trail: filled polyline (fill alpha 73) with a 600 ms release fade. Segment
-    // [750, 3000]; [1000, 2000] remaps to [250, 1250] ms, so the fade runs
-    // [400, 1000] ms into the dialogue.
+    // Trail: the synthetic draw interval is 600 ms and the release fade is
+    // another 600 ms. Segment [750, 3000]; the animated interval
+    // [1000, 2200] remaps to [250, 1450] ms.
     let trail = cursor
         .iter()
         .find(|line| line.contains("\\1a&H73&"))
         .expect("trail dialogue");
     assert!(
-        trail.contains("Dialogue: 1,0:00:00.25,0:00:01.25,Cursor,"),
+        trail.contains("Dialogue: 1,0:00:00.25,0:00:01.45,Cursor,"),
         "{ass}"
     );
     assert!(trail.contains("\\an7\\pos(0,0)"), "{ass}");
-    assert!(trail.contains("\\t(400,1000,\\1a&HFF&)"), "{ass}");
+    assert!(trail.contains("\\t(600,1200,\\1a&HFF&)"), "{ass}");
     // Anchor at the press point, alpha 87, centered on it via `\an7`.
     let anchor = cursor
         .iter()
         .find(|line| line.contains("\\1a&H87&"))
         .expect("anchor dialogue");
     assert!(anchor.contains("\\an7\\pos(100,100)"), "{ass}");
-    // Held dot moves press -> release over the hold [1000, 1400] -> [250, 650].
+    // Held dot moves press -> release over the synthetic draw interval
+    // [1000, 1600] -> [250, 850].
     let held = cursor
         .iter()
         .find(|line| line.contains("\\1a&H4B&"))
         .expect("held dialogue");
-    assert!(held.contains("\\move(100,100,300,400,0,400)"), "{ass}");
+    assert!(held.contains("\\move(100,100,300,400,0,600)"), "{ass}");
 }
 
 #[test]
@@ -570,13 +571,66 @@ fn multi_segment_drag_trail_has_a_quad_per_nonzero_segment() {
         ],
     );
     let ass = build_overlay_ass(&[drag], (1280, 720), SOURCE_TEN_SECS, FRAME_RATE_15);
-    let trail = cursor_dialogues(&ass)
+    let trails = cursor_dialogues(&ass)
         .into_iter()
-        .find(|line| line.contains("\\1a&H73&"))
-        .expect("trail dialogue");
+        .filter(|line| line.contains("\\1a&H73&"))
+        .collect::<Vec<_>>();
     // Points (0,0)->(100,0)->(100,100)->(100,100): the final zero-length segment
-    // is dropped, leaving two quads (each a `m ... l ... l ... l ...` subpath).
-    assert_eq!(trail.matches("m ").count(), 2, "{trail}");
+    // is dropped, leaving two dialogues with one quad each.
+    assert_eq!(trails.len(), 2, "{ass}");
+    assert!(
+        trails.iter().all(|trail| trail.matches("m ").count() == 1),
+        "{ass}"
+    );
+}
+
+#[test]
+fn multi_segment_drag_reveals_trail_progressively() {
+    let drag = pointer_entry(
+        1000,
+        2000,
+        &[],
+        vec![
+            down(1000, 0, 0),
+            mv(1100, 100, 0),
+            mv(1200, 100, 100),
+            up(1300, 100, 100),
+        ],
+    );
+    let ass = build_overlay_ass(&[drag], (1280, 720), SOURCE_TEN_SECS, FRAME_RATE_15);
+    let trails = cursor_dialogues(&ass)
+        .into_iter()
+        .filter(|line| line.contains("\\1a&H73&"))
+        .collect::<Vec<_>>();
+
+    // Each non-zero path segment gets its own dialogue. The second segment starts
+    // later, so the trail is revealed behind the dot rather than appearing whole.
+    assert_eq!(trails.len(), 2, "{ass}");
+    assert!(trails[0] < trails[1], "{ass}");
+    assert!(
+        trails[0].contains("Dialogue: 1,0:00:00.25,0:00:01.45,Cursor,"),
+        "{ass}"
+    );
+    assert!(
+        trails[1].contains("Dialogue: 1,0:00:00.55,0:00:01.45,Cursor,"),
+        "{ass}"
+    );
+    assert!(trails[0].contains("\\clip(0,0,1280,720)"), "{ass}");
+    assert!(trails[1].contains("\\clip(0,0,1280,720)"), "{ass}");
+    let held = cursor_dialogues(&ass)
+        .into_iter()
+        .filter(|line| line.contains("\\1a&H4B&"))
+        .collect::<Vec<_>>();
+    assert_eq!(held.len(), 2, "{ass}");
+    assert!(held[0].contains("\\move(0,0,100,0,0,300)"), "{ass}");
+    assert!(held[1].contains("\\move(100,0,100,100,0,300)"), "{ass}");
+    // The complete path remains visible through the synthetic release and then
+    // fades using the existing post-release duration.
+    assert!(trails.iter().all(|line| line.contains("\\t(")), "{ass}");
+    assert!(
+        trails.iter().all(|line| line.contains("\\1a&HFF&")),
+        "{ass}"
+    );
 }
 
 #[test]
@@ -815,16 +869,23 @@ fn split_call_drag_with_moves_across_two_entries_renders_one_trail() {
     ];
     let ass = build_overlay_ass(&split, (1280, 720), SOURCE_TEN_SECS, FRAME_RATE_15);
     assert!(ring_dialogues(&ass).is_empty(), "{ass}");
-    let trail = cursor_dialogues(&ass)
-        .into_iter()
-        .find(|line| line.contains("\\1a&H73&"))
-        .expect("trail dialogue");
     // Two non-zero segments: (0,0)->(100,0) and (100,0)->(100,100); the final
-    // move-to-release segment is zero-length and dropped, leaving two quads.
-    assert_eq!(trail.matches("m ").count(), 2, "{trail}");
+    // move-to-release segment is zero-length and dropped, leaving two dialogues.
+    let trails = cursor_dialogues(&ass)
+        .into_iter()
+        .filter(|line| line.contains("\\1a&H73&"))
+        .collect::<Vec<_>>();
+    assert_eq!(trails.len(), 2, "{ass}");
+    assert!(
+        trails.iter().all(|trail| trail.matches("m ").count() == 1),
+        "{ass}"
+    );
     // The release fade is present (a drag with a release).
-    assert!(trail.contains("\\t("), "release fade missing: {trail}");
-    assert!(trail.contains("\\1a&HFF&"), "release fade missing: {trail}");
+    assert!(trails.iter().all(|trail| trail.contains("\\t(")), "{ass}");
+    assert!(
+        trails.iter().all(|trail| trail.contains("\\1a&HFF&")),
+        "{ass}"
+    );
 }
 
 // --- Button identity and boundary cases (QUALITY-1169 follow-up) -------------
