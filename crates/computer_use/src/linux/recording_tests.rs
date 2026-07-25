@@ -16,8 +16,12 @@ use x11rb::rust_connection::RustConnection;
 
 use super::Recorder;
 // The `Recorder` trait provides `start`/`stop` on the concrete `super::Recorder` struct.
+use crate::camera::{CameraConfig, build_camera_track};
 use crate::overlay::KeepSegment;
-use crate::{Recorder as _, RecordingConfig, Target};
+use crate::{
+    ActionLogEntry, MouseButton, PointerEvent, PointerEventKind, Recorder as _, RecordingConfig,
+    Target, Vector2I,
+};
 
 // 24-bit TrueColor pixel values (0xRRGGBB) for the two solid-color test windows.
 const RED_PIXEL: u32 = 0x00FF_0000;
@@ -602,6 +606,64 @@ async fn smart_cut_retains_only_selected_frames_in_order() {
     assert!(
         (duration - 0.6).abs() < 0.08,
         "output duration should be ~0.6s (6 frames at 10fps), got {duration}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Runs the real zoompan pass on a deterministic fixture and asserts that the
+/// camera preserves output geometry and a finite playback duration.
+#[tokio::test]
+async fn auto_zoom_fixture_preserves_geometry_and_duration() {
+    if !ffmpeg_available().await {
+        eprintln!("skipping auto_zoom_fixture_preserves_geometry_and_duration: no ffmpeg");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!("warp-auto-zoom-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let source = dir.join("source.mp4");
+    write_fixture_source(&source).await;
+
+    let entries = vec![ActionLogEntry {
+        offset: Duration::from_millis(200),
+        finish_offset: Duration::from_millis(300),
+        labels: Vec::new(),
+        pointer_events: vec![PointerEvent {
+            offset: Duration::from_millis(200),
+            kind: PointerEventKind::Down,
+            button: Some(MouseButton::Left),
+            point: Vector2I::new(0, 0),
+        }],
+    }];
+    let segments = vec![KeepSegment {
+        source_start: Duration::ZERO,
+        source_end: Duration::from_secs(1),
+        output_start: Duration::ZERO,
+    }];
+    let track = build_camera_track(
+        &entries,
+        &segments,
+        (FIXTURE_W, FIXTURE_H),
+        FIXTURE_FRAME_RATE,
+        CameraConfig {
+            enabled: true,
+            ..CameraConfig::default()
+        },
+    );
+    let output = super::zoom_cut(&source, &track, (FIXTURE_W, FIXTURE_H), FIXTURE_FRAME_RATE)
+        .await
+        .expect("zoompan fixture render should succeed");
+
+    assert_eq!(
+        probe_dimensions(&output).await,
+        (FIXTURE_W, FIXTURE_H),
+        "zoompan must preserve output dimensions"
+    );
+    let duration = probe_duration(&output).await;
+    assert!(
+        (duration - 1.0).abs() < 0.2,
+        "zoompan must preserve the compacted duration, got {duration}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

@@ -591,6 +591,9 @@ pub enum FeatureFlag {
 
     /// Enables video recording of computer-use sessions for cloud agents.
     VideoRecording,
+    /// Enables the experimental post-stop auto-zoom camera for Linux
+    /// computer-use recordings.
+    ComputerUseAutoZoom,
 
     /// Enables team API key creation in the API key management UI.
     TeamApiKeys,
@@ -1024,7 +1027,10 @@ pub const RELEASE_FLAGS: &[FeatureFlag] = &[
 ];
 
 /// Flags that we want to allow to switch at runtime (assuming RuntimeFeatureFlags is set)
-pub const RUNTIME_FEATURE_FLAGS: &[FeatureFlag] = &[FeatureFlag::LocalClaudeCodexChildHarnesses];
+pub const RUNTIME_FEATURE_FLAGS: &[FeatureFlag] = &[
+    FeatureFlag::LocalClaudeCodexChildHarnesses,
+    FeatureFlag::ComputerUseAutoZoom,
+];
 
 impl FeatureFlag {
     pub fn is_enabled(&self) -> bool {
