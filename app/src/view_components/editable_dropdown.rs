@@ -269,7 +269,11 @@ where
     fn handle_menu_event(&mut self, event: &MenuEvent, ctx: &mut ViewContext<Self>) {
         match event {
             MenuEvent::Close { via_select_item: _ } => self.close(ctx),
-            MenuEvent::ItemSelected => self.sync_selected_item(ctx),
+            // Arrow-key navigation changes the menu's highlighted item and emits
+            // `ItemSelected` before the user commits it. The editor stays tied
+            // to the saved value until the preset action is actually dispatched
+            // and the backing setting synchronizes the component.
+            MenuEvent::ItemSelected => {}
             MenuEvent::ItemHovered => {}
         }
     }

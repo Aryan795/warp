@@ -7,6 +7,7 @@ use warpui::{App, View};
 use super::EditableDropdown;
 use crate::auth::AuthStateProvider;
 use crate::editor::{EditOrigin, Event as EditorEvent};
+use crate::menu::Event as MenuEvent;
 use crate::settings_view::keybindings::KeybindingChangedNotifier;
 use crate::test_util::settings::initialize_settings_for_tests;
 use crate::view_components::DropdownItem;
@@ -122,6 +123,12 @@ fn presets_and_external_values_stay_synchronized() {
             dropdown.set_value_text("142%", ctx);
             dropdown.set_selected_by_action(TestAction(142), ctx);
             assert_eq!(dropdown.selected_item_label(), None);
+            assert_eq!(dropdown.editor_text(ctx), "142%");
+
+            dropdown.dropdown.update(ctx, |menu, ctx| {
+                menu.set_selected_by_index(0, ctx);
+            });
+            dropdown.handle_menu_event(&MenuEvent::ItemSelected, ctx);
             assert_eq!(dropdown.editor_text(ctx), "142%");
         });
 
