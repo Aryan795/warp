@@ -2,6 +2,7 @@
 use voice_input::VoiceInput;
 use warp_core::ui::appearance::Appearance;
 use warpui::platform::WindowStyle;
+use warpui::text_layout::TextAlignment;
 use warpui::{App, View};
 
 use super::EditableDropdown;
@@ -84,6 +85,21 @@ fn typed_values_validate_commit_and_revert() {
             dropdown.handle_editor_event(&EditorEvent::Blurred, ctx);
             assert_eq!(dropdown.editor_text(ctx), "100");
             assert_eq!(dropdown.last_dispatched_action(), Some(&TestAction(225)));
+        });
+    })
+}
+
+#[test]
+fn editor_text_is_center_aligned() {
+    App::test((), |mut app| async move {
+        initialize_test_app(&mut app);
+        let dropdown = add_dropdown(&mut app);
+
+        dropdown.read(&app, |dropdown, ctx| {
+            assert_eq!(
+                dropdown.editor.as_ref(ctx).text_alignment(),
+                TextAlignment::Center
+            );
         });
     })
 }

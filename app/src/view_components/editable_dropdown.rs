@@ -2,11 +2,12 @@ use std::marker::PhantomData;
 
 use pathfinder_geometry::vector::vec2f;
 use warpui::elements::{
-    Border, ChildAnchor, ChildView, Clipped, ConstrainedBox, Container, CornerRadius,
-    CrossAxisAlignment, Element, Flex, Icon, MainAxisAlignment, MainAxisSize, MouseStateHandle,
-    OffsetPositioning, ParentElement, PositionedElementAnchor, PositionedElementOffsetBounds,
-    Radius, SavePosition, Shrinkable, Stack,
+    Border, ChildAnchor, ChildView, Clipped, ConstrainedBox, Container, CornerRadius, Element,
+    EventDispatchMode, Icon, MouseStateHandle, OffsetPositioning, ParentAnchor, ParentElement,
+    ParentOffsetBounds, PositionedElementAnchor, PositionedElementOffsetBounds, Radius,
+    SavePosition, Stack,
 };
+use warpui::text_layout::TextAlignment;
 use warpui::ui_components::button::ButtonVariant;
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
 use warpui::{
@@ -88,6 +89,7 @@ where
                 },
                 ctx,
             )
+            .with_text_alignment(TextAlignment::Center)
         });
         ctx.subscribe_to_view(&editor, |me, _, event, ctx| {
             me.handle_editor_event(event, ctx);
@@ -312,10 +314,8 @@ where
     }
 
     fn render_top_bar(&self, appearance: &Appearance) -> Box<dyn Element> {
-        let editor = Container::new(Clipped::new(ChildView::new(&self.editor).finish()).finish())
-            .with_padding_left(8.)
-            .with_padding_right(4.)
-            .finish();
+        let editor =
+            Container::new(Clipped::new(ChildView::new(&self.editor).finish()).finish()).finish();
 
         let chevron = ConstrainedBox::new(
             Icon::new(
@@ -350,18 +350,28 @@ where
             });
         }
 
-        let row = Flex::row()
-            .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_child(Shrinkable::new(1., editor).finish())
-            .with_child(button.finish())
-            .finish();
+        let mut control = Stack::new()
+            .with_event_dispatch_mode(EventDispatchMode::Waterfall)
+            .with_child(
+                ConstrainedBox::new(editor)
+                    .with_width(self.top_bar_max_width)
+                    .with_height(self.top_bar_height)
+                    .finish(),
+            );
+        control.add_positioned_child(
+            button.finish(),
+            OffsetPositioning::offset_from_parent(
+                vec2f(0., 0.),
+                ParentOffsetBounds::ParentByPosition,
+                ParentAnchor::MiddleRight,
+                ChildAnchor::MiddleRight,
+            ),
+        );
 
         let border_fill = self
             .validation_border_fill()
             .unwrap_or_else(|| appearance.theme().outline());
-        let top_bar = Container::new(row)
+        let top_bar = Container::new(control.finish())
             .with_background(appearance.theme().surface_2())
             .with_border(Border::all(1.).with_border_fill(border_fill))
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
