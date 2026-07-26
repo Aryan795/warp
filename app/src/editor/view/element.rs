@@ -1641,6 +1641,15 @@ impl Element for EditorElement {
         } else {
             vec![]
         };
+        let first_suggestion_line_row = (!placeholder_suggestion_text_line_layouts.is_empty())
+            .then(|| match view_snapshot.autosuggestion_location() {
+                Some(AutosuggestionLocation::Inline(logical_line_ix)) => {
+                    frame_layouts.end_of_logical_row(logical_line_ix) as u32
+                }
+                Some(AutosuggestionLocation::EndOfBuffer) | None => {
+                    frame_layouts.num_lines().saturating_sub(1) as u32
+                }
+            });
         // Set the height of the element, in case we don't have enough text to fill
         // in all the space.
         if size.y().is_infinite() || view_snapshot.autogrow {
@@ -1792,6 +1801,7 @@ impl Element for EditorElement {
             left_notch_layout_width_px,
             right_notch_layout_width_px,
             text_alignment: view_snapshot.text_alignment,
+            first_suggestion_line_row,
         });
         size
     }
@@ -1914,23 +1924,11 @@ impl Element for EditorElement {
             // It's mutable and updated according to the width of autosuggestion lines. And it is only drawn at the last line of autosuggestion.
             let mut last_autosuggestion_glyph_position = Some(vec2f(0., 0.));
 
-            // The autosuggestion location should be expressed in a soft-wrapped row coordinate
-            // In other words, in what soft-wrapped row can we find the last character in the logical row that has the autosuggestion?
-            let autosuggestion_soft_wrapped_line = view_snapshot
-                .autosuggestion_location()
-                .as_ref()
-                .and_then(|l| match l {
-                    AutosuggestionLocation::EndOfBuffer => None,
-                    AutosuggestionLocation::Inline(logical_line_ix) => {
-                        Some(layout.frame_layouts.end_of_logical_row(*logical_line_ix))
-                    }
-                });
-
             self.paint_lines(
                 content_origin,
                 layout,
                 line_height,
-                autosuggestion_soft_wrapped_line,
+                layout.first_suggestion_line_row.map(|row| row as usize),
                 ctx,
                 app,
                 &mut last_autosuggestion_glyph_position,
@@ -2243,6 +2241,7 @@ struct LayoutState {
     left_notch_layout_width_px: f32,
     right_notch_layout_width_px: f32,
     text_alignment: TextAlignment,
+    first_suggestion_line_row: Option<u32>,
 }
 
 impl LayoutState {
@@ -2256,7 +2255,16 @@ impl LayoutState {
             (0., 0.)
         };
         let available_width = (self.size.x() - left_inset - right_inset).max(0.);
-        EditorElement::aligned_line_x_offset(self.text_alignment, available_width, line.width)
+        let suggestion_width = self
+            .first_suggestion_line_row
+            .filter(|suggestion_row| *suggestion_row == row)
+            .and_then(|_| self.placeholder_suggestion_text_line_layouts.first())
+            .map_or(0., |suggestion| suggestion.width);
+        EditorElement::aligned_line_x_offset(
+            self.text_alignment,
+            available_width,
+            line.width + suggestion_width,
+        )
     }
 
     /// Computes the scroll width of this editor in pixels.
