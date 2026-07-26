@@ -56,7 +56,7 @@ only.
 
 **Key design choices:** (a) Scope the wake assertion to the agent *conversation* lifecycle
 (held across turns, including the local command-execution gap), not per-request. (b) Add a
-**refreshable max-duration cap** (default 30 minutes) so a stuck conversation cannot hold
+**refreshable max-duration cap** (default 20 minutes) so a stuck conversation cannot hold
 the assertion indefinitely; each turn / tool-call activity / command-output poll / user
 input refreshes the cap, and cap expiry releases the assertion (with a log + telemetry
 signal) even while still `InProgress`. (c) **Remove** the existing per-request guard — it
@@ -202,9 +202,9 @@ this change the assertion must be present continuously through the `sleep 600` r
      actually resume, the cap bounds the held duration (it expires after `CAP` with no
      refresh events).
    - The model's own `Drop` releases all held guards as a final safety net.
-   - **Cap default:** `CAP = 30 minutes` (`const CAP: Duration = Duration::from_secs(30 * 60)`).
+   - **Cap default:** `CAP = 20 minutes` (`const CAP: Duration = Duration::from_secs(20 * 60)`).
      Rationale: a single turn + local action execution rarely exceeds a few minutes; an
-     LRC poll cycle is bounded by `MAX_AGENT_DELAY_DURATION` (120s). 30 min is well above
+     LRC poll cycle is bounded by `MAX_AGENT_DELAY_DURATION` (120s). 20 min is well above
      normal inter-turn gaps, comfortably covers a long LRC polled every few minutes, yet
      short enough that a truly stuck conversation (no turns, no polls, no user input)
      releases the assertion in a bounded window rather than draining battery until the
@@ -308,7 +308,7 @@ this change the assertion must be present continuously through the `sleep 600` r
   bound was the SSE stream ending (guard `Drop`). The new conversation-scoped guard is
   intended to span a much longer window, so it adds the refreshable cap the old guard
   never had.
-- *Cap value* — 30 minutes (const, not a setting). Well above normal inter-turn gaps and
+- *Cap value* — 20 minutes (const, not a setting). Well above normal inter-turn gaps and
   LRC poll cycles, short enough to bound a stuck run. Tunable in one place.
 - *What refreshes the cap* — new SSE turn (`StreamInit`), locally-executed action result
   drained, `ReadShellCommandOutput`/`WriteToLongRunningShellCommand` poll completion, and
