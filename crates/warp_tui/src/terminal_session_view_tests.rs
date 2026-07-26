@@ -5,14 +5,16 @@ use std::time::Duration;
 use instant::Instant;
 use tempfile::TempDir;
 use warp::appearance::Appearance;
-use warp::settings::{AISettings, TuiUsageDisplayMode, TuiZeroStateObject};
+use warp::settings::{
+    AISettings, TuiTheme, TuiThemeSettings, TuiUsageDisplayMode, TuiZeroStateObject,
+};
 use warp::terminal::model::ansi::{Handler, InputBufferValue, Mode};
 use warp::tui_export::{
     AIAgentActionId, AIAgentExchangeId, AIConversationAutoexecuteMode, AIConversationId,
     AgentViewEntryOrigin, BlockPadding, BlocklistAIHistoryModel, ConversationStatus,
-    ConversationUsageTotals, Harness, LLMPreferences, PtyIntent, PtyIntentEvent, SizeInfo,
-    SizeUpdate, TaskId, TranscriptScope, export_conversation_markdown,
-    register_tui_session_view_test_singletons, slash_commands,
+    ConversationUsageTotals, Harness, LLMPreferences, LongRunningCommandControlState, PtyIntent,
+    PtyIntentEvent, SizeInfo, SizeUpdate, TaskId, TranscriptScope, UserTakeOverReason,
+    export_conversation_markdown, register_tui_session_view_test_singletons, slash_commands,
 };
 use warp_core::settings::Setting as _;
 use warp_editor::model::CoreEditorModel;
@@ -33,11 +35,11 @@ use warpui_core::telemetry::{EventPayload, flush_events};
 use warpui_core::{App, AppContext, TuiView, TypedActionView as _, WindowInvalidation};
 
 use super::{
-    ACCEPT_BLOCKED_TERMINAL_USE_ACTION_BINDING_NAME, AUTO_APPROVE_FEEDBACK_DURATION,
-    AUTO_APPROVE_TOGGLE_BINDING_NAME, COST_CONVERSATION_IN_PROGRESS_HINT,
-    COST_EMPTY_CONVERSATION_HINT, COST_NO_ACTIVE_CONVERSATION_HINT, CTRL_C_EXIT_HINT,
-    ConversationRestoreState, FooterSegments, INLINE_MENU_TOP_PADDING_ROWS,
-    LOADING_CONVERSATION_HINT, LOG_BUNDLE_FAILED_HINT,
+    ACCEPT_BLOCKED_TERMINAL_USE_ACTION_BINDING_NAME, AUTO_APPROVE_DISABLED_HINT,
+    AUTO_APPROVE_ENABLED_HINT, AUTO_APPROVE_FEEDBACK_DURATION, AUTO_APPROVE_TOGGLE_BINDING_NAME,
+    BlockingInputSource, COST_CONVERSATION_IN_PROGRESS_HINT, COST_EMPTY_CONVERSATION_HINT,
+    COST_NO_ACTIVE_CONVERSATION_HINT, CTRL_C_EXIT_HINT, ConversationRestoreState, FooterSegments,
+    INLINE_MENU_TOP_PADDING_ROWS, LOADING_CONVERSATION_HINT, LOG_BUNDLE_FAILED_HINT,
     SESSION_CAN_ACCEPT_BLOCKED_TERMINAL_USE_ACTION_FLAG, SESSION_COMPOSER_OWNS_INPUT_FLAG,
     SHELL_MODE_HINT, TuiConversationRestoreOrigin, TuiTerminalSessionAction,
     TuiTerminalSessionEvent, TuiTerminalSessionView, VOICE_INPUT_BINDING_NAME, VOICE_USAGE_HINT,
@@ -47,6 +49,8 @@ use super::{
 };
 use crate::autoupdate::TuiAutoupdater;
 use crate::inline_menu::MAX_INLINE_MENU_ROWS;
+use crate::input_mode_policy::{AI_LOCKED_CONFIG, AI_UNLOCKED_CONFIG};
+use crate::input_suggestions_mode::TuiInputSuggestionsMode;
 use crate::keybindings::{
     CONTEXTUAL_PLAN_TOGGLE_BINDING_NAME, KEYBOARD_ENHANCEMENT_AVAILABLE_FLAG,
     PLAN_TOGGLE_AVAILABLE_FLAG, PLAN_TOGGLE_BINDING_NAME, TUI_BINDING_GROUP,
@@ -82,6 +86,56 @@ fn shell_mode_reserves_tab_even_when_attachments_render() {
 }
 
 #[test]
+fn nld_reset_only_unlocks_after_agent_control_and_not_on_user_edit() {
+    App::test((), |mut app| async move {
+        let fixture = focus_test_fixture(&mut app);
+        let (view, _) = add_focus_test_session(&mut app, &fixture, true);
+
+        view.update(&mut app, |view, ctx| {
+            AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                settings
+                    .ai_autodetection_enabled_internal
+                    .set_value(true, ctx)
+                    .expect("test setting should update");
+            });
+            view.input_view.update(ctx, |input, ctx| {
+                input.exit_shell_mode(ctx);
+                input.set_text("git status", ctx);
+            });
+            assert_eq!(
+                view.ai_input_model.as_ref(ctx).input_config(),
+                AI_LOCKED_CONFIG,
+                "an explicit Agent lock should be retained while the user edits"
+            );
+
+            // User edits must not reinterpret an explicit Agent lock as stale
+            // agent-control state.
+            view.handle_input_content_changed(true, ctx);
+            assert_eq!(
+                view.ai_input_model.as_ref(ctx).input_config(),
+                AI_LOCKED_CONFIG,
+                "user edits must not unlock an explicit Agent lock"
+            );
+
+            // A lock installed for agent terminal control is reset when that
+            // control completes, which restores the first post-agent prompt to
+            // the setting-derived NLD state.
+            view.input_view.update(ctx, |input, ctx| {
+                input.lock_for_agent_control(ctx);
+            });
+            view.input_view.update(ctx, |input, ctx| {
+                input.reset_after_agent_control(ctx);
+            });
+            assert_eq!(
+                view.ai_input_model.as_ref(ctx).input_config(),
+                AI_UNLOCKED_CONFIG,
+                "agent-control completion should resume NLD"
+            );
+        });
+    });
+}
+
+#[test]
 fn voice_accepts_exact_and_whitespace_only_arguments() {
     assert_eq!(voice_command_argument("/voice"), Some(""));
     assert_eq!(voice_command_argument("/voice   "), Some("   "));
@@ -92,6 +146,7 @@ fn voice_accepts_exact_and_whitespace_only_arguments() {
     assert!(voice_argument_is_empty(Some(&"   ".to_owned())));
     assert!(!voice_argument_is_empty(Some(&"text".to_owned())));
 }
+
 #[test]
 fn voice_slash_command_rejects_arguments_before_prompt_fallback() {
     App::test((), |mut app| async move {
@@ -203,6 +258,77 @@ fn zero_state_reload_failure_renders_as_an_error_footer_hint() {
                     .expect("error text style should have a foreground")
             );
         });
+    });
+}
+
+#[test]
+fn theme_slash_command_accepts_direct_selection_and_rejects_invalid_values() {
+    App::test((), |mut app| async move {
+        let fixture = focus_test_fixture(&mut app);
+        let (view, _) = add_focus_test_session(&mut app, &fixture, true);
+        let light = "light".to_owned();
+
+        view.update(&mut app, |view, ctx| {
+            view.execute_tui_slash_command(&slash_commands::THEME, Some(&light), ctx);
+        });
+        app.read(|ctx| {
+            assert_eq!(
+                TuiTheme::from(Appearance::as_ref(ctx).theme()),
+                TuiTheme::Light
+            );
+            assert_eq!(
+                TuiThemeSettings::as_ref(ctx).selected_theme(),
+                TuiTheme::Light
+            );
+        });
+        let dark = "dark".to_owned();
+        view.update(&mut app, |view, ctx| {
+            view.execute_tui_slash_command(&slash_commands::THEME, Some(&dark), ctx);
+        });
+        app.read(|ctx| {
+            assert_eq!(
+                TuiTheme::from(Appearance::as_ref(ctx).theme()),
+                TuiTheme::Dark
+            );
+            assert_eq!(
+                TuiThemeSettings::as_ref(ctx).selected_theme(),
+                TuiTheme::Dark
+            );
+        });
+
+        let auto = "auto".to_owned();
+        view.update(&mut app, |view, ctx| {
+            view.execute_tui_slash_command(&slash_commands::THEME, Some(&auto), ctx);
+        });
+        app.read(|ctx| {
+            assert_eq!(
+                TuiTheme::from(Appearance::as_ref(ctx).theme()),
+                TuiTheme::Dark
+            );
+            assert_eq!(
+                TuiThemeSettings::as_ref(ctx).selected_theme(),
+                TuiTheme::Auto
+            );
+        });
+
+        let invalid = "sepia".to_owned();
+        view.update(&mut app, |view, ctx| {
+            view.execute_tui_slash_command(&slash_commands::THEME, Some(&invalid), ctx);
+        });
+        app.read(|ctx| {
+            assert_eq!(
+                TuiThemeSettings::as_ref(ctx).selected_theme(),
+                TuiTheme::Auto
+            );
+        });
+        assert_eq!(
+            view.read(&app, |view, _| {
+                view.transient_hint
+                    .current()
+                    .map(|(text, _)| text.to_owned())
+            }),
+            Some(super::THEME_INVALID_ARGUMENT_HINT.to_owned())
+        );
     });
 }
 
@@ -460,6 +586,13 @@ fn auto_approve_slash_command_toggles_selected_conversation_off_on_off() {
                     .as_ref(ctx)
                     .selected_conversation_id(ctx)
             );
+            assert_eq!(
+                view.transient_hint.current(),
+                Some((
+                    AUTO_APPROVE_ENABLED_HINT,
+                    crate::transient_hint::TransientHintTone::Success
+                ))
+            );
         });
 
         // Invoking `/auto-approve` again toggles it back off.
@@ -479,7 +612,55 @@ fn auto_approve_slash_command_toggles_selected_conversation_off_on_off() {
                     .as_ref(ctx)
                     .selected_conversation_id(ctx)
             );
+            assert_eq!(
+                view.transient_hint.current(),
+                Some((
+                    AUTO_APPROVE_DISABLED_HINT,
+                    crate::transient_hint::TransientHintTone::Success
+                ))
+            );
         });
+    });
+}
+
+#[test]
+fn theme_slash_command_rejects_a_missing_argument() {
+    App::test((), |mut app| async move {
+        let fixture = focus_test_fixture(&mut app);
+        let (view, _) = add_focus_test_session(&mut app, &fixture, true);
+
+        app.read(|ctx| {
+            assert_eq!(
+                TuiTheme::from(Appearance::as_ref(ctx).theme()),
+                TuiTheme::Dark
+            );
+            assert_eq!(
+                TuiThemeSettings::as_ref(ctx).selected_theme(),
+                TuiTheme::Auto
+            );
+        });
+
+        view.update(&mut app, |view, ctx| {
+            view.execute_tui_slash_command(&slash_commands::THEME, None, ctx);
+        });
+        app.read(|ctx| {
+            assert_eq!(
+                TuiTheme::from(Appearance::as_ref(ctx).theme()),
+                TuiTheme::Dark
+            );
+            assert_eq!(
+                TuiThemeSettings::as_ref(ctx).selected_theme(),
+                TuiTheme::Auto
+            );
+        });
+        assert_eq!(
+            view.read(&app, |view, _| {
+                view.transient_hint
+                    .current()
+                    .map(|(text, _)| text.to_owned())
+            }),
+            Some(super::THEME_INVALID_ARGUMENT_HINT.to_owned())
+        );
     });
 }
 
@@ -623,7 +804,7 @@ fn response_summary_visibility_is_independent_from_the_footer_usage_mode() {
 }
 
 #[test]
-fn auto_approve_actions_control_transient_color_feedback() {
+fn auto_approve_actions_control_visible_feedback() {
     App::test((), |mut app| async move {
         let fixture = focus_test_fixture(&mut app);
         let (view, _) = add_focus_test_session(&mut app, &fixture, true);
@@ -648,6 +829,13 @@ fn auto_approve_actions_control_transient_color_feedback() {
                 view.conversation_selection
                     .as_ref(ctx)
                     .selected_conversation_id(ctx)
+            );
+            assert_eq!(
+                view.transient_hint.current(),
+                Some((
+                    AUTO_APPROVE_ENABLED_HINT,
+                    crate::transient_hint::TransientHintTone::Success
+                ))
             );
         });
 
@@ -851,6 +1039,44 @@ fn render_session(
     })
 }
 
+#[test]
+fn shortcuts_surface_renders_above_the_input() {
+    App::test((), |mut app| async move {
+        app.update(crate::keybindings::init);
+        let fixture = focus_test_fixture(&mut app);
+        let (view, _) = add_focus_test_session(&mut app, &fixture, true);
+        view.update(&mut app, |view, ctx| {
+            view.suggestions_mode.update(ctx, |mode, ctx| {
+                mode.set_mode(TuiInputSuggestionsMode::Shortcuts, ctx);
+            });
+        });
+
+        let rendered = render_session(&mut app, &view, 80, 24).join("\n");
+        assert!(rendered.contains("Shortcuts"), "{rendered}");
+        assert!(rendered.contains("? shortcuts"), "{rendered}");
+        assert!(rendered.contains("/ commands"), "{rendered}");
+        assert!(rendered.contains("! shell mode"), "{rendered}");
+        assert!(rendered.contains("← conversations"), "{rendered}");
+        assert!(rendered.contains("↑ input history"), "{rendered}");
+        assert!(rendered.contains("toggle auto-approve"), "{rendered}");
+
+        view.update(&mut app, |view, ctx| {
+            view.handle_action(
+                &TuiTerminalSessionAction::ToggleAutoApprove {
+                    show_feedback: true,
+                },
+                ctx,
+            );
+        });
+        let rendered = render_session(&mut app, &view, 80, 24).join("\n");
+        assert!(rendered.contains("toggle auto-approve"), "{rendered}");
+        assert!(rendered.contains(AUTO_APPROVE_ENABLED_HINT), "{rendered}");
+
+        let narrow = render_session(&mut app, &view, 40, 24).join("\n");
+        assert!(narrow.contains("Shortcuts"), "{narrow}");
+        assert!(narrow.contains("? shortcuts"), "{narrow}");
+    });
+}
 fn input_text(view: &ViewHandle<super::TuiTerminalSessionView>, ctx: &AppContext) -> String {
     view.as_ref(ctx)
         .input_view
@@ -1136,10 +1362,16 @@ fn long_running_command_keeps_input_hidden() {
     App::test((), |mut app| async move {
         let fixture = focus_test_fixture(&mut app);
         let (view, _) = add_focus_test_session(&mut app, &fixture, true);
-        view.update(&mut app, |view, _| {
+        view.update(&mut app, |view, ctx| {
             view.terminal_model
                 .lock()
                 .simulate_long_running_block("cat", "");
+            assert!(matches!(
+                view.session_state(ctx)
+                    .expect("session state resolves")
+                    .blocking_input_source(),
+                Some(&BlockingInputSource::LongRunningCommand)
+            ));
         });
 
         let lines = render_session(&mut app, &view, 80, 40);
@@ -1866,6 +2098,56 @@ fn footer_conversations_callout_no_longer_renders() {
 fn interrupt_event_projects_to_high_level_pty_intent() {
     let event = TuiTerminalSessionEvent::InterruptPty;
     assert!(matches!(event.pty_intent(), Some(PtyIntent::Interrupt)));
+}
+
+#[test]
+fn terminal_use_interrupt_closes_shortcuts_before_taking_control() {
+    App::test((), |mut app| async move {
+        let fixture = focus_test_fixture(&mut app);
+        let (view, _) = add_focus_test_session(&mut app, &fixture, true);
+        view.update(&mut app, |view, ctx| {
+            let terminal_surface_id = ctx.view_id();
+            let conversation_id =
+                BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+                    history.start_new_conversation(terminal_surface_id, false, false, false, ctx)
+                });
+            view.terminal_model
+                .lock()
+                .simulate_long_running_block("sleep 20", "running");
+            view.terminal_model
+                .lock()
+                .block_list_mut()
+                .active_block_mut()
+                .set_agent_interaction_mode_for_agent_monitored_command(
+                    &TaskId::new("test-cli-subagent".to_owned()),
+                    conversation_id,
+                )
+                .expect("command should become agent monitored");
+            view.suggestions_mode.update(ctx, |mode, ctx| {
+                mode.set_mode(TuiInputSuggestionsMode::Shortcuts, ctx);
+            });
+
+            view.handle_action(&TuiTerminalSessionAction::Interrupt, ctx);
+
+            assert_eq!(
+                view.suggestions_mode.as_ref(ctx).mode(),
+                TuiInputSuggestionsMode::Closed
+            );
+            let target = view
+                .cli_subagent_controller
+                .as_ref(ctx)
+                .active_target()
+                .expect("terminal use target should remain active");
+            assert!(matches!(
+                target.control_state,
+                LongRunningCommandControlState::User {
+                    reason: UserTakeOverReason::Stop {
+                        should_auto_resume: true
+                    }
+                }
+            ));
+        });
+    });
 }
 
 #[test]
