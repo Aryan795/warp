@@ -189,7 +189,9 @@ fn is_active_status(status: &ConversationStatus) -> bool {
 
 impl Drop for AgentRunSleepGuardModel {
     fn drop(&mut self) {
-        self.expiry_timer.take().map(|handle| handle.abort());
+        if let Some(handle) = self.expiry_timer.take() {
+            handle.abort();
+        }
         self.guards.clear();
     }
 }
