@@ -1619,6 +1619,94 @@ fn empty_buffer_enter_skips_locked_initial_cloud_mode_head() {
     });
 }
 
+/// Typing '?' while a queued prompt is being edited inline must not toggle the agent view
+/// shortcuts panel; the keystroke should fall through to the focused queued-prompt editor so
+/// it is inserted as a literal character.
+#[test]
+fn question_mark_edits_queued_prompt_instead_of_toggling_shortcuts() {
+    App::test((), |mut app| async move {
+        let _agent_view_flag = FeatureFlag::AgentView.override_enabled(true);
+        let _queue_flag = FeatureFlag::QueueSlashCommand.override_enabled(true);
+        initialize_app(&mut app);
+
+        let (window_id, terminal) =
+            add_window_with_bootstrapped_terminal_and_window_id(&mut app, None, None).await;
+        let (input, editor) = terminal.read(&app, |terminal, ctx| {
+            let input = terminal.input().clone();
+            let editor = input.as_ref(ctx).editor().clone();
+            (input, editor)
+        });
+
+        let conversation_id = terminal.update(&mut app, |view, ctx| {
+            view.agent_view_controller().update(ctx, |controller, ctx| {
+                controller
+                    .try_enter_agent_view(
+                        None,
+                        AgentViewEntryOrigin::Input {
+                            was_prompt_autodetected: false,
+                        },
+                        ctx,
+                    )
+                    .expect("Should be able to enter agent view")
+            })
+        });
+
+        // Queue a prompt and start editing it inline.
+        QueuedQueryModel::handle(&app).update(&mut app, |model, ctx| {
+            let query_id = model.append(
+                conversation_id,
+                QueuedQuery::new("queued".to_owned(), QueuedQueryOrigin::QueueSlashCommand),
+                ctx,
+            );
+            model.enter_edit_mode(conversation_id, query_id, ctx);
+        });
+        input.read(&app, |input, ctx| {
+            assert!(input.is_editing_queued_prompt(ctx));
+        });
+
+        // While editing the queued prompt (with an empty host input buffer), shift-? must not
+        // match the ToggleAgentViewShortcuts binding, so the '?' keystroke reaches the focused
+        // inline editor instead of opening the shortcuts panel.
+        let focus_path = [terminal.id(), input.id(), editor.id()];
+        let handled = app
+            .dispatch_keystroke(
+                window_id,
+                &focus_path,
+                &Keystroke::parse("shift-?").unwrap(),
+                false,
+            )
+            .unwrap();
+        assert!(!handled);
+        input.read(&app, |input, ctx| {
+            assert!(!input
+                .agent_shortcut_view_model
+                .as_ref(ctx)
+                .is_shortcut_view_open());
+        });
+
+        // Control: once the inline edit ends, the same keystroke toggles the shortcuts panel,
+        // proving the binding is otherwise active in this setup.
+        QueuedQueryModel::handle(&app).update(&mut app, |model, ctx| {
+            model.cancel_edit(conversation_id, ctx);
+        });
+        let handled = app
+            .dispatch_keystroke(
+                window_id,
+                &focus_path,
+                &Keystroke::parse("shift-?").unwrap(),
+                false,
+            )
+            .unwrap();
+        assert!(handled);
+        input.read(&app, |input, ctx| {
+            assert!(input
+                .agent_shortcut_view_model
+                .as_ref(ctx)
+                .is_shortcut_view_open());
+        });
+    });
+}
+
 /// Seeds an in-progress conversation for `terminal`.
 fn seed_in_progress_conversation(
     app: &mut App,

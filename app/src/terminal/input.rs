@@ -2070,10 +2070,15 @@ pub fn init(app: &mut AppContext) {
         app.register_fixed_bindings([FixedBinding::new(
             "shift-?",
             InputAction::ToggleAgentViewShortcuts,
+            // Exclude the queued prompt inline editor context so that typing '?' while
+            // editing a queued prompt inserts the character instead of toggling the
+            // shortcuts panel. The inline editor is a descendant of Input in the responder
+            // chain, so this parent binding would otherwise consume the keystroke.
             id!("Input")
                 & !id!("IMEOpen")
                 & id!(flags::EMPTY_INPUT_BUFFER)
                 & id!(flags::ACTIVE_AGENT_VIEW)
+                & !id!(QUEUED_PROMPT_INLINE_EDITOR_OPEN_CONTEXT)
                 & !id!("LongRunningCommand")
                 & !(id!(flags::TERMINAL_MODE_INPUT) & id!(flags::LOCKED_INPUT)),
         )]);
