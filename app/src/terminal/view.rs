@@ -8822,7 +8822,16 @@ impl TerminalView {
         ctx: &mut ViewContext<Self>,
     ) {
         if has_block_list_selection || has_copiable_block_selection {
-            self.clear_selections_when_shell_mode_without_focusing_input(ctx);
+            // Always clear block selections on Ctrl+C — this overrides the
+            // AgentView block-preservation so that Ctrl+C acts as a consistent
+            // "dismiss and return to prompt" gesture on both the idle path and
+            // the running-process (SIGINT) path. AgentView's preservation of
+            // selected blocks as attachable AI context is intentional for normal
+            // editing, but should not apply to the Ctrl+C gesture. The
+            // subsequent `redetermine_global_focus` in `ctrl_c` will then focus
+            // the input box since no blocks remain selected.
+            self.clear_selected_blocks(ctx);
+            self.clear_selected_text(ctx);
         } else if has_alt_screen_selection {
             self.model.lock().alt_screen_mut().clear_selection();
         }
