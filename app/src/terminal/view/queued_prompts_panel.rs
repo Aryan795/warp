@@ -703,6 +703,12 @@ impl QueuedPromptsPanelView {
             editor.set_buffer_text(text, ctx);
         });
     }
+
+    /// Test accessor: the reusable inline edit editor handle, so tests can build a focus path
+    /// through the focused queued-prompt editor or inspect its buffer.
+    pub(in crate::terminal) fn edit_editor_handle_for_test(&self) -> ViewHandle<EditorView> {
+        self.edit_editor.clone()
+    }
 }
 
 impl TypedActionView for QueuedPromptsPanelView {
