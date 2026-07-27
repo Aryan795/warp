@@ -22426,26 +22426,43 @@ impl TerminalView {
         };
 
         let input_mode = InputMode::PinnedToBottom;
-        let mounted_exchange_positions = {
+        // Collect the exchange IDs that currently have a mounted/rendered scrollable
+        // rich-content block for this conversation, along with each block's scroll
+        // top. Navigation only targets these exchanges: a conversation can contain
+        // user queries with no rendered block (e.g. CLI/docs/conversation-search
+        // subtask queries), and selecting one would leave an unscrollable pending
+        // target. Filtering via the predicate-aware anchor helpers skips those
+        // exchanges and lands on the next visible query anchor instead.
+        let (mounted_exchange_positions, mounted_exchange_ids) = {
             let model = self.model.lock();
             let viewport = self.viewport_state(model.block_list(), input_mode, ctx);
-            self.rich_content_views
-                .iter()
-                .filter_map(|rich_content| {
-                    let metadata = rich_content.ai_block_metadata()?;
-                    if metadata.conversation_id != conversation_id
-                        || !AIConversationAnchor::UserQuery
-                            .matches(conversation.exchange_with_id(metadata.exchange_id)?)
-                    {
-                        return None;
-                    }
-                    let index = model.block_list().removable_blocklist_item_position(
-                        &RemovableBlocklistItem::RichContent(rich_content.view_id()),
-                    )?;
-                    let (top, _) = viewport.rich_content_scroll_bounds(*index);
-                    Some((metadata.exchange_id, top))
-                })
-                .collect::<Vec<_>>()
+            let mut positions = Vec::new();
+            let mut ids = HashSet::new();
+            for rich_content in self.rich_content_views.iter() {
+                let metadata = rich_content.ai_block_metadata();
+                let Some(metadata) = metadata else {
+                    continue;
+                };
+                if metadata.conversation_id != conversation_id
+                    || !AIConversationAnchor::UserQuery.matches(
+                        match conversation.exchange_with_id(metadata.exchange_id) {
+                            Some(exchange) => exchange,
+                            None => continue,
+                        },
+                    )
+                {
+                    continue;
+                }
+                let Some(index) = model.block_list().removable_blocklist_item_position(
+                    &RemovableBlocklistItem::RichContent(rich_content.view_id()),
+                ) else {
+                    continue;
+                };
+                let (top, _) = viewport.rich_content_scroll_bounds(*index);
+                positions.push((metadata.exchange_id, top));
+                ids.insert(metadata.exchange_id);
+            }
+            (positions, ids)
         };
 
         if mounted_exchange_positions.is_empty() {
@@ -22469,12 +22486,23 @@ impl TerminalView {
             return;
         };
 
+        // Restrict anchor candidates to exchanges with a mounted scrollable block
+        // so navigation skips unrendered user queries (CLI/docs/conversation-search
+        // subtasks) and lands on the next visible query anchor.
         let target_exchange_id = match direction {
             AgentQueryNavigationDirection::Previous => conversation
-                .previous_anchor(AIConversationAnchor::UserQuery, current_exchange_id)
+                .previous_anchor_where(
+                    AIConversationAnchor::UserQuery,
+                    current_exchange_id,
+                    |exchange| mounted_exchange_ids.contains(&exchange.id),
+                )
                 .map(|exchange| exchange.id),
             AgentQueryNavigationDirection::Next => conversation
-                .next_anchor(AIConversationAnchor::UserQuery, current_exchange_id)
+                .next_anchor_where(
+                    AIConversationAnchor::UserQuery,
+                    current_exchange_id,
+                    |exchange| mounted_exchange_ids.contains(&exchange.id),
+                )
                 .map(|exchange| exchange.id),
         };
         let Some(target_exchange_id) = target_exchange_id else {

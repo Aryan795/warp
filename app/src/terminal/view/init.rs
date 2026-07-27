@@ -566,7 +566,16 @@ pub fn init(app: &mut AppContext) {
         )
         .with_custom_action(CustomAction::SelectBlockAbove)
         .with_context_predicate(
-            id!("Terminal") & id!("TerminalView_NonEmptyBlockList") & !id!("AltScreen"),
+            id!("Terminal")
+                & id!("TerminalView_NonEmptyBlockList")
+                & !id!("AltScreen")
+                // In the active agent view, Cmd-Up/Down navigate between
+                // user-query anchors instead of selecting command blocks (see
+                // `NAVIGATE_TO_PREVIOUS_AGENT_QUERY_KEYBINDING`). Without this
+                // exclusion the block-selection bindings shadow those anchors
+                // because `SelectBlockAbove`/`SelectBlockBelow` also default to
+                // `cmdorctrl-up`/`cmdorctrl-down`.
+                & !id!(flags::ACTIVE_AGENT_VIEW),
         ),
         EditableBinding::new(
             SELECT_NEXT_BLOCK_ACTION_NAME,
@@ -575,7 +584,10 @@ pub fn init(app: &mut AppContext) {
         )
         .with_custom_action(CustomAction::SelectBlockBelow)
         .with_context_predicate(
-            id!("Terminal") & id!("TerminalView_NonEmptyBlockList") & !id!("AltScreen"),
+            id!("Terminal")
+                & id!("TerminalView_NonEmptyBlockList")
+                & !id!("AltScreen")
+                & !id!(flags::ACTIVE_AGENT_VIEW),
         ),
         EditableBinding::new(
             "terminal:open_share_block_modal",
