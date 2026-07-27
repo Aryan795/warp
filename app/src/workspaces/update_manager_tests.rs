@@ -211,7 +211,6 @@ fn test_leaving_team_removes_objects() {
 }
 
 fn make_team_update_manager_test_app(
-    team_uid: ServerId,
     workspace_uid: WorkspaceUid,
     app: &mut App,
 ) -> ModelHandle<TeamUpdateManager> {
@@ -263,8 +262,7 @@ fn test_leave_team_transport_error_emits_fallback_message() {
         let team_uid: ServerId = ServerId::from(123);
         let workspace_uid: WorkspaceUid = WorkspaceUid::from(ServerId::from(987));
 
-        let team_update_manager =
-            make_team_update_manager_test_app(team_uid, workspace_uid, &mut app);
+        let team_update_manager = make_team_update_manager_test_app(workspace_uid, &mut app);
 
         // Subscribe to LeaveError events and capture the message.
         let captured_error_msg: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -304,8 +302,7 @@ fn test_leave_team_user_facing_error_emits_verbatim_message() {
         let team_uid: ServerId = ServerId::from(123);
         let workspace_uid: WorkspaceUid = WorkspaceUid::from(ServerId::from(987));
 
-        let team_update_manager =
-            make_team_update_manager_test_app(team_uid, workspace_uid, &mut app);
+        let team_update_manager = make_team_update_manager_test_app(workspace_uid, &mut app);
 
         // Subscribe to LeaveError events and capture the message.
         let captured_error_msg: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
