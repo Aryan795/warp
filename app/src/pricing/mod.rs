@@ -143,6 +143,34 @@ impl AddonPackPriceInfo {
     }
 }
 
+/// Formats the dropdown label for an add-on credits option in the banner
+/// (`"{price} / {credits} credits"`).
+///
+/// Shows `"Pricing unavailable / {credits} credits"` for invalid server totals
+/// so the dropdown never fabricates a bad amount (Behavior 18).
+pub fn addon_credits_dropdown_label(opt: &AddonCreditsOption) -> String {
+    if !opt.is_price_valid() {
+        return format!("Pricing unavailable / {} credits", opt.credits);
+    }
+    format!(
+        "{} / {} credits",
+        format_usd_cents(opt.total_price_cents()),
+        opt.credits
+    )
+}
+
+/// Computes the volume-discount percentage for an add-on credits option relative
+/// to `base_rate` (the cheapest pack's price-per-credit rate).
+///
+/// A non-zero result means a discount badge should be displayed (Behavior 7).
+pub fn addon_credits_discount_percent(base_rate: f32, opt: &AddonCreditsOption) -> u32 {
+    if base_rate <= 0.0 {
+        return 0;
+    }
+    let actual_rate = opt.rate();
+    ((base_rate - actual_rate) / base_rate * 100.0).round() as u32
+}
+
 impl Default for PricingInfoModel {
     fn default() -> Self {
         Self::new()

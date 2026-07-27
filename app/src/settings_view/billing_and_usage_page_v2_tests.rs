@@ -1,7 +1,10 @@
-use thousands::Separable;
 use warp_graphql::billing::AddonCreditsOption;
 
-use crate::pricing::format_usd_cents;
+use super::{price_label_for_option, show_auto_reload_for_options, would_exceed_monthly_limit};
+use crate::pricing::{
+    addon_credits_discount_percent as discount_percent_for_option,
+    addon_credits_dropdown_label as dropdown_label_for_option,
+};
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -27,45 +30,6 @@ fn free_option(credits: i32, base_cents: i32, markup_cents: i32) -> AddonCredits
     }
 }
 
-// ── Helpers that replicate production logic ───────────────────────────────────
-
-/// Mirrors `addon_credits_panel_state` price_label computation (spec criteria 3, 4).
-fn price_label_for(opt: &AddonCreditsOption) -> String {
-    if !opt.is_price_valid() {
-        return String::new();
-    }
-    let credits = opt.credits.separate_with_commas();
-    let dollars = format_usd_cents(opt.total_price_cents());
-    format!("{credits} credits / {dollars}")
-}
-
-/// Mirrors `BuyCreditsBanner::update_addon_credits_options` dropdown label
-/// (spec criterion 6).
-fn dropdown_label_for(opt: &AddonCreditsOption) -> String {
-    format!(
-        "{} / {} credits",
-        format_usd_cents(opt.total_price_cents()),
-        opt.credits
-    )
-}
-
-/// Mirrors the discount-percent calculation in `update_addon_credits_options`
-/// (spec criterion 6).
-fn discount_percent_for(base_rate: f32, opt: &AddonCreditsOption) -> u32 {
-    if base_rate <= 0.0 {
-        return 0;
-    }
-    let actual_rate = opt.rate();
-    ((base_rate - actual_rate) / base_rate * 100.0).round() as u32
-}
-
-/// Mirrors `addon_credits_panel_state` auto-reload visibility
-/// (spec criteria 3, 9).
-fn show_auto_reload(has_admin_permissions: bool, options: &[AddonCreditsOption]) -> bool {
-    let any_markup = options.iter().any(|o| o.has_markup());
-    has_admin_permissions && !any_markup
-}
-
 // ── Spec criterion 3 & 4: Settings v2 price label ─────────────────────────────
 
 /// Paid zero-markup fixture: price_label carries the total and shows credits
@@ -73,7 +37,7 @@ fn show_auto_reload(has_admin_permissions: bool, options: &[AddonCreditsOption])
 #[test]
 fn test_paid_price_label_format() {
     let opt = paid_option(1000, 2500); // 1 000 credits, $25.00
-    let label = price_label_for(&opt);
+    let label = price_label_for_option(&opt);
     assert_eq!(label, "1,000 credits / $25.00");
 }
 
@@ -82,7 +46,7 @@ fn test_paid_price_label_format() {
 #[test]
 fn test_paid_price_label_large_pack() {
     let opt = paid_option(10_000, 15_000); // 10 000 credits, $150.00
-    let label = price_label_for(&opt);
+    let label = price_label_for_option(&opt);
     assert_eq!(label, "10,000 credits / $150.00");
 }
 
@@ -91,12 +55,12 @@ fn test_paid_price_label_large_pack() {
 #[test]
 fn test_free_price_label_shows_total_not_base() {
     let opt = free_option(1000, 2500, 250); // base $25.00 + markup $2.50 = $27.50
-    let label = price_label_for(&opt);
+    let label = price_label_for_option(&opt);
     assert_eq!(label, "1,000 credits / $27.50");
 }
 
-/// Behavior 18: invalid server price → label is suppressed, not rendered as garbage
-/// (spec criterion 11 — invalid data is not fabricated).
+/// Behavior 18: invalid server price → label shows \"Pricing unavailable\", not garbage
+/// (spec criterion 11 — invalid data is not fabricated; safe error is surfaced).
 #[test]
 fn test_price_label_suppressed_for_invalid_option() {
     let neg_total = AddonCreditsOption {
@@ -106,7 +70,7 @@ fn test_price_label_suppressed_for_invalid_option() {
         markup_usd_cents: Some(0),
         total_price_usd_cents: Some(-1), // negative — invalid
     };
-    assert_eq!(price_label_for(&neg_total), "");
+    assert_eq!(price_label_for_option(&neg_total), "Pricing unavailable");
 
     let total_lt_base = AddonCreditsOption {
         credits: 1000,
@@ -115,11 +79,14 @@ fn test_price_label_suppressed_for_invalid_option() {
         markup_usd_cents: Some(0),
         total_price_usd_cents: Some(100),
     };
-    assert_eq!(price_label_for(&total_lt_base), "");
+    assert_eq!(
+        price_label_for_option(&total_lt_base),
+        "Pricing unavailable"
+    );
 }
 
 /// Behavior 18: partially-populated breakdown is treated as invalid and
-/// the label is suppressed (spec criterion 11, suggestion from review).
+/// the label shows \"Pricing unavailable\" (spec criterion 11, suggestion from review).
 #[test]
 fn test_price_label_suppressed_for_partial_breakdown() {
     // Only base is present, total and markup are null — malformed new-server response.
@@ -134,7 +101,7 @@ fn test_price_label_suppressed_for_partial_breakdown() {
         !partial.is_price_valid(),
         "partial breakdown must be invalid"
     );
-    assert_eq!(price_label_for(&partial), "");
+    assert_eq!(price_label_for_option(&partial), "Pricing unavailable");
 }
 
 // ── Spec criterion 9: auto-reload visibility ──────────────────────────────────
@@ -143,7 +110,7 @@ fn test_price_label_suppressed_for_partial_breakdown() {
 #[test]
 fn test_show_auto_reload_true_for_paid_admin() {
     let options = vec![paid_option(1000, 2500), paid_option(5000, 10_000)];
-    assert!(show_auto_reload(true, &options));
+    assert!(show_auto_reload_for_options(true, &options));
 }
 
 /// Free admin with markup: show_auto_reload is false (spec criteria 3, 9).
@@ -153,14 +120,50 @@ fn test_show_auto_reload_false_for_free_markup_admin() {
         free_option(1000, 2500, 250),
         free_option(5000, 10_000, 1000),
     ];
-    assert!(!show_auto_reload(true, &options));
+    assert!(!show_auto_reload_for_options(true, &options));
 }
 
 /// Non-admin: show_auto_reload is false even for paid plans (spec criterion 4).
 #[test]
 fn test_show_auto_reload_false_for_non_admin() {
     let options = vec![paid_option(1000, 2500)];
-    assert!(!show_auto_reload(false, &options));
+    assert!(!show_auto_reload_for_options(false, &options));
+}
+
+// ── Spec criterion 5: spend-limit boundary ────────────────────────────────────
+
+/// `already_spent + total == limit` is allowed (does NOT exceed).
+#[test]
+fn test_spend_limit_at_boundary_is_allowed() {
+    let opt = paid_option(1000, 2500); // $25.00
+    // Exactly at limit: $175 spent + $25 purchase = $200 limit → allowed.
+    assert!(!would_exceed_monthly_limit(&opt, 17_500, 20_000));
+}
+
+/// `already_spent + total > limit` by one cent disables purchase.
+#[test]
+fn test_spend_limit_one_cent_over_is_blocked() {
+    let opt = paid_option(1000, 2500); // $25.00
+    // $175.01 spent + $25.00 = $200.01 > $200 → blocked.
+    assert!(would_exceed_monthly_limit(&opt, 17_501, 20_000));
+}
+
+/// Well below limit: purchase allowed.
+#[test]
+fn test_spend_limit_well_below_is_allowed() {
+    let opt = paid_option(1000, 2500); // $25.00
+    assert!(!would_exceed_monthly_limit(&opt, 0, 20_000));
+}
+
+/// Free markup option: spend-limit check uses total_price_cents (includes markup).
+#[test]
+fn test_spend_limit_uses_total_price_including_markup() {
+    // Base $25, markup $2.50, total $27.50.
+    let opt = free_option(1000, 2500, 250);
+    // $172.51 already spent + $27.50 = $200.01 > $200 → blocked.
+    assert!(would_exceed_monthly_limit(&opt, 17_251, 20_000));
+    // $172.50 already spent + $27.50 = $200.00 → allowed.
+    assert!(!would_exceed_monthly_limit(&opt, 17_250, 20_000));
 }
 
 // ── Spec criterion 6: banner dropdown labels and discount percentages ──────────
@@ -169,7 +172,7 @@ fn test_show_auto_reload_false_for_non_admin() {
 #[test]
 fn test_dropdown_label_paid_fixture() {
     let opt = paid_option(1000, 2500);
-    assert_eq!(dropdown_label_for(&opt), "$25.00 / 1000 credits");
+    assert_eq!(dropdown_label_for_option(&opt), "$25.00 / 1000 credits");
 }
 
 /// Banner dropdown label for a Free markup option shows the marked-up total
@@ -177,7 +180,7 @@ fn test_dropdown_label_paid_fixture() {
 #[test]
 fn test_dropdown_label_free_markup_fixture() {
     let opt = free_option(1000, 2500, 250); // total = $27.50
-    assert_eq!(dropdown_label_for(&opt), "$27.50 / 1000 credits");
+    assert_eq!(dropdown_label_for_option(&opt), "$27.50 / 1000 credits");
 }
 
 /// Discount percentages use base price, not the marked-up total
@@ -195,9 +198,9 @@ fn test_discount_percent_uses_base_price() {
         paid_option(10_000, 17_500),
     ];
     let base_rate = packs[0].rate();
-    assert_eq!(discount_percent_for(base_rate, &packs[0]), 0);
-    assert_eq!(discount_percent_for(base_rate, &packs[1]), 20);
-    assert_eq!(discount_percent_for(base_rate, &packs[2]), 30);
+    assert_eq!(discount_percent_for_option(base_rate, &packs[0]), 0);
+    assert_eq!(discount_percent_for_option(base_rate, &packs[1]), 20);
+    assert_eq!(discount_percent_for_option(base_rate, &packs[2]), 30);
 }
 
 /// For a Free fixture, discount percent still uses base rate, not total
@@ -216,7 +219,7 @@ fn test_discount_percent_unaffected_by_markup() {
     let base_rate = packs[0].rate();
     // base rates: 1000/1000=1.0 cents/credit, 4000/5000=0.8 cents/credit
     let expected = ((1.0_f32 - 0.8_f32) / 1.0_f32 * 100.0_f32).round() as u32;
-    assert_eq!(discount_percent_for(base_rate, &packs[1]), expected);
+    assert_eq!(discount_percent_for_option(base_rate, &packs[1]), expected);
 }
 
 // ── Spec criterion 11: stale-selection with invalid data ──────────────────────
@@ -225,11 +228,11 @@ fn test_discount_percent_unaffected_by_markup() {
 /// (spec criterion 11 — safe fallback for missing pack data).
 #[test]
 fn test_price_label_empty_when_no_option_selected() {
-    // Simulate no options available (price_label_for called with None equivalent)
+    // Simulate no options available (price_label_for_option called with None equivalent)
     let empty_options: Vec<AddonCreditsOption> = vec![];
     let label = empty_options
         .first()
-        .map(price_label_for)
+        .map(price_label_for_option)
         .unwrap_or_default();
     assert_eq!(label, "");
 }
@@ -249,5 +252,5 @@ fn test_legacy_no_breakdown_is_valid_when_price_positive() {
         legacy.is_price_valid(),
         "all-null breakdown falls back to price_usd_cents, which is valid"
     );
-    assert_eq!(price_label_for(&legacy), "1,000 credits / $25.00");
+    assert_eq!(price_label_for_option(&legacy), "1,000 credits / $25.00");
 }

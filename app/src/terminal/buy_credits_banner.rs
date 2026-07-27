@@ -50,6 +50,10 @@ pub struct BuyCreditsBanner {
     addon_credits_options: Vec<AddonCreditsOption>,
     selected_denomination_index: usize,
     purchase_addon_credits_loading: bool,
+    /// True while a Free-plan Stripe Checkout URL is open in the browser.
+    /// The Buy button stays disabled until this is cleared (preventing a
+    /// second click from creating a second Checkout session).
+    checkout_pending: bool,
     should_display_banner: bool,
     billing_settings_hyperlink: HighlightedHyperlink,
     is_denomination_dropdown_open: bool,
@@ -109,6 +113,7 @@ impl BuyCreditsBanner {
             addon_credits_options: Default::default(),
             selected_denomination_index: 0,
             purchase_addon_credits_loading: false,
+            checkout_pending: false,
             should_display_banner: false,
             billing_settings_hyperlink: HighlightedHyperlink::default(),
             is_denomination_dropdown_open: false,
@@ -127,6 +132,7 @@ impl BuyCreditsBanner {
         match event {
             UserWorkspacesEvent::PurchaseAddonCreditsSuccess => {
                 self.purchase_addon_credits_loading = false;
+                self.checkout_pending = false;
 
                 let banner_toggle_flag_enabled =
                     FeatureFlag::BuildPlanAutoReloadBannerToggle.is_enabled();
@@ -196,14 +202,17 @@ impl BuyCreditsBanner {
             }
             UserWorkspacesEvent::PurchaseAddonCreditsCheckoutRequired { url, .. } => {
                 // A Free-plan Stripe Checkout session was created. Open the URL
-                // in the browser and remain in a pending state — the banner stays
-                // visible until the server confirms the grant on app reactivation.
+                // in the browser and set checkout_pending so the Buy button stays
+                // disabled while the user is on the Stripe page — preventing a
+                // second click from creating a second Checkout session (Behavior 13).
                 self.purchase_addon_credits_loading = false;
+                self.checkout_pending = true;
                 ctx.open_url(url);
                 ctx.notify();
             }
             UserWorkspacesEvent::PurchaseAddonCreditsRejected(err) => {
                 self.purchase_addon_credits_loading = false;
+                self.checkout_pending = false;
                 self.banner_auto_reload_update_in_flight = false;
 
                 if err.downcast_ref::<BudgetExceededError>().is_some() {
@@ -227,6 +236,16 @@ impl BuyCreditsBanner {
                     ctx.emit(BuyCreditsBannerEvent::ShowAutoReloadError {
                         error_message: "Failed to enable auto-reload for your team. Please try again in Settings > Billing and Usage.",
                     });
+                    ctx.notify();
+                }
+            }
+            UserWorkspacesEvent::TeamsChanged => {
+                // A workspace refresh arrived. If a Stripe Checkout was pending,
+                // clear it so the Buy button re-enables (either the purchase
+                // completed and the banner will auto-dismiss, or the user
+                // cancelled and needs to be able to try again).
+                if self.checkout_pending {
+                    self.checkout_pending = false;
                     ctx.notify();
                 }
             }
@@ -339,17 +358,9 @@ impl BuyCreditsBanner {
                 // Use format_usd_cents so non-round marked-up amounts
                 // (e.g. $27.50 for a 10% markup on $25) are not truncated
                 // to the nearest dollar (spec risk #1: displayed price ≠ charged price).
-                let primary_text = format!(
-                    "{} / {} credits",
-                    crate::pricing::format_usd_cents(option.total_price_cents()),
-                    option.credits
-                );
-                let discount_percent = if base_rate > 0.0 {
-                    let actual_rate = option.rate();
-                    ((base_rate - actual_rate) / base_rate * 100.0).round() as u32
-                } else {
-                    0
-                };
+                // Behavior 18: show "Pricing unavailable" for invalid server totals.
+                let primary_text = dropdown_label_for_option(option);
+                let discount_percent = discount_percent_for_option(base_rate, option);
                 if discount_percent > 0 {
                     MenuItemFields::new_with_custom_label(
                         Arc::new(enclose!((primary_text) move |is_selected, is_hovered, appearance, _| {
@@ -670,7 +681,15 @@ impl BuyCreditsBanner {
         let make_buy_button = || {
             let team_uid = current_team.map(|team| team.uid);
 
+            // Behavior 18: disable Buy when the server returned an invalid price.
+            let price_invalid = self
+                .addon_credits_options
+                .get(self.selected_denomination_index)
+                .is_some_and(|opt| !opt.is_price_valid());
+
             let buy_button_disabled = self.purchase_addon_credits_loading
+                || self.checkout_pending
+                || price_invalid
                 || delinquent_due_to_payment_issue
                 || is_at_monthly_limit
                 || would_purchase_exceed_limit;
@@ -826,6 +845,22 @@ impl BuyCreditsBanner {
             .with_drop_shadow(DropShadow::default())
             .finish()
     }
+}
+
+/// Formats the dropdown label for a banner add-on credits option.
+/// Delegates to `crate::pricing::addon_credits_dropdown_label`.
+/// Shows `"Pricing unavailable / {credits} credits"` for invalid server totals
+/// (Behavior 18) instead of fabricating a bad amount.
+pub(crate) fn dropdown_label_for_option(opt: &AddonCreditsOption) -> String {
+    crate::pricing::addon_credits_dropdown_label(opt)
+}
+
+/// Computes the volume-discount percentage for a banner option relative to
+/// `base_rate` (the cheapest pack's rate). A non-zero result means the option
+/// should display a discount badge (Behavior 7).
+/// Delegates to `crate::pricing::addon_credits_discount_percent`.
+pub(crate) fn discount_percent_for_option(base_rate: f32, opt: &AddonCreditsOption) -> u32 {
+    crate::pricing::addon_credits_discount_percent(base_rate, opt)
 }
 
 #[derive(Clone, Debug)]

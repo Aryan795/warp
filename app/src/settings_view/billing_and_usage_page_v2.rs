@@ -142,9 +142,14 @@ struct AddonCreditsState {
     denomination_buttons: Vec<ViewHandle<ActionButton>>,
     purchase_loading: bool,
     /// Server-returned `teamUid` from a Free-plan `PurchaseAddonCreditsCheckoutRequired`
-    /// response. Retained for workspace/billing reconciliation on app activation.
-    /// Cleared when the next workspace refresh fires (TeamsChanged).
+    /// response. Retained until the workspace refresh confirms the credit grant
+    /// (`bonus_grants_purchased_this_month.cents_spent` exceeds the baseline captured
+    /// at checkout time) or the bounded poll times out after 2.5 minutes.
     pending_checkout: Option<ServerId>,
+    /// `bonus_grants_purchased_this_month.cents_spent` at the moment the Free-plan
+    /// Stripe Checkout URL was opened.  Used to detect the credit grant on each
+    /// `TeamsChanged` refresh without relying on an explicit server event.
+    checkout_cents_spent_baseline: i32,
 }
 enum AddonCreditsPanelState {
     IneligiblePlan(AddonCreditsRestriction),
@@ -368,6 +373,7 @@ impl BillingAndUsagePageV2View {
                 denomination_buttons: Default::default(),
                 purchase_loading: false,
                 pending_checkout: None,
+                checkout_cents_spent_baseline: 0,
             },
             pending_auto_reload_toast: None,
             tab_mouse_states: Default::default(),
@@ -420,14 +426,30 @@ impl BillingAndUsagePageV2View {
         match event {
             UserWorkspacesEvent::TeamsChanged => {
                 self.update_addon_credit_modal(ctx);
-                // If a Free-plan Checkout was pending, the workspace refresh that
-                // triggered TeamsChanged may reflect the completed credit grant.
-                // Refresh AI usage and return to the retryable purchase surface;
-                // the updated credit balance from AIRequestUsageModel is the
-                // confirmation signal (spec Behavior 15).
-                if self.addon_credits.pending_checkout.take().is_some() {
-                    AIRequestUsageModel::handle(ctx)
-                        .update(ctx, |m, ctx| m.refresh_request_usage_async(ctx));
+                // If a Free-plan Checkout was pending, check whether this workspace
+                // refresh reflects the completed credit grant by comparing
+                // cents_spent against the baseline captured at checkout time.
+                // Only clear pending when a real grant is observed — the poll
+                // itself triggers TeamsChanged on every tick, so we must not
+                // clear unconditionally (spec Behavior 15).
+                if self.addon_credits.pending_checkout.is_some() {
+                    let current_cents = UserWorkspaces::as_ref(ctx)
+                        .current_workspace()
+                        .map(|ws| ws.bonus_grants_purchased_this_month.cents_spent)
+                        .unwrap_or(0);
+                    if current_cents > self.addon_credits.checkout_cents_spent_baseline {
+                        // Grant observed — purchase completed in Stripe Checkout.
+                        self.addon_credits.pending_checkout = None;
+                        self.addon_credits.checkout_cents_spent_baseline = 0;
+                        self.show_toast(
+                            "Successfully purchased add-on credits",
+                            ToastFlavor::Success,
+                            ctx,
+                        );
+                        AIRequestUsageModel::handle(ctx)
+                            .update(ctx, |m, ctx| m.refresh_request_usage_async(ctx));
+                    }
+                    // No grant yet — leave pending set so the poll continues.
                 }
             }
             UserWorkspacesEvent::UpdateWorkspaceSettingsSuccess => {
@@ -462,13 +484,18 @@ impl BillingAndUsagePageV2View {
             }
             UserWorkspacesEvent::PurchaseAddonCreditsCheckoutRequired { url, team_uid } => {
                 // Free-plan purchase: the server created a one-time Stripe Checkout
-                // session. Open the URL in the browser, retain team_uid for
-                // reconciliation, and start a short-interval bounded refresh loop
-                // so the pending state clears within seconds of the user returning
+                // session. Open the URL in the browser, capture the current spend
+                // baseline for grant-detection, retain team_uid for reconciliation,
+                // and start a short-interval bounded refresh loop so the pending
+                // state clears within seconds of the user returning
                 // (spec Behaviors 14-15). Success is confirmed only after a workspace
                 // refresh shows the granted credits; the redirect alone is not success.
                 self.addon_credits.purchase_loading = false;
                 self.addon_credits.pending_checkout = Some(*team_uid);
+                self.addon_credits.checkout_cents_spent_baseline = UserWorkspaces::as_ref(ctx)
+                    .current_workspace()
+                    .map(|ws| ws.bonus_grants_purchased_this_month.cents_spent)
+                    .unwrap_or(0);
                 self.schedule_checkout_reconciliation_poll(ctx, 0);
                 ctx.open_url(url);
                 ctx.notify();
@@ -482,16 +509,23 @@ impl BillingAndUsagePageV2View {
         }
     }
 
-    /// Schedules a workspace-metadata refresh after `delay`, then re-schedules itself
-    /// until `pending_checkout` is cleared or the attempt cap is reached (spec Behavior 15).
-    /// Each refresh fires `TeamsChanged`, which clears `pending_checkout` and re-enables
-    /// the purchase button within seconds of the user returning from Stripe Checkout.
-    fn schedule_checkout_reconciliation_poll(&self, ctx: &mut ViewContext<Self>, attempts: u8) {
+    /// Schedules a workspace-metadata refresh on a fixed interval, re-scheduling itself
+    /// until the grant is observed or the attempt cap is reached (spec Behavior 15).
+    /// Each refresh fires `TeamsChanged`; the handler clears `pending_checkout` only
+    /// when `bonus_grants_purchased_this_month.cents_spent` exceeds the baseline —
+    /// ensuring the button stays disabled while the user is in the browser.
+    fn schedule_checkout_reconciliation_poll(&mut self, ctx: &mut ViewContext<Self>, attempts: u8) {
         // Poll every 5 seconds for up to 2.5 minutes (30 × 5 s).
         const MAX_ATTEMPTS: u8 = 30;
         const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
         if attempts >= MAX_ATTEMPTS {
+            // Timed out without observing a grant.  Clear pending so the buy
+            // button re-enables and the user can try again.
+            if self.addon_credits.pending_checkout.take().is_some() {
+                self.addon_credits.checkout_cents_spent_baseline = 0;
+                ctx.notify();
+            }
             return;
         }
 
@@ -1195,20 +1229,17 @@ impl BillingAndUsagePageV2View {
             ADDON_CREDITS_DESCRIPTION.to_string()
         };
 
-        // Whether any of the server-provided options carry a Free-plan markup.
-        // Used to hide (not just disable) auto-reload for the whole plan, keyed
-        // on the plan rather than the selected option to avoid flickering.
-        let any_option_has_markup = self.addon_credits.options.iter().any(|o| o.has_markup());
-
         let would_exceed = selected_credit_option.is_some_and(|opt| {
             let limit = workspace
                 .settings
                 .addon_credits_settings
                 .max_monthly_spend_cents
                 .unwrap_or(DEFAULT_MAX_MONTHLY_SPEND_CENTS);
-            // Use the total charge amount (base + any markup) for spend-limit checks.
-            (workspace.bonus_grants_purchased_this_month.cents_spent + opt.total_price_cents())
-                > limit
+            would_exceed_monthly_limit(
+                opt,
+                workspace.bonus_grants_purchased_this_month.cents_spent,
+                limit,
+            )
         });
         // Also disable purchase when the server returned invalid price data (Behavior 18).
         let price_invalid = selected_credit_option.is_some_and(|opt| !opt.is_price_valid());
@@ -1221,22 +1252,13 @@ impl BillingAndUsagePageV2View {
             || auto_reload_enabled;
         // Auto-reload switch is shown only for plans without Free markup.
         // For markup plans, the entire auto-reload row is hidden (spec Behavior 9).
-        let show_auto_reload = has_admin_permissions && !any_option_has_markup;
+        let show_auto_reload =
+            show_auto_reload_for_options(has_admin_permissions, &self.addon_credits.options);
         let auto_reload_switch_disabled = !has_admin_permissions
             || delinquent
             || (!auto_reload_enabled && selected_credit_option.is_none());
         let price_label = selected_credit_option
-            .map(|opt| {
-                // Behavior 18: invalid server prices are not rendered; the button
-                // is already disabled by `price_invalid`, so show nothing here.
-                if !opt.is_price_valid() {
-                    return String::new();
-                }
-                let credits = opt.credits.separate_with_commas();
-                // Display the total charge amount the user will actually pay.
-                let dollars = format_usd_cents(opt.total_price_cents());
-                format!("{credits} credits / {dollars}")
-            })
+            .map(price_label_for_option)
             .unwrap_or_default();
         let auto_reload_credit_amount = selected_credit_option
             .map(|o| format!("{} credits", o.credits.separate_with_commas()))
@@ -2266,6 +2288,40 @@ impl TypedActionView for BillingAndUsagePageV2View {
             }
         }
     }
+}
+
+/// Computes the price label for a Settings v2 add-on credits option.
+/// Returns `"Pricing unavailable"` when server price data is invalid (Behavior 18),
+/// otherwise formats as `"{credits} credits / {dollars}"`.
+pub(super) fn price_label_for_option(opt: &AddonCreditsOption) -> String {
+    if !opt.is_price_valid() {
+        // Behavior 18: surface a safe error rather than showing a blank or bad amount.
+        return "Pricing unavailable".to_string();
+    }
+    let credits = opt.credits.separate_with_commas();
+    let dollars = format_usd_cents(opt.total_price_cents());
+    format!("{credits} credits / {dollars}")
+}
+
+/// Returns `true` when the auto-reload row should be shown in the Settings v2
+/// add-on credits panel (spec Behavior 9).
+pub(super) fn show_auto_reload_for_options(
+    has_admin_permissions: bool,
+    options: &[AddonCreditsOption],
+) -> bool {
+    let any_markup = options.iter().any(|o| o.has_markup());
+    has_admin_permissions && !any_markup
+}
+
+/// Returns `true` when adding the selected option's total charge to the amount
+/// already spent this month would exceed the configured spend limit.
+pub(super) fn would_exceed_monthly_limit(
+    opt: &AddonCreditsOption,
+    cents_spent_this_month: i32,
+    limit_cents: i32,
+) -> bool {
+    // Use the total charge amount (base + any markup) for spend-limit checks.
+    (cents_spent_this_month + opt.total_price_cents()) > limit_cents
 }
 
 fn render_balance_card(
