@@ -194,6 +194,14 @@ impl BuyCreditsBanner {
 
                 ctx.notify();
             }
+            UserWorkspacesEvent::PurchaseAddonCreditsCheckoutRequired { url, .. } => {
+                // A Free-plan Stripe Checkout session was created. Open the URL
+                // in the browser and remain in a pending state — the banner stays
+                // visible until the server confirms the grant on app reactivation.
+                self.purchase_addon_credits_loading = false;
+                ctx.open_url(url);
+                ctx.notify();
+            }
             UserWorkspacesEvent::PurchaseAddonCreditsRejected(err) => {
                 self.purchase_addon_credits_loading = false;
                 self.banner_auto_reload_update_in_flight = false;
@@ -327,9 +335,10 @@ impl BuyCreditsBanner {
             .iter()
             .enumerate()
             .map(|(index, option)| {
+                // Display the total charge amount (base + any plan markup).
                 let primary_text = format!(
                     "${:.0} / {} credits",
-                    option.price_usd_cents as f32 / 100.,
+                    option.total_price_usd_cents as f32 / 100.,
                     option.credits
                 );
                 let discount_percent = if base_rate > 0.0 {
@@ -555,7 +564,8 @@ impl BuyCreditsBanner {
         let would_purchase_exceed_limit = current_workspace
             .zip(selected_option)
             .map(|(workspace, option)| {
-                workspace.would_addon_purchase_reach_limit(option.price_usd_cents)
+                // Use total_price_usd_cents for limit checks (includes any Free-plan markup).
+                workspace.would_addon_purchase_reach_limit(option.total_price_usd_cents)
             })
             .unwrap_or(false);
 
@@ -683,9 +693,7 @@ impl BuyCreditsBanner {
                 .with_text_label(button_text)
                 .build()
                 .on_click(move |ctx, _, _| {
-                    if let Some(team_uid) = team_uid {
-                        ctx.dispatch_typed_action(Action::PurchaseAddonCredits { team_uid });
-                    }
+                    ctx.dispatch_typed_action(Action::PurchaseAddonCredits { team_uid });
                 });
 
             if buy_button_disabled {
@@ -849,7 +857,11 @@ impl View for BuyCreditsBanner {
 pub enum Action {
     SelectDenomination(usize),
     Close,
-    PurchaseAddonCredits { team_uid: ServerId },
+    /// Purchase add-on credits. `team_uid` is `None` for teamless Free users;
+    /// the server will create the standard non-discoverable workspace.
+    PurchaseAddonCredits {
+        team_uid: Option<ServerId>,
+    },
     ManageBilling,
     ToggleAutoReload,
 }

@@ -266,11 +266,26 @@ pub enum DelinquencyStatus {
 pub struct AddonCreditsOption {
     pub credits: i32,
     pub price_usd_cents: i32,
+    pub base_price_usd_cents: i32,
+    pub markup_usd_cents: i32,
+    pub total_price_usd_cents: i32,
 }
 
 impl AddonCreditsOption {
+    /// Rate in cents per credit using the base price (for volume-discount badge calculations).
     pub fn rate(&self) -> f32 {
-        self.price_usd_cents as f32 / self.credits as f32
+        self.base_price_usd_cents as f32 / self.credits as f32
+    }
+
+    /// Whether this option has a Free-plan markup applied.
+    pub fn has_markup(&self) -> bool {
+        self.markup_usd_cents > 0
+    }
+
+    /// The total price in cents that the user will actually be charged.
+    /// Use this for spend-limit checks and confirmation displays.
+    pub fn total_price_cents(&self) -> i32 {
+        self.total_price_usd_cents
     }
 }
 

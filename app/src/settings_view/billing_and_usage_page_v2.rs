@@ -435,6 +435,14 @@ impl BillingAndUsagePageV2View {
                 AIRequestUsageModel::handle(ctx)
                     .update(ctx, |m, ctx| m.refresh_request_usage_async(ctx));
             }
+            UserWorkspacesEvent::PurchaseAddonCreditsCheckoutRequired { url, .. } => {
+                // Free-plan purchase: a one-time Stripe Checkout session was
+                // created. Open the URL in the browser; the page stays open in
+                // a browser-pending state until app reactivation confirms the grant.
+                self.addon_credits.purchase_loading = false;
+                ctx.open_url(url);
+                ctx.notify();
+            }
             UserWorkspacesEvent::PurchaseAddonCreditsRejected(err) => {
                 self.addon_credits.purchase_loading = false;
                 self.show_toast(&err.to_string(), ToastFlavor::Error, ctx);
@@ -1118,19 +1126,25 @@ impl BillingAndUsagePageV2View {
                 .addon_credits_settings
                 .max_monthly_spend_cents
                 .unwrap_or(DEFAULT_MAX_MONTHLY_SPEND_CENTS);
-            (workspace.bonus_grants_purchased_this_month.cents_spent + opt.price_usd_cents) > limit
+            // Use the total charge amount (base + any markup) for spend-limit checks.
+            (workspace.bonus_grants_purchased_this_month.cents_spent + opt.total_price_usd_cents)
+                > limit
         });
         let purchase_disabled = self.addon_credits.purchase_loading
             || would_exceed
             || delinquent
             || auto_reload_enabled;
+        let has_markup = selected_credit_option.is_some_and(|opt| opt.has_markup());
+        // Auto-reload is hidden/disabled for Free-plan marked-up purchases (spec behavior 9).
         let auto_reload_switch_disabled = !has_admin_permissions
             || delinquent
+            || has_markup
             || (!auto_reload_enabled && selected_credit_option.is_none());
         let price_label = selected_credit_option
             .map(|opt| {
                 let credits = opt.credits.separate_with_commas();
-                let dollars = format!("${:.2}", opt.price_usd_cents as f64 / 100.0);
+                // Display the total charge amount the user will actually pay.
+                let dollars = format!("${:.2}", opt.total_price_usd_cents as f64 / 100.0);
                 format!("{credits} credits / {dollars}")
             })
             .unwrap_or_default();
@@ -1188,7 +1202,7 @@ impl BillingAndUsagePageV2View {
             let description_text = match configured_auto_reload_option {
                 Some(option) => {
                     let credits = option.credits.separate_with_commas();
-                    let price = format!("${:.2}", option.price_usd_cents as f64 / 100.0);
+                    let price = format!("${:.2}", option.total_price_usd_cents as f64 / 100.0);
                     format!(
                         "Your admin has enabled auto-reload for add-on credits. When your personal add-on credit balance runs low, Warp will automatically purchase {credits} credits for {price} and add them to your balance."
                     )
@@ -1549,7 +1563,7 @@ impl BillingAndUsagePageV2View {
             .build()
             .on_click(move |ctx, _, _| {
                 ctx.dispatch_typed_action(BillingAndUsagePageAction::PurchaseAddonCredits {
-                    team_uid,
+                    team_uid: Some(team_uid),
                 });
             });
         if state.purchase_disabled {

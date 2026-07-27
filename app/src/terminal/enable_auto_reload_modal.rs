@@ -153,9 +153,10 @@ impl EnableAutoReloadModalBody {
             .iter()
             .enumerate()
             .map(|(index, option)| {
+                // Display the total charge amount (base + any plan markup).
                 let primary_text = format!(
                     "${:.0} / {} credits",
-                    option.price_usd_cents as f32 / 100.,
+                    option.total_price_usd_cents as f32 / 100.,
                     option.credits
                 );
                 let discount_percent = if base_rate > 0.0 {

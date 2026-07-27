@@ -225,7 +225,8 @@ impl BuildPlanMigrationModal {
                             DropdownItem::new(
                                 format!(
                                     "${} / {} credits",
-                                    option.price_usd_cents / 100,
+                                    // Display the total charge amount (base + any plan markup).
+                                    option.total_price_usd_cents / 100,
                                     option.credits.separate_with_commas(),
                                 ),
                                 BuildPlanMigrationModalViewAction::SelectReloadDenomination(i),
@@ -821,7 +822,8 @@ impl TypedActionView for BuildPlanMigrationModal {
                     self.addon_credits_options
                         .get(self.selected_addon_credits_option)
                         .and_then(|option| {
-                            let selected_price = option.price_usd_cents;
+                            // Use total_price_usd_cents for limit comparison (includes markup).
+                            let selected_price = option.total_price_usd_cents;
                             match current_monthly_spend_limit {
                                 Some(current_limit) if selected_price > current_limit => {
                                     Some(selected_price)
