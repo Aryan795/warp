@@ -169,40 +169,10 @@ impl AgentRunSleepGuardModel {
     }
 
     #[cfg(test)]
-    pub(crate) fn refresh_for_test(&mut self, conversation_id: AIConversationId) {
-        if let Some(state) = self.guards.get_mut(&conversation_id) {
-            state.deadline = Instant::now() + AGENT_RUN_SLEEP_GUARD_CAP;
-        }
-    }
-
-    #[cfg(test)]
-    fn apply_status_for_test(
-        &mut self,
-        conversation_id: AIConversationId,
-        status: ConversationStatus,
-    ) {
-        if is_active_status(&status) {
-            self.guards
-                .entry(conversation_id)
-                .or_insert_with(|| GuardState {
-                    _guard: prevent_sleep::prevent_sleep(GUARD_REASON),
-                    deadline: Instant::now() + AGENT_RUN_SLEEP_GUARD_CAP,
-                });
-        } else {
-            self.release(conversation_id);
-        }
-    }
-
-    #[cfg(test)]
     fn set_deadline_for_test(&mut self, conversation_id: AIConversationId, deadline: Instant) {
         if let Some(state) = self.guards.get_mut(&conversation_id) {
             state.deadline = deadline;
         }
-    }
-
-    #[cfg(test)]
-    fn expire_for_test_no_ctx(&mut self, now: Instant) {
-        self.guards.retain(|_, state| state.deadline > now);
     }
 }
 
