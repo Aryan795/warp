@@ -1680,6 +1680,34 @@ pub(crate) fn initialize_app(
         manager
     });
 
+    // Keep the server-authoritative AI credit availability fresh across
+    // meaningful state changes. The primary cadence is the workspace metadata
+    // refresh piggyback; these targeted triggers cover changes that don't
+    // immediately produce a metadata response. `TeamsChanged` is deliberately
+    // not a trigger: it fires on every metadata poll, whose response already
+    // carries the piggybacked availability.
+    ctx.subscribe_to_model(&UserWorkspaces::handle(ctx), |_, event, ctx| {
+        if matches!(
+            event,
+            UserWorkspacesEvent::CurrentWorkspaceChanged
+                | UserWorkspacesEvent::AiOveragesUpdated
+                | UserWorkspacesEvent::PurchaseAddonCreditsSuccess
+        ) {
+            AIRequestUsageModel::handle(ctx).update(ctx, |usage_model, ctx| {
+                usage_model.request_availability_refresh(ctx);
+            });
+        }
+    });
+    ctx.subscribe_to_model(
+        &::ai::api_keys::ApiKeyManager::handle(ctx),
+        |_, event, ctx| {
+            let ::ai::api_keys::ApiKeyManagerEvent::KeysUpdated = event;
+            AIRequestUsageModel::handle(ctx).update(ctx, |usage_model, ctx| {
+                usage_model.request_availability_refresh(ctx);
+            });
+        },
+    );
+
     ctx.add_singleton_model(AntivirusInfo::new);
 
     cfg_if::cfg_if! {

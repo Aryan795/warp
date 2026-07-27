@@ -15,6 +15,7 @@ use warpui::{AppContext, Entity, ModelContext, SingletonEntity};
 use crate::BlocklistAIHistoryModel;
 use crate::ai::agent::AIAgentExchangeId;
 use crate::ai::agent::conversation::AIConversationId;
+use crate::ai::credit_availability::AICreditAvailability;
 use crate::auth::AuthStateProvider;
 use crate::pricing::PricingInfoModel;
 use crate::server::server_api::ai::AIClient;
@@ -184,6 +185,24 @@ fn get_cached_ambient_credits_banner_dismissed(app_mut: &mut AppContext) -> bool
         .unwrap_or_default()
 }
 
+/// The server-authoritative AI credit availability state shared by all AI
+/// surfaces. It is fed from exactly two paths: the workspace metadata refresh
+/// piggyback (primary cadence) and targeted fetches after meaningful state
+/// changes (auth completion, plan/billing, workspace selection, credentials).
+#[derive(Default)]
+struct ServerAvailabilityState {
+    /// The last successfully fetched decision. Retained as last-known-good
+    /// when a refresh fails; never cleared by transient errors.
+    latest: Option<AICreditAvailability>,
+    /// When `latest` was last updated from a successful response.
+    last_success_time: Option<Instant>,
+    /// Whether a targeted availability fetch is currently in flight. Used to
+    /// coalesce coincident event-triggered fetches.
+    refresh_in_flight: bool,
+    /// The most recent refresh failure, kept until the next success.
+    last_error: Option<String>,
+}
+
 pub struct AIRequestUsageModel {
     ai_client: Arc<dyn AIClient>,
 
@@ -193,6 +212,8 @@ pub struct AIRequestUsageModel {
     request_limit_info: RequestLimitInfo,
 
     bonus_grants: Vec<BonusGrant>,
+
+    server_availability: ServerAvailabilityState,
 
     /// Whether the buy credits banner has been dismissed by the user.
     buy_addon_credits_banner_dismissed: bool,
@@ -207,6 +228,8 @@ impl Entity for AIRequestUsageModel {
 
 pub enum AIRequestUsageModelEvent {
     RequestUsageUpdated,
+    /// The server-authoritative credit availability decision was updated.
+    CreditAvailabilityUpdated,
     AmbientCreditsBannerDismissed,
     RequestBonusRefunded {
         requests_refunded: i32,
@@ -228,6 +251,7 @@ impl AIRequestUsageModel {
             request_limit_info,
             last_update_time: None,
             bonus_grants: vec![],
+            server_availability: ServerAvailabilityState::default(),
             buy_addon_credits_banner_dismissed: false,
             ambient_credits_banner_dismissed,
         }
@@ -240,6 +264,7 @@ impl AIRequestUsageModel {
             last_update_time: None,
             request_limit_info: RequestLimitInfo::default(),
             bonus_grants: vec![],
+            server_availability: ServerAvailabilityState::default(),
             buy_addon_credits_banner_dismissed: false,
             ambient_credits_banner_dismissed: get_cached_ambient_credits_banner_dismissed(ctx),
         }
@@ -308,6 +333,72 @@ impl AIRequestUsageModel {
         });
 
         ctx.emit(AIRequestUsageModelEvent::RequestUsageUpdated);
+    }
+
+    /// The server-authoritative availability decision, if one has been
+    /// successfully fetched this session (last-known-good on refresh failure).
+    pub fn server_availability(&self) -> Option<AICreditAvailability> {
+        self.server_availability.latest
+    }
+
+    /// Records the outcome of an availability fetch, whether piggybacked on a
+    /// workspace metadata refresh or from a targeted fetch.
+    ///
+    /// A failure keeps the last-known-good decision: a transport or resolver
+    /// error must never flip availability in either direction, and legacy
+    /// locally derived availability must not be re-enabled once a valid server
+    /// decision has been received.
+    pub fn apply_server_availability(
+        &mut self,
+        result: Result<AICreditAvailability, anyhow::Error>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        match result {
+            Ok(availability) => {
+                self.server_availability.latest = Some(availability);
+                self.server_availability.last_success_time = Some(Instant::now());
+                self.server_availability.last_error = None;
+                ctx.emit(AIRequestUsageModelEvent::CreditAvailabilityUpdated);
+                ctx.notify();
+            }
+            Err(e) => {
+                log::warn!("Failed to refresh AI credit availability: {e:#}");
+                self.server_availability.last_error = Some(format!("{e:#}"));
+            }
+        }
+    }
+
+    /// Fetches the server-authoritative availability decision in response to a
+    /// meaningful state change (auth completion, plan/billing change,
+    /// workspace selection change, or API-key/credential change).
+    ///
+    /// Coincident triggers are coalesced: if a fetch is already in flight this
+    /// is a no-op. There is intentionally no retry loop — the next qualifying
+    /// trigger or workspace metadata refresh serves as the retry.
+    pub fn request_availability_refresh(&mut self, ctx: &mut ModelContext<Self>) {
+        if !AuthStateProvider::as_ref(ctx).get().is_logged_in() {
+            return;
+        }
+        if self.server_availability.refresh_in_flight {
+            return;
+        }
+        self.server_availability.refresh_in_flight = true;
+
+        let ai_client = self.ai_client.clone();
+        ctx.spawn(
+            async move { ai_client.get_ai_credit_availability().await },
+            |model, result, ctx| {
+                model.server_availability.refresh_in_flight = false;
+                model.apply_server_availability(result, ctx);
+            },
+        );
+    }
+
+    /// Clears the server-authoritative availability state, e.g. on logout.
+    pub fn reset_server_availability(&mut self, ctx: &mut ModelContext<Self>) {
+        self.server_availability = ServerAvailabilityState::default();
+        ctx.emit(AIRequestUsageModelEvent::CreditAvailabilityUpdated);
+        ctx.notify();
     }
 
     pub fn provide_negative_feedback_response_for_ai_conversation(
@@ -421,7 +512,23 @@ impl AIRequestUsageModel {
         self.requests_remaining() > 0
     }
 
-    /// Returns `true` if the user meets one of the following conditions:
+    /// Returns `true` if the user can start an interactive AI request.
+    /// Use this method as the starting point for AI availability checking.
+    ///
+    /// Once a server-authoritative availability decision has been received
+    /// this session, that decision (last-known-good on transient refresh
+    /// failures) is the only authority. The locally derived fallback below is
+    /// used solely before the first successful fetch, e.g. right after startup
+    /// or against servers that don't support the availability field yet.
+    pub fn has_any_ai_remaining(&self, ctx: &AppContext) -> bool {
+        if let Some(availability) = self.server_availability.latest {
+            return availability.available;
+        }
+        self.has_any_ai_remaining_from_local_state(ctx)
+    }
+
+    /// Legacy locally derived availability check. Returns `true` if the user
+    /// meets one of the following conditions:
     /// 1. user has ai credits from the plan base limit
     /// 2. user has overage enabled
     /// 3. user has bonus grants (either team grants or user grants)
@@ -430,8 +537,7 @@ impl AIRequestUsageModel {
     /// 6. user's team has self-serve auto-reload enabled within its monthly spend limit
     /// 7. user has BYOK enabled and has either provided at least one API key or
     ///    connected a Grok subscription
-    /// Use this method as the starting point for AI availability checking.
-    pub fn has_any_ai_remaining(&self, ctx: &AppContext) -> bool {
+    fn has_any_ai_remaining_from_local_state(&self, ctx: &AppContext) -> bool {
         let current_workspace = UserWorkspaces::as_ref(ctx).current_workspace();
 
         let has_base_plan_ai_requests = self.has_requests_remaining();

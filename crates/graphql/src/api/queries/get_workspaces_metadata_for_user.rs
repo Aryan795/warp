@@ -1,3 +1,4 @@
+use crate::ai::AICreditAvailability;
 use crate::billing::PricingInfo;
 use crate::experiment::Experiment;
 use crate::request_context::RequestContext;
@@ -12,6 +13,11 @@ query GetWorkspacesMetadataForUser($requestContext: RequestContext!) {
       user {
         profile {
           uid
+        }
+        aiCreditAvailability {
+          available
+          denialReason
+          creditSource
         }
         workspaces {
           uid
@@ -226,6 +232,7 @@ pub enum PricingInfoResult {
 #[derive(cynic::QueryFragment, Debug)]
 pub struct User {
     pub profile: UserProfile,
+    pub ai_credit_availability: AICreditAvailability,
     pub workspaces: Vec<Workspace>,
     pub experiments: Option<Vec<Experiment>>,
     pub discoverable_teams: Vec<DiscoverableTeamData>,

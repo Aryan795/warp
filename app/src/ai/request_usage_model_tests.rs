@@ -8,9 +8,11 @@ use warp_graphql::billing::{AddonCreditsOption, OveragesPricing, PricingInfo};
 use warpui::{App, ModelHandle};
 
 use super::*;
+use crate::ai::credit_availability::{AICreditDenialReason, AICreditSource};
 use crate::auth::AuthStateProvider;
 use crate::pricing::PricingInfoModel;
 use crate::server::server_api::ServerApiProvider;
+use crate::server::server_api::ai::MockAIClient;
 use crate::server::server_api::team::MockTeamClient;
 use crate::server::server_api::workspace::MockWorkspaceClient;
 use crate::workspaces::user_workspaces::UserWorkspaces;
@@ -71,6 +73,16 @@ fn add_request_usage_model_without_auth(app: &mut App) -> ModelHandle<AIRequestU
     app.add_singleton_model(|ctx| {
         AIRequestUsageModel::new_for_test(ServerApiProvider::as_ref(ctx).get_ai_client(), ctx)
     })
+}
+
+/// Registers the request usage model backed by an explicit AI client so tests
+/// can control the availability fetch behavior.
+fn add_request_usage_model_with_client(
+    app: &mut App,
+    ai_client: Arc<dyn AIClient>,
+) -> ModelHandle<AIRequestUsageModel> {
+    register_user_preferences_for_tests(app);
+    app.add_singleton_model(|ctx| AIRequestUsageModel::new_for_test(ai_client, ctx))
 }
 
 fn set_addon_credits_pricing_info(app: &mut App) {
@@ -901,6 +913,172 @@ fn test_has_any_ai_remaining_false_with_only_ambient_bonus_credits() {
                 !model.has_any_ai_remaining(ctx),
                 "expected has_any_ai_remaining to be false when only ambient-only bonus credits exist",
             );
+        });
+    });
+}
+
+#[test]
+fn test_server_availability_overrides_locally_derived_state() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(UserWorkspaces::default_mock);
+        let request_usage_model = add_request_usage_model(&mut app);
+
+        request_usage_model.update(&mut app, |model, ctx| {
+            // Local state says AI is available.
+            model.request_limit_info = RequestLimitInfo::new_for_test(10, 5);
+            assert!(model.has_any_ai_remaining(ctx));
+
+            // The server-authoritative decision wins over local state.
+            model.apply_server_availability(
+                Ok(AICreditAvailability::unavailable(
+                    AICreditDenialReason::OutOfCredits,
+                )),
+                ctx,
+            );
+            assert!(!model.has_any_ai_remaining(ctx));
+
+            // And in the other direction: local state is exhausted, but the
+            // server reports a usable fallback source.
+            model.request_limit_info = RequestLimitInfo::new_for_test(10, 10);
+            model.apply_server_availability(
+                Ok(AICreditAvailability::available_with_source(Some(
+                    AICreditSource::BonusGrant,
+                ))),
+                ctx,
+            );
+            assert!(model.has_any_ai_remaining(ctx));
+        });
+    });
+}
+
+#[test]
+fn test_availability_refresh_failure_keeps_last_known_good() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(UserWorkspaces::default_mock);
+        let request_usage_model = add_request_usage_model(&mut app);
+
+        request_usage_model.update(&mut app, |model, ctx| {
+            // Local state says AI is available, so any legacy fallback would
+            // report `true`.
+            model.request_limit_info = RequestLimitInfo::new_for_test(10, 5);
+
+            let denied = AICreditAvailability::unavailable(AICreditDenialReason::Delinquent);
+            model.apply_server_availability(Ok(denied), ctx);
+            model.apply_server_availability(Err(anyhow::anyhow!("transient failure")), ctx);
+
+            // The last-known-good server decision is retained: the error is
+            // recorded but neither flips availability nor re-enables the
+            // legacy locally derived decision.
+            assert_eq!(model.server_availability(), Some(denied));
+            assert!(!model.has_any_ai_remaining(ctx));
+            assert_eq!(
+                model.server_availability.last_error.as_deref(),
+                Some("transient failure")
+            );
+        });
+    });
+}
+
+#[test]
+fn test_availability_refresh_failure_before_first_success_uses_legacy_fallback() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(UserWorkspaces::default_mock);
+        let request_usage_model = add_request_usage_model(&mut app);
+
+        request_usage_model.update(&mut app, |model, ctx| {
+            model.request_limit_info = RequestLimitInfo::new_for_test(10, 5);
+            model.apply_server_availability(Err(anyhow::anyhow!("unsupported operation")), ctx);
+
+            // Without any successful fetch (e.g. server doesn't support the
+            // field yet), the legacy locally derived decision still applies.
+            assert_eq!(model.server_availability(), None);
+            assert!(model.has_any_ai_remaining(ctx));
+        });
+    });
+}
+
+#[test]
+fn test_reset_server_availability_restores_legacy_fallback() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(UserWorkspaces::default_mock);
+        let request_usage_model = add_request_usage_model(&mut app);
+
+        request_usage_model.update(&mut app, |model, ctx| {
+            model.request_limit_info = RequestLimitInfo::new_for_test(10, 5);
+            model.apply_server_availability(
+                Ok(AICreditAvailability::unavailable(
+                    AICreditDenialReason::OutOfCredits,
+                )),
+                ctx,
+            );
+            assert!(!model.has_any_ai_remaining(ctx));
+
+            // On logout the server decision is cleared and pre-fetch behavior
+            // is restored for the next principal.
+            model.reset_server_availability(ctx);
+            assert_eq!(model.server_availability(), None);
+            assert!(model.has_any_ai_remaining(ctx));
+        });
+    });
+}
+
+#[test]
+fn test_availability_refresh_coalesces_concurrent_fetches() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|_| AuthStateProvider::new_for_test());
+
+        let mut ai_client = MockAIClient::new();
+        // Exactly one fetch may go out even though two triggers fire while the
+        // first request is still in flight.
+        ai_client
+            .expect_get_ai_credit_availability()
+            .times(1)
+            .returning(|| {
+                Ok(AICreditAvailability::available_with_source(Some(
+                    AICreditSource::BaseLimit,
+                )))
+            });
+        let request_usage_model =
+            add_request_usage_model_with_client(&mut app, Arc::new(ai_client));
+
+        request_usage_model.update(&mut app, |model, ctx| {
+            model.request_availability_refresh(ctx);
+            model.request_availability_refresh(ctx);
+            assert!(model.server_availability.refresh_in_flight);
+        });
+
+        // Let the spawned fetch complete.
+        warpui::r#async::Timer::after(std::time::Duration::from_millis(100)).await;
+
+        request_usage_model.read(&app, |model, _| {
+            assert!(!model.server_availability.refresh_in_flight);
+            assert_eq!(
+                model.server_availability(),
+                Some(AICreditAvailability::available_with_source(Some(
+                    AICreditSource::BaseLimit,
+                )))
+            );
+        });
+    });
+}
+
+#[test]
+fn test_availability_refresh_skipped_when_logged_out() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|_| AuthStateProvider::new_logged_out_for_test());
+
+        // No expectations: any fetch would panic the test.
+        let ai_client = MockAIClient::new();
+        let request_usage_model =
+            add_request_usage_model_with_client(&mut app, Arc::new(ai_client));
+
+        request_usage_model.update(&mut app, |model, ctx| {
+            model.request_availability_refresh(ctx);
+            assert!(!model.server_availability.refresh_in_flight);
+        });
+
+        request_usage_model.read(&app, |model, _| {
+            assert_eq!(model.server_availability(), None);
         });
     });
 }
