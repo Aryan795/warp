@@ -171,17 +171,26 @@ fn agent_run_sleep_guard_model_cap_expiry_records_telemetry_and_reacquires() {
         });
         assert_eq!(held_guard_count(&app), 0);
 
-        // `send_telemetry_from_ctx!` records asynchronously on the app executor.
-        Timer::after(Duration::ZERO).await;
-        let expiry_event = warpui::telemetry::flush_events()
-            .into_iter()
-            .find(|event| match &event.payload {
-                warpui::telemetry::EventPayload::NamedEvent { name, .. } => {
-                    name == "AgentMode.SleepGuardCapExpired"
+        // `send_telemetry_from_ctx!` records asynchronously on the app executor. Poll the
+        // queue with a bounded wait so this remains reliable when the executor is under load.
+        let expiry_event = {
+            let mut expiry_event = None;
+            for _ in 0..20 {
+                expiry_event = warpui::telemetry::flush_events().into_iter().find(|event| {
+                    match &event.payload {
+                        warpui::telemetry::EventPayload::NamedEvent { name, .. } => {
+                            name == "AgentMode.SleepGuardCapExpired"
+                        }
+                        _ => false,
+                    }
+                });
+                if expiry_event.is_some() {
+                    break;
                 }
-                _ => false,
-            })
-            .expect("cap expiry should record telemetry");
+                Timer::after(Duration::from_millis(10)).await;
+            }
+            expiry_event.expect("cap expiry should record telemetry")
+        };
         assert!(matches!(
             expiry_event.payload,
             warpui::telemetry::EventPayload::NamedEvent { .. }
