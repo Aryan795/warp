@@ -699,7 +699,10 @@ fn test_format_match_error() {
         },
     };
     let msg = err.to_conversation_message();
-    assert!(msg.contains("1 search block"), "Should mention count: {msg}");
+    assert!(
+        msg.contains("1 search block"),
+        "Should mention count: {msg}"
+    );
     assert!(msg.contains("file.txt"), "Should name the file: {msg}");
 
     // noop_deltas: changes already applied
@@ -728,7 +731,10 @@ fn test_format_match_error() {
         },
     };
     let msg = err.to_conversation_message();
-    assert!(msg.contains("2 search block"), "Should mention count: {msg}");
+    assert!(
+        msg.contains("2 search block"),
+        "Should mention count: {msg}"
+    );
     assert!(
         msg.contains("multiple locations"),
         "Should say ambiguous: {msg}"
@@ -823,6 +829,7 @@ fn test_apply_v4a_edits_simple_match() {
         )
         .unwrap();
 
+        // Create a V4A edit with context
         let v4a_edit = ParsedDiff::V4AEdit {
             file: Some(file_path.clone()),
             move_to: None,
@@ -868,6 +875,7 @@ fn test_apply_v4a_edits_with_jump_context() {
         )
         .unwrap();
 
+        // Create a V4A edit with change context
         let v4a_edit = ParsedDiff::V4AEdit {
             file: Some(file_path.clone()),
             move_to: None,
@@ -907,6 +915,7 @@ fn test_apply_v4a_edits_no_match() {
         let file_path = temp_file.path().to_string_lossy().to_string();
         writeln!(&mut temp_file, "First line\nSecond line\n").unwrap();
 
+        // Create a V4A edit that won't match
         let v4a_edit = ParsedDiff::V4AEdit {
             file: Some(file_path.clone()),
             move_to: None,
@@ -947,6 +956,7 @@ fn test_apply_v4a_edits_noop() {
         let file_path = temp_file.path().to_string_lossy().to_string();
         writeln!(&mut temp_file, "Line One\nLine Two\nLine Three").unwrap();
 
+        // Create a V4A edit where old and new are identical (noop)
         let v4a_edit = ParsedDiff::V4AEdit {
             file: Some(file_path.clone()),
             move_to: None,
@@ -997,6 +1007,7 @@ fn test_apply_v4a_edits_multiline_change() {
         )
         .unwrap();
 
+        // Create a V4A edit with multiline old and new content
         let v4a_edit = ParsedDiff::V4AEdit {
             file: Some(file_path.clone()),
             move_to: None,
@@ -1041,6 +1052,7 @@ fn test_apply_v4a_edits_nested_jump_context() {
         )
         .unwrap();
 
+        // Create a V4A edit with nested change context
         let v4a_edit = ParsedDiff::V4AEdit {
             file: Some(file_path.clone()),
             move_to: None,
@@ -1118,6 +1130,7 @@ fn test_apply_v4a_edits_empty_context() {
         let file_path = temp_file.path().to_string_lossy().to_string();
         writeln!(&mut temp_file, "first\nsecond\nthird").unwrap();
 
+        // Create a V4A edit with empty pre and post context
         let v4a_edit = ParsedDiff::V4AEdit {
             file: Some(file_path.clone()),
             move_to: None,
@@ -1159,8 +1172,10 @@ fn test_apply_v4a_rename_to_nonexistent_file() {
         let source_path = source_file.path().to_string_lossy().to_string();
         writeln!(&mut source_file, "line one\nline two\nline three").unwrap();
 
+        // Target file does not exist
         let target_path = format!("{}_renamed.txt", source_path);
 
+        // Create a V4A edit with rename to non-existent file
         let v4a_edit = ParsedDiff::V4AEdit {
             file: Some(source_path.clone()),
             move_to: Some(target_path.clone()),
@@ -1185,6 +1200,8 @@ fn test_apply_v4a_rename_to_nonexistent_file() {
         .await;
 
         let diffs = assert_success(outcome);
+
+        // Should produce a single Update diff with rename
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].file_name, source_path);
 
@@ -1202,6 +1219,7 @@ fn test_apply_v4a_rename_to_nonexistent_file() {
 #[test]
 fn test_apply_v4a_rename_to_existing_file() {
     App::test((), |app| async move {
+        // Create source file A
         let mut source_file = NamedTempFile::new().expect("Failed to create source file");
         let source_path = source_file.path().to_string_lossy().to_string();
         writeln!(
@@ -1210,10 +1228,12 @@ fn test_apply_v4a_rename_to_existing_file() {
         )
         .unwrap();
 
+        // Create target file B (already exists)
         let mut target_file = NamedTempFile::new().expect("Failed to create target file");
         let target_path = target_file.path().to_string_lossy().to_string();
         writeln!(&mut target_file, "target old content\nshould be replaced").unwrap();
 
+        // Create a V4A edit to rename A to B (where B exists) with a modification
         let v4a_edit = ParsedDiff::V4AEdit {
             file: Some(source_path.clone()),
             move_to: Some(target_path.clone()),
@@ -1238,22 +1258,29 @@ fn test_apply_v4a_rename_to_existing_file() {
         .await;
 
         let diffs = assert_success(outcome);
+
+        // Should produce TWO diffs: deletion for source, update for target
         assert_eq!(diffs.len(), 2);
 
+        // First diff: deletion of source file A
         assert_eq!(diffs[0].file_name, source_path);
         match &diffs[0].diff_type {
             DiffType::Delete { .. } => {}
             other => panic!("Expected Delete diff_type for source, got {other:?}"),
         }
 
+        // Second diff: update of target file B with source content (after applying deltas)
         assert_eq!(diffs[1].file_name, target_path);
         match &diffs[1].diff_type {
             DiffType::Update { deltas, rename } => {
                 assert!(rename.is_none(), "Target update should not have rename");
+                // Two deltas: one replaces target with source content, one applies the modification
                 assert_eq!(deltas.len(), 2);
+                // First delta: replaces target content with source content
                 assert!(deltas[0].insertion.contains("source line one"));
                 assert!(deltas[0].insertion.contains("source line two"));
                 assert!(deltas[0].insertion.contains("source line three"));
+                // Second delta: applies the modification
                 assert!(deltas[1].insertion.contains("MODIFIED LINE TWO"));
             }
             other => panic!("Expected Update diff_type for target, got {other:?}"),
@@ -1264,14 +1291,18 @@ fn test_apply_v4a_rename_to_existing_file() {
 #[test]
 fn test_apply_v4a_rename_to_existing_file_no_deltas() {
     App::test((), |app| async move {
+        // Create source file A
         let mut source_file = NamedTempFile::new().expect("Failed to create source file");
         let source_path = source_file.path().to_string_lossy().to_string();
         writeln!(&mut source_file, "source content only").unwrap();
 
+        // Create target file B (already exists)
         let mut target_file = NamedTempFile::new().expect("Failed to create target file");
         let target_path = target_file.path().to_string_lossy().to_string();
         writeln!(&mut target_file, "target old content").unwrap();
 
+        // Create a V4A edit to rename A to B with no actual content changes
+        // (empty hunks list means just a rename)
         let v4a_edit = ParsedDiff::V4AEdit {
             file: Some(source_path.clone()),
             move_to: Some(target_path.clone()),
@@ -1290,19 +1321,24 @@ fn test_apply_v4a_rename_to_existing_file_no_deltas() {
         .await;
 
         let diffs = assert_success(outcome);
+
+        // Should produce TWO diffs: deletion for source, update for target
         assert_eq!(diffs.len(), 2);
 
+        // First diff: deletion of source file A
         assert_eq!(diffs[0].file_name, source_path);
         match &diffs[0].diff_type {
             DiffType::Delete { .. } => {}
             other => panic!("Expected Delete diff_type for source, got {other:?}"),
         }
 
+        // Second diff: update of target file B with source content (no modifications)
         assert_eq!(diffs[1].file_name, target_path);
         match &diffs[1].diff_type {
             DiffType::Update { deltas, rename } => {
                 assert!(rename.is_none());
                 assert_eq!(deltas.len(), 1);
+                // The insertion should be exactly the source content (including trailing newline from writeln!)
                 assert_eq!(deltas[0].insertion, "source content only\n");
             }
             other => panic!("Expected Update diff_type for target, got {other:?}"),

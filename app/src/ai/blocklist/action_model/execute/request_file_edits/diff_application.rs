@@ -310,16 +310,24 @@ where
     // would leave a half-applied rename (e.g. the source is deleted but the
     // target write is dropped, losing content). Excluding the whole pair keeps
     // the rename atomic.
-    let mut rename_pair_additions: Vec<&str> = Vec::new();
-    for (source, target) in &result.rename_pairs {
-        if failed_file_names.contains(source.as_str())
-            || failed_file_names.contains(target.as_str())
-        {
-            rename_pair_additions.push(source.as_str());
-            rename_pair_additions.push(target.as_str());
+    //
+    // Iterate to a fixed point so chained renames are handled correctly:
+    // if a → b and b → c, an error on a must exclude b, which in turn must
+    // exclude c. A single pass would miss the transitive exclusion.
+    loop {
+        let prev_len = failed_file_names.len();
+        for (source, target) in &result.rename_pairs {
+            if failed_file_names.contains(source.as_str())
+                || failed_file_names.contains(target.as_str())
+            {
+                failed_file_names.insert(source.as_str());
+                failed_file_names.insert(target.as_str());
+            }
+        }
+        if failed_file_names.len() == prev_len {
+            break; // set is stable — no new exclusions in this pass
         }
     }
-    failed_file_names.extend(rename_pair_additions);
 
     let applied_diffs = result
         .diffs

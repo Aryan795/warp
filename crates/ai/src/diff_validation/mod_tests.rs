@@ -374,7 +374,7 @@ fn test_single_line_n_pipe_line_number_drifted_in_large_file() {
     // Build a 200-line file where the target content is at line 47,
     // but the search prefix points to line 102.
     let target_line = "Includes CRUD for suites/versions, tasks, configs, runs, trials.";
-    let mut lines_vec: Vec<String> = (1..=200)
+    let lines_vec: Vec<String> = (1..=200)
         .map(|n| {
             if n == 47 {
                 target_line.to_string()
@@ -481,6 +481,88 @@ fn test_sub_line_fragment_search_matches_unique_substring() {
         "Line suffix (after the fragment) must be preserved; got: {insertion}"
     );
     assert!(diff.failures.is_none());
+}
+
+/// Regression test: the `1|Z` case proved in the code review.
+/// A single-character fragment hinted at line 1 must NOT silently edit line 3
+/// when the only `Z` in the file is there.  The proximity guard (±1 line) must
+/// reject this because |3 - 1| = 2 > 1, and the minimum-length guard also
+/// catches it because `Z` (after stripping `1|`) has length 1 < 10.
+#[test]
+fn test_substring_tier_rejects_wrong_location_short_search() {
+    // Three-line file: Z only exists on line 3, not near the hint of line 1.
+    let file_content = "alpha beta\ngamma delta\nepsilon Z zeta";
+    let search = "1|Z"; // hint says line 1; Z is on line 3
+    let input_diffs = vec![SearchAndReplace {
+        search: search.to_string(),
+        replace: "REPLACED".to_string(),
+    }];
+    let diff = fuzzy_match_diffs("file.md", &input_diffs, file_content);
+
+    // Must NOT produce a delta — both the min-length guard (len 1 < 10) and the
+    // proximity guard (line 3 is 2 away from hinted line 1) must reject it.
+    assert!(
+        deltas(&diff).is_empty(),
+        "Short search at wrong location must not produce a delta; got: {:?}",
+        deltas(&diff)
+    );
+    // fuzzy_match_failures must be set (not ambiguous).
+    assert!(
+        diff.failures.is_some_and(|f| f.fuzzy_match_failures > 0),
+        "Expected fuzzy_match_failures, got: {:?}",
+        diff.failures
+    );
+}
+
+/// Regression test: a degenerate whitespace-only search must be rejected.
+#[test]
+fn test_substring_tier_rejects_whitespace_only_search() {
+    let file_content = "line one\nline two";
+    // Whitespace-only search (even though it has enough bytes) must be rejected.
+    let input_diffs = vec![SearchAndReplace {
+        search: "1|          ".to_string(), // 10 spaces — passes length but not trim check
+        replace: "REPLACED".to_string(),
+    }];
+    let diff = fuzzy_match_diffs("file.md", &input_diffs, file_content);
+    assert!(
+        deltas(&diff).is_empty(),
+        "Whitespace-only search must not produce a delta"
+    );
+}
+
+/// Ambiguity guard: when the fragment appears as a sub-line substring in more
+/// than one location, `ambiguous_substring_matches` must be set and no delta
+/// produced. The fragment must be a *substring* (not a whole line) so that
+/// line-based matchers cannot find it, forcing the substring tier to run.
+#[test]
+fn test_substring_tier_ambiguity_guard() {
+    // Both lines contain the needle as a sub-string. They are NOT equal to the
+    // needle, so exact and fuzzy matchers reject them; only the substring tier
+    // runs and must detect the ambiguity.
+    let needle = "the_shared_needle_here"; // 22 chars > MIN_SUBSTRING_SEARCH_LEN
+    let file_content = format!(
+        "prefix_A {needle} suffix_A\nunrelated middle line content\nprefix_B {needle} suffix_B"
+    );
+    // Line-range hint points to line 5, which is beyond the 3-line file,
+    // so the filter produces None — the substring tier runs with no proximity
+    // constraint and must still catch the ambiguity.
+    let search = format!("5|{needle}");
+    let input_diffs = vec![SearchAndReplace {
+        search: search.clone(),
+        replace: "REPLACED".to_string(),
+    }];
+    let diff = fuzzy_match_diffs("file.md", &input_diffs, &file_content);
+    assert!(
+        deltas(&diff).is_empty(),
+        "Ambiguous fragment must not produce a delta; got: {:?}",
+        deltas(&diff)
+    );
+    assert!(
+        diff.failures
+            .is_some_and(|f| f.ambiguous_substring_matches > 0),
+        "Expected ambiguous_substring_matches; got: {:?}",
+        diff.failures
+    );
 }
 
 /// Verbatim indented-prefix case from the same evidence:

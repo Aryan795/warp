@@ -214,9 +214,11 @@ impl RequestFileEditsExecutor {
             }
 
             // For a partial-success batch: some files were applied (shown to the user above)
-            // but others failed. Augment the Success result with the partial failure details
-            // so the model retains the full context of what changed (updated files, diff content,
-            // user edits) AND learns which files to retry — without masking save failures.
+            // but others failed. Surface the partial-failure notice through the dedicated
+            // `partial_errors` field on Success rather than appending it to `diff`. The
+            // `diff` field is a legacy field that is zeroed on conversation reload and is
+            // rendered inside a ```diff fence by the driver output formatter; `partial_errors`
+            // survives the round-trip and is displayed as plain prose by the Display impl.
             if let Some(error_msg) = partial_error_msg {
                 if let RequestFileEditsResult::Success {
                     diff,
@@ -224,24 +226,21 @@ impl RequestFileEditsExecutor {
                     deleted_files,
                     lines_added,
                     lines_removed,
+                    ..
                 } = result
                 {
-                    let augmented_diff = format!(
-                        "{diff}\n\nNote: the following files could not be edited \
-                         (please retry only those):\n{error_msg}"
-                    );
                     return AIAgentActionResultType::RequestFileEdits(
                         RequestFileEditsResult::Success {
-                            diff: augmented_diff,
+                            diff,
                             updated_files,
                             deleted_files,
                             lines_added,
                             lines_removed,
+                            partial_errors: Some(error_msg),
                         },
                     );
                 }
-                // accept_and_save itself failed for a reason other than a save error
-                // (e.g. Cancelled) — propagate that result as-is.
+                // accept_and_save itself failed (e.g. Cancelled) — propagate as-is.
             }
 
             AIAgentActionResultType::RequestFileEdits(result)

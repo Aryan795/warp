@@ -54,6 +54,7 @@ impl RegisteredDiffStorage for TestStorage {
             deleted_files: Vec::new(),
             lines_added: 0,
             lines_removed: 0,
+            partial_errors: None,
         })
         .boxed()
     }
