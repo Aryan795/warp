@@ -101,9 +101,20 @@ impl DiffApplicationError {
                 if match_failures.fuzzy_match_failures > 0 {
                     let n = match_failures.fuzzy_match_failures;
                     parts.push(format!(
-                        "{n} search block{} did not match the current content of {file} — \
-                         the file may have changed since the search blocks were generated. \
-                         Re-read the file and update the search blocks before retrying.",
+                        "{n} search block{} did not match any line in {file} — \
+                         either the content has changed or the search spans only part of a line \
+                         in which case the surrounding context is not unique enough. \
+                         Re-read the file and use a search string that corresponds to a \
+                         complete, unique line or provide more context to disambiguate.",
+                        if n == 1 { "" } else { "s" }
+                    ));
+                }
+                if match_failures.ambiguous_substring_matches > 0 {
+                    let n = match_failures.ambiguous_substring_matches;
+                    parts.push(format!(
+                        "{n} search block{} found in multiple locations in {file} — \
+                         include more surrounding context in the search string so it \
+                         uniquely identifies the target.",
                         if n == 1 { "" } else { "s" }
                     ));
                 }

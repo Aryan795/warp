@@ -688,51 +688,70 @@ fn test_create_edit_for_existing_file() {
 
 #[test]
 fn test_format_match_error() {
+    // fuzzy_match_failures: search did not match any line
     let err = DiffApplicationError::UnmatchedDiffs {
         file: "file.txt".to_string(),
         match_failures: DiffMatchFailures {
             fuzzy_match_failures: 1,
             noop_deltas: 0,
             missing_line_numbers: 0,
+            ambiguous_substring_matches: 0,
         },
     };
+    let msg = err.to_conversation_message();
+    assert!(msg.contains("1 search block"), "Should mention count: {msg}");
+    assert!(msg.contains("file.txt"), "Should name the file: {msg}");
 
-    assert_eq!(
-        err.to_conversation_message(),
-        "1 search block did not match the current content of file.txt \u{2014} \
-         the file may have changed since the search blocks were generated. \
-         Re-read the file and update the search blocks before retrying."
-    );
-
+    // noop_deltas: changes already applied
     let err = DiffApplicationError::UnmatchedDiffs {
         file: "file.txt".to_string(),
         match_failures: DiffMatchFailures {
             fuzzy_match_failures: 0,
             noop_deltas: 1,
             missing_line_numbers: 0,
+            ambiguous_substring_matches: 0,
         },
     };
-
     assert_eq!(
         err.to_conversation_message(),
         "1 change to file.txt has already been applied."
     );
 
+    // ambiguous_substring_matches: fragment found in multiple locations
+    let err = DiffApplicationError::UnmatchedDiffs {
+        file: "file.txt".to_string(),
+        match_failures: DiffMatchFailures {
+            fuzzy_match_failures: 0,
+            noop_deltas: 0,
+            missing_line_numbers: 0,
+            ambiguous_substring_matches: 2,
+        },
+    };
+    let msg = err.to_conversation_message();
+    assert!(msg.contains("2 search block"), "Should mention count: {msg}");
+    assert!(
+        msg.contains("multiple locations"),
+        "Should say ambiguous: {msg}"
+    );
+
+    // both fuzzy failures and noops
     let err = DiffApplicationError::UnmatchedDiffs {
         file: "file.txt".to_string(),
         match_failures: DiffMatchFailures {
             fuzzy_match_failures: 2,
             noop_deltas: 2,
             missing_line_numbers: 0,
+            ambiguous_substring_matches: 0,
         },
     };
-
-    assert_eq!(
-        err.to_conversation_message(),
-        "2 search blocks did not match the current content of file.txt \u{2014} \
-         the file may have changed since the search blocks were generated. \
-         Re-read the file and update the search blocks before retrying. \
-         2 changes to file.txt have already been applied."
+    let msg = err.to_conversation_message();
+    assert!(
+        msg.contains("2 search block"),
+        "Should mention unmatched count: {msg}"
+    );
+    assert!(
+        msg.contains("2 change"),
+        "Should mention already-applied count: {msg}"
     );
 }
 
@@ -761,17 +780,21 @@ fn test_format_multiple_errors() {
                 fuzzy_match_failures: 1,
                 noop_deltas: 0,
                 missing_line_numbers: 0,
+                ambiguous_substring_matches: 0,
             },
         },
     ];
 
-    assert_eq!(
-        errors_to_conversation_message(&errs),
-        "* missing.rs does not exist. Is the path correct?\n\
-         * 1 search block did not match the current content of unmatched.rs \u{2014} \
-         the file may have changed since the search blocks were generated. \
-         Re-read the file and update the search blocks before retrying."
+    let msg = errors_to_conversation_message(&errs);
+    assert!(
+        msg.contains("* missing.rs does not exist"),
+        "Should list missing file error: {msg}"
     );
+    assert!(
+        msg.contains("* 1 search block"),
+        "Should list unmatched count: {msg}"
+    );
+    assert!(msg.contains("unmatched.rs"), "Should name the file: {msg}");
 }
 
 #[test]

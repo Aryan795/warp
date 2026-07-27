@@ -149,13 +149,16 @@ impl AIRequestedCodeDiff {
                 fuzzy_match_failures,
                 noop_deltas,
                 missing_line_numbers: _,
+                ambiguous_substring_matches,
             }) => {
                 let update_deltas_empty = match &self.diff_type {
                     DiffType::Update { deltas, .. } => deltas.is_empty(),
                     DiffType::Create { .. } | DiffType::Delete { .. } => false,
                 };
 
-                *fuzzy_match_failures > 0 || (*noop_deltas > 0 && update_deltas_empty)
+                *fuzzy_match_failures > 0
+                    || *ambiguous_substring_matches > 0
+                    || (*noop_deltas > 0 && update_deltas_empty)
             }
             None => false,
         }
@@ -331,6 +334,66 @@ pub struct DiffMatchFailures {
     pub noop_deltas: u8,
     /// Search blocks that are missing line numbers.
     pub missing_line_numbers: u8,
+    /// Search blocks that appear in more than one location as a raw substring
+    /// (ambiguous — a unique match could not be determined).
+    #[serde(default)]
+    pub ambiguous_substring_matches: u8,
+}
+
+/// Attempts to match `search` as a unique raw substring within a single file line.
+///
+/// This is the last-resort tier after all line-based matchers have failed. It handles
+/// the case where the model produced a search string that is a **sub-line fragment** of a
+/// long prose or Markdown line — a string that starts and/or ends mid-line and therefore
+/// cannot match any whole-line window. Python's `str.replace()` with a
+/// `text.count(old) == 1` guard is functionally equivalent to this tier.
+///
+/// Returns:
+/// - `Ok((delta, is_noop))` when the search occurs exactly once in the file
+///   (across all lines combined), never spanning a line boundary.
+/// - `Err(count)` when the search occurs in more than one line (ambiguous).
+/// - `None` when the search does not appear anywhere in the file as a substring.
+fn try_substring_match_delta(
+    search: &str,
+    replace: &str,
+    target_lines: &[&str],
+) -> Option<Result<(DiffDelta, bool), usize>> {
+    if search.is_empty() {
+        return None;
+    }
+
+    // Collect every (0-indexed) line that contains the search as a substring.
+    let mut matched_at: Option<(usize, &str)> = None;
+    let mut ambiguous_count: usize = 0;
+
+    for (i, &line) in target_lines.iter().enumerate() {
+        // Count occurrences within this single line.
+        let occurrences = line.matches(search).count();
+        if occurrences == 0 {
+            continue;
+        }
+        ambiguous_count += occurrences;
+        // More than one total occurrence across all lines → ambiguous.
+        if ambiguous_count > 1 {
+            return Some(Err(ambiguous_count));
+        }
+        matched_at = Some((i, line));
+    }
+
+    let (line_idx, file_line) = matched_at?;
+
+    // Splice the replacement into the containing line.
+    let new_line = file_line.replacen(search, replace, 1);
+    let line_1indexed = line_idx + 1;
+    let is_noop = new_line == file_line;
+
+    Some(Ok((
+        DiffDelta {
+            replacement_line_range: line_1indexed..line_1indexed + 1,
+            insertion: new_line,
+        },
+        is_noop,
+    )))
 }
 
 /// Fix two common issues with responses from the models that request code actions:
@@ -362,6 +425,7 @@ pub fn fuzzy_match_diffs(
     let update_deltas_empty = deltas.is_empty();
     let failures = if failures.fuzzy_match_failures > 0
         || failures.missing_line_numbers > 0
+        || failures.ambiguous_substring_matches > 0
         || (failures.noop_deltas > 0 && update_deltas_empty)
     {
         Some(failures)
@@ -623,7 +687,39 @@ fn fuzzy_match_file_diffs(
                 });
             }
             None => {
-                failures.fuzzy_match_failures += 1;
+                // All line-based tiers failed.  Try a last-resort substring-match tier:
+                // if the search occurs as a raw substring exactly ONCE in the entire
+                // file (never spanning a line boundary), apply the replacement there.
+                // This handles sub-line fragment searches produced by the model from
+                // long prose/Markdown lines.  The uniqueness guard (exactly 1 occurrence)
+                // mirrors Python's `text.count(old) != 1` guard.
+                match try_substring_match_delta(&search, &diff.replace, &target_lines) {
+                    Some(Ok((delta, is_noop))) => {
+                        if is_noop {
+                            log::info!(
+                                "Ignoring substring-match diff: \
+                                 replacement is identical to the matched fragment"
+                            );
+                            failures.noop_deltas += 1;
+                        } else {
+                            log::info!(
+                                "Matched search string as unique sub-line fragment \
+                                 via substring tier"
+                            );
+                            deltas.push(delta);
+                        }
+                    }
+                    Some(Err(n)) => {
+                        log::warn!(
+                            "Substring-match ambiguous: search fragment found {} time(s)",
+                            n
+                        );
+                        failures.ambiguous_substring_matches += 1;
+                    }
+                    None => {
+                        failures.fuzzy_match_failures += 1;
+                    }
+                }
             }
         }
     }

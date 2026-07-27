@@ -363,6 +363,126 @@ fn test_single_line_n_pipe_stale_line_number_uses_global_fallback() {
     assert!(diff.failures.is_none());
 }
 
+/// Reproduces the exact minimal failing scenario from QUALITY-1253 request b338d92f msg 623:
+/// - 200-line file (a spec)
+/// - Target line is at position 47 (1-indexed) in the actual file
+/// - Search carries prefix "102|" pointing to line 102 (which exists but has DIFFERENT content)
+/// - After stripping the prefix the content matches exactly once in the file
+/// - The local search window around line 102 should miss, and the global fallback must succeed
+#[test]
+fn test_single_line_n_pipe_line_number_drifted_in_large_file() {
+    // Build a 200-line file where the target content is at line 47,
+    // but the search prefix points to line 102.
+    let target_line = "Includes CRUD for suites/versions, tasks, configs, runs, trials.";
+    let mut lines_vec: Vec<String> = (1..=200)
+        .map(|n| {
+            if n == 47 {
+                target_line.to_string()
+            } else {
+                format!("Line {} of the spec document with some text.", n)
+            }
+        })
+        .collect();
+    let file_content = lines_vec.join("\n");
+
+    // The search prefix says line 102 — which exists but has different content.
+    let search = format!("102|{}", target_line);
+    let input_diffs = vec![SearchAndReplace {
+        search: search.clone(),
+        replace: "UPDATED_CRUD".to_string(),
+    }];
+    let diff = fuzzy_match_diffs("M1-data-model.md", &input_diffs, &file_content);
+
+    // Must find the target at line 47 via global fallback.
+    assert!(
+        !deltas(&diff).is_empty(),
+        "N|-prefixed search with drifted line number must still match via global fallback; \
+         failures: {:?}",
+        diff.failures
+    );
+    assert_eq!(
+        deltas(&diff)[0].replacement_line_range,
+        47..48,
+        "Delta should replace line 47 (the actual location of the target)"
+    );
+    assert_eq!(deltas(&diff)[0].insertion, "UPDATED_CRUD");
+    assert!(diff.failures.is_none());
+}
+
+/// Regression test for QUALITY-1253 (root cause, msg 623).
+///
+/// The model produced a search string that is a unique **sub-line fragment** of a
+/// long prose/Markdown line.  It is NOT a whole line, so every line-based matcher
+/// (ExactMatch, IndentationAgnosticMatch, PrefixTail, JaroWinkler) rejects it.
+/// Python's `str.replace()` succeeded with the same fragment because Python does
+/// raw substring matching.
+///
+/// Before the fix this must FAIL (`fuzzy_match_failures = 1`).
+/// After the fix a substring-match tier should apply the replacement.
+#[test]
+fn test_sub_line_fragment_search_matches_unique_substring() {
+    // File line 102 — a long Markdown prose line that contains the search fragment
+    // starting at column 152.  Reproduced verbatim from the real file bytes.
+    let full_line = concat!(
+        "- `model/benchmark.go` \u{2014} `BenchmarkStore` implementation. ",
+        "**Every SELECT/UPDATE includes `AND marked_for_deletion_ts IS NULL`** ",
+        "(data-deletion Step 2). ",
+        "Includes CRUD for suites/versions, tasks, configs, runs, trials; ",
+        "a `CreateSuiteVersion` that writes the suite row + its task/config child rows ",
+        "in one transaction; and `Mark\u{2026}ForDeletionByTeamIDs`.",
+    );
+
+    // The fragment starts mid-line (column 152) and is cut off before `\u{2026}`.
+    // The server prepends `102|` before sending it to the client.
+    let search_with_prefix = concat!(
+        "102|Includes CRUD for suites/versions, tasks, configs, runs, trials; ",
+        "a `CreateSuiteVersion` that writes the suite row + its task/config child rows ",
+        "in one transaction; and `Mark",
+    );
+
+    // The fragment occurs exactly ONCE in the file (unique substring) — which is
+    // exactly why Python's `.replace()` with a `count(old) == 1` guard succeeded.
+    let fragment = search_with_prefix.strip_prefix("102|").unwrap();
+    assert_eq!(
+        full_line.matches(fragment).count(),
+        1,
+        "Sanity: fragment must appear exactly once in the line"
+    );
+
+    let replace_text = "UPDATED CRUD CONTENT";
+    let input_diffs = vec![SearchAndReplace {
+        search: search_with_prefix.to_string(),
+        replace: replace_text.to_string(),
+    }];
+    let diff = fuzzy_match_diffs("M1-data-model.md", &input_diffs, full_line);
+
+    // Before the fix this fails with fuzzy_match_failures=1; after the fix it applies.
+    assert!(
+        !deltas(&diff).is_empty(),
+        "Sub-line fragment must match via substring tier after the fix; \
+         failures: {:?}",
+        diff.failures
+    );
+    // The delta replaces line 102 with the fragment substituted.
+    assert_eq!(deltas(&diff)[0].replacement_line_range, 1..2);
+    assert!(
+        deltas(&diff)[0].insertion.contains(replace_text),
+        "The inserted line must contain the replacement"
+    );
+    // Prefix (before fragment) and suffix (after fragment) of the original line are preserved.
+    // The search fragment ends at "`Mark" which is consumed, so the suffix starts at U+2026.
+    let insertion = &deltas(&diff)[0].insertion;
+    assert!(
+        insertion.starts_with("- `model/benchmark.go`"),
+        "Line prefix must be preserved; got: {insertion}"
+    );
+    assert!(
+        insertion.ends_with("\u{2026}ForDeletionByTeamIDs`."),
+        "Line suffix (after the fragment) must be preserved; got: {insertion}"
+    );
+    assert!(diff.failures.is_none());
+}
+
 /// Verbatim indented-prefix case from the same evidence:
 /// `117|  - \`Apply\`` where the N| prefix precedes the leading whitespace.
 #[test]

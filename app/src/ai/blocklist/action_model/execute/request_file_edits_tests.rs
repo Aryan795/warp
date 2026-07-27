@@ -272,6 +272,7 @@ fn partial_success_seeds_storage_and_does_not_bypass_permission_gate() {
                             fuzzy_match_failures: 1,
                             noop_deltas: 0,
                             missing_line_numbers: 0,
+                            ambiguous_substring_matches: 0,
                         },
                     }],
                 },
