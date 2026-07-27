@@ -6,12 +6,19 @@ use super::*;
 use crate::workspaces::workspace::BillingMetadata;
 
 fn make_service_agreement(status: ServiceAgreementStatus) -> ServiceAgreement {
+    make_service_agreement_with_type(status, ServiceAgreementType::SelfServe)
+}
+
+fn make_service_agreement_with_type(
+    status: ServiceAgreementStatus,
+    type_: ServiceAgreementType,
+) -> ServiceAgreement {
     ServiceAgreement {
         addon_credit_auto_reload_status: None,
         current_period_end: ServerTimestamp::new(Utc::now() + chrono::Duration::days(30)),
         status,
         stripe_subscription_id: None,
-        type_: ServiceAgreementType::SelfServe,
+        type_,
         sunsetted_to_build_ts: None,
     }
 }
@@ -114,4 +121,92 @@ fn test_get_delete_disabled_reason_remaining_credits_block_delete() {
         reason,
         Some(TeamDeleteDisabledReason::RemainingBonusCredits),
     );
+}
+
+// --- Tests that pin the client/server rule parity ---
+//
+// The server blocks deletion when the *first non-Canceled* SA is
+// self-serviceable (`SelfServe | Turbo | Prosumer | Business | Lightspeed`).
+// `PastDue` and `Unpaid` SAs count as "live" on the server and must also
+// block deletion on the client (regression tests for the previous bug where
+// the client only checked for `Active` status).
+// Non-self-serviceable types such as `ProTrial`, `TeamTrial`, and `Legacy`
+// must NOT block deletion even when the SA is `Active` (the server allows it).
+
+/// A `PastDue` self-serve SA is live on the server and must block deletion.
+#[test]
+fn test_get_delete_disabled_reason_past_due_subscription_blocks_delete() {
+    let billing = BillingMetadata {
+        service_agreements: vec![make_service_agreement(ServiceAgreementStatus::PastDue)],
+        ..Default::default()
+    };
+    let team = solo_owner_team_with_billing("owner@example.com", billing);
+    let reason = team.get_delete_disabled_reason("owner@example.com", 0);
+    assert_eq!(
+        reason,
+        Some(TeamDeleteDisabledReason::ActivePaidSubscription),
+    );
+}
+
+/// An `Unpaid` self-serve SA is live on the server and must block deletion.
+#[test]
+fn test_get_delete_disabled_reason_unpaid_subscription_blocks_delete() {
+    let billing = BillingMetadata {
+        service_agreements: vec![make_service_agreement(ServiceAgreementStatus::Unpaid)],
+        ..Default::default()
+    };
+    let team = solo_owner_team_with_billing("owner@example.com", billing);
+    let reason = team.get_delete_disabled_reason("owner@example.com", 0);
+    assert_eq!(
+        reason,
+        Some(TeamDeleteDisabledReason::ActivePaidSubscription),
+    );
+}
+
+/// An `Active` SA of a non-self-serviceable type (`ProTrial`) must NOT block
+/// deletion — the server allows it via `IsSelfServicableAgreementType`.
+#[test]
+fn test_get_delete_disabled_reason_active_pro_trial_allows_delete() {
+    let billing = BillingMetadata {
+        service_agreements: vec![make_service_agreement_with_type(
+            ServiceAgreementStatus::Active,
+            ServiceAgreementType::ProTrial,
+        )],
+        ..Default::default()
+    };
+    let team = solo_owner_team_with_billing("owner@example.com", billing);
+    let reason = team.get_delete_disabled_reason("owner@example.com", 0);
+    assert_eq!(reason, None);
+}
+
+/// An `Active` SA of a non-self-serviceable type (`TeamTrial`) must NOT block
+/// deletion — the server allows it via `IsSelfServicableAgreementType`.
+#[test]
+fn test_get_delete_disabled_reason_active_team_trial_allows_delete() {
+    let billing = BillingMetadata {
+        service_agreements: vec![make_service_agreement_with_type(
+            ServiceAgreementStatus::Active,
+            ServiceAgreementType::TeamTrial,
+        )],
+        ..Default::default()
+    };
+    let team = solo_owner_team_with_billing("owner@example.com", billing);
+    let reason = team.get_delete_disabled_reason("owner@example.com", 0);
+    assert_eq!(reason, None);
+}
+
+/// An `Active` SA of a non-self-serviceable type (`Legacy`) must NOT block
+/// deletion — the server allows it via `IsSelfServicableAgreementType`.
+#[test]
+fn test_get_delete_disabled_reason_active_legacy_allows_delete() {
+    let billing = BillingMetadata {
+        service_agreements: vec![make_service_agreement_with_type(
+            ServiceAgreementStatus::Active,
+            ServiceAgreementType::Legacy,
+        )],
+        ..Default::default()
+    };
+    let team = solo_owner_team_with_billing("owner@example.com", billing);
+    let reason = team.get_delete_disabled_reason("owner@example.com", 0);
+    assert_eq!(reason, None);
 }

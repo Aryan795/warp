@@ -720,15 +720,27 @@ impl BillingMetadata {
         self.tier.name == "Warp Plan"
     }
 
-    /// Returns `true` when the workspace has a service agreement whose status is
-    /// explicitly `Active`. A cancelled, past-due, or unpaid agreement does not
-    /// qualify, even if `current_period_end` is still in the future. This is the
-    /// client-side mirror of the server's "live subscription" gate that prevents
-    /// team deletion for users with an active paid plan.
+    /// Returns `true` when the workspace has a live, self-serviceable subscription that
+    /// prevents team deletion. Mirrors the server gate in
+    /// `logic/workspace_memberships.go` (`GetLiveServiceAgreement` + `IsSelfServicableAgreementType`):
+    /// - "live" means the first SA whose status is **not** `Canceled`
+    ///   (`PastDue`, `Unpaid`, and unknown statuses all count as live).
+    /// - "self-serviceable" means the SA's type is one of
+    ///   `SelfServe | Turbo | Prosumer | Business | Lightspeed`.
     pub fn has_live_active_subscription(&self) -> bool {
         self.service_agreements
-            .first()
-            .is_some_and(|sa| matches!(sa.status, ServiceAgreementStatus::Active))
+            .iter()
+            .find(|sa| !matches!(sa.status, ServiceAgreementStatus::Canceled))
+            .is_some_and(|sa| {
+                matches!(
+                    sa.type_,
+                    ServiceAgreementType::SelfServe
+                        | ServiceAgreementType::Turbo
+                        | ServiceAgreementType::Prosumer
+                        | ServiceAgreementType::Business
+                        | ServiceAgreementType::Lightspeed
+                )
+            })
     }
 
     pub fn has_active_subscription(&self) -> bool {

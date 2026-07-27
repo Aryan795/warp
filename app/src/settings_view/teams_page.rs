@@ -1150,7 +1150,8 @@ impl TeamsPageView {
     ) {
         match event {
             TeamUpdateManagerEvent::LeaveError(err_msg) => {
-                self.show_error(err_msg.clone(), None, ctx);
+                // Sentry reporting already happened in TeamUpdateManager; just show the toast.
+                self.show_toast(err_msg.clone(), ToastFlavor::Error, ctx);
             }
             TeamUpdateManagerEvent::LeaveSuccess => {
                 self.show_success("Successfully left team", ctx);
@@ -1470,6 +1471,8 @@ impl TeamsPageView {
             TeamUpdateManager::handle(ctx).update(ctx, |manager, ctx| {
                 manager.leave_team(team_uid, CloudObjectEventEntrypoint::TeamSettings, ctx)
             });
+        } else {
+            log::warn!("Cannot leave team: no current team UID available");
         }
     }
 
