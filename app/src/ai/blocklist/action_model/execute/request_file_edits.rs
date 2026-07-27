@@ -219,8 +219,9 @@ impl RequestFileEditsExecutor {
             // `diff` field is a legacy field that is zeroed on conversation reload and is
             // rendered inside a ```diff fence by the driver output formatter; `partial_errors`
             // survives the round-trip and is displayed as plain prose by the Display impl.
-            if let Some(error_msg) = partial_error_msg {
-                if let RequestFileEditsResult::Success {
+            // When accept_and_save returned non-Success (e.g. Cancelled), fall through.
+            if let Some(error_msg) = partial_error_msg
+                && let RequestFileEditsResult::Success {
                     diff,
                     updated_files,
                     deleted_files,
@@ -228,19 +229,17 @@ impl RequestFileEditsExecutor {
                     lines_removed,
                     ..
                 } = result
-                {
-                    return AIAgentActionResultType::RequestFileEdits(
-                        RequestFileEditsResult::Success {
-                            diff,
-                            updated_files,
-                            deleted_files,
-                            lines_added,
-                            lines_removed,
-                            partial_errors: Some(error_msg),
-                        },
-                    );
-                }
-                // accept_and_save itself failed (e.g. Cancelled) — propagate as-is.
+            {
+                return AIAgentActionResultType::RequestFileEdits(
+                    RequestFileEditsResult::Success {
+                        diff,
+                        updated_files,
+                        deleted_files,
+                        lines_added,
+                        lines_removed,
+                        partial_errors: Some(error_msg),
+                    },
+                );
             }
 
             AIAgentActionResultType::RequestFileEdits(result)

@@ -484,12 +484,11 @@ fn test_sub_line_fragment_search_matches_unique_substring() {
 }
 
 /// Regression test: the `1|Z` case proved in the code review.
-/// A single-character fragment hinted at line 1 must NOT silently edit line 3
-/// when the only `Z` in the file is there.  The proximity guard (±1 line) must
-/// reject this because |3 - 1| = 2 > 1, and the minimum-length guard also
-/// catches it because `Z` (after stripping `1|`) has length 1 < 10.
+/// `Z` (after stripping `1|`) has only 1 character < MIN_SUBSTRING_SEARCH_LEN (10),
+/// so the degenerate-search guard rejects it before any location check runs.
+/// (Even without the proximity guard, the length guard is sufficient here.)
 #[test]
-fn test_substring_tier_rejects_wrong_location_short_search() {
+fn test_substring_tier_rejects_short_search() {
     // Three-line file: Z only exists on line 3, not near the hint of line 1.
     let file_content = "alpha beta\ngamma delta\nepsilon Z zeta";
     let search = "1|Z"; // hint says line 1; Z is on line 3
@@ -499,18 +498,88 @@ fn test_substring_tier_rejects_wrong_location_short_search() {
     }];
     let diff = fuzzy_match_diffs("file.md", &input_diffs, file_content);
 
-    // Must NOT produce a delta — both the min-length guard (len 1 < 10) and the
-    // proximity guard (line 3 is 2 away from hinted line 1) must reject it.
+    // Must NOT produce a delta — the min-length guard (1 char < 10) rejects it.
     assert!(
         deltas(&diff).is_empty(),
-        "Short search at wrong location must not produce a delta; got: {:?}",
+        "Short search must not produce a delta; got: {:?}",
         deltas(&diff)
     );
-    // fuzzy_match_failures must be set (not ambiguous).
     assert!(
         diff.failures.is_some_and(|f| f.fuzzy_match_failures > 0),
         "Expected fuzzy_match_failures, got: {:?}",
         diff.failures
+    );
+}
+
+/// When the line-range hint is in-bounds but drifted (the file was rewritten and
+/// the content shifted from the hinted line), the tier must still apply the
+/// substitution via the file-wide fallback.  Uniqueness is the primary guard.
+#[test]
+fn test_substring_tier_accepts_drifted_in_bounds_hint() {
+    // 10-line file; the search fragment is uniquely on line 7,
+    // but the hint (after stripping the N| prefix) points to line 2.
+    let fragment = "the_unique_needle_in_haystack"; // > 10 chars
+    let lines: Vec<String> = (1..=10)
+        .map(|n| {
+            if n == 7 {
+                format!("prefix line {n}: {fragment} suffix")
+            } else {
+                format!("unrelated content for line {n}")
+            }
+        })
+        .collect();
+    let file_content = lines.join("\n");
+
+    // Search hinted at line 2 (in-bounds for this 10-line file), but the only
+    // occurrence of the fragment is on line 7 — more than 1 line away.
+    let search = format!("2|{fragment}");
+    let input_diffs = vec![SearchAndReplace {
+        search: search.clone(),
+        replace: "UPDATED_NEEDLE".to_string(),
+    }];
+    let diff = fuzzy_match_diffs("spec.md", &input_diffs, &file_content);
+
+    // Must produce a delta at line 7 (the unique file-wide location).
+    assert!(
+        !deltas(&diff).is_empty(),
+        "Drifted hint must still apply via file-wide fallback; \
+         failures: {:?}",
+        diff.failures
+    );
+    assert_eq!(
+        deltas(&diff)[0].replacement_line_range,
+        7..8,
+        "Delta must be at the actual location of the fragment (line 7)"
+    );
+    assert!(diff.failures.is_none());
+}
+
+/// The min-length guard counts Unicode characters, not bytes, so that multi-byte
+/// code-points (CJK, emoji, …) each count as one character and very short CJK
+/// searches are still rejected even though they may occupy many bytes.
+///
+/// The search is a sub-line fragment (not the whole line) so that line-based
+/// matchers cannot find it and the substring tier is exercised.
+#[test]
+fn test_substring_tier_rejects_short_multibyte_search() {
+    // Nine CJK characters = 27 bytes but only 9 Unicode chars < MIN_SUBSTRING_SEARCH_LEN (10).
+    // Embed the fragment in a longer line so line-based matchers reject it first.
+    let cjk_fragment = "\u{6211}\u{4EEC}\u{5728}\u{5B66}\u{4E60}\u{4E2D}\u{6587}\u{5BF9}\u{5417}"; // 9 chars
+    assert_eq!(cjk_fragment.chars().count(), 9, "sanity: 9 CJK chars");
+    let file_content = format!("English prefix: {cjk_fragment} suffix text here");
+    // The search carries the 9-char CJK fragment hinted at line 5 (out of bounds → None).
+    let search = format!("5|{cjk_fragment}");
+    let input_diffs = vec![SearchAndReplace {
+        search: search.clone(),
+        replace: "REPLACED".to_string(),
+    }];
+    let diff = fuzzy_match_diffs("file.md", &input_diffs, &file_content);
+    // Must be rejected: 9 chars < MIN_SUBSTRING_SEARCH_LEN (10).
+    assert!(
+        deltas(&diff).is_empty(),
+        "9-character CJK search (27 bytes) must be rejected by the char-count guard; \
+         got: {:?}",
+        deltas(&diff)
     );
 }
 

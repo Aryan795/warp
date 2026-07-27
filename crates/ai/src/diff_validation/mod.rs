@@ -340,11 +340,13 @@ pub struct DiffMatchFailures {
     pub ambiguous_substring_matches: u8,
 }
 
-/// The minimum number of non-whitespace characters a search string must contain to
-/// be eligible for the substring-match tier. Short searches (e.g. a single letter)
-/// are overwhelmingly likely to produce false positives even when they appear only
-/// once, so we follow the same philosophy as the prefix-tail rescue (which requires a
-/// line-number hint) and simply reject them.
+/// The minimum number of **Unicode characters** a search string must contain to
+/// be eligible for the substring-match tier.  Short searches (e.g. a single
+/// ASCII letter or a few CJK ideographs) are overwhelmingly likely to produce
+/// false positives even when they appear only once, so we follow the same
+/// philosophy as the prefix-tail rescue (which requires a line-number hint) and
+/// simply reject them.  Counted with `str::chars().count()` so that multi-byte
+/// code-points (CJK, emoji, …) are each counted as one character.
 const MIN_SUBSTRING_SEARCH_LEN: usize = 10;
 
 /// Attempts to match `search` as a unique raw substring within a single file line.
@@ -356,29 +358,32 @@ const MIN_SUBSTRING_SEARCH_LEN: usize = 10;
 /// `text.count(old) == 1` guard is functionally equivalent to this tier.
 ///
 /// # Guards
-/// 1. **Degenerate-search rejection** — searches shorter than
-///    [`MIN_SUBSTRING_SEARCH_LEN`] characters or consisting solely of whitespace
-///    are rejected immediately (they match too broadly to be safe).
+/// 1. **Degenerate-search rejection** — searches with fewer than
+///    [`MIN_SUBSTRING_SEARCH_LEN`] Unicode characters, or consisting solely of
+///    whitespace, are rejected immediately (they match too broadly to be safe).
 /// 2. **Uniqueness** — the search must occur exactly once across the entire file
 ///    content (same semantics as Python's `text.count(old) == 1` guard).
-/// 3. **Line-range proximity** (when `line_range` is `Some`) — the unique
-///    occurrence must land on or adjacent to (±1 line) the hinted line.  A search
-///    that is globally unique but contradicts the model's own line-number hint is
-///    a degenerate case rather than a legitimate sub-line fragment.
+/// 3. **Line-range preference** (when `line_range` is `Some`) — if the hint
+///    is within the file and the unique occurrence falls on or adjacent to
+///    (±1 line) the hinted position, that is the preferred match.  If the
+///    occurrence is farther away (e.g. because a large rewrite shifted the
+///    content), the unique file-wide match is still accepted as a fallback —
+///    uniqueness is the primary safety guard.  The hint is only used for
+///    logging to distinguish the two paths.
 ///
 /// # Returns
-/// - `Ok((delta, is_noop))` when all guards pass and the search occurs exactly once.
+/// - `Ok((delta, is_noop))` when guards 1 and 2 pass and the search occurs exactly once.
 /// - `Err(count)` when the search occurs in more than one location (ambiguous).
-/// - `None` when the search does not appear anywhere, is degenerate, or is unique
-///   but contradicts the line-range hint.
+/// - `None` when the search does not appear anywhere or is degenerate.
 fn try_substring_match_delta(
     search: &str,
     replace: &str,
     target_lines: &[&str],
     line_range: Option<Range<usize>>,
 ) -> Option<Result<(DiffDelta, bool), usize>> {
-    // Guard 1: reject degenerate searches.
-    if search.len() < MIN_SUBSTRING_SEARCH_LEN || search.trim().is_empty() {
+    // Guard 1: reject degenerate searches (count Unicode characters, not bytes,
+    // so that multi-byte code-points are each counted as one character).
+    if search.chars().count() < MIN_SUBSTRING_SEARCH_LEN || search.trim().is_empty() {
         return None;
     }
 
@@ -405,20 +410,26 @@ fn try_substring_match_delta(
     let (line_idx, file_line) = matched_at?;
     let match_line_1indexed = line_idx + 1;
 
-    // Guard 3: when the caller supplied a line-range hint, the match must land on
-    // or directly adjacent to (±1 line) the hinted position.  Without this check a
-    // short but syntactically unique token (e.g. `1|Z`) can silently edit the wrong
-    // location — the exact failure mode demonstrated in the code review.
+    // Guard 3 (preference, not hard gate): log whether the match landed near the
+    // hinted line or was found farther away via the file-wide fallback path.  A
+    // large in-bounds rewrite can shift content away from the stale hint, and
+    // uniqueness alone is sufficient to accept the result in either case.
     if let Some(Range { start, .. }) = &line_range {
         let hinted_line = *start; // 1-indexed
-        if match_line_1indexed.abs_diff(hinted_line) > 1 {
+        if match_line_1indexed.abs_diff(hinted_line) <= 1 {
             log::debug!(
-                "Substring-match rejected: unique occurrence at line {} \
-                 is too far from the hinted line {}",
+                "Substring-match: unique occurrence at line {} \
+                 matched within the hinted window (hint: {})",
                 match_line_1indexed,
                 hinted_line
             );
-            return None;
+        } else {
+            log::debug!(
+                "Substring-match: unique occurrence at line {} \
+                 accepted via file-wide fallback (hint was {})",
+                match_line_1indexed,
+                hinted_line
+            );
         }
     }
 
