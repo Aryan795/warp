@@ -111,7 +111,16 @@ impl TuiCodeBlockView {
 
         let language_changed = self.payload.language != payload.language;
         self.payload = payload;
-        self.text_overrides.clear();
+        // A language change completely invalidates the prior highlights (the
+        // token kinds no longer match), so clear them immediately.  A
+        // code-only change during streaming leaves the existing overrides in
+        // place: they still correctly color the unchanged prefix, avoiding a
+        // visible flash of fully-unstyled text while the new parse is in
+        // flight.  `refresh_highlights` will replace them once the fresh
+        // parse for `expected_syntax_version` completes.
+        if language_changed {
+            self.text_overrides.clear();
+        }
         self.expected_syntax_version = None;
         self.fallback_text = bounded_fallback_text(&self.payload.code);
 
