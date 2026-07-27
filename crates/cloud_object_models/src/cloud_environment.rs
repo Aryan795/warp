@@ -122,6 +122,53 @@ impl fmt::Display for BaseImage {
     }
 }
 
+/// Serde adapter for the flattened, optional [`BaseImage`] field on
+/// [`AmbientAgentEnvironment`].
+///
+/// `BaseImage` is an externally-tagged enum that serializes to
+/// `{"docker_image": "..."}`; `#[serde(flatten)]` merges that map into the
+/// environment so the image appears as a top-level `docker_image` string. The
+/// field is `Option<BaseImage>` so environments without a pinned image
+/// deserialize cleanly, but `flatten` + `Option<enum>` is unreliable when the
+/// buffered flatten content also carries unrelated leftover keys (a missing
+/// image can be misread as a present-but-malformed one). To stay robust, we
+/// (de)serialize through a plain struct whose only field is an optional
+/// `docker_image` string: it reads exactly that key, defaults to `None` when
+/// absent, and ignores other keys — while serializing back to the identical
+/// top-level `docker_image` shape (or nothing at all when absent).
+mod base_image_field {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::BaseImage;
+
+    #[derive(Serialize, Deserialize)]
+    struct Repr {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        docker_image: Option<String>,
+    }
+
+    pub fn serialize<S>(value: &Option<BaseImage>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let repr = match value {
+            Some(BaseImage::DockerImage(image)) => Repr {
+                docker_image: Some(image.clone()),
+            },
+            None => Repr { docker_image: None },
+        };
+        repr.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<BaseImage>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let repr = Repr::deserialize(deserializer)?;
+        Ok(repr.docker_image.map(BaseImage::DockerImage))
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct GcpProviderConfig {
     pub project_number: String,
@@ -181,9 +228,14 @@ pub struct AmbientAgentEnvironment {
     /// `github_repos`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_repos: Option<Vec<SourceRepo>>,
-    /// Base image specification
-    #[serde(flatten)]
-    pub base_image: BaseImage,
+    /// Base image specification.
+    ///
+    /// `None` for cloud environments that do not pin a docker image. When
+    /// present, this flattens into the environment's JSON as a top-level
+    /// `docker_image` string, preserving the legacy wire format for
+    /// environments that have one.
+    #[serde(flatten, with = "base_image_field")]
+    pub base_image: Option<BaseImage>,
     /// List of setup commands to run after cloning
     #[serde(default)]
     pub setup_commands: Vec<String>,
@@ -212,7 +264,7 @@ impl AmbientAgentEnvironment {
             code_forge: None,
             github_repos,
             source_repos: None,
-            base_image: BaseImage::DockerImage(docker_image),
+            base_image: Some(BaseImage::DockerImage(docker_image)),
             setup_commands,
             providers: ProvidersConfig::default(),
             secrets: None,

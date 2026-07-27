@@ -32,7 +32,7 @@ use warpui::{
     ViewContext, ViewHandle, WindowId,
 };
 
-use crate::ai::cloud_environments::CloudAmbientAgentEnvironment;
+use crate::ai::cloud_environments::{BaseImage, CloudAmbientAgentEnvironment};
 use crate::cloud_object::model::generic_string_model::StringModel;
 use crate::cloud_object::CloudObjectLookup as _;
 use crate::editor::{
@@ -664,7 +664,12 @@ impl DisplayChipMenu {
         Some(EnvironmentSidecarData {
             name: env.model().string_model.display_name(),
             id: env.id.to_string(),
-            image: env.model().string_model.base_image.to_string(),
+            image: env
+                .model()
+                .string_model
+                .base_image
+                .as_ref()
+                .map_or(String::new(), BaseImage::to_string),
             repos_text,
         })
     }

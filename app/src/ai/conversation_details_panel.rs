@@ -48,7 +48,9 @@ use crate::ai::ambient_agents::task::TaskPrincipalInfo;
 use crate::ai::ambient_agents::{cancel_task_with_toast, AmbientAgentTaskId};
 use crate::ai::artifacts::{Artifact, ArtifactButtonsRow, ArtifactButtonsRowEvent};
 use crate::ai::blocklist::BlocklistAIHistoryModel;
-use crate::ai::cloud_environments::{AmbientAgentEnvironment, CloudAmbientAgentEnvironment};
+use crate::ai::cloud_environments::{
+    AmbientAgentEnvironment, BaseImage, CloudAmbientAgentEnvironment,
+};
 use crate::ai::harness_availability::HarnessAvailabilityModel;
 use crate::ai::harness_display;
 use crate::appearance::Appearance;
@@ -1635,7 +1637,10 @@ impl ConversationDetailsPanel {
         app: &AppContext,
     ) -> Box<dyn Element> {
         let environment_name = &env_model.name;
-        let docker_image = env_model.base_image.to_string();
+        let docker_image = env_model
+            .base_image
+            .as_ref()
+            .map_or(String::new(), BaseImage::to_string);
 
         let theme = appearance.theme();
         let ui_font_size = appearance.ui_font_size();
@@ -2263,7 +2268,12 @@ impl TypedActionView for ConversationDetailsPanel {
                     if let Ok(server_id) = ServerId::try_from(env_id.as_str()) {
                         let sync_id = SyncId::ServerId(server_id);
                         if let Some(env) = CloudAmbientAgentEnvironment::get_by_id(&sync_id, ctx) {
-                            let docker_image = env.model().string_model.base_image.to_string();
+                            let docker_image = env
+                                .model()
+                                .string_model
+                                .base_image
+                                .as_ref()
+                                .map_or(String::new(), BaseImage::to_string);
                             ctx.clipboard()
                                 .write(ClipboardContent::plain_text(docker_image));
                             self.record_copy(CopyButtonKind::DockerImage, ctx);

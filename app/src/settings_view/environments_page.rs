@@ -39,7 +39,7 @@ use super::update_environment_form::{
 };
 use super::{editor_text_colors, SettingsSection};
 use crate::ai::ambient_agents::github_auth_url::GithubAuthRedirectTarget;
-use crate::ai::cloud_environments::{self, CloudAmbientAgentEnvironment};
+use crate::ai::cloud_environments::{self, BaseImage, CloudAmbientAgentEnvironment};
 use crate::appearance::Appearance;
 use crate::cloud_object::model::persistence::{CloudModel, CloudModelEvent};
 use crate::cloud_object::{
@@ -144,7 +144,10 @@ impl EnvironmentDisplayData {
             id: env.id,
             name: model.name.clone(),
             description: model.description.clone(),
-            docker_image: model.base_image.to_string(),
+            docker_image: model
+                .base_image
+                .as_ref()
+                .map_or(String::new(), BaseImage::to_string),
             github_repos: model
                 .github_repos
                 .iter()
@@ -270,7 +273,10 @@ impl EnvironmentsPageView {
                         name: model.name.clone(),
                         description: model.description.clone().unwrap_or_default(),
                         selected_repos: model.github_repos.clone(),
-                        docker_image: model.base_image.to_string(),
+                        docker_image: model
+                            .base_image
+                            .as_ref()
+                            .map_or(String::new(), BaseImage::to_string),
                         setup_commands: model.setup_commands.clone(),
                     }
                 });

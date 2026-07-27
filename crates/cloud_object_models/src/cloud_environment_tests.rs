@@ -28,7 +28,7 @@ fn deserialize_legacy_environment_without_providers() {
     );
     assert_eq!(
         env.base_image,
-        BaseImage::DockerImage("ubuntu:latest".into())
+        Some(BaseImage::DockerImage("ubuntu:latest".into()))
     );
     assert_eq!(env.setup_commands, vec!["echo hello"]);
 }
@@ -345,4 +345,102 @@ fn roundtrip_serde_with_secrets() {
     let serialized = serde_json::to_string(&env).unwrap();
     let deserialized: AmbientAgentEnvironment = serde_json::from_str(&serialized).unwrap();
     assert_eq!(env, deserialized);
+}
+
+#[test]
+fn deserialize_environment_without_docker_image() {
+    let json = serde_json::json!({
+        "name": "no-image-env",
+        "github_repos": [{ "owner": "warpdotdev", "repo": "warp" }],
+        "setup_commands": ["echo hello"],
+    });
+
+    let env: AmbientAgentEnvironment = serde_json::from_value(json).unwrap();
+    assert_eq!(env.name, "no-image-env");
+    assert_eq!(env.base_image, None);
+    assert_eq!(env.github_repos.len(), 1);
+    assert_eq!(env.setup_commands, vec!["echo hello"]);
+}
+
+#[test]
+fn deserialize_environment_with_null_docker_image() {
+    // An explicit null should be treated the same as a missing key.
+    let json = serde_json::json!({
+        "name": "null-image-env",
+        "github_repos": [],
+        "docker_image": null,
+    });
+
+    let env: AmbientAgentEnvironment = serde_json::from_value(json).unwrap();
+    assert_eq!(env.base_image, None);
+}
+
+#[test]
+fn deserialize_environment_without_docker_image_ignores_unknown_keys() {
+    // The flattened optional field must not misread a missing image as
+    // present-but-malformed when the environment carries unrelated leftover
+    // keys the client doesn't know about yet.
+    let json = serde_json::json!({
+        "name": "forward-compat-env",
+        "github_repos": [],
+        "future_field": {"anything": "goes"},
+        "another_unknown": 42,
+    });
+
+    let env: AmbientAgentEnvironment = serde_json::from_value(json).unwrap();
+    assert_eq!(env.name, "forward-compat-env");
+    assert_eq!(env.base_image, None);
+}
+
+#[test]
+fn serialize_environment_without_docker_image_omits_field() {
+    let mut env =
+        AmbientAgentEnvironment::new("no-image".into(), None, vec![], "ignored".into(), vec![]);
+    env.base_image = None;
+
+    let json = serde_json::to_value(&env).unwrap();
+    assert!(
+        !json.as_object().unwrap().contains_key("docker_image"),
+        "missing docker image must not serialize as null or an empty string: {json}",
+    );
+}
+
+#[test]
+fn serialize_environment_with_docker_image_preserves_wire_format() {
+    let env = AmbientAgentEnvironment::new(
+        "with-image".into(),
+        None,
+        vec![],
+        "ubuntu:latest".into(),
+        vec![],
+    );
+
+    let json = serde_json::to_value(&env).unwrap();
+    // The image must remain a top-level string, exactly as before the field
+    // was made optional.
+    assert_eq!(
+        json.get("docker_image").unwrap().as_str().unwrap(),
+        "ubuntu:latest"
+    );
+}
+
+#[test]
+fn roundtrip_serde_without_docker_image() {
+    let mut env = AmbientAgentEnvironment::new(
+        "rt-no-image".into(),
+        Some("desc".into()),
+        vec![GithubRepo::new("owner".into(), "repo".into())],
+        "unused".into(),
+        vec!["make build".into()],
+    );
+    env.base_image = None;
+
+    let serialized = serde_json::to_string(&env).unwrap();
+    assert!(
+        !serialized.contains("docker_image"),
+        "round-trip source must not contain docker_image: {serialized}",
+    );
+    let deserialized: AmbientAgentEnvironment = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(env, deserialized);
+    assert_eq!(deserialized.base_image, None);
 }
