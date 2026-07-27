@@ -83,7 +83,8 @@ use command_corrections::rules::{Rule, RuleId as CommandCorrectionsRuleId};
 use command_corrections::{Command, Correction, HistoryItem, SessionMetadata, correct_command};
 use enclose::enclose;
 pub use init::{
-    CANCEL_COMMAND_KEYBINDING, TOGGLE_AUTOEXECUTE_MODE_KEYBINDING,
+    CANCEL_COMMAND_KEYBINDING, NAVIGATE_TO_NEXT_AGENT_QUERY_KEYBINDING,
+    NAVIGATE_TO_PREVIOUS_AGENT_QUERY_KEYBINDING, TOGGLE_AUTOEXECUTE_MODE_KEYBINDING,
     TOGGLE_HIDE_CLI_RESPONSES_KEYBINDING, TOGGLE_QUEUE_NEXT_PROMPT_KEYBINDING, init,
 };
 use init::{INPUT_BOX_VISIBLE_KEY, TOGGLE_BLOCK_FILTER_KEYBINDING};
@@ -203,7 +204,9 @@ use super::{CLIAgent, GridType, cli_agent};
 #[cfg(any(test, feature = "integration_tests"))]
 use crate::ai::agent::UserQueryMode;
 use crate::ai::agent::api::ServerConversationToken;
-use crate::ai::agent::conversation::{AIConversation, AIConversationId, ConversationStatus};
+use crate::ai::agent::conversation::{
+    AIConversation, AIConversationAnchor, AIConversationId, ConversationStatus,
+};
 use crate::ai::agent::redaction::redact_secrets;
 use crate::ai::agent::todos::popup::{AgentTodosPopupEvent, AgentTodosPopupView};
 use crate::ai::agent::{
@@ -2921,6 +2924,11 @@ pub struct BlockSelectionDetails {
     is_cmd_down: bool,
     is_shift_down: bool,
 }
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum AgentQueryNavigationDirection {
+    Previous,
+    Next,
+}
 
 /// Why `apply_block_metadata_update` is being invoked. The two sources have
 /// different cardinalities — precmd fires exactly once per block, whereas OSC 7
@@ -4959,7 +4967,7 @@ impl TerminalView {
                 BlocklistAIHistoryModel::as_ref(ctx),
             )
         else {
-            return;
+            return false;
         };
         QueuedQueryModel::handle(ctx).update(ctx, |model, _ctx| {
             model.clear_command_in_flight(conversation_id);
@@ -16092,8 +16100,10 @@ impl TerminalView {
         // block exists, so scroll to it — once. Doing it here (after layout, after
         // the agent view's own entry scroll) means a single shot lands without any
         // retry loop. Each agent turn is one block, so this lands on its top.
-        if let Some(exchange_id) = self.pending_agent_scroll_target.take() {
-            self.scroll_to_exchange(exchange_id, ctx);
+        if let Some(exchange_id) = self.pending_agent_scroll_target
+            && self.scroll_to_exchange(exchange_id, ctx)
+        {
+            self.pending_agent_scroll_target = None;
         }
 
         let size_update = SizeUpdateBuilder::after_layout(*self.size_info, size).build(self, ctx);
@@ -22372,7 +22382,9 @@ impl TerminalView {
             == Some(conversation_id);
         if already_in_view {
             // Blocks are already mounted, so the exchange resolves immediately.
-            self.scroll_to_exchange(exchange_id, ctx);
+            if !self.scroll_to_exchange(exchange_id, ctx) {
+                self.pending_agent_scroll_target = Some(exchange_id);
+            }
         } else {
             self.enter_agent_view_for_conversation(
                 None,
@@ -22388,6 +22400,94 @@ impl TerminalView {
             self.pending_agent_scroll_target = Some(exchange_id);
         }
         send_telemetry_from_ctx!(TelemetryEvent::JumpToLatestAgentMessage, ctx);
+    }
+
+    fn navigate_agent_query(
+        &mut self,
+        direction: AgentQueryNavigationDirection,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if !FeatureFlag::AgentView.is_enabled() {
+            return;
+        }
+
+        let Some(conversation_id) = self
+            .agent_view_controller
+            .as_ref(ctx)
+            .agent_view_state()
+            .active_conversation_id()
+        else {
+            return;
+        };
+
+        let history = BlocklistAIHistoryModel::as_ref(ctx);
+        let Some(conversation) = history.conversation(&conversation_id) else {
+            return;
+        };
+
+        let input_mode = InputMode::PinnedToBottom;
+        let mounted_exchange_positions = {
+            let model = self.model.lock();
+            let viewport = self.viewport_state(model.block_list(), input_mode, ctx);
+            self.rich_content_views
+                .iter()
+                .filter_map(|rich_content| {
+                    let metadata = rich_content.ai_block_metadata()?;
+                    if metadata.conversation_id != conversation_id
+                        || !AIConversationAnchor::UserQuery
+                            .matches(conversation.exchange_with_id(metadata.exchange_id)?)
+                    {
+                        return None;
+                    }
+                    let index = model.block_list().removable_blocklist_item_position(
+                        &RemovableBlocklistItem::RichContent(rich_content.view_id()),
+                    )?;
+                    let (top, _) = viewport.rich_content_scroll_bounds(*index);
+                    Some((metadata.exchange_id, top))
+                })
+                .collect::<Vec<_>>()
+        };
+
+        if mounted_exchange_positions.is_empty() {
+            return;
+        }
+
+        let scroll_top = {
+            let model = self.model.lock();
+            self.viewport_state(model.block_list(), input_mode, ctx)
+                .scroll_top_in_lines()
+        };
+        let current_exchange_id = mounted_exchange_positions
+            .iter()
+            .filter(|(_, top)| *top <= scroll_top)
+            .max_by(|(_, left), (_, right)| {
+                left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .or_else(|| mounted_exchange_positions.first())
+            .map(|(exchange_id, _)| *exchange_id);
+        let Some(current_exchange_id) = current_exchange_id else {
+            return;
+        };
+
+        let target_exchange_id = match direction {
+            AgentQueryNavigationDirection::Previous => conversation
+                .previous_anchor(AIConversationAnchor::UserQuery, current_exchange_id)
+                .map(|exchange| exchange.id),
+            AgentQueryNavigationDirection::Next => conversation
+                .next_anchor(AIConversationAnchor::UserQuery, current_exchange_id)
+                .map(|exchange| exchange.id),
+        };
+        let Some(target_exchange_id) = target_exchange_id else {
+            return;
+        };
+
+        if !self.scroll_to_exchange(target_exchange_id, ctx) {
+            // A conversation can mount its rich-content blocks asynchronously. Keep the
+            // exchange ID so the next layout retries once the target block exists.
+            self.pending_agent_scroll_target = Some(target_exchange_id);
+        } else {
+            self.pending_agent_scroll_target = None;
+        }
     }
 
     fn terminal_down(&mut self, ctx: &mut ViewContext<Self>) {
@@ -22575,14 +22675,18 @@ impl TerminalView {
     }
 
     /// Scrolls the view to the AI block associated with the given exchange ID.
-    fn scroll_to_exchange(&mut self, exchange_id: AIAgentExchangeId, ctx: &mut ViewContext<Self>) {
+    fn scroll_to_exchange(
+        &mut self,
+        exchange_id: AIAgentExchangeId,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
         // Find the rich content view with the matching exchange_id.
         let Some(view_id) = self.rich_content_views.iter().find_map(|rc| {
             rc.ai_block_metadata()
                 .filter(|meta| meta.exchange_id == exchange_id)
                 .map(|_| rc.view_id())
         }) else {
-            return;
+            return false;
         };
 
         // Get the TotalIndex from the model.
@@ -22593,13 +22697,14 @@ impl TerminalView {
             .removable_blocklist_item_position(&RemovableBlocklistItem::RichContent(view_id))
             .copied()
         else {
-            return;
+            return false;
         };
 
         self.update_scroll_position_locking(
             ScrollPositionUpdate::ScrollToTopOfRichContent { index },
             ctx,
         );
+        true
     }
 
     #[cfg(any(test, feature = "integration_tests"))]
@@ -25957,6 +26062,8 @@ impl TypedActionView for TerminalView {
             | SelectBookmarkUp
             | SelectBookmarkDown
             | JumpToLatestAgentMessage
+            | NavigateToPreviousAgentQuery
+            | NavigateToNextAgentQuery
             | Up
             | Down
             | JumpToBookmark(_)
@@ -26477,6 +26584,12 @@ impl TypedActionView for TerminalView {
                 InputMode::PinnedToTop => self.bookmark_up(ctx),
             },
             JumpToLatestAgentMessage => self.jump_to_latest_agent_message(ctx),
+            NavigateToPreviousAgentQuery => {
+                self.navigate_agent_query(AgentQueryNavigationDirection::Previous, ctx)
+            }
+            NavigateToNextAgentQuery => {
+                self.navigate_agent_query(AgentQueryNavigationDirection::Next, ctx)
+            }
             BookmarkSelectedBlock => self.bookmark_selected_block(ctx),
             UserInputSequence(bytes) => self.user_input_sequence(bytes, ctx),
             ControlSequence(bytes) => self.control_sequence_on_terminal(bytes, ctx),

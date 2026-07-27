@@ -6,8 +6,8 @@ use warp_multi_agent_api as api;
 use warpui::{App, SingletonEntity};
 
 use super::{
-    AIConversation, AIConversationAutoexecuteMode, AIConversationId, ConversationStatus,
-    ConversationUsageTotals, RecordingSpanStatus, RestoreConversationError,
+    AIConversation, AIConversationAnchor, AIConversationAutoexecuteMode, AIConversationId,
+    ConversationStatus, ConversationUsageTotals, RecordingSpanStatus, RestoreConversationError,
     artifact_from_fork_proto, footer_model_token_usage,
 };
 use crate::ai::artifacts::Artifact;
@@ -34,6 +34,53 @@ fn restored_conversation(conversation_data: Option<AgentConversationData>) -> AI
         conversation_data,
     )
     .unwrap()
+}
+
+#[test]
+fn query_anchor_navigation_skips_exchanges_without_user_queries() {
+    let messages = vec![
+        user_query_message("user-0", "request-0", "first"),
+        agent_output_message("agent-0", "request-0"),
+        agent_output_message("agent-between", "request-between"),
+        user_query_message("user-1", "request-1", "second"),
+        agent_output_message("agent-1", "request-1"),
+        user_query_message("user-2", "request-2", "third"),
+        agent_output_message("agent-2", "request-2"),
+    ];
+    let conversation = restored_conversation_with_messages(messages);
+    let exchanges = conversation.all_exchanges();
+    assert_eq!(exchanges.len(), 4);
+    assert!(exchanges[0].has_user_query());
+    assert!(!exchanges[1].has_user_query());
+    assert!(exchanges[2].has_user_query());
+    assert!(exchanges[3].has_user_query());
+
+    let previous = conversation
+        .previous_anchor(AIConversationAnchor::UserQuery, exchanges[2].id)
+        .expect("second query should have a previous query anchor");
+    assert_eq!(previous.id, exchanges[0].id);
+
+    let next = conversation
+        .next_anchor(AIConversationAnchor::UserQuery, exchanges[0].id)
+        .expect("first query should have a next query anchor");
+    assert_eq!(next.id, exchanges[2].id);
+}
+
+#[test]
+fn query_anchor_navigation_returns_none_at_conversation_edges() {
+    let conversation = restored_conversation_with_queries(&["first", "second"]);
+    let exchanges = conversation.all_exchanges();
+
+    assert!(
+        conversation
+            .previous_anchor(AIConversationAnchor::UserQuery, exchanges[0].id)
+            .is_none()
+    );
+    assert!(
+        conversation
+            .next_anchor(AIConversationAnchor::UserQuery, exchanges[1].id)
+            .is_none()
+    );
 }
 
 fn restored_conversation_with_root_description(description: &str) -> AIConversation {

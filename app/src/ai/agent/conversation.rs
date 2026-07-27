@@ -104,6 +104,23 @@ pub enum RecordingSpanStatus {
     Active,
     Captured,
 }
+/// The semantic anchor used when navigating within an agent conversation.
+///
+/// Keeping the anchor predicate separate from the navigation entrypoint lets
+/// keybindings continue to use the same actions if navigation later switches
+/// from user queries to another exchange type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AIConversationAnchor {
+    UserQuery,
+}
+
+impl AIConversationAnchor {
+    pub fn matches(self, exchange: &AIAgentExchange) -> bool {
+        match self {
+            Self::UserQuery => exchange.has_user_query(),
+        }
+    }
+}
 
 fn footer_model_token_usage(
     usage_metadata: &stream_finished::ConversationUsageMetadata,
@@ -1513,6 +1530,40 @@ impl AIConversation {
             .root_task()
             .into_iter()
             .flat_map(|task| task.exchanges_reversed())
+    }
+    /// Returns the previous exchange matching `anchor` before `exchange_id`.
+    pub fn previous_anchor(
+        &self,
+        anchor: AIConversationAnchor,
+        exchange_id: AIAgentExchangeId,
+    ) -> Option<&AIAgentExchange> {
+        let mut previous = None;
+        for exchange in self.all_exchanges() {
+            if exchange.id == exchange_id {
+                return previous;
+            }
+            if anchor.matches(exchange) {
+                previous = Some(exchange);
+            }
+        }
+        None
+    }
+
+    /// Returns the next exchange matching `anchor` after `exchange_id`.
+    pub fn next_anchor(
+        &self,
+        anchor: AIConversationAnchor,
+        exchange_id: AIAgentExchangeId,
+    ) -> Option<&AIAgentExchange> {
+        let mut found_current = false;
+        self.all_exchanges().into_iter().find(|exchange| {
+            if found_current {
+                anchor.matches(exchange)
+            } else {
+                found_current = exchange.id == exchange_id;
+                false
+            }
+        })
     }
 
     #[cfg_attr(target_family = "wasm", allow(unused))]

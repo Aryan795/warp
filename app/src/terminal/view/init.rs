@@ -45,6 +45,9 @@ pub const CYCLE_NEXT_ORCHESTRATION_CHILD_AGENT_KEYBINDING: &str =
     "terminal:cycle_next_orchestration_child_agent";
 pub const CYCLE_PREVIOUS_ORCHESTRATION_CHILD_AGENT_KEYBINDING: &str =
     "terminal:cycle_previous_orchestration_child_agent";
+pub const NAVIGATE_TO_PREVIOUS_AGENT_QUERY_KEYBINDING: &str =
+    "terminal:navigate_to_previous_agent_query";
+pub const NAVIGATE_TO_NEXT_AGENT_QUERY_KEYBINDING: &str = "terminal:navigate_to_next_agent_query";
 
 const SELECT_NEXT_BLOCK_ACTION_NAME: &str = "terminal:select_next_block";
 pub const SELECT_PREVIOUS_BLOCK_ACTION_NAME: &str = "terminal:select_previous_block";
@@ -429,6 +432,22 @@ pub fn init(app: &mut AppContext) {
         .with_context_predicate(
             (id!("Terminal") | (id!("Input") & id!(flags::ACTIVE_AGENT_VIEW))) & !id!("IMEOpen"),
         ),
+        EditableBinding::new(
+            NAVIGATE_TO_PREVIOUS_AGENT_QUERY_KEYBINDING,
+            "Navigate to previous agent query",
+            TerminalAction::NavigateToPreviousAgentQuery,
+        )
+        .with_mac_key_binding("cmd-up")
+        .with_linux_or_windows_key_binding("ctrl-up")
+        .with_context_predicate(id!("Input") & id!(flags::ACTIVE_AGENT_VIEW) & !id!("IMEOpen")),
+        EditableBinding::new(
+            NAVIGATE_TO_NEXT_AGENT_QUERY_KEYBINDING,
+            "Navigate to next agent query",
+            TerminalAction::NavigateToNextAgentQuery,
+        )
+        .with_mac_key_binding("cmd-down")
+        .with_linux_or_windows_key_binding("ctrl-down")
+        .with_context_predicate(id!("Input") & id!(flags::ACTIVE_AGENT_VIEW) & !id!("IMEOpen")),
         EditableBinding::new(
             "terminal:open_block_list_context_menu_via_keybinding",
             "Open block context menu",
