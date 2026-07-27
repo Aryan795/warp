@@ -122,6 +122,54 @@ impl fmt::Display for BaseImage {
     }
 }
 
+/// Serde adapter that flattens an optional [`BaseImage`] to and from the
+/// top-level `docker_image` key.
+///
+/// Cloud environments are not required to pin a docker image. Historically the
+/// image was a required, flattened field, so an environment created without one
+/// would fail to deserialize on the client. This adapter keeps the exact legacy
+/// wire format for environments that do pin an image (`"docker_image": "<ref>"`)
+/// while treating a missing `docker_image` key as `None` rather than an error.
+///
+/// The custom module (rather than `#[serde(flatten, default)]`) sidesteps the
+/// serde flatten-with-default interaction (serde#1626): an externally tagged
+/// enum flattened behind an `Option` does not otherwise resolve a missing key
+/// to `None`.
+mod base_image_field {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::BaseImage;
+
+    /// Intermediate representation whose map layout matches the legacy wire
+    /// format once flattened into the parent object.
+    #[derive(Serialize, Deserialize)]
+    struct Repr {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        docker_image: Option<String>,
+    }
+
+    pub(super) fn serialize<S>(
+        value: &Option<BaseImage>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let docker_image = value
+            .as_ref()
+            .map(|BaseImage::DockerImage(image)| image.clone());
+        Repr { docker_image }.serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Option<BaseImage>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let Repr { docker_image } = Repr::deserialize(deserializer)?;
+        Ok(docker_image.map(BaseImage::DockerImage))
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct GcpProviderConfig {
     pub project_number: String,
@@ -181,9 +229,14 @@ pub struct AmbientAgentEnvironment {
     /// `github_repos`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_repos: Option<Vec<SourceRepo>>,
-    /// Base image specification
-    #[serde(flatten)]
-    pub base_image: BaseImage,
+    /// Base image specification.
+    ///
+    /// Optional: an environment is not required to pin a docker image. When
+    /// present it keeps the legacy wire format (`"docker_image": "<ref>"`);
+    /// when absent the `docker_image` key is omitted entirely and this
+    /// deserializes to `None`.
+    #[serde(flatten, with = "base_image_field")]
+    pub base_image: Option<BaseImage>,
     /// List of setup commands to run after cloning
     #[serde(default)]
     pub setup_commands: Vec<String>,
@@ -212,10 +265,19 @@ impl AmbientAgentEnvironment {
             code_forge: None,
             github_repos,
             source_repos: None,
-            base_image: BaseImage::DockerImage(docker_image),
+            base_image: Some(BaseImage::DockerImage(docker_image)),
             setup_commands,
             providers: ProvidersConfig::default(),
             secrets: None,
+        }
+    }
+
+    /// Returns the pinned docker image reference, if the environment specifies
+    /// one. Environments without a pinned image return `None`.
+    pub fn docker_image(&self) -> Option<&str> {
+        match &self.base_image {
+            Some(BaseImage::DockerImage(image)) => Some(image),
+            None => None,
         }
     }
 
