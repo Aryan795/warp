@@ -176,6 +176,12 @@ impl RunAgentsExecutor {
             return receiver;
         }
         let pending_plan_publications = prepare_plan_publications(parent_conversation_id, ctx);
+        log::info!(
+            "DANIEL: RunAgentsExecutor: dispatch_prepared_run_agents action_id={action_id:?} \
+             children={} pending_plan_publications={}",
+            request.agent_run_configs.len(),
+            pending_plan_publications.len()
+        );
 
         let snapshot = RunAgentsSpawningSnapshot {
             agent_count: request.agent_run_configs.len(),
@@ -198,8 +204,16 @@ impl RunAgentsExecutor {
             },
             move |me, request, ctx| {
                 if !me.is_pending(&action_id_for_wait) {
+                    log::info!(
+                        "DANIEL: RunAgentsExecutor: dispatch cancelled before children \
+                         dispatched for {action_id_for_wait:?}"
+                    );
                     return;
                 }
+                log::info!(
+                    "DANIEL: RunAgentsExecutor: plan publications resolved; dispatching \
+                     children for {action_id_for_wait:?}"
+                );
                 me.dispatch_children_for_prepared_request(
                     action_id_for_wait.clone(),
                     request,
@@ -238,6 +252,12 @@ impl RunAgentsExecutor {
             ..
         } = request;
 
+        log::info!(
+            "DANIEL: RunAgentsExecutor: dispatching {} children for {action_id:?} \
+             execution_mode={run_execution_mode:?} harness_type={harness_type:?} \
+             model_id={model_id:?}",
+            agent_run_configs.len()
+        );
         let mut slots: Vec<ChildSlot> = Vec::with_capacity(agent_run_configs.len());
         for cfg in &agent_run_configs {
             let prompt = compose_run_agents_child_prompt(&base_prompt, &cfg.prompt);
@@ -251,6 +271,10 @@ impl RunAgentsExecutor {
             ) {
                 Ok(mode) => mode,
                 Err(err) => {
+                    log::info!(
+                        "DANIEL: RunAgentsExecutor: child {:?} failed mode conversion: {err}",
+                        cfg.name
+                    );
                     slots.push(ChildSlot::Failed(err));
                     continue;
                 }
@@ -263,6 +287,10 @@ impl RunAgentsExecutor {
                 ));
                 continue;
             }
+            log::info!(
+                "DANIEL: RunAgentsExecutor: dispatching child {:?} via StartAgentExecutor",
+                cfg.name
+            );
             let recv = self.start_agent_executor.update(ctx, |executor, exec_ctx| {
                 executor.dispatch(
                     cfg.name.clone(),
@@ -287,7 +315,8 @@ impl RunAgentsExecutor {
         ctx.spawn(
             async move {
                 let mut outcomes: Vec<RunAgentsAgentOutcomeKind> = Vec::with_capacity(slots.len());
-                for slot in slots {
+                for (slot_index, slot) in slots.into_iter().enumerate() {
+                    log::info!("DANIEL: RunAgentsExecutor: awaiting outcome for slot {slot_index}");
                     let kind = match slot {
                         ChildSlot::Failed(error) => RunAgentsAgentOutcomeKind::Failed { error },
                         ChildSlot::Pending(recv) => {
@@ -324,6 +353,9 @@ impl RunAgentsExecutor {
                             }
                         }
                     };
+                    log::info!(
+                        "DANIEL: RunAgentsExecutor: slot {slot_index} resolved: {kind:?}"
+                    );
                     outcomes.push(kind);
                 }
                 outcomes
@@ -366,6 +398,7 @@ impl RunAgentsExecutor {
                 ctx.emit(RunAgentsExecutorEvent::SpawningFinished {
                     action_id: action_id_for_aggr,
                 });
+                log::info!("DANIEL: RunAgentsExecutor: sending aggregated result: {result:?}");
                 let _ = sender.try_send(result);
             },
         );
@@ -383,6 +416,10 @@ impl RunAgentsExecutor {
         let mut request = request.clone();
         let action_id = id.clone();
         let parent_conversation_id = input.conversation_id;
+        log::info!(
+            "DANIEL: RunAgentsExecutor: execute action_id={action_id:?} children={}",
+            request.agent_run_configs.len()
+        );
         if let Some(reason) = prepare_request_for_execution(
             &mut request,
             parent_conversation_id,
@@ -390,6 +427,7 @@ impl RunAgentsExecutor {
             &self.launched_agents,
             ctx,
         ) {
+            log::info!("DANIEL: RunAgentsExecutor: execution denied: {reason}");
             return ActionExecution::Sync(AIAgentActionResultType::RunAgents(
                 RunAgentsResult::Denied { reason },
             ));
@@ -401,8 +439,16 @@ impl RunAgentsExecutor {
         ActionExecution::new_async(
             async move { receiver.recv().await },
             |result, _| match result {
-                Ok(r) => AIAgentActionResultType::RunAgents(r),
-                Err(_) => AIAgentActionResultType::RunAgents(RunAgentsResult::Cancelled),
+                Ok(r) => {
+                    log::info!("DANIEL: RunAgentsExecutor: async execution finished with result");
+                    AIAgentActionResultType::RunAgents(r)
+                }
+                Err(_) => {
+                    log::info!(
+                        "DANIEL: RunAgentsExecutor: async execution channel closed; cancelled"
+                    );
+                    AIAgentActionResultType::RunAgents(RunAgentsResult::Cancelled)
+                }
             },
         )
     }

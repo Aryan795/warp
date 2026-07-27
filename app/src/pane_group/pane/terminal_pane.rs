@@ -1493,12 +1493,19 @@ fn dispatch_start_agent_conversation(
     request: StartAgentRequest,
     ctx: &mut ViewContext<PaneGroup>,
 ) {
+    log::info!(
+        "DANIEL: dispatch_start_agent_conversation request={:?} name={:?} mode={:?}",
+        request.id,
+        request.name,
+        std::mem::discriminant(&request.execution_mode)
+    );
     match request.execution_mode.clone() {
         #[cfg(not(target_family = "wasm"))]
         StartAgentExecutionMode::Local {
             harness_type: None,
             model_id,
         } => {
+            log::info!("DANIEL: dispatch_start_agent_conversation: local no-harness (Oz) child");
             launch_local_no_harness_child(group, parent_pane_id, request, model_id, ctx);
         }
         #[cfg(not(target_family = "wasm"))]
@@ -1599,6 +1606,7 @@ fn launch_local_no_harness_child(
         .terminal_view_from_pane_id(parent_pane_id, ctx)
         .and_then(|view| host_terminal_shared_session_source_type(&view, ctx));
 
+    log::info!("DANIEL: launch_local_no_harness_child: preparing launch (create_agent_task)");
     let launch = prepare_local_oz_child_launch(
         &request.name,
         &request.prompt,
@@ -1608,6 +1616,10 @@ fn launch_local_no_harness_child(
     let _ = ctx.spawn(launch, move |group, result, ctx| match result {
         Ok(prepared) => {
             let child_task_id = prepared.task_id;
+            log::info!(
+                "DANIEL: launch_local_no_harness_child: prepared task_id={child_task_id}; \
+                 creating hidden child pane"
+            );
             let is_shared_session_creator =
                 inherit_share_for_local_child(host_source.as_ref(), child_task_id);
 
@@ -1633,6 +1645,10 @@ fn launch_local_no_harness_child(
                     conversation_id,
                     ..
                 }) => {
+                    log::info!(
+                        "DANIEL: launch_local_no_harness_child: hidden child pane created, \
+                         conversation={conversation_id:?}; sending child query"
+                    );
                     apply_child_agent_model_override(terminal_view_id, model_id.as_deref(), ctx);
 
                     // Stamp the task id on the child conversation directly
@@ -1662,6 +1678,10 @@ fn launch_local_no_harness_child(
                                     ctx,
                                 );
                             });
+                        log::info!(
+                            "DANIEL: launch_local_no_harness_child: child query sent for \
+                             conversation={conversation_id:?}; entering agent view"
+                        );
 
                         terminal_view.enter_agent_view(
                             None,
@@ -1670,8 +1690,16 @@ fn launch_local_no_harness_child(
                             ctx,
                         );
                     });
+                    log::info!(
+                        "DANIEL: launch_local_no_harness_child: launch complete for \
+                         conversation={conversation_id:?}"
+                    );
                 }
                 _ => {
+                    log::info!(
+                        "DANIEL: launch_local_no_harness_child: failed to create hidden \
+                         child pane; surfacing error conversation"
+                    );
                     let _ = create_error_child_agent_conversation(
                         group,
                         ErrorChildAgentConversationRequest {
@@ -1690,6 +1718,7 @@ fn launch_local_no_harness_child(
             }
         }
         Err(error) => {
+            log::info!("DANIEL: launch_local_no_harness_child: prepare failed: {error}");
             let _ = create_error_child_agent_conversation(
                 group,
                 ErrorChildAgentConversationRequest {

@@ -81,6 +81,10 @@ impl StartAgentExecutor {
         let Some(pending) = self.pending.get_mut(&request_id) else {
             return;
         };
+        log::info!(
+            "DANIEL: StartAgentExecutor: recorded child conversation \
+             {child_conversation_id:?} for request {request_id:?}"
+        );
         pending.child_conversation_id = Some(child_conversation_id);
         self.maybe_complete_pending_for_child_state(request_id, child_conversation_id, ctx);
     }
@@ -106,6 +110,10 @@ impl StartAgentExecutor {
         let agent_id = BlocklistAIHistoryModel::as_ref(ctx)
             .conversation(&child_conversation_id)
             .and_then(|conversation| conversation.orchestration_agent_id());
+        log::info!(
+            "DANIEL: StartAgentExecutor: complete_pending_as_started request={request_id:?} \
+             child_conversation={child_conversation_id:?} agent_id={agent_id:?}"
+        );
         match agent_id {
             Some(id) => {
                 let _ = pending.sender.try_send(StartAgentOutcome::Started {
@@ -137,6 +145,10 @@ impl StartAgentExecutor {
         let Some(pending) = self.pending.remove(&request_id) else {
             return;
         };
+        log::info!(
+            "DANIEL: StartAgentExecutor: complete_pending_as_error request={request_id:?} \
+             child_conversation={child_conversation_id:?} error={error_msg}"
+        );
         let _ = pending.sender.try_send(StartAgentOutcome::Error(error_msg));
         // A child that reaches `complete_pending_as_error` never obtained an
         // agent id, so it failed at the launch stage. Clean up its hidden
@@ -255,6 +267,10 @@ impl StartAgentExecutor {
     ) -> async_channel::Receiver<StartAgentOutcome> {
         let (sender, receiver) = async_channel::bounded(1);
         let request_id = self.next_request_id();
+        log::info!(
+            "DANIEL: StartAgentExecutor: dispatch request={request_id:?} name={name:?}; \
+             emitting CreateAgent"
+        );
         self.pending.insert(
             request_id,
             PendingStartAgent {

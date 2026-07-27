@@ -107,11 +107,18 @@ pub(crate) fn create_hidden_child_agent_conversation(
         task_context,
         is_shared_session_creator,
     } = request;
+    log::info!(
+        "DANIEL: create_hidden_child_agent_conversation: inserting hidden terminal pane \
+         (parent_pane_id={parent_pane_id:?})"
+    );
     let new_pane_id = group.insert_terminal_pane_hidden_for_child_agent(
         parent_pane_id,
         env_vars,
         is_shared_session_creator,
         ctx,
+    );
+    log::info!(
+        "DANIEL: create_hidden_child_agent_conversation: inserted hidden pane {new_pane_id:?}"
     );
     let Some(new_terminal_view) = group.terminal_view_from_pane_id(new_pane_id, ctx) else {
         report_error!("Failed to get terminal view for new StartAgent pane");
@@ -140,6 +147,10 @@ pub(crate) fn create_hidden_child_agent_conversation(
         parent_conversation_id,
         orchestration_harness,
         ctx,
+    );
+    log::info!(
+        "DANIEL: create_hidden_child_agent_conversation: created child conversation \
+         {conversation_id:?} in pane {new_pane_id:?}"
     );
 
     group
