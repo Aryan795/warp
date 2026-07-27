@@ -29,6 +29,8 @@ struct GuardState {
 pub struct AgentRunSleepGuardModel {
     guards: HashMap<AIConversationId, GuardState>,
     expiry_timer: Option<SpawnedFutureHandle>,
+    #[cfg(test)]
+    now_for_test: Option<Instant>,
 }
 
 impl Entity for AgentRunSleepGuardModel {
@@ -46,6 +48,8 @@ impl AgentRunSleepGuardModel {
         Self {
             guards: HashMap::new(),
             expiry_timer: None,
+            #[cfg(test)]
+            now_for_test: None,
         }
     }
 
@@ -82,7 +86,7 @@ impl AgentRunSleepGuardModel {
             } => self.release(*conversation_id),
             _ => {}
         }
-        self.expire_guards_at(Instant::now(), ctx);
+        self.expire_guards_at(self.now(), ctx);
     }
 
     /// Refreshes the cap for a genuinely active conversation. If a previous
@@ -101,7 +105,7 @@ impl AgentRunSleepGuardModel {
         conversation_id: AIConversationId,
         ctx: &mut ModelContext<Self>,
     ) {
-        let deadline = Instant::now() + AGENT_RUN_SLEEP_GUARD_CAP;
+        let deadline = self.now() + AGENT_RUN_SLEEP_GUARD_CAP;
         if let Some(state) = self.guards.get_mut(&conversation_id) {
             state.deadline = deadline;
         } else {
@@ -130,9 +134,17 @@ impl AgentRunSleepGuardModel {
             },
             |me, _, ctx| {
                 me.expiry_timer = None;
-                me.expire_guards_at(Instant::now(), ctx);
+                me.expire_guards_at(me.now(), ctx);
             },
         ));
+    }
+
+    fn now(&self) -> Instant {
+        #[cfg(test)]
+        if let Some(now) = self.now_for_test {
+            return now;
+        }
+        Instant::now()
     }
 
     fn expire_guards_at(&mut self, now: Instant, ctx: &mut ModelContext<Self>) {
@@ -169,10 +181,8 @@ impl AgentRunSleepGuardModel {
     }
 
     #[cfg(test)]
-    fn set_deadline_for_test(&mut self, conversation_id: AIConversationId, deadline: Instant) {
-        if let Some(state) = self.guards.get_mut(&conversation_id) {
-            state.deadline = deadline;
-        }
+    pub(crate) fn set_now_for_test(&mut self, now: Instant) {
+        self.now_for_test = Some(now);
     }
 }
 
