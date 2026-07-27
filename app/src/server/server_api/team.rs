@@ -4,6 +4,7 @@ use cynic::{MutationBuilder, QueryBuilder};
 #[cfg(test)]
 use mockall::{automock, predicate::*};
 use thiserror::Error;
+use warp_errors::{ErrorExt, register_error};
 use warp_graphql::mutations::add_invite_link_domain_restriction::{
     AddInviteLinkDomainRestriction, AddInviteLinkDomainRestrictionInput,
     AddInviteLinkDomainRestrictionResult, AddInviteLinkDomainRestrictionVariables,
@@ -73,6 +74,13 @@ use crate::workspaces::workspace::Workspace;
 #[derive(Debug, Error)]
 #[error("{0}")]
 pub(crate) struct LeaveTeamUserFacingError(pub String);
+
+impl ErrorExt for LeaveTeamUserFacingError {
+    fn is_actionable(&self) -> bool {
+        false
+    }
+}
+register_error!(LeaveTeamUserFacingError);
 
 #[cfg_attr(test, automock)]
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
