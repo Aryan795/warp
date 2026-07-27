@@ -2074,6 +2074,11 @@ pub fn init(app: &mut AppContext) {
                 & !id!("IMEOpen")
                 & id!(flags::EMPTY_INPUT_BUFFER)
                 & id!(flags::ACTIVE_AGENT_VIEW)
+                // When editing a queued prompt, `?` should be inserted into the
+                // queued prompt editor rather than opening the shortcuts help
+                // panel. The queued editor is a descendant of `Input`, so it
+                // inherits this keymap context and would otherwise consume `?`.
+                & !id!(QUEUED_PROMPT_INLINE_EDITOR_OPEN_CONTEXT)
                 & !id!("LongRunningCommand")
                 & !(id!(flags::TERMINAL_MODE_INPUT) & id!(flags::LOCKED_INPUT)),
         )]);

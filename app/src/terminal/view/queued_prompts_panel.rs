@@ -703,6 +703,12 @@ impl QueuedPromptsPanelView {
             editor.set_buffer_text(text, ctx);
         });
     }
+
+    /// Test accessor: the view id of the inline edit editor, so tests can build the responder
+    /// chain that focuses it while a queued prompt is being edited.
+    pub(in crate::terminal) fn edit_editor_id_for_test(&self) -> EntityId {
+        self.edit_editor.id()
+    }
 }
 
 impl TypedActionView for QueuedPromptsPanelView {

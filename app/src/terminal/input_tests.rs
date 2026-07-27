@@ -1504,6 +1504,135 @@ fn empty_buffer_enter_sends_top_queued_prompt_then_next_on_repeat() {
     });
 }
 
+/// Regression test: pressing `?` while editing a queued prompt (empty regular input, non-empty
+/// queued prompt) must NOT open the Agent View shortcuts/help panel. The `shift-?` ->
+/// `ToggleAgentViewShortcuts` binding is registered against the `Input` context, and the
+/// queued-prompt inline editor is a descendant of `Input` in the responder chain, so without an
+/// explicit exclusion the ancestor `Input` binding would consume `?` and pop up the help panel
+/// instead of letting `?` be typed into the queued prompt being edited.
+#[test]
+fn question_mark_while_editing_queued_prompt_does_not_open_agent_shortcuts() {
+    App::test((), |mut app| async move {
+        // The shift-? binding is only registered when AgentView is enabled at init time, so the
+        // override must be in place before `initialize_app` runs `input::init`.
+        let _agent_view_flag = FeatureFlag::AgentView.override_enabled(true);
+        let _queue_flag = FeatureFlag::QueueSlashCommand.override_enabled(true);
+        initialize_app(&mut app);
+
+        let (window_id, terminal) =
+            add_window_with_bootstrapped_terminal_and_window_id(&mut app, None, None).await;
+        let terminal_view_id = terminal.read(&app, |view, _| view.id());
+        let input = terminal.read(&app, |view, _| view.input().clone());
+
+        // Enter fullscreen agent view so the `shift-?` shortcut binding is active.
+        let conversation_id = terminal.update(&mut app, |view, ctx| {
+            view.agent_view_controller().update(ctx, |controller, ctx| {
+                controller
+                    .try_enter_agent_view(
+                        None,
+                        AgentViewEntryOrigin::Input {
+                            was_prompt_autodetected: false,
+                        },
+                        ctx,
+                    )
+                    .expect("Should be able to enter agent view")
+            })
+        });
+
+        // Control: with an empty buffer in the active agent view and no queued-prompt edit in
+        // progress, `shift-?` opens the shortcuts panel. This proves the binding is live in the
+        // test harness so the assertion below isn't vacuously true.
+        let handled = app
+            .dispatch_keystroke(
+                window_id,
+                &[terminal_view_id, input.id()],
+                &Keystroke::parse("shift-?").unwrap(),
+                false,
+            )
+            .unwrap();
+        assert!(
+            handled,
+            "shift-? should open the shortcuts panel in an empty agent-view input"
+        );
+        input.read(&app, |input, ctx| {
+            assert!(
+                input
+                    .agent_shortcut_view_model
+                    .as_ref(ctx)
+                    .is_shortcut_view_open(),
+                "control: shortcuts panel should be open after shift-? with no queued edit"
+            );
+        });
+        // Reset the panel state before exercising the queued-prompt edit case.
+        input.update(&mut app, |input, ctx| {
+            input.agent_shortcut_view_model.update(ctx, |model, ctx| {
+                model.hide_shortcut_view(ctx);
+            });
+        });
+
+        // Queue a prompt and enter inline edit mode; the panel focuses its edit editor.
+        let query_id = QueuedQueryModel::handle(&app).update(&mut app, |model, ctx| {
+            let query = QueuedQuery::new("queued".to_owned(), QueuedQueryOrigin::QueueSlashCommand);
+            let id = query.id();
+            model.append(conversation_id, query, ctx);
+            id
+        });
+        QueuedQueryModel::handle(&app).update(&mut app, |model, ctx| {
+            model.enter_edit_mode(conversation_id, query_id, ctx);
+        });
+
+        // Grab the responder chain that mirrors production: the queued-prompt edit editor is
+        // focused, nested under the panel, which is nested under the Input.
+        let (panel_id, edit_editor_id) = input.read(&app, |input, ctx| {
+            let panel = input
+                .queued_prompts_panel()
+                .expect("queued prompts panel exists when QueueSlashCommand is enabled");
+            (panel.id(), panel.as_ref(ctx).edit_editor_id_for_test())
+        });
+
+        // Sanity: the regular input is empty and the Input keymap context reflects the exact
+        // scenario the buggy binding matched (empty buffer + active agent view + editing queued).
+        input.read(&app, |input, ctx| {
+            assert!(
+                input.buffer_text(ctx).is_empty(),
+                "regular input buffer must be empty while editing a queued prompt"
+            );
+            let km_ctx = input.keymap_context(ctx);
+            assert!(km_ctx.set.contains(flags::EMPTY_INPUT_BUFFER));
+            assert!(km_ctx.set.contains(flags::ACTIVE_AGENT_VIEW));
+            assert!(
+                km_ctx.set.contains(QUEUED_PROMPT_INLINE_EDITOR_OPEN_CONTEXT),
+                "editing a queued prompt must set the queued-editor keymap context"
+            );
+        });
+
+        // Press `shift-?` with the queued-prompt edit editor focused. The Input's shortcuts
+        // binding must be suppressed, so nothing consumes the keystroke and the help panel stays
+        // closed — leaving `?` free to be typed into the queued prompt.
+        let handled = app
+            .dispatch_keystroke(
+                window_id,
+                &[terminal_view_id, input.id(), panel_id, edit_editor_id],
+                &Keystroke::parse("shift-?").unwrap(),
+                false,
+            )
+            .unwrap();
+        assert!(
+            !handled,
+            "shift-? must not be consumed by the shortcuts binding while editing a queued prompt"
+        );
+        input.read(&app, |input, ctx| {
+            assert!(
+                !input
+                    .agent_shortcut_view_model
+                    .as_ref(ctx)
+                    .is_shortcut_view_open(),
+                "the shortcuts/help panel must NOT open when pressing ? while editing a queued prompt"
+            );
+        });
+    });
+}
+
 /// With the input in (default) shell mode and an empty buffer, Enter executes the top queued
 /// command row instead of submitting an empty shell command.
 #[test]
