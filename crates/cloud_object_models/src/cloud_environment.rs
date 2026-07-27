@@ -121,6 +121,37 @@ impl fmt::Display for BaseImage {
         }
     }
 }
+mod base_image_field {
+    use serde::ser::SerializeMap;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use super::BaseImage;
+
+    pub fn serialize<S>(base_image: &Option<BaseImage>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(usize::from(base_image.is_some())))?;
+        if let Some(BaseImage::DockerImage(docker_image)) = base_image {
+            map.serialize_entry("docker_image", docker_image)?;
+        }
+        map.end()
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<BaseImage>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct BaseImageField {
+            #[serde(default)]
+            docker_image: Option<String>,
+        }
+
+        let field = BaseImageField::deserialize(deserializer)?;
+        Ok(field.docker_image.map(BaseImage::DockerImage))
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct GcpProviderConfig {
@@ -182,8 +213,8 @@ pub struct AmbientAgentEnvironment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_repos: Option<Vec<SourceRepo>>,
     /// Base image specification
-    #[serde(flatten)]
-    pub base_image: BaseImage,
+    #[serde(flatten, with = "base_image_field")]
+    pub base_image: Option<BaseImage>,
     /// List of setup commands to run after cloning
     #[serde(default)]
     pub setup_commands: Vec<String>,
@@ -212,7 +243,7 @@ impl AmbientAgentEnvironment {
             code_forge: None,
             github_repos,
             source_repos: None,
-            base_image: BaseImage::DockerImage(docker_image),
+            base_image: Some(BaseImage::DockerImage(docker_image)),
             setup_commands,
             providers: ProvidersConfig::default(),
             secrets: None,

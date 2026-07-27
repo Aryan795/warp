@@ -28,9 +28,24 @@ fn deserialize_legacy_environment_without_providers() {
     );
     assert_eq!(
         env.base_image,
-        BaseImage::DockerImage("ubuntu:latest".into())
+        Some(BaseImage::DockerImage("ubuntu:latest".into()))
     );
     assert_eq!(env.setup_commands, vec!["echo hello"]);
+}
+
+#[test]
+fn deserialize_environment_without_docker_image() {
+    let json = serde_json::json!({
+        "name": "unpinned-env",
+        "github_repos": [],
+        "setup_commands": []
+    });
+
+    let env: AmbientAgentEnvironment = serde_json::from_value(json).unwrap();
+
+    assert_eq!(env.base_image, None);
+    let serialized = serde_json::to_value(&env).unwrap();
+    assert!(!serialized.as_object().unwrap().contains_key("docker_image"));
 }
 
 #[test]
@@ -93,6 +108,8 @@ fn legacy_environment_serialization_omits_provider_neutral_fields() {
 
     assert!(!json.as_object().unwrap().contains_key("code_forge"));
     assert!(!json.as_object().unwrap().contains_key("source_repos"));
+    assert!(!json.as_object().unwrap().contains_key("base_image"));
+    assert_eq!(json.get("docker_image").unwrap(), "ubuntu:latest");
 }
 
 #[test]
