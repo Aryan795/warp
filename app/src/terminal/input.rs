@@ -2075,6 +2075,10 @@ pub fn init(app: &mut AppContext) {
                 & id!(flags::EMPTY_INPUT_BUFFER)
                 & id!(flags::ACTIVE_AGENT_VIEW)
                 & !id!("LongRunningCommand")
+                // Exclude the queued-prompt inline editor (a descendant of
+                // `Input`): without this, the parent binding consumes `?` and
+                // raises the help panel instead of typing into the editor.
+                & !id!(QUEUED_PROMPT_INLINE_EDITOR_OPEN_CONTEXT)
                 & !(id!(flags::TERMINAL_MODE_INPUT) & id!(flags::LOCKED_INPUT)),
         )]);
     }
@@ -16339,6 +16343,18 @@ impl Input {
         self.agent_input_footer
             .as_ref(app)
             .cli_display_chip_kinds(app)
+    }
+
+    /// Test accessor: whether the Agent View shortcuts (help) panel is open.
+    pub fn agent_shortcut_view_is_open(&self, ctx: &AppContext) -> bool {
+        self.agent_shortcut_view_model
+            .as_ref(ctx)
+            .is_shortcut_view_open()
+    }
+
+    /// Test accessor: whether a queued prompt is currently being edited inline.
+    pub fn is_editing_queued_prompt_for_test(&self, ctx: &AppContext) -> bool {
+        self.is_editing_queued_prompt(ctx)
     }
 }
 

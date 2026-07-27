@@ -703,6 +703,12 @@ impl QueuedPromptsPanelView {
             editor.set_buffer_text(text, ctx);
         });
     }
+
+    /// Test accessor for the reusable inline edit editor, so tests can include
+    /// it in a keystroke-dispatch responder chain.
+    pub(in crate::terminal) fn edit_editor_for_test(&self) -> &ViewHandle<EditorView> {
+        &self.edit_editor
+    }
 }
 
 impl TypedActionView for QueuedPromptsPanelView {

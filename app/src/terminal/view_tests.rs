@@ -5984,6 +5984,143 @@ fn ctrl_g_toggles_cli_agent_rich_input_from_terminal_context() {
     })
 }
 
+/// Regression test: typing `?` while editing a queued prompt must NOT open the
+/// Agent View shortcuts (help) panel. The `shift-?` binding lives on the
+/// `Input` keymap context, and the queued-prompt inline editor is a descendant
+/// of `Input`, so without excluding `QueuedPromptInlineEditorOpen` the parent
+/// binding consumes the keystroke and raises the help panel instead of letting
+/// `?` flow to the focused queued-prompt editor.
+#[test]
+fn shift_question_mark_does_not_open_agent_help_while_editing_queued_prompt() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        app.add_singleton_model(ImportedConfigModel::new);
+        // Register keybindings so keystroke dispatch can match the shift-? binding.
+        app.update(|ctx| {
+            crate::terminal::init(ctx);
+            crate::terminal::input::init(ctx);
+            crate::editor::init(ctx);
+        });
+        let _agent_view = FeatureFlag::AgentView.override_enabled(true);
+        let _queue_flag = FeatureFlag::QueueSlashCommand.override_enabled(true);
+
+        let (window_id, terminal) = add_window_with_id_and_terminal(&mut app, None);
+
+        // Enter the agent view: this activates `ACTIVE_AGENT_VIEW`, puts the
+        // input in AI mode, and leaves the host input buffer empty
+        // (`EMPTY_INPUT_BUFFER`) — the state in which `shift-?` is bound to
+        // toggle the shortcuts panel.
+        let conversation_id = terminal.update(&mut app, |view, ctx| {
+            view.agent_view_controller().update(ctx, |controller, ctx| {
+                controller
+                    .try_enter_agent_view(
+                        None,
+                        AgentViewEntryOrigin::Input {
+                            was_prompt_autodetected: false,
+                        },
+                        ctx,
+                    )
+                    .expect("Should be able to enter agent view")
+            })
+        });
+
+        // Seed a queued prompt for the active conversation.
+        let query_id =
+            crate::ai::blocklist::QueuedQueryModel::handle(&app).update(&mut app, |model, ctx| {
+                model.append(
+                    conversation_id,
+                    crate::ai::blocklist::QueuedQuery::new(
+                        "queued prompt".to_owned(),
+                        crate::ai::blocklist::QueuedQueryOrigin::QueueSlashCommand,
+                    ),
+                    ctx,
+                )
+            });
+
+        let (input_id, panel_id, edit_editor_id) = terminal.read(&app, |view, ctx| {
+            let input = view.input().clone();
+            let buffer_empty = input.as_ref(ctx).buffer_text(ctx).is_empty();
+            assert!(
+                buffer_empty,
+                "host input should be empty after entering agent view"
+            );
+            let help_open = input.as_ref(ctx).agent_shortcut_view_is_open(ctx);
+            assert!(!help_open, "agent help panel should start closed");
+            let panel = input
+                .as_ref(ctx)
+                .queued_prompts_panel()
+                .expect("queue flag should create a queued prompts panel")
+                .clone();
+            (
+                input.id(),
+                panel.id(),
+                panel.as_ref(ctx).edit_editor_for_test().id(),
+            )
+        });
+
+        let panel = terminal.read(&app, |view, ctx| {
+            view.input()
+                .as_ref(ctx)
+                .queued_prompts_panel()
+                .expect("queue panel should exist")
+                .clone()
+        });
+
+        // Start inline editing the queued row. This focuses the queued-prompt
+        // inline editor (a descendant of `Input`) and marks the row as being
+        // edited, which sets `QueuedPromptInlineEditorOpen` on `Input`'s
+        // keymap context.
+        panel.update(&mut app, |panel, ctx| {
+            panel.handle_action(
+                &super::queued_prompts_panel::QueuedPromptsPanelAction::StartEditingRow(query_id),
+                ctx,
+            );
+        });
+        panel.read(&app, |panel, ctx| {
+            assert!(
+                panel.is_inline_edit_editor_focused(ctx),
+                "queued-prompt inline editor should be focused after starting edit"
+            );
+        });
+        terminal.read(&app, |view, ctx| {
+            let input = view.input().clone();
+            let is_editing = input.as_ref(ctx).is_editing_queued_prompt_for_test(ctx);
+            assert!(
+                is_editing,
+                "Input should report a queued prompt is being edited"
+            );
+        });
+
+        // Dispatch `shift-?` through the focused queued-prompt editor's
+        // responder chain. Before the fix the `Input`-level binding matched
+        // (opened the help panel, handled=true); after the fix the
+        // `QueuedPromptInlineEditorOpen` exclusion prevents the match, so the
+        // keystroke is not consumed by the help binding and flows to the
+        // editor like any other character.
+        let handled = app
+            .dispatch_keystroke(
+                window_id,
+                &[terminal.id(), input_id, panel_id, edit_editor_id],
+                &warpui::keymap::Keystroke::parse("shift-?").expect("valid keystroke"),
+                false,
+            )
+            .expect("dispatch should succeed");
+        assert!(
+            !handled,
+            "shift-? should not be consumed by the help binding while editing a queued prompt"
+        );
+
+        terminal.read(&app, |view, ctx| {
+            let input = view.input().clone();
+            let help_open = input.as_ref(ctx).agent_shortcut_view_is_open(ctx);
+            assert!(
+                !help_open,
+                "agent help panel must not open when '?' is typed while editing a queued prompt"
+            );
+        });
+    })
+}
+
 #[test]
 fn cli_agent_rich_input_hint_text_mentions_active_cli_agent() {
     App::test((), |mut app| async move {
