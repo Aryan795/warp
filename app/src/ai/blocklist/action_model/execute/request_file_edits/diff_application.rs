@@ -161,12 +161,11 @@ impl DiffApplicationError {
                 .join("\n")
         }
     }
+}
 
-    /// Format a list of errors for inclusion in the agent conversation.
-    #[allow(dead_code)]
-    pub fn error_for_conversation(errors: &Vec1<DiffApplicationError>) -> String {
-        Self::errors_to_conversation_message(errors.as_slice())
-    }
+/// Format a non-empty list of diff-application errors for inclusion in the agent conversation.
+pub(crate) fn errors_to_conversation_message(errors: &Vec1<DiffApplicationError>) -> String {
+    DiffApplicationError::errors_to_conversation_message(errors.as_slice())
 }
 
 /// The outcome of [`apply_edits`], carrying the diffs that were successfully processed
@@ -278,7 +277,7 @@ where
     // diff for a file that also has a reported error would be misleading — the
     // model would see a partial apply while the error message says nothing was
     // applied.  Only fully-successful files go into `applied_diffs`.
-    let failed_file_names: HashSet<&str> = result
+    let mut failed_file_names: HashSet<&str> = result
         .errors
         .iter()
         .filter_map(|e| match e {
@@ -293,6 +292,23 @@ where
             | DiffApplicationError::RemoteFileOperationsUnsupported => None,
         })
         .collect();
+
+    // Expand to cover both ends of any V4A rename-to-existing-target pair.
+    // If either the source (Delete) or the target (Update) path has an error
+    // from another operation in the batch, excluding only the erroring half
+    // would leave a half-applied rename (e.g. the source is deleted but the
+    // target write is dropped, losing content). Excluding the whole pair keeps
+    // the rename atomic.
+    let mut rename_pair_additions: Vec<&str> = Vec::new();
+    for (source, target) in &result.rename_pairs {
+        if failed_file_names.contains(source.as_str())
+            || failed_file_names.contains(target.as_str())
+        {
+            rename_pair_additions.push(source.as_str());
+            rename_pair_additions.push(target.as_str());
+        }
+    }
+    failed_file_names.extend(rename_pair_additions);
 
     let applied_diffs = result
         .diffs
@@ -325,6 +341,12 @@ struct DiffResult {
     errors: Vec<DiffApplicationError>,
     /// All warnings that occurred while applying diffs.
     warnings: Vec<DiffWarning>,
+    /// Source/target pairs from successful V4A rename-to-existing-target operations.
+    /// Each entry is (source_path, target_path). When either path in a pair has an
+    /// error from another operation in the same batch, both halves must be excluded
+    /// from `applied_diffs` together to avoid presenting a half-applied rename (e.g.
+    /// the source deletion without the target update).
+    rename_pairs: Vec<(String, String)>,
 }
 
 /// You generally want to use `apply_edits`, however, if you don't want to report telemetry or be as
@@ -849,7 +871,13 @@ async fn apply_v4a_update<F, Fut>(
             new_deltas.extend(source_deltas);
         }
 
-        // Create deletion diff for source file A
+        // Create deletion diff for source file A and update diff for target B.
+        // Record the pair so the partial-success filter can exclude both if either
+        // path has an error from another operation in this batch.
+        result
+            .rename_pairs
+            .push((file_path.clone(), rename_target.clone()));
+
         result.diffs.push(AIRequestedCodeDiff {
             file_name: file_path.clone(),
             diff_type: DiffType::deletion(source_num_lines),

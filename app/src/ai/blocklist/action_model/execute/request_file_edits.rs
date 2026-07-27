@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use apply_diff_model::ApplyDiffModel;
-use diff_application::DiffApplicationError;
 pub(crate) use diff_application::{ApplyEditsOutcome, FileReadResult, apply_edits};
+use diff_application::{DiffApplicationError, errors_to_conversation_message};
 use futures::FutureExt;
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
@@ -106,12 +106,12 @@ impl RequestFileEditsExecutor {
         // from the LLM.
         // If we don't do this, a failed diff application will block execution of the entire AI conversation
         // without any possibility of recovery.
+        //
+        // Note: partial-success batches are NOT auto-executed here — they contain successful diffs
+        // that still need to go through the normal `can_write_files` / user-acceptance gate.
         if self
             .diff_application_failures
             .contains_key(&input.action.id)
-            || self
-                .diff_application_partial_errors
-                .contains_key(&input.action.id)
         {
             return true;
         }
@@ -163,7 +163,7 @@ impl RequestFileEditsExecutor {
         if let Some(errors) = self.diff_application_failures.remove(id) {
             return ActionExecution::Sync(AIAgentActionResultType::RequestFileEdits(
                 RequestFileEditsResult::DiffApplicationFailed {
-                    error: DiffApplicationError::error_for_conversation(&errors),
+                    error: errors_to_conversation_message(&errors),
                 },
             ));
         }
@@ -214,13 +214,34 @@ impl RequestFileEditsExecutor {
             }
 
             // For a partial-success batch: some files were applied (shown to the user above)
-            // but others failed. Return a DiffApplicationFailed so the model knows to retry
-            // the failing files. The message names what succeeded so the model doesn't
-            // re-submit those.
+            // but others failed. Augment the Success result with the partial failure details
+            // so the model retains the full context of what changed (updated files, diff content,
+            // user edits) AND learns which files to retry — without masking save failures.
             if let Some(error_msg) = partial_error_msg {
-                return AIAgentActionResultType::RequestFileEdits(
-                    RequestFileEditsResult::DiffApplicationFailed { error: error_msg },
-                );
+                if let RequestFileEditsResult::Success {
+                    diff,
+                    updated_files,
+                    deleted_files,
+                    lines_added,
+                    lines_removed,
+                } = result
+                {
+                    let augmented_diff = format!(
+                        "{diff}\n\nNote: the following files could not be edited \
+                         (please retry only those):\n{error_msg}"
+                    );
+                    return AIAgentActionResultType::RequestFileEdits(
+                        RequestFileEditsResult::Success {
+                            diff: augmented_diff,
+                            updated_files,
+                            deleted_files,
+                            lines_added,
+                            lines_removed,
+                        },
+                    );
+                }
+                // accept_and_save itself failed for a reason other than a save error
+                // (e.g. Cancelled) — propagate that result as-is.
             }
 
             AIAgentActionResultType::RequestFileEdits(result)

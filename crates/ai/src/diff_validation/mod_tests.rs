@@ -304,6 +304,93 @@ fn test_find_similar_sections_out_of_bounds() {
     assert!(matches.is_empty());
 }
 
+/// Regression test for QUALITY-1253 (b338d92f evidence):
+/// A single-line search with a leading N| line-number prefix should match the
+/// same content without the prefix, even when the line number in the prefix
+/// does not match the actual line position in the file.
+#[test]
+fn test_single_line_n_pipe_prefixed_search_matches_clean_content() {
+    // Verbatim failing search from request b338d92f (prefix "100|", content on line 1 of test file).
+    let search = "100|Includes CRUD for suites/versions, tasks, configs, runs, trials; a `CreateSuiteVersion` that writes the suite row + its task/config child rows in one transaction; and `Mark\u{2026}ForDeletionByTeamIDs`.";
+    // File contains the SAME text WITHOUT the N| prefix.
+    let file_line = "Includes CRUD for suites/versions, tasks, configs, runs, trials; a `CreateSuiteVersion` that writes the suite row + its task/config child rows in one transaction; and `Mark\u{2026}ForDeletionByTeamIDs`.";
+    let new_content = "UPDATED_CRUD_CONTENT";
+
+    let input_diffs = vec![SearchAndReplace {
+        search: search.to_string(),
+        replace: new_content.to_string(),
+    }];
+    let diff = fuzzy_match_diffs("spec.md", &input_diffs, file_line);
+
+    // The prefix should be stripped and the content should match line 1.
+    assert!(
+        !deltas(&diff).is_empty(),
+        "Expected a delta but got none; failures: {:?}",
+        diff.failures
+    );
+    assert_eq!(deltas(&diff)[0].insertion, new_content);
+    assert!(
+        diff.failures.is_none(),
+        "Expected no failures, got: {:?}",
+        diff.failures
+    );
+}
+
+/// Stale-line-number edge case: the line number in the N| prefix (100) is larger
+/// than the file size (5 lines). The local window search cannot run, so the
+/// global fallback must find the content. This is the realistic condition when
+/// a large spec file is rewritten (line count shrinks) and the model's saved
+/// line numbers are stale.
+#[test]
+fn test_single_line_n_pipe_stale_line_number_uses_global_fallback() {
+    // File has only 5 lines; search prefix says line 100.
+    let file_content =
+        "line one\nline two\nline three\nline four\nIncludes CRUD for suites/versions.";
+    let search = "100|Includes CRUD for suites/versions.";
+    let input_diffs = vec![SearchAndReplace {
+        search: search.to_string(),
+        replace: "UPDATED CRUD".to_string(),
+    }];
+    let diff = fuzzy_match_diffs("spec.md", &input_diffs, file_content);
+    // The global fallback must find "Includes CRUD..." at line 5.
+    assert!(
+        !deltas(&diff).is_empty(),
+        "Expected a delta from the global fallback, failures: {:?}",
+        diff.failures
+    );
+    assert_eq!(deltas(&diff)[0].replacement_line_range, 5..6);
+    assert_eq!(deltas(&diff)[0].insertion, "UPDATED CRUD");
+    assert!(diff.failures.is_none());
+}
+
+/// Verbatim indented-prefix case from the same evidence:
+/// `117|  - \`Apply\`` where the N| prefix precedes the leading whitespace.
+#[test]
+fn test_single_line_n_pipe_with_indented_content_matches() {
+    // The prefix sits BEFORE the indentation ("117|  - ...").
+    let search = "117|  - `Apply` (mutations via the `syncauth.Applier`): upsert a **new suite version** (max(version)+1 for the uid) with its task/config rows, in the caller's tx.";
+    let file_line = "  - `Apply` (mutations via the `syncauth.Applier`): upsert a **new suite version** (max(version)+1 for the uid) with its task/config rows, in the caller's tx.";
+    let new_content = "  - `Apply` (mutations via UPDATED path): upsert a **new suite version**.";
+
+    let input_diffs = vec![SearchAndReplace {
+        search: search.to_string(),
+        replace: new_content.to_string(),
+    }];
+    let diff = fuzzy_match_diffs("spec.md", &input_diffs, file_line);
+
+    assert!(
+        !deltas(&diff).is_empty(),
+        "Expected a delta for indented N|-prefixed search but got none; failures: {:?}",
+        diff.failures
+    );
+    assert_eq!(deltas(&diff)[0].insertion, new_content);
+    assert!(
+        diff.failures.is_none(),
+        "Expected no failures, got: {:?}",
+        diff.failures
+    );
+}
+
 #[test]
 fn test_v4a_exact_match() {
     let hunks = vec![V4AHunk {

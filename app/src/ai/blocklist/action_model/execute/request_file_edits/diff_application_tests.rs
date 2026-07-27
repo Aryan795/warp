@@ -46,6 +46,7 @@ fn test_apply_diffs_error_when_no_diffs_applied() {
         let file_path = temp_file.path().to_string_lossy().to_string();
         writeln!(&mut temp_file, "First line\nSecond line\n").unwrap();
 
+        // Create a diff that won't match the file content.
         let invalid_diff = ParsedDiff::StrReplaceEdit {
             file: Some(file_path.clone()),
             search: Some("1|This content doesn't exist in the file".to_string()),
@@ -80,6 +81,7 @@ fn test_apply_diffs_succeeds_with_valid_diff() {
         let file_path = temp_file.path().to_string_lossy().to_string();
         writeln!(&mut temp_file, "First line\nSecond line\n").unwrap();
 
+        // Create a valid diff
         let valid_diff = ParsedDiff::StrReplaceEdit {
             file: Some(file_path.clone()),
             search: Some("1|First line".to_string()),
@@ -188,6 +190,8 @@ fn test_apply_diffs_with_new_file() {
 fn test_apply_diffs_with_missing_file() {
     App::test((), |app| async move {
         let non_existent_file = "non_existent_file.txt".to_string();
+
+        // Create a diff for a non-existent file with non-empty search (should fail)
         let invalid_non_existent_diff = ParsedDiff::StrReplaceEdit {
             file: Some(non_existent_file.clone()),
             search: Some("1|Some content".to_string()),
@@ -214,11 +218,105 @@ fn test_apply_diffs_with_missing_file() {
     });
 }
 
-/// Regression test for QUALITY-1253.
+/// Regression test for QUALITY-1253 (request b338d92f evidence):
+/// A StrReplaceEdit whose `search` field carries a single N| line-number prefix
+/// (e.g. "100|content") should match the same content in the file even though
+/// the file has no N| prefix. This is the exact failure mode observed in staging:
+/// apply-diffs rejected the diff while a Python `text.replace(old, new)` using
+/// the cleaned string succeeded in the same session.
+#[test]
+fn test_single_line_n_pipe_prefixed_search_via_apply_edits() {
+    App::test((), |app| async move {
+        let mut temp_file = NamedTempFile::new().expect("Failed to create temporary file");
+        let file_path = temp_file.path().to_string_lossy().to_string();
+        // File content has NO N| prefix — exactly what's in the real spec files.
+        writeln!(
+            &mut temp_file,
+            "Includes CRUD for suites/versions, tasks, configs, runs, trials; a `CreateSuiteVersion` that writes the suite row + its task/config child rows in one transaction; and `Mark\u{2026}ForDeletionByTeamIDs`."
+        ).unwrap();
+
+        // The apply-diffs search carries the N| prefix that parse_line_numbers should strip.
+        let diff = ParsedDiff::StrReplaceEdit {
+            file: Some(file_path.clone()),
+            search: Some("100|Includes CRUD for suites/versions, tasks, configs, runs, trials; a `CreateSuiteVersion` that writes the suite row + its task/config child rows in one transaction; and `Mark\u{2026}ForDeletionByTeamIDs`.".to_string()),
+            replace: Some("UPDATED CRUD line".to_string()),
+        };
+
+        let outcome = apply_edits(
+            vec![FileEdit::Edit(diff)],
+            &SessionContext::new_for_test(),
+            &AIIdentifiers::default(),
+            app.background_executor(),
+            Arc::new(AuthState::new_for_test()),
+            false,
+            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+        )
+        .await;
+
+        let diffs = assert_success(outcome);
+        assert_eq!(
+            diffs.len(),
+            1,
+            "Expected the N|-prefixed search to produce one applied diff"
+        );
+        let deltas = update_deltas(&diffs[0]);
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].insertion, "UPDATED CRUD line");
+    });
+}
+
+/// Verbatim indented case from the same evidence: N| prefix before indentation.
+#[test]
+fn test_indented_n_pipe_prefixed_search_via_apply_edits() {
+    App::test((), |app| async move {
+        let mut temp_file = NamedTempFile::new().expect("Failed to create temporary file");
+        let file_path = temp_file.path().to_string_lossy().to_string();
+        writeln!(
+            &mut temp_file,
+            "  - `Apply` (mutations via the `syncauth.Applier`): upsert a **new suite version** (max(version)+1 for the uid) with its task/config rows, in the caller's tx."
+        ).unwrap();
+
+        // The N| prefix "117|" precedes the leading indentation "  - `Apply`".
+        let diff = ParsedDiff::StrReplaceEdit {
+            file: Some(file_path.clone()),
+            search: Some("117|  - `Apply` (mutations via the `syncauth.Applier`): upsert a **new suite version** (max(version)+1 for the uid) with its task/config rows, in the caller's tx.".to_string()),
+            replace: Some("  - `Apply` (mutations via UPDATED path): upsert a **new suite version**.".to_string()),
+        };
+
+        let outcome = apply_edits(
+            vec![FileEdit::Edit(diff)],
+            &SessionContext::new_for_test(),
+            &AIIdentifiers::default(),
+            app.background_executor(),
+            Arc::new(AuthState::new_for_test()),
+            false,
+            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+        )
+        .await;
+
+        let diffs = assert_success(outcome);
+        assert_eq!(
+            diffs.len(),
+            1,
+            "Expected the indented N|-prefixed search to produce one applied diff"
+        );
+        let deltas = update_deltas(&diffs[0]);
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(
+            deltas[0].insertion,
+            "  - `Apply` (mutations via UPDATED path): upsert a **new suite version**."
+        );
+    });
+}
+
+/// Regression test for QUALITY-1253: a multi-file batch where some files match
+/// and others do not should apply the matching files and report only the failures,
+/// rather than discarding the whole batch.
 ///
-/// When a multi-file batch has some files that match and others that do not,
-/// the matching files should be returned in `applied_diffs` and the failing
-/// files should appear in `errors` — instead of discarding the whole batch.
+/// Reproduces the staging failure in conversation 09d2ec39: the model emitted a
+/// mixed batch of PRODUCT.md hunks (all matched) and TECH.md hunks (none matched).
+/// Previously the entire batch was discarded and only a thin TECH.md error was
+/// returned; the PRODUCT.md edits were silently dropped.
 #[test]
 fn test_multi_file_batch_applies_successful_files_when_some_fail() {
     App::test((), |app| async move {
@@ -371,6 +469,7 @@ fn test_multiple_file_create_edits_for_same_path() {
     App::test((), |app| async move {
         let file_path = "new_file.txt".to_string();
 
+        // Create two FileEdit::Create edits for the same file path
         let outcome = apply_edits(
             vec![
                 FileEdit::Create {
@@ -444,6 +543,7 @@ fn test_delete_and_create_same_path_replaces_existing_file() {
         let file_path = temp_file.path().to_string_lossy().to_string();
         writeln!(&mut temp_file, "Old line one\nOld line two").unwrap();
 
+        // Combining a delete and create for the same path is treated as a full-file replacement.
         let outcome = apply_edits(
             vec![
                 FileEdit::Delete {
@@ -556,10 +656,12 @@ fn test_delete_create_and_edit_same_path_still_fails() {
 #[test]
 fn test_create_edit_for_existing_file() {
     App::test((), |app| async move {
+        // Create a temporary file that already exists
         let mut temp_file = NamedTempFile::new().expect("Failed to create temporary file");
         let file_path = temp_file.path().to_string_lossy().to_string();
         writeln!(&mut temp_file, "Existing content").unwrap();
 
+        // Try to create a file that already exists
         let outcome = apply_edits(
             vec![FileEdit::Create {
                 file: Some(file_path.clone()),
@@ -586,7 +688,6 @@ fn test_create_edit_for_existing_file() {
 
 #[test]
 fn test_format_match_error() {
-    // Single unmatched search block
     let err = DiffApplicationError::UnmatchedDiffs {
         file: "file.txt".to_string(),
         match_failures: DiffMatchFailures {
@@ -595,21 +696,14 @@ fn test_format_match_error() {
             missing_line_numbers: 0,
         },
     };
-    let msg = err.to_conversation_message();
-    assert!(
-        msg.contains("1 search block"),
-        "Should mention count: {msg}"
-    );
-    assert!(
-        msg.contains("file.txt"),
-        "Should mention the file name: {msg}"
-    );
-    assert!(
-        msg.contains("Re-read") || msg.contains("re-read"),
-        "Should include recovery hint: {msg}"
+
+    assert_eq!(
+        err.to_conversation_message(),
+        "1 search block did not match the current content of file.txt \u{2014} \
+         the file may have changed since the search blocks were generated. \
+         Re-read the file and update the search blocks before retrying."
     );
 
-    // Single noop delta
     let err = DiffApplicationError::UnmatchedDiffs {
         file: "file.txt".to_string(),
         match_failures: DiffMatchFailures {
@@ -618,13 +712,12 @@ fn test_format_match_error() {
             missing_line_numbers: 0,
         },
     };
-    let msg = err.to_conversation_message();
-    assert!(
-        msg.contains("1 change") || msg.contains("already been applied"),
-        "Should mention already applied: {msg}"
+
+    assert_eq!(
+        err.to_conversation_message(),
+        "1 change to file.txt has already been applied."
     );
 
-    // Both failures and noops — the message should cover both
     let err = DiffApplicationError::UnmatchedDiffs {
         file: "file.txt".to_string(),
         match_failures: DiffMatchFailures {
@@ -633,14 +726,13 @@ fn test_format_match_error() {
             missing_line_numbers: 0,
         },
     };
-    let msg = err.to_conversation_message();
-    assert!(
-        msg.contains("2 search block"),
-        "Should mention the unmatched count: {msg}"
-    );
-    assert!(
-        msg.contains("2 change") || msg.contains("already"),
-        "Should mention the already-applied count: {msg}"
+
+    assert_eq!(
+        err.to_conversation_message(),
+        "2 search blocks did not match the current content of file.txt \u{2014} \
+         the file may have changed since the search blocks were generated. \
+         Re-read the file and update the search blocks before retrying. \
+         2 changes to file.txt have already been applied."
     );
 }
 
@@ -650,14 +742,10 @@ fn test_format_already_exists_message_includes_recovery_hint() {
         file: "spec.md".to_string(),
     };
 
-    let msg = err.to_conversation_message();
-    assert!(
-        msg.contains("already exists"),
-        "Message should mention the file exists: {msg}"
-    );
-    assert!(
-        msg.contains("search-and-replace") || msg.contains("update"),
-        "Message should hint at recovery: {msg}"
+    assert_eq!(
+        err.to_conversation_message(),
+        "Could not create spec.md because it already exists. \
+         Use search-and-replace or an update operation to modify the existing file."
     );
 }
 
@@ -677,16 +765,13 @@ fn test_format_multiple_errors() {
         },
     ];
 
-    let msg = DiffApplicationError::error_for_conversation(&errs);
-    assert!(
-        msg.contains("* missing.rs does not exist"),
-        "Should list missing file error: {msg}"
+    assert_eq!(
+        errors_to_conversation_message(&errs),
+        "* missing.rs does not exist. Is the path correct?\n\
+         * 1 search block did not match the current content of unmatched.rs \u{2014} \
+         the file may have changed since the search blocks were generated. \
+         Re-read the file and update the search blocks before retrying."
     );
-    assert!(
-        msg.contains("* 1 search block"),
-        "Should list unmatched block count: {msg}"
-    );
-    assert!(msg.contains("unmatched.rs"), "Should name the file: {msg}");
 }
 
 #[test]
@@ -697,7 +782,7 @@ fn test_format_single_errors() {
     },];
 
     assert_eq!(
-        DiffApplicationError::error_for_conversation(&errs),
+        errors_to_conversation_message(&errs),
         "Could not read no_permissions.scala"
     );
 }
