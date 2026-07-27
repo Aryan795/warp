@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use chrono::Utc;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use warp_graphql::billing::{AddonCreditAutoReloadStatus, ServiceAgreement, ServiceAgreementType};
+use warp_graphql::billing::{
+    AddonCreditAutoReloadStatus, ServiceAgreement, ServiceAgreementStatus, ServiceAgreementType,
+};
 pub use warp_graphql::billing::{
     AiCreditsUsageAndCostSubjectType, AiCreditsUsageAndCostType, AiCreditsUsageBucket,
     AiCreditsUsageSource,
@@ -716,6 +718,17 @@ impl BillingMetadata {
     // Whether the enterprise customer is our Stable Warp Enterprise team (internal team of Warpers).
     pub fn is_warp_plan(&self) -> bool {
         self.tier.name == "Warp Plan"
+    }
+
+    /// Returns `true` when the workspace has a service agreement whose status is
+    /// explicitly `Active`. A cancelled, past-due, or unpaid agreement does not
+    /// qualify, even if `current_period_end` is still in the future. This is the
+    /// client-side mirror of the server's "live subscription" gate that prevents
+    /// team deletion for users with an active paid plan.
+    pub fn has_live_active_subscription(&self) -> bool {
+        self.service_agreements
+            .first()
+            .is_some_and(|sa| matches!(sa.status, ServiceAgreementStatus::Active))
     }
 
     pub fn has_active_subscription(&self) -> bool {

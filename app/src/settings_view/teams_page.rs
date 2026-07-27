@@ -1149,9 +1149,8 @@ impl TeamsPageView {
         ctx: &mut ViewContext<TeamsPageView>,
     ) {
         match event {
-            TeamUpdateManagerEvent::LeaveError => {
-                let error = "Error leaving team".to_string();
-                self.show_error(error, None, ctx);
+            TeamUpdateManagerEvent::LeaveError(err_msg) => {
+                self.show_error(err_msg.clone(), None, ctx);
             }
             TeamUpdateManagerEvent::LeaveSuccess => {
                 self.show_success("Successfully left team", ctx);

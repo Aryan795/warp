@@ -31,7 +31,9 @@ use crate::server::server_api::team::TeamClient;
 
 pub enum TeamUpdateManagerEvent {
     LeaveSuccess,
-    LeaveError,
+    /// Emitted when the leave/delete team mutation fails. Carries a user-facing
+    /// description of the error so the UI can surface it in a toast.
+    LeaveError(String),
     RenameTeamSuccess,
     RenameTeamError,
 }
@@ -329,7 +331,9 @@ impl TeamUpdateManager {
             );
         } else {
             log::warn!("User is not authenticated, cannot leave team");
-            ctx.emit(TeamUpdateManagerEvent::LeaveError);
+            ctx.emit(TeamUpdateManagerEvent::LeaveError(
+                "Not authenticated — cannot leave team".to_string(),
+            ));
         }
     }
 
@@ -381,9 +385,15 @@ impl TeamUpdateManager {
                 ctx.emit(TeamUpdateManagerEvent::LeaveSuccess);
             }
             Err(e) => {
+                // Format before `report_error!` consumes `e`.
+                let user_msg = format!("{e:#}");
+                let display_msg = if user_msg.is_empty() {
+                    "Failed to leave team. Please try again.".to_string()
+                } else {
+                    user_msg
+                };
                 report_error!(e);
-
-                ctx.emit(TeamUpdateManagerEvent::LeaveError);
+                ctx.emit(TeamUpdateManagerEvent::LeaveError(display_msg));
             }
         }
     }
