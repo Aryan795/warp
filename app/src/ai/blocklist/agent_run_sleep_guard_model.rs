@@ -1,6 +1,7 @@
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use instant::Instant;
 use prevent_sleep::Guard;
 use warpui::r#async::{SpawnedFutureHandle, Timer};
 use warpui::{Entity, ModelContext, SingletonEntity};
