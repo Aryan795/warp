@@ -464,8 +464,11 @@ impl BillingAndUsagePageView {
             }
             UserWorkspacesEvent::PurchaseAddonCreditsCheckoutRequired { url, .. } => {
                 // Free-plan purchase: a one-time Stripe Checkout session was created.
+                // Open the Stripe Checkout URL; the legacy page does not track the
+                // pending team — users are expected to use Settings v2 for Free purchases.
                 self.purchase_addon_credits_loading = false;
                 ctx.open_url(url);
+                ctx.notify();
             }
             UserWorkspacesEvent::PurchaseAddonCreditsRejected(err) => {
                 self.purchase_addon_credits_loading = false;
@@ -1953,7 +1956,7 @@ impl BillingAndUsagePageView {
         let (rendered_price, discount_badge) = match selected_option {
             Some(option) => {
                 // Display the total charge amount (base + any plan markup).
-                let price_dollars = option.total_price_usd_cents as f64 / 100.0;
+                let price_dollars = option.total_price_cents() as f64 / 100.0;
                 let rendered_price = Container::new(
                     Text::new_inline(
                         format!("${price_dollars:.2}"),
@@ -1991,8 +1994,8 @@ impl BillingAndUsagePageView {
         };
 
         let would_exceed_limit = selected_option.is_some_and(|option| {
-            // Use total_price_usd_cents (includes any plan markup) for the limit check.
-            let purchase_cost_cents = option.total_price_usd_cents;
+            // Use total_price_cents() (includes any plan markup) for the limit check.
+            let purchase_cost_cents = option.total_price_cents();
             let monthly_limit_cents = workspace
                 .settings
                 .addon_credits_settings

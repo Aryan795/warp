@@ -215,9 +215,13 @@ enum AddonCreditAutoReloadStatus {
 type AddonCreditsOption {
   credits: Int!
   priceUsdCents: Int!
-  basePriceUsdCents: Int!
-  markupUsdCents: Int!
-  totalPriceUsdCents: Int!
+  """
+  Nullable to allow safe rollout: the client can be deployed before the server
+  adds these fields. Old servers return null here; fall back to priceUsdCents.
+  """
+  basePriceUsdCents: Int
+  markupUsdCents: Int
+  totalPriceUsdCents: Int
 }
 
 type AddonCreditsSettings {

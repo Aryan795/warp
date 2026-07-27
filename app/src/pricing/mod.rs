@@ -7,7 +7,6 @@ use warpui::{Entity, ModelContext, SingletonEntity};
 ///
 /// The client must never compute markup or round amounts; only use this with
 /// server-authored integer-cent fields.
-#[allow(dead_code)]
 pub fn format_usd_cents(cents: i32) -> String {
     format!("${:.2}", cents as f64 / 100.0)
 }
@@ -88,8 +87,7 @@ impl PricingInfoModel {
 ///
 /// All amounts are in integer US cents as provided by the server. Use
 /// `format_usd_cents` to render them; never compute markup locally.
-/// This type is infrastructure for the markup UI rendering once design mocks are available.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Fields and methods are infrastructure for the markup UI (pending design mocks).
 #[allow(dead_code)]
 pub struct AddonPackPriceInfo {
     pub credits: i32,
@@ -101,20 +99,27 @@ pub struct AddonPackPriceInfo {
     pub total_price_usd_cents: i32,
 }
 
-#[allow(dead_code)]
 impl AddonPackPriceInfo {
     pub fn from_option(option: &AddonCreditsOption) -> Self {
         Self {
             credits: option.credits,
-            base_price_usd_cents: option.base_price_usd_cents,
-            markup_usd_cents: option.markup_usd_cents,
-            total_price_usd_cents: option.total_price_usd_cents,
+            base_price_usd_cents: option.effective_base_price_cents(),
+            markup_usd_cents: option.markup_usd_cents.unwrap_or(0),
+            total_price_usd_cents: option.total_price_cents(),
         }
     }
 
     /// Whether this option has a Free-plan markup applied.
     pub fn has_markup(&self) -> bool {
         self.markup_usd_cents > 0
+    }
+
+    /// Returns false when the server has returned internally inconsistent or
+    /// unsafe price data. Purchase must be disabled when false.
+    pub fn is_valid(&self) -> bool {
+        self.total_price_usd_cents > 0
+            && self.base_price_usd_cents > 0
+            && self.total_price_usd_cents >= self.base_price_usd_cents
     }
 
     /// Formatted base price string (e.g. "$10.00").

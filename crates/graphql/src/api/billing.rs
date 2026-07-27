@@ -265,27 +265,48 @@ pub enum DelinquencyStatus {
 #[derive(cynic::QueryFragment, Debug, Clone)]
 pub struct AddonCreditsOption {
     pub credits: i32,
+    /// Legacy price field kept for backward compatibility with old servers.
     pub price_usd_cents: i32,
-    pub base_price_usd_cents: i32,
-    pub markup_usd_cents: i32,
-    pub total_price_usd_cents: i32,
+    /// Nullable: old servers that have not yet deployed the price-breakdown fields
+    /// return null here. Fall back to `price_usd_cents` when None.
+    pub base_price_usd_cents: Option<i32>,
+    /// Nullable: see `base_price_usd_cents`.
+    pub markup_usd_cents: Option<i32>,
+    /// Nullable: see `base_price_usd_cents`.
+    pub total_price_usd_cents: Option<i32>,
 }
 
 impl AddonCreditsOption {
+    /// Base price in cents, falling back to the legacy field for old servers.
+    pub fn effective_base_price_cents(&self) -> i32 {
+        self.base_price_usd_cents.unwrap_or(self.price_usd_cents)
+    }
+
     /// Rate in cents per credit using the base price (for volume-discount badge calculations).
     pub fn rate(&self) -> f32 {
-        self.base_price_usd_cents as f32 / self.credits as f32
+        self.effective_base_price_cents() as f32 / self.credits as f32
     }
 
     /// Whether this option has a Free-plan markup applied.
     pub fn has_markup(&self) -> bool {
-        self.markup_usd_cents > 0
+        self.markup_usd_cents.is_some_and(|m| m > 0)
     }
 
     /// The total price in cents that the user will actually be charged.
-    /// Use this for spend-limit checks and confirmation displays.
+    /// Falls back to the legacy `price_usd_cents` for old servers that have not
+    /// yet deployed `totalPriceUsdCents`. Use for spend-limit checks and
+    /// confirmation displays.
     pub fn total_price_cents(&self) -> i32 {
-        self.total_price_usd_cents
+        self.total_price_usd_cents.unwrap_or(self.price_usd_cents)
+    }
+
+    /// Returns false when the server has returned internally inconsistent or
+    /// otherwise unsafe price data (negative total, total < base, etc.).
+    /// Purchase must be disabled and the amount must not be displayed when false.
+    pub fn is_price_valid(&self) -> bool {
+        let total = self.total_price_cents();
+        let base = self.effective_base_price_cents();
+        total > 0 && base > 0 && total >= base
     }
 }
 

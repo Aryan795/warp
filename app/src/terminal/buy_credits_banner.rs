@@ -336,9 +336,12 @@ impl BuyCreditsBanner {
             .enumerate()
             .map(|(index, option)| {
                 // Display the total charge amount (base + any plan markup).
+                // Use format_usd_cents so non-round marked-up amounts
+                // (e.g. $27.50 for a 10% markup on $25) are not truncated
+                // to the nearest dollar (spec risk #1: displayed price ≠ charged price).
                 let primary_text = format!(
-                    "${:.0} / {} credits",
-                    option.total_price_usd_cents as f32 / 100.,
+                    "{} / {} credits",
+                    crate::pricing::format_usd_cents(option.total_price_cents()),
                     option.credits
                 );
                 let discount_percent = if base_rate > 0.0 {
@@ -541,18 +544,29 @@ impl BuyCreditsBanner {
 
         let auth_state = AuthStateProvider::as_ref(app).get();
         let current_team = UserWorkspaces::as_ref(app).current_team();
-        let has_admin_permissions = auth_state
+        let has_team_admin_permissions = auth_state
             .user_email()
             .zip(current_team)
             .map(|(email, team)| team.has_admin_permissions(&email))
             .unwrap_or_default();
+        // Teamless Free users are eligible to purchase on their own workspace.
+        // Gate the buy controls on either team-admin or teamless-purchase eligibility
+        // (spec "Proposed changes → Out-of-credits banner").
+        let current_workspace = UserWorkspaces::as_ref(app).current_workspace();
+        let teamless_can_purchase = current_team.is_none()
+            && current_workspace.is_some_and(|ws| {
+                ws.billing_metadata
+                    .tier
+                    .purchase_add_on_credits_policy
+                    .is_some_and(|p| p.enabled)
+            });
+        let has_admin_permissions = has_team_admin_permissions || teamless_can_purchase;
         let delinquent_due_to_payment_issue = current_team
             .is_some_and(|team| team.billing_metadata.is_delinquent_due_to_payment_issue());
         let auto_reload_banner_toggle_ff =
             FeatureFlag::BuildPlanAutoReloadBannerToggle.is_enabled();
 
         // Check if user has reached their monthly addon credits limit
-        let current_workspace = UserWorkspaces::as_ref(app).current_workspace();
         let is_at_monthly_limit = current_workspace
             .map(|workspace| workspace.is_at_addon_credits_monthly_limit())
             .unwrap_or(false);
@@ -564,8 +578,8 @@ impl BuyCreditsBanner {
         let would_purchase_exceed_limit = current_workspace
             .zip(selected_option)
             .map(|(workspace, option)| {
-                // Use total_price_usd_cents for limit checks (includes any Free-plan markup).
-                workspace.would_addon_purchase_reach_limit(option.total_price_usd_cents)
+                // Use total_price_cents() for limit checks (includes any Free-plan markup).
+                workspace.would_addon_purchase_reach_limit(option.total_price_cents())
             })
             .unwrap_or(false);
 
