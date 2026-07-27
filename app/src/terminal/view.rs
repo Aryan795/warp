@@ -4967,7 +4967,7 @@ impl TerminalView {
                 BlocklistAIHistoryModel::as_ref(ctx),
             )
         else {
-            return false;
+            return;
         };
         QueuedQueryModel::handle(ctx).update(ctx, |model, _ctx| {
             model.clear_command_in_flight(conversation_id);
