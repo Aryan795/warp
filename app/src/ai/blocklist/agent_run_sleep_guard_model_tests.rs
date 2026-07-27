@@ -242,7 +242,7 @@ fn agent_run_sleep_guard_model_refresh_keeps_active_conversation_awake_past_cap(
         let refresh_interval = AGENT_RUN_SLEEP_GUARD_CAP - Duration::from_secs(1);
         let mut now = start;
         for _ in 0..3 {
-            now = now + refresh_interval;
+            now += refresh_interval;
             AgentRunSleepGuardModel::handle(&app).update(&mut app, |model, ctx| {
                 model.set_now_for_test(now);
                 model.refresh(conversation_id, ctx);
