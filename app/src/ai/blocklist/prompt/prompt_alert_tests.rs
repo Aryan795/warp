@@ -7,8 +7,13 @@ use crate::ai::credit_availability::AICreditSource;
 use crate::server::server_api::ServerApiProvider;
 use crate::server::server_api::team::MockTeamClient;
 use crate::server::server_api::workspace::MockWorkspaceClient;
+use crate::workspaces::workspace::{ByoApiKeyPolicy, Workspace, WorkspaceUid};
 
 fn initialize_app(app: &mut App) {
+    initialize_app_with_workspaces(app, vec![]);
+}
+
+fn initialize_app_with_workspaces(app: &mut App, workspaces: Vec<Workspace>) {
     app.add_singleton_model(|_| NetworkStatus::new());
     app.add_singleton_model(|_| AuthStateProvider::new_for_test());
     app.add_singleton_model(|_| ServerApiProvider::new_for_test());
@@ -16,7 +21,7 @@ fn initialize_app(app: &mut App) {
         UserWorkspaces::mock(
             Arc::new(MockTeamClient::new()),
             Arc::new(MockWorkspaceClient::new()),
-            vec![],
+            workspaces,
             ctx,
         )
     });
@@ -118,6 +123,38 @@ fn test_legacy_fallback_used_before_first_server_response() {
         initialize_app(&mut app);
         // No server availability applied: the default request limit info has
         // requests remaining, so the legacy derivation reports no alert.
+        assert_eq!(determine_state(&mut app), PromptAlertState::NoAlert);
+    });
+}
+
+#[test]
+fn test_capability_only_without_local_key_maps_to_out_of_credits() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        // The server allows BYO by policy but found no credit source; with no
+        // locally stored key this is effectively out of credits.
+        apply_server_availability(&mut app, AICreditAvailability::available_with_source(None));
+        assert_eq!(
+            determine_state(&mut app),
+            PromptAlertState::RequestLimitReached
+        );
+    });
+}
+
+#[test]
+fn test_capability_only_with_local_key_maps_to_no_alert() {
+    App::test((), |mut app| async move {
+        let uid = WorkspaceUid::from(crate::server::ids::ServerId::from(1_i64));
+        let mut workspace = Workspace::from_local_cache(uid, "Test Workspace".to_string(), None);
+        workspace.billing_metadata.tier.byo_api_key_policy =
+            Some(ByoApiKeyPolicy { enabled: true });
+        initialize_app_with_workspaces(&mut app, vec![workspace]);
+
+        ApiKeyManager::handle(&app).update(&mut app, |manager, ctx| {
+            manager.set_openai_key(Some("test-key".to_string()), ctx);
+        });
+
+        apply_server_availability(&mut app, AICreditAvailability::available_with_source(None));
         assert_eq!(determine_state(&mut app), PromptAlertState::NoAlert);
     });
 }

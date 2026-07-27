@@ -1023,6 +1023,100 @@ fn test_reset_server_availability_restores_legacy_fallback() {
 }
 
 #[test]
+fn test_capability_only_availability_requires_local_byo_path() {
+    App::test((), |mut app| async move {
+        // BYOK is allowed by policy, but no key has been stored locally.
+        let (_uid, mut workspace) = create_test_workspace();
+        workspace.billing_metadata.tier.byo_api_key_policy =
+            Some(ByoApiKeyPolicy { enabled: true });
+        add_user_workspaces_with_workspace(&mut app, workspace);
+        let request_usage_model = add_request_usage_model(&mut app);
+
+        // Capability-only: the server allows BYO by policy but found no Warp
+        // credit source. It cannot see locally stored keys.
+        request_usage_model.update(&mut app, |model, ctx| {
+            model.request_limit_info = RequestLimitInfo::new_for_test(10, 10);
+            model.apply_server_availability(
+                Ok(AICreditAvailability::available_with_source(None)),
+                ctx,
+            );
+            assert!(
+                !model.has_any_ai_remaining(ctx),
+                "capability-only availability without a stored key should be treated as out of credits",
+            );
+        });
+
+        // Storing a key makes the capability usable.
+        ApiKeyManager::handle(&app).update(&mut app, |manager, ctx| {
+            manager.set_openai_key(Some("test-key".to_string()), ctx);
+        });
+        request_usage_model.read(&app, |model, ctx| {
+            assert!(
+                model.has_any_ai_remaining(ctx),
+                "capability-only availability with a stored key should permit AI",
+            );
+        });
+    });
+}
+
+#[test]
+fn test_capability_only_availability_with_team_custom_llm() {
+    App::test((), |mut app| async move {
+        // A team-managed custom LLM configuration is a usable BYO path even
+        // without any locally stored API key.
+        let mut team = crate::workspaces::team::Team::from_local_cache(
+            123.into(),
+            "Test Team".to_string(),
+            None,
+            None,
+            None,
+        );
+        team.organization_settings.llm_settings.enabled = true;
+        let (uid, _workspace) = create_test_workspace();
+        let workspace =
+            Workspace::from_local_cache(uid, "Test Workspace".to_string(), Some(vec![team]));
+        add_user_workspaces_with_workspace(&mut app, workspace);
+        let request_usage_model = add_request_usage_model(&mut app);
+
+        request_usage_model.update(&mut app, |model, ctx| {
+            model.request_limit_info = RequestLimitInfo::new_for_test(10, 10);
+            model.apply_server_availability(
+                Ok(AICreditAvailability::available_with_source(None)),
+                ctx,
+            );
+            assert!(model.has_any_ai_remaining(ctx));
+        });
+    });
+}
+
+#[test]
+fn test_server_unavailable_overrides_local_byo_key() {
+    App::test((), |mut app| async move {
+        // A locally stored key never overrides an explicit server denial —
+        // the refinement only applies to capability-only availability.
+        let (_uid, mut workspace) = create_test_workspace();
+        workspace.billing_metadata.tier.byo_api_key_policy =
+            Some(ByoApiKeyPolicy { enabled: true });
+        add_user_workspaces_with_workspace(&mut app, workspace);
+        let request_usage_model = add_request_usage_model(&mut app);
+
+        ApiKeyManager::handle(&app).update(&mut app, |manager, ctx| {
+            manager.set_openai_key(Some("test-key".to_string()), ctx);
+        });
+
+        request_usage_model.update(&mut app, |model, ctx| {
+            model.apply_server_availability(
+                Ok(AICreditAvailability::unavailable(
+                    AICreditDenialReason::Delinquent,
+                )),
+                ctx,
+            );
+            assert!(!model.has_any_ai_remaining(ctx));
+        });
+    });
+}
+
+#[test]
 fn test_availability_refresh_coalesces_concurrent_fetches() {
     App::test((), |mut app| async move {
         app.add_singleton_model(|_| AuthStateProvider::new_for_test());

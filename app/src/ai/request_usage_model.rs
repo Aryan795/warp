@@ -517,14 +517,46 @@ impl AIRequestUsageModel {
     ///
     /// Once a server-authoritative availability decision has been received
     /// this session, that decision (last-known-good on transient refresh
-    /// failures) is the only authority. The locally derived fallback below is
-    /// used solely before the first successful fetch, e.g. right after startup
-    /// or against servers that don't support the availability field yet.
+    /// failures) is the authority. The locally derived fallback below is used
+    /// solely before the first successful fetch, e.g. right after startup or
+    /// against servers that don't support the availability field yet.
     pub fn has_any_ai_remaining(&self, ctx: &AppContext) -> bool {
         if let Some(availability) = self.server_availability.latest {
-            return availability.available;
+            return Self::server_availability_permits_ai(availability, ctx);
         }
         self.has_any_ai_remaining_from_local_state(ctx)
+    }
+
+    /// Interprets the server-authoritative decision. Capability-only
+    /// availability (available with no credit source) means "no Warp credits,
+    /// but BYO inference is allowed by policy" — the server cannot see locally
+    /// stored API keys, so the client contributes that one fact and treats
+    /// capability-only availability without a usable BYO path as out of
+    /// credits.
+    fn server_availability_permits_ai(
+        availability: AICreditAvailability,
+        ctx: &AppContext,
+    ) -> bool {
+        if !availability.available {
+            return false;
+        }
+        if availability.credit_source.is_some() {
+            return true;
+        }
+        Self::has_usable_byo_inference_path(ctx)
+    }
+
+    /// Whether a BYO inference path is actually usable from this client: a
+    /// locally stored API key, custom endpoint, or connected Grok subscription
+    /// (when the BYOK policy allows it), or a team-managed custom LLM
+    /// configuration.
+    fn has_usable_byo_inference_path(ctx: &AppContext) -> bool {
+        let has_byo_credentials = UserWorkspaces::as_ref(ctx).is_byo_api_key_enabled(ctx)
+            && ApiKeyManager::as_ref(ctx).has_any_key();
+        let has_team_custom_llm = UserWorkspaces::as_ref(ctx)
+            .current_team()
+            .is_some_and(|team| team.is_custom_llm_enabled());
+        has_byo_credentials || has_team_custom_llm
     }
 
     /// Legacy locally derived availability check. Returns `true` if the user

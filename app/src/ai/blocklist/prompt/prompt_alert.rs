@@ -175,7 +175,14 @@ impl PromptAlertView {
         app: &AppContext,
     ) -> PromptAlertState {
         if availability.available {
-            return PromptAlertState::NoAlert;
+            // Capability-only availability (no credit source) is refined with
+            // local key knowledge by `has_any_ai_remaining`: the server cannot
+            // see locally stored API keys, so without a usable BYO path the
+            // user is effectively out of credits.
+            if AIRequestUsageModel::as_ref(app).has_any_ai_remaining(app) {
+                return PromptAlertState::NoAlert;
+            }
+            return Self::out_of_credits_presentation(app);
         }
 
         match availability.denial_reason {
