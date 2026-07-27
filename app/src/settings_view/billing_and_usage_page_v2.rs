@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Local;
 use itertools::Itertools;
@@ -12,6 +13,7 @@ use thousands::Separable;
 use warp_core::features::FeatureFlag;
 use warp_core::ui::appearance::Appearance;
 use warp_graphql::billing::AddonCreditsOption;
+use warpui::r#async::Timer;
 use warpui::elements::{
     Align, Border, Clipped, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Empty,
     Expanded, Flex, FormattedTextElement, HighlightedHyperlink, MainAxisAlignment, MainAxisSize,
@@ -460,13 +462,14 @@ impl BillingAndUsagePageV2View {
             }
             UserWorkspacesEvent::PurchaseAddonCreditsCheckoutRequired { url, team_uid } => {
                 // Free-plan purchase: the server created a one-time Stripe Checkout
-                // session. Open the URL in the browser and retain team_uid for
-                // reconciliation when Warp regains focus (spec Behaviors 14-15).
-                // The page remains in a browser-pending state — success is confirmed
-                // only after a workspace refresh shows the granted credits; the
-                // redirect alone is not success.
+                // session. Open the URL in the browser, retain team_uid for
+                // reconciliation, and start a short-interval bounded refresh loop
+                // so the pending state clears within seconds of the user returning
+                // (spec Behaviors 14-15). Success is confirmed only after a workspace
+                // refresh shows the granted credits; the redirect alone is not success.
                 self.addon_credits.purchase_loading = false;
                 self.addon_credits.pending_checkout = Some(*team_uid);
+                self.schedule_checkout_reconciliation_poll(ctx, 0);
                 ctx.open_url(url);
                 ctx.notify();
             }
@@ -477,6 +480,29 @@ impl BillingAndUsagePageV2View {
             }
             _ => {}
         }
+    }
+
+    /// Schedules a workspace-metadata refresh after `delay`, then re-schedules itself
+    /// until `pending_checkout` is cleared or the attempt cap is reached (spec Behavior 15).
+    /// Each refresh fires `TeamsChanged`, which clears `pending_checkout` and re-enables
+    /// the purchase button within seconds of the user returning from Stripe Checkout.
+    fn schedule_checkout_reconciliation_poll(&self, ctx: &mut ViewContext<Self>, attempts: u8) {
+        // Poll every 5 seconds for up to 2.5 minutes (30 × 5 s).
+        const MAX_ATTEMPTS: u8 = 30;
+        const POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+        if attempts >= MAX_ATTEMPTS {
+            return;
+        }
+
+        let _ = ctx.spawn(Timer::after(POLL_INTERVAL), move |view, _, ctx| {
+            if view.addon_credits.pending_checkout.is_some() {
+                TeamUpdateManager::handle(ctx).update(ctx, |mgr, ctx| {
+                    std::mem::drop(mgr.refresh_workspace_metadata(ctx))
+                });
+                view.schedule_checkout_reconciliation_poll(ctx, attempts + 1);
+            }
+        });
     }
 
     fn show_toast(&self, message: &str, flavor: ToastFlavor, ctx: &mut ViewContext<Self>) {
@@ -1106,16 +1132,19 @@ impl BillingAndUsagePageV2View {
         app: &AppContext,
     ) -> AddonCreditsPanelState {
         // Check purchase eligibility from the team first, then fall back to the
-        // workspace billing metadata for teamless Free users (spec "Settings v2 #2").
+        // workspace billing metadata only for teamless Free users (spec "Settings v2 #2").
+        // When a team exists, team entitlement stays authoritative; the workspace
+        // fallback must not widen eligibility for users who do have a team.
         let team_can_purchase = UserWorkspaces::as_ref(app)
             .current_team()
             .and_then(|t| t.billing_metadata.tier.purchase_add_on_credits_policy)
             .is_some_and(|p| p.enabled);
-        let workspace_can_purchase = workspace
-            .billing_metadata
-            .tier
-            .purchase_add_on_credits_policy
-            .is_some_and(|p| p.enabled);
+        let workspace_can_purchase = UserWorkspaces::as_ref(app).current_team().is_none()
+            && workspace
+                .billing_metadata
+                .tier
+                .purchase_add_on_credits_policy
+                .is_some_and(|p| p.enabled);
         let can_purchase = team_can_purchase || workspace_can_purchase;
         let can_upgrade = workspace.billing_metadata.can_upgrade_to_build_plan();
 
@@ -1198,6 +1227,11 @@ impl BillingAndUsagePageV2View {
             || (!auto_reload_enabled && selected_credit_option.is_none());
         let price_label = selected_credit_option
             .map(|opt| {
+                // Behavior 18: invalid server prices are not rendered; the button
+                // is already disabled by `price_invalid`, so show nothing here.
+                if !opt.is_price_valid() {
+                    return String::new();
+                }
                 let credits = opt.credits.separate_with_commas();
                 // Display the total charge amount the user will actually pay.
                 let dollars = format_usd_cents(opt.total_price_cents());
@@ -2322,3 +2356,7 @@ fn render_balance_card(
     .with_vertical_padding(12.)
     .finish()
 }
+
+#[cfg(test)]
+#[path = "billing_and_usage_page_v2_tests.rs"]
+mod tests;

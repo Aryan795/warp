@@ -99,6 +99,7 @@ pub struct AddonPackPriceInfo {
     pub total_price_usd_cents: i32,
 }
 
+#[allow(dead_code)]
 impl AddonPackPriceInfo {
     pub fn from_option(option: &AddonCreditsOption) -> Self {
         Self {

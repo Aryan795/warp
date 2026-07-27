@@ -303,7 +303,23 @@ impl AddonCreditsOption {
     /// Returns false when the server has returned internally inconsistent or
     /// otherwise unsafe price data (negative total, total < base, etc.).
     /// Purchase must be disabled and the amount must not be displayed when false.
+    ///
+    /// A partially-populated breakdown (some of the three nullable fields present,
+    /// others null) is also treated as invalid, since a correct new server always
+    /// sends all three fields together. The all-null case is the old-server fallback
+    /// and uses `price_usd_cents`, which is always valid if positive.
     pub fn is_price_valid(&self) -> bool {
+        // If any breakdown field is present, all three must be: a partial breakdown
+        // from a new server is a malformed response, not a legacy-fallback case.
+        let has_any = self.base_price_usd_cents.is_some()
+            || self.markup_usd_cents.is_some()
+            || self.total_price_usd_cents.is_some();
+        let has_all = self.base_price_usd_cents.is_some()
+            && self.markup_usd_cents.is_some()
+            && self.total_price_usd_cents.is_some();
+        if has_any && !has_all {
+            return false;
+        }
         let total = self.total_price_cents();
         let base = self.effective_base_price_cents();
         total > 0 && base > 0 && total >= base

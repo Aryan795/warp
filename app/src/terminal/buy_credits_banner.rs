@@ -565,6 +565,9 @@ impl BuyCreditsBanner {
             .is_some_and(|team| team.billing_metadata.is_delinquent_due_to_payment_issue());
         let auto_reload_banner_toggle_ff =
             FeatureFlag::BuildPlanAutoReloadBannerToggle.is_enabled();
+        // Free users (markup > 0) must not see auto-reload experiment controls
+        // (spec Behavior 9, proposed changes → out-of-credits banner #4).
+        let any_option_has_markup = self.addon_credits_options.iter().any(|o| o.has_markup());
 
         // Check if user has reached their monthly addon credits limit
         let is_at_monthly_limit = current_workspace
@@ -736,7 +739,7 @@ impl BuyCreditsBanner {
 
             let mut children = Vec::new();
 
-            if auto_reload_banner_toggle_ff {
+            if auto_reload_banner_toggle_ff && !any_option_has_markup {
                 children.push(
                     Container::new(self.render_auto_reload_checkbox(appearance))
                         .with_margin_right(8.)
@@ -792,7 +795,7 @@ impl BuyCreditsBanner {
         };
 
         let content = if has_admin_permissions {
-            let stacked_breakpoint = if auto_reload_banner_toggle_ff {
+            let stacked_breakpoint = if auto_reload_banner_toggle_ff && !any_option_has_markup {
                 STACKED_LAYOUT_MAX_WIDTH_WITH_AUTO_RELOAD
             } else {
                 STACKED_LAYOUT_MAX_WIDTH_WITHOUT_AUTO_RELOAD
