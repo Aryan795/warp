@@ -11,6 +11,13 @@ use crate::ai::agent::task::TaskId;
 use crate::terminal::model::session::Sessions;
 use crate::terminal::model_events::ModelEventDispatcher;
 
+fn outcome_from_diffs(diffs: Vec<AIRequestedCodeDiff>) -> ApplyEditsOutcome {
+    ApplyEditsOutcome {
+        applied_diffs: diffs,
+        errors: Vec::new(),
+    }
+}
+
 /// Shared observable state for a [`TestStorage`].
 struct TestStorageState {
     diffs: RefCell<Option<(Vec<FileDiff>, DiffSessionType)>>,
@@ -121,7 +128,7 @@ fn on_diffs_applied_seeds_registered_storage() {
         let (tx, _rx) = oneshot::channel();
         executor.update(&mut app, |executor, ctx| {
             executor.on_diffs_applied(
-                Ok(vec![AIRequestedCodeDiff {
+                outcome_from_diffs(vec![AIRequestedCodeDiff {
                     file_name: "/tmp/x.rs".to_owned(),
                     diff_type: DiffType::creation("fn main() {}\n".to_owned()),
                     failures: None,
