@@ -563,6 +563,9 @@ fn grow_reflow_full_grid_clear_behavior() {
     grid.resize(SizeInfo::new_without_font_metrics(2, 3));
 
     assert_eq!(grid.total_rows(), 2);
+    // Reflow must stay within GridStorage; flat_storage must not gain any rows
+    // (preserving the GH #9838 invariant on the grow path).
+    assert_eq!(grid.history_size(), 0);
 
     // Row 0 should contain "123" (still soft-wrapped because " " continues
     // on the next row).
@@ -582,8 +585,19 @@ fn grow_reflow_full_grid_clear_behavior() {
 
 /// Complementary to `grow_reflow_full_grid_clear_behavior`: verifies that
 /// column *shrink* in an active FullGridClearBehavior::Clear session still does
-/// NOT reflow and does NOT push rows to flat_storage scrollback, preserving the
-/// GH #9838 invariant (no old TUI frames shoved into scrollback on resize).
+/// NOT reflow, leaving visible rows in-place (truncated to the new width) rather
+/// than reflowing them into extra rows.
+///
+/// Without the no-reflow guard, shrink reflow would split visible rows into
+/// more rows than `GridStorage::max_scroll_limit` (hardcoded to 0 by
+/// `GridHandler::new`) permits, causing `shrink_cols` to truncate the reversed
+/// row list and discard the leading content — e.g. keeping only the final
+/// fragment "5" instead of the expected truncation "12".
+///
+/// Note: `history_size()` measures `flat_storage` rows, and the
+/// `FullGridClearBehavior::Clear` branch returns before any `flat_storage` push,
+/// so `history_size()` is 0 regardless of the reflow flag. The meaningful
+/// invariant is therefore the content of the visible row itself.
 #[test]
 fn shrink_no_reflow_full_grid_clear_behavior_keeps_visible_rows_in_place() {
     let mut grid = GridHandler::new_for_test_with_scroll_limit(1, 5, 100);
@@ -592,8 +606,14 @@ fn shrink_no_reflow_full_grid_clear_behavior_keeps_visible_rows_in_place() {
 
     grid.resize(SizeInfo::new_without_font_metrics(1, 2));
 
-    // Visible rows must NOT be pushed to flat_storage scrollback.
-    assert_eq!(grid.history_size(), 0);
+    assert_eq!(grid.visible_rows(), 1);
+    // Row 0 must contain the in-place truncation of "12345" to 2 columns.
+    // Under a shrink-reflow, GridStorage would split "12345" into "12"/"34"/"5"
+    // and then truncate to 1 row (max_scroll_limit=0 + rows=1), keeping only
+    // the trailing fragment "5" — the wrong content.
+    let row = grid.row(0).expect("row should exist");
+    assert_eq!(row[0], cell('1'));
+    assert_eq!(row[1], cell('2'));
 }
 
 #[test]

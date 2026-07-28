@@ -80,6 +80,22 @@ impl GridHandler {
             // max_scroll_limit (0), causing content loss.
             //
             // For alt-screen: always disable reflow (no scrollback).
+            //
+            // Known edge cases on the grow path (both are transient — SIGWINCH
+            // triggers a full TUI redraw that repaints the affected area):
+            //
+            // 1. Grid/scrollback seam: this branch reflows GridStorage rows
+            //    independently of flat_storage, so a soft wrap that straddles
+            //    the visible-grid/scrollback seam is not merged across it; the
+            //    seam row retains its old break until the next redraw.
+            //
+            // 2. Live TUI frames: any agent-written row carrying a WRAPLINE flag
+            //    (e.g. auto-wrapped prose) merges on widen just like primary
+            //    content does.  The merge reduces the row count, leaving blank
+            //    padding rows at the top of the visible grid until the TUI
+            //    repaints.  This is intentional — it matches the fix's goal of
+            //    merging stale soft-wrapped rows after a widen — and the blank
+            //    rows are repainted on the next SIGWINCH-driven redraw.
             let reflow_on_grow =
                 !self.ansi_handler_state.is_alt_screen && num_cols > self.columns();
             self.grid
