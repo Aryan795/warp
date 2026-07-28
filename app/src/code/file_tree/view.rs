@@ -3154,26 +3154,25 @@ impl TypedActionView for FileTreeView {
                     return;
                 };
 
-                // Use the absolute path (consistent with Finder drops).
-                let path = item.path().as_str().to_string();
-                let is_remote = root_dir.is_remote();
+                let behavior = drop_behavior_for_item(root_dir, item);
 
                 let weak_view_handle = terminal_input_data.weak_view_handle();
                 let Some(input_view) = weak_view_handle.upgrade(ctx) else {
                     return;
                 };
 
-                input_view.update(ctx, |input_view, ctx| {
-                    if is_remote {
-                        // For remote roots, insert the path as text to avoid local
-                        // filesystem reads (e.g. image detection would read a local
-                        // file at the same path instead of the remote file).
-                        input_view.append_to_buffer(&path, ctx);
-                    } else {
-                        // For local roots, route through the editor's DragAndDropFiles
-                        // path so that image detection, shell escaping, and WSL path
-                        // transformation all apply uniformly regardless of drop source.
+                input_view.update(ctx, |input_view, ctx| match behavior {
+                    FileTreeDropBehavior::FinderEquivalent { path } => {
+                        // Local root: route through DragAndDropFiles so that image
+                        // detection, shell escaping, and WSL path transformation all
+                        // apply uniformly, matching Finder drop behavior.
                         input_view.handle_drag_and_drop_files(&[path], ctx);
+                    }
+                    FileTreeDropBehavior::InsertText { text } => {
+                        // Remote root: insert the Posix-escaped absolute path as text.
+                        // Avoids reading a local file at the same path (image detection)
+                        // and avoids any SFTP upload (the file is already on the server).
+                        input_view.append_to_buffer(&text, ctx);
                     }
                 });
             }
@@ -3185,29 +3184,87 @@ impl TypedActionView for FileTreeView {
                     return;
                 };
 
-                let path = item.path().as_str().to_string();
-                let is_remote = root_dir.is_remote();
+                let behavior = drop_behavior_for_item(root_dir, item);
 
                 let Some(terminal_view) = terminal_view.upgrade(ctx) else {
                     return;
                 };
 
-                terminal_view.update(ctx, |view, ctx| {
-                    if is_remote {
-                        // For remote roots, keep text-insertion: the file is already on
-                        // the server, so SFTP upload would fail and local image detection
-                        // would read a local file at the same path instead of the remote.
-                        view.insert_text_into_active_command(&path, ctx);
-                    } else {
-                        // For local roots, route through drag_and_drop_files so that
-                        // image detection, shell escaping, WSL path conversion, and SSH
-                        // file upload all apply consistently with Finder drops.
+                terminal_view.update(ctx, |view, ctx| match behavior {
+                    FileTreeDropBehavior::FinderEquivalent { path } => {
+                        // Local root: route through drag_and_drop_files so that image
+                        // detection, shell escaping, WSL path conversion, and SSH file
+                        // upload all apply consistently with Finder drops.
                         view.drag_and_drop_files(&[path], ctx);
+                    }
+                    FileTreeDropBehavior::InsertText { text } => {
+                        // Remote root: insert the Posix-escaped absolute path as text.
+                        // The file already lives on the server; SFTP upload would fail.
+                        view.insert_text_into_active_command(&text, ctx);
                     }
                 });
             }
         }
     }
 }
+
+/// How a Project Explorer file-tree item should be handled when dropped onto
+/// an input or terminal.
+///
+/// Returned by [`drop_behavior_for_path`]; call sites dispatch the appropriate
+/// action based on the variant.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum FileTreeDropBehavior {
+    /// Route through the Finder-equivalent path. For local roots only.
+    ///
+    /// - `ItemDroppedOnInput` → `Input::handle_drag_and_drop_files` →
+    ///   `EditorAction::DragAndDropFiles` (image auto-attach, shell escaping,
+    ///   WSL path transformation).
+    /// - `ItemDroppedOnTerminal` → `TerminalView::drag_and_drop_files` (image
+    ///   detection, shell escaping, WSL/MSYS2 conversion, SSH file upload).
+    FinderEquivalent {
+        /// The absolute path of the item. The receiving code path handles its
+        /// own shell escaping.
+        path: String,
+    },
+    /// Insert as Posix-shell-escaped text. For remote roots.
+    ///
+    /// Prevents local filesystem reads for image detection (which would read a
+    /// local file at the same path instead of the remote file) and prevents an
+    /// SFTP upload for a path that already lives on the remote server.
+    InsertText {
+        /// The absolute path, already Posix-escaped, ready to insert verbatim.
+        text: String,
+    },
+}
+
+/// Returns the drop behavior for a Project Explorer item given its root locality.
+///
+/// - `is_remote` — whether the owning root directory is backed by a remote host.
+/// - `path`      — the absolute path string, as returned by
+///   `FileTreeItem::path().as_str()`.
+///
+/// Local roots  → [`FileTreeDropBehavior::FinderEquivalent`] (absolute path)
+/// Remote roots → [`FileTreeDropBehavior::InsertText`] (Posix-escaped absolute path)
+///
+/// `pub(crate)` so it can be exercised by unit tests without needing a live
+/// `Input` or `TerminalView`.
+pub(crate) fn drop_behavior_for_path(is_remote: bool, path: String) -> FileTreeDropBehavior {
+    if is_remote {
+        FileTreeDropBehavior::InsertText {
+            text: warpui::clipboard_utils::escaped_paths_str(
+                &[path],
+                Some(warp_util::path::ShellFamily::Posix),
+            ),
+        }
+    } else {
+        FileTreeDropBehavior::FinderEquivalent { path }
+    }
+}
+
+fn drop_behavior_for_item(root_dir: &RootDirectory, item: &FileTreeItem) -> FileTreeDropBehavior {
+    drop_behavior_for_path(root_dir.is_remote(), item.path().as_str().to_string())
+}
+
 #[cfg(test)]
 mod view_tests;
