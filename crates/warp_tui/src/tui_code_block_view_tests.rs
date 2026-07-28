@@ -3,7 +3,7 @@ use string_offset::CharOffset;
 use warp::tui_export::Appearance;
 use warpui::platform::WindowStyle;
 use warpui::{AddWindowOptions, App};
-use warpui_core::elements::tui::{TuiBufferExt, TuiRect};
+use warpui_core::elements::tui::{Color, TuiBufferExt, TuiRect};
 use warpui_core::presenter::tui::TuiPresenter;
 use warpui_core::{TuiView, ViewHandle};
 
@@ -255,13 +255,145 @@ fn text_overrides_preserved_during_code_only_streaming_sync() {
 
         app.read(|ctx| {
             let view = view.as_ref(ctx);
-            // The 'for' override from the prior parse must still be present
-            // even though the new parse has not yet finished.
+            // The 'for' override from the prior parse must still be present at
+            // the specific range [0, 3), even though the new parse has not yet
+            // finished.  Asserting a non-empty vec is too weak: it passes for
+            // any surviving ranges, including stale ones at the wrong offsets.
+            let for_override = view
+                .text_overrides
+                .iter()
+                .find(|(r, _)| r.start == CharOffset::zero() && r.end == CharOffset::from(3));
             assert!(
-                !view.text_overrides.is_empty(),
-                "text_overrides must not be cleared during a code-only streaming sync; \
+                for_override.is_some(),
+                "text_overrides must retain the 'for' keyword override [0, 3) during a \
+                 code-only streaming sync (the new parse is still in flight); \
                  got: {:?}",
                 view.text_overrides
+            );
+        });
+    });
+}
+
+/// After a phase-1 parse completes, a phase-2 sync (same language, appended
+/// code, no parse wait) must produce a rendered mid-stream frame where the
+/// 'for' keyword retains the syntax-highlight fg color it had in the phase-1
+/// frame.  Without the fix (text_overrides always cleared), the mid-stream
+/// frame reverts to the base text color at those cells.
+#[test]
+fn mid_stream_frame_retains_keyword_coloring() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|_| Appearance::mock());
+        // Phase 1: short seed — keyword at buffer start, parse completes.
+        let view = add_code_view(&mut app, |ctx| {
+            TuiCodeBlockView::new(TuiCodeBlockPayload::new("for ", Some("go".to_owned())), ctx)
+        });
+        let rx1 = wait_for_syntax_updated(&view, &mut app);
+        rx1.await.expect("phase-1 syntax parse should complete");
+
+        // Capture the 'f' cell's fg color from the settled phase-1 render.
+        // The code block renders as:
+        //   row 0: ┌──────────────────────────────────────┐  (border)
+        //   row 1: │ go                                   │  (language)
+        //   row 2: │ for …                                │  (code)
+        //   row 3: └──────────────────────────────────────┘  (border)
+        // 'f' is at column 2 (│=0, space=1, f=2), row 2.
+        let phase1_f_fg = app.read(|ctx| {
+            let mut presenter = TuiPresenter::new();
+            let frame = presenter.present_element(
+                view.as_ref(ctx).render(ctx),
+                TuiRect::new(0, 0, 40, 6),
+                ctx,
+            );
+            frame.buffer[(2, 2)].fg
+        });
+        // Sanity-check: the settled frame must have a non-Reset fg so that the
+        // comparison below is meaningful.  If syntax highlighting produced no
+        // color, phase1_f_fg would be Reset and the test would be vacuous.
+        assert_ne!(
+            phase1_f_fg,
+            Color::Reset,
+            "Phase-1 'f' cell must have a syntax-highlight fg color, got Reset"
+        );
+
+        // Phase 2: grow the code WITHOUT waiting for the new parse.
+        app.update(|ctx| {
+            view.update(ctx, |view, ctx| {
+                view.sync(
+                    TuiCodeBlockPayload::new(
+                        "for _, num := range numbers {",
+                        Some("go".to_owned()),
+                    ),
+                    ctx,
+                );
+            });
+        });
+
+        // Render the mid-stream frame (new parse still in flight).
+        let midstream_f_fg = app.read(|ctx| {
+            let mut presenter = TuiPresenter::new();
+            let frame = presenter.present_element(
+                view.as_ref(ctx).render(ctx),
+                TuiRect::new(0, 0, 40, 6),
+                ctx,
+            );
+            frame.buffer[(2, 2)].fg
+        });
+
+        // The syntax-highlight color must be retained in the mid-stream frame.
+        // Without the fix, text_overrides were cleared by sync(), causing the
+        // 'f' cell to revert to the base text color while the new parse ran.
+        assert_eq!(
+            phase1_f_fg, midstream_f_fg,
+            "Mid-stream frame must retain the 'for' keyword fg color from the \
+             phase-1 parse; phase-1 fg = {phase1_f_fg:?}, mid-stream fg = {midstream_f_fg:?}"
+        );
+    });
+}
+
+/// When code is *rewritten* (not appended) under the same language, the retained
+/// text_overrides from the prior parse would map to unrelated new text.  The
+/// prefix guard must detect the non-append and clear the overrides so stale
+/// highlights do not appear.
+#[test]
+fn text_overrides_cleared_when_code_is_rewritten() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|_| Appearance::mock());
+        // Phase 1: parse "range foo {" — highlights land on specific offsets.
+        let view = add_code_view(&mut app, |ctx| {
+            TuiCodeBlockView::new(
+                TuiCodeBlockPayload::new("range foo {", Some("go".to_owned())),
+                ctx,
+            )
+        });
+        let rx = wait_for_syntax_updated(&view, &mut app);
+        rx.await.expect("syntax parse should complete");
+        app.read(|ctx| {
+            assert!(
+                !view.as_ref(ctx).text_overrides.is_empty(),
+                "text_overrides must be non-empty after phase-1 parse"
+            );
+        });
+
+        // Phase 2: replace with code whose first char differs from phase-1.
+        // "for _, num..." does NOT start with "range foo {", so the prefix
+        // guard must clear the overrides immediately.
+        app.update(|ctx| {
+            view.update(ctx, |view, ctx| {
+                view.sync(
+                    TuiCodeBlockPayload::new(
+                        "for _, num := range numbers {",
+                        Some("go".to_owned()),
+                    ),
+                    ctx,
+                );
+            });
+        });
+
+        app.read(|ctx| {
+            assert!(
+                view.as_ref(ctx).text_overrides.is_empty(),
+                "text_overrides must be cleared when code is rewritten (not \
+                 appended); retained ranges would transiently style unrelated new text"
             );
         });
     });

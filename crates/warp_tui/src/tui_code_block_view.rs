@@ -110,15 +110,23 @@ impl TuiCodeBlockView {
         }
 
         let language_changed = self.payload.language != payload.language;
+        // Capture the previous code before the payload is replaced so we can
+        // decide whether the retained overrides are still valid.
+        let prev_code = self.payload.code.clone();
         self.payload = payload;
         // A language change completely invalidates the prior highlights (the
-        // token kinds no longer match), so clear them immediately.  A
-        // code-only change during streaming leaves the existing overrides in
-        // place: they still correctly color the unchanged prefix, avoiding a
-        // visible flash of fully-unstyled text while the new parse is in
-        // flight.  `refresh_highlights` will replace them once the fresh
+        // token kinds no longer match), so clear them immediately.  For a
+        // code-only streaming update that is a strict *append* (the new code
+        // starts with the entire previous code), the retained overrides still
+        // correctly color the unchanged prefix while the new parse is in
+        // flight — avoiding a visible flash of fully-unstyled text.  If the
+        // code is *rewritten or shrunk* under the same language (e.g. a
+        // streaming section-index shift that produces a different prefix), the
+        // retained ranges would transiently style unrelated new text until the
+        // next parse lands, so we clear them and accept a brief flash in that
+        // rarer case.  `refresh_highlights` will replace them once the fresh
         // parse for `expected_syntax_version` completes.
-        if language_changed {
+        if language_changed || !self.payload.code.starts_with(prev_code.as_str()) {
             self.text_overrides.clear();
         }
         self.expected_syntax_version = None;
