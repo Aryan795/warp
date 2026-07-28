@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::iter;
 
 use itertools::Itertools;
@@ -7,15 +8,16 @@ use session_sharing_protocol::common::{
 use warp_core::command::ExitCode;
 use warpui::App;
 
+use super::PRESET_COLORS;
+// PRESET_COLORS is a private const in the parent module; accessible here because
+// this file is declared as `mod tests` inside presence_manager.rs.
+use super::{PresenceManager, assign_colors_for_participants, color_for_participant_id_index};
 use crate::auth::UserUid;
 use crate::terminal::model::ansi::{
     CommandFinishedValue, CompletionMetadata, Handler, PrecmdValue, PromptMetadata,
 };
 use crate::terminal::model::blocks::BlockList;
 use crate::terminal::model::test_utils::TestBlockListBuilder;
-use crate::terminal::shared_session::presence_manager::{
-    PRESET_COLORS, PresenceManager, color_for_participant_id,
-};
 
 fn viewer_with_uid(uid: &str, is_present: bool) -> Viewer {
     Viewer {
@@ -112,9 +114,9 @@ fn test_viewer_colors_come_from_preset_palette() {
             assert_eq!(presence_manager.get_present_viewers().count(), 0);
         });
 
-        // Add viewers one-by-one. Each viewer should receive a color from PRESET_COLORS
-        // determined by `color_for_participant_id`, and the color must be stable across
-        // subsequent `update_participants` calls.
+        // Add viewers one-by-one. Each viewer should receive a collision-free color from
+        // PRESET_COLORS via `assign_colors_for_participants`, and all present viewers at
+        // any point in time must have distinct colors.
         let viewer_ids: Vec<_> = iter::repeat_with(ParticipantId::new).take(3).collect();
 
         for (i, id) in viewer_ids.iter().enumerate() {
@@ -151,18 +153,24 @@ fn test_viewer_colors_come_from_preset_palette() {
 
             presence_manager.read(&app, |presence_manager, _ctx| {
                 assert_eq!(presence_manager.get_present_viewers().count(), i + 1);
-                for viewer in presence_manager.get_present_viewers() {
-                    // Color must come from the preset palette.
+                let colors: Vec<_> = presence_manager
+                    .get_present_viewers()
+                    .map(|v| v.color)
+                    .collect();
+                for &color in &colors {
                     assert!(
-                        PRESET_COLORS.contains(&viewer.color),
+                        PRESET_COLORS.contains(&color),
                         "viewer color must be a preset color"
                     );
-                    // Color must match the deterministic formula.
-                    assert_eq!(
-                        viewer.color,
-                        color_for_participant_id(&viewer.info.id),
-                        "viewer color must match color_for_participant_id"
-                    );
+                }
+                // All viewers must have distinct colors (collision-free guarantee).
+                let unique: HashSet<_> = colors.iter().copied().collect();
+                assert_eq!(
+                    colors.len(),
+                    unique.len(),
+                    "all viewers must have distinct colors"
+                );
+                for viewer in presence_manager.get_present_viewers() {
                     assert!(matches!(viewer.role, Some(Role::Reader)));
                 }
             });
@@ -202,16 +210,24 @@ fn test_viewer_colors_come_from_preset_palette() {
             .await;
 
         presence_manager.read(&app, |presence_manager, _ctx| {
-            for viewer in presence_manager.get_present_viewers() {
+            let colors: Vec<_> = presence_manager
+                .get_present_viewers()
+                .map(|v| v.color)
+                .collect();
+            for &color in &colors {
                 assert!(
-                    PRESET_COLORS.contains(&viewer.color),
+                    PRESET_COLORS.contains(&color),
                     "viewer color must be a preset color after departure/join"
                 );
-                assert_eq!(
-                    viewer.color,
-                    color_for_participant_id(&viewer.info.id),
-                    "viewer color must still match color_for_participant_id after departure/join"
-                );
+            }
+            // Distinctness must hold after departure/join too.
+            let unique: HashSet<_> = colors.iter().copied().collect();
+            assert_eq!(
+                colors.len(),
+                unique.len(),
+                "all viewers must have distinct colors after departure/join"
+            );
+            for viewer in presence_manager.get_present_viewers() {
                 assert!(matches!(viewer.role, Some(Role::Reader)));
             }
         });
@@ -293,18 +309,11 @@ fn test_dont_include_self_in_viewers() {
             // The viewers returned by presence manager should not include ourselves.
             let viewers = presence_manager.get_present_viewers().collect_vec();
             assert_eq!(viewers.len(), 3);
-            for viewer in viewers {
+            for viewer in &viewers {
                 assert_ne!(viewer.info.id, self_id);
-                // Each viewer's color must come from the preset palette and match
-                // the deterministic formula.
                 assert!(
                     PRESET_COLORS.contains(&viewer.color),
                     "viewer color must be a preset color"
-                );
-                assert_eq!(
-                    viewer.color,
-                    color_for_participant_id(&viewer.info.id),
-                    "viewer color must match color_for_participant_id"
                 );
             }
 
@@ -312,6 +321,16 @@ fn test_dont_include_self_in_viewers() {
             assert!(
                 PRESET_COLORS.contains(&sharer.color),
                 "sharer color must be a preset color"
+            );
+
+            // All 4 participants (sharer + 3 viewers, not self) must have distinct colors.
+            let mut all_colors: Vec<_> = viewers.iter().map(|v| v.color).collect();
+            all_colors.push(sharer.color);
+            let unique: HashSet<_> = all_colors.iter().copied().collect();
+            assert_eq!(
+                all_colors.len(),
+                unique.len(),
+                "sharer and all viewers must have distinct colors"
             );
         });
     });
@@ -434,21 +453,19 @@ fn test_get_participant_for_attribution_resolves_self() {
                 "other viewer color must be a preset color"
             );
 
-            // Colors must match the deterministic formula.
-            assert_eq!(
-                self_color,
-                color_for_participant_id(&self_id),
-                "self color must match color_for_participant_id"
+            // All three participants must have DISTINCT colors (AC1/AC2: collision-free
+            // guarantee from `assign_colors_for_participants`).
+            assert_ne!(
+                self_color, sharer_color,
+                "self and sharer must have different colors"
             );
-            assert_eq!(
-                sharer_color,
-                color_for_participant_id(&sharer_id),
-                "sharer color must match color_for_participant_id"
+            assert_ne!(
+                self_color, other_color,
+                "self and other viewer must have different colors"
             );
-            assert_eq!(
-                other_color,
-                color_for_participant_id(&other_viewer_id),
-                "other viewer color must match color_for_participant_id"
+            assert_ne!(
+                sharer_color, other_color,
+                "sharer and other viewer must have different colors"
             );
 
             // An unknown participant ID must not resolve.
@@ -539,15 +556,16 @@ fn test_get_participant_for_attribution_resolves_sharer_self() {
                 .expect("sharer self must be resolvable for attribution after update_participants");
             assert_eq!(attr.display_name, sharer_display_name);
 
-            // Color must be deterministic and from the preset palette.
-            assert_eq!(
-                attr.color,
-                color_for_participant_id(&sharer_id),
-                "sharer color must match color_for_participant_id"
-            );
+            // Color must come from the preset palette and be the collision-free
+            // assignment for this participant set (sharer + one viewer).
             assert!(
                 PRESET_COLORS.contains(&attr.color),
                 "sharer color must be a preset color"
+            );
+            let expected = assign_colors_for_participants(&[sharer_id.clone(), viewer_id.clone()]);
+            assert_eq!(
+                attr.color, expected[&sharer_id],
+                "sharer color must match assign_colors_for_participants"
             );
         });
     });
@@ -652,7 +670,52 @@ fn test_color_parity_across_managers() {
             viewer_color_on_terminal, viewer_color_on_browser,
             "viewer must have the same color on terminal and browser (AC3)"
         );
+
+        // AC1/AC2: the two participants must have distinct colors.
+        assert_ne!(
+            sharer_color_on_terminal, viewer_color_on_terminal,
+            "sharer and viewer must have different colors"
+        );
     });
+}
+
+#[test]
+fn test_color_index_uses_u64_arithmetic_not_usize() {
+    // `color_for_participant_id_index` must compute modulo in `u64`, not `usize`.
+    //
+    // On wasm32 (the browser target) `usize` is 32 bits wide.  A naive
+    // `(hash as usize) % n` would silently discard the upper 32 bits of the
+    // 64-bit hash value *before* the modulo, yielding a different palette index
+    // for the ~57 % of participant IDs whose upper 32 bits are non-zero.
+    //
+    // This test pins the expected index against an explicit `u64` reference
+    // computation. On a native 64-bit host `u64 == usize` so both formulas agree
+    // and the test is trivially green. On wasm32 CI a function that uses
+    // `(hash as usize) % n` would return a different result, failing the
+    // assertion for every ID where the two formulas diverge.
+    for _ in 0..20 {
+        let id = ParticipantId::new();
+        let s = id.to_string();
+
+        // Reference: u64 modulo before narrowing to usize.
+        let hash_u64: u64 = s.bytes().fold(0u64, |acc, b| {
+            acc.wrapping_mul(31).wrapping_add(u64::from(b))
+        });
+        let expected_index = (hash_u64 % PRESET_COLORS.len() as u64) as usize;
+
+        // Hypothetical buggy path (what `(hash as usize) % n` would give on wasm32):
+        let buggy_u32_index = (hash_u64 as u32 as usize) % PRESET_COLORS.len();
+        // (On a 64-bit host `buggy_u32_index` can equal `expected_index`, but the
+        // assertion below catches the wasm32 regression regardless.)
+        let _ = buggy_u32_index; // suppress unused warning on 64-bit
+
+        assert_eq!(
+            color_for_participant_id_index(&id),
+            expected_index,
+            "color_for_participant_id_index must use u64 modulo to avoid wasm32 truncation \
+             (id={s}, hash={hash_u64:#018x})"
+        );
+    }
 }
 
 fn block_list_for_test(max_block_index: usize) -> BlockList {
