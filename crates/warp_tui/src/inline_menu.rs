@@ -98,8 +98,9 @@ impl TuiInlineMenuHandle for ModelHandle<TuiMcpMenuModel> {
         self.as_ref(ctx).snapshot(ctx)
     }
 
-    fn select_by_snapshot_index(&self, index: usize, ctx: &mut AppContext) {
+    fn select_by_snapshot_index(&self, index: usize, ctx: &mut AppContext) -> bool {
         self.update(ctx, |model, ctx| model.select_at_snapshot_index(index, ctx));
+        true
     }
 
     fn scroll_by_delta(&self, delta: isize, ctx: &mut AppContext) {
@@ -275,11 +276,20 @@ impl<Row> TuiInlineMenuListState<Row> {
     }
 
     /// Selects the row at `index` directly (for mouse-click targeting) and
-    /// scrolls to keep it visible.
-    pub(crate) fn select_absolute(&mut self, index: usize, max_visible_rows: usize) {
+    /// scrolls to keep it visible. Only moves the selection when
+    /// `is_selectable` returns true for the target row, matching the
+    /// behaviour of `select_next` / `select_previous` / `replace_rows`.
+    pub(crate) fn select_absolute(
+        &mut self,
+        index: usize,
+        max_visible_rows: usize,
+        mut is_selectable: impl FnMut(&Row) -> bool,
+    ) {
         let rows_len = self.rows.len();
-        if index < rows_len {
-            self.selection.select(index, rows_len, |_| true);
+        if index < rows_len && is_selectable(&self.rows[index]) {
+            self.selection.select(index, rows_len, |i| {
+                self.rows.get(i).is_some_and(&mut is_selectable)
+            });
             self.keep_selected_visible(max_visible_rows);
         }
     }
@@ -334,8 +344,13 @@ pub(crate) trait TuiInlineMenuHandle {
     /// Returns the menu's presentation snapshot.
     fn snapshot(&self, ctx: &AppContext) -> Option<TuiInlineMenuSnapshot>;
     /// Selects the row at the given absolute snapshot index (for mouse-click
-    /// targeting). No-op by default; models that support it override this.
-    fn select_by_snapshot_index(&self, _index: usize, _ctx: &mut AppContext) {}
+    /// targeting). Returns `true` when the selection was (or could have been)
+    /// made so that the caller can safely fire `accept`. Returns `false` by
+    /// default so that a menu that forgets to override this method does not
+    /// silently accept whatever row happened to be keyboard-selected.
+    fn select_by_snapshot_index(&self, _index: usize, _ctx: &mut AppContext) -> bool {
+        false
+    }
     /// Scrolls the menu viewport by `delta` rows without changing the
     /// selection. No-op by default; models that support it override this.
     fn scroll_by_delta(&self, _delta: isize, _ctx: &mut AppContext) {}
@@ -373,7 +388,7 @@ impl TuiInlineMenu {
 
     /// Renders the menu without mouse interactions (used in tests and other
     /// non-interactive contexts).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn render(&self, ctx: &AppContext) -> Option<Box<dyn TuiElement>> {
         self.snapshot(ctx)
             .map(|snapshot| render_inline_menu(&snapshot, &TuiUiBuilder::from_app(ctx)))
@@ -388,13 +403,9 @@ impl TuiInlineMenu {
         on_accept: impl Fn(usize, &mut TuiEventContext<'_>, &AppContext) + 'static,
         on_scroll: impl Fn(isize, &mut TuiEventContext<'_>, &AppContext) + 'static,
     ) -> Option<Box<dyn TuiElement>> {
+        // Mouse-state growth happens in TuiInlineMenuElement::layout every
+        // frame, so there is no need to pre-grow the vec here.
         self.snapshot(ctx).map(|snapshot| {
-            {
-                let mut states = self.item_mouse_states.borrow_mut();
-                while states.len() < snapshot.rows.len() {
-                    states.push(MouseStateHandle::default());
-                }
-            }
             let on_accept: Rc<InlineMenuAcceptFn> = Rc::new(on_accept);
             let on_scroll: Box<InlineMenuScrollFn> = Box::new(on_scroll);
             TuiInlineMenuElement {
@@ -409,8 +420,8 @@ impl TuiInlineMenu {
         })
     }
 
-    pub(crate) fn select_by_snapshot_index(&self, index: usize, ctx: &mut AppContext) {
-        self.handle.select_by_snapshot_index(index, ctx);
+    pub(crate) fn select_by_snapshot_index(&self, index: usize, ctx: &mut AppContext) -> bool {
+        self.handle.select_by_snapshot_index(index, ctx)
     }
 
     pub(crate) fn scroll_by_delta(&self, delta: isize, ctx: &mut AppContext) {
@@ -482,8 +493,9 @@ impl TuiInlineMenuHandle for ModelHandle<TuiSlashCommandModel> {
         self.as_ref(ctx).snapshot(ctx)
     }
 
-    fn select_by_snapshot_index(&self, index: usize, ctx: &mut AppContext) {
+    fn select_by_snapshot_index(&self, index: usize, ctx: &mut AppContext) -> bool {
         self.update(ctx, |model, ctx| model.select_at_snapshot_index(index, ctx));
+        true
     }
 
     fn scroll_by_delta(&self, delta: isize, ctx: &mut AppContext) {
@@ -531,8 +543,9 @@ impl TuiInlineMenuHandle for ModelHandle<TuiConversationMenuModel> {
         self.as_ref(ctx).snapshot(ctx)
     }
 
-    fn select_by_snapshot_index(&self, index: usize, ctx: &mut AppContext) {
+    fn select_by_snapshot_index(&self, index: usize, ctx: &mut AppContext) -> bool {
         self.update(ctx, |model, ctx| model.select_at_snapshot_index(index, ctx));
+        true
     }
 
     fn scroll_by_delta(&self, delta: isize, ctx: &mut AppContext) {
@@ -581,8 +594,9 @@ impl TuiInlineMenuHandle for ModelHandle<TuiPromptHistoryMenuModel> {
         self.as_ref(ctx).snapshot(ctx)
     }
 
-    fn select_by_snapshot_index(&self, index: usize, ctx: &mut AppContext) {
+    fn select_by_snapshot_index(&self, index: usize, ctx: &mut AppContext) -> bool {
         self.update(ctx, |model, ctx| model.select_at_snapshot_index(index, ctx));
+        true
     }
 
     fn scroll_by_delta(&self, delta: isize, ctx: &mut AppContext) {
@@ -630,8 +644,9 @@ impl TuiInlineMenuHandle for ModelHandle<TuiModelMenuModel> {
         self.as_ref(ctx).snapshot(ctx)
     }
 
-    fn select_by_snapshot_index(&self, index: usize, ctx: &mut AppContext) {
+    fn select_by_snapshot_index(&self, index: usize, ctx: &mut AppContext) -> bool {
         self.update(ctx, |model, ctx| model.select_at_snapshot_index(index, ctx));
+        true
     }
 
     fn scroll_by_delta(&self, delta: isize, ctx: &mut AppContext) {
@@ -684,8 +699,9 @@ impl TuiInlineMenuHandle for ModelHandle<TuiSkillMenuModel> {
         self.as_ref(ctx).snapshot(ctx)
     }
 
-    fn select_by_snapshot_index(&self, index: usize, ctx: &mut AppContext) {
+    fn select_by_snapshot_index(&self, index: usize, ctx: &mut AppContext) -> bool {
         self.update(ctx, |model, ctx| model.select_at_snapshot_index(index, ctx));
+        true
     }
 
     fn scroll_by_delta(&self, delta: isize, ctx: &mut AppContext) {
@@ -693,7 +709,7 @@ impl TuiInlineMenuHandle for ModelHandle<TuiSkillMenuModel> {
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn render_inline_menu(
     snapshot: &TuiInlineMenuSnapshot,
     builder: &TuiUiBuilder,
@@ -778,18 +794,31 @@ impl TuiElement for TuiInlineMenuElement {
         }
     }
 
-    /// Handles scroll-wheel events, then delegates remaining events to the
-    /// laid-out content (which forwards hover/click through `TuiHoverable`).
+    /// Handles scroll-wheel events over the menu bounds, then delegates
+    /// remaining events to the laid-out content (which forwards hover/click
+    /// through `TuiHoverable`).
     fn dispatch_event(
         &mut self,
         event: &TuiEvent,
         event_ctx: &mut TuiEventContext<'_>,
         app: &AppContext,
     ) -> bool {
-        if let TuiEvent::ScrollWheel { delta, .. } = event
+        if let TuiEvent::ScrollWheel {
+            position, delta, ..
+        } = event
             && let Some(on_scroll) = &self.on_scroll
+            && let Some((origin, size)) = self.origin().zip(self.size())
+            && event_ctx.hit_test(origin, size, *position)
+            && delta.1 != 0
         {
-            on_scroll(delta.1, event_ctx, app);
+            // Positive wheel delta scrolls toward the start of the list,
+            // matching `option_selector` and the transcript scrollable.
+            // Clear stale hover states so rows that scroll out of view don't
+            // stay bold under a stationary pointer.
+            for state in self.item_mouse_states.borrow().iter() {
+                state.lock().unwrap().reset_hover_state();
+            }
+            on_scroll(-delta.1, event_ctx, app);
             return true;
         }
         self.content

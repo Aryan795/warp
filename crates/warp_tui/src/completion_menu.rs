@@ -148,7 +148,7 @@ impl TuiCompletionMenuModel {
         let TuiCompletionMenuState::Open { list } = &mut self.state else {
             return;
         };
-        list.select_absolute(index, MAX_VISIBLE_ROWS);
+        list.select_absolute(index, MAX_VISIBLE_ROWS, |_| true);
         ctx.emit(TuiCompletionMenuEvent);
     }
 
@@ -250,8 +250,9 @@ impl TuiInlineMenuHandle for ModelHandle<TuiCompletionMenuModel> {
         self.as_ref(ctx).snapshot(ctx)
     }
 
-    fn select_by_snapshot_index(&self, index: usize, ctx: &mut AppContext) {
+    fn select_by_snapshot_index(&self, index: usize, ctx: &mut AppContext) -> bool {
         self.update(ctx, |model, ctx| model.select_at_snapshot_index(index, ctx));
+        true
     }
 
     fn scroll_by_delta(&self, delta: isize, ctx: &mut AppContext) {

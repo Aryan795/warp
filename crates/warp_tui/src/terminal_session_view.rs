@@ -3287,7 +3287,13 @@ impl TuiTerminalSessionView {
         let Some(menu) = active_inline_menu(&self.inline_menus, mode, ctx) else {
             return;
         };
-        menu.select_by_snapshot_index(index, ctx);
+        // Guard: only fire accept when select_by_snapshot_index confirms the
+        // selection was made. The default no-op impl returns false, preventing
+        // a future menu that omits the override from silently accepting
+        // whatever row happened to be keyboard-selected.
+        if !menu.select_by_snapshot_index(index, ctx) {
+            return;
+        }
         let Some(accepted) = menu.accept(ctx) else {
             return;
         };

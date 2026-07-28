@@ -188,7 +188,7 @@ impl TuiPromptHistoryMenuModel {
             return;
         }
         if let TuiPromptHistoryMenuState::Open { list, .. } = &mut self.state {
-            list.select_absolute(index, MAX_VISIBLE_ROWS);
+            list.select_absolute(index, MAX_VISIBLE_ROWS, |_| true);
         }
         self.preview_selection(ctx);
         ctx.emit(TuiPromptHistoryMenuEvent::Updated);

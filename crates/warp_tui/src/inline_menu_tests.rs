@@ -1,13 +1,101 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use warp::appearance::Appearance;
-use warpui_core::App;
-use warpui_core::elements::tui::{Color, Modifier, TuiBufferExt, TuiRect};
+use warpui::event::ModifiersState;
+use warpui_core::elements::tui::{
+    Color, Modifier, TuiBuffer, TuiBufferExt, TuiConstraint, TuiElement, TuiEvent, TuiEventContext,
+    TuiLayoutContext, TuiPaintContext, TuiPaintSurface, TuiRect, TuiScreenPosition, TuiSize,
+};
 use warpui_core::presenter::tui::TuiPresenter;
+use warpui_core::{App, AppContext, EntityId, EntityIdMap};
 
 use super::{
-    TuiInlineMenuHeader, TuiInlineMenuListState, TuiInlineMenuRow, TuiInlineMenuRowStyle,
-    TuiInlineMenuSnapshot, TuiInlineMenuStatus, TuiInlineMenuTab, render_inline_menu,
+    InlineMenuScrollFn, TuiInlineMenuElement, TuiInlineMenuHeader, TuiInlineMenuListState,
+    TuiInlineMenuRow, TuiInlineMenuRowStyle, TuiInlineMenuSnapshot, TuiInlineMenuStatus,
+    TuiInlineMenuTab, render_inline_menu,
 };
 use crate::tui_builder::TuiUiBuilder;
+
+/// Lays out `element` at `area` so that content sizes are populated for
+/// subsequent render/dispatch calls.
+fn layout_element(element: &mut dyn TuiElement, area: TuiRect, ctx: &AppContext) {
+    let mut rendered_views = EntityIdMap::default();
+    let mut lctx = TuiLayoutContext {
+        rendered_views: &mut rendered_views,
+    };
+    element.layout(
+        TuiConstraint::tight(TuiSize::new(area.width, area.height)),
+        &mut lctx,
+        ctx,
+    );
+}
+
+/// Renders `element` into a fresh buffer then dispatches `event`, recording
+/// element origins in the scene so hit-tests work correctly.
+/// Mirrors `transcript_view_tests.rs::dispatch_event`. Layout must have run.
+fn render_and_dispatch(
+    element: &mut dyn TuiElement,
+    area: TuiRect,
+    event: &TuiEvent,
+    ctx: &AppContext,
+) -> bool {
+    let mut rendered_views = EntityIdMap::default();
+    let mut buffer = TuiBuffer::empty(area);
+    let mut paint_ctx = TuiPaintContext::new(&mut rendered_views);
+    {
+        let mut surface = TuiPaintSurface::new(&mut buffer);
+        element.render(
+            TuiScreenPosition::new(i32::from(area.x), i32::from(area.y)),
+            &mut surface,
+            &mut paint_ctx,
+        );
+    }
+    let scene = Rc::new(paint_ctx.scene.clone());
+    drop(paint_ctx);
+    let mut event_ctx = TuiEventContext::new(scene, &mut rendered_views);
+    event_ctx.set_origin_view(Some(EntityId::new()));
+    element.dispatch_event(event, &mut event_ctx, ctx)
+}
+
+/// Builds an interactive `TuiInlineMenuElement` for use in unit tests.
+/// The closures capture the provided `Rc<RefCell<_>>` cells so the test can
+/// observe what index was accepted and what delta the scroll received.
+fn make_interactive_element(
+    snapshot: TuiInlineMenuSnapshot,
+    ctx: &AppContext,
+    accepted_index: Rc<RefCell<Option<usize>>>,
+    scroll_delta: Rc<RefCell<Option<isize>>>,
+) -> TuiInlineMenuElement {
+    use warpui_core::elements::MouseStateHandle;
+    let on_accept = {
+        let accepted_index = Rc::clone(&accepted_index);
+        move |index: usize, _: &mut TuiEventContext<'_>, _: &AppContext| {
+            *accepted_index.borrow_mut() = Some(index);
+        }
+    };
+    let on_scroll: Box<InlineMenuScrollFn> = {
+        let scroll_delta = Rc::clone(&scroll_delta);
+        Box::new(
+            move |delta: isize, _: &mut TuiEventContext<'_>, _: &AppContext| {
+                *scroll_delta.borrow_mut() = Some(delta);
+            },
+        )
+    };
+    let item_mouse_states = Rc::new(RefCell::new(
+        (0..snapshot.rows.len())
+            .map(|_| MouseStateHandle::default())
+            .collect::<Vec<_>>(),
+    ));
+    TuiInlineMenuElement {
+        snapshot,
+        builder: TuiUiBuilder::from_app(ctx),
+        content: None,
+        item_mouse_states,
+        on_accept: Some(Rc::new(on_accept)),
+        on_scroll: Some(on_scroll),
+    }
+}
 
 fn render_at_size(snapshot: TuiInlineMenuSnapshot, width: u16, height: u16) -> Vec<String> {
     App::test((), |app| async move {
@@ -458,7 +546,7 @@ fn list_select_absolute_sets_selection_and_scrolls_to_keep_visible() {
     let mut list = TuiInlineMenuListState::default();
     list.replace_rows(vec![(); 5], false, Some(0), 2, |_| true);
 
-    list.select_absolute(3, 2);
+    list.select_absolute(3, 2, |_| true);
     assert_eq!(list.selected_index(), Some(3));
     // With 2 visible rows the viewport starts at scroll_offset=2 so row 3
     // lands in the [2, 4) window.
@@ -474,8 +562,23 @@ fn list_select_absolute_ignores_out_of_bounds_index() {
     let mut list = TuiInlineMenuListState::default();
     list.replace_rows(vec![(); 3], false, Some(1), 3, |_| true);
 
-    list.select_absolute(10, 3); // out of bounds — no change
+    list.select_absolute(10, 3, |_| true); // out of bounds — no change
     assert_eq!(list.selected_index(), Some(1));
+}
+
+#[test]
+fn list_select_absolute_skips_non_selectable_row() {
+    // Row 0 is selectable, row 1 is not, row 2 is selectable.
+    let mut list = TuiInlineMenuListState::default();
+    list.replace_rows(vec![true, false, true], false, Some(0), 3, |row| *row);
+
+    // Clicking the non-selectable row must leave the selection unchanged.
+    list.select_absolute(1, 3, |row| *row);
+    assert_eq!(list.selected_index(), Some(0));
+
+    // Clicking a selectable row should work normally.
+    list.select_absolute(2, 3, |row| *row);
+    assert_eq!(list.selected_index(), Some(2));
 }
 
 #[test]
@@ -546,4 +649,121 @@ fn shared_list_preserves_ready_rows_while_a_mixer_query_loads() {
     assert_eq!(list.rows(), &["ready"]);
     assert_eq!(list.selected_index(), Some(0));
     assert!(list.is_loading());
+}
+
+// --- Interactive render-path tests ---
+// These tests exercise the interactive TuiInlineMenuElement::dispatch_event
+// branch (TuiHoverable click, scroll-wheel, out-of-bounds scroll), which the
+// non-interactive render_inline_menu helper never touches.
+
+#[test]
+fn interactive_menu_click_on_selectable_row_fires_on_accept() {
+    // 3 selectable rows rendered in a 50x3 area; click lands on row 1 (y=1).
+    App::test((), |app| async move {
+        app.add_singleton_model(|_| Appearance::mock());
+        app.read(move |ctx| {
+            let accepted = Rc::new(RefCell::new(None::<usize>));
+            let scroll = Rc::new(RefCell::new(None::<isize>));
+            let snapshot = rows_snapshot(3, 0, 0, 5);
+            let mut element =
+                make_interactive_element(snapshot, ctx, Rc::clone(&accepted), Rc::clone(&scroll));
+
+            let area = TuiRect::new(0, 0, 50, 3);
+
+            // Layout first so that content sizes are known for hit-testing.
+            layout_element(&mut element, area, ctx);
+
+            // Simulate LeftMouseDown + LeftMouseUp at row 1 (y=1) to trigger a
+            // click. Each render_and_dispatch call re-renders and re-records
+            // the scene so element origins remain valid for hit-testing.
+            let down = TuiEvent::LeftMouseDown {
+                position: (5u16, 1u16).into(),
+                modifiers: ModifiersState::default(),
+                click_count: 1,
+                is_first_mouse: false,
+            };
+            let up = TuiEvent::LeftMouseUp {
+                position: (5u16, 1u16).into(),
+                modifiers: ModifiersState::default(),
+            };
+            render_and_dispatch(&mut element, area, &down, ctx);
+            render_and_dispatch(&mut element, area, &up, ctx);
+
+            assert_eq!(
+                *accepted.borrow(),
+                Some(1),
+                "clicking row 1 should fire on_accept with index 1"
+            );
+            assert_eq!(*scroll.borrow(), None, "no scroll should fire on a click");
+        });
+    });
+}
+
+#[test]
+fn interactive_menu_scroll_wheel_calls_on_scroll_with_negated_delta() {
+    // Verify that a positive wheel delta (user scrolls down) produces a
+    // *negative* delta to the on_scroll callback, matching option_selector
+    // and scrollable: positive delta = scroll toward the start of the list.
+    App::test((), |app| async move {
+        app.add_singleton_model(|_| Appearance::mock());
+        app.read(move |ctx| {
+            let accepted = Rc::new(RefCell::new(None::<usize>));
+            let scroll = Rc::new(RefCell::new(None::<isize>));
+            let snapshot = rows_snapshot(3, 0, 0, 5);
+            let mut element =
+                make_interactive_element(snapshot, ctx, Rc::clone(&accepted), Rc::clone(&scroll));
+
+            let area = TuiRect::new(0, 0, 50, 3);
+            layout_element(&mut element, area, ctx);
+
+            // Positive y-delta — pointer is inside the element area (y=1).
+            let event = TuiEvent::ScrollWheel {
+                position: (5u16, 1u16).into(),
+                delta: (0, 2),
+                precise: false,
+                modifiers: ModifiersState::default(),
+            };
+            let handled = render_and_dispatch(&mut element, area, &event, ctx);
+
+            assert!(handled, "in-bounds scroll must be consumed");
+            assert_eq!(
+                *scroll.borrow(),
+                Some(-2),
+                "on_scroll must receive -delta.1 so the viewport scrolls toward the start"
+            );
+            assert_eq!(*accepted.borrow(), None);
+        });
+    });
+}
+
+#[test]
+fn interactive_menu_scroll_wheel_outside_bounds_is_not_handled() {
+    // A wheel event whose position lies outside the rendered element area must
+    // pass through unhandled so the transcript scrollable beneath the menu can
+    // still receive it.
+    App::test((), |app| async move {
+        app.add_singleton_model(|_| Appearance::mock());
+        app.read(move |ctx| {
+            let accepted = Rc::new(RefCell::new(None::<usize>));
+            let scroll = Rc::new(RefCell::new(None::<isize>));
+            let snapshot = rows_snapshot(3, 0, 0, 5);
+            let mut element =
+                make_interactive_element(snapshot, ctx, Rc::clone(&accepted), Rc::clone(&scroll));
+
+            // Element occupies rows 0-2; pointer at y=10 is well outside.
+            let area = TuiRect::new(0, 0, 50, 3);
+            layout_element(&mut element, area, ctx);
+
+            let event = TuiEvent::ScrollWheel {
+                position: (5u16, 10u16).into(),
+                delta: (0, 1),
+                precise: false,
+                modifiers: ModifiersState::default(),
+            };
+            let handled = render_and_dispatch(&mut element, area, &event, ctx);
+
+            assert!(!handled, "out-of-bounds scroll must not be consumed");
+            assert_eq!(*scroll.borrow(), None, "on_scroll must not fire");
+        });
+    });
 }

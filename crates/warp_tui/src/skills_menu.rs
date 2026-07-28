@@ -138,7 +138,7 @@ impl TuiSkillMenuModel {
         let TuiSkillMenuState::Open { list } = &mut self.state else {
             return;
         };
-        list.select_absolute(index, MAX_VISIBLE_ROWS);
+        list.select_absolute(index, MAX_VISIBLE_ROWS, |_| true);
         ctx.emit(TuiSkillMenuEvent);
     }
 
