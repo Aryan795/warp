@@ -150,12 +150,19 @@ impl TuiConversationMenuModel {
     }
 
     /// Selects the row at absolute snapshot index `index` (for mouse click).
-    pub(crate) fn select_at_snapshot_index(&mut self, index: usize, ctx: &mut ModelContext<Self>) {
+    /// Returns `true` when the row was actually selected, `false` when the
+    /// index is out of bounds or the menu is not open.
+    pub(crate) fn select_at_snapshot_index(
+        &mut self,
+        index: usize,
+        ctx: &mut ModelContext<Self>,
+    ) -> bool {
         let TuiConversationMenuState::Open { list } = &mut self.state else {
-            return;
+            return false;
         };
-        list.select_absolute(index, MAX_VISIBLE_ROWS, |_| true);
+        let selected = list.select_absolute(index, MAX_VISIBLE_ROWS, |_| true);
         ctx.emit(TuiConversationMenuEvent::Updated);
+        selected
     }
 
     /// Scrolls the viewport by `delta` rows without changing the selection.

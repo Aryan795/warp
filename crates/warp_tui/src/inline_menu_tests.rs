@@ -92,6 +92,7 @@ fn make_interactive_element(
         builder: TuiUiBuilder::from_app(ctx),
         content: None,
         item_mouse_states,
+        last_row_titles: Rc::new(RefCell::new(Vec::new())),
         on_accept: Some(Rc::new(on_accept)),
         on_scroll: Some(on_scroll),
     }
@@ -764,6 +765,145 @@ fn interactive_menu_scroll_wheel_outside_bounds_is_not_handled() {
 
             assert!(!handled, "out-of-bounds scroll must not be consumed");
             assert_eq!(*scroll.borrow(), None, "on_scroll must not fire");
+        });
+    });
+}
+
+#[test]
+fn interactive_menu_hovered_selectable_row_renders_bold() {
+    // Verify that a row whose MouseStateHandle is in hovered state renders
+    // with the BOLD modifier, confirming that hover feedback is visible.
+    //
+    // The hover state is stored on the shared MouseStateHandle and is read
+    // during layout (in build_inline_menu). So the flow is:
+    //   1. layout → build content (no hover yet)
+    //   2. render+dispatch MouseMoved → TuiHoverable sets is_hovered=true on
+    //      the shared handle
+    //   3. re-layout → build_inline_menu reads is_hovered=true, applies BOLD
+    //   4. render to buffer and assert BOLD is present
+    App::test((), |app| async move {
+        app.add_singleton_model(|_| Appearance::mock());
+        app.read(move |ctx| {
+            let accepted = Rc::new(RefCell::new(None::<usize>));
+            let scroll = Rc::new(RefCell::new(None::<isize>));
+            // Use 3 rows all selectable; row 0 is initially selected.
+            let snapshot = rows_snapshot(3, 0, 0, 5);
+            let mut element =
+                make_interactive_element(snapshot, ctx, Rc::clone(&accepted), Rc::clone(&scroll));
+
+            let area = TuiRect::new(0, 0, 50, 3);
+            // Step 1: initial layout so origins are available for hit-testing.
+            layout_element(&mut element, area, ctx);
+
+            // Step 2: dispatch MouseMoved at row 1 (y=1).
+            // render_and_dispatch renders first (recording scene origins) then
+            // dispatches, so TuiHoverable can hit-test and set is_hovered.
+            let hover_event = TuiEvent::MouseMoved {
+                position: (5u16, 1u16).into(),
+                modifiers: ModifiersState::default(),
+                is_synthetic: false,
+            };
+            render_and_dispatch(&mut element, area, &hover_event, ctx);
+
+            // Step 3: re-layout so build_inline_menu reads the updated hover
+            // state and rebuilds the content tree with BOLD on row 1.
+            layout_element(&mut element, area, ctx);
+
+            // Step 4: render to a buffer and inspect the cells.
+            let mut rendered_views = EntityIdMap::default();
+            let mut buffer = TuiBuffer::empty(area);
+            let mut paint_ctx = TuiPaintContext::new(&mut rendered_views);
+            {
+                let mut surface = TuiPaintSurface::new(&mut buffer);
+                element.render(
+                    TuiScreenPosition::new(i32::from(area.x), i32::from(area.y)),
+                    &mut surface,
+                    &mut paint_ctx,
+                );
+            }
+            // Row 1 should be rendered with the BOLD modifier (hover feedback).
+            let cell = &buffer[(0u16, 1u16)];
+            assert!(
+                cell.modifier.contains(Modifier::BOLD),
+                "hovered selectable row must render bold; modifier was {:?}",
+                cell.modifier
+            );
+            // Row 0 should not be bold (it is selected, which uses a different
+            // style, not bold; and it is not hovered).
+            // Row 2 is not hovered and not selected so also must not be bold.
+            assert!(
+                !buffer[(0u16, 2u16)].modifier.contains(Modifier::BOLD),
+                "non-hovered row 2 must not be bold"
+            );
+        });
+    });
+}
+
+#[test]
+fn interactive_menu_click_on_non_selectable_row_does_not_fire_on_accept() {
+    // A click on a non-selectable row (is_selectable = false) must not call
+    // on_accept; the row has no click handler so the click falls through.
+    App::test((), |app| async move {
+        app.add_singleton_model(|_| Appearance::mock());
+        app.read(move |ctx| {
+            let accepted = Rc::new(RefCell::new(None::<usize>));
+            let scroll = Rc::new(RefCell::new(None::<isize>));
+            // Build a snapshot with row 1 marked non-selectable.
+            let snapshot = TuiInlineMenuSnapshot {
+                header: None,
+                rows: vec![
+                    TuiInlineMenuRow {
+                        title: "Selectable".to_owned(),
+                        description: None,
+                        state_suffix: None,
+                        is_selectable: true,
+                        style: TuiInlineMenuRowStyle::Default,
+                    },
+                    TuiInlineMenuRow {
+                        title: "Non-selectable header".to_owned(),
+                        description: None,
+                        state_suffix: None,
+                        is_selectable: false,
+                        style: TuiInlineMenuRowStyle::Default,
+                    },
+                    TuiInlineMenuRow {
+                        title: "Also selectable".to_owned(),
+                        description: None,
+                        state_suffix: None,
+                        is_selectable: true,
+                        style: TuiInlineMenuRowStyle::Default,
+                    },
+                ],
+                selected_index: Some(0),
+                scroll_offset: 0,
+                max_visible_rows: 5,
+                status: None,
+            };
+            let mut element =
+                make_interactive_element(snapshot, ctx, Rc::clone(&accepted), Rc::clone(&scroll));
+
+            let area = TuiRect::new(0, 0, 50, 3);
+            layout_element(&mut element, area, ctx);
+
+            // Click on the non-selectable row at y=1.
+            let down = TuiEvent::LeftMouseDown {
+                position: (5u16, 1u16).into(),
+                modifiers: ModifiersState::default(),
+                click_count: 1,
+                is_first_mouse: false,
+            };
+            let up = TuiEvent::LeftMouseUp {
+                position: (5u16, 1u16).into(),
+                modifiers: ModifiersState::default(),
+            };
+            render_and_dispatch(&mut element, area, &down, ctx);
+            render_and_dispatch(&mut element, area, &up, ctx);
+
+            assert_eq!(
+                *accepted.borrow(),
+                None,
+                "clicking a non-selectable row must not fire on_accept"
+            );
         });
     });
 }

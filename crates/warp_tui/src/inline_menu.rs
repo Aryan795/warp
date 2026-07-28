@@ -99,8 +99,7 @@ impl TuiInlineMenuHandle for ModelHandle<TuiMcpMenuModel> {
     }
 
     fn select_by_snapshot_index(&self, index: usize, ctx: &mut AppContext) -> bool {
-        self.update(ctx, |model, ctx| model.select_at_snapshot_index(index, ctx));
-        true
+        self.update(ctx, |model, ctx| model.select_at_snapshot_index(index, ctx))
     }
 
     fn scroll_by_delta(&self, delta: isize, ctx: &mut AppContext) {
@@ -279,18 +278,23 @@ impl<Row> TuiInlineMenuListState<Row> {
     /// scrolls to keep it visible. Only moves the selection when
     /// `is_selectable` returns true for the target row, matching the
     /// behaviour of `select_next` / `select_previous` / `replace_rows`.
+    /// Returns `true` when the selection was actually moved to `index`, or
+    /// `false` when the index was out of bounds or the row is not selectable.
     pub(crate) fn select_absolute(
         &mut self,
         index: usize,
         max_visible_rows: usize,
         mut is_selectable: impl FnMut(&Row) -> bool,
-    ) {
+    ) -> bool {
         let rows_len = self.rows.len();
         if index < rows_len && is_selectable(&self.rows[index]) {
             self.selection.select(index, rows_len, |i| {
                 self.rows.get(i).is_some_and(&mut is_selectable)
             });
             self.keep_selected_visible(max_visible_rows);
+            true
+        } else {
+            false
         }
     }
 
@@ -365,6 +369,10 @@ pub(crate) struct TuiInlineMenu {
     /// row count. Shared across `Clone`s so both the session view and the
     /// input view see the same hover/click state.
     item_mouse_states: Rc<RefCell<Vec<MouseStateHandle>>>,
+    /// Row titles from the last-rendered snapshot. Compared in the layout
+    /// path to detect row-set changes (filtering, reloads) that would leave
+    /// stale hover bold on a row that now holds different content.
+    last_row_titles: Rc<RefCell<Vec<String>>>,
 }
 
 impl TuiInlineMenu {
@@ -373,6 +381,7 @@ impl TuiInlineMenu {
         Self {
             handle: Rc::new(handle),
             item_mouse_states: Rc::new(RefCell::new(Vec::new())),
+            last_row_titles: Rc::new(RefCell::new(Vec::new())),
         }
     }
     pub(crate) fn is_open(&self, ctx: &AppContext) -> bool {
@@ -413,6 +422,7 @@ impl TuiInlineMenu {
                 builder: TuiUiBuilder::from_app(ctx),
                 content: None,
                 item_mouse_states: Rc::clone(&self.item_mouse_states),
+                last_row_titles: Rc::clone(&self.last_row_titles),
                 on_accept: Some(on_accept),
                 on_scroll: Some(on_scroll),
             }
@@ -450,6 +460,12 @@ impl TuiInlineMenu {
 
     pub(crate) fn dismiss(&self, ctx: &mut AppContext) {
         self.handle.dismiss(ctx);
+        // Clear hover states immediately so no row stays bold after the menu
+        // closes and to ensure a clean state on the next open.
+        for state in self.item_mouse_states.borrow().iter() {
+            state.lock().unwrap().reset_hover_state();
+        }
+        self.last_row_titles.borrow_mut().clear();
     }
 
     fn snapshot(&self, ctx: &AppContext) -> Option<TuiInlineMenuSnapshot> {
@@ -494,8 +510,7 @@ impl TuiInlineMenuHandle for ModelHandle<TuiSlashCommandModel> {
     }
 
     fn select_by_snapshot_index(&self, index: usize, ctx: &mut AppContext) -> bool {
-        self.update(ctx, |model, ctx| model.select_at_snapshot_index(index, ctx));
-        true
+        self.update(ctx, |model, ctx| model.select_at_snapshot_index(index, ctx))
     }
 
     fn scroll_by_delta(&self, delta: isize, ctx: &mut AppContext) {
@@ -544,8 +559,7 @@ impl TuiInlineMenuHandle for ModelHandle<TuiConversationMenuModel> {
     }
 
     fn select_by_snapshot_index(&self, index: usize, ctx: &mut AppContext) -> bool {
-        self.update(ctx, |model, ctx| model.select_at_snapshot_index(index, ctx));
-        true
+        self.update(ctx, |model, ctx| model.select_at_snapshot_index(index, ctx))
     }
 
     fn scroll_by_delta(&self, delta: isize, ctx: &mut AppContext) {
@@ -595,8 +609,7 @@ impl TuiInlineMenuHandle for ModelHandle<TuiPromptHistoryMenuModel> {
     }
 
     fn select_by_snapshot_index(&self, index: usize, ctx: &mut AppContext) -> bool {
-        self.update(ctx, |model, ctx| model.select_at_snapshot_index(index, ctx));
-        true
+        self.update(ctx, |model, ctx| model.select_at_snapshot_index(index, ctx))
     }
 
     fn scroll_by_delta(&self, delta: isize, ctx: &mut AppContext) {
@@ -645,8 +658,7 @@ impl TuiInlineMenuHandle for ModelHandle<TuiModelMenuModel> {
     }
 
     fn select_by_snapshot_index(&self, index: usize, ctx: &mut AppContext) -> bool {
-        self.update(ctx, |model, ctx| model.select_at_snapshot_index(index, ctx));
-        true
+        self.update(ctx, |model, ctx| model.select_at_snapshot_index(index, ctx))
     }
 
     fn scroll_by_delta(&self, delta: isize, ctx: &mut AppContext) {
@@ -700,8 +712,7 @@ impl TuiInlineMenuHandle for ModelHandle<TuiSkillMenuModel> {
     }
 
     fn select_by_snapshot_index(&self, index: usize, ctx: &mut AppContext) -> bool {
-        self.update(ctx, |model, ctx| model.select_at_snapshot_index(index, ctx));
-        true
+        self.update(ctx, |model, ctx| model.select_at_snapshot_index(index, ctx))
     }
 
     fn scroll_by_delta(&self, delta: isize, ctx: &mut AppContext) {
@@ -719,6 +730,7 @@ pub(crate) fn render_inline_menu(
         builder: builder.clone(),
         content: None,
         item_mouse_states: Rc::new(RefCell::new(Vec::new())),
+        last_row_titles: Rc::new(RefCell::new(Vec::new())),
         on_accept: None,
         on_scroll: None,
     }
@@ -731,6 +743,9 @@ struct TuiInlineMenuElement {
     content: Option<Box<dyn TuiElement>>,
     /// Retained per-row mouse handles shared with the owning `TuiInlineMenu`.
     item_mouse_states: Rc<RefCell<Vec<MouseStateHandle>>>,
+    /// Row titles from the last-rendered snapshot, shared with `TuiInlineMenu`
+    /// so row-set changes are detected across frames.
+    last_row_titles: Rc<RefCell<Vec<String>>>,
     /// Called with the absolute snapshot index when a row is clicked.
     on_accept: Option<Rc<InlineMenuAcceptFn>>,
     /// Called with the scroll-wheel row delta.
@@ -744,6 +759,21 @@ impl TuiElement for TuiInlineMenuElement {
         ctx: &mut TuiLayoutContext,
         app: &AppContext,
     ) -> TuiSize {
+        // Detect row-set changes (filtering, reloads): compare snapshot row
+        // titles against the last-seen set. When they differ, clear all stale
+        // hover state so a stationary pointer does not bold a different row
+        // whose content has changed but whose index is reused.
+        {
+            let current_titles: Vec<String> =
+                self.snapshot.rows.iter().map(|r| r.title.clone()).collect();
+            let mut last_titles = self.last_row_titles.borrow_mut();
+            if *last_titles != current_titles {
+                for state in self.item_mouse_states.borrow().iter() {
+                    state.lock().unwrap().reset_hover_state();
+                }
+                *last_titles = current_titles;
+            }
+        }
         // Grow mouse-state handles to match the current snapshot's row count.
         {
             let mut states = self.item_mouse_states.borrow_mut();

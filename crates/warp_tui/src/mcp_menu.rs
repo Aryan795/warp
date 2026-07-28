@@ -132,23 +132,33 @@ impl TuiMcpMenuModel {
     }
 
     /// Selects the row at absolute snapshot index `index` (for mouse click).
-    pub(crate) fn select_at_snapshot_index(&mut self, index: usize, ctx: &mut ModelContext<Self>) {
+    /// Returns `true` when the row was actually selected, `false` when the
+    /// index is out of bounds, the menu is not open, or the row has no action.
+    pub(crate) fn select_at_snapshot_index(
+        &mut self,
+        index: usize,
+        ctx: &mut ModelContext<Self>,
+    ) -> bool {
         let TuiMcpMenuState::Open {
             rows,
             selection,
             scroll_offset,
         } = &mut self.state
         else {
-            return;
+            return false;
         };
         let rows_len = rows.len();
-        if index < rows_len && rows[index].action.is_some() {
+        let selected = if index < rows_len && rows[index].action.is_some() {
             selection.select(index, rows_len, |i| rows[i].action.is_some());
             if let Some(selected) = selection.selected_index() {
                 keep_selected_visible(rows_len, selected, MAX_VISIBLE_ROWS, scroll_offset);
             }
-        }
+            true
+        } else {
+            false
+        };
         ctx.emit(TuiMcpMenuEvent::Updated);
+        selected
     }
 
     /// Scrolls the viewport by `delta` rows without changing the selection.

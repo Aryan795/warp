@@ -182,16 +182,25 @@ impl TuiPromptHistoryMenuModel {
     }
 
     /// Selects the row at absolute snapshot index `index` (for mouse click)
-    /// and previews it in the input.
-    pub(crate) fn select_at_snapshot_index(&mut self, index: usize, ctx: &mut ModelContext<Self>) {
+    /// and previews it in the input. Returns `true` when the row was actually
+    /// selected, `false` when the index is out of bounds or the menu is not
+    /// open.
+    pub(crate) fn select_at_snapshot_index(
+        &mut self,
+        index: usize,
+        ctx: &mut ModelContext<Self>,
+    ) -> bool {
         if !self.has_open_state() {
-            return;
+            return false;
         }
-        if let TuiPromptHistoryMenuState::Open { list, .. } = &mut self.state {
-            list.select_absolute(index, MAX_VISIBLE_ROWS, |_| true);
-        }
+        let selected = if let TuiPromptHistoryMenuState::Open { list, .. } = &mut self.state {
+            list.select_absolute(index, MAX_VISIBLE_ROWS, |_| true)
+        } else {
+            false
+        };
         self.preview_selection(ctx);
         ctx.emit(TuiPromptHistoryMenuEvent::Updated);
+        selected
     }
 
     /// Scrolls the viewport by `delta` rows without changing the selection.
