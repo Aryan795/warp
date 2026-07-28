@@ -81,6 +81,27 @@ fn tool_call_statuses_map_to_tool_call_display_states() {
 }
 
 #[test]
+fn long_tool_call_values_are_left_for_layout_to_wrap() {
+    let command = "x".repeat(160);
+    let action = command_action(&command);
+
+    assert_eq!(
+        tool_call_label(&action, None, false, None),
+        format!("Run `{command}`")
+    );
+}
+
+#[test]
+fn multiline_tool_call_values_stay_condensed() {
+    let action = command_action("first line\nsecond line");
+
+    assert_eq!(
+        tool_call_label(&action, None, false, None),
+        "Run `first line…`"
+    );
+}
+
+#[test]
 fn all_failed_run_agents_uses_failure_glyph() {
     let agents = vec![failed_agent("first"), failed_agent("second")];
     assert_eq!(launched_agents_label(&agents), "Failed to spawn 2 agents");

@@ -41,10 +41,6 @@ pub(crate) struct ResolvedCommandBlock {
     pub(crate) state: CommandBlockState,
 }
 
-/// Longest rendered length for interpolated values (commands, queries, paths)
-/// so tool-call rows stay scannable one-liners.
-const MAX_INLINE_LEN: usize = 80;
-
 /// Coarse presentation state for a tool call.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ToolCallDisplayState {
@@ -642,12 +638,13 @@ fn fallback_label(action: &AIAgentActionType, state: State) -> String {
     }
 }
 
-/// Collapses text to its first line, capped at [`MAX_INLINE_LEN`] chars, with
-/// a trailing `…` when anything was trimmed.
+/// Collapses text to its first line, with a trailing `…` when additional
+/// lines were trimmed. Horizontal wrapping is left to the rendered element so
+/// it can use the width available during layout.
 fn single_line(text: &str) -> String {
     let first_line = text.lines().next().unwrap_or_default().trim_end();
-    let mut out: String = first_line.chars().take(MAX_INLINE_LEN).collect();
-    if first_line.chars().count() > MAX_INLINE_LEN || text.lines().count() > 1 {
+    let mut out = first_line.to_owned();
+    if text.lines().count() > 1 {
         out.push('…');
     }
     out
