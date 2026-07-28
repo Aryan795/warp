@@ -39,5 +39,9 @@ pub enum PurchaseAddonCreditsResult {
 #[derive(cynic::QueryFragment, Debug)]
 pub struct PurchaseAddonCreditsOutput {
     pub success: bool,
+    /// When set, the purchase could not be charged synchronously (no saved
+    /// payment method) and the user must complete checkout in the browser at
+    /// this URL. Credits are granted via webhook after checkout completes.
+    pub checkout_url: Option<String>,
     pub response_context: ResponseContext,
 }
