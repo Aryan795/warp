@@ -181,6 +181,27 @@ impl TuiPromptHistoryMenuModel {
         ctx.emit(TuiPromptHistoryMenuEvent::Updated);
     }
 
+    /// Selects the row at absolute snapshot index `index` (for mouse click)
+    /// and previews it in the input.
+    pub(crate) fn select_at_snapshot_index(&mut self, index: usize, ctx: &mut ModelContext<Self>) {
+        if !self.has_open_state() {
+            return;
+        }
+        if let TuiPromptHistoryMenuState::Open { list, .. } = &mut self.state {
+            list.select_absolute(index, MAX_VISIBLE_ROWS);
+        }
+        self.preview_selection(ctx);
+        ctx.emit(TuiPromptHistoryMenuEvent::Updated);
+    }
+
+    /// Scrolls the viewport by `delta` rows without changing the selection.
+    pub(crate) fn scroll_by_delta(&mut self, delta: isize, ctx: &mut ModelContext<Self>) {
+        if let TuiPromptHistoryMenuState::Open { list, .. } = &mut self.state {
+            list.scroll_by(delta, MAX_VISIBLE_ROWS);
+        }
+        ctx.emit(TuiPromptHistoryMenuEvent::Updated);
+    }
+
     /// Accepts the current selection, closing the menu and returning the text to
     /// submit. With a highlighted prompt that is its text; with an empty or
     /// filtered-to-nothing list it is the current input, so Enter behaves as a

@@ -69,7 +69,9 @@ use crate::conversation_selection::TuiConversationSelection;
 use crate::editor_interaction::TuiEditorCommand;
 use crate::exit_confirmation::{CTRL_C_EXIT_WINDOW, ExitConfirmation};
 use crate::handoff::TuiHandoffBlock;
-use crate::inline_menu::{MAX_INLINE_MENU_ROWS, TuiInlineMenu, active_inline_menu};
+use crate::inline_menu::{
+    MAX_INLINE_MENU_ROWS, TuiInlineMenu, TuiInlineMenuAccepted, active_inline_menu,
+};
 use crate::input::view::TuiInputAction;
 use crate::input::{TuiInputView, TuiInputViewEvent};
 use crate::input_hints;
@@ -581,6 +583,12 @@ pub(crate) enum TuiTerminalSessionAction {
     PasteFromClipboard,
     /// Start recording voice input from the session composer.
     StartVoiceInput,
+    /// Left-click on the inline menu at absolute snapshot index `index`:
+    /// selects and accepts that row.
+    InlineMenuMouseAcceptRow(usize),
+    /// Scroll-wheel over the inline menu: scrolls the viewport by `delta` rows
+    /// without changing the selection.
+    InlineMenuMouseScrollBy(isize),
 }
 
 /// The authenticated terminal/session surface rendered inside [`RootTuiView`].
@@ -3271,6 +3279,42 @@ impl TuiTerminalSessionView {
         self.handle_submitted(text, ctx);
     }
 
+    /// Handles a mouse-click accept on the inline menu: selects the row at
+    /// `index` in the active menu and dispatches the result through the same
+    /// path as keyboard-based acceptance.
+    fn handle_inline_menu_mouse_accept(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
+        let mode = self.suggestions_mode.as_ref(ctx).mode();
+        let Some(menu) = active_inline_menu(&self.inline_menus, mode, ctx) else {
+            return;
+        };
+        menu.select_by_snapshot_index(index, ctx);
+        let Some(accepted) = menu.accept(ctx) else {
+            return;
+        };
+        match accepted {
+            TuiInlineMenuAccepted::SlashCommand(action) => {
+                self.handle_accepted_slash_command(&action, ctx);
+            }
+            TuiInlineMenuAccepted::Conversation(entry_id) => {
+                self.handle_accepted_conversation(entry_id, ctx);
+            }
+            TuiInlineMenuAccepted::Model(id) => {
+                self.handle_accepted_model(&id, ctx);
+            }
+            TuiInlineMenuAccepted::Mcp(action) => {
+                self.handle_accepted_mcp_action(action, ctx);
+            }
+            TuiInlineMenuAccepted::PromptHistory(text) => {
+                self.handle_accepted_prompt_history(text, ctx);
+            }
+            TuiInlineMenuAccepted::Completion(acceptance) => {
+                self.input_view.update(ctx, |input, ctx| {
+                    input.apply_shell_completion(acceptance, ctx);
+                });
+            }
+        }
+    }
+
     fn select_tui_slash_command(&mut self, command: &StaticCommand, ctx: &mut ViewContext<Self>) {
         if command.kind == SlashCommandKind::MoveToCloud {
             self.input_view.update(ctx, |input, ctx| {
@@ -3823,7 +3867,21 @@ impl TuiView for TuiTerminalSessionView {
                     self.suggestions_mode.as_ref(ctx).mode(),
                     ctx,
                 )
-                .and_then(|menu| menu.render(ctx))
+                .and_then(|menu| {
+                    menu.render_with_interaction(
+                        ctx,
+                        |index, event_ctx, _| {
+                            event_ctx.dispatch_typed_action(
+                                TuiTerminalSessionAction::InlineMenuMouseAcceptRow(index),
+                            );
+                        },
+                        |delta, event_ctx, _| {
+                            event_ctx.dispatch_typed_action(
+                                TuiTerminalSessionAction::InlineMenuMouseScrollBy(delta),
+                            );
+                        },
+                    )
+                })
             })
             .flatten();
         let builder = TuiUiBuilder::from_app(ctx);
@@ -4129,6 +4187,16 @@ impl TypedActionView for TuiTerminalSessionView {
             }
             TuiTerminalSessionAction::StartVoiceInput => {
                 self.start_voice_input(VoiceInputStartSource::Keybinding, ctx);
+            }
+            TuiTerminalSessionAction::InlineMenuMouseAcceptRow(index) => {
+                self.handle_inline_menu_mouse_accept(*index, ctx);
+            }
+            TuiTerminalSessionAction::InlineMenuMouseScrollBy(delta) => {
+                let mode = self.suggestions_mode.as_ref(ctx).mode();
+                if let Some(menu) = active_inline_menu(&self.inline_menus, mode, ctx) {
+                    menu.scroll_by_delta(*delta, ctx);
+                    ctx.notify();
+                }
             }
         }
     }

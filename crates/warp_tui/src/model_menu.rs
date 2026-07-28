@@ -151,6 +151,24 @@ impl TuiModelMenuModel {
         ctx.emit(TuiModelMenuEvent);
     }
 
+    /// Selects the row at absolute snapshot index `index` (for mouse click).
+    pub(crate) fn select_at_snapshot_index(&mut self, index: usize, ctx: &mut ModelContext<Self>) {
+        let TuiModelMenuState::Open { list } = &mut self.state else {
+            return;
+        };
+        list.select_absolute(index, MAX_VISIBLE_ROWS);
+        ctx.emit(TuiModelMenuEvent);
+    }
+
+    /// Scrolls the viewport by `delta` rows without changing the selection.
+    pub(crate) fn scroll_by_delta(&mut self, delta: isize, ctx: &mut ModelContext<Self>) {
+        let TuiModelMenuState::Open { list } = &mut self.state else {
+            return;
+        };
+        list.scroll_by(delta, MAX_VISIBLE_ROWS);
+        ctx.emit(TuiModelMenuEvent);
+    }
+
     pub(crate) fn accept_selected(&self, ctx: &AppContext) -> Option<LLMId> {
         if !self.is_open(ctx) {
             return None;

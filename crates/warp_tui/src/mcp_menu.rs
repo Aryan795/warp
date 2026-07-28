@@ -131,6 +131,41 @@ impl TuiMcpMenuModel {
         ctx.emit(TuiMcpMenuEvent::Updated);
     }
 
+    /// Selects the row at absolute snapshot index `index` (for mouse click).
+    pub(crate) fn select_at_snapshot_index(&mut self, index: usize, ctx: &mut ModelContext<Self>) {
+        let TuiMcpMenuState::Open {
+            rows,
+            selection,
+            scroll_offset,
+        } = &mut self.state
+        else {
+            return;
+        };
+        let rows_len = rows.len();
+        if index < rows_len && rows[index].action.is_some() {
+            selection.select(index, rows_len, |i| rows[i].action.is_some());
+            if let Some(selected) = selection.selected_index() {
+                keep_selected_visible(rows_len, selected, MAX_VISIBLE_ROWS, scroll_offset);
+            }
+        }
+        ctx.emit(TuiMcpMenuEvent::Updated);
+    }
+
+    /// Scrolls the viewport by `delta` rows without changing the selection.
+    pub(crate) fn scroll_by_delta(&mut self, delta: isize, ctx: &mut ModelContext<Self>) {
+        let TuiMcpMenuState::Open {
+            rows,
+            scroll_offset,
+            ..
+        } = &mut self.state
+        else {
+            return;
+        };
+        let max_offset = rows.len().saturating_sub(MAX_VISIBLE_ROWS);
+        *scroll_offset = scroll_offset.saturating_add_signed(delta).min(max_offset);
+        ctx.emit(TuiMcpMenuEvent::Updated);
+    }
+
     pub(crate) fn accept_selected(
         &mut self,
         _ctx: &mut ModelContext<Self>,

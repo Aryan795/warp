@@ -453,6 +453,54 @@ fn narrow_slash_command_rows_use_the_full_width_for_titles() {
 }
 
 #[test]
+fn list_select_absolute_sets_selection_and_scrolls_to_keep_visible() {
+    // 5 rows, max 2 visible. Select row 3 (index 3, 0-based) absolutely.
+    let mut list = TuiInlineMenuListState::default();
+    list.replace_rows(vec![(); 5], false, Some(0), 2, |_| true);
+
+    list.select_absolute(3, 2);
+    assert_eq!(list.selected_index(), Some(3));
+    // With 2 visible rows the viewport starts at scroll_offset=2 so row 3
+    // lands in the [2, 4) window.
+    assert_eq!(
+        list.scroll_offset(),
+        2,
+        "scroll offset should make row 3 visible"
+    );
+}
+
+#[test]
+fn list_select_absolute_ignores_out_of_bounds_index() {
+    let mut list = TuiInlineMenuListState::default();
+    list.replace_rows(vec![(); 3], false, Some(1), 3, |_| true);
+
+    list.select_absolute(10, 3); // out of bounds — no change
+    assert_eq!(list.selected_index(), Some(1));
+}
+
+#[test]
+fn list_scroll_by_moves_offset_without_changing_selection() {
+    let mut list = TuiInlineMenuListState::default();
+    // 8 rows, 3 visible; start at offset 0, selection at row 1.
+    list.replace_rows(vec![(); 8], false, Some(1), 3, |_| true);
+    assert_eq!(list.selected_index(), Some(1));
+    assert_eq!(list.scroll_offset(), 0);
+
+    list.scroll_by(2, 3);
+    // Selection unchanged, scroll offset moved forward.
+    assert_eq!(list.selected_index(), Some(1));
+    assert_eq!(list.scroll_offset(), 2);
+
+    // Negative scroll brings it back.
+    list.scroll_by(-1, 3);
+    assert_eq!(list.scroll_offset(), 1);
+
+    // Scroll past the end is clamped.
+    list.scroll_by(100, 3);
+    assert_eq!(list.scroll_offset(), 5); // max is 8 - 3 = 5
+}
+
+#[test]
 fn shared_list_navigation_wraps_skips_disabled_rows_and_scrolls() {
     let mut list = TuiInlineMenuListState::default();
     list.replace_rows(vec![true, false, true, true], false, Some(0), 2, |row| *row);

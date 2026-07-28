@@ -143,6 +143,24 @@ impl TuiCompletionMenuModel {
         ctx.emit(TuiCompletionMenuEvent);
     }
 
+    /// Selects the row at absolute snapshot index `index` (for mouse click).
+    pub(crate) fn select_at_snapshot_index(&mut self, index: usize, ctx: &mut ModelContext<Self>) {
+        let TuiCompletionMenuState::Open { list } = &mut self.state else {
+            return;
+        };
+        list.select_absolute(index, MAX_VISIBLE_ROWS);
+        ctx.emit(TuiCompletionMenuEvent);
+    }
+
+    /// Scrolls the viewport by `delta` rows without changing the selection.
+    pub(crate) fn scroll_by_delta(&mut self, delta: isize, ctx: &mut ModelContext<Self>) {
+        let TuiCompletionMenuState::Open { list } = &mut self.state else {
+            return;
+        };
+        list.scroll_by(delta, MAX_VISIBLE_ROWS);
+        ctx.emit(TuiCompletionMenuEvent);
+    }
+
     pub(crate) fn accept_selected(
         &mut self,
         ctx: &mut ModelContext<Self>,
@@ -230,6 +248,14 @@ impl TuiInlineMenuHandle for ModelHandle<TuiCompletionMenuModel> {
 
     fn snapshot(&self, ctx: &AppContext) -> Option<TuiInlineMenuSnapshot> {
         self.as_ref(ctx).snapshot(ctx)
+    }
+
+    fn select_by_snapshot_index(&self, index: usize, ctx: &mut AppContext) {
+        self.update(ctx, |model, ctx| model.select_at_snapshot_index(index, ctx));
+    }
+
+    fn scroll_by_delta(&self, delta: isize, ctx: &mut AppContext) {
+        self.update(ctx, |model, ctx| model.scroll_by_delta(delta, ctx));
     }
 }
 impl Entity for TuiCompletionMenuModel {
