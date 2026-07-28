@@ -8,7 +8,7 @@ use warp_multi_agent_api::{self as api};
 use super::*;
 use crate::agent::action_result::ShellCommandError;
 use crate::agent::action_result::diff_application_failure::{
-    DiffApplicationFailure, MAX_DIFF_MATCH_FAILURE_BYTES, render,
+    DiffApplicationFailure, DiffSearchBlockFailure, MAX_DIFF_MATCH_FAILURE_BYTES, render,
 };
 use crate::agent::convert::ConvertToAPITypeError;
 
@@ -439,6 +439,95 @@ fn diff_application_failure_to_proto(
                 message: message.clone(),
             }))]
         }
+    }
+}
+
+/// Reconstruct a [`Vec<DiffApplicationFailure>`] from a proto
+/// [`api::apply_file_diffs_result::Error`].
+///
+/// When `error.failures` is non-empty, each proto entry is decoded into the
+/// matching [`DiffApplicationFailure`] variant. When `failures` is empty the
+/// `message` field (back-compat) is wrapped in `Opaque`.
+///
+/// Unrecognised `kind` entries are silently skipped (forward-compatibility
+/// for proto additions).
+pub fn failures_from_proto_error(
+    error: &api::apply_file_diffs_result::Error,
+) -> Vec<DiffApplicationFailure> {
+    if error.failures.is_empty() {
+        // Old proto: no structured failures — wrap the back-compat message.
+        return vec![DiffApplicationFailure::Opaque {
+            message: error.message.clone(),
+        }];
+    }
+    error
+        .failures
+        .iter()
+        .filter_map(proto_failure_to_diff_application_failure)
+        .collect()
+}
+
+/// Convert one proto [`api::apply_file_diffs_result::Failure`] to a
+/// [`DiffApplicationFailure`].
+///
+/// Returns `None` for entries without a recognised `kind` so they are
+/// silently skipped rather than panicking — future proto additions won't
+/// break old clients.
+fn proto_failure_to_diff_application_failure(
+    proto: &api::apply_file_diffs_result::Failure,
+) -> Option<DiffApplicationFailure> {
+    use api::apply_file_diffs_result::failure::Kind;
+
+    match proto.kind.as_ref()? {
+        Kind::UnmatchedDiffs(u) => Some(DiffApplicationFailure::UnmatchedDiffs {
+            file: u.file.clone(),
+            fuzzy_match_failure_count: u.fuzzy_match_failure_count as u8,
+            changes_already_applied_count: 0,
+            search_block_failures: u
+                .search_block_failures
+                .iter()
+                .map(|b| DiffSearchBlockFailure {
+                    search: b.search.clone(),
+                    // Convert proto 1-indexed inclusive end back to exclusive end.
+                    expected_range: if b.expected_start_line > 0 && b.expected_end_line > 0 {
+                        Some(
+                            b.expected_start_line as usize
+                                ..(b.expected_end_line as usize).saturating_add(1),
+                        )
+                    } else {
+                        None
+                    },
+                })
+                .collect(),
+        }),
+        Kind::ChangesAlreadyApplied(c) => Some(DiffApplicationFailure::ChangesAlreadyApplied {
+            file: c.file.clone(),
+        }),
+        Kind::MissingFile(m) => Some(DiffApplicationFailure::MissingFile {
+            file: m.file.clone(),
+        }),
+        Kind::ReadFailed(r) => Some(DiffApplicationFailure::ReadFailed {
+            file: r.file.clone(),
+        }),
+        Kind::AlreadyExists(a) => Some(DiffApplicationFailure::AlreadyExists {
+            file: a.file.clone(),
+        }),
+        Kind::MultipleFileCreation(m) => Some(DiffApplicationFailure::MultipleFileCreation {
+            file: m.file.clone(),
+        }),
+        Kind::MultipleFileRenames(m) => Some(DiffApplicationFailure::MultipleFileRenames {
+            file: m.file.clone(),
+        }),
+        Kind::MutatedDeletedFile(m) => Some(DiffApplicationFailure::MutatedDeletedFile {
+            file: m.file.clone(),
+        }),
+        Kind::NoDiffsApplicable(()) => Some(DiffApplicationFailure::NoDiffsApplicable),
+        Kind::RemoteFileOperationsUnsupported(()) => {
+            Some(DiffApplicationFailure::RemoteFileOperationsUnsupported)
+        }
+        Kind::Opaque(o) => Some(DiffApplicationFailure::Opaque {
+            message: o.message.clone(),
+        }),
     }
 }
 

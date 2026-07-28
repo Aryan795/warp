@@ -1,11 +1,11 @@
 mod convert;
 pub mod diff_application_failure;
-
 use std::fmt::Display;
 use std::ops::Range;
 use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Local};
+pub use convert::failures_from_proto_error;
 use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
 use warp_core::command::ExitCode;

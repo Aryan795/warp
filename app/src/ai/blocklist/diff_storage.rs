@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 
+use ai::agent::action_result::diff_application_failure::DiffApplicationFailure;
 use futures::FutureExt;
 use futures::future::{BoxFuture, join_all};
 use itertools::Itertools;
@@ -34,7 +35,6 @@ use crate::ai::agent::{
 use crate::ai::blocklist::diff_types::{DiffSessionType, FileDiff};
 use crate::code::DiffResult;
 use crate::code::editor::compute_unified_diff;
-use ai::agent::action_result::diff_application_failure::DiffApplicationFailure;
 
 const APPLY_DIFF_RESULT_CONTEXT_LINES: usize = 10;
 
