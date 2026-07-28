@@ -475,6 +475,14 @@ pub fn fuzzy_match_v4a_diffs(
             None => {
                 log::warn!("Failed to find matching location for V4A diff");
                 failures.fuzzy_match_failures += 1;
+                // Capture per-block detail so the server can enumerate the failed
+                // blocks (PRODUCT criterion 2). Use the hunk's `old` content as the
+                // search text; V4A hunks don't carry explicit line numbers so
+                // expected_range is None.
+                failures.search_block_failures.push(DiffMatchFailure {
+                    search: diff.old.clone(),
+                    expected_range: None,
+                });
             }
         }
     }
@@ -561,7 +569,10 @@ fn fuzzy_match_file_diffs(
 
         // Snapshot the line range hint BEFORE the if-else below potentially moves
         // `line_range` (the prepend branch moves it into `fuzzy_match_line_numbers`).
-        // Used for per-block failure detail in the `None` arm below.
+        // Note: this snapshot is taken before the out-of-bounds filter a few lines below
+        // (the `line_range.filter(...)` call), so a range the matcher subsequently
+        // rejects as invalid can still appear as the block's expected location hint.
+        // This is intentional — the hint is approximate and useful even if rejected.
         let hint_range_for_failure = line_range.clone();
 
         // Find similar sections in the file content using the matching strategies.

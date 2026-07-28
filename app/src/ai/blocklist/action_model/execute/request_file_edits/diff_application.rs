@@ -7,7 +7,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use ai::agent::action_result::diff_application_failure::{
-    DiffApplicationFailure, DiffSearchBlockFailure, MAX_DIFF_MATCH_FAILURE_BYTES,
+    DiffApplicationFailure, DiffSearchBlockFailure,
 };
 use ai::diff_validation::{
     AIRequestedCodeDiff, DiffDelta, DiffMatchFailures, DiffType, ParsedDiff, SearchAndReplace,
@@ -89,69 +89,6 @@ pub(crate) enum DiffApplicationError {
     /// File read/write operations are not available on this remote session.
     /// This covers both connection-dropped and unsupported SSH session types.
     RemoteFileOperationsUnsupported,
-}
-
-impl DiffApplicationError {
-    /// Format this error for inclusion in the agent conversation. The error should help the LLM
-    /// retry and generate a valid diff.
-    fn to_conversation_message(&self) -> String {
-        match self {
-            DiffApplicationError::UnmatchedDiffs {
-                file,
-                match_failures,
-            } => {
-                use std::fmt::Write;
-                let mut message = String::new();
-                if match_failures.fuzzy_match_failures > 0 {
-                    let _ = write!(message, "Could not apply all diffs to {file}.");
-                }
-
-                if match_failures.noop_deltas > 0 {
-                    if !message.is_empty() {
-                        message.push(' ');
-                    }
-                    let _ = write!(message, "The changes to {file} were already made.");
-                }
-                message
-            }
-            DiffApplicationError::MissingFile { file } => {
-                format!("{file} does not exist. Is the path correct?")
-            }
-            DiffApplicationError::AlreadyExists { file } => {
-                format!("Could not create {file} because it already exists.")
-            }
-            DiffApplicationError::ReadFailed { file, .. } => {
-                format!("Could not read {file}")
-            }
-            DiffApplicationError::MultipleFileCreation { file } => {
-                format!("There can only be one attempt to create {file}.")
-            }
-            DiffApplicationError::MultipleFileRenames { file } => {
-                format!("There can only be one attempt to rename {file}.")
-            }
-            DiffApplicationError::MutatedDeletedFile { file } => {
-                format!("Could not mutate a deleted file {file}.")
-            }
-            DiffApplicationError::EmptyDiff => "No diffs could be applied.".to_string(),
-            DiffApplicationError::RemoteFileOperationsUnsupported => {
-                "The file read/edit tool is not available on this remote session. Try using a different tool.".to_string()
-            }
-        }
-    }
-
-    /// Format a list of errors for inclusion in the agent conversation.
-    pub fn error_for_conversation(errors: &Vec1<DiffApplicationError>) -> String {
-        if errors.len() == 1 {
-            errors.first().to_conversation_message()
-        } else {
-            errors
-                .iter()
-                .format_with("\n", |err, f| {
-                    f(&format_args!("* {}", err.to_conversation_message()))
-                })
-                .to_string()
-        }
-    }
 }
 
 /// Given a list of suggested edits from the server API, parse it into applicable diffs to be shown
@@ -845,23 +782,13 @@ pub(crate) fn error_to_failures(error: &DiffApplicationError) -> Vec<DiffApplica
                     .search_block_failures
                     .iter()
                     .map(|b| {
-                        // Apply the byte cap; mark truncated if we trim the search text.
-                        let (search, truncated) = if b.search.len() > MAX_DIFF_MATCH_FAILURE_BYTES {
-                            // Round to a char boundary.
-                            let mut end = MAX_DIFF_MATCH_FAILURE_BYTES;
-                            while !b.search.is_char_boundary(end) {
-                                end -= 1;
-                            }
-                            (b.search[..end].to_owned(), true)
-                        } else {
-                            (b.search.clone(), false)
-                        };
-                        // We store the raw (untruncated) search text in DiffMatchFailure
-                        // so the cap can be applied here. DiffSearchBlockFailure is the
-                        // cap-applied version used for proto serialisation.
-                        let _ = truncated; // used below in the proto path; not needed in this struct
+                        // Store the raw (pre-truncation) search text so that
+                        // diff_application_failure_to_proto (in convert.rs) can apply
+                        // MAX_DIFF_MATCH_FAILURE_BYTES and set `truncated` correctly.
+                        // Applying the cap here AND in convert.rs would mean the second
+                        // cap never fires and `truncated` is always false (PRODUCT 8).
                         DiffSearchBlockFailure {
-                            search,
+                            search: b.search.clone(),
                             expected_range: b.expected_range.clone(),
                         }
                     })

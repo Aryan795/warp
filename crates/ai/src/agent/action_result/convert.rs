@@ -446,11 +446,13 @@ fn diff_application_failure_to_proto(
 /// [`api::apply_file_diffs_result::Error`].
 ///
 /// When `error.failures` is non-empty, each proto entry is decoded into the
-/// matching [`DiffApplicationFailure`] variant. When `failures` is empty the
-/// `message` field (back-compat) is wrapped in `Opaque`.
+/// matching [`DiffApplicationFailure`] variant. When `failures` is empty (old
+/// proto) or every entry has an unrecognised `kind` (forward-compat), the
+/// back-compat `message` field is wrapped in `Opaque`.
 ///
-/// Unrecognised `kind` entries are silently skipped (forward-compatibility
-/// for proto additions).
+/// After decoding, consecutive `ChangesAlreadyApplied` entries are merged back
+/// into the preceding `UnmatchedDiffs` for the same file to restore the
+/// round-trip representation that `diff_application_failure_to_proto` split.
 pub fn failures_from_proto_error(
     error: &api::apply_file_diffs_result::Error,
 ) -> Vec<DiffApplicationFailure> {
@@ -460,11 +462,50 @@ pub fn failures_from_proto_error(
             message: error.message.clone(),
         }];
     }
-    error
+    let mut failures: Vec<DiffApplicationFailure> = error
         .failures
         .iter()
         .filter_map(proto_failure_to_diff_application_failure)
-        .collect()
+        .collect();
+    if failures.is_empty() {
+        // Every structured entry had an unrecognised kind (forward-compat). Fall
+        // back to the back-compat message so render() never returns an empty string.
+        return vec![DiffApplicationFailure::Opaque {
+            message: error.message.clone(),
+        }];
+    }
+    // Merge standalone ChangesAlreadyApplied entries back into the preceding
+    // UnmatchedDiffs for the same file. When diff_application_failure_to_proto encodes
+    // `UnmatchedDiffs { changes_already_applied_count: N > 0 }` it emits two separate
+    // proto entries; this restores the combined single-entry representation so that
+    // render() can produce the expected combined single-line wording after a round-trip.
+    let mut i = 0;
+    while i < failures.len() {
+        if let DiffApplicationFailure::ChangesAlreadyApplied { file: ref caa_file } = failures[i] {
+            let caa_file = caa_file.clone();
+            // Find the most-recent UnmatchedDiffs for the same file at an earlier index.
+            let merge_idx = (0..i).rev().find(|&j| {
+                matches!(
+                    &failures[j],
+                    DiffApplicationFailure::UnmatchedDiffs { file, .. } if file == &caa_file
+                )
+            });
+            if let Some(mi) = merge_idx {
+                if let DiffApplicationFailure::UnmatchedDiffs {
+                    changes_already_applied_count,
+                    ..
+                } = &mut failures[mi]
+                {
+                    *changes_already_applied_count =
+                        changes_already_applied_count.saturating_add(1);
+                }
+                failures.remove(i);
+                continue; // don't increment — element at i is now the next one
+            }
+        }
+        i += 1;
+    }
+    failures
 }
 
 /// Convert one proto [`api::apply_file_diffs_result::Failure`] to a
@@ -481,7 +522,9 @@ fn proto_failure_to_diff_application_failure(
     match proto.kind.as_ref()? {
         Kind::UnmatchedDiffs(u) => Some(DiffApplicationFailure::UnmatchedDiffs {
             file: u.file.clone(),
-            fuzzy_match_failure_count: u.fuzzy_match_failure_count as u8,
+            // Clamp to u8::MAX rather than silently truncating (256 → 0 would
+            // make render_one emit an empty string — PRODUCT 9 violation).
+            fuzzy_match_failure_count: u8::try_from(u.fuzzy_match_failure_count).unwrap_or(u8::MAX),
             changes_already_applied_count: 0,
             search_block_failures: u
                 .search_block_failures

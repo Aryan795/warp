@@ -228,6 +228,13 @@ fn render_one(failure: &DiffApplicationFailure) -> String {
                 }
                 let _ = write!(message, "The changes to {file} were already made.");
             }
+            // Defensive fallback: both counts are zero, e.g. after a round-trip where
+            // fuzzy_match_failure_count saturated to u8::MAX and was read back as 0, or
+            // if the caller constructs a zero-count variant. PRODUCT invariant 9 requires
+            // the agent always receives a non-empty message.
+            if message.is_empty() {
+                let _ = write!(message, "Could not apply all diffs to {file}.");
+            }
             message
         }
         DiffApplicationFailure::ChangesAlreadyApplied { file } => {

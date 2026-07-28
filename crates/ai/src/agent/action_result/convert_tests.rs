@@ -354,6 +354,68 @@ fn read_back_unrecognised_kind_is_silently_skipped() {
 }
 
 #[test]
+fn read_back_all_unrecognised_falls_back_to_opaque() {
+    // If every structured entry has an unrecognised kind (forward-compat), fall
+    // back to the back-compat `message` so render() never returns an empty string.
+    use api::apply_file_diffs_result::Failure;
+    let error = api::apply_file_diffs_result::Error {
+        message: "fallback message".to_string(),
+        failures: vec![Failure { kind: None }, Failure { kind: None }],
+    };
+    let failures = super::failures_from_proto_error(&error);
+    assert_eq!(failures.len(), 1);
+    assert!(
+        matches!(&failures[0], DiffApplicationFailure::Opaque { message } if message == "fallback message"),
+        "all-unrecognised entries must fall back to Opaque with the back-compat message"
+    );
+}
+
+#[test]
+fn read_back_changes_already_applied_merged_into_unmatched_diffs() {
+    // PRODUCT 9 / round-trip: diff_application_failure_to_proto emits a separate
+    // ChangesAlreadyApplied when changes_already_applied_count > 0; failures_from_proto_error
+    // must merge it back so render() produces the combined single-line wording.
+    use api::apply_file_diffs_result::{Failure, failure as f};
+    let error = api::apply_file_diffs_result::Error {
+        message: "Could not apply all diffs to f.rs. The changes to f.rs were already made."
+            .to_string(),
+        failures: vec![
+            Failure {
+                kind: Some(f::Kind::UnmatchedDiffs(f::UnmatchedDiffs {
+                    file: "f.rs".to_string(),
+                    fuzzy_match_failure_count: 1,
+                    search_block_failures: vec![],
+                })),
+            },
+            Failure {
+                kind: Some(f::Kind::ChangesAlreadyApplied(f::ChangesAlreadyApplied {
+                    file: "f.rs".to_string(),
+                })),
+            },
+        ],
+    };
+    let failures = super::failures_from_proto_error(&error);
+    // Should merge into one combined entry, not two separate ones.
+    assert_eq!(
+        failures.len(),
+        1,
+        "ChangesAlreadyApplied must be merged back into UnmatchedDiffs"
+    );
+    let DiffApplicationFailure::UnmatchedDiffs {
+        file,
+        fuzzy_match_failure_count,
+        changes_already_applied_count,
+        ..
+    } = &failures[0]
+    else {
+        panic!("expected UnmatchedDiffs after merge, got {:?}", failures[0]);
+    };
+    assert_eq!(file, "f.rs");
+    assert_eq!(*fuzzy_match_failure_count, 1);
+    assert_eq!(*changes_already_applied_count, 1);
+}
+
+#[test]
 fn read_files_partial_success_converts_failed_files() {
     let result =
         api::request::input::tool_call_result::Result::try_from(ReadFilesResult::Success {
