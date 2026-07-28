@@ -3147,18 +3147,34 @@ impl TypedActionView for FileTreeView {
                 id,
                 terminal_input_data,
             } => {
-                let Some(relative_path) = self.relative_path_for_item(id) else {
+                let Some(root_dir) = self.root_directories.get(&id.root) else {
                     return;
                 };
+                let Some(item) = root_dir.items.get(id.index) else {
+                    return;
+                };
+
+                // Use the absolute path (consistent with Finder drops).
+                let path = item.path().as_str().to_string();
+                let is_remote = root_dir.is_remote();
 
                 let weak_view_handle = terminal_input_data.weak_view_handle();
                 let Some(input_view) = weak_view_handle.upgrade(ctx) else {
                     return;
                 };
 
-                let file_path = relative_path.to_string_lossy();
                 input_view.update(ctx, |input_view, ctx| {
-                    input_view.append_to_buffer(&file_path, ctx);
+                    if is_remote {
+                        // For remote roots, insert the path as text to avoid local
+                        // filesystem reads (e.g. image detection would read a local
+                        // file at the same path instead of the remote file).
+                        input_view.append_to_buffer(&path, ctx);
+                    } else {
+                        // For local roots, route through the editor's DragAndDropFiles
+                        // path so that image detection, shell escaping, and WSL path
+                        // transformation all apply uniformly regardless of drop source.
+                        input_view.handle_drag_and_drop_files(&[path], ctx);
+                    }
                 });
             }
             FileTreeAction::ItemDroppedOnTerminal { id, terminal_view } => {
@@ -3169,15 +3185,25 @@ impl TypedActionView for FileTreeView {
                     return;
                 };
 
-                let path_str = item.path().as_str();
+                let path = item.path().as_str().to_string();
+                let is_remote = root_dir.is_remote();
 
                 let Some(terminal_view) = terminal_view.upgrade(ctx) else {
                     return;
                 };
 
-                let file_path = path_str.to_string();
                 terminal_view.update(ctx, |view, ctx| {
-                    view.handle_file_tree_drop_on_active_command(&file_path, ctx);
+                    if is_remote {
+                        // For remote roots, keep text-insertion: the file is already on
+                        // the server, so SFTP upload would fail and local image detection
+                        // would read a local file at the same path instead of the remote.
+                        view.insert_text_into_active_command(&path, ctx);
+                    } else {
+                        // For local roots, route through drag_and_drop_files so that
+                        // image detection, shell escaping, WSL path conversion, and SSH
+                        // file upload all apply consistently with Finder drops.
+                        view.drag_and_drop_files(&[path], ctx);
+                    }
                 });
             }
         }
