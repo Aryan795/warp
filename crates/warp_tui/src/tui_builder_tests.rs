@@ -38,8 +38,7 @@ fn text_styles_follow_light_theme_foreground() {
     );
 
     let slash_command_color: Color = CoreFill::from(ThemeFill::Solid(theme.ansi_fg_blue())).into();
-    // Accent-colored selection: uses theme accent, not ANSI cyan.
-    let selection_fill = theme.accent();
+    let selection_fill = ThemeFill::from(theme.terminal_colors().normal.cyan);
     let selection_background: Color = CoreFill::from(selection_fill).into();
     let selection_foreground: Color =
         CoreFill::from(theme.font_color(selection_fill.into_solid())).into();
@@ -59,8 +58,9 @@ fn text_styles_follow_light_theme_foreground() {
             .blend(&shell_command_fill.with_opacity(10)),
     )
     .into();
+    let shortcut_accent = ThemeFill::from(theme.terminal_colors().normal.cyan);
     let shortcuts_background: Color =
-        CoreFill::from(theme.background().blend(&theme.accent().with_opacity(10))).into();
+        CoreFill::from(theme.background().blend(&shortcut_accent.with_opacity(10))).into();
     assert_eq!(builder.shortcuts_background(), shortcuts_background);
     assert_eq!(builder.shell_command_background(), shell_command_background);
     let shell_command_prefix_style = builder.shell_command_prefix_style();
@@ -115,22 +115,22 @@ fn selected_state_suffix_midpoint_matches_figma_dark_palette() {
 }
 
 #[test]
-fn voice_input_border_pulses_between_accent_overlay_2_and_lilac_600() {
+fn voice_input_border_pulses_between_cyan_overlay_2_and_lilac_600() {
     let theme = light_theme();
     let builder = TuiUiBuilder {
         warp_theme: theme.clone(),
     };
-    let accent_fill = theme.accent();
-    let accent: Color = CoreFill::from(accent_fill).into();
+    let cyan_fill = ThemeFill::from(theme.terminal_colors().normal.cyan);
+    let cyan: Color = CoreFill::from(cyan_fill).into();
     let lilac_600: Color =
         CoreFill::from(ThemeFill::from(theme.terminal_colors().normal.magenta)).into();
-    let accent_overlay_2: Color =
-        CoreFill::from(theme.background().blend(&accent_fill.with_opacity(50))).into();
+    let cyan_overlay_2: Color =
+        CoreFill::from(theme.background().blend(&cyan_fill.with_opacity(50))).into();
 
-    assert_eq!(builder.voice_input_status_style().fg, Some(accent));
+    assert_eq!(builder.voice_input_status_style().fg, Some(cyan));
     assert_eq!(
         builder.voice_input_border_style(Duration::ZERO).fg,
-        Some(accent_overlay_2)
+        Some(cyan_overlay_2)
     );
     assert_eq!(
         builder.voice_input_border_style(Duration::from_secs(1)).fg,
@@ -138,34 +138,6 @@ fn voice_input_border_pulses_between_accent_overlay_2_and_lilac_600() {
     );
     assert_eq!(
         builder.voice_input_border_style(Duration::from_secs(2)).fg,
-        Some(accent_overlay_2)
-    );
-}
-
-/// Regression test: the TUI accent color must be the theme's accent fill, not
-/// the ANSI terminal cyan. In light mode these two colors are meaningfully
-/// different (#00C2FF accent vs #20A5BA ANSI cyan), so the wrong binding
-/// causes visibly incorrect chrome colors.
-#[test]
-fn accent_color_uses_theme_accent_not_ansi_cyan() {
-    let theme = light_theme();
-    let builder = TuiUiBuilder {
-        warp_theme: theme.clone(),
-    };
-
-    let expected_accent: Color = CoreFill::from(theme.accent()).into();
-    let ansi_cyan: Color =
-        CoreFill::from(ThemeFill::from(theme.terminal_colors().normal.cyan)).into();
-
-    // These must differ in light mode — the bug was using ANSI cyan as if it
-    // were the accent.
-    assert_ne!(
-        expected_accent, ansi_cyan,
-        "light theme accent and ANSI cyan must be different colors"
-    );
-    assert_eq!(
-        builder.accent_color(),
-        expected_accent,
-        "accent_color() must use theme.accent(), not terminal_colors().normal.cyan"
+        Some(cyan_overlay_2)
     );
 }

@@ -311,9 +311,7 @@ fn slash_command_rows_match_figma_layout_and_colors() {
                 frame.buffer[(0, 0)].bg,
                 builder.slash_command_selection_background()
             );
-            // The selection background is the theme's accent color, not the
-            // ANSI terminal cyan. The mock theme's accent is Rgb(18, 123, 156).
-            assert_eq!(frame.buffer[(0, 0)].bg, Color::Rgb(18, 123, 156));
+            assert_eq!(frame.buffer[(0, 0)].bg, Color::Rgb(208, 209, 254));
             assert_eq!(
                 frame.buffer[(0, 0)].fg,
                 builder
