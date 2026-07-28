@@ -22,7 +22,11 @@ pub enum IntegrationCommand {
     /// (e.g. Linear Settings → Agents → Oz → Revoke access) and need to
     /// re-authorize. This removes the stale local connection and re-triggers
     /// the provider OAuth/install flow.
-    Reconnect(ReconnectIntegrationArgs),
+    ///
+    /// Note: any configuration (environment, model, base prompt, MCP servers)
+    /// must be explicitly passed again — the existing server-side config is
+    /// cleared as part of reconnection.
+    Reconnect(CreateIntegrationArgs),
 }
 
 impl IntegrationCommand {
@@ -101,41 +105,6 @@ pub struct UpdateIntegrationArgs {
     /// This removes the server entry whose key matches `SERVER_NAME`.
     #[arg(long = "remove-mcp", value_name = "SERVER_NAME")]
     pub remove_mcp: Vec<String>,
-
-    /// Custom instructions for the integration.
-    #[arg(long = "prompt", short = 'p')]
-    pub prompt: Option<String>,
-
-    /// Worker host ID for self-hosted workers.
-    /// If not specified or set to "warp", tasks will run on Warp-hosted workers.
-    #[arg(long = "host")]
-    pub worker_host: Option<String>,
-}
-
-#[derive(Debug, Clone, Args)]
-pub struct ReconnectIntegrationArgs {
-    /// Provider to reconnect the integration for.
-    #[arg(value_enum)]
-    pub provider: ProviderType,
-
-    #[command(flatten)]
-    pub model: ModelArgs,
-
-    #[clap(flatten)]
-    pub environment: EnvironmentCreateArgs,
-
-    #[command(flatten)]
-    pub config_file: ConfigFileArgs,
-
-    /// MCP servers to configure for this integration.
-    ///
-    /// Can be specified as:
-    /// - A path to a JSON file containing MCP configuration
-    /// - Inline JSON with MCP server configuration
-    ///
-    /// Can be specified multiple times to include multiple servers.
-    #[arg(long = "mcp", value_name = "SPEC")]
-    pub mcp_specs: Vec<MCPSpec>,
 
     /// Custom instructions for the integration.
     #[arg(long = "prompt", short = 'p')]

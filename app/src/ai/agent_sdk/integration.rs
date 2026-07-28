@@ -1,8 +1,6 @@
 use futures::future;
 use warp_cli::GlobalOptions;
-use warp_cli::integration::{
-    CreateIntegrationArgs, IntegrationCommand, ReconnectIntegrationArgs, UpdateIntegrationArgs,
-};
+use warp_cli::integration::{CreateIntegrationArgs, IntegrationCommand, UpdateIntegrationArgs};
 use warp_cli::provider::ProviderType;
 use warp_graphql::mutations::create_simple_integration::CreateSimpleIntegrationOutput;
 use warp_graphql::queries::get_oauth_connect_tx_status::OauthConnectTxStatus;
@@ -36,6 +34,123 @@ pub fn run(
         }
     }
     Ok(())
+}
+
+/// Resolved configuration ready to pass to `start_create_or_update_flow`.
+struct ResolvedIntegrationConfig {
+    integration_type: String,
+    environment_uid: Option<String>,
+    base_prompt: Option<String>,
+    model_id: Option<String>,
+    mcp_servers_json: Option<String>,
+    worker_host: Option<String>,
+}
+
+impl ResolvedIntegrationConfig {
+    /// Resolve args into a config, terminating the app on any validation error.
+    /// Returns `None` and terminates the app if an error or cancellation occurs.
+    fn resolve(
+        args: CreateIntegrationArgs,
+        ctx: &mut ModelContext<IntegrationCommandRunner>,
+    ) -> Option<Self> {
+        let loaded_file = match args.config_file.file.as_deref() {
+            Some(path) => match super::config_file::load_config_file(path) {
+                Ok(file) => Some(file),
+                Err(err) => {
+                    ctx.terminate_app(TerminationMode::ForceTerminate, Some(Err(err)));
+                    return None;
+                }
+            },
+            None => None,
+        };
+
+        let cli_mcp_servers = match super::mcp_config::build_mcp_servers_from_specs(&args.mcp_specs)
+        {
+            Ok(mcp_servers) => mcp_servers,
+            Err(err) => {
+                ctx.terminate_app(TerminationMode::ForceTerminate, Some(Err(err)));
+                return None;
+            }
+        };
+
+        let mut merged_config = super::config_file::merge_with_precedence(
+            loaded_file.as_ref(),
+            crate::ai::ambient_agents::AgentConfigSnapshot {
+                name: None,
+                environment_id: args.environment.environment.clone(),
+                // TODO(REMOTE-1936): support a runner for integrations.
+                runner_id: None,
+                model_id: args.model.model.clone(),
+                base_prompt: args.prompt.clone(),
+                mcp_servers: cli_mcp_servers,
+                profile_id: None,
+                worker_host: args.worker_host.clone(),
+                skill_spec: None,
+                // TODO(QUALITY-295): Support computer use flag in integrations.
+                computer_use_enabled: None,
+                // TODO(REMOTE-1134): Support harness selection for integrations.
+                harness: None,
+                harness_auth_secrets: None,
+                additional_source_repos: None,
+            },
+        );
+
+        // We must wait until after workspace metadata is refreshed to check available LLMs.
+        let model_id = match merged_config
+            .model_id
+            .as_deref()
+            .map(|model_id| super::common::validate_agent_mode_base_model_id(model_id, ctx))
+            .transpose()
+        {
+            Ok(model_id) => model_id.map(|model_id| model_id.to_string()),
+            Err(err) => {
+                ctx.terminate_app(TerminationMode::ForceTerminate, Some(Err(err)));
+                return None;
+            }
+        };
+
+        let base_prompt = merged_config.base_prompt.take();
+        let worker_host = merged_config.worker_host.take();
+
+        let mcp_servers_json = match merged_config.mcp_servers.take() {
+            Some(map) => match serde_json::to_string(&map) {
+                Ok(json) => Some(json),
+                Err(err) => {
+                    ctx.terminate_app(TerminationMode::ForceTerminate, Some(Err(err.into())));
+                    return None;
+                }
+            },
+            None => None,
+        };
+
+        // If the user didn't explicitly request no environment, load from the merged config.
+        let mut environment_args = args.environment;
+        if environment_args.environment.is_none() && !environment_args.no_environment {
+            environment_args.environment = merged_config.environment_id.take();
+        }
+
+        let environment_uid = match EnvironmentChoice::resolve_for_create(environment_args, ctx) {
+            Ok(EnvironmentChoice::None) => None,
+            Ok(EnvironmentChoice::Environment { id, .. }) => Some(id),
+            Err(ResolveConfigurationError::Canceled) => {
+                ctx.terminate_app(TerminationMode::ForceTerminate, None);
+                return None;
+            }
+            Err(err) => {
+                super::report_fatal_error(anyhow::anyhow!(err), ctx);
+                return None;
+            }
+        };
+
+        Some(ResolvedIntegrationConfig {
+            integration_type: args.provider.slug(),
+            environment_uid,
+            base_prompt,
+            model_id,
+            mcp_servers_json,
+            worker_host,
+        })
+    }
 }
 
 struct IntegrationCommandRunner;
@@ -79,118 +194,27 @@ impl IntegrationCommandRunner {
                 return;
             }
 
-            let loaded_file = match args.config_file.file.as_deref() {
-                Some(path) => match super::config_file::load_config_file(path) {
-                    Ok(file) => Some(file),
-                    Err(err) => {
-                        ctx.terminate_app(TerminationMode::ForceTerminate, Some(Err(err)));
-                        return;
-                    }
-                },
-                None => None,
+            let Some(config) = ResolvedIntegrationConfig::resolve(args, ctx) else {
+                return;
             };
 
-            let integration_type = args.provider.slug();
-            let enabled = true;
-            let is_update = false;
-
-            let cli_mcp_servers =
-                match super::mcp_config::build_mcp_servers_from_specs(&args.mcp_specs) {
-                    Ok(mcp_servers) => mcp_servers,
-                    Err(err) => {
-                        ctx.terminate_app(TerminationMode::ForceTerminate, Some(Err(err)));
-                        return;
-                    }
-                };
-
-            let mut merged_config = super::config_file::merge_with_precedence(
-                loaded_file.as_ref(),
-                crate::ai::ambient_agents::AgentConfigSnapshot {
-                    name: None,
-                    environment_id: args.environment.environment.clone(),
-                    // TODO(REMOTE-1936): support a runner for integrations.
-                    runner_id: None,
-                    model_id: args.model.model.clone(),
-                    base_prompt: args.prompt.clone(),
-                    mcp_servers: cli_mcp_servers,
-                    profile_id: None,
-                    worker_host: args.worker_host.clone(),
-                    skill_spec: None,
-                    // TODO(QUALITY-295): Support computer use flag in integrations.
-                    computer_use_enabled: None,
-                    // TODO(REMOTE-1134): Support harness selection for integrations.
-                    harness: None,
-                    harness_auth_secrets: None,
-                    additional_source_repos: None,
-                },
-            );
-
-            // We must wait until after workspace metadata is refreshed to check available LLMs.
-            let model_id = match merged_config
-                .model_id
-                .as_deref()
-                .map(|model_id| super::common::validate_agent_mode_base_model_id(model_id, ctx))
-                .transpose()
-            {
-                Ok(model_id) => model_id.map(|model_id| model_id.to_string()),
-                Err(err) => {
-                    ctx.terminate_app(TerminationMode::ForceTerminate, Some(Err(err)));
-                    return;
-                }
-            };
-
-            let base_prompt = merged_config.base_prompt.take();
-            let worker_host = merged_config.worker_host.take();
-
-            let mcp_servers_json = match merged_config.mcp_servers.take() {
-                Some(map) => match serde_json::to_string(&map) {
-                    Ok(json) => Some(json),
-                    Err(err) => {
-                        ctx.terminate_app(TerminationMode::ForceTerminate, Some(Err(err.into())));
-                        return;
-                    }
-                },
-                None => None,
-            };
-
-            //If the user didn't explicitly request no environment, load environment from the config
-            let mut environment_args = args.environment;
-            if environment_args.environment.is_none() && !environment_args.no_environment {
-                environment_args.environment = merged_config.environment_id.take();
+            match &config.environment_uid {
+                None => eprintln!("Creating integration without an environment."),
+                Some(id) => eprintln!("Creating integration with environment {id}."),
             }
-
-            let environment_uid = match EnvironmentChoice::resolve_for_create(environment_args, ctx)
-            {
-                Ok(EnvironmentChoice::None) => {
-                    eprintln!("Creating integration without an environment.");
-                    None
-                }
-                Ok(EnvironmentChoice::Environment { id, .. }) => {
-                    eprintln!("Creating integration with environment {id}.");
-                    Some(id)
-                }
-                Err(ResolveConfigurationError::Canceled) => {
-                    eprintln!("Integration creation canceled.");
-                    ctx.terminate_app(TerminationMode::ForceTerminate, None);
-                    return;
-                }
-                Err(err) => {
-                    super::report_fatal_error(anyhow::anyhow!(err), ctx);
-                    return;
-                }
-            };
 
             runner.start_create_or_update_flow(
                 ctx,
-                integration_type,
-                environment_uid,
-                base_prompt,
-                model_id,
-                mcp_servers_json,
+                config.integration_type,
+                config.environment_uid,
+                config.base_prompt,
+                config.model_id,
+                config.mcp_servers_json,
                 None,
-                worker_host,
-                enabled,
-                is_update,
+                config.worker_host,
+                true,  // enabled
+                false, // is_update
+                false, // in_reconnect
                 1,
             );
         });
@@ -209,6 +233,7 @@ impl IntegrationCommandRunner {
         worker_host: Option<String>,
         enabled: bool,
         is_update: bool,
+        in_reconnect: bool,
         attempt: u32,
     ) {
         const MAX_CREATE_ATTEMPTS: u32 = 8;
@@ -284,6 +309,7 @@ impl IntegrationCommandRunner {
                                 let next_worker_host = worker_host.clone();
                                 let next_enabled = enabled;
                                 let next_is_update = is_update;
+                                let next_in_reconnect = in_reconnect;
                                 let next_attempt = attempt + 1;
 
                                 ctx.spawn(
@@ -304,6 +330,7 @@ impl IntegrationCommandRunner {
                                                     next_worker_host,
                                                     next_enabled,
                                                     next_is_update,
+                                                    next_in_reconnect,
                                                     next_attempt,
                                                 );
                                             }
@@ -375,7 +402,7 @@ impl IntegrationCommandRunner {
                         // check if they may have revoked provider access and guide them to
                         // reconnect instead of just failing.
                         let err_msg = err.to_string();
-                        if err_msg.contains("Integration already exists") {
+                        if err_msg.contains("Integration already exists") && !in_reconnect {
                             eprintln!("error: {err_msg}");
                             eprintln!(
                                 "If you revoked Oz's access from the provider (e.g. Linear \
@@ -518,6 +545,7 @@ impl IntegrationCommandRunner {
                     worker_host,
                     enabled,
                     is_update,
+                    false, // in_reconnect
                     1,
                 );
                 return;
@@ -536,12 +564,13 @@ impl IntegrationCommandRunner {
                 worker_host,
                 enabled,
                 is_update,
+                false, // in_reconnect
                 1,
             );
         });
     }
 
-    fn reconnect(&self, args: ReconnectIntegrationArgs, ctx: &mut ModelContext<Self>) {
+    fn reconnect(&self, args: CreateIntegrationArgs, ctx: &mut ModelContext<Self>) {
         let refresh_future = super::common::refresh_workspace_metadata(ctx);
         let warp_drive_sync_future = super::common::refresh_warp_drive(ctx);
         let setup_future = future::try_join(refresh_future, warp_drive_sync_future);
@@ -552,145 +581,56 @@ impl IntegrationCommandRunner {
                 return;
             }
 
-            let integration_type = args.provider.slug();
-            let integrations_client = ServerApiProvider::as_ref(ctx).get_integrations_client();
+            // Validate all args *before* making any destructive server changes.
+            // This ensures that a bad config file, invalid MCP spec, or unknown model
+            // is caught before the existing integration is deleted.
+            let Some(config) = ResolvedIntegrationConfig::resolve(args, ctx) else {
+                return;
+            };
 
-            let delete_integration_type = integration_type.clone();
+            // Inform the user that the server-side config will be reset.
+            eprintln!(
+                "Note: reconnect will clear the existing {} integration configuration on \
+                 the server. Any configuration not passed explicitly (environment, model, \
+                 base prompt, MCP servers) will be reset to defaults.",
+                config.integration_type,
+            );
+
+            match &config.environment_uid {
+                None => eprintln!("Reconnecting integration without an environment."),
+                Some(id) => eprintln!("Reconnecting integration with environment {id}."),
+            }
+
+            let integrations_client = ServerApiProvider::as_ref(ctx).get_integrations_client();
+            let delete_integration_type = config.integration_type.clone();
             let delete_future = async move {
                 integrations_client
                     .delete_simple_integration(delete_integration_type)
                     .await
             };
 
-            eprintln!("Disconnecting existing {integration_type} integration...");
+            eprintln!(
+                "Disconnecting existing {} integration...",
+                config.integration_type
+            );
 
             ctx.spawn(
                 delete_future,
                 move |runner, delete_result, ctx| match delete_result {
                     Ok(()) => {
                         eprintln!("Disconnected successfully. Starting authorization flow...");
-
-                        let loaded_file = match args.config_file.file.as_deref() {
-                            Some(path) => match super::config_file::load_config_file(path) {
-                                Ok(file) => Some(file),
-                                Err(err) => {
-                                    ctx.terminate_app(
-                                        TerminationMode::ForceTerminate,
-                                        Some(Err(err)),
-                                    );
-                                    return;
-                                }
-                            },
-                            None => None,
-                        };
-
-                        let cli_mcp_servers = match super::mcp_config::build_mcp_servers_from_specs(
-                            &args.mcp_specs,
-                        ) {
-                            Ok(mcp_servers) => mcp_servers,
-                            Err(err) => {
-                                ctx.terminate_app(TerminationMode::ForceTerminate, Some(Err(err)));
-                                return;
-                            }
-                        };
-
-                        let mut merged_config = super::config_file::merge_with_precedence(
-                            loaded_file.as_ref(),
-                            crate::ai::ambient_agents::AgentConfigSnapshot {
-                                name: None,
-                                environment_id: args.environment.environment.clone(),
-                                // TODO(REMOTE-1936): support a runner for integrations.
-                                runner_id: None,
-                                model_id: args.model.model.clone(),
-                                base_prompt: args.prompt.clone(),
-                                mcp_servers: cli_mcp_servers,
-                                profile_id: None,
-                                worker_host: args.worker_host.clone(),
-                                skill_spec: None,
-                                // TODO(QUALITY-295): Support computer use flag in integrations.
-                                computer_use_enabled: None,
-                                // TODO(REMOTE-1134): Support harness selection for integrations.
-                                harness: None,
-                                harness_auth_secrets: None,
-                                additional_source_repos: None,
-                            },
-                        );
-
-                        // We must wait until after workspace metadata is refreshed to check
-                        // available LLMs.
-                        let model_id = match merged_config
-                            .model_id
-                            .as_deref()
-                            .map(|model_id| {
-                                super::common::validate_agent_mode_base_model_id(model_id, ctx)
-                            })
-                            .transpose()
-                        {
-                            Ok(model_id) => model_id.map(|model_id| model_id.to_string()),
-                            Err(err) => {
-                                ctx.terminate_app(TerminationMode::ForceTerminate, Some(Err(err)));
-                                return;
-                            }
-                        };
-
-                        let base_prompt = merged_config.base_prompt.take();
-                        let worker_host = merged_config.worker_host.take();
-
-                        let mcp_servers_json = match merged_config.mcp_servers.take() {
-                            Some(map) => match serde_json::to_string(&map) {
-                                Ok(json) => Some(json),
-                                Err(err) => {
-                                    ctx.terminate_app(
-                                        TerminationMode::ForceTerminate,
-                                        Some(Err(err.into())),
-                                    );
-                                    return;
-                                }
-                            },
-                            None => None,
-                        };
-
-                        // If the user didn't explicitly request no environment, load environment
-                        // from the config.
-                        let mut environment_args = args.environment;
-                        if environment_args.environment.is_none()
-                            && !environment_args.no_environment
-                        {
-                            environment_args.environment = merged_config.environment_id.take();
-                        }
-
-                        let environment_uid =
-                            match EnvironmentChoice::resolve_for_create(environment_args, ctx) {
-                                Ok(EnvironmentChoice::None) => {
-                                    eprintln!("Reconnecting integration without an environment.");
-                                    None
-                                }
-                                Ok(EnvironmentChoice::Environment { id, .. }) => {
-                                    eprintln!("Reconnecting integration with environment {id}.");
-                                    Some(id)
-                                }
-                                Err(ResolveConfigurationError::Canceled) => {
-                                    eprintln!("Integration reconnect canceled.");
-                                    ctx.terminate_app(TerminationMode::ForceTerminate, None);
-                                    return;
-                                }
-                                Err(err) => {
-                                    super::report_fatal_error(anyhow::anyhow!(err), ctx);
-                                    return;
-                                }
-                            };
-
                         runner.start_create_or_update_flow(
                             ctx,
-                            integration_type,
-                            environment_uid,
-                            base_prompt,
-                            model_id,
-                            mcp_servers_json,
+                            config.integration_type,
+                            config.environment_uid,
+                            config.base_prompt,
+                            config.model_id,
+                            config.mcp_servers_json,
                             None,
-                            worker_host,
+                            config.worker_host,
                             true,  // enabled
                             false, // is_update: treat as fresh create after disconnect
+                            true,  // in_reconnect: suppress redundant reconnect hint
                             1,
                         );
                     }

@@ -1,5 +1,6 @@
 use crate::error::UserFacingError;
 use crate::request_context::RequestContext;
+use crate::response_context::ResponseContext;
 use crate::schema;
 
 #[derive(cynic::QueryVariables, Debug)]
@@ -25,7 +26,7 @@ pub struct DeleteSimpleIntegration {
 
 #[derive(cynic::QueryFragment, Debug)]
 pub struct DeleteSimpleIntegrationOutput {
-    pub success: bool,
+    pub response_context: ResponseContext,
 }
 
 #[derive(cynic::InlineFragments, Debug)]

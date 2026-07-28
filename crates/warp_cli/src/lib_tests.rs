@@ -2869,3 +2869,25 @@ fn integration_reconnect_missing_provider_fails() {
     let result = Args::try_parse_from(["warp", "integration", "reconnect"]);
     assert!(result.is_err(), "missing provider should fail to parse");
 }
+
+#[test]
+fn integration_reconnect_accepts_mcp_json() {
+    // Regression test: after deduplicating ReconnectIntegrationArgs into CreateIntegrationArgs,
+    // the reconnect subcommand must still accept --mcp specs.
+    let json = r#"{"my-server":{"command":"echo"}}"#;
+
+    let args = Args::try_parse_from(["warp", "integration", "reconnect", "linear", "--mcp", json])
+        .unwrap();
+
+    let Some(Command::CommandLine(boxed_cmd)) = args.command else {
+        panic!("Expected `warp integration reconnect` command");
+    };
+    let CliCommand::Integration(IntegrationCommand::Reconnect(args)) = boxed_cmd.as_ref() else {
+        panic!("Expected `warp integration reconnect` command");
+    };
+
+    assert!(matches!(
+        args.mcp_specs.as_slice(),
+        [crate::mcp::MCPSpec::Json(parsed_json)] if parsed_json == json
+    ));
+}

@@ -277,13 +277,7 @@ impl IntegrationsClient for ServerApi {
         let operation = DeleteSimpleIntegration::build(variables);
         let response = self.send_graphql_request(operation, None).await?;
         match response.delete_simple_integration {
-            DeleteSimpleIntegrationResult::DeleteSimpleIntegrationOutput(output) => {
-                if output.success {
-                    Ok(())
-                } else {
-                    Err(anyhow!("Failed to delete integration"))
-                }
-            }
+            DeleteSimpleIntegrationResult::DeleteSimpleIntegrationOutput(_) => Ok(()),
             DeleteSimpleIntegrationResult::UserFacingError(error) => {
                 Err(anyhow!(get_user_facing_error_message(error)))
             }

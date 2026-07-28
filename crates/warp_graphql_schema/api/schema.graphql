@@ -3505,7 +3505,6 @@ input DeleteSimpleIntegrationInput {
 
 type DeleteSimpleIntegrationOutput implements Response {
   responseContext: ResponseContext!
-  success: Boolean!
 }
 
 union DeleteSimpleIntegrationResult = DeleteSimpleIntegrationOutput | UserFacingError
