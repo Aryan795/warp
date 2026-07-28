@@ -1624,6 +1624,139 @@ jobs:
           name: release-web-${{ steps.get-config.outputs.channel }}
           path: ${{ steps.bundle_app.outputs.packages_dir }}
 
+  release_windows_tui:
+    name: Build Release (Windows TUI x64)
+    runs-on: windows-latest-large
+    needs: prepare_release
+    if: ${{ inputs.build_windows != false && inputs.channel == 'dev' }}
+    timeout-minutes: 150
+    env:
+      TRUSTED_SIGNING_ENDPOINT: https://eus.codesigning.azure.net/
+      TRUSTED_SIGNING_ACCOUNT: warpdotdev
+      TRUSTED_SIGNING_CERT_PROFILE: warpterminal
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - uses: ./.github/actions/prepare_environment
+        with:
+          target_os: windows
+          cache_key: tui-x64
+          is_self_hosted: false
+          ref: ${{ needs.prepare_release.outputs.release_branch }}
+          install_release_deps: true
+          ssh_key: ${{ secrets.WARP_CHANNEL_CONFIG_ACCESS_SSH_KEY }}
+
+      - name: Get channel configuration
+        id: get-config
+        uses: ./.github/actions/get_channel_config/
+        with:
+          config_file: ${{ env.CONFIG_FILE }}
+          channel: ${{ inputs.channel }}
+
+      - name: Test Windows TUI packaging
+        run: ./script/windows/test_package_tui.ps1
+        shell: pwsh
+
+      - name: Build Warp Agent CLI
+        id: build_tui
+        run: script/bundle --artifact tui --channel "$CHANNEL" --skip_build_installer --arch x64
+        shell: bash
+        env:
+          CHANNEL: ${{ steps.get-config.outputs.channel }}
+          GIT_RELEASE_TAG: ${{ needs.prepare_release.outputs.release_tag }}
+
+      - name: Sign Warp Agent CLI and PTY executables
+        uses: azure/artifact-signing-action@b443cf8ea4124818d2ea9f043cba29fc3ec47b16 # v1.2.0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ env.TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ env.TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ env.TRUSTED_SIGNING_CERT_PROFILE }}
+          files: ${{ steps.build_tui.outputs.binary_path }}
+          files-folder: ${{ github.workspace }}\app\assets\windows\x64
+          files-folder-filter: dll,exe
+          files-folder-recurse: true
+          files-folder-depth: 2
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Package signed Warp Agent CLI
+        id: package_tui
+        run: script/bundle --artifact tui --channel "$CHANNEL" --skip_build_binary --require_signatures --arch x64
+        shell: bash
+        env:
+          CHANNEL: ${{ steps.get-config.outputs.channel }}
+          GIT_RELEASE_TAG: ${{ needs.prepare_release.outputs.release_tag }}
+
+      - name: Inspect and launch isolated package
+        id: inspect_tui
+        shell: pwsh
+        env:
+          ARCHIVE_PATH: ${{ steps.package_tui.outputs.archive_path }}
+          EXPECTED_VERSION: ${{ needs.prepare_release.outputs.release_tag }}
+        run: |
+          Add-Type -AssemblyName System.IO.Compression
+          $Archive = [System.IO.Compression.ZipFile]::OpenRead($env:ARCHIVE_PATH)
+          try {
+            $Entries = @($Archive.Entries.FullName | Sort-Object)
+          } finally {
+            $Archive.Dispose()
+          }
+          $RequiredEntries = @(
+            'conpty.dll',
+            'warp-tui-dev.exe',
+            'x64/OpenConsole.exe'
+          )
+          foreach ($RequiredEntry in $RequiredEntries) {
+            if ($RequiredEntry -notin $Entries) {
+              throw "Archive is missing required entry: $RequiredEntry"
+            }
+          }
+          $ResourceEntries = @($Entries | Where-Object { $_.StartsWith('resources/') })
+          if ($ResourceEntries.Count -eq 0) {
+            throw 'Archive does not contain bundled resources'
+          }
+          $UnexpectedEntries = @($Entries | Where-Object {
+            $_ -notin $RequiredEntries -and -not $_.StartsWith('resources/')
+          })
+          if ($UnexpectedEntries.Count -ne 0) {
+            throw "Archive contains unexpected entries: $($UnexpectedEntries -join ', ')"
+          }
+
+          $PackageRoot = Join-Path $env:RUNNER_TEMP 'Warp Agent CLI package with spaces'
+          Expand-Archive -LiteralPath $env:ARCHIVE_PATH -DestinationPath $PackageRoot
+          $BinaryPath = Join-Path $PackageRoot 'warp-tui-dev.exe'
+          $Version = (& $BinaryPath --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) {
+            throw "Packaged binary exited with code $LASTEXITCODE"
+          }
+          if ($Version -cne $env:EXPECTED_VERSION) {
+            throw "Packaged binary reported '$Version', expected '$env:EXPECTED_VERSION'"
+          }
+          "package_root=$PackageRoot" >> $env:GITHUB_OUTPUT
+
+      - name: Smoke test packaged ConPTY
+        shell: bash
+        run: |
+          cargo test -p warp --lib \
+            --features tui,release_bundle,standalone,crash_reporting \
+            packaged_conpty_spawns_powershell_and_reads_output \
+            -- --ignored --nocapture
+        env:
+          WARP_PACKAGED_TUI_ROOT: ${{ steps.inspect_tui.outputs.package_root }}
+
+      - name: Upload Windows TUI archives
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release-windows-tui-x64-${{ steps.get-config.outputs.channel }}
+          path: |
+            ${{ steps.package_tui.outputs.archive_path }}
+            ${{ steps.package_tui.outputs.symbols_archive_path }}
+          if-no-files-found: error
+
   release_windows:
     name: Build Release (Windows ${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
@@ -1801,6 +1934,7 @@ jobs:
       - release_linux_arm
       - release_linux_cli_x86
       - release_web
+      - release_windows_tui
       - release_windows
     if: ${{ always() && needs.prepare_release.outputs.should_publish == 'true' }}
     steps:
@@ -1840,6 +1974,9 @@ jobs:
           fi
           if [[ ${{ needs.release_windows.result }} != 'success' ]]; then
               FAILED+=("Windows")
+          fi
+          if [[ ${{ needs.release_windows_tui.result }} != 'success' && ${{ inputs.channel }} == 'dev' ]]; then
+              FAILED+=("Windows TUI")
           fi
 
           if (( ${#FAILED[@]} )); then

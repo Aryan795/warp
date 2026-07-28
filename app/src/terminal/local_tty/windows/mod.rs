@@ -18,7 +18,9 @@ pub use environment::get_user_and_system_env_variable;
 use thiserror::Error;
 use warp_errors::{report_error, report_if_error};
 use warpui::{AppContext, SingletonEntity};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows::Win32::Foundation::{
+    CloseHandle, E_ACCESSDENIED, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 use windows::Win32::System::Console::{COORD, HPCON};
 use windows::Win32::System::Threading::{
     CREATE_BREAKAWAY_FROM_JOB, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
@@ -218,7 +220,6 @@ pub(super) fn spawn(
             ));
         }
     };
-    let mut process_information = PROCESS_INFORMATION::default();
 
     let start_directory = options
         .start_dir
@@ -229,31 +230,52 @@ pub(super) fn spawn(
                 .filter(|path| path.is_dir())
         })
         .map(|path| HSTRING::from(path.as_os_str()));
-
-    unsafe {
-        CreateProcessW(
-            PCWSTR::null(), /* lpApplicationName */
-            Some(PWSTR::from_raw(shell_command.as_ptr().cast_mut())),
-            None,  /* lpProcessAttributes */
-            None,  /* lpThreadAttributes */
-            false, /* bInheritHandles */
-            PROCESS_CREATION_FLAGS(0)
-                | EXTENDED_STARTUPINFO_PRESENT
-                | CREATE_UNICODE_ENVIRONMENT
-                | CREATE_BREAKAWAY_FROM_JOB,
-            Some(environment_block.as_ptr() as *const std::ffi::c_void),
-            start_directory
-                .as_ref()
-                .map(|hstring| PCWSTR::from_raw(hstring.as_ptr()))
-                .unwrap_or(PCWSTR::null()),
-            &startup_info.StartupInfo as *const STARTUPINFOW,
-            &mut process_information,
-        )
+    let create_shell_process = |creation_flags| {
+        // CreateProcessW may mutate its command-line buffer, so each attempt
+        // needs a fresh, null-terminated copy.
+        let mut command_line = shell_command.to_vec();
+        command_line.push(0);
+        let mut process_information = PROCESS_INFORMATION::default();
+        unsafe {
+            CreateProcessW(
+                PCWSTR::null(), /* lpApplicationName */
+                Some(PWSTR::from_raw(command_line.as_mut_ptr())),
+                None,  /* lpProcessAttributes */
+                None,  /* lpThreadAttributes */
+                false, /* bInheritHandles */
+                creation_flags,
+                Some(environment_block.as_ptr() as *const std::ffi::c_void),
+                start_directory
+                    .as_ref()
+                    .map(|hstring| PCWSTR::from_raw(hstring.as_ptr()))
+                    .unwrap_or(PCWSTR::null()),
+                &startup_info.StartupInfo as *const STARTUPINFOW,
+                &mut process_information,
+            )
+        }
+        .map(|()| process_information)
+    };
+    let base_creation_flags =
+        PROCESS_CREATION_FLAGS(0) | EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
+    let process_information =
+        match create_shell_process(base_creation_flags | CREATE_BREAKAWAY_FROM_JOB) {
+            Ok(process_information) => Ok(process_information),
+            Err(error) if error.code() == E_ACCESSDENIED => {
+                // Job-contained hosts such as WinRM and CI can forbid
+                // breakaway. Inherit that job rather than refusing to start
+                // the user's shell.
+                log::info!(
+                    "Shell process could not break away from the parent Windows job; retrying \
+                     inside the job"
+                );
+                create_shell_process(base_creation_flags)
+            }
+            Err(error) => Err(error),
+        }
         .map_err(|error| {
             let detail = shell_starter.shell_detail();
             PtySpawnError::CreateShellProcessFailed { detail, error }
         })?;
-    }
 
     let _ = unsafe { conpty_api.release(pty_handle) };
 
@@ -527,3 +549,7 @@ impl Drop for Pty {
         self.close_pseudoconsole();
     }
 }
+
+#[cfg(test)]
+#[path = "windows_tests.rs"]
+mod tests;
