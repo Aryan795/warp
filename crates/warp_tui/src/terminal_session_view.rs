@@ -73,9 +73,7 @@ use crate::conversation_selection::TuiConversationSelection;
 use crate::editor_interaction::TuiEditorCommand;
 use crate::exit_confirmation::{CTRL_C_EXIT_WINDOW, ExitConfirmation};
 use crate::handoff::TuiHandoffBlock;
-use crate::inline_menu::{
-    MAX_INLINE_MENU_ROWS, TuiInlineMenu, TuiInlineMenuAccepted, active_inline_menu,
-};
+use crate::inline_menu::{MAX_INLINE_MENU_ROWS, TuiInlineMenu, active_inline_menu};
 use crate::input::view::TuiInputAction;
 use crate::input::{TuiInputView, TuiInputViewEvent};
 use crate::input_hints;
@@ -3536,28 +3534,10 @@ impl TuiTerminalSessionView {
         let Some(accepted) = menu.accept(ctx) else {
             return;
         };
-        match accepted {
-            TuiInlineMenuAccepted::SlashCommand(action) => {
-                self.handle_accepted_slash_command(&action, ctx);
-            }
-            TuiInlineMenuAccepted::Conversation(entry_id) => {
-                self.handle_accepted_conversation(entry_id, ctx);
-            }
-            TuiInlineMenuAccepted::Model(id) => {
-                self.handle_accepted_model(&id, ctx);
-            }
-            TuiInlineMenuAccepted::Mcp(action) => {
-                self.handle_accepted_mcp_action(action, ctx);
-            }
-            TuiInlineMenuAccepted::PromptHistory(text) => {
-                self.handle_accepted_prompt_history(text, ctx);
-            }
-            TuiInlineMenuAccepted::Completion(acceptance) => {
-                self.input_view.update(ctx, |input, ctx| {
-                    input.apply_shell_completion(acceptance, ctx);
-                });
-            }
-        }
+        self.input_view.update(ctx, |input, ctx| {
+            input.route_inline_menu_acceptance(accepted, ctx);
+        });
+        ctx.notify();
     }
 
     fn select_tui_slash_command(&mut self, command: &StaticCommand, ctx: &mut ViewContext<Self>) {

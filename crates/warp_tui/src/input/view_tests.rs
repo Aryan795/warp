@@ -41,7 +41,7 @@ use crate::editor_element::{TuiEditorAction, TuiEditorElement};
 use crate::editor_interaction::TuiEditorCommand;
 use crate::inline_menu::{
     TuiInlineMenu, TuiInlineMenuAccepted, TuiInlineMenuHandle, TuiInlineMenuHeader,
-    TuiInlineMenuSnapshot, TuiInlineMenuStatus,
+    TuiInlineMenuScrollAnchor, TuiInlineMenuSnapshot, TuiInlineMenuStatus,
 };
 use crate::input_mode_policy::AI_LOCKED_CONFIG;
 use crate::input_suggestions_mode::{TuiInputSuggestionsMode, TuiInputSuggestionsModeModel};
@@ -753,6 +753,7 @@ impl TuiInlineMenuHandle for TestConversationMenuHandle {
             rows: Vec::new(),
             selected_index: None,
             scroll_offset: 0,
+            scroll_anchor: TuiInlineMenuScrollAnchor::Selection,
             max_visible_rows: 8,
             status: Some(TuiInlineMenuStatus::Empty(
                 "No conversations found".to_owned(),

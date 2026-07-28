@@ -205,6 +205,7 @@ impl TuiCompletionMenuModel {
                 .collect(),
             selected_index: list.selected_index(),
             scroll_offset: list.scroll_offset(),
+            scroll_anchor: list.scroll_anchor(),
             max_visible_rows: MAX_VISIBLE_ROWS,
             status: None,
         })

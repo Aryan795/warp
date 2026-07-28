@@ -144,6 +144,12 @@ pub(crate) enum TuiInlineMenuStatus {
     Loading(String),
     Empty(String),
 }
+/// Controls whether rendering follows the selection or an explicit wheel offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TuiInlineMenuScrollAnchor {
+    Selection,
+    ScrollOffset,
+}
 
 /// Render-friendly, domain-neutral state for a TUI inline menu.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,6 +158,7 @@ pub(crate) struct TuiInlineMenuSnapshot {
     pub(crate) rows: Vec<TuiInlineMenuRow>,
     pub(crate) selected_index: Option<usize>,
     pub(crate) scroll_offset: usize,
+    pub(crate) scroll_anchor: TuiInlineMenuScrollAnchor,
     pub(crate) max_visible_rows: usize,
     pub(crate) status: Option<TuiInlineMenuStatus>,
 }
@@ -162,6 +169,7 @@ pub(crate) struct TuiInlineMenuListState<Row> {
     selection: InlineMenuSelection,
     is_loading: bool,
     scroll_offset: usize,
+    scroll_anchor: TuiInlineMenuScrollAnchor,
 }
 
 impl<Row> Default for TuiInlineMenuListState<Row> {
@@ -171,6 +179,7 @@ impl<Row> Default for TuiInlineMenuListState<Row> {
             selection: InlineMenuSelection::default(),
             is_loading: false,
             scroll_offset: 0,
+            scroll_anchor: TuiInlineMenuScrollAnchor::Selection,
         }
     }
 }
@@ -198,6 +207,9 @@ impl<Row> TuiInlineMenuListState<Row> {
 
     pub(crate) fn scroll_offset(&self) -> usize {
         self.scroll_offset
+    }
+    pub(crate) fn scroll_anchor(&self) -> TuiInlineMenuScrollAnchor {
+        self.scroll_anchor
     }
 
     /// Replaces the current rows and applies a caller-selected preferred row.
@@ -264,11 +276,13 @@ impl<Row> TuiInlineMenuListState<Row> {
     }
 
     fn keep_selected_visible(&mut self, max_visible_rows: usize) {
+        self.scroll_anchor = TuiInlineMenuScrollAnchor::Selection;
         self.scroll_offset = inline_menu_viewport(
             self.rows.len(),
             self.selection.selected_index(),
             self.scroll_offset,
             max_visible_rows,
+            self.scroll_anchor,
         )
         .rows
         .start;
@@ -300,11 +314,15 @@ impl<Row> TuiInlineMenuListState<Row> {
 
     /// Scrolls the viewport by `delta` rows without changing the selection.
     pub(crate) fn scroll_by(&mut self, delta: isize, max_visible_rows: usize) {
-        let max_offset = self.rows.len().saturating_sub(max_visible_rows);
-        self.scroll_offset = self
+        let max_offset = max_inline_menu_scroll_offset(self.rows.len(), max_visible_rows);
+        let scroll_offset = self
             .scroll_offset
             .saturating_add_signed(delta)
             .min(max_offset);
+        if scroll_offset != self.scroll_offset {
+            self.scroll_offset = scroll_offset;
+            self.scroll_anchor = TuiInlineMenuScrollAnchor::ScrollOffset;
+        }
     }
 }
 
@@ -958,6 +976,7 @@ fn build_inline_menu(
             snapshot.selected_index,
             snapshot.scroll_offset,
             visible_rows,
+            snapshot.scroll_anchor,
         );
 
         if viewport.has_more_above {
@@ -1025,6 +1044,7 @@ fn inline_menu_viewport(
     selected_index: Option<usize>,
     scroll_offset: usize,
     visible_rows: usize,
+    scroll_anchor: TuiInlineMenuScrollAnchor,
 ) -> TuiInlineMenuViewport {
     if rows_len == 0 || visible_rows == 0 {
         return TuiInlineMenuViewport {
@@ -1046,13 +1066,17 @@ fn inline_menu_viewport(
             selected_index,
             scroll_offset,
             visible_rows,
+            scroll_anchor,
         );
     }
 
     let bottom_start = rows_len.saturating_sub(visible_rows - 1);
     let mut start = scroll_offset.min(bottom_start);
     let mut end = inline_menu_viewport_end(rows_len, start, visible_rows);
-    if let Some(selected_index) = selected_index.filter(|index| *index < rows_len) {
+    if let Some(selected_index) = selected_index
+        .filter(|_| matches!(scroll_anchor, TuiInlineMenuScrollAnchor::Selection))
+        .filter(|index| *index < rows_len)
+    {
         if selected_index < start {
             start = selected_index;
         } else if selected_index >= end {
@@ -1072,6 +1096,7 @@ fn inline_menu_viewport(
             selected_index,
             scroll_offset,
             visible_rows,
+            scroll_anchor,
         );
     }
     viewport
@@ -1082,9 +1107,13 @@ fn inline_menu_viewport_without_indicators(
     selected_index: Option<usize>,
     scroll_offset: usize,
     visible_rows: usize,
+    scroll_anchor: TuiInlineMenuScrollAnchor,
 ) -> TuiInlineMenuViewport {
     let mut start = scroll_offset.min(rows_len.saturating_sub(visible_rows));
-    if let Some(selected_index) = selected_index.filter(|index| *index < rows_len) {
+    if let Some(selected_index) = selected_index
+        .filter(|_| matches!(scroll_anchor, TuiInlineMenuScrollAnchor::Selection))
+        .filter(|index| *index < rows_len)
+    {
         if selected_index < start {
             start = selected_index;
         } else if selected_index >= start + visible_rows {
@@ -1098,6 +1127,13 @@ fn inline_menu_viewport_without_indicators(
     }
 }
 
+fn max_inline_menu_scroll_offset(rows_len: usize, visible_rows: usize) -> usize {
+    if visible_rows > MIN_REAL_ROWS_WITH_SCROLL_INDICATORS {
+        rows_len.saturating_sub(visible_rows - 1)
+    } else {
+        rows_len.saturating_sub(visible_rows)
+    }
+}
 fn inline_menu_viewport_end(rows_len: usize, start: usize, visible_rows: usize) -> usize {
     let upper_indicator_rows = usize::from(start > 0);
     let rows_without_lower_indicator = visible_rows - upper_indicator_rows;

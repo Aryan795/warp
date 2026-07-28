@@ -12,8 +12,8 @@ use warpui_core::{App, AppContext, EntityId, EntityIdMap};
 
 use super::{
     InlineMenuScrollFn, TuiInlineMenuElement, TuiInlineMenuHeader, TuiInlineMenuListState,
-    TuiInlineMenuRow, TuiInlineMenuRowStyle, TuiInlineMenuSnapshot, TuiInlineMenuStatus,
-    TuiInlineMenuTab, render_inline_menu,
+    TuiInlineMenuRow, TuiInlineMenuRowStyle, TuiInlineMenuScrollAnchor, TuiInlineMenuSnapshot,
+    TuiInlineMenuStatus, TuiInlineMenuTab, render_inline_menu,
 };
 use crate::tui_builder::TuiUiBuilder;
 
@@ -149,6 +149,7 @@ fn rows_snapshot(
             .collect(),
         selected_index: Some(selected_index),
         scroll_offset,
+        scroll_anchor: TuiInlineMenuScrollAnchor::Selection,
         max_visible_rows,
         status: None,
     }
@@ -160,6 +161,7 @@ fn status_snapshot(status: TuiInlineMenuStatus) -> TuiInlineMenuSnapshot {
         rows: Vec::new(),
         selected_index: None,
         scroll_offset: 0,
+        scroll_anchor: TuiInlineMenuScrollAnchor::Selection,
         max_visible_rows: 8,
         status: Some(status),
     }
@@ -289,6 +291,7 @@ fn conversation_like_snapshot_reuses_header_tabs_rows_and_selection() {
         ],
         selected_index: Some(0),
         scroll_offset: 0,
+        scroll_anchor: TuiInlineMenuScrollAnchor::Selection,
         max_visible_rows: 8,
         status: None,
     });
@@ -328,6 +331,7 @@ fn conversation_like_snapshot_keeps_selection_visible_within_production_height()
                 .collect(),
             selected_index: Some(7),
             scroll_offset: 0,
+            scroll_anchor: TuiInlineMenuScrollAnchor::Selection,
             max_visible_rows: 8,
             status: None,
         },
@@ -370,6 +374,7 @@ fn slash_command_rows_match_figma_layout_and_colors() {
                 ],
                 selected_index: Some(0),
                 scroll_offset: 0,
+                scroll_anchor: TuiInlineMenuScrollAnchor::Selection,
                 max_visible_rows: 8,
                 status: None,
             };
@@ -458,6 +463,7 @@ fn long_slash_command_titles_are_ellipsized_before_the_description() {
         }],
         selected_index: Some(0),
         scroll_offset: 0,
+        scroll_anchor: TuiInlineMenuScrollAnchor::Selection,
         max_visible_rows: 8,
         status: None,
     });
@@ -479,6 +485,7 @@ fn wide_slash_command_rows_expand_to_show_long_titles() {
             }],
             selected_index: Some(0),
             scroll_offset: 0,
+            scroll_anchor: TuiInlineMenuScrollAnchor::Selection,
             max_visible_rows: 8,
             status: None,
         },
@@ -507,6 +514,7 @@ fn boundary_width_preserves_useful_title_and_description_columns() {
             }],
             selected_index: Some(0),
             scroll_offset: 0,
+            scroll_anchor: TuiInlineMenuScrollAnchor::Selection,
             max_visible_rows: 8,
             status: None,
         },
@@ -531,6 +539,7 @@ fn narrow_slash_command_rows_use_the_full_width_for_titles() {
             }],
             selected_index: Some(0),
             scroll_offset: 0,
+            scroll_anchor: TuiInlineMenuScrollAnchor::Selection,
             max_visible_rows: 8,
             status: None,
         },
@@ -602,6 +611,50 @@ fn list_scroll_by_moves_offset_without_changing_selection() {
     // Scroll past the end is clamped.
     list.scroll_by(100, 3);
     assert_eq!(list.scroll_offset(), 5); // max is 8 - 3 = 5
+}
+#[test]
+fn explicit_scroll_offset_renders_independently_from_selection() {
+    let mut list = TuiInlineMenuListState::default();
+    list.replace_rows(
+        (0..8)
+            .map(|index| format!("Conversation {index}"))
+            .collect(),
+        false,
+        Some(0),
+        4,
+        |_| true,
+    );
+
+    list.scroll_by(100, 4);
+
+    assert_eq!(list.selected_index(), Some(0));
+    assert_eq!(
+        list.scroll_anchor(),
+        TuiInlineMenuScrollAnchor::ScrollOffset
+    );
+    let snapshot = TuiInlineMenuSnapshot {
+        header: None,
+        rows: list
+            .rows()
+            .iter()
+            .map(|title| TuiInlineMenuRow {
+                title: title.clone(),
+                description: None,
+                state_suffix: None,
+                is_selectable: true,
+                style: TuiInlineMenuRowStyle::Default,
+            })
+            .collect(),
+        selected_index: list.selected_index(),
+        scroll_offset: list.scroll_offset(),
+        scroll_anchor: list.scroll_anchor(),
+        max_visible_rows: 4,
+        status: None,
+    };
+    assert_eq!(
+        rendered_labels(snapshot, 4),
+        vec!["↑", "Conversation 5", "Conversation 6", "Conversation 7"]
+    );
 }
 
 #[test]
@@ -876,6 +929,7 @@ fn interactive_menu_click_on_non_selectable_row_does_not_fire_on_accept() {
                 ],
                 selected_index: Some(0),
                 scroll_offset: 0,
+                scroll_anchor: TuiInlineMenuScrollAnchor::Selection,
                 max_visible_rows: 5,
                 status: None,
             };

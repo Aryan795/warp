@@ -987,6 +987,32 @@ impl TuiInputView {
         }
     }
 
+    pub(crate) fn route_inline_menu_acceptance(
+        &mut self,
+        accepted: TuiInlineMenuAccepted,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match accepted {
+            TuiInlineMenuAccepted::SlashCommand(action) => {
+                ctx.emit(TuiInputViewEvent::AcceptedSlashCommand(action));
+            }
+            TuiInlineMenuAccepted::Conversation(entry_id) => {
+                ctx.emit(TuiInputViewEvent::AcceptedConversation(entry_id));
+            }
+            TuiInlineMenuAccepted::Model(id) => {
+                ctx.emit(TuiInputViewEvent::AcceptedModel(id));
+            }
+            TuiInlineMenuAccepted::Mcp(action) => {
+                ctx.emit(TuiInputViewEvent::AcceptedMcp(action));
+            }
+            TuiInlineMenuAccepted::PromptHistory(text) => {
+                ctx.emit(TuiInputViewEvent::AcceptedPromptHistory(text));
+            }
+            TuiInlineMenuAccepted::Completion(acceptance) => {
+                self.apply_shell_completion(acceptance, ctx);
+            }
+        }
+    }
     fn handle_inline_menu_action(
         &mut self,
         action: &TuiInputAction,
@@ -1028,26 +1054,7 @@ impl TuiInputView {
             }
             TuiInputAction::Submit => {
                 if let Some(accepted) = inline_menu.accept(ctx) {
-                    match accepted {
-                        TuiInlineMenuAccepted::SlashCommand(action) => {
-                            ctx.emit(TuiInputViewEvent::AcceptedSlashCommand(action));
-                        }
-                        TuiInlineMenuAccepted::Conversation(entry_id) => {
-                            ctx.emit(TuiInputViewEvent::AcceptedConversation(entry_id));
-                        }
-                        TuiInlineMenuAccepted::Model(id) => {
-                            ctx.emit(TuiInputViewEvent::AcceptedModel(id));
-                        }
-                        TuiInlineMenuAccepted::Mcp(action) => {
-                            ctx.emit(TuiInputViewEvent::AcceptedMcp(action));
-                        }
-                        TuiInlineMenuAccepted::PromptHistory(text) => {
-                            ctx.emit(TuiInputViewEvent::AcceptedPromptHistory(text));
-                        }
-                        TuiInlineMenuAccepted::Completion(acceptance) => {
-                            self.apply_shell_completion(acceptance, ctx);
-                        }
-                    }
+                    self.route_inline_menu_acceptance(accepted, ctx);
                 }
             }
             TuiInputAction::HandleEscape => return self.handle_escape(ctx),
