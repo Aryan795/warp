@@ -36,9 +36,10 @@ use warp::tui_export::{
     TuiMcpAction, TuiMcpManager, TuiSlashCommandDataSource, TuiSlashCommandDataSourceArgs,
     TuiZeroStateDataSource, UserTakeOverReason, WAKEUP_THROTTLE_PERIOD,
     block_context_from_terminal_model, build_slash_command_mixer, detect_possible_git_repo,
-    export_conversation_markdown, log_out_tui, maybe_build_ai_query_upsert_event,
-    prepare_conversation_block_restoration, record_autodetection_toggle_from_slash_command,
-    record_saved_prompt_accepted, record_static_slash_command_accepted, saved_prompt_text_for_id,
+    export_conversation_markdown, is_lrc_auto_queue_active, log_out_tui,
+    maybe_build_ai_query_upsert_event, prepare_conversation_block_restoration,
+    record_autodetection_toggle_from_slash_command, record_saved_prompt_accepted,
+    record_static_slash_command_accepted, saved_prompt_text_for_id,
     slash_command_selection_behavior, slash_commands, throttle,
 };
 use warp_core::channel::{Channel, ChannelState};
@@ -152,6 +153,7 @@ const SESSION_CAN_ACCEPT_BLOCKED_TERMINAL_USE_ACTION_FLAG: &str =
 pub(crate) const SESSION_COMPOSER_OWNS_INPUT_FLAG: &str = "TuiSessionComposerOwnsInput";
 pub(crate) const PASTE_IMAGE_BINDING_NAME: &str = "tui:session:paste_image";
 pub(crate) const AUTO_APPROVE_TOGGLE_BINDING_NAME: &str = "tui:session:toggle_auto_approve";
+pub(crate) const AUTO_QUEUE_TOGGLE_BINDING_NAME: &str = "tui:session:toggle_auto_queue";
 pub(crate) const ACCEPT_BLOCKED_TERMINAL_USE_ACTION_BINDING_NAME: &str =
     "tui:session:accept_blocked_terminal_use_action";
 pub(crate) const VOICE_INPUT_BINDING_NAME: &str = "tui:session:start_voice_input";
@@ -621,6 +623,8 @@ pub(crate) enum TuiTerminalSessionAction {
     ToggleModelMenu,
     /// Toggle per-conversation auto approve.
     ToggleAutoApprove { show_feedback: bool },
+    /// Toggle per-conversation auto-queue.
+    ToggleAutoQueue,
     /// Raw user bytes to forward to the foreground PTY process.
     ForwardUserPtyBytes(Vec<u8>),
     /// Ctrl-d while the prompt is focused: exit the TUI immediately when the
@@ -777,6 +781,15 @@ pub(crate) fn init(app: &mut AppContext) {
         .with_context_predicate(view_context.clone())
         .with_group(TUI_BINDING_GROUP)
         .with_key_binding("ctrl-shift-I"),
+        EditableBinding::new(
+            AUTO_QUEUE_TOGGLE_BINDING_NAME,
+            "Toggle auto queue",
+            TuiTerminalSessionAction::ToggleAutoQueue,
+        )
+        .with_enabled(|| FeatureFlag::QueueSlashCommand.is_enabled())
+        .with_context_predicate(view_context.clone())
+        .with_group(TUI_BINDING_GROUP)
+        .with_key_binding("ctrl-shift-J"),
         EditableBinding::new(
             PLAN_TOGGLE_BINDING_NAME,
             "Toggle the latest plan",
@@ -2547,6 +2560,35 @@ impl TuiTerminalSessionView {
         } else {
             self.clear_auto_approve_feedback(ctx);
         }
+    }
+
+    fn toggle_auto_queue(&mut self, ctx: &mut ViewContext<Self>) {
+        if !FeatureFlag::QueueSlashCommand.is_enabled() {
+            return;
+        }
+        let Some(conversation_id) = self
+            .conversation_selection
+            .as_ref(ctx)
+            .selected_conversation_id(ctx)
+        else {
+            return;
+        };
+        let lrc_auto_queue_active = {
+            let terminal_model = self.terminal_model.lock();
+            is_lrc_auto_queue_active(
+                terminal_model.block_list().active_block(),
+                conversation_id,
+                ctx,
+            )
+        };
+        QueuedQueryModel::handle(ctx).update(ctx, |queue, ctx| {
+            if lrc_auto_queue_active {
+                queue.toggle_queue_next_prompt_during_lrc(conversation_id, ctx);
+            } else {
+                queue.toggle_queue_next_prompt(conversation_id, ctx);
+            }
+        });
+        ctx.notify();
     }
 
     fn handle_pasted(&mut self, text: String, ctx: &mut ViewContext<Self>) {
@@ -4409,6 +4451,7 @@ impl TypedActionView for TuiTerminalSessionView {
             TuiTerminalSessionAction::ToggleAutoApprove { show_feedback } => {
                 self.toggle_auto_approve(*show_feedback, ctx)
             }
+            TuiTerminalSessionAction::ToggleAutoQueue => self.toggle_auto_queue(ctx),
             TuiTerminalSessionAction::FocusDefaultInteractionTarget => {
                 self.set_orchestration_tab_focus(false, ctx)
             }

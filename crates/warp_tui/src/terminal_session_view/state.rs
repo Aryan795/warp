@@ -5,10 +5,13 @@ use std::{error, fmt};
 
 use parking_lot::FairMutex;
 use warp::tui_export::{BlocklistAIInputModel, CLISubagentController, TerminalModel};
+use warp_core::features::FeatureFlag;
 use warpui_core::keymap::Context;
 use warpui_core::{AppContext, Entity, ModelHandle, ViewHandle, WeakModelHandle, WeakViewHandle};
 
-use super::{AUTO_APPROVE_TOGGLE_BINDING_NAME, BlockingInputSource};
+use super::{
+    AUTO_APPROVE_TOGGLE_BINDING_NAME, AUTO_QUEUE_TOGGLE_BINDING_NAME, BlockingInputSource,
+};
 use crate::input_mode_policy;
 use crate::input_suggestions_mode::{TuiInputSuggestionsMode, TuiInputSuggestionsModeModel};
 use crate::keybindings::{PLAN_TOGGLE_BINDING_NAME, binding_hint};
@@ -512,16 +515,24 @@ impl TuiTerminalSessionState {
                 description: "agent mode",
             }),
         }
-        if let Some(key) = binding_hint(AUTO_APPROVE_TOGGLE_BINDING_NAME, context, ctx) {
+        if FeatureFlag::QueueSlashCommand.is_enabled()
+            && let Some(key) = binding_hint(AUTO_QUEUE_TOGGLE_BINDING_NAME, context, ctx)
+        {
             shortcuts.push(TuiShortcut {
                 key,
-                description: "toggle auto-approve",
+                description: "toggle auto-queue",
             });
         }
         if matches!(composer.mode, TuiComposerMode::Agent { .. }) {
             shortcuts.push(TuiShortcut {
                 key: "↑".to_owned(),
                 description: "input history",
+            });
+        }
+        if let Some(key) = binding_hint(AUTO_APPROVE_TOGGLE_BINDING_NAME, context, ctx) {
+            shortcuts.push(TuiShortcut {
+                key,
+                description: "toggle auto-approve",
             });
         }
         if state.plan_available

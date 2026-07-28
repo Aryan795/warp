@@ -243,6 +243,15 @@ pub use crate::util::time_format::format_elapsed_seconds;
 pub use crate::voice::transcriber::{Transcriber, VoiceTranscriber};
 pub use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
 
+/// Returns whether auto-queue is governed by the active agent-requested command.
+pub fn is_lrc_auto_queue_active(
+    active_block: &Block,
+    conversation_id: AIConversationId,
+    app: &warpui::AppContext,
+) -> bool {
+    crate::ai::blocklist::is_lrc_auto_queue_active(active_block, conversation_id, app)
+}
+
 /// Builds the live-shell completion context used to parse TUI input for NLD.
 pub fn tui_completion_session_context(
     active_session: &ActiveSession,

@@ -40,18 +40,18 @@ use warpui_core::{App, AppContext, TuiView, TypedActionView as _, WindowInvalida
 use super::{
     ACCEPT_BLOCKED_TERMINAL_USE_ACTION_BINDING_NAME, AUTO_APPROVE_DISABLED_HINT,
     AUTO_APPROVE_ENABLED_HINT, AUTO_APPROVE_FEEDBACK_DURATION, AUTO_APPROVE_TOGGLE_BINDING_NAME,
-    BlockingInputSource, COST_CONVERSATION_IN_PROGRESS_HINT, COST_EMPTY_CONVERSATION_HINT,
-    COST_NO_ACTIVE_CONVERSATION_HINT, CTRL_C_EXIT_HINT, ConversationRestoreState, FooterSegment,
-    FooterSegments, INLINE_MENU_TOP_PADDING_ROWS, LOADING_CONVERSATION_HINT,
-    LOG_BUNDLE_FAILED_HINT, SESSION_CAN_ACCEPT_BLOCKED_TERMINAL_USE_ACTION_FLAG,
-    SESSION_COMPOSER_OWNS_INPUT_FLAG, SHELL_MODE_HINT, TuiConversationRestoreOrigin,
-    TuiTerminalSessionAction, TuiTerminalSessionEvent, TuiTerminalSessionView,
-    VOICE_INPUT_BINDING_NAME, VOICE_USAGE_HINT, attachment_focus_available,
-    cost_command_unavailable_hint, export_file_success_message, format_context_window_usage,
-    format_statusline_date, format_statusline_time_12_hour, format_statusline_time_24_hour,
-    format_todo_progress, log_bundle_success_message, raw_prompt_if_not_blank,
-    render_status_footer_row, render_statusline_datetime, voice_argument_is_empty,
-    voice_command_argument,
+    AUTO_QUEUE_TOGGLE_BINDING_NAME, BlockingInputSource, COST_CONVERSATION_IN_PROGRESS_HINT,
+    COST_EMPTY_CONVERSATION_HINT, COST_NO_ACTIVE_CONVERSATION_HINT, CTRL_C_EXIT_HINT,
+    ConversationRestoreState, FooterSegment, FooterSegments, INLINE_MENU_TOP_PADDING_ROWS,
+    LOADING_CONVERSATION_HINT, LOG_BUNDLE_FAILED_HINT,
+    SESSION_CAN_ACCEPT_BLOCKED_TERMINAL_USE_ACTION_FLAG, SESSION_COMPOSER_OWNS_INPUT_FLAG,
+    SHELL_MODE_HINT, TuiConversationRestoreOrigin, TuiTerminalSessionAction,
+    TuiTerminalSessionEvent, TuiTerminalSessionView, VOICE_INPUT_BINDING_NAME, VOICE_USAGE_HINT,
+    attachment_focus_available, cost_command_unavailable_hint, export_file_success_message,
+    format_context_window_usage, format_statusline_date, format_statusline_time_12_hour,
+    format_statusline_time_24_hour, format_todo_progress, log_bundle_success_message,
+    raw_prompt_if_not_blank, render_status_footer_row, render_statusline_datetime,
+    voice_argument_is_empty, voice_command_argument,
 };
 use crate::autoupdate::TuiAutoupdater;
 use crate::inline_menu::MAX_INLINE_MENU_ROWS;
@@ -1138,6 +1138,126 @@ fn auto_approve_actions_control_visible_feedback() {
         });
     });
 }
+
+#[test]
+fn auto_queue_binding_action_and_statusline_toggle_together() {
+    App::test((), |mut app| async move {
+        let _queue_flag =
+            warp_core::features::FeatureFlag::QueueSlashCommand.override_enabled(true);
+        app.update(crate::keybindings::init);
+        let fixture = focus_test_fixture(&mut app);
+        let (view, _) = add_focus_test_session(&mut app, &fixture, true);
+        view.update(&mut app, |view, ctx| {
+            view.conversation_selection.update(ctx, |selection, ctx| {
+                selection
+                    .try_start_new_conversation(AgentViewEntryOrigin::Tui, ctx)
+                    .expect("test conversation should start");
+            });
+            AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                settings
+                    .tui_statusline
+                    .set_value(
+                        TuiStatuslineConfig {
+                            order: vec![TuiStatuslineItem::AutoQueue],
+                            enabled: vec![TuiStatuslineItem::AutoQueue],
+                        }
+                        .normalized(),
+                        ctx,
+                    )
+                    .expect("statusline setting should persist");
+            });
+        });
+
+        app.read(|ctx| {
+            let binding = ctx
+                .editable_bindings()
+                .find(|binding| binding.name == AUTO_QUEUE_TOGGLE_BINDING_NAME)
+                .expect("auto-queue toggle binding");
+            assert_eq!(
+                *binding.trigger,
+                Trigger::Keystrokes(vec![Keystroke::parse("ctrl-shift-J").unwrap()])
+            );
+            let mut session_context = Context::default();
+            session_context
+                .set
+                .insert(TuiTerminalSessionView::ui_name());
+            assert!(binding.in_context(&session_context));
+        });
+
+        let before = view.read(&app, |view, ctx| view.is_auto_queue_enabled(ctx));
+        let footer_before = render_footer_lines(&mut app, &view, 80).join("\n");
+        assert_eq!(footer_before.contains("Auto-queue"), before);
+
+        view.update(&mut app, |view, ctx| {
+            view.handle_action(&TuiTerminalSessionAction::ToggleAutoQueue, ctx);
+        });
+        let after = view.read(&app, |view, ctx| view.is_auto_queue_enabled(ctx));
+        let footer_after = render_footer_lines(&mut app, &view, 80).join("\n");
+        assert_ne!(after, before);
+        assert_eq!(footer_after.contains("Auto-queue"), after);
+
+        view.update(&mut app, |view, ctx| {
+            view.handle_action(&TuiTerminalSessionAction::ToggleAutoQueue, ctx);
+        });
+        assert_eq!(
+            view.read(&app, |view, ctx| view.is_auto_queue_enabled(ctx)),
+            before
+        );
+    });
+}
+
+#[test]
+fn disabled_auto_queue_feature_hides_and_deactivates_the_shortcut() {
+    App::test((), |mut app| async move {
+        let _queue_flag =
+            warp_core::features::FeatureFlag::QueueSlashCommand.override_enabled(false);
+        app.update(crate::keybindings::init);
+        let fixture = focus_test_fixture(&mut app);
+        let (view, _) = add_focus_test_session(&mut app, &fixture, true);
+        let conversation_id = view.update(&mut app, |view, ctx| {
+            let conversation_id = view.conversation_selection.update(ctx, |selection, ctx| {
+                selection
+                    .try_start_new_conversation(AgentViewEntryOrigin::Tui, ctx)
+                    .expect("test conversation should start")
+            });
+            view.suggestions_mode.update(ctx, |mode, ctx| {
+                mode.set_mode(TuiInputSuggestionsMode::Shortcuts, ctx);
+            });
+            conversation_id
+        });
+
+        app.read(|ctx| {
+            assert!(
+                ctx.editable_bindings()
+                    .all(|binding| binding.name != AUTO_QUEUE_TOGGLE_BINDING_NAME),
+                "disabled auto-queue binding must not be active"
+            );
+        });
+        let rendered = render_session(&mut app, &view, 80, 24).join("\n");
+        assert!(!rendered.contains("toggle auto-queue"), "{rendered}");
+
+        let enabled_before = view.read(&app, |view, ctx| {
+            let terminal_model = view.terminal_model.lock();
+            QueuedQueryModel::as_ref(ctx).is_queue_next_prompt_enabled(
+                conversation_id,
+                terminal_model.block_list().active_block(),
+                ctx,
+            )
+        });
+        view.update(&mut app, |view, ctx| {
+            view.handle_action(&TuiTerminalSessionAction::ToggleAutoQueue, ctx);
+        });
+        let enabled_after = view.read(&app, |view, ctx| {
+            let terminal_model = view.terminal_model.lock();
+            QueuedQueryModel::as_ref(ctx).is_queue_next_prompt_enabled(
+                conversation_id,
+                terminal_model.block_list().active_block(),
+                ctx,
+            )
+        });
+        assert_eq!(enabled_after, enabled_before);
+    });
+}
 #[test]
 fn footer_model_label_is_a_bounded_click_target() {
     App::test((), |mut app| async move {
@@ -1321,6 +1441,8 @@ fn render_session(
 #[test]
 fn shortcuts_surface_renders_above_the_input() {
     App::test((), |mut app| async move {
+        let _queue_flag =
+            warp_core::features::FeatureFlag::QueueSlashCommand.override_enabled(true);
         app.update(crate::keybindings::init);
         let fixture = focus_test_fixture(&mut app);
         let (view, _) = add_focus_test_session(&mut app, &fixture, true);
@@ -1337,6 +1459,10 @@ fn shortcuts_surface_renders_above_the_input() {
         assert!(rendered.contains("! shell mode"), "{rendered}");
         assert!(rendered.contains("← conversations"), "{rendered}");
         assert!(rendered.contains("↑ input history"), "{rendered}");
+        assert!(
+            rendered.contains("Ctrl + Shift + J toggle auto-queue"),
+            "{rendered}"
+        );
         assert!(rendered.contains("toggle auto-approve"), "{rendered}");
 
         view.update(&mut app, |view, ctx| {
