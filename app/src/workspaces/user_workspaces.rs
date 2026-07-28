@@ -28,7 +28,7 @@ use crate::pricing::PricingInfoModel;
 use crate::server::experiments::{ServerExperiment, ServerExperiments, ServerExperimentsEvent};
 use crate::server::ids::ServerId;
 use crate::server::server_api::team::TeamClient;
-use crate::server::server_api::workspace::WorkspaceClient;
+use crate::server::server_api::workspace::{PurchaseAddonCreditsOutcome, WorkspaceClient};
 #[cfg(test)]
 use crate::server::server_api::{team::MockTeamClient, workspace::MockWorkspaceClient};
 use crate::settings::{
@@ -74,6 +74,12 @@ pub enum UserWorkspacesEvent {
     UpdateWorkspaceSettingsRejected(anyhow::Error),
     AiOveragesUpdated,
     PurchaseAddonCreditsSuccess,
+    /// The purchase requires the user to complete checkout in the browser
+    /// (no saved payment method). Credits arrive via webhook + polling after
+    /// checkout completes.
+    PurchaseAddonCreditsCheckoutRequired {
+        checkout_url: String,
+    },
     PurchaseAddonCreditsRejected(anyhow::Error),
     /// Fired whenever the set of teams the user is on changes.
     TeamsChanged,
@@ -1479,17 +1485,22 @@ impl UserWorkspaces {
 
     fn on_purchase_addon_credits(
         &mut self,
-        result: Result<WorkspacesMetadataResponse>,
+        result: Result<PurchaseAddonCreditsOutcome>,
         ctx: &mut ModelContext<Self>,
     ) {
         match result {
-            Ok(result) => {
+            Ok(PurchaseAddonCreditsOutcome::Completed(result)) => {
                 let wrapped = WorkspacesMetadataWithPricing {
-                    metadata: result,
+                    metadata: *result,
                     pricing_info: None,
                 };
                 self.on_workspaces_updated(Ok(wrapped), ctx);
                 ctx.emit(UserWorkspacesEvent::PurchaseAddonCreditsSuccess);
+            }
+            Ok(PurchaseAddonCreditsOutcome::CheckoutRequired { checkout_url }) => {
+                ctx.emit(UserWorkspacesEvent::PurchaseAddonCreditsCheckoutRequired {
+                    checkout_url,
+                });
             }
             Err(err) => {
                 ctx.emit(UserWorkspacesEvent::PurchaseAddonCreditsRejected(

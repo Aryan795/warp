@@ -476,6 +476,8 @@ impl From<GqlPurchaseAddOnCreditsPolicy> for PurchaseAddOnCreditsPolicy {
     ) -> PurchaseAddOnCreditsPolicy {
         Self {
             enabled: gql_purchase_add_on_credits_policy.enabled,
+            premium_enabled: gql_purchase_add_on_credits_policy.premium_enabled,
+            price_premium_bps: gql_purchase_add_on_credits_policy.price_premium_bps,
         }
     }
 }

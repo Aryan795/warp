@@ -607,9 +607,7 @@ impl AIRequestUsageModel {
         let policy_allows_purchasing = current_workspace
             .map(|w| {
                 w.billing_metadata
-                    .tier
-                    .purchase_add_on_credits_policy
-                    .is_some_and(|p| p.enabled)
+                    .is_purchase_add_on_credits_policy_enabled()
             })
             .unwrap_or(false);
 

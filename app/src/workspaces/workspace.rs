@@ -388,6 +388,14 @@ pub struct ManagedByokByoePolicy {
 #[derive(Clone, Debug, Copy, Serialize, Deserialize)]
 pub struct PurchaseAddOnCreditsPolicy {
     pub enabled: bool,
+    /// When `enabled` is false, allows purchasing add-on credit packs at a
+    /// `price_premium_bps` surcharge over list price (e.g. on the Free plan).
+    #[serde(default)]
+    pub premium_enabled: bool,
+    /// Surcharge in basis points applied to list prices when purchasing via
+    /// the premium path (1000 bps = +10%). 0 for standard purchasing plans.
+    #[serde(default)]
+    pub price_premium_bps: i32,
 }
 
 #[derive(Clone, Debug, Copy, Serialize, Deserialize)]
@@ -775,10 +783,34 @@ impl BillingMetadata {
                 .is_some_and(|policy| policy.enabled)
     }
 
+    /// Whether this plan may purchase add-on credit packs at all, either at
+    /// list price (`enabled`) or at a premium surcharge (`premium_enabled`).
     pub fn is_purchase_add_on_credits_policy_enabled(&self) -> bool {
         self.tier
             .purchase_add_on_credits_policy
-            .is_some_and(|policy| policy.enabled)
+            .is_some_and(|policy| policy.enabled || policy.premium_enabled)
+    }
+
+    /// Whether add-on credit purchases on this plan go through the premium
+    /// (surcharged) path rather than standard list-price purchasing.
+    pub fn is_premium_addon_credits_purchase(&self) -> bool {
+        self.tier
+            .purchase_add_on_credits_policy
+            .is_some_and(|policy| !policy.enabled && policy.premium_enabled)
+    }
+
+    /// The surcharge in basis points applied to add-on credit pack list
+    /// prices for this plan. 0 whenever standard purchasing is enabled.
+    pub fn addon_credits_price_premium_bps(&self) -> i32 {
+        self.tier
+            .purchase_add_on_credits_policy
+            .map_or(0, |policy| {
+                if !policy.enabled && policy.premium_enabled {
+                    policy.price_premium_bps
+                } else {
+                    0
+                }
+            })
     }
 }
 

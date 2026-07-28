@@ -91,6 +91,22 @@ fn set_addon_credits_pricing_info(app: &mut App) {
     });
 }
 
+fn standard_purchase_policy() -> PurchaseAddOnCreditsPolicy {
+    PurchaseAddOnCreditsPolicy {
+        enabled: true,
+        premium_enabled: false,
+        price_premium_bps: 0,
+    }
+}
+
+fn premium_purchase_policy() -> PurchaseAddOnCreditsPolicy {
+    PurchaseAddOnCreditsPolicy {
+        enabled: false,
+        premium_enabled: true,
+        price_premium_bps: 1000,
+    }
+}
+
 fn enable_auto_reload(workspace: &mut Workspace) {
     workspace
         .settings
@@ -237,7 +253,7 @@ fn test_buy_credits_banner_shows_with_only_ambient_bonus_credits() {
         workspace
             .billing_metadata
             .tier
-            .purchase_add_on_credits_policy = Some(PurchaseAddOnCreditsPolicy { enabled: true });
+            .purchase_add_on_credits_policy = Some(standard_purchase_policy());
 
         add_user_workspaces_with_workspace(&mut app, workspace);
         let request_usage_model = add_request_usage_model(&mut app);
@@ -265,13 +281,65 @@ fn test_buy_credits_banner_shows_with_only_ambient_bonus_credits() {
 }
 
 #[test]
+fn test_buy_credits_banner_shows_for_premium_enabled_plan_out_of_credits() {
+    App::test((), |mut app| async move {
+        let (_uid, mut workspace) = create_test_workspace();
+        workspace
+            .billing_metadata
+            .tier
+            .purchase_add_on_credits_policy = Some(premium_purchase_policy());
+
+        add_user_workspaces_with_workspace(&mut app, workspace);
+        let request_usage_model = add_request_usage_model(&mut app);
+
+        request_usage_model.update(&mut app, |model, ctx| {
+            model.request_limit_info = RequestLimitInfo::new_for_test(10, 10);
+            model.bonus_grants.clear();
+
+            assert_eq!(
+                model.compute_buy_addon_credits_banner_display_state(ctx),
+                BuyCreditsBannerDisplayState::OutOfCredits,
+            );
+        });
+    });
+}
+
+#[test]
+fn test_buy_credits_banner_hidden_when_policy_fully_disabled() {
+    App::test((), |mut app| async move {
+        let (_uid, mut workspace) = create_test_workspace();
+        workspace
+            .billing_metadata
+            .tier
+            .purchase_add_on_credits_policy = Some(PurchaseAddOnCreditsPolicy {
+            enabled: false,
+            premium_enabled: false,
+            price_premium_bps: 0,
+        });
+
+        add_user_workspaces_with_workspace(&mut app, workspace);
+        let request_usage_model = add_request_usage_model(&mut app);
+
+        request_usage_model.update(&mut app, |model, ctx| {
+            model.request_limit_info = RequestLimitInfo::new_for_test(10, 10);
+            model.bonus_grants.clear();
+
+            assert_eq!(
+                model.compute_buy_addon_credits_banner_display_state(ctx),
+                BuyCreditsBannerDisplayState::Hidden,
+            );
+        });
+    });
+}
+
+#[test]
 fn test_buy_credits_banner_hidden_with_non_ambient_bonus_credits() {
     App::test((), |mut app| async move {
         let (_uid, mut workspace) = create_test_workspace();
         workspace
             .billing_metadata
             .tier
-            .purchase_add_on_credits_policy = Some(PurchaseAddOnCreditsPolicy { enabled: true });
+            .purchase_add_on_credits_policy = Some(standard_purchase_policy());
 
         add_user_workspaces_with_workspace(&mut app, workspace);
         let request_usage_model = add_request_usage_model(&mut app);
@@ -305,7 +373,7 @@ fn test_buy_credits_banner_shows_when_non_ambient_bonus_credits_are_depleted() {
         workspace
             .billing_metadata
             .tier
-            .purchase_add_on_credits_policy = Some(PurchaseAddOnCreditsPolicy { enabled: true });
+            .purchase_add_on_credits_policy = Some(standard_purchase_policy());
 
         add_user_workspaces_with_workspace(&mut app, workspace);
         let request_usage_model = add_request_usage_model(&mut app);
@@ -566,7 +634,7 @@ fn test_has_any_ai_remaining_true_with_self_serve_auto_reload() {
         workspace
             .billing_metadata
             .tier
-            .purchase_add_on_credits_policy = Some(PurchaseAddOnCreditsPolicy { enabled: true });
+            .purchase_add_on_credits_policy = Some(standard_purchase_policy());
         enable_auto_reload(&mut workspace);
 
         add_user_workspaces_with_workspace(&mut app, workspace);
@@ -594,7 +662,7 @@ fn test_has_any_ai_remaining_true_with_self_serve_auto_reload_and_billing_v2_dis
         workspace
             .billing_metadata
             .tier
-            .purchase_add_on_credits_policy = Some(PurchaseAddOnCreditsPolicy { enabled: true });
+            .purchase_add_on_credits_policy = Some(standard_purchase_policy());
         enable_auto_reload(&mut workspace);
 
         add_user_workspaces_with_workspace(&mut app, workspace);
@@ -620,7 +688,7 @@ fn test_has_any_ai_remaining_false_with_add_on_credits_policy_when_purchase_woul
         workspace
             .billing_metadata
             .tier
-            .purchase_add_on_credits_policy = Some(PurchaseAddOnCreditsPolicy { enabled: true });
+            .purchase_add_on_credits_policy = Some(standard_purchase_policy());
         enable_auto_reload(&mut workspace);
         workspace
             .settings

@@ -28,6 +28,17 @@ use crate::server::ids::ServerId;
 use crate::workspaces::user_workspaces::WorkspacesMetadataResponse;
 use crate::workspaces::workspace::AiOverages;
 
+/// Outcome of a successful `purchaseAddonCredits` mutation.
+pub enum PurchaseAddonCreditsOutcome {
+    /// The saved payment method was charged synchronously and credits were
+    /// granted immediately. Carries refreshed workspace metadata.
+    Completed(Box<WorkspacesMetadataResponse>),
+    /// There was no saved payment method to charge. The user must complete
+    /// the purchase in the browser at `checkout_url`; credits are granted
+    /// via webhook shortly after checkout completes.
+    CheckoutRequired { checkout_url: String },
+}
+
 #[cfg_attr(test, automock)]
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
@@ -47,7 +58,7 @@ pub trait WorkspaceClient: 'static + Send + Sync {
         &self,
         team_uid: ServerId,
         credits: i32,
-    ) -> Result<WorkspacesMetadataResponse>;
+    ) -> Result<PurchaseAddonCreditsOutcome>;
 
     async fn update_addon_credits_settings(
         &self,
@@ -153,7 +164,7 @@ impl WorkspaceClient for ServerApi {
         &self,
         team_uid: ServerId,
         credits: i32,
-    ) -> Result<WorkspacesMetadataResponse> {
+    ) -> Result<PurchaseAddonCreditsOutcome> {
         let variables = PurchaseAddonCreditsVariables {
             input: PurchaseAddonCreditsInput {
                 team_uid: team_uid.into(),
@@ -167,10 +178,13 @@ impl WorkspaceClient for ServerApi {
         match response {
             Err(_) => Err(anyhow!("Failed to purchase add-on credits")),
             Ok(response) => match response.purchase_addon_credits {
-                PurchaseAddonCreditsResult::PurchaseAddonCreditsOutput(_) => {
+                PurchaseAddonCreditsResult::PurchaseAddonCreditsOutput(output) => {
+                    if let Some(checkout_url) = output.checkout_url {
+                        return Ok(PurchaseAddonCreditsOutcome::CheckoutRequired { checkout_url });
+                    }
                     TeamClient::workspaces_metadata(self)
                         .await
-                        .map(|w| w.metadata)
+                        .map(|w| PurchaseAddonCreditsOutcome::Completed(Box::new(w.metadata)))
                 }
                 PurchaseAddonCreditsResult::UserFacingError(error) => match error.error {
                     UserFacingErrorInterface::BudgetExceededError(budget_error) => {
