@@ -12,10 +12,40 @@ use crate::suggestions::ignored_suggestions_model::{IgnoredSuggestionsModel, Sug
 use crate::terminal::model::session::SessionId;
 
 /// Controls which item types are included in up-arrow history results.
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct UpArrowHistoryConfig {
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct UpArrowHistoryConfig {
     pub include_commands: bool,
     pub include_prompts: bool,
+}
+
+/// An owned up-arrow history item for frontend-agnostic consumers (GUI and TUI).
+///
+/// Empty and whitespace-only items are never produced by the shared projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpArrowHistoryEntry {
+    /// A previously executed shell command.
+    Command { text: String },
+    /// A previously submitted agent prompt.
+    Prompt { text: String },
+}
+
+impl UpArrowHistoryEntry {
+    /// Display / buffer text for this history entry.
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Command { text } | Self::Prompt { text } => text.as_str(),
+        }
+    }
+
+    /// True when this entry is a shell command.
+    pub fn is_command(&self) -> bool {
+        matches!(self, Self::Command { .. })
+    }
+
+    /// True when this entry is an agent prompt.
+    pub fn is_prompt(&self) -> bool {
+        matches!(self, Self::Prompt { .. })
+    }
 }
 
 impl UpArrowHistoryConfig {
@@ -33,6 +63,22 @@ impl UpArrowHistoryConfig {
                 include_commands: true,
                 include_prompts: true,
             }
+        }
+    }
+
+    /// Config for agent-mode up-arrow history (commands and prompts interleaved).
+    pub fn agent_mode() -> Self {
+        Self {
+            include_commands: true,
+            include_prompts: true,
+        }
+    }
+
+    /// Config for `!` shell-mode up-arrow history (commands only).
+    pub fn shell_mode() -> Self {
+        Self {
+            include_commands: true,
+            include_prompts: false,
         }
     }
 }
@@ -70,6 +116,27 @@ fn sort_and_dedupe_suggestions<'a>(
         .map(|(_, suggestion)| suggestion)
         .collect()
 }
+
+fn prompt_suggestions_for_terminal_view(
+    terminal_view_id: EntityId,
+    app: &AppContext,
+) -> Vec<HistoryInputSuggestion<'_>> {
+    let ignored_prompts = if app.has_singleton_model::<IgnoredSuggestionsModel>() {
+        IgnoredSuggestionsModel::handle(app)
+            .as_ref(app)
+            .get_ignored_suggestions_for_type(SuggestionType::AIQuery)
+    } else {
+        HashSet::new()
+    };
+    BlocklistAIHistoryModel::handle(app)
+        .as_ref(app)
+        .all_ai_queries(Some(terminal_view_id))
+        .filter(|entry| !ignored_prompts.contains(&entry.query_text))
+        .filter(|entry| !entry.query_text.trim().is_empty())
+        .map(|entry| HistoryInputSuggestion::AIQuery { entry })
+        .collect()
+}
+
 /// Returns de-duplicated prompt history ordered for up-arrow presentation.
 ///
 /// Prompts from other terminal surfaces precede prompts from the requested
@@ -78,20 +145,7 @@ pub fn prompt_history_for_terminal_view(
     terminal_view_id: EntityId,
     app: &AppContext,
 ) -> Vec<AIQueryHistory> {
-    let ignored_prompts = if app.has_singleton_model::<IgnoredSuggestionsModel>() {
-        IgnoredSuggestionsModel::handle(app)
-            .as_ref(app)
-            .get_ignored_suggestions_for_type(SuggestionType::AIQuery)
-    } else {
-        HashSet::new()
-    };
-    let suggestions = BlocklistAIHistoryModel::handle(app)
-        .as_ref(app)
-        .all_ai_queries(Some(terminal_view_id))
-        .filter(|entry| !ignored_prompts.contains(&entry.query_text))
-        .filter(|entry| !entry.query_text.trim().is_empty())
-        .map(|entry| HistoryInputSuggestion::AIQuery { entry })
-        .collect();
+    let suggestions = prompt_suggestions_for_terminal_view(terminal_view_id, app);
     let sorted = sort_and_dedupe_suggestions(suggestions, None, &HashSet::new());
 
     sorted
@@ -99,6 +153,51 @@ pub fn prompt_history_for_terminal_view(
         .filter_map(|suggestion| match suggestion {
             HistoryInputSuggestion::AIQuery { entry } => Some(entry),
             HistoryInputSuggestion::Command { .. } => None,
+        })
+        .collect()
+}
+
+/// Returns owned, de-duplicated up-arrow history for a terminal surface.
+///
+/// Ordering matches the GUI: other-session entries before current-session
+/// entries, oldest-first within each group. Commands and prompts are deduped
+/// separately (newest occurrence wins). Whitespace-only and empty items are
+/// omitted. Shared ignored-suggestion handling, session scoping, and
+/// agent-executed-command filtering are applied.
+pub fn up_arrow_history_for_terminal_view(
+    terminal_view_id: EntityId,
+    session_id: Option<SessionId>,
+    config: UpArrowHistoryConfig,
+    app: &AppContext,
+) -> Vec<UpArrowHistoryEntry> {
+    let suggestions = if app.has_singleton_model::<History>() {
+        History::handle(app)
+            .as_ref(app)
+            .up_arrow_suggestions_for_terminal_view(terminal_view_id, session_id, config, app)
+    } else if config.include_prompts {
+        // Tests (and early startup) may lack the shell History singleton while
+        // still having AI query history. Fall back to prompts-only.
+        let suggestions = prompt_suggestions_for_terminal_view(terminal_view_id, app);
+        sort_and_dedupe_suggestions(suggestions, session_id, &HashSet::new())
+    } else {
+        Vec::new()
+    };
+
+    suggestions
+        .into_iter()
+        .filter_map(|suggestion| {
+            let text = suggestion.text();
+            if text.trim().is_empty() {
+                return None;
+            }
+            Some(match suggestion {
+                HistoryInputSuggestion::Command { entry } => UpArrowHistoryEntry::Command {
+                    text: entry.command.clone(),
+                },
+                HistoryInputSuggestion::AIQuery { entry } => UpArrowHistoryEntry::Prompt {
+                    text: entry.query_text,
+                },
+            })
         })
         .collect()
 }
@@ -111,25 +210,39 @@ impl History {
         config: UpArrowHistoryConfig,
         app: &'a AppContext,
     ) -> Vec<HistoryInputSuggestion<'a>> {
-        let ignored_suggestions = IgnoredSuggestionsModel::handle(app).as_ref(app);
+        let ignored_suggestions = if app.has_singleton_model::<IgnoredSuggestionsModel>() {
+            Some(IgnoredSuggestionsModel::handle(app).as_ref(app))
+        } else {
+            None
+        };
 
-        let include_agent_commands = *AISettings::handle(app)
-            .as_ref(app)
-            .include_agent_commands_in_history;
+        let include_agent_commands = if app.has_singleton_model::<AISettings>() {
+            *AISettings::handle(app)
+                .as_ref(app)
+                .include_agent_commands_in_history
+        } else {
+            true
+        };
 
         let commands = session_id
             .and_then(|session_id| self.commands(session_id))
             .unwrap_or_default()
             .into_iter()
             .filter(|entry| {
-                !ignored_suggestions.is_ignored(&entry.command, SuggestionType::ShellCommand)
+                ignored_suggestions.as_ref().is_none_or(|ignored| {
+                    !ignored.is_ignored(&entry.command, SuggestionType::ShellCommand)
+                })
             })
+            .filter(|entry| !entry.command.trim().is_empty())
             .filter(move |entry| include_agent_commands || !entry.is_agent_executed)
             .map(|entry| HistoryInputSuggestion::Command { entry });
 
         let should_include_prompts = config.include_prompts
             && FeatureFlag::AgentMode.is_enabled()
-            && AISettings::handle(app).as_ref(app).is_any_ai_enabled(app);
+            && app
+                .has_singleton_model::<AISettings>()
+                .then(|| AISettings::handle(app).as_ref(app).is_any_ai_enabled(app))
+                .unwrap_or(true);
         let all_live_session_ids = self.all_live_session_ids();
         if !should_include_prompts {
             if !config.include_commands {

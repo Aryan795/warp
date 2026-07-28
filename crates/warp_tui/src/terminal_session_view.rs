@@ -95,7 +95,9 @@ use crate::orchestration_tab_bar::{
     render_orchestration_tab_footer,
 };
 use crate::platform::reveal_path_in_file_manager;
-use crate::prompt_history_menu::{TuiPromptHistoryMenuEvent, TuiPromptHistoryMenuModel};
+use crate::prompt_history_menu::{
+    TuiHistoryAccepted, TuiPromptHistoryMenuEvent, TuiPromptHistoryMenuModel,
+};
 use crate::resume::TuiExitSummaryHandle;
 use crate::session_registry::TuiSessions;
 use crate::skills_menu::{TuiSkillMenuEvent, TuiSkillMenuModel};
@@ -1451,8 +1453,10 @@ impl TuiTerminalSessionView {
         let prompt_history_menu = ctx.add_model(|ctx| {
             TuiPromptHistoryMenuModel::new(
                 input_editor_model.clone(),
+                ai_input_model.clone(),
                 suggestions_mode.clone(),
                 terminal_surface_id,
+                Some(active_session.clone()),
                 ctx,
             )
         });
@@ -1615,8 +1619,8 @@ impl TuiTerminalSessionView {
             TuiInputViewEvent::AcceptedMcp(action) => {
                 view.handle_accepted_mcp_action(*action, ctx);
             }
-            TuiInputViewEvent::AcceptedPromptHistory(text) => {
-                view.handle_accepted_prompt_history(text.clone(), ctx);
+            TuiInputViewEvent::AcceptedHistory(accepted) => {
+                view.handle_accepted_history(accepted.clone(), ctx);
             }
             TuiInputViewEvent::RequestShellCompletion => {
                 view.request_shell_completion(ctx);
@@ -3563,14 +3567,34 @@ impl TuiTerminalSessionView {
         ctx.notify();
     }
 
-    /// Fills the accepted prompt-history prompt into the input and submits it
-    /// immediately, matching the GUI's accept-a-prompt-from-history behavior.
-    /// The menu has already closed itself.
-    fn handle_accepted_prompt_history(&mut self, text: String, ctx: &mut ViewContext<Self>) {
-        self.input_view.update(ctx, |input, ctx| {
-            input.set_text(&text, ctx);
-        });
-        self.handle_submitted(text, ctx);
+    /// Applies an accepted history-menu entry: prompts submit as agent input,
+    /// commands execute in shell mode. The menu has already closed itself and
+    /// left the input buffer/mode previewed appropriately.
+    fn handle_accepted_history(
+        &mut self,
+        accepted: TuiHistoryAccepted,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match accepted {
+            TuiHistoryAccepted::Prompt { text } => {
+                self.input_view.update(ctx, |input, ctx| {
+                    input.set_text(&text, ctx);
+                });
+                self.handle_submitted(text, ctx);
+            }
+            TuiHistoryAccepted::Command { text } => {
+                // Ensure shell mode so handle_submitted routes to command execution.
+                if !self.is_shell_mode(ctx) {
+                    self.input_view.update(ctx, |input, ctx| {
+                        input.enter_shell_mode(ctx);
+                    });
+                }
+                self.input_view.update(ctx, |input, ctx| {
+                    input.set_text(&text, ctx);
+                });
+                self.handle_submitted(text, ctx);
+            }
+        }
     }
 
     fn select_tui_slash_command(&mut self, command: &StaticCommand, ctx: &mut ViewContext<Self>) {

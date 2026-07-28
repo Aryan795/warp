@@ -211,8 +211,8 @@ pub use crate::terminal::model::blocks::{
 pub use crate::terminal::model::escape_sequences::{KeystrokeWithDetails, ToEscapeSequence};
 pub use crate::terminal::model::grid::grid_handler::{GridHandler, TermMode};
 pub use crate::terminal::model::rich_content::RichContentType;
-pub use crate::terminal::model::session::Sessions;
 pub use crate::terminal::model::session::active_session::{ActiveSession, ActiveSessionEvent};
+pub use crate::terminal::model::session::{SessionId, Sessions};
 pub use crate::terminal::model::terminal_model::BlockIndex;
 pub use crate::terminal::model_events::{ModelEvent, ModelEventDispatcher};
 pub use crate::terminal::shared_session::IsSharedSessionCreator;
@@ -221,8 +221,8 @@ pub use crate::terminal::view::blocklist_filter::should_show_task_in_blocklist;
 pub use crate::terminal::view::{ExecuteCommandEvent, WAKEUP_THROTTLE_PERIOD};
 pub use crate::terminal::{
     BlockPadding, PtyIntent, PtyIntentEvent, ShellLaunchData, SizeInfo, SizeUpdate,
-    TerminalManager as TerminalManagerTrait, TerminalModel, TerminalSurface,
-    prompt_history_for_terminal_view,
+    TerminalManager as TerminalManagerTrait, TerminalModel, TerminalSurface, UpArrowHistoryConfig,
+    UpArrowHistoryEntry, prompt_history_for_terminal_view, up_arrow_history_for_terminal_view,
 };
 pub use crate::themes::default_themes::{dark_theme, light_theme};
 pub use crate::throttle::throttle;
