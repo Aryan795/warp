@@ -455,7 +455,17 @@ impl TuiInlineMenu {
     }
 
     pub(crate) fn accept(&self, ctx: &mut AppContext) -> Option<TuiInlineMenuAccepted> {
-        self.handle.accept(ctx)
+        let result = self.handle.accept(ctx);
+        // Mirror dismiss(): clear hover state when the accept closes the menu
+        // so a stationary pointer does not leave a stale bold row the next time
+        // the menu reopens with the same title list.
+        if result.is_some() {
+            for state in self.item_mouse_states.borrow().iter() {
+                state.lock().unwrap().reset_hover_state();
+            }
+            self.last_row_titles.borrow_mut().clear();
+        }
+        result
     }
 
     pub(crate) fn dismiss(&self, ctx: &mut AppContext) {
@@ -763,15 +773,18 @@ impl TuiElement for TuiInlineMenuElement {
         // titles against the last-seen set. When they differ, clear all stale
         // hover state so a stationary pointer does not bold a different row
         // whose content has changed but whose index is reused.
+        // Compare in-place to avoid allocating a fresh Vec<String> on every
+        // layout pass; only allocate when the title set actually changed.
         {
-            let current_titles: Vec<String> =
-                self.snapshot.rows.iter().map(|r| r.title.clone()).collect();
             let mut last_titles = self.last_row_titles.borrow_mut();
-            if *last_titles != current_titles {
+            if last_titles
+                .iter()
+                .ne(self.snapshot.rows.iter().map(|r| &r.title))
+            {
                 for state in self.item_mouse_states.borrow().iter() {
                     state.lock().unwrap().reset_hover_state();
                 }
-                *last_titles = current_titles;
+                *last_titles = self.snapshot.rows.iter().map(|r| r.title.clone()).collect();
             }
         }
         // Grow mouse-state handles to match the current snapshot's row count.
