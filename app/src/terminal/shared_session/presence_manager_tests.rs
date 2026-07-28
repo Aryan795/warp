@@ -306,6 +306,113 @@ fn test_dont_include_self_in_viewers() {
     });
 }
 
+/// Regression test for REMOTE-2361:
+/// After a viewer disconnects from a shared cloud agent session, AI-block avatars
+/// authored by that viewer should still resolve to the viewer's original color and
+/// identity, rather than falling back to the local user.
+#[test]
+fn test_absent_viewer_color_retained_for_avatar_lookup() {
+    App::test((), |mut app| async move {
+        let firebase_uid = UserUid::new("mock_firebase_uid");
+        let presence_manager =
+            app.add_model(|_| PresenceManager::new_for_sharer(ParticipantId::new(), firebase_uid));
+
+        let sharer_id = ParticipantId::new();
+        let sharer = Sharer {
+            info: ParticipantInfo {
+                id: sharer_id.clone(),
+                ..Default::default()
+            },
+        };
+        let viewer_id = ParticipantId::new();
+
+        // Step 1: add the viewer as a present participant.
+        let present_viewers = vec![Viewer {
+            info: ParticipantInfo {
+                id: viewer_id.clone(),
+                ..Default::default()
+            },
+            role: Role::Reader,
+            is_present: true,
+        }];
+        presence_manager
+            .update(&mut app, |presence_manager, ctx| {
+                presence_manager.update_participants(
+                    ParticipantList {
+                        sharer: sharer.clone(),
+                        viewers: present_viewers,
+                        present_viewers: Default::default(),
+                        absent_viewers: Default::default(),
+                        guests: Default::default(),
+                        pending_guests: Default::default(),
+                    },
+                    ctx,
+                );
+                let spawned_future = presence_manager
+                    .load_participants_imgs_future_handle
+                    .as_ref()
+                    .expect("should have future handle");
+                ctx.await_spawned_future(spawned_future.future_id())
+            })
+            .await;
+
+        // Record the color assigned while the viewer is present.
+        let viewer_color = presence_manager.read(&app, |pm, _ctx| {
+            pm.get_participant(&viewer_id)
+                .expect("viewer should be present")
+                .color
+        });
+
+        // Step 2: mark the viewer as absent (disconnect).
+        let absent_viewers = vec![Viewer {
+            info: ParticipantInfo {
+                id: viewer_id.clone(),
+                ..Default::default()
+            },
+            role: Role::Reader,
+            is_present: false,
+        }];
+        presence_manager
+            .update(&mut app, |presence_manager, ctx| {
+                presence_manager.update_participants(
+                    ParticipantList {
+                        sharer: sharer.clone(),
+                        viewers: absent_viewers,
+                        present_viewers: Default::default(),
+                        absent_viewers: Default::default(),
+                        guests: Default::default(),
+                        pending_guests: Default::default(),
+                    },
+                    ctx,
+                );
+                let spawned_future = presence_manager
+                    .load_participants_imgs_future_handle
+                    .as_ref()
+                    .expect("should have future handle");
+                ctx.await_spawned_future(spawned_future.future_id())
+            })
+            .await;
+
+        presence_manager.read(&app, |pm, _ctx| {
+            // get_participant must NOT return absent viewers (present-only API preserved).
+            assert!(
+                pm.get_participant(&viewer_id).is_none(),
+                "get_participant should not return absent viewers"
+            );
+
+            // get_participant_info_for_avatar MUST resolve the absent viewer and return
+            // the original assigned color, not fall back to the local user.
+            let (_info, color) = pm
+                .get_participant_info_for_avatar(&viewer_id)
+                .expect("get_participant_info_for_avatar should resolve absent viewers");
+            assert_eq!(
+                color, viewer_color,
+                "absent viewer color must be retained for historical AI-block avatar rendering"
+            );
+        });
+    });
+}
+
 fn block_list_for_test(max_block_index: usize) -> BlockList {
     let mut block_list = TestBlockListBuilder::new().build();
 

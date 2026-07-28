@@ -172,6 +172,10 @@ pub struct ParticipantAtSelectedBlock<'a> {
 pub struct AbsentViewer {
     /// The last known info we had about the viewer.
     participant_info: ParticipantInfo,
+    /// The color that was assigned to this viewer while they were present.
+    /// Retained so historical AI-block message avatars continue to show the
+    /// correct author color even after the viewer disconnects.
+    color: ColorU,
 }
 
 impl AbsentViewer {
@@ -363,6 +367,24 @@ impl PresenceManager {
         None
     }
 
+    /// Returns the participant's profile info and color for historical avatar rendering.
+    ///
+    /// Unlike [`get_participant`](Self::get_participant), this also resolves **absent**
+    /// participants, so AI-block author colors remain stable after a viewer disconnects
+    /// from the shared session.
+    pub fn get_participant_info_for_avatar(
+        &self,
+        id: &ParticipantId,
+    ) -> Option<(&ParticipantInfo, ColorU)> {
+        if let Some(participant) = self.get_participant(id) {
+            return Some((&participant.info, participant.color));
+        }
+        if let Some(absent) = self.absent_viewers.get(id) {
+            return Some((&absent.participant_info, absent.color));
+        }
+        None
+    }
+
     /// Returns the participants who have the block at the block index selected.
     pub fn get_participants_selected_block_index(
         &self,
@@ -456,13 +478,26 @@ impl PresenceManager {
 
         for viewer in participants.viewers {
             if !viewer.is_present {
-                if let Some(viewer) = self.present_viewers.remove(&viewer.info.id) {
-                    self.chosen_colors.remove(&viewer.color);
-                }
+                // Capture the color before freeing it. We free it from chosen_colors
+                // so new joiners can reuse it for live presence coloring, but we also
+                // store a copy in AbsentViewer so historical AI-block avatar lookups
+                // continue to resolve the correct author color after disconnect.
+                let retained_color = self
+                    .present_viewers
+                    .remove(&viewer.info.id)
+                    .map(|present_viewer| {
+                        self.chosen_colors.remove(&present_viewer.color);
+                        present_viewer.color
+                    })
+                    // If the viewer was already absent, keep their previously recorded color.
+                    .or_else(|| self.absent_viewers.get(&viewer.info.id).map(|v| v.color))
+                    // Fallback: viewer was never tracked (should not happen in practice).
+                    .unwrap_or(MUTED_PARTICIPANT_COLOR);
                 self.absent_viewers.insert(
                     viewer.info.id.clone(),
                     AbsentViewer {
                         participant_info: viewer.info,
+                        color: retained_color,
                     },
                 );
                 continue;
