@@ -399,6 +399,116 @@ fn text_overrides_cleared_when_code_is_rewritten() {
     });
 }
 
+/// After syncing "format(x)" from phase-1 "for", the 'for' override must be
+/// dropped even though "format(x)" starts with "for", because the 'for' range
+/// ends exactly at the previous code boundary (the token was still mid-stream).
+/// Without this fix the retained `[0, 3)` override would color only `f/o/r` in
+/// keyword magenta while `m/a/t/(x)/()` rendered in base grey — an
+/// intra-token split in a single frame.
+#[test]
+fn mid_stream_intra_token_fix_prevents_keyword_prefix_coloring() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|_| Appearance::mock());
+        // Phase 1: parse "for" with no trailing space so 'for' ends AT the
+        // code boundary (prev_end == 3 == range.end).
+        let view = add_code_view(&mut app, |ctx| {
+            TuiCodeBlockView::new(TuiCodeBlockPayload::new("for", Some("go".to_owned())), ctx)
+        });
+        let rx1 = wait_for_syntax_updated(&view, &mut app);
+        rx1.await.expect("phase-1 syntax parse should complete");
+
+        // Phase 2: sync "format(x)" (starts_with "for"), no parse wait.
+        // The 'for' override at [0, 3) must be dropped because range.end (3)
+        // equals prev_end (3) — that token was growing.
+        app.update(|ctx| {
+            view.update(ctx, |view, ctx| {
+                view.sync(
+                    TuiCodeBlockPayload::new("format(x)", Some("go".to_owned())),
+                    ctx,
+                );
+            });
+        });
+
+        app.read(|ctx| {
+            let view = view.as_ref(ctx);
+            let for_override = view
+                .text_overrides
+                .iter()
+                .find(|(r, _)| r.start == CharOffset::zero() && r.end == CharOffset::from(3));
+            assert!(
+                for_override.is_none(),
+                "'for' override [0,3) must be dropped when the token ended at \
+                 prev_code's boundary (it was still growing into 'format'); \
+                 got text_overrides = {:?}",
+                view.text_overrides
+            );
+        });
+
+        // Render the mid-stream frame and confirm no intra-token color split:
+        // all chars of "format(x)" must have the same fg (uniformly unstyled).
+        // Buffer is indexed (x=col, y=row). Layout:
+        //   row 0: ┌ border
+        //   row 1: │ go   (language)
+        //   row 2: │ format(x) ... (code)
+        //   row 3: └ border
+        // Code chars: col 0=│, col 1=space, col 2..=10 = f,o,r,m,a,t,(,x,)
+        app.read(|ctx| {
+            let mut presenter = TuiPresenter::new();
+            let frame = presenter.present_element(
+                view.as_ref(ctx).render(ctx),
+                TuiRect::new(0, 0, 40, 6),
+                ctx,
+            );
+            let chars_fg: Vec<_> = (2..11usize)
+                .map(|col| frame.buffer[(col as u16, 2)].fg) // (x=col, y=row)
+                .collect();
+            // Verify all chars have the same fg — no intra-token split.
+            let first_fg = chars_fg[0];
+            for (i, &fg) in chars_fg.iter().enumerate() {
+                assert_eq!(
+                    first_fg,
+                    fg,
+                    "Char at col {} has fg={fg:?} but first char has fg={first_fg:?}; \
+                     mid-stream frame must not split keyword prefix from identifier suffix. \
+                     All fgs: {chars_fg:?}",
+                    i + 2
+                );
+            }
+        });
+    });
+}
+
+/// The highlight for a Python `def` keyword at the beginning of a code block
+/// must cover char offset 0 from the first character, satisfying acceptance
+/// criterion 1 (coverage in Go and at least one other language).
+#[test]
+fn python_keyword_highlight_covers_first_character() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|_| Appearance::mock());
+        let view = add_code_view(&mut app, |ctx| {
+            TuiCodeBlockView::new(
+                TuiCodeBlockPayload::new("def foo():", Some("python".to_owned())),
+                ctx,
+            )
+        });
+        let rx = wait_for_syntax_updated(&view, &mut app);
+        rx.await.expect("syntax parse should complete");
+        app.read(|ctx| {
+            let view = view.as_ref(ctx);
+            let def_range = view
+                .text_overrides
+                .iter()
+                .find(|(r, _)| r.start == CharOffset::zero() && r.end == CharOffset::from(3));
+            assert!(
+                def_range.is_some(),
+                "Expected 'def' keyword override at [0, 3) in Python code block, \
+                 got: {:?}",
+                view.text_overrides
+            );
+        });
+    });
+}
+
 /// After a streaming growth (short → longer code, both syncs waited on), the
 /// settled highlights must still cover every character of every keyword,
 /// including the very first character.  This catches the streaming/paint race
