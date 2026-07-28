@@ -8340,14 +8340,16 @@ fn ctrl_c_with_selected_block_clears_selection_on_idle_path() {
             });
         });
 
-        // Set up a completed (non-long-running) block and select it.
+        // Set up a completed (non-long-running) block and select it via the
+        // normal selection path (not direct field mutation) so the AI-context
+        // side effects run and the precondition faithfully mirrors production.
         terminal.update(&mut app, |view, _| {
             view.model.lock().simulate_block("ls", "output");
         });
         terminal.update(&mut app, |view, ctx| {
-            // Select the first (completed) block — this is the "whole-block highlight"
-            // the bug report describes.
-            view.selected_blocks.reset_to_single(BlockIndex::zero());
+            // Select the first (completed) block via the real selection entry
+            // point — this is the "whole-block highlight" the bug report describes.
+            view.reset_selection_to_single_block(BlockIndex::zero(), ctx);
             assert!(
                 !view.selected_blocks.is_empty(),
                 "block must be selected before Ctrl+C"
@@ -8359,6 +8361,15 @@ fn ctrl_c_with_selected_block_clears_selection_on_idle_path() {
             assert!(
                 view.selected_blocks.is_empty(),
                 "Ctrl+C on idle path must clear block selection"
+            );
+        });
+
+        // Focus must return to the input editor — this is the literal bug
+        // reported in GH-13480 ("ctrl+c does not set focus on prompt").
+        terminal.read(&app, |view, ctx| {
+            assert!(
+                view.input.as_ref(ctx).editor().is_focused(ctx),
+                "input editor must be focused after Ctrl+C on idle path"
             );
         });
 
@@ -8398,8 +8409,9 @@ fn ctrl_c_with_selected_block_and_running_process_clears_selection_and_sends_sig
                 .simulate_long_running_block("sleep 60", "running");
         });
         terminal.update(&mut app, |view, ctx| {
-            // Select a block while the long-running command is active.
-            view.selected_blocks.reset_to_single(BlockIndex::zero());
+            // Select a block while the long-running command is active via the
+            // real selection entry point so AI-context side effects run.
+            view.reset_selection_to_single_block(BlockIndex::zero(), ctx);
             assert!(
                 !view.selected_blocks.is_empty(),
                 "block must be selected before Ctrl+C"
