@@ -445,12 +445,12 @@ fn expected_prompt_text_color(app: &AppContext) -> Color {
 }
 fn expected_prompt_prefix_color(app: &AppContext) -> Color {
     let theme = Appearance::as_ref(app).theme();
-    CoreFill::from(ThemeFill::from(theme.terminal_colors().normal.cyan)).into()
+    CoreFill::from(theme.accent()).into()
 }
 
 fn expected_input_background(app: &AppContext) -> Color {
     let theme = Appearance::as_ref(app).theme();
-    let accent = ThemeFill::from(theme.terminal_colors().normal.cyan);
+    let accent = theme.accent();
     CoreFill::from(
         theme
             .background()

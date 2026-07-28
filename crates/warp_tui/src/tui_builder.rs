@@ -133,12 +133,10 @@ impl TuiUiBuilder {
         TuiStyle::default().fg(self.accent_color())
     }
 
-    /// The accent/cyan color as a raw `Color`, for contexts that need it
+    /// The theme accent color as a raw `Color`, for contexts that need it
     /// directly (e.g. the zero-state animation glow).
     pub(crate) fn accent_color(&self) -> Color {
-        cell_color(ThemeFill::from(
-            self.warp_theme.terminal_colors().normal.cyan,
-        ))
+        cell_color(self.warp_theme.accent())
     }
 
     /// Theme-blue link text, matching linked filenames in tool-call headers.
@@ -170,16 +168,14 @@ impl TuiUiBuilder {
         self.link_text_style()
     }
 
-    /// Solid cyan selection background used by the slash-command menu.
+    /// Accent-colored selection background used by the slash-command menu.
     pub(crate) fn slash_command_selection_background(&self) -> Color {
-        cell_color(ThemeFill::from(
-            self.warp_theme.terminal_colors().normal.cyan,
-        ))
+        cell_color(self.warp_theme.accent())
     }
 
     /// Bold, contrast-derived text over the slash-command selection color.
     pub(crate) fn slash_command_selection_text_style(&self) -> TuiStyle {
-        let background_fill = ThemeFill::from(self.warp_theme.terminal_colors().normal.cyan);
+        let background_fill = self.warp_theme.accent();
         let foreground = self.warp_theme.font_color(background_fill.into_solid());
         TuiStyle::default()
             .fg(cell_color(foreground))
@@ -198,7 +194,7 @@ impl TuiUiBuilder {
             .add_modifier(Modifier::BOLD)
     }
 
-    /// Bold accent prompt marker over the submitted-input background.
+    /// Bold, accent prompt marker over the submitted-input background.
     pub(crate) fn input_prefix_style(&self) -> TuiStyle {
         self.accent_text_style()
             .bg(self.input_background())
@@ -207,7 +203,7 @@ impl TuiUiBuilder {
 
     /// The accent-tinted background behind the user-input section.
     pub(crate) fn input_background(&self) -> Color {
-        let accent = ThemeFill::from(self.warp_theme.terminal_colors().normal.cyan);
+        let accent = self.warp_theme.accent();
         cell_color(
             self.base_background()
                 .blend(&accent.with_opacity(10))
@@ -217,7 +213,7 @@ impl TuiUiBuilder {
 
     /// Theme-accent overlay for the shortcut reference panel.
     pub(crate) fn shortcuts_background(&self) -> Color {
-        let accent = ThemeFill::from(self.warp_theme.terminal_colors().normal.cyan);
+        let accent = self.warp_theme.accent();
         cell_color(self.base_background().blend(&accent.with_opacity(10)))
     }
 
@@ -262,35 +258,32 @@ impl TuiUiBuilder {
             None => self.warp_theme.background(),
         }
     }
-    fn cyan_overlay_2(&self) -> ThemeFill {
-        let cyan = ThemeFill::from(self.warp_theme.terminal_colors().normal.cyan);
-        self.base_background().blend(&cyan.with_opacity(50))
+    fn accent_overlay_2(&self) -> ThemeFill {
+        let accent = self.warp_theme.accent();
+        self.base_background().blend(&accent.with_opacity(50))
     }
 
-    /// Accent-colored border style for focused/primary containers. The design
-    /// uses the cyan token at 50%; pre-blend it because terminal cells do not
-    /// preserve alpha.
+    /// Accent-colored border style for focused/primary containers.
+    /// Pre-blended at 50% because terminal cells do not preserve alpha.
     pub(crate) fn accent_border_style(&self) -> TuiStyle {
-        TuiStyle::default().fg(cell_color(self.cyan_overlay_2()))
+        TuiStyle::default().fg(cell_color(self.accent_overlay_2()))
     }
 
-    /// Fixed themed cyan for voice-input status text. Terminal foreground
-    /// colors cannot preserve the alpha from `cyan_overlay_2`, so use the
-    /// corresponding opaque color instead of pre-blending it into gray.
+    /// Theme accent color for voice-input status text.
     pub(crate) fn voice_input_status_style(&self) -> TuiStyle {
         self.accent_text_style()
     }
 
     /// Smoothly pulsing border between the themed equivalents of
-    /// `cyan_overlay_2` and `Lilac-600`.
+    /// `accent_overlay_2` and `Lilac-600`.
     pub(crate) fn voice_input_border_style(&self, elapsed: Duration) -> TuiStyle {
         const PERIOD: Duration = Duration::from_secs(2);
 
         let phase = elapsed.as_secs_f32() / PERIOD.as_secs_f32();
         let intensity = (1.0 - (phase * TAU).cos()) * 0.5;
         let lilac_600 = ThemeFill::from(self.warp_theme.terminal_colors().normal.magenta);
-        let cyan_overlay_2 = self.cyan_overlay_2().into_solid();
-        let color = cyan_overlay_2
+        let accent_overlay_2 = self.accent_overlay_2().into_solid();
+        let color = accent_overlay_2
             .to_f32()
             .lerp(lilac_600.into_solid().to_f32(), intensity)
             .to_u8();
@@ -425,13 +418,13 @@ impl TuiUiBuilder {
 
     /// Accent-tinted body background for standard permission cards.
     pub(crate) fn permission_surface_background(&self) -> Color {
-        let accent = ThemeFill::from(self.warp_theme.terminal_colors().normal.cyan);
+        let accent = self.warp_theme.accent();
         cell_color(self.base_background().blend(&accent.with_opacity(10)))
     }
 
     /// Stronger accent tint for standard permission-card title rows.
     pub(crate) fn permission_header_background(&self) -> Color {
-        let accent = ThemeFill::from(self.warp_theme.terminal_colors().normal.cyan);
+        let accent = self.warp_theme.accent();
         cell_color(
             self.base_background()
                 .blend(&accent.with_opacity(10))
