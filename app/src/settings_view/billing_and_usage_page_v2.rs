@@ -33,7 +33,10 @@ use super::billing_and_usage::overage_limit_modal::{SpendingLimitModal, Spending
 use super::billing_and_usage::usage_history_entry::UsageHistoryEntry;
 use super::billing_and_usage::usage_history_model::UsageHistoryModel;
 pub use super::billing_and_usage_page::BillingAndUsagePageEvent;
-use super::billing_and_usage_page::{BillingAndUsagePageAction, BillingUsageTab};
+use super::billing_and_usage_page::{
+    BillingAndUsagePageAction, BillingUsageTab, CHECKOUT_PENDING_MESSAGE,
+    create_premium_surcharge_badge, render_premium_surcharge_note,
+};
 use super::settings_page::{AdditionalInfo, render_customer_type_badge, render_info_icon};
 use crate::ai::AIRequestUsageModel;
 use crate::ai::request_usage_model::{
@@ -167,6 +170,11 @@ struct AddonCreditsPurchaseState {
     price_label: String,
     auto_reload_tooltip_text: String,
     warning_text: Option<&'static str>,
+    /// True when purchases on this plan go through the premium (surcharged)
+    /// path; hides auto-reload, which only applies to list-price plans.
+    is_premium_purchase: bool,
+    /// Surcharge in basis points applied to displayed prices (0 = none).
+    premium_bps: i32,
 }
 
 struct UsageHistoryState {
@@ -436,6 +444,23 @@ impl BillingAndUsagePageV2View {
                 );
                 AIRequestUsageModel::handle(ctx)
                     .update(ctx, |m, ctx| m.refresh_request_usage_async(ctx));
+            }
+            UserWorkspacesEvent::PurchaseAddonCreditsCheckoutRequired { checkout_url } => {
+                // Multiple surfaces subscribe to purchase events; only the one
+                // that initiated the purchase should hand off to the browser.
+                if self.addon_credits.purchase_loading {
+                    self.addon_credits.purchase_loading = false;
+                    ctx.open_url(checkout_url);
+                    self.show_toast(CHECKOUT_PENDING_MESSAGE, ToastFlavor::Default, ctx);
+                    // Credits are granted via webhook once checkout completes;
+                    // refresh billing data so polling picks them up promptly.
+                    std::mem::drop(
+                        TeamUpdateManager::handle(ctx)
+                            .update(ctx, |mgr, ctx| mgr.refresh_workspace_metadata(ctx)),
+                    );
+                    AIRequestUsageModel::handle(ctx)
+                        .update(ctx, |m, ctx| m.refresh_request_usage_async(ctx));
+                }
             }
             UserWorkspacesEvent::PurchaseAddonCreditsRejected(err) => {
                 self.addon_credits.purchase_loading = false;
@@ -1078,9 +1103,9 @@ impl BillingAndUsagePageV2View {
     ) -> AddonCreditsPanelState {
         let team_can_purchase = workspace
             .billing_metadata
-            .tier
-            .purchase_add_on_credits_policy
-            .is_some_and(|p| p.enabled);
+            .is_purchase_add_on_credits_policy_enabled();
+        let is_premium_purchase = workspace.billing_metadata.is_premium_addon_credits_purchase();
+        let premium_bps = workspace.billing_metadata.addon_credits_price_premium_bps();
         let can_upgrade = workspace.billing_metadata.can_upgrade_to_build_plan();
 
         if !team_can_purchase {
@@ -1105,10 +1130,13 @@ impl BillingAndUsagePageV2View {
             .addon_credits
             .options
             .get(self.addon_credits.selected_denomination);
-        let auto_reload_enabled = workspace
-            .settings
-            .addon_credits_settings
-            .auto_reload_enabled;
+        // Auto-reload only applies to plans with standard (list price)
+        // purchasing; premium-purchase plans always use one-time purchases.
+        let auto_reload_enabled = !is_premium_purchase
+            && workspace
+                .settings
+                .addon_credits_settings
+                .auto_reload_enabled;
 
         let team_count = UserWorkspaces::as_ref(app)
             .team_for_view_handle(&self.self_handle, app)
@@ -1126,7 +1154,9 @@ impl BillingAndUsagePageV2View {
                 .addon_credits_settings
                 .max_monthly_spend_cents
                 .unwrap_or(DEFAULT_MAX_MONTHLY_SPEND_CENTS);
-            (workspace.bonus_grants_purchased_this_month.cents_spent + opt.price_usd_cents) > limit
+            (workspace.bonus_grants_purchased_this_month.cents_spent
+                + opt.price_usd_cents_with_premium(premium_bps))
+                > limit
         });
         let purchase_disabled = self.addon_credits.purchase_loading
             || would_exceed
@@ -1138,7 +1168,10 @@ impl BillingAndUsagePageV2View {
         let price_label = selected_credit_option
             .map(|opt| {
                 let credits = opt.credits.separate_with_commas();
-                let dollars = format!("${:.2}", opt.price_usd_cents as f64 / 100.0);
+                let dollars = format!(
+                    "${:.2}",
+                    opt.price_usd_cents_with_premium(premium_bps) as f64 / 100.0
+                );
                 format!("{credits} credits / {dollars}")
             })
             .unwrap_or_default();
@@ -1220,6 +1253,8 @@ impl BillingAndUsagePageV2View {
             price_label,
             auto_reload_tooltip_text,
             warning_text,
+            is_premium_purchase,
+            premium_bps,
         })
     }
 
@@ -1564,7 +1599,7 @@ impl BillingAndUsagePageV2View {
             purchase_button = purchase_button.disable();
         }
         let purchase_button = purchase_button.finish();
-        let price_row = Flex::row()
+        let mut price_row = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_child(
                 Text::new_inline(state.price_label.clone(), appearance.ui_font_family(), 14.)
@@ -1572,9 +1607,19 @@ impl BillingAndUsagePageV2View {
                     .with_style(Properties::default().weight(Weight::Medium))
                     .finish(),
             );
+        if state.premium_bps > 0 {
+            price_row.add_child(
+                Container::new(create_premium_surcharge_badge(
+                    state.premium_bps,
+                    appearance,
+                ))
+                .with_margin_left(8.)
+                .finish(),
+            );
+        }
 
         let mut right_group = Flex::row().with_cross_axis_alignment(CrossAxisAlignment::Center);
-        if state.has_admin_permissions {
+        if state.has_admin_permissions && !state.is_premium_purchase {
             let auto_reload_switch_element = {
                 let switch_builder = appearance
                     .ui_builder()
@@ -1621,7 +1666,13 @@ impl BillingAndUsagePageV2View {
         }
         right_group.add_child(
             Container::new(purchase_button)
-                .with_margin_left(if state.has_admin_permissions { 16. } else { 0. })
+                .with_margin_left(
+                    if state.has_admin_permissions && !state.is_premium_purchase {
+                        16.
+                    } else {
+                        0.
+                    },
+                )
                 .finish(),
         );
         let lower_row = Flex::row()
@@ -1631,6 +1682,14 @@ impl BillingAndUsagePageV2View {
             .with_child(price_row.finish())
             .with_child(right_group.finish());
         let mut lower_children: Vec<Box<dyn Element>> = vec![lower_row.finish()];
+
+        if state.premium_bps > 0 {
+            lower_children.push(render_premium_surcharge_note(
+                team_uid,
+                state.premium_bps,
+                appearance,
+            ));
+        }
 
         if let Some(warning_text) = state.warning_text {
             lower_children.push(self.render_warning_row(appearance, warning_text.to_string()));

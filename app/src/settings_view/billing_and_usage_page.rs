@@ -120,6 +120,84 @@ pub fn create_discount_badge(discount: u32, appearance: &Appearance) -> Box<dyn 
     .finish()
 }
 
+/// Formats an add-on credits price surcharge, expressed in basis points, as a
+/// human-readable percentage (e.g. 1000 -> "10%").
+pub fn format_addon_premium_percent(premium_bps: i32) -> String {
+    if premium_bps % 100 == 0 {
+        format!("{}%", premium_bps / 100)
+    } else {
+        format!("{:.2}%", premium_bps as f64 / 100.0)
+    }
+}
+
+/// Renders a "+10%"-style badge for plans that purchase add-on credits at a
+/// premium over list price.
+pub fn create_premium_surcharge_badge(
+    premium_bps: i32,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    if premium_bps <= 0 {
+        return Empty::new().finish();
+    }
+
+    let theme = appearance.theme();
+    let bg_color: Fill = theme.terminal_colors().normal.yellow.into();
+
+    Container::new(
+        Text::new_inline(
+            format!("+{}", format_addon_premium_percent(premium_bps)),
+            appearance.ui_font_family(),
+            10.,
+        )
+        .with_color(theme.main_text_color(bg_color).into())
+        .finish(),
+    )
+    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+    .with_background(bg_color)
+    .with_uniform_padding(4.)
+    .finish()
+}
+
+pub(crate) const CHECKOUT_PENDING_MESSAGE: &str =
+    "Finish your purchase in the browser — credits will appear shortly.";
+
+/// Renders the note shown under the one-time purchase row for plans that pay
+/// a premium over list price, with an upgrade link to skip the surcharge.
+pub(crate) fn render_premium_surcharge_note(
+    team_uid: ServerId,
+    premium_bps: i32,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    let theme = appearance.theme();
+    let percent = format_addon_premium_percent(premium_bps);
+    let fragments = vec![
+        FormattedTextFragment::plain_text(format!(
+            "Prices include a {percent} Free plan surcharge. "
+        )),
+        FormattedTextFragment::hyperlink(
+            "Upgrade to skip the surcharge",
+            UserWorkspaces::upgrade_link_for_team(team_uid),
+        ),
+        FormattedTextFragment::plain_text("."),
+    ];
+
+    FormattedTextElement::new(
+        FormattedText::new([FormattedTextLine::Line(fragments)]),
+        appearance.ui_font_size(),
+        appearance.ui_font_family(),
+        appearance.ui_font_family(),
+        theme.sub_text_color(theme.background()).into(),
+        HighlightedHyperlink::default(),
+    )
+    .with_hyperlink_font_color(theme.accent().into_solid())
+    .register_default_click_handlers_with_action_support(|hyperlink_lens, _, ctx| {
+        if let warpui::elements::HyperlinkLens::Url(url) = hyperlink_lens {
+            ctx.open_url(url);
+        }
+    })
+    .finish()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BillingUsageTab {
     Overview,
@@ -462,6 +540,24 @@ impl BillingAndUsagePageView {
                 AIRequestUsageModel::handle(ctx).update(ctx, |ai_request_usage_model, ctx| {
                     ai_request_usage_model.refresh_request_usage_async(ctx)
                 });
+            }
+            UserWorkspacesEvent::PurchaseAddonCreditsCheckoutRequired { checkout_url } => {
+                // Multiple surfaces subscribe to purchase events; only the one
+                // that initiated the purchase should hand off to the browser.
+                if self.purchase_addon_credits_loading {
+                    self.purchase_addon_credits_loading = false;
+                    ctx.open_url(checkout_url);
+                    self.show_toast(CHECKOUT_PENDING_MESSAGE, ToastFlavor::Default, ctx);
+                    // Credits are granted via webhook once checkout completes;
+                    // refresh billing data so polling picks them up promptly.
+                    std::mem::drop(
+                        TeamUpdateManager::handle(ctx)
+                            .update(ctx, |manager, ctx| manager.refresh_workspace_metadata(ctx)),
+                    );
+                    AIRequestUsageModel::handle(ctx).update(ctx, |ai_request_usage_model, ctx| {
+                        ai_request_usage_model.refresh_request_usage_async(ctx)
+                    });
+                }
             }
             UserWorkspacesEvent::PurchaseAddonCreditsRejected(err) => {
                 self.purchase_addon_credits_loading = false;
@@ -1638,9 +1734,9 @@ impl BillingAndUsagePageView {
 
         let team_can_purchase_addon_credits = workspace
             .billing_metadata
-            .tier
-            .purchase_add_on_credits_policy
-            .is_some_and(|policy| policy.enabled);
+            .is_purchase_add_on_credits_policy_enabled();
+        let is_premium_purchase = workspace.billing_metadata.is_premium_addon_credits_purchase();
+        let premium_bps = workspace.billing_metadata.addon_credits_price_premium_bps();
         let can_upgrade_to_build = workspace.billing_metadata.can_upgrade_to_build_plan();
 
         let no_credits_access_explanation = match (
@@ -1872,10 +1968,13 @@ impl BillingAndUsagePageView {
 
         let selected_option = addon_credits_options.get(selected_topup_denomination);
 
-        let auto_reload_enabled = workspace
-            .settings
-            .addon_credits_settings
-            .auto_reload_enabled;
+        // Auto-reload only applies to plans with standard (list price)
+        // purchasing; premium-purchase plans always use one-time purchases.
+        let auto_reload_enabled = !is_premium_purchase
+            && workspace
+                .settings
+                .addon_credits_settings
+                .auto_reload_enabled;
 
         let auto_reload_amount = selected_option
             .map(|option| option.credits.to_string())
@@ -1929,7 +2028,9 @@ impl BillingAndUsagePageView {
         if let Some(purchased_row) = purchased_this_month_row {
             card_content_upper.add_child(purchased_row);
         }
-        card_content_upper.add_child(auto_reload_switch);
+        if !is_premium_purchase {
+            card_content_upper.add_child(auto_reload_switch);
+        }
 
         let base_rate = addon_credits_options
             .first()
@@ -1937,7 +2038,7 @@ impl BillingAndUsagePageView {
 
         let (rendered_price, discount_badge) = match selected_option {
             Some(option) => {
-                let price_dollars = option.price_usd_cents as f64 / 100.0;
+                let price_dollars = option.price_usd_cents_with_premium(premium_bps) as f64 / 100.0;
                 let rendered_price = Container::new(
                     Text::new_inline(
                         format!("${price_dollars:.2}"),
@@ -1973,7 +2074,7 @@ impl BillingAndUsagePageView {
         };
 
         let would_exceed_limit = selected_option.is_some_and(|option| {
-            let purchase_cost_cents = option.price_usd_cents;
+            let purchase_cost_cents = option.price_usd_cents_with_premium(premium_bps);
             let monthly_limit_cents = workspace
                 .settings
                 .addon_credits_settings
@@ -2021,12 +2122,20 @@ impl BillingAndUsagePageView {
 
         let buy_button = buy_button.finish();
 
+        let premium_surcharge_badge = if premium_bps > 0 {
+            Container::new(create_premium_surcharge_badge(premium_bps, appearance))
+                .with_margin_right(8.)
+                .finish()
+        } else {
+            Empty::new().finish()
+        };
+
         let mut buy_row = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_children([
                 Shrinkable::new(1., denominations).finish(),
                 Flex::row()
-                    .with_children([discount_badge, rendered_price])
+                    .with_children([discount_badge, premium_surcharge_badge, rendered_price])
                     .with_cross_axis_alignment(CrossAxisAlignment::Center)
                     .finish(),
             ]);
@@ -2063,6 +2172,14 @@ impl BillingAndUsagePageView {
                 ui_builder.span("One-time purchase").build().finish(),
                 buy_row.finish(),
             ];
+
+            if premium_bps > 0 {
+                card_content_lower_children.push(render_premium_surcharge_note(
+                    team_uid,
+                    premium_bps,
+                    appearance,
+                ));
+            }
 
             if delinquent_due_to_payment_issue {
                 card_content_lower_children.push(self.render_warning_row(

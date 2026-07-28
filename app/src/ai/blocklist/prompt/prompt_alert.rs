@@ -380,9 +380,10 @@ impl View for PromptAlertView {
             .zip(current_team)
             .is_some_and(|(email, team)| team.has_admin_permissions(&email));
 
-        let can_purchase_addon_credits = current_team
-            .and_then(|team| team.billing_metadata.tier.purchase_add_on_credits_policy)
-            .is_some_and(|policy| policy.enabled);
+        let can_purchase_addon_credits = current_team.is_some_and(|team| {
+            team.billing_metadata
+                .is_purchase_add_on_credits_policy_enabled()
+        });
 
         let suggest_buy_credits = can_purchase_addon_credits
             && has_admin_permissions
