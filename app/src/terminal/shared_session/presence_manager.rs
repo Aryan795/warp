@@ -217,6 +217,13 @@ pub struct PresenceManager {
     /// _do not_ include the absent viewers.
     absent_viewers: HashMap<ParticipantId, AbsentViewer>,
 
+    /// A permanent record of each participant's assigned color for the session lifetime.
+    /// Colors are allocated here the first time a participant appears and are **never**
+    /// removed, so each participant's color is stable and unique — even across disconnects
+    /// and rejoins. When allocating a new color, `chosen_colors` (which contains all
+    /// session-allocated colors) prevents color reuse.
+    session_colors: HashMap<ParticipantId, ColorU>,
+
     chosen_colors: HashSet<ColorU>,
 
     /// Loading participants is a future because we may need to download an image.
@@ -259,6 +266,7 @@ impl PresenceManager {
             sharer: None,
             present_viewers: HashMap::new(),
             absent_viewers: HashMap::new(),
+            session_colors: HashMap::new(),
             chosen_colors: HashSet::new(),
             load_participants_imgs_future_handle: None,
             block_id_to_participants_selected: HashMap::new(),
@@ -293,6 +301,7 @@ impl PresenceManager {
             sharer: Some(sharer),
             present_viewers: HashMap::new(),
             absent_viewers: HashMap::new(),
+            session_colors: HashMap::new(),
             chosen_colors,
             load_participants_imgs_future_handle: None,
             block_id_to_participants_selected: HashMap::new(),
@@ -478,26 +487,36 @@ impl PresenceManager {
 
         for viewer in participants.viewers {
             if !viewer.is_present {
-                // Capture the color before freeing it. We free it from chosen_colors
-                // so new joiners can reuse it for live presence coloring, but we also
-                // store a copy in AbsentViewer so historical AI-block avatar lookups
-                // continue to resolve the correct author color after disconnect.
-                let retained_color = self
-                    .present_viewers
-                    .remove(&viewer.info.id)
-                    .map(|present_viewer| {
-                        self.chosen_colors.remove(&present_viewer.color);
-                        present_viewer.color
-                    })
-                    // If the viewer was already absent, keep their previously recorded color.
-                    .or_else(|| self.absent_viewers.get(&viewer.info.id).map(|v| v.color))
-                    // Fallback: viewer was never tracked (should not happen in practice).
-                    .unwrap_or(MUTED_PARTICIPANT_COLOR);
+                // Determine the stable session color for this participant.
+                // Colors are never freed from chosen_colors or session_colors, so each
+                // participant's color is unique and stable for the entire session lifetime —
+                // preventing the color-collision defect (REMOTE-2361) where a new joiner
+                // could receive the same color as an absent author's historical blocks.
+                let color =
+                    if let Some(present_viewer) = self.present_viewers.remove(&viewer.info.id) {
+                        // Transitioning from present → absent. Keep the color in chosen_colors so
+                        // future joiners cannot be assigned it; record it in session_colors.
+                        let c = present_viewer.color;
+                        self.session_colors.insert(viewer.info.id.clone(), c);
+                        c
+                    } else if let Some(&c) = self.session_colors.get(&viewer.info.id) {
+                        // Already in the session record (rejoined-then-left, or previously
+                        // seen as absent): reuse the stable session color.
+                        c
+                    } else {
+                        // Participant arrived already absent (left before this client joined).
+                        // Allocate a real color so their historical blocks are distinguishable
+                        // and not all collapsed to the same muted grey.
+                        let c = get_available_color(&self.chosen_colors);
+                        self.chosen_colors.insert(c);
+                        self.session_colors.insert(viewer.info.id.clone(), c);
+                        c
+                    };
                 self.absent_viewers.insert(
                     viewer.info.id.clone(),
                     AbsentViewer {
                         participant_info: viewer.info,
-                        color: retained_color,
+                        color,
                     },
                 );
                 continue;
@@ -510,7 +529,7 @@ impl PresenceManager {
                 continue;
             }
 
-            // If this participant already existed, update the info and role
+            // If this participant already exists as present, update info and role
             // while keeping their color.
             if let Some(existing_participant) = self.present_viewers.get_mut(&info.id) {
                 existing_participant.info = info;
@@ -518,9 +537,21 @@ impl PresenceManager {
                 continue;
             };
 
-            // Otherwise, pick an available color and add them.
-            let color = get_available_color(&self.chosen_colors);
-            self.chosen_colors.insert(color);
+            // Determine the color for this viewer — rejoining or first join.
+            let color = if let Some(absent_viewer) = self.absent_viewers.remove(&info.id) {
+                // Rejoining viewer: restore their stable session color and clear the
+                // absent entry so historical blocks keep the same color mid-session.
+                absent_viewer.color
+            } else if let Some(&c) = self.session_colors.get(&info.id) {
+                // In session history but absent entry already consumed (rare).
+                c
+            } else {
+                // Truly new participant: allocate a fresh session color.
+                let c = get_available_color(&self.chosen_colors);
+                self.chosen_colors.insert(c);
+                self.session_colors.insert(info.id.clone(), c);
+                c
+            };
 
             let new_viewer = Participant {
                 info,
