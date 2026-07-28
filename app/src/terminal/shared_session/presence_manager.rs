@@ -6,7 +6,6 @@ use futures::future::BoxFuture;
 use futures_util::future::join_all;
 use itertools::{Either, Itertools};
 use pathfinder_color::ColorU;
-use rand::Rng;
 #[cfg(not(target_arch = "wasm32"))]
 use session_sharing_protocol::common::Viewer;
 use session_sharing_protocol::common::{
@@ -46,7 +45,7 @@ pub const MUTED_AVATAR_BORDER_COLOR: ColorU = ColorU {
 
 /// A set of pre-assigned colors that we use for shared session participants.
 /// These come from https://www.figma.com/file/chk9pwt35jTJhf9KnHmZyE/Components?type=design&node-id=1650-1410&mode=design&t=RTHbE9G6NLhFRqLQ-0.
-const PRESET_COLORS: &[ColorU] = &[
+pub const PRESET_COLORS: &[ColorU] = &[
     ColorU {
         r: 93,
         g: 202,
@@ -153,6 +152,14 @@ impl Participant {
     }
 }
 
+/// Display info for a participant in an AI-block exchange attribution.
+/// Returned by `PresenceManager::get_participant_for_attribution`.
+pub struct ParticipantAttribution {
+    pub display_name: String,
+    pub photo_url: Option<String>,
+    pub color: ColorU,
+}
+
 /// Helper struct containing presence information about a participant who selected a particular block.
 pub struct ParticipantAtSelectedBlock<'a> {
     /// The participant who selected the block.
@@ -188,8 +195,8 @@ impl AbsentViewer {
 /// This should contain the data needed to render presence-related UIs.
 /// The presence manager does not store participant data about ourselves in the live-presence
 /// maps (`present_viewers` / `sharer`), whether we are the sharer or viewer. However, it does
-/// store a snapshot of our own profile info and a session-scoped color so that AI-block avatar
-/// attribution can resolve self-initiated exchanges (see `get_participant_for_attribution`).
+/// store a snapshot of our own profile info so that AI-block avatar attribution can resolve
+/// self-initiated exchanges (see `get_participant_for_attribution`).
 pub struct PresenceManager {
     /// Our own Participant ID.
     id: ParticipantId,
@@ -216,21 +223,17 @@ pub struct PresenceManager {
     /// _do not_ include the absent viewers.
     absent_viewers: HashMap<ParticipantId, AbsentViewer>,
 
-    chosen_colors: HashSet<ColorU>,
-
     /// Our own participant profile info, populated when we first see ourselves in a
-    /// participant list update (viewer path only; sharers use the auth profile directly).
+    /// participant list update (both viewer and sharer paths).
     /// Used exclusively by `get_participant_for_attribution` so that self-initiated AI
     /// exchanges render with the correct identity rather than falling back to the
     /// session-wide theme accent.
     own_profile_info: Option<ParticipantInfo>,
 
     /// The color assigned to ourselves for attribution purposes.
-    /// Populated at the same time as `own_profile_info`.  The color is chosen from
-    /// `PRESET_COLORS` (the same palette used for other participants) at the time we
-    /// first see our own entry in the participant list, so it is stable for the lifetime
-    /// of this session.
-    own_color: Option<ColorU>,
+    /// Derived deterministically from `self.id` via `color_for_participant_id` so that
+    /// both the terminal and the browser assign the same color to the same participant.
+    own_color: ColorU,
 
     /// Loading participants is a future because we may need to download an image.
     /// Note even if there is no image, the participant is still loaded as a future.
@@ -246,24 +249,24 @@ pub struct PresenceManager {
     role_requests: HashMap<ParticipantId, RoleRequestId>,
 }
 
-/// Returns the first available preset color, or a random color if all are taken.
-pub fn get_available_color(chosen_colors: &HashSet<ColorU>) -> ColorU {
-    for color in PRESET_COLORS {
-        if !chosen_colors.contains(color) {
-            return *color;
-        }
-    }
-    // If we ran out of colors, generate a random one.
-    ColorU::new(
-        rand::thread_rng().gen_range(0..=255),
-        rand::thread_rng().gen_range(0..=255),
-        rand::thread_rng().gen_range(0..=255),
-        255,
-    )
+/// Returns a deterministic color for a participant based on their participant ID.
+///
+/// Both the terminal and the browser derive the same color for the same participant ID,
+/// ensuring that the identity→color mapping is consistent across clients (AC3).
+/// A stable hash of the participant ID's string representation is folded into a
+/// `PRESET_COLORS` index, so no state is needed and the result never changes for
+/// the lifetime of the session.
+pub fn color_for_participant_id(id: &ParticipantId) -> ColorU {
+    let s = id.to_string();
+    let hash = s.bytes().fold(0u64, |acc, b| {
+        acc.wrapping_mul(31).wrapping_add(u64::from(b))
+    });
+    PRESET_COLORS[(hash as usize) % PRESET_COLORS.len()]
 }
 
 impl PresenceManager {
     pub fn new_for_sharer(id: ParticipantId, firebase_uid: UserUid) -> Self {
+        let own_color = color_for_participant_id(&id);
         Self {
             id: id.clone(),
             firebase_uid,
@@ -272,9 +275,8 @@ impl PresenceManager {
             sharer: None,
             present_viewers: HashMap::new(),
             absent_viewers: HashMap::new(),
-            chosen_colors: HashSet::new(),
             own_profile_info: None,
-            own_color: None,
+            own_color,
             load_participants_imgs_future_handle: None,
             block_id_to_participants_selected: HashMap::new(),
             is_reconnecting: false,
@@ -288,18 +290,16 @@ impl PresenceManager {
         participants: ParticipantList,
         ctx: &mut ModelContext<Self>,
     ) -> Self {
-        // Populate sharer info, remaining fields for sharer and viewer
+        // Populate sharer info; remaining fields for sharer and viewer
         // will be populated in the call to `update_participants`.
-        let mut chosen_colors = HashSet::new();
-        let color = get_available_color(&chosen_colors);
-        chosen_colors.insert(color);
-
+        let sharer_color = color_for_participant_id(&participants.sharer.info.id);
         let sharer = Participant {
             info: participants.sharer.info.clone(),
-            color,
+            color: sharer_color,
             role: None,
         };
 
+        let own_color = color_for_participant_id(&id);
         let mut manager = Self {
             id,
             firebase_uid,
@@ -308,9 +308,8 @@ impl PresenceManager {
             sharer: Some(sharer),
             present_viewers: HashMap::new(),
             absent_viewers: HashMap::new(),
-            chosen_colors,
             own_profile_info: None,
-            own_color: None,
+            own_color,
             load_participants_imgs_future_handle: None,
             block_id_to_participants_selected: HashMap::new(),
             is_reconnecting: false,
@@ -384,10 +383,11 @@ impl PresenceManager {
         None
     }
 
-    /// Returns display name, photo URL, and color for a participant suitable for AI-block
-    /// avatar attribution.  Unlike `get_participant`, this also handles the case where the
-    /// caller is themselves the initiator of an exchange — i.e. it resolves the local user's
-    /// own identity from `own_profile_info` / `own_color` when `id` matches `self.id`.
+    /// Returns display info for a participant suitable for AI-block avatar attribution.
+    ///
+    /// Unlike `get_participant`, this also handles the case where the caller is themselves
+    /// the initiator of an exchange — i.e. it resolves the local user's own identity from
+    /// `own_profile_info` / `own_color` when `id` matches `self.id`.
     ///
     /// Use this method in rendering paths that attribute an AI exchange to its initiator.
     /// Continue to use `get_participant` for live-presence UI (cursors, pane-header avatars,
@@ -395,37 +395,37 @@ impl PresenceManager {
     pub fn get_participant_for_attribution(
         &self,
         id: &ParticipantId,
-    ) -> Option<(&str, Option<&str>, ColorU)> {
+    ) -> Option<ParticipantAttribution> {
         // Check present viewers first.
         if let Some(participant) = self.present_viewers.get(id) {
-            return Some((
-                &participant.info.profile_data.display_name,
-                participant.info.profile_data.photo_url.as_deref(),
-                participant.color,
-            ));
+            return Some(ParticipantAttribution {
+                display_name: participant.info.profile_data.display_name.clone(),
+                photo_url: participant.info.profile_data.photo_url.clone(),
+                color: participant.color,
+            });
         }
         // Check sharer.
         if let Some(sharer) = &self.sharer
             && &self.sharer_id == id
         {
-            return Some((
-                &sharer.info.profile_data.display_name,
-                sharer.info.profile_data.photo_url.as_deref(),
-                sharer.color,
-            ));
+            return Some(ParticipantAttribution {
+                display_name: sharer.info.profile_data.display_name.clone(),
+                photo_url: sharer.info.profile_data.photo_url.clone(),
+                color: sharer.color,
+            });
         }
         // Check self — excluded from present_viewers and sharer but needed for attribution
         // when the local user initiated the exchange (e.g. viewer-originated prompts on
-        // the browser side of a shared cloud-agent session).
+        // the browser side of a shared cloud-agent session, or the sharer's own prompts
+        // when own_profile_info is populated from the participant list).
         if &self.id == id
             && let Some(own_info) = &self.own_profile_info
-            && let Some(own_color) = self.own_color
         {
-            return Some((
-                &own_info.profile_data.display_name,
-                own_info.profile_data.photo_url.as_deref(),
-                own_color,
-            ));
+            return Some(ParticipantAttribution {
+                display_name: own_info.profile_data.display_name.clone(),
+                photo_url: own_info.profile_data.photo_url.clone(),
+                color: self.own_color,
+            });
         }
         None
     }
@@ -510,7 +510,7 @@ impl PresenceManager {
         // A list of futures. Each one represents a profile image that's being loaded for a participant.
         let mut participant_image_loading_futures = Vec::new();
 
-        // Update sharer info
+        // Update sharer info.
         let incoming_sharer_info = participants.sharer.info;
         if let Some(sharer) = self.sharer.as_mut() {
             sharer.info = incoming_sharer_info.clone();
@@ -519,13 +519,17 @@ impl PresenceManager {
                 participant_image_loading_futures.push(future);
             }
             latest_participants.push(sharer.clone());
+        } else if incoming_sharer_info.id == self.id {
+            // We are the sharer: snapshot our own profile info for attribution lookups
+            // (see `get_participant_for_attribution`). The sharer is excluded from
+            // `present_viewers` and `sharer`, but AI-block attribution needs the display name
+            // and photo so that the sharer's own messages render with the correct identity.
+            self.own_profile_info = Some(incoming_sharer_info.clone());
         }
 
         for viewer in participants.viewers {
             if !viewer.is_present {
-                if let Some(viewer) = self.present_viewers.remove(&viewer.info.id) {
-                    self.chosen_colors.remove(&viewer.color);
-                }
+                self.present_viewers.remove(&viewer.info.id);
                 self.absent_viewers.insert(
                     viewer.info.id.clone(),
                     AbsentViewer {
@@ -536,9 +540,7 @@ impl PresenceManager {
             }
 
             let info = viewer.info;
-            // Only update role + profile info for ourselves; color assignment is
-            // deferred to after the viewer loop so that other participants' color
-            // assignments are not shifted by where self appears in the list.
+            // Update role + profile info for ourselves but skip adding to present_viewers.
             if info.id == self.id {
                 self.role = Some(viewer.role);
                 // Snapshot our own profile info for attribution lookups
@@ -555,9 +557,9 @@ impl PresenceManager {
                 continue;
             };
 
-            // Otherwise, pick an available color and add them.
-            let color = get_available_color(&self.chosen_colors);
-            self.chosen_colors.insert(color);
+            // Assign a deterministic color derived from the participant's ID so that
+            // every client independently arrives at the same color for the same participant.
+            let color = color_for_participant_id(&info.id);
 
             let new_viewer = Participant {
                 info,
@@ -569,16 +571,6 @@ impl PresenceManager {
                 participant_image_loading_futures.push(future);
             }
             latest_participants.push(new_viewer);
-        }
-
-        // Assign ourselves a color after all other viewers have been processed so that
-        // their assignments are not shifted by where self appears in the participant list.
-        // The color is inserted into `chosen_colors` to prevent future participants from
-        // being assigned the same one.
-        if self.own_profile_info.is_some() && self.own_color.is_none() {
-            let color = get_available_color(&self.chosen_colors);
-            self.chosen_colors.insert(color);
-            self.own_color = Some(color);
         }
 
         // Spawn a future that waits for all the new profile images to be loaded into memory.

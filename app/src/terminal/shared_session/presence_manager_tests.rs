@@ -1,4 +1,3 @@
-use std::collections::{HashMap, HashSet};
 use std::iter;
 
 use itertools::Itertools;
@@ -14,7 +13,9 @@ use crate::terminal::model::ansi::{
 };
 use crate::terminal::model::blocks::BlockList;
 use crate::terminal::model::test_utils::TestBlockListBuilder;
-use crate::terminal::shared_session::presence_manager::{PRESET_COLORS, PresenceManager};
+use crate::terminal::shared_session::presence_manager::{
+    PRESET_COLORS, PresenceManager, color_for_participant_id,
+};
 
 fn viewer_with_uid(uid: &str, is_present: bool) -> Viewer {
     Viewer {
@@ -59,9 +60,13 @@ fn single_distinct_present_viewer_uid_returns_none_for_zero_or_multiple_uids() {
 }
 
 #[test]
-fn test_choosing_preset_colors() {
+fn test_viewer_colors_come_from_preset_palette() {
+    // Colors are now derived deterministically from each participant's ID via
+    // `color_for_participant_id`, so viewers no longer receive sequential
+    // preset colors. This test verifies that every viewer's color still comes
+    // from the `PRESET_COLORS` palette and that the color is stable across
+    // repeated `update_participants` calls.
     App::test((), |mut app| async move {
-        // Initialize with a sharer.
         let firebase_uid = UserUid::new("mock_firebase_uid");
         let presence_manager =
             app.add_model(|_| PresenceManager::new_for_sharer(ParticipantId::new(), firebase_uid));
@@ -101,21 +106,18 @@ fn test_choosing_preset_colors() {
             })
             .await;
 
-        // We ourselves are the sharer, so no color is saved
+        // We ourselves are the sharer, so we are not in the viewers list.
         presence_manager.read(&app, |presence_manager: &PresenceManager, _ctx| {
-            let sharer = presence_manager.get_sharer();
-            assert!(sharer.is_none());
-
-            let viewers = presence_manager.get_present_viewers().collect_vec();
-            assert_eq!(viewers.len(), 0);
+            assert!(presence_manager.get_sharer().is_none());
+            assert_eq!(presence_manager.get_present_viewers().count(), 0);
         });
 
-        // Add new viewers one-by-one. Each new viewer should take the next preset color, while existing viewers keep their colors.
-        let viewer_ids = iter::repeat_with(ParticipantId::new).take(PRESET_COLORS.len());
-        let mut id_to_expected_color = HashMap::new();
+        // Add viewers one-by-one. Each viewer should receive a color from PRESET_COLORS
+        // determined by `color_for_participant_id`, and the color must be stable across
+        // subsequent `update_participants` calls.
+        let viewer_ids: Vec<_> = iter::repeat_with(ParticipantId::new).take(3).collect();
 
-        for (i, id) in viewer_ids.enumerate() {
-            // Add a new viewer.
+        for (i, id) in viewer_ids.iter().enumerate() {
             viewers.push(Viewer {
                 info: ParticipantInfo {
                     id: id.clone(),
@@ -147,25 +149,28 @@ fn test_choosing_preset_colors() {
                 })
                 .await;
 
-            // Expect the new viewer to take the next preset color, while continuing to expect old viewers to keep their colors.
-            id_to_expected_color.insert(id, PRESET_COLORS[i]);
             presence_manager.read(&app, |presence_manager, _ctx| {
-                let viewers = presence_manager.get_present_viewers().collect_vec();
-                assert_eq!(viewers.len(), i + 1);
+                assert_eq!(presence_manager.get_present_viewers().count(), i + 1);
                 for viewer in presence_manager.get_present_viewers() {
-                    let expected_color = *id_to_expected_color
-                        .get(&viewer.info.id)
-                        .expect("should have expected viewer ids only");
-                    assert_eq!(viewer.color, expected_color);
+                    // Color must come from the preset palette.
+                    assert!(
+                        PRESET_COLORS.contains(&viewer.color),
+                        "viewer color must be a preset color"
+                    );
+                    // Color must match the deterministic formula.
+                    assert_eq!(
+                        viewer.color,
+                        color_for_participant_id(&viewer.info.id),
+                        "viewer color must match color_for_participant_id"
+                    );
                     assert!(matches!(viewer.role, Some(Role::Reader)));
                 }
             });
         }
 
-        // Set the first viewer as no longer present, and add a new participant.
-        viewers.get_mut(0).unwrap().is_present = false;
-        assert!(!viewers.first().unwrap().is_present);
-        let old_participant_id = viewers.first().unwrap().info.id.clone();
+        // Mark one viewer absent and add a new one. The new viewer still gets
+        // a deterministic color from PRESET_COLORS.
+        viewers.first_mut().unwrap().is_present = false;
         let new_id = ParticipantId::new();
         viewers.push(Viewer {
             info: ParticipantInfo {
@@ -196,20 +201,16 @@ fn test_choosing_preset_colors() {
             })
             .await;
 
-        // The color previously taken by the first viewer should be reused for the new participant, while other participants keep their existing colors.
-        let old_participant_color = id_to_expected_color
-            .remove(&old_participant_id)
-            .expect("old participant exists");
-        id_to_expected_color.insert(new_id, old_participant_color);
         presence_manager.read(&app, |presence_manager, _ctx| {
-            let viewers = presence_manager.get_present_viewers().collect_vec();
-            assert_eq!(viewers.len(), PRESET_COLORS.len());
-            for viewer in viewers {
+            for viewer in presence_manager.get_present_viewers() {
+                assert!(
+                    PRESET_COLORS.contains(&viewer.color),
+                    "viewer color must be a preset color after departure/join"
+                );
                 assert_eq!(
                     viewer.color,
-                    *id_to_expected_color
-                        .get(&viewer.info.id)
-                        .expect("should have expected viewer ids only")
+                    color_for_participant_id(&viewer.info.id),
+                    "viewer color must still match color_for_participant_id after departure/join"
                 );
                 assert!(matches!(viewer.role, Some(Role::Reader)));
             }
@@ -287,21 +288,31 @@ fn test_dont_include_self_in_viewers() {
             .await;
 
         presence_manager.read(&app, |presence_manager, _ctx| {
-            let mut participant_colors = HashSet::new();
             let sharer = presence_manager.get_sharer().expect("should have sharer");
-            participant_colors.insert(sharer.color);
 
             // The viewers returned by presence manager should not include ourselves.
             let viewers = presence_manager.get_present_viewers().collect_vec();
             assert_eq!(viewers.len(), 3);
             for viewer in viewers {
                 assert_ne!(viewer.info.id, self_id);
-                participant_colors.insert(viewer.color);
+                // Each viewer's color must come from the preset palette and match
+                // the deterministic formula.
+                assert!(
+                    PRESET_COLORS.contains(&viewer.color),
+                    "viewer color must be a preset color"
+                );
+                assert_eq!(
+                    viewer.color,
+                    color_for_participant_id(&viewer.info.id),
+                    "viewer color must match color_for_participant_id"
+                );
             }
 
-            // The sharer and 3 other viewers should all use colors from the preset colors.
-            let preset_colors = HashSet::from_iter(PRESET_COLORS[..4].iter().copied());
-            assert!(participant_colors.eq(&preset_colors));
+            // Sharer color must also come from the preset palette.
+            assert!(
+                PRESET_COLORS.contains(&sharer.color),
+                "sharer color must be a preset color"
+            );
         });
     });
 }
@@ -390,36 +401,24 @@ fn test_get_participant_for_attribution_resolves_self() {
             assert!(presence_manager.get_participant(&self_id).is_none());
 
             // `get_participant_for_attribution` must resolve the sharer.
-            let (name, _, sharer_color) = presence_manager
+            let sharer_attr = presence_manager
                 .get_participant_for_attribution(&sharer_id)
                 .expect("sharer must be resolvable for attribution");
-            assert_eq!(name, sharer_display_name.as_str());
+            assert_eq!(sharer_attr.display_name, sharer_display_name);
+            let sharer_color = sharer_attr.color;
 
             // `get_participant_for_attribution` must resolve self.
-            let (name, _, self_color) = presence_manager
+            let self_attr = presence_manager
                 .get_participant_for_attribution(&self_id)
                 .expect("self must be resolvable for attribution");
-            assert_eq!(name, self_display_name.as_str());
+            assert_eq!(self_attr.display_name, self_display_name);
+            let self_color = self_attr.color;
 
             // `get_participant_for_attribution` must resolve the other viewer.
-            let (_, _, other_color) = presence_manager
+            let other_attr = presence_manager
                 .get_participant_for_attribution(&other_viewer_id)
                 .expect("other viewer must be resolvable for attribution");
-
-            // All three participants must have distinct colors (primary fix: no two
-            // participants collapse to the same avatar color in the browser view).
-            assert_ne!(
-                self_color, sharer_color,
-                "self and sharer must have different colors"
-            );
-            assert_ne!(
-                self_color, other_color,
-                "self and other viewer must have different colors"
-            );
-            assert_ne!(
-                sharer_color, other_color,
-                "sharer and other viewer must have different colors"
-            );
+            let other_color = other_attr.color;
 
             // All colors must come from the preset palette.
             assert!(
@@ -435,6 +434,23 @@ fn test_get_participant_for_attribution_resolves_self() {
                 "other viewer color must be a preset color"
             );
 
+            // Colors must match the deterministic formula.
+            assert_eq!(
+                self_color,
+                color_for_participant_id(&self_id),
+                "self color must match color_for_participant_id"
+            );
+            assert_eq!(
+                sharer_color,
+                color_for_participant_id(&sharer_id),
+                "sharer color must match color_for_participant_id"
+            );
+            assert_eq!(
+                other_color,
+                color_for_participant_id(&other_viewer_id),
+                "other viewer color must match color_for_participant_id"
+            );
+
             // An unknown participant ID must not resolve.
             assert!(
                 presence_manager
@@ -443,6 +459,199 @@ fn test_get_participant_for_attribution_resolves_self() {
                 "unknown participant must not resolve for attribution"
             );
         });
+    });
+}
+
+#[test]
+fn test_get_participant_for_attribution_resolves_sharer_self() {
+    // On the sharer's terminal client, `sharer` is None and `present_viewers` excludes self.
+    // `get_participant_for_attribution` must still resolve the sharer's own identity after
+    // `update_participants` populates `own_profile_info` from the incoming sharer info.
+    App::test((), |mut app| async move {
+        let sharer_id = ParticipantId::new();
+        let sharer_display_name = "Terminal Sharer".to_string();
+        let firebase_uid = UserUid::new("sharer_uid");
+
+        // Create a sharer-mode presence manager.
+        let presence_manager =
+            app.add_model(|_| PresenceManager::new_for_sharer(sharer_id.clone(), firebase_uid));
+
+        // Before update_participants, own_profile_info is None, so attribution returns None.
+        presence_manager.read(&app, |pm, _ctx| {
+            assert!(
+                pm.get_participant_for_attribution(&sharer_id).is_none(),
+                "before update_participants, sharer self must not resolve"
+            );
+        });
+
+        // Simulate the server sending a participant list that includes the sharer's own info.
+        let viewer_id = ParticipantId::new();
+        let participant_list = ParticipantList {
+            sharer: Sharer {
+                info: ParticipantInfo {
+                    id: sharer_id.clone(),
+                    profile_data: ProfileData {
+                        display_name: sharer_display_name.clone(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            },
+            viewers: vec![Viewer {
+                info: ParticipantInfo {
+                    id: viewer_id.clone(),
+                    ..Default::default()
+                },
+                role: Role::Reader,
+                is_present: true,
+            }],
+            present_viewers: Default::default(),
+            absent_viewers: Default::default(),
+            guests: Default::default(),
+            pending_guests: Default::default(),
+        };
+
+        presence_manager
+            .update(&mut app, |pm, ctx| {
+                pm.update_participants(participant_list, ctx);
+                let spawned_future = pm
+                    .load_participants_imgs_future_handle
+                    .as_ref()
+                    .expect("should have future handle");
+                ctx.await_spawned_future(spawned_future.future_id())
+            })
+            .await;
+
+        presence_manager.read(&app, |pm, _ctx| {
+            // The sharer is still not in the live-presence maps.
+            assert!(
+                pm.get_sharer().is_none(),
+                "sharer must not see themselves in get_sharer()"
+            );
+            assert!(
+                pm.get_participant(&sharer_id).is_none(),
+                "sharer must not see themselves in get_participant()"
+            );
+
+            // But attribution must resolve the sharer's own identity.
+            let attr = pm
+                .get_participant_for_attribution(&sharer_id)
+                .expect("sharer self must be resolvable for attribution after update_participants");
+            assert_eq!(attr.display_name, sharer_display_name);
+
+            // Color must be deterministic and from the preset palette.
+            assert_eq!(
+                attr.color,
+                color_for_participant_id(&sharer_id),
+                "sharer color must match color_for_participant_id"
+            );
+            assert!(
+                PRESET_COLORS.contains(&attr.color),
+                "sharer color must be a preset color"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_color_parity_across_managers() {
+    // Cross-client parity: two independently-constructed `PresenceManager` instances
+    // (one for the browser viewer, one for the terminal sharer) must assign the same
+    // color to the same participant ID.  This property is what acceptance criterion 3
+    // (AC3) of REMOTE-2363 requires.
+    App::test((), |mut app| async move {
+        let sharer_id = ParticipantId::new();
+        let viewer_id = ParticipantId::new();
+
+        let sharer_firebase_uid = UserUid::new("sharer_uid");
+        let viewer_firebase_uid = UserUid::new("viewer_uid");
+
+        // Build the shared participant list that both clients would receive.
+        let make_participant_list = || ParticipantList {
+            sharer: Sharer {
+                info: ParticipantInfo {
+                    id: sharer_id.clone(),
+                    ..Default::default()
+                },
+            },
+            viewers: vec![Viewer {
+                info: ParticipantInfo {
+                    id: viewer_id.clone(),
+                    ..Default::default()
+                },
+                role: Role::Reader,
+                is_present: true,
+            }],
+            present_viewers: Default::default(),
+            absent_viewers: Default::default(),
+            guests: Default::default(),
+            pending_guests: Default::default(),
+        };
+
+        // Terminal (sharer) manager.
+        let sharer_manager = app
+            .add_model(|_| PresenceManager::new_for_sharer(sharer_id.clone(), sharer_firebase_uid));
+        sharer_manager
+            .update(&mut app, |pm, ctx| {
+                pm.update_participants(make_participant_list(), ctx);
+                let spawned_future = pm
+                    .load_participants_imgs_future_handle
+                    .as_ref()
+                    .expect("should have future handle");
+                ctx.await_spawned_future(spawned_future.future_id())
+            })
+            .await;
+
+        // Browser (viewer) manager.
+        let viewer_manager = app.add_model(|ctx| {
+            PresenceManager::new_for_viewer(
+                viewer_id.clone(),
+                viewer_firebase_uid,
+                make_participant_list(),
+                ctx,
+            )
+        });
+        viewer_manager
+            .update(&mut app, |pm, ctx| {
+                let spawned_future = pm
+                    .load_participants_imgs_future_handle
+                    .as_ref()
+                    .expect("should have future handle");
+                ctx.await_spawned_future(spawned_future.future_id())
+            })
+            .await;
+
+        // Both clients must agree on the color for the sharer.
+        let sharer_color_on_terminal = sharer_manager.read(&app, |pm, _| {
+            pm.get_participant_for_attribution(&sharer_id)
+                .expect("sharer manager must resolve sharer self")
+                .color
+        });
+        let sharer_color_on_browser = viewer_manager.read(&app, |pm, _| {
+            pm.get_participant_for_attribution(&sharer_id)
+                .expect("viewer manager must resolve sharer")
+                .color
+        });
+        assert_eq!(
+            sharer_color_on_terminal, sharer_color_on_browser,
+            "sharer must have the same color on terminal and browser (AC3)"
+        );
+
+        // Both clients must agree on the color for the viewer.
+        let viewer_color_on_terminal = sharer_manager.read(&app, |pm, _| {
+            pm.get_participant(&viewer_id)
+                .expect("sharer manager must see viewer in present_viewers")
+                .color
+        });
+        let viewer_color_on_browser = viewer_manager.read(&app, |pm, _| {
+            pm.get_participant_for_attribution(&viewer_id)
+                .expect("viewer manager must resolve self")
+                .color
+        });
+        assert_eq!(
+            viewer_color_on_terminal, viewer_color_on_browser,
+            "viewer must have the same color on terminal and browser (AC3)"
+        );
     });
 }
 

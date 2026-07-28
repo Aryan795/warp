@@ -975,14 +975,10 @@ impl View for AIBlock {
                                 view.shared_session_presence_manager().and_then(move |pm| {
                                     pm.as_ref(app)
                                         .get_participant_for_attribution(&participant_id)
-                                        .map(|(display_name, photo_url, color)| {
+                                        .map(|attr| {
                                             // Get the display info from the participant
                                             // who sent this query.
-                                            (
-                                                display_name.to_owned(),
-                                                photo_url.map(|s| s.to_owned()),
-                                                Some(color),
-                                            )
+                                            (attr.display_name, attr.photo_url, Some(attr.color))
                                         })
                                 })
                             })
