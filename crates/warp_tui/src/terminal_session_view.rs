@@ -430,7 +430,7 @@ enum FooterSegment {
 impl FooterSegment {
     fn separator_to(&self, next: &Self) -> &'static str {
         match (self, next) {
-            (Self::ShellMode | Self::Model(_), Self::WorkingDirectory(_)) => " ",
+            (Self::ShellMode, Self::WorkingDirectory(_)) => " ",
             (Self::WorkingDirectory(_), Self::GitBranch(_)) => " ↬ ",
             (Self::ActiveIndicator(_), Self::ActiveIndicator(_)) => " • ",
             (
