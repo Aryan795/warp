@@ -543,6 +543,59 @@ fn shrink_reflow_disabled() {
     assert_eq!(row[1], cell('2'));
 }
 
+/// Regression test for APP-5010: soft-wrapped primary content in an active
+/// FullGridClearBehavior::Clear session (CLI-agent TUI) must reflow when the
+/// pane grows wider, just as it does in a normal primary block.
+///
+/// Before the fix, `resize_storage` called `grid.resize(false, ...)` (no
+/// reflow) for all FullGridClear active sessions, leaving WRAPLINE flags at
+/// the old column position and producing the large empty right margin the
+/// reporter observed after widening.
+#[test]
+fn grow_reflow_full_grid_clear_behavior() {
+    let mut grid = GridHandler::new_for_test(2, 2);
+    // Input "123 " which wraps at 2 cols:
+    //   row 0: "12" (WRAPLINE), row 1: "3 " (WRAPLINE on the space)
+    grid.input_at_cursor("123 ");
+    grid.enable_full_grid_clear_behavior();
+
+    // Grow to 3 cols — the two soft-wrapped rows should merge.
+    grid.resize(SizeInfo::new_without_font_metrics(2, 3));
+
+    assert_eq!(grid.total_rows(), 2);
+
+    // Row 0 should contain "123" (still soft-wrapped because " " continues
+    // on the next row).
+    let row = grid.row(0).expect("row should exist");
+    assert_eq!(row.len(), 3);
+    assert_eq!(row[0], cell('1'));
+    assert_eq!(row[1], cell('2'));
+    assert_eq!(row[2], wrap_cell('3'));
+
+    // Row 1 should contain the trailing space.
+    let row = grid.row(1).expect("row should exist");
+    assert_eq!(row.len(), 3);
+    assert_eq!(row[0], cell(' '));
+    assert_eq!(row[1], Cell::default());
+    assert_eq!(row[2], Cell::default());
+}
+
+/// Complementary to `grow_reflow_full_grid_clear_behavior`: verifies that
+/// column *shrink* in an active FullGridClearBehavior::Clear session still does
+/// NOT reflow and does NOT push rows to flat_storage scrollback, preserving the
+/// GH #9838 invariant (no old TUI frames shoved into scrollback on resize).
+#[test]
+fn shrink_no_reflow_full_grid_clear_behavior_keeps_visible_rows_in_place() {
+    let mut grid = GridHandler::new_for_test_with_scroll_limit(1, 5, 100);
+    grid.input_at_cursor("12345");
+    grid.enable_full_grid_clear_behavior();
+
+    grid.resize(SizeInfo::new_without_font_metrics(1, 2));
+
+    // Visible rows must NOT be pushed to flat_storage scrollback.
+    assert_eq!(grid.history_size(), 0);
+}
+
 #[test]
 fn grow_can_move_max_cursor_column_left() {
     // Starting Grid
