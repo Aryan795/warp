@@ -306,6 +306,146 @@ fn test_dont_include_self_in_viewers() {
     });
 }
 
+#[test]
+fn test_get_participant_for_attribution_resolves_self() {
+    // Regression test for REMOTE-2363: the browser's shared-session view showed the
+    // same avatar/color for every message because `get_participant` excluded the local
+    // user (self), so viewer-initiated exchanges always fell back to the theme accent.
+    // `get_participant_for_attribution` must resolve the viewer's own identity so that
+    // each participant's messages render with distinct, per-author colors.
+    App::test((), |mut app| async move {
+        let self_id = ParticipantId::new();
+        let self_display_name = "Browser Viewer".to_string();
+        let self_firebase_uid = UserUid::new("self_uid");
+
+        let sharer_id = ParticipantId::new();
+        let sharer_display_name = "Terminal Sharer".to_string();
+        let sharer = Sharer {
+            info: ParticipantInfo {
+                id: sharer_id.clone(),
+                profile_data: ProfileData {
+                    display_name: sharer_display_name.clone(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        };
+
+        // The viewer list includes self as the first entry (as the server would send it)
+        // followed by one other viewer.
+        let other_viewer_id = ParticipantId::new();
+        let viewers = vec![
+            Viewer {
+                info: ParticipantInfo {
+                    id: self_id.clone(),
+                    profile_data: ProfileData {
+                        display_name: self_display_name.clone(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                role: Role::Reader,
+                is_present: true,
+            },
+            Viewer {
+                info: ParticipantInfo {
+                    id: other_viewer_id.clone(),
+                    ..Default::default()
+                },
+                role: Role::Reader,
+                is_present: true,
+            },
+        ];
+
+        let participant_list = ParticipantList {
+            sharer,
+            viewers,
+            present_viewers: Default::default(),
+            absent_viewers: Default::default(),
+            guests: Default::default(),
+            pending_guests: Default::default(),
+        };
+
+        let presence_manager = app.add_model(|ctx| {
+            PresenceManager::new_for_viewer(
+                self_id.clone(),
+                self_firebase_uid,
+                participant_list,
+                ctx,
+            )
+        });
+
+        presence_manager
+            .update(&mut app, |presence_manager, ctx| {
+                let spawned_future = presence_manager
+                    .load_participants_imgs_future_handle
+                    .as_ref()
+                    .expect("should have future handle");
+                ctx.await_spawned_future(spawned_future.future_id())
+            })
+            .await;
+
+        presence_manager.read(&app, |presence_manager, _ctx| {
+            // Self must NOT appear in present_viewers (live-presence exclusion is preserved).
+            assert!(presence_manager.get_participant(&self_id).is_none());
+
+            // `get_participant_for_attribution` must resolve the sharer.
+            let (name, _, sharer_color) = presence_manager
+                .get_participant_for_attribution(&sharer_id)
+                .expect("sharer must be resolvable for attribution");
+            assert_eq!(name, sharer_display_name.as_str());
+
+            // `get_participant_for_attribution` must resolve self.
+            let (name, _, self_color) = presence_manager
+                .get_participant_for_attribution(&self_id)
+                .expect("self must be resolvable for attribution");
+            assert_eq!(name, self_display_name.as_str());
+
+            // `get_participant_for_attribution` must resolve the other viewer.
+            let (_, _, other_color) = presence_manager
+                .get_participant_for_attribution(&other_viewer_id)
+                .expect("other viewer must be resolvable for attribution");
+
+            // All three participants must have distinct colors (primary fix: no two
+            // participants collapse to the same avatar color in the browser view).
+            assert_ne!(
+                self_color, sharer_color,
+                "self and sharer must have different colors"
+            );
+            assert_ne!(
+                self_color, other_color,
+                "self and other viewer must have different colors"
+            );
+            assert_ne!(
+                sharer_color, other_color,
+                "sharer and other viewer must have different colors"
+            );
+
+            // All colors must come from the preset palette.
+            assert!(
+                PRESET_COLORS.contains(&self_color),
+                "self color must be a preset color"
+            );
+            assert!(
+                PRESET_COLORS.contains(&sharer_color),
+                "sharer color must be a preset color"
+            );
+            assert!(
+                PRESET_COLORS.contains(&other_color),
+                "other viewer color must be a preset color"
+            );
+
+            // An unknown participant ID must not resolve.
+            assert!(
+                presence_manager
+                    .get_participant_for_attribution(&ParticipantId::new())
+                    .is_none(),
+                "unknown participant must not resolve for attribution"
+            );
+        });
+    });
+}
+
 fn block_list_for_test(max_block_index: usize) -> BlockList {
     let mut block_list = TestBlockListBuilder::new().build();
 
