@@ -3499,6 +3499,9 @@ type SimpleIntegrationsOutput implements Response {
 
 union SimpleIntegrationsResult = SimpleIntegrationsOutput | UserFacingError
 
+# NOTE: These types are hand-edited to match the server-side deleteSimpleIntegration mutation.
+# When the warp-server PR for deleteSimpleIntegration lands, regenerate this schema from
+# the server to replace this section and keep it in sync.
 input DeleteSimpleIntegrationInput {
   integrationType: String!
 }

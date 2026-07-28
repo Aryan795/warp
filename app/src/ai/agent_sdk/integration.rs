@@ -133,6 +133,7 @@ impl ResolvedIntegrationConfig {
             Ok(EnvironmentChoice::None) => None,
             Ok(EnvironmentChoice::Environment { id, .. }) => Some(id),
             Err(ResolveConfigurationError::Canceled) => {
+                eprintln!("Integration creation canceled.");
                 ctx.terminate_app(TerminationMode::ForceTerminate, None);
                 return None;
             }
@@ -409,7 +410,7 @@ impl IntegrationCommandRunner {
                                  Settings → Agents → Oz → Revoke access), use \
                                  `oz integration reconnect {integration_type}` to re-authorize."
                             );
-                            ctx.terminate_app(TerminationMode::ForceTerminate, None);
+                            ctx.terminate_app(TerminationMode::ForceTerminate, Some(Err(err)));
                         } else {
                             ctx.terminate_app(
                                 TerminationMode::ForceTerminate,
