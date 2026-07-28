@@ -3065,6 +3065,7 @@ type RootMutation {
   createManagedSecret(input: CreateManagedSecretInput!, requestContext: RequestContext!): CreateManagedSecretResult!
   createNotebook(input: CreateNotebookInput!, requestContext: RequestContext!): CreateNotebookResult!
   createSimpleIntegration(input: CreateSimpleIntegrationInput!, requestContext: RequestContext!): CreateSimpleIntegrationResult!
+  deleteSimpleIntegration(input: DeleteSimpleIntegrationInput!, requestContext: RequestContext!): DeleteSimpleIntegrationResult!
   createTeam(input: CreateTeamInput!, requestContext: RequestContext!): CreateTeamResult!
   createWorkflow(input: CreateWorkflowInput!, requestContext: RequestContext!): CreateWorkflowResult!
   deleteConversation(input: DeleteConversationInput!, requestContext: RequestContext!): DeleteConversationResult!
@@ -3497,6 +3498,17 @@ type SimpleIntegrationsOutput implements Response {
 }
 
 union SimpleIntegrationsResult = SimpleIntegrationsOutput | UserFacingError
+
+input DeleteSimpleIntegrationInput {
+  integrationType: String!
+}
+
+type DeleteSimpleIntegrationOutput implements Response {
+  responseContext: ResponseContext!
+  success: Boolean!
+}
+
+union DeleteSimpleIntegrationResult = DeleteSimpleIntegrationOutput | UserFacingError
 
 """A return type for a SINGLE action and when it occurred."""
 type SingleAction {

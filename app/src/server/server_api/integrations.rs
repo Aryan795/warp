@@ -7,6 +7,10 @@ use warp_graphql::mutations::create_simple_integration::{
     CreateSimpleIntegration, CreateSimpleIntegrationOutput, CreateSimpleIntegrationResult,
     CreateSimpleIntegrationVariables, SimpleIntegrationConfig,
 };
+use warp_graphql::mutations::delete_simple_integration::{
+    DeleteSimpleIntegration, DeleteSimpleIntegrationInput, DeleteSimpleIntegrationResult,
+    DeleteSimpleIntegrationVariables,
+};
 use warp_graphql::queries::get_integrations_using_environment::{
     GetIntegrationsUsingEnvironment, GetIntegrationsUsingEnvironmentInput,
     GetIntegrationsUsingEnvironmentOutput, GetIntegrationsUsingEnvironmentResult,
@@ -108,6 +112,17 @@ pub trait IntegrationsClient: 'static + IntegrationsClientBounds {
     /// * `Ok(OauthConnectTxStatus)` - The current status of the transaction
     /// * `Err` - If the transaction is not found or polling fails
     async fn poll_oauth_connect_status(&self, tx_id: String) -> Result<OauthConnectTxStatus>;
+
+    /// Deletes a simple integration and disconnects its OAuth connection on the server.
+    ///
+    /// Use this before reconnecting when the provider has revoked Oz's access
+    /// (e.g. from Linear Settings → Agents → Oz → Revoke access). After this
+    /// call succeeds, `create_or_update_simple_integration` with `is_update=false`
+    /// will trigger a fresh OAuth install flow.
+    ///
+    /// # Arguments
+    /// * `integration_type` - The integration provider slug (e.g. "linear", "slack")
+    async fn delete_simple_integration(&self, integration_type: String) -> Result<()>;
 
     /// Gets the list of integration provider names that are using the specified environment.
     ///
@@ -249,6 +264,31 @@ impl IntegrationsClient for ServerApi {
             }
             SimpleIntegrationsResult::Unknown => {
                 Err(anyhow!("Unknown error while listing simple integrations"))
+            }
+        }
+    }
+
+    async fn delete_simple_integration(&self, integration_type: String) -> Result<()> {
+        let variables = DeleteSimpleIntegrationVariables {
+            request_context: get_request_context(),
+            input: DeleteSimpleIntegrationInput { integration_type },
+        };
+
+        let operation = DeleteSimpleIntegration::build(variables);
+        let response = self.send_graphql_request(operation, None).await?;
+        match response.delete_simple_integration {
+            DeleteSimpleIntegrationResult::DeleteSimpleIntegrationOutput(output) => {
+                if output.success {
+                    Ok(())
+                } else {
+                    Err(anyhow!("Failed to delete integration"))
+                }
+            }
+            DeleteSimpleIntegrationResult::UserFacingError(error) => {
+                Err(anyhow!(get_user_facing_error_message(error)))
+            }
+            DeleteSimpleIntegrationResult::Unknown => {
+                Err(anyhow!("Unknown error while deleting integration"))
             }
         }
     }

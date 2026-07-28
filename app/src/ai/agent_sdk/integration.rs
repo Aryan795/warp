@@ -1,6 +1,8 @@
 use futures::future;
 use warp_cli::GlobalOptions;
-use warp_cli::integration::{CreateIntegrationArgs, IntegrationCommand, UpdateIntegrationArgs};
+use warp_cli::integration::{
+    CreateIntegrationArgs, IntegrationCommand, ReconnectIntegrationArgs, UpdateIntegrationArgs,
+};
 use warp_cli::provider::ProviderType;
 use warp_graphql::mutations::create_simple_integration::CreateSimpleIntegrationOutput;
 use warp_graphql::queries::get_oauth_connect_tx_status::OauthConnectTxStatus;
@@ -28,6 +30,9 @@ pub fn run(
         }
         IntegrationCommand::List => {
             runner.update(ctx, |runner, ctx| runner.list(global_options, ctx));
+        }
+        IntegrationCommand::Reconnect(args) => {
+            runner.update(ctx, |runner, ctx| runner.reconnect(args, ctx));
         }
     }
     Ok(())
@@ -366,10 +371,24 @@ impl IntegrationCommandRunner {
                         }
                     }
                     Err(err) => {
-                        ctx.terminate_app(
-                            TerminationMode::ForceTerminate,
-                            Some(Err(err)),
-                        );
+                        // If the integration already exists (user previously set it up),
+                        // check if they may have revoked provider access and guide them to
+                        // reconnect instead of just failing.
+                        let err_msg = err.to_string();
+                        if err_msg.contains("Integration already exists") {
+                            eprintln!("error: {err_msg}");
+                            eprintln!(
+                                "If you revoked Oz's access from the provider (e.g. Linear \
+                                 Settings → Agents → Oz → Revoke access), use \
+                                 `oz integration reconnect {integration_type}` to re-authorize."
+                            );
+                            ctx.terminate_app(TerminationMode::ForceTerminate, None);
+                        } else {
+                            ctx.terminate_app(
+                                TerminationMode::ForceTerminate,
+                                Some(Err(err)),
+                            );
+                        }
                     }
                 }
             },
@@ -518,6 +537,167 @@ impl IntegrationCommandRunner {
                 enabled,
                 is_update,
                 1,
+            );
+        });
+    }
+
+    fn reconnect(&self, args: ReconnectIntegrationArgs, ctx: &mut ModelContext<Self>) {
+        let refresh_future = super::common::refresh_workspace_metadata(ctx);
+        let warp_drive_sync_future = super::common::refresh_warp_drive(ctx);
+        let setup_future = future::try_join(refresh_future, warp_drive_sync_future);
+
+        ctx.spawn(setup_future, move |_runner, setup_result, ctx| {
+            if let Err(err) = setup_result {
+                ctx.terminate_app(TerminationMode::ForceTerminate, Some(Err(err)));
+                return;
+            }
+
+            let integration_type = args.provider.slug();
+            let integrations_client = ServerApiProvider::as_ref(ctx).get_integrations_client();
+
+            let delete_integration_type = integration_type.clone();
+            let delete_future = async move {
+                integrations_client
+                    .delete_simple_integration(delete_integration_type)
+                    .await
+            };
+
+            eprintln!("Disconnecting existing {integration_type} integration...");
+
+            ctx.spawn(
+                delete_future,
+                move |runner, delete_result, ctx| match delete_result {
+                    Ok(()) => {
+                        eprintln!("Disconnected successfully. Starting authorization flow...");
+
+                        let loaded_file = match args.config_file.file.as_deref() {
+                            Some(path) => match super::config_file::load_config_file(path) {
+                                Ok(file) => Some(file),
+                                Err(err) => {
+                                    ctx.terminate_app(
+                                        TerminationMode::ForceTerminate,
+                                        Some(Err(err)),
+                                    );
+                                    return;
+                                }
+                            },
+                            None => None,
+                        };
+
+                        let cli_mcp_servers = match super::mcp_config::build_mcp_servers_from_specs(
+                            &args.mcp_specs,
+                        ) {
+                            Ok(mcp_servers) => mcp_servers,
+                            Err(err) => {
+                                ctx.terminate_app(TerminationMode::ForceTerminate, Some(Err(err)));
+                                return;
+                            }
+                        };
+
+                        let mut merged_config = super::config_file::merge_with_precedence(
+                            loaded_file.as_ref(),
+                            crate::ai::ambient_agents::AgentConfigSnapshot {
+                                name: None,
+                                environment_id: args.environment.environment.clone(),
+                                // TODO(REMOTE-1936): support a runner for integrations.
+                                runner_id: None,
+                                model_id: args.model.model.clone(),
+                                base_prompt: args.prompt.clone(),
+                                mcp_servers: cli_mcp_servers,
+                                profile_id: None,
+                                worker_host: args.worker_host.clone(),
+                                skill_spec: None,
+                                // TODO(QUALITY-295): Support computer use flag in integrations.
+                                computer_use_enabled: None,
+                                // TODO(REMOTE-1134): Support harness selection for integrations.
+                                harness: None,
+                                harness_auth_secrets: None,
+                                additional_source_repos: None,
+                            },
+                        );
+
+                        // We must wait until after workspace metadata is refreshed to check
+                        // available LLMs.
+                        let model_id = match merged_config
+                            .model_id
+                            .as_deref()
+                            .map(|model_id| {
+                                super::common::validate_agent_mode_base_model_id(model_id, ctx)
+                            })
+                            .transpose()
+                        {
+                            Ok(model_id) => model_id.map(|model_id| model_id.to_string()),
+                            Err(err) => {
+                                ctx.terminate_app(TerminationMode::ForceTerminate, Some(Err(err)));
+                                return;
+                            }
+                        };
+
+                        let base_prompt = merged_config.base_prompt.take();
+                        let worker_host = merged_config.worker_host.take();
+
+                        let mcp_servers_json = match merged_config.mcp_servers.take() {
+                            Some(map) => match serde_json::to_string(&map) {
+                                Ok(json) => Some(json),
+                                Err(err) => {
+                                    ctx.terminate_app(
+                                        TerminationMode::ForceTerminate,
+                                        Some(Err(err.into())),
+                                    );
+                                    return;
+                                }
+                            },
+                            None => None,
+                        };
+
+                        // If the user didn't explicitly request no environment, load environment
+                        // from the config.
+                        let mut environment_args = args.environment;
+                        if environment_args.environment.is_none()
+                            && !environment_args.no_environment
+                        {
+                            environment_args.environment = merged_config.environment_id.take();
+                        }
+
+                        let environment_uid =
+                            match EnvironmentChoice::resolve_for_create(environment_args, ctx) {
+                                Ok(EnvironmentChoice::None) => {
+                                    eprintln!("Reconnecting integration without an environment.");
+                                    None
+                                }
+                                Ok(EnvironmentChoice::Environment { id, .. }) => {
+                                    eprintln!("Reconnecting integration with environment {id}.");
+                                    Some(id)
+                                }
+                                Err(ResolveConfigurationError::Canceled) => {
+                                    eprintln!("Integration reconnect canceled.");
+                                    ctx.terminate_app(TerminationMode::ForceTerminate, None);
+                                    return;
+                                }
+                                Err(err) => {
+                                    super::report_fatal_error(anyhow::anyhow!(err), ctx);
+                                    return;
+                                }
+                            };
+
+                        runner.start_create_or_update_flow(
+                            ctx,
+                            integration_type,
+                            environment_uid,
+                            base_prompt,
+                            model_id,
+                            mcp_servers_json,
+                            None,
+                            worker_host,
+                            true,  // enabled
+                            false, // is_update: treat as fresh create after disconnect
+                            1,
+                        );
+                    }
+                    Err(err) => {
+                        ctx.terminate_app(TerminationMode::ForceTerminate, Some(Err(err)));
+                    }
+                },
             );
         });
     }

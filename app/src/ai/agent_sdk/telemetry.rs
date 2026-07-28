@@ -101,6 +101,8 @@ pub(super) enum CliTelemetryEvent {
     IntegrationUpdate,
     /// Executing `warp integration list`
     IntegrationList,
+    /// Executing `warp integration reconnect`
+    IntegrationReconnect,
     /// Executing `warp artifact upload`
     ArtifactUpload,
     /// Executing `warp artifact get`
@@ -223,6 +225,7 @@ impl TelemetryEvent for CliTelemetryEvent {
             CliTelemetryEvent::IntegrationCreate => None,
             CliTelemetryEvent::IntegrationUpdate => None,
             CliTelemetryEvent::IntegrationList => None,
+            CliTelemetryEvent::IntegrationReconnect => None,
             CliTelemetryEvent::ArtifactUpload => None,
             CliTelemetryEvent::ArtifactGet => None,
             CliTelemetryEvent::ArtifactDownload => None,
@@ -343,6 +346,9 @@ impl TelemetryEventDesc for CliTelemetryEventDiscriminants {
             CliTelemetryEventDiscriminants::IntegrationCreate => "CLI.Execute.Integration.Create",
             CliTelemetryEventDiscriminants::IntegrationUpdate => "CLI.Execute.Integration.Update",
             CliTelemetryEventDiscriminants::IntegrationList => "CLI.Execute.Integration.List",
+            CliTelemetryEventDiscriminants::IntegrationReconnect => {
+                "CLI.Execute.Integration.Reconnect"
+            }
             CliTelemetryEventDiscriminants::ArtifactUpload => "CLI.Execute.Artifact.Upload",
             CliTelemetryEventDiscriminants::ArtifactGet => "CLI.Execute.Artifact.Get",
             CliTelemetryEventDiscriminants::ArtifactDownload => "CLI.Execute.Artifact.Download",
@@ -482,6 +488,9 @@ impl TelemetryEventDesc for CliTelemetryEventDiscriminants {
             }
             CliTelemetryEventDiscriminants::IntegrationList => {
                 "Listed integrations from the Warp CLI"
+            }
+            CliTelemetryEventDiscriminants::IntegrationReconnect => {
+                "Reconnected an integration from the Warp CLI"
             }
             CliTelemetryEventDiscriminants::ArtifactUpload => {
                 "Uploaded an artifact from the Warp CLI"

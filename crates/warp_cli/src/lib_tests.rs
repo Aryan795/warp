@@ -2783,3 +2783,89 @@ fn report_external_reference_missing_reference_type_fails() {
         "missing --reference-type should fail to parse"
     );
 }
+
+#[test]
+fn integration_reconnect_parses_provider() {
+    let args = Args::try_parse_from(["warp", "integration", "reconnect", "linear"]).unwrap();
+
+    let Some(Command::CommandLine(boxed_cmd)) = args.command else {
+        panic!("Expected `warp integration reconnect` command");
+    };
+    let CliCommand::Integration(IntegrationCommand::Reconnect(args)) = boxed_cmd.as_ref() else {
+        panic!("Expected `warp integration reconnect` command");
+    };
+
+    assert_eq!(args.provider.slug(), "linear");
+}
+
+#[test]
+fn integration_reconnect_accepts_environment() {
+    let args = Args::try_parse_from([
+        "warp",
+        "integration",
+        "reconnect",
+        "linear",
+        "--environment",
+        "env-123",
+    ])
+    .unwrap();
+
+    let Some(Command::CommandLine(boxed_cmd)) = args.command else {
+        panic!("Expected `warp integration reconnect` command");
+    };
+    let CliCommand::Integration(IntegrationCommand::Reconnect(args)) = boxed_cmd.as_ref() else {
+        panic!("Expected `warp integration reconnect` command");
+    };
+
+    assert_eq!(args.environment.environment.as_deref(), Some("env-123"));
+}
+
+#[test]
+fn integration_reconnect_accepts_model() {
+    let args = Args::try_parse_from([
+        "warp",
+        "integration",
+        "reconnect",
+        "linear",
+        "--model",
+        "gpt-4o",
+    ])
+    .unwrap();
+
+    let Some(Command::CommandLine(boxed_cmd)) = args.command else {
+        panic!("Expected `warp integration reconnect` command");
+    };
+    let CliCommand::Integration(IntegrationCommand::Reconnect(args)) = boxed_cmd.as_ref() else {
+        panic!("Expected `warp integration reconnect` command");
+    };
+
+    assert_eq!(args.model.model.as_deref(), Some("gpt-4o"));
+}
+
+#[test]
+fn integration_reconnect_accepts_prompt() {
+    let args = Args::try_parse_from([
+        "warp",
+        "integration",
+        "reconnect",
+        "linear",
+        "--prompt",
+        "Focus on Rust PRs",
+    ])
+    .unwrap();
+
+    let Some(Command::CommandLine(boxed_cmd)) = args.command else {
+        panic!("Expected `warp integration reconnect` command");
+    };
+    let CliCommand::Integration(IntegrationCommand::Reconnect(args)) = boxed_cmd.as_ref() else {
+        panic!("Expected `warp integration reconnect` command");
+    };
+
+    assert_eq!(args.prompt.as_deref(), Some("Focus on Rust PRs"));
+}
+
+#[test]
+fn integration_reconnect_missing_provider_fails() {
+    let result = Args::try_parse_from(["warp", "integration", "reconnect"]);
+    assert!(result.is_err(), "missing provider should fail to parse");
+}

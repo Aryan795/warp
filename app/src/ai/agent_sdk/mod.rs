@@ -1811,6 +1811,7 @@ fn command_to_telemetry_event(command: &CliCommand) -> CliTelemetryEvent {
             IntegrationCommand::Create(_) => CliTelemetryEvent::IntegrationCreate,
             IntegrationCommand::Update(_) => CliTelemetryEvent::IntegrationUpdate,
             IntegrationCommand::List => CliTelemetryEvent::IntegrationList,
+            IntegrationCommand::Reconnect(_) => CliTelemetryEvent::IntegrationReconnect,
         },
         CliCommand::Schedule(c) => match c.subcommand() {
             None | Some(ScheduleSubcommand::Create(_)) => CliTelemetryEvent::ScheduleCreate,

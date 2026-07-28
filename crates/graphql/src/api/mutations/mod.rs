@@ -18,6 +18,7 @@ pub mod delete_invite_link_domain_restriction;
 pub mod delete_managed_secret;
 pub mod delete_object;
 pub mod delete_runner;
+pub mod delete_simple_integration;
 pub mod delete_team_invite;
 pub mod empty_trash;
 pub mod expire_api_key;
