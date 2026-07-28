@@ -637,7 +637,11 @@ fn mouse_accept_row_n_accepts_that_row_not_keyboard_selection() {
             ),
             other => panic!(
                 "expected SlashCommand for row 2, got accepted = {}",
-                if other.is_some() { "Some(non-SlashCommand)" } else { "None" }
+                if other.is_some() {
+                    "Some(non-SlashCommand)"
+                } else {
+                    "None"
+                }
             ),
         }
     });
