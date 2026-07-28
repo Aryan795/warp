@@ -101,12 +101,21 @@ uuid.workspace = true
 # path). macOS/Windows have no such backend feature and stay text-only.
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 arboard = { workspace = true }
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security_Cryptography",
+  "Win32_Security_WinTrust",
+  "Win32_Storage_FileSystem",
+] }
+zip = { version = "2.1", default-features = false, features = ["deflate"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 arboard = { workspace = true, features = ["wayland-data-control"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+zip = { version = "2.1", default-features = false, features = ["deflate"] }
 # `test-util` exposes `Appearance::mock()`, used to register the `Appearance`
 # singleton that the editor-backed TUI input view depends on in tests.
 warp_core = { workspace = true, features = ["test-util"] }

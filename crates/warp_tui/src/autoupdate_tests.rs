@@ -1,3 +1,4 @@
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 #[allow(clippy::disallowed_types)]
 use std::process::Child;
@@ -9,14 +10,15 @@ use instant::Instant;
 use warp_core::channel::Channel;
 
 use super::{
-    CURRENT_LINK_NAME, InstallLayout, InstallLock, LOCK_FILE_NAME, LOCK_OWNER_FILE_NAME,
-    VERSION_LEASES_DIR_NAME, VersionDirState, VersionLease, create_unique_staging_dir_with,
-    download_endpoint, is_complete_version_dir, version_dir_state,
+    CURRENT_POINTER_NAME, InstallLayout, InstallLock, LOCK_FILE_NAME, VERSION_LEASES_DIR_NAME,
+    VersionDirState, VersionLease, create_unique_staging_dir_with, download_endpoint,
+    extract_windows_archive, is_complete_version_dir, is_safe_version_component, point_current_at,
+    prune_old_versions, version_dir_state,
 };
 #[cfg(unix)]
-use super::{
-    StagedUpdate, finalize_staged_version, install_update, point_current_at, prune_old_versions,
-};
+use super::{LOCK_OWNER_FILE_NAME, StagedUpdate, finalize_staged_version, install_update};
+#[cfg(windows)]
+use super::{PREVIOUS_POINTER_NAME, verify_authenticode, windows_assets_dir};
 
 const BINARY_NAME: &str = "warp-tui-dev";
 const HELPER_MODE_ENV: &str = "WARP_TUI_AUTOUPDATE_HELPER_MODE";
@@ -32,11 +34,164 @@ fn temp_root(name: &str) -> tempfile::TempDir {
         .unwrap()
 }
 
+fn write_zip(path: &Path, entries: &[(&str, &str)]) {
+    let file = fs::File::create(path).unwrap();
+    let mut archive = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    for (name, contents) in entries {
+        archive.start_file(*name, options).unwrap();
+        archive.write_all(contents.as_bytes()).unwrap();
+    }
+    archive.finish().unwrap();
+}
+
+#[test]
+fn version_directory_names_are_single_safe_components() {
+    for valid in ["v0.2026.07.28.12.00.dev_00", "preview-1", "A"] {
+        assert!(is_safe_version_component(valid), "{valid}");
+    }
+    for invalid in [
+        "",
+        ".",
+        "..",
+        "v1..dev",
+        "../v1",
+        "nested/v1",
+        "nested\\v1",
+        "version:stream",
+        "CON",
+        "trailing.",
+        "contains space",
+    ] {
+        assert!(!is_safe_version_component(invalid), "{invalid}");
+    }
+}
+
+#[test]
+fn extracts_exact_windows_archive_shape() {
+    let root = temp_root("windows-zip");
+    let archive_path = root.path().join("warp-tui.zip");
+    write_zip(
+        &archive_path,
+        &[
+            (BINARY_NAME, "binary"),
+            ("conpty.dll", "conpty"),
+            ("x64/OpenConsole.exe", "console"),
+            ("resources/marker", "resource"),
+            ("resources/nested/value", "nested"),
+        ],
+    );
+    let payload_dir = root.path().join("payload with spaces");
+
+    extract_windows_archive(&archive_path, &payload_dir, BINARY_NAME, "x64").unwrap();
+
+    assert_eq!(
+        fs::read_to_string(payload_dir.join(BINARY_NAME)).unwrap(),
+        "binary"
+    );
+    assert_eq!(
+        fs::read_to_string(payload_dir.join("x64/OpenConsole.exe")).unwrap(),
+        "console"
+    );
+    assert_eq!(
+        fs::read_to_string(payload_dir.join("resources/nested/value")).unwrap(),
+        "nested"
+    );
+}
+
+#[test]
+fn rejects_invalid_windows_archives() {
+    let cases: &[(&str, &[(&str, &str)])] = &[
+        (
+            "missing-pty",
+            &[
+                (BINARY_NAME, "binary"),
+                ("x64/OpenConsole.exe", "console"),
+                ("resources/marker", "resource"),
+            ],
+        ),
+        (
+            "unexpected",
+            &[
+                (BINARY_NAME, "binary"),
+                ("conpty.dll", "conpty"),
+                ("x64/OpenConsole.exe", "console"),
+                ("resources/marker", "resource"),
+                ("d3dcompiler_47.dll", "unexpected"),
+            ],
+        ),
+        (
+            "traversal",
+            &[
+                (BINARY_NAME, "binary"),
+                ("conpty.dll", "conpty"),
+                ("x64/OpenConsole.exe", "console"),
+                ("resources/../escape", "escape"),
+            ],
+        ),
+        (
+            "case-collision",
+            &[
+                (BINARY_NAME, "binary"),
+                ("conpty.dll", "conpty"),
+                ("x64/OpenConsole.exe", "console"),
+                ("resources/marker", "resource"),
+                ("resources/MARKER", "collision"),
+            ],
+        ),
+        (
+            "alternate-data-stream",
+            &[
+                (BINARY_NAME, "binary"),
+                ("conpty.dll", "conpty"),
+                ("x64/OpenConsole.exe", "console"),
+                ("resources/marker:payload", "stream"),
+            ],
+        ),
+        (
+            "reserved-name",
+            &[
+                (BINARY_NAME, "binary"),
+                ("conpty.dll", "conpty"),
+                ("x64/OpenConsole.exe", "console"),
+                ("resources/CON.txt", "reserved"),
+            ],
+        ),
+        (
+            "trailing-dot",
+            &[
+                (BINARY_NAME, "binary"),
+                ("conpty.dll", "conpty"),
+                ("x64/OpenConsole.exe", "console"),
+                ("resources/marker.", "normalized"),
+            ],
+        ),
+    ];
+
+    for (name, entries) in cases {
+        let root = temp_root(name);
+        let archive_path = root.path().join("warp-tui.zip");
+        write_zip(&archive_path, entries);
+
+        let error = extract_windows_archive(
+            &archive_path,
+            &root.path().join("payload"),
+            BINARY_NAME,
+            "x64",
+        )
+        .unwrap_err();
+
+        assert!(!format!("{error:#}").is_empty(), "{name}");
+        assert!(!root.path().join("escape").exists(), "{name}");
+    }
+}
+
 fn layout(root: &Path, running_version: &str) -> InstallLayout {
     InstallLayout {
         root: root.to_path_buf(),
         versions_dir: root.join("versions"),
-        current_link: root.join(CURRENT_LINK_NAME),
+        current_pointer: root.join(CURRENT_POINTER_NAME),
         running_version_dir: root.join("versions").join(running_version),
         binary_name: BINARY_NAME.to_owned(),
     }
@@ -45,9 +200,42 @@ fn layout(root: &Path, running_version: &str) -> InstallLayout {
 fn create_complete_version(root: &Path, version: &str, contents: &str) -> PathBuf {
     let version_dir = root.join("versions").join(version);
     fs::create_dir_all(version_dir.join("resources")).unwrap();
+    #[cfg(not(windows))]
     fs::write(version_dir.join(BINARY_NAME), contents).unwrap();
+    #[cfg(windows)]
+    {
+        let signed_executable = signed_windows_executable();
+        let assets_dir = version_dir.join(windows_assets_dir());
+        fs::create_dir_all(&assets_dir).unwrap();
+        fs::copy(&signed_executable, version_dir.join(BINARY_NAME)).unwrap();
+        fs::copy(&signed_executable, version_dir.join("conpty.dll")).unwrap();
+        fs::copy(&signed_executable, assets_dir.join("OpenConsole.exe")).unwrap();
+    }
     fs::write(version_dir.join("resources").join("marker"), contents).unwrap();
     version_dir
+}
+
+#[cfg(windows)]
+fn signed_windows_executable() -> PathBuf {
+    let mut candidates = Vec::new();
+    for root in ["ProgramW6432", "ProgramFiles"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from)
+    {
+        candidates.push(root.join("PowerShell/7/pwsh.exe"));
+        candidates.push(root.join("dotnet/dotnet.exe"));
+    }
+    if let Some(system_root) = std::env::var_os("SystemRoot").map(PathBuf::from) {
+        candidates.push(system_root.join("System32/WindowsPowerShell/v1.0/powershell.exe"));
+    }
+
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.is_file() && verify_authenticode(candidate).is_ok())
+        .expect(
+            "Windows tests require an installed executable with an embedded Authenticode signature",
+        )
 }
 
 fn lease_path(root: &Path, version: &str) -> PathBuf {
@@ -104,7 +292,7 @@ fn detects_managed_install_layout() {
         Path::new("/home/user/.warp/tui/versions")
     );
     assert_eq!(
-        layout.current_link,
+        layout.current_pointer,
         Path::new("/home/user/.warp/tui/current")
     );
     assert_eq!(
@@ -163,6 +351,7 @@ fn complete_versions_require_real_binary_and_resources() {
         version_dir_state(&layout, &version_dir).unwrap(),
         VersionDirState::Invalid
     );
+    #[cfg(not(windows))]
     assert_eq!(
         fs::read_to_string(version_dir.join(BINARY_NAME)).unwrap(),
         "original"
@@ -265,7 +454,6 @@ fn completed_version_is_reused_and_invalid_version_is_not_replaced() {
     assert!(super::current_points_at(&layout, "A"));
 }
 
-#[cfg(unix)]
 #[test]
 fn live_versions_are_retained_and_reclaimed_after_exit() {
     let root = temp_root("gc");
@@ -306,7 +494,6 @@ fn live_versions_are_retained_and_reclaimed_after_exit() {
     assert!(root.path().join("versions/legacy").is_dir());
 }
 
-#[cfg(unix)]
 #[test]
 fn current_version_is_rechecked_before_gc_deletion() {
     let root = temp_root("gc-current");
@@ -347,6 +534,95 @@ fn startup_fails_closed_if_gc_wins_the_lease_race() {
     assert!(child.wait().unwrap().success());
 }
 
+#[cfg(windows)]
+#[test]
+fn authenticode_rejects_unsigned_files() {
+    verify_authenticode(&signed_windows_executable()).unwrap();
+
+    let root = temp_root("unsigned");
+    let unsigned = root.path().join("unsigned.exe");
+    fs::write(&unsigned, "unsigned").unwrap();
+    assert!(verify_authenticode(&unsigned).is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_activation_records_previous_version_atomically() {
+    let root = temp_root("windows-pointers");
+    let layout = layout(root.path(), "A");
+    create_complete_version(root.path(), "A", "A");
+    create_complete_version(root.path(), "B", "B");
+    fs::write(&layout.current_pointer, "A").unwrap();
+
+    point_current_at(&layout, "B").unwrap();
+
+    assert_eq!(fs::read_to_string(&layout.current_pointer).unwrap(), "B");
+    assert_eq!(
+        fs::read_to_string(root.path().join(PREVIOUS_POINTER_NAME)).unwrap(),
+        "A"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_gc_retains_rollback_version() {
+    let root = temp_root("windows-rollback-gc");
+    let layout = layout(root.path(), "C");
+    for version in ["A", "B", "C"] {
+        create_complete_version(root.path(), version, version);
+        fs::create_dir_all(root.path().join(VERSION_LEASES_DIR_NAME)).unwrap();
+        fs::write(lease_path(root.path(), version), "").unwrap();
+    }
+    fs::write(&layout.current_pointer, "C").unwrap();
+    fs::write(root.path().join(PREVIOUS_POINTER_NAME), "B").unwrap();
+
+    prune_old_versions(&layout, "C");
+
+    assert!(!root.path().join("versions/A").exists());
+    assert!(root.path().join("versions/B").exists());
+    assert!(root.path().join("versions/C").exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_install_lock_is_compatible_with_installer_file_sharing() {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    let root = temp_root("windows-install-lock");
+    let lock_path = root.path().join(LOCK_FILE_NAME);
+    let installer_lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .share_mode(0)
+        .open(&lock_path)
+        .unwrap();
+    assert!(InstallLock::acquire(root.path()).unwrap().is_none());
+    drop(installer_lock);
+
+    let updater_lock = InstallLock::acquire(root.path()).unwrap().unwrap();
+    assert!(lock_path.is_file());
+    assert!(
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(&lock_path)
+            .is_err()
+    );
+    drop(updater_lock);
+
+    assert!(lock_path.is_file());
+    let _installer_lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(0)
+        .open(&lock_path)
+        .unwrap();
+}
+
+#[cfg(unix)]
 #[test]
 fn directory_install_lock_is_cross_process_and_token_owned() {
     let root = temp_root("install-lock");
@@ -374,6 +650,7 @@ fn directory_install_lock_is_cross_process_and_token_owned() {
     assert!(root.path().join(LOCK_FILE_NAME).is_dir());
 }
 
+#[cfg(unix)]
 #[test]
 fn install_lock_migrates_stale_legacy_file_and_directory() {
     for representation in ["file", "directory"] {
@@ -399,6 +676,7 @@ fn install_lock_migrates_stale_legacy_file_and_directory() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn fresh_legacy_install_lock_is_contention() {
     let root = temp_root("fresh-legacy-lock");

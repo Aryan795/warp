@@ -16053,6 +16053,8 @@ dependencies = [
  "warp_util",
  "warpui",
  "warpui_core",
+ "windows 0.62.2",
+ "zip 2.4.2",
 ]
 
 [[package]]
