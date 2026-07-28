@@ -6,6 +6,9 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 
+use ai::agent::action_result::diff_application_failure::{
+    DiffApplicationFailure, DiffSearchBlockFailure, MAX_DIFF_MATCH_FAILURE_BYTES,
+};
 use ai::diff_validation::{
     AIRequestedCodeDiff, DiffDelta, DiffMatchFailures, DiffType, ParsedDiff, SearchAndReplace,
     V4AHunk, fuzzy_match_diffs, fuzzy_match_v4a_diffs,
@@ -185,7 +188,7 @@ where
                     auth_state,
                     RequestFileEditsTelemetryEvent::DiffMatchFailed(DiffMatchFailedEvent {
                         identifiers: ai_identifiers.clone(),
-                        failures: *match_failures,
+                        failures: match_failures.clone(),
                         passive_diff,
                     }),
                     background_executor
@@ -653,7 +656,7 @@ async fn apply_search_replace<F, Fut>(
                 );
                 result.errors.push(DiffApplicationError::UnmatchedDiffs {
                     file: file_path.clone(),
-                    match_failures: *failures,
+                    match_failures: failures.clone(),
                 });
             }
             result.diffs.push(fuzzy_match_diffs);
@@ -751,7 +754,7 @@ async fn apply_v4a_update<F, Fut>(
                 );
                 result.errors.push(DiffApplicationError::UnmatchedDiffs {
                     file: file_path.clone(),
-                    match_failures: *failures,
+                    match_failures: failures.clone(),
                 });
             }
             return;
@@ -813,11 +816,91 @@ async fn apply_v4a_update<F, Fut>(
             );
             result.errors.push(DiffApplicationError::UnmatchedDiffs {
                 file: file_path.clone(),
-                match_failures: *failures,
+                match_failures: failures.clone(),
             });
         }
         result.diffs.push(diffs);
     }
+}
+
+/// Maps one [`DiffApplicationError`] to one or more [`DiffApplicationFailure`] entries.
+///
+/// `UnmatchedDiffs` that carries both fuzzy failures and noop deltas produces a
+/// single `UnmatchedDiffs` failure (so that `render()` keeps the combined
+/// single-entry wording). When `ChangesAlreadyApplied` is emitted as a
+/// stand-alone entry it is distinct; the proto layer separately emits a
+/// `ChangesAlreadyApplied` failure alongside `UnmatchedDiffs` when the counts
+/// are non-zero (see `convert.rs`).
+pub(crate) fn error_to_failures(error: &DiffApplicationError) -> Vec<DiffApplicationFailure> {
+    match error {
+        DiffApplicationError::UnmatchedDiffs {
+            file,
+            match_failures,
+        } => {
+            vec![DiffApplicationFailure::UnmatchedDiffs {
+                file: file.clone(),
+                fuzzy_match_failure_count: match_failures.fuzzy_match_failures,
+                changes_already_applied_count: match_failures.noop_deltas,
+                search_block_failures: match_failures
+                    .search_block_failures
+                    .iter()
+                    .map(|b| {
+                        // Apply the byte cap; mark truncated if we trim the search text.
+                        let (search, truncated) = if b.search.len() > MAX_DIFF_MATCH_FAILURE_BYTES {
+                            // Round to a char boundary.
+                            let mut end = MAX_DIFF_MATCH_FAILURE_BYTES;
+                            while !b.search.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            (b.search[..end].to_owned(), true)
+                        } else {
+                            (b.search.clone(), false)
+                        };
+                        // We store the raw (untruncated) search text in DiffMatchFailure
+                        // so the cap can be applied here. DiffSearchBlockFailure is the
+                        // cap-applied version used for proto serialisation.
+                        let _ = truncated; // used below in the proto path; not needed in this struct
+                        DiffSearchBlockFailure {
+                            search,
+                            expected_range: b.expected_range.clone(),
+                        }
+                    })
+                    .collect(),
+            }]
+        }
+        DiffApplicationError::MissingFile { file } => {
+            vec![DiffApplicationFailure::MissingFile { file: file.clone() }]
+        }
+        DiffApplicationError::ReadFailed { file, .. } => {
+            vec![DiffApplicationFailure::ReadFailed { file: file.clone() }]
+        }
+        DiffApplicationError::AlreadyExists { file } => {
+            vec![DiffApplicationFailure::AlreadyExists { file: file.clone() }]
+        }
+        DiffApplicationError::MultipleFileCreation { file } => {
+            vec![DiffApplicationFailure::MultipleFileCreation { file: file.clone() }]
+        }
+        DiffApplicationError::MultipleFileRenames { file } => {
+            vec![DiffApplicationFailure::MultipleFileRenames { file: file.clone() }]
+        }
+        DiffApplicationError::MutatedDeletedFile { file } => {
+            vec![DiffApplicationFailure::MutatedDeletedFile { file: file.clone() }]
+        }
+        DiffApplicationError::EmptyDiff => {
+            vec![DiffApplicationFailure::NoDiffsApplicable]
+        }
+        DiffApplicationError::RemoteFileOperationsUnsupported => {
+            vec![DiffApplicationFailure::RemoteFileOperationsUnsupported]
+        }
+    }
+}
+
+/// Converts a list of [`DiffApplicationError`]s to a flat
+/// [`Vec<DiffApplicationFailure>`].
+pub(crate) fn errors_to_failures(
+    errors: &Vec1<DiffApplicationError>,
+) -> Vec<DiffApplicationFailure> {
+    errors.iter().flat_map(error_to_failures).collect()
 }
 
 #[cfg(test)]

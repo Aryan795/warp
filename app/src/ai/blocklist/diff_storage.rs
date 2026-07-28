@@ -34,6 +34,7 @@ use crate::ai::agent::{
 use crate::ai::blocklist::diff_types::{DiffSessionType, FileDiff};
 use crate::code::DiffResult;
 use crate::code::editor::compute_unified_diff;
+use ai::agent::action_result::diff_application_failure::DiffApplicationFailure;
 
 const APPLY_DIFF_RESULT_CONTEXT_LINES: usize = 10;
 
@@ -165,7 +166,7 @@ pub struct UpdatedFileState {
 
 /// Fails the whole edit when any file failed to save.
 fn save_failure_result(errors: &[Arc<FileSaveError>]) -> RequestFileEditsResult {
-    let error = errors
+    let message = errors
         .iter()
         .map(|error| match error.as_ref() {
             FileSaveError::IOError { error, path } => {
@@ -174,7 +175,9 @@ fn save_failure_result(errors: &[Arc<FileSaveError>]) -> RequestFileEditsResult 
             other => other.to_string(),
         })
         .join("\n");
-    RequestFileEditsResult::DiffApplicationFailed { error }
+    RequestFileEditsResult::DiffApplicationFailed {
+        failures: vec![DiffApplicationFailure::Opaque { message }],
+    }
 }
 
 /// Combines per-file report state and the combined result diff into one
