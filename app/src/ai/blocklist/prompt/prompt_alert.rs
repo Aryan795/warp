@@ -175,14 +175,7 @@ impl PromptAlertView {
         app: &AppContext,
     ) -> PromptAlertState {
         if availability.available {
-            // Capability-only availability (no credit source) is refined with
-            // local key knowledge by `has_any_ai_remaining`: the server cannot
-            // see locally stored API keys, so without a usable BYO path the
-            // user is effectively out of credits.
-            if AIRequestUsageModel::as_ref(app).has_any_ai_remaining(app) {
-                return PromptAlertState::NoAlert;
-            }
-            return Self::out_of_credits_presentation(app);
+            return PromptAlertState::NoAlert;
         }
 
         match availability.denial_reason {
@@ -194,7 +187,15 @@ impl PromptAlertView {
             }
             AICreditDenialReason::None
             | AICreditDenialReason::OutOfCredits
-            | AICreditDenialReason::Unknown => Self::out_of_credits_presentation(app),
+            | AICreditDenialReason::Unknown => {
+                // An out-of-credits denial only means the server found no path
+                // it can see; a locally stored API key still permits requests,
+                // which `has_any_ai_remaining` accounts for.
+                if AIRequestUsageModel::as_ref(app).has_any_ai_remaining(app) {
+                    return PromptAlertState::NoAlert;
+                }
+                Self::out_of_credits_presentation(app)
+            }
         }
     }
 

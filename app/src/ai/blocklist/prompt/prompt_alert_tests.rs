@@ -128,21 +128,18 @@ fn test_legacy_fallback_used_before_first_server_response() {
 }
 
 #[test]
-fn test_capability_only_without_local_key_maps_to_out_of_credits() {
+fn test_server_managed_availability_maps_to_no_alert() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
-        // The server allows BYO by policy but found no credit source; with no
-        // locally stored key this is effectively out of credits.
+        // `available` with no credit source means a server-managed BYO path
+        // is configured — definite availability, no local key required.
         apply_server_availability(&mut app, AICreditAvailability::available_with_source(None));
-        assert_eq!(
-            determine_state(&mut app),
-            PromptAlertState::RequestLimitReached
-        );
+        assert_eq!(determine_state(&mut app), PromptAlertState::NoAlert);
     });
 }
 
 #[test]
-fn test_capability_only_with_local_key_maps_to_no_alert() {
+fn test_out_of_credits_with_local_key_maps_to_no_alert() {
     App::test((), |mut app| async move {
         let uid = WorkspaceUid::from(crate::server::ids::ServerId::from(1_i64));
         let mut workspace = Workspace::from_local_cache(uid, "Test Workspace".to_string(), None);
@@ -154,7 +151,12 @@ fn test_capability_only_with_local_key_maps_to_no_alert() {
             manager.set_openai_key(Some("test-key".to_string()), ctx);
         });
 
-        apply_server_availability(&mut app, AICreditAvailability::available_with_source(None));
+        // The server cannot see the locally stored key; the client refines
+        // its OUT_OF_CREDITS answer.
+        apply_server_availability(
+            &mut app,
+            AICreditAvailability::unavailable(AICreditDenialReason::OutOfCredits),
+        );
         assert_eq!(determine_state(&mut app), PromptAlertState::NoAlert);
     });
 }

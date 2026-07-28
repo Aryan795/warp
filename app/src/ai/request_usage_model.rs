@@ -15,7 +15,7 @@ use warpui::{AppContext, Entity, ModelContext, SingletonEntity};
 use crate::BlocklistAIHistoryModel;
 use crate::ai::agent::AIAgentExchangeId;
 use crate::ai::agent::conversation::AIConversationId;
-use crate::ai::credit_availability::AICreditAvailability;
+use crate::ai::credit_availability::{AICreditAvailability, AICreditDenialReason};
 use crate::auth::AuthStateProvider;
 use crate::pricing::PricingInfoModel;
 use crate::server::server_api::ai::AIClient;
@@ -527,36 +527,34 @@ impl AIRequestUsageModel {
         self.has_any_ai_remaining_from_local_state(ctx)
     }
 
-    /// Interprets the server-authoritative decision. Capability-only
-    /// availability (available with no credit source) means "no Warp credits,
-    /// but BYO inference is allowed by policy" — the server cannot see locally
-    /// stored API keys, so the client contributes that one fact and treats
-    /// capability-only availability without a usable BYO path as out of
-    /// credits.
+    /// Interprets the server-authoritative decision. `available` means the
+    /// server knows for a fact that requests can run (a Warp credit source or
+    /// a server-managed BYO path) and is trusted outright. An `OutOfCredits`
+    /// denial means the server found no path *it can see* — locally stored
+    /// API keys are request-level parameters invisible to it — so the client
+    /// contributes that one fact. Every other denial is a hard rejection that
+    /// local keys cannot bypass.
     fn server_availability_permits_ai(
         availability: AICreditAvailability,
         ctx: &AppContext,
     ) -> bool {
-        if !availability.available {
-            return false;
-        }
-        if availability.credit_source.is_some() {
+        if availability.available {
             return true;
         }
-        Self::has_usable_byo_inference_path(ctx)
+        matches!(
+            availability.denial_reason,
+            AICreditDenialReason::OutOfCredits
+        ) && Self::has_usable_byo_inference_path(ctx)
     }
 
     /// Whether a BYO inference path is actually usable from this client: a
     /// locally stored API key, custom endpoint, or connected Grok subscription
-    /// (when the BYOK policy allows it), or a team-managed custom LLM
-    /// configuration.
+    /// (when the BYOK policy allows it). Server-managed paths (team-managed
+    /// keys/endpoints, enterprise custom LLM) are already reflected in the
+    /// server's availability decision.
     fn has_usable_byo_inference_path(ctx: &AppContext) -> bool {
-        let has_byo_credentials = UserWorkspaces::as_ref(ctx).is_byo_api_key_enabled(ctx)
-            && ApiKeyManager::as_ref(ctx).has_any_key();
-        let has_team_custom_llm = UserWorkspaces::as_ref(ctx)
-            .current_team()
-            .is_some_and(|team| team.is_custom_llm_enabled());
-        has_byo_credentials || has_team_custom_llm
+        UserWorkspaces::as_ref(ctx).is_byo_api_key_enabled(ctx)
+            && ApiKeyManager::as_ref(ctx).has_any_key()
     }
 
     /// Legacy locally derived availability check. Returns `true` if the user
