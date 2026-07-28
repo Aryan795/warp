@@ -473,7 +473,7 @@ struct FooterSegments {
     ordered: Vec<FooterSegment>,
 }
 /// Builds the status row from resolved segments. Working directory follows a
-/// leading shell-mode or model label with a plain space; an immediately
+/// leading shell-mode label with a plain space; an immediately
 /// following branch uses the existing ` ↬ ` relationship marker. Items in
 /// different Figma groups use ` | `; other adjacent pairs use ` • `. The first
 /// item never receives a separator.
