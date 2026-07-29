@@ -119,7 +119,7 @@ mod warpify_page;
 #[cfg(not(target_family = "wasm"))]
 pub(crate) use ai_page::cli_agent_settings_widget_id;
 pub(crate) use ai_page::custom_model_routers_widget_id;
-pub use billing_and_usage_page::{create_discount_badge, format_addon_premium_percent};
+pub use billing_and_usage_page::create_discount_badge;
 pub use code_page::CodeSettingsPageView;
 pub use features_page::FeaturesPageAction;
 pub use main_page::handle_experiment_change;

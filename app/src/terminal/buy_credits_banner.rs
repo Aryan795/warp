@@ -34,7 +34,7 @@ use crate::pricing::{PricingInfoModel, PricingInfoModelEvent};
 use crate::send_telemetry_from_ctx;
 use crate::server::ids::ServerId;
 use crate::server::telemetry::{OutOfCreditsBannerAction, TelemetryEvent};
-use crate::settings_view::{create_discount_badge, format_addon_premium_percent};
+use crate::settings_view::create_discount_badge;
 use crate::view_components::{Dropdown, DropdownAction};
 use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
 
@@ -297,11 +297,7 @@ impl BuyCreditsBanner {
         }
     }
 
-    fn render_auto_reload_checkbox(
-        &self,
-        premium_bps: i32,
-        appearance: &Appearance,
-    ) -> Box<dyn Element> {
+    fn render_auto_reload_checkbox(&self, appearance: &Appearance) -> Box<dyn Element> {
         let theme = appearance.theme();
         let check_color = theme.background().into_solid();
         let auto_reload_enabled = self.auto_reload_enabled;
@@ -336,16 +332,10 @@ impl BuyCreditsBanner {
             .map(|option| option.credits)
             .unwrap_or(0);
 
-        let mut tooltip_text = format!(
+        let tooltip_text = format!(
             "When enabled, auto reload will purchase {} credits when your credit balance gets low",
             selected_credits
         );
-        if premium_bps > 0 {
-            let percent = format_addon_premium_percent(premium_bps);
-            tooltip_text.push_str(&format!(
-                ". Auto-reload purchases include the {percent} Free plan surcharge"
-            ));
-        }
 
         // Create info icon with a custom sub_text_color & mouse cursor (i.e. as opposed to using IconWithTooltip)
         let ui_builder = appearance.ui_builder();
@@ -879,7 +869,7 @@ impl BuyCreditsBanner {
 
             if auto_reload_banner_toggle_ff {
                 children.push(
-                    Container::new(self.render_auto_reload_checkbox(premium_bps, appearance))
+                    Container::new(self.render_auto_reload_checkbox(appearance))
                         .with_margin_right(8.)
                         .finish(),
                 );

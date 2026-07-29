@@ -35,7 +35,7 @@ use super::billing_and_usage::usage_history_model::UsageHistoryModel;
 pub use super::billing_and_usage_page::BillingAndUsagePageEvent;
 use super::billing_and_usage_page::{
     BillingAndUsagePageAction, BillingUsageTab, CHECKOUT_PENDING_MESSAGE,
-    create_premium_surcharge_badge, format_addon_premium_percent, render_premium_surcharge_note,
+    render_premium_upgrade_savings_note,
 };
 use super::settings_page::{AdditionalInfo, render_customer_type_badge, render_info_icon};
 use crate::ai::AIRequestUsageModel;
@@ -1171,16 +1171,10 @@ impl BillingAndUsagePageV2View {
         let auto_reload_credit_amount = selected_credit_option
             .map(|o| format!("{} credits", o.credits.separate_with_commas()))
             .unwrap_or_else(|| "selected credit amount".to_string());
-        let mut auto_reload_tooltip_text = format!(
+        let auto_reload_tooltip_text = format!(
             "When any member on your team’s credit balance reaches 100 credits remaining, \
             automatically purchase {auto_reload_credit_amount}."
         );
-        if premium_bps > 0 {
-            let percent = format_addon_premium_percent(premium_bps);
-            auto_reload_tooltip_text.push_str(&format!(
-                " Auto-reload purchases include the {percent} Free plan surcharge."
-            ));
-        }
         let warning_text = if delinquent && has_admin_permissions {
             Some(ADDON_CREDITS_DELINQUENT_WARNING_STRING)
         } else if delinquent {
@@ -1600,7 +1594,7 @@ impl BillingAndUsagePageV2View {
             purchase_button = purchase_button.disable();
         }
         let purchase_button = purchase_button.finish();
-        let mut price_row = Flex::row()
+        let price_row = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_child(
                 Text::new_inline(state.price_label.clone(), appearance.ui_font_family(), 14.)
@@ -1608,16 +1602,6 @@ impl BillingAndUsagePageV2View {
                     .with_style(Properties::default().weight(Weight::Medium))
                     .finish(),
             );
-        if state.premium_bps > 0 {
-            price_row.add_child(
-                Container::new(create_premium_surcharge_badge(
-                    state.premium_bps,
-                    appearance,
-                ))
-                .with_margin_left(8.)
-                .finish(),
-            );
-        }
 
         let mut right_group = Flex::row().with_cross_axis_alignment(CrossAxisAlignment::Center);
         if state.has_admin_permissions {
@@ -1679,7 +1663,7 @@ impl BillingAndUsagePageV2View {
         let mut lower_children: Vec<Box<dyn Element>> = vec![lower_row.finish()];
 
         if state.premium_bps > 0 {
-            lower_children.push(render_premium_surcharge_note(
+            lower_children.push(render_premium_upgrade_savings_note(
                 team_uid,
                 state.premium_bps,
                 appearance,

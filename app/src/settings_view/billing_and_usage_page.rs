@@ -120,9 +120,9 @@ pub fn create_discount_badge(discount: u32, appearance: &Appearance) -> Box<dyn 
     .finish()
 }
 
-/// Formats an add-on credits price surcharge, expressed in basis points, as a
+/// Formats an add-on credits price premium, expressed in basis points, as a
 /// human-readable percentage (e.g. 1000 -> "10%").
-pub fn format_addon_premium_percent(premium_bps: i32) -> String {
+fn format_addon_premium_percent(premium_bps: i32) -> String {
     if premium_bps % 100 == 0 {
         format!("{}%", premium_bps / 100)
     } else {
@@ -130,40 +130,13 @@ pub fn format_addon_premium_percent(premium_bps: i32) -> String {
     }
 }
 
-/// Renders a "+10%"-style badge for plans that purchase add-on credits at a
-/// premium over list price.
-pub fn create_premium_surcharge_badge(
-    premium_bps: i32,
-    appearance: &Appearance,
-) -> Box<dyn Element> {
-    if premium_bps <= 0 {
-        return Empty::new().finish();
-    }
-
-    let theme = appearance.theme();
-    let bg_color: Fill = theme.terminal_colors().normal.yellow.into();
-
-    Container::new(
-        Text::new_inline(
-            format!("+{}", format_addon_premium_percent(premium_bps)),
-            appearance.ui_font_family(),
-            10.,
-        )
-        .with_color(theme.main_text_color(bg_color).into())
-        .finish(),
-    )
-    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
-    .with_background(bg_color)
-    .with_uniform_padding(4.)
-    .finish()
-}
-
 pub(crate) const CHECKOUT_PENDING_MESSAGE: &str =
     "Finish your purchase in the browser — credits will appear shortly.";
 
-/// Renders the note shown under the one-time purchase row for plans that pay
-/// a premium over list price, with an upgrade link to skip the surcharge.
-pub(crate) fn render_premium_surcharge_note(
+/// Renders the savings-framed upsell shown in the add-on credits panel for
+/// plans that purchase at a premium over list price, linking to the upgrade
+/// page.
+pub(crate) fn render_premium_upgrade_savings_note(
     team_uid: ServerId,
     premium_bps: i32,
     appearance: &Appearance,
@@ -171,11 +144,9 @@ pub(crate) fn render_premium_surcharge_note(
     let theme = appearance.theme();
     let percent = format_addon_premium_percent(premium_bps);
     let fragments = vec![
-        FormattedTextFragment::plain_text(format!(
-            "Prices include a {percent} Free plan surcharge. "
-        )),
+        FormattedTextFragment::plain_text(format!("Save {percent} on add-on credits by ")),
         FormattedTextFragment::hyperlink(
-            "Upgrade to skip the surcharge",
+            "upgrading to a Build plan",
             UserWorkspaces::upgrade_link_for_team(team_uid),
         ),
         FormattedTextFragment::plain_text("."),
@@ -1993,17 +1964,6 @@ impl BillingAndUsagePageView {
                 .finish()
         };
 
-        let mut auto_reload_description = format!(
-            "When enabled, auto reload will automatically purchase {auto_reload_amount} \
-            credits when your add-on credit balance reaches 100 credits remaining."
-        );
-        if premium_bps > 0 {
-            let percent = format_addon_premium_percent(premium_bps);
-            auto_reload_description.push_str(&format!(
-                " Auto-reload purchases include the {percent} Free plan surcharge."
-            ));
-        }
-
         let auto_reload_switch = Container::new(render_body_item::<BillingAndUsagePageAction>(
             "Auto reload".into(),
             None,
@@ -2011,7 +1971,10 @@ impl BillingAndUsagePageView {
             Default::default(),
             appearance,
             auto_reload_switch,
-            Some(auto_reload_description),
+            Some(format!(
+                "When enabled, auto reload will automatically purchase {auto_reload_amount} \
+                credits when your add-on credit balance reaches 100 credits remaining."
+            )),
         ))
         .with_padding_right(-TOGGLE_BUTTON_RIGHT_PADDING)
         .finish();
@@ -2124,20 +2087,12 @@ impl BillingAndUsagePageView {
 
         let buy_button = buy_button.finish();
 
-        let premium_surcharge_badge = if premium_bps > 0 {
-            Container::new(create_premium_surcharge_badge(premium_bps, appearance))
-                .with_margin_right(8.)
-                .finish()
-        } else {
-            Empty::new().finish()
-        };
-
         let mut buy_row = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_children([
                 Shrinkable::new(1., denominations).finish(),
                 Flex::row()
-                    .with_children([discount_badge, premium_surcharge_badge, rendered_price])
+                    .with_children([discount_badge, rendered_price])
                     .with_cross_axis_alignment(CrossAxisAlignment::Center)
                     .finish(),
             ]);
@@ -2145,7 +2100,7 @@ impl BillingAndUsagePageView {
         if auto_reload_enabled {
             card_content_upper.add_child(buy_row.finish());
             if premium_bps > 0 {
-                card_content_upper.add_child(render_premium_surcharge_note(
+                card_content_upper.add_child(render_premium_upgrade_savings_note(
                     team_uid,
                     premium_bps,
                     appearance,
@@ -2183,7 +2138,7 @@ impl BillingAndUsagePageView {
             ];
 
             if premium_bps > 0 {
-                card_content_lower_children.push(render_premium_surcharge_note(
+                card_content_lower_children.push(render_premium_upgrade_savings_note(
                     team_uid,
                     premium_bps,
                     appearance,

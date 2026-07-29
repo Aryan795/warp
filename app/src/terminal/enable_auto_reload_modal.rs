@@ -12,10 +12,7 @@ use warpui::elements::{
 use warpui::fonts::Weight;
 use warpui::ui_components::button::ButtonVariant;
 use warpui::ui_components::components::{Coords, UiComponent as _, UiComponentStyles};
-use warpui::{
-    AppContext, Element, Entity, SingletonEntity as _, View, ViewContext, ViewHandle,
-    WeakViewHandle,
-};
+use warpui::{AppContext, Element, Entity, SingletonEntity as _, View, ViewContext, ViewHandle};
 
 use crate::features::FeatureFlag;
 use crate::menu::MenuItemFields;
@@ -23,7 +20,7 @@ use crate::modal::{MODAL_PADDING, MODAL_WIDTH, Modal, ModalEvent};
 use crate::pricing::{PricingInfoModel, PricingInfoModelEvent};
 use crate::send_telemetry_from_ctx;
 use crate::server::telemetry::{AutoReloadModalAction, TelemetryEvent};
-use crate::settings_view::{create_discount_badge, format_addon_premium_percent};
+use crate::settings_view::create_discount_badge;
 use crate::ui_components::blended_colors;
 use crate::view_components::{Dropdown, DropdownAction, ToastFlavor};
 use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
@@ -38,7 +35,6 @@ struct MouseStates {
 
 /// The body content of the enable auto-reload modal
 pub struct EnableAutoReloadModalBody {
-    view_handle: WeakViewHandle<Self>,
     mouse_states: MouseStates,
     denomination_dropdown: ViewHandle<Dropdown<Action>>,
     addon_credits_options: Vec<AddonCreditsOption>,
@@ -139,7 +135,6 @@ impl EnableAutoReloadModalBody {
         });
 
         let mut me = Self {
-            view_handle: ctx.handle(),
             mouse_states: Default::default(),
             denomination_dropdown,
             addon_credits_options: Default::default(),
@@ -232,30 +227,19 @@ impl EnableAutoReloadModalBody {
         });
     }
 
-    fn render_content(&self, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
+    fn render_content(&self, appearance: &Appearance) -> Box<dyn Element> {
         let theme = appearance.theme();
-        let premium_bps = UserWorkspaces::as_ref(app)
-            .team_for_view_handle(&self.view_handle, app)
-            .map_or(0, |team| {
-                team.billing_metadata.addon_credits_price_premium_bps()
-            });
-        let mut explanation_fragments = vec![
+        let explanation_fragments = vec![
             FormattedTextFragment::plain_text("When enabled, "),
             FormattedTextFragment::bold("auto-reload"),
             FormattedTextFragment::plain_text(
                 " will automatically purchase your selected package when you run out. ",
             ),
+            FormattedTextFragment::hyperlink(
+                "Learn more",
+                "https://docs.warp.dev/support-and-community/plans-and-billing/add-on-credits#id-2.-enable-auto-reload",
+            ),
         ];
-        if premium_bps > 0 {
-            let percent = format_addon_premium_percent(premium_bps);
-            explanation_fragments.push(FormattedTextFragment::plain_text(format!(
-                "Auto-reload purchases include the {percent} Free plan surcharge. "
-            )));
-        }
-        explanation_fragments.push(FormattedTextFragment::hyperlink(
-            "Learn more",
-            "https://docs.warp.dev/support-and-community/plans-and-billing/add-on-credits#id-2.-enable-auto-reload",
-        ));
         let explanation_text = warpui::elements::FormattedTextElement::new(
             FormattedText::new([FormattedTextLine::Line(explanation_fragments)]),
             appearance.ui_font_size(),
@@ -374,7 +358,7 @@ impl View for EnableAutoReloadModalBody {
     fn render(&self, app: &AppContext) -> Box<dyn Element> {
         let appearance = Appearance::as_ref(app);
 
-        let content = Container::new(self.render_content(appearance, app))
+        let content = Container::new(self.render_content(appearance))
             .with_horizontal_padding(MODAL_PADDING)
             .with_margin_top(0.) // let the header padding handle the top margin
             .finish();
