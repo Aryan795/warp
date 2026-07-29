@@ -43,6 +43,7 @@ use crate::code::buffer_location::LocalOrRemotePath;
 #[cfg(feature = "local_fs")]
 use crate::pane_group::CodeSource;
 use crate::pane_group::Event::OpenConversationHistory;
+use crate::pane_group::child_agent::materialization::ChildPaneMaterializationMode;
 use crate::pane_group::child_agent::{
     ErrorChildAgentConversationRequest, create_error_child_agent_conversation,
 };
@@ -1425,7 +1426,12 @@ fn handle_terminal_view_event(
                 // shared-session viewer pane for the child so subsequent pill
                 // clicks land on a populated agent view rather than an empty
                 // cloud-mode shell.
-                group.ensure_shared_session_viewer_child_pane(*conversation_id, *session_id, ctx);
+                group.attach_child_session(
+                    *conversation_id,
+                    *session_id,
+                    ChildPaneMaterializationMode::Viewer,
+                    ctx,
+                );
             }
             Event::OpenChildAgentInNewTab { conversation_id } => {
                 // Pane group can't add tabs; forward to the workspace.
