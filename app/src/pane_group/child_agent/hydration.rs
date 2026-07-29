@@ -102,18 +102,41 @@ impl PaneGroup {
         if let Some(existing_pane_id) = self.child_agent_panes.get(&child_id).copied()
             && self.has_pane_id(existing_pane_id)
         {
+            log::info!(
+                "[orchestration-unified-debug] materialize idempotent-skip \
+                 child_conversation_id={child_id:?} mode={mode:?} \
+                 existing_pane_id={existing_pane_id:?}"
+            );
             return;
         }
 
         let task_id = child_conversation.task_id();
-        let materialization = task_id
+        let task_for_decision = task_id
             .and_then(|task_id| {
                 AgentConversationsModel::handle(ctx).update(ctx, |model, ctx| {
                     model.get_or_async_fetch_task_data(&task_id, ctx)
                 })
-            })
+            });
+        let materialization = task_for_decision
             .as_ref()
             .map(decide_child_pane_materialization);
+        log::info!(
+            "[orchestration-unified-debug] materialize entry \
+             child_conversation_id={child_id:?} mode={mode:?} task_id={task_id:?} \
+             task_found={} materialization={materialization:?}",
+            task_for_decision.is_some()
+        );
+        if let Some(ref task) = task_for_decision {
+            log::info!(
+                "[orchestration-unified-debug] materialize task-detail \
+                 child_conversation_id={child_id:?} task_id={} state={:?} \
+                 live_session_state={:?} has_conversation_token={}",
+                task.task_id,
+                task.state,
+                task.active_live_session_state(),
+                task.conversation_id().is_some()
+            );
+        }
 
         match mode {
             ChildPaneMaterializationMode::Owner => {
@@ -164,6 +187,17 @@ impl PaneGroup {
             return;
         };
 
+        log::info!(
+            "[orchestration-unified-debug] materialize_owner match-arm \
+             child_conversation_id={child_id:?} pane_id={pane_id:?} \
+             arm={}",
+            match &materialization {
+                Some(crate::pane_group::child_agent::materialization::ChildPaneMaterialization::AttachLive { .. }) => "AttachLive",
+                Some(crate::pane_group::child_agent::materialization::ChildPaneMaterialization::LoadTranscript { .. }) => "LoadTranscript",
+                Some(crate::pane_group::child_agent::materialization::ChildPaneMaterialization::Pending) => "Pending",
+                None => "None(task-missing)",
+            }
+        );
         match materialization {
             Some(ChildPaneMaterialization::AttachLive { session_id }) => {
                 self.attach_child_session(
@@ -186,6 +220,11 @@ impl PaneGroup {
                 // Pending: the bare ambient shell stays un-materialized; the
                 // tracker re-drives on the next lifecycle / session-linked
                 // signal (an async task fetch was already kicked above).
+                log::info!(
+                    "[orchestration-unified-debug] materialize_owner Pending: \
+                     child_conversation_id={child_id:?} pane_id={pane_id:?}; \
+                     waiting for tracker re-drive"
+                );
             }
         }
     }
@@ -252,6 +291,14 @@ impl PaneGroup {
         mode: ChildPaneMaterializationMode,
         ctx: &mut ViewContext<Self>,
     ) {
+        log::info!(
+            "[orchestration-unified-debug] attach_child_session entry \
+             child_conversation_id={child_id:?} mode={mode:?} \
+             pane_in_map={}",
+            self.child_agent_panes
+                .get(&child_id)
+                .is_some_and(|p| self.has_pane_id(*p))
+        );
         match mode {
             ChildPaneMaterializationMode::Owner => {
                 let Some(pane_id) = self
@@ -260,16 +307,31 @@ impl PaneGroup {
                     .copied()
                     .filter(|pane_id| self.has_pane_id(*pane_id))
                 else {
+                    log::warn!(
+                        "[orchestration-unified-debug] attach_child_session owner: no pane found \
+                         for child_conversation_id={child_id:?}"
+                    );
                     return;
                 };
-                let Some(task_id) = BlocklistAIHistoryModel::as_ref(ctx)
+                let task_id_opt = BlocklistAIHistoryModel::as_ref(ctx)
                     .conversation(&child_id)
-                    .and_then(|conversation| conversation.task_id())
-                else {
+                    .and_then(|conversation| conversation.task_id());
+                log::info!(
+                    "[orchestration-unified-debug] attach_child_session owner: \
+                     child_conversation_id={child_id:?} pane_id={pane_id:?} \
+                     task_id={task_id_opt:?}"
+                );
+                let Some(task_id) = task_id_opt else {
                     return;
                 };
                 self.apply_existing_ambient_task_to_pane(pane_id, child_id, task_id, ctx);
-                self.attach_execution_session_to_ambient_pane(pane_id, session_id, ctx);
+                let attached =
+                    self.attach_execution_session_to_ambient_pane(pane_id, session_id, ctx);
+                log::info!(
+                    "[orchestration-unified-debug] attach_child_session owner: \
+                     attach_execution_session_to_ambient_pane result={attached} \
+                     child_conversation_id={child_id:?} pane_id={pane_id:?}"
+                );
             }
             ChildPaneMaterializationMode::Viewer => {
                 self.attach_viewer_child_session(child_id, session_id, ctx);
