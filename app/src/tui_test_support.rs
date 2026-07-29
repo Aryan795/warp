@@ -43,7 +43,11 @@ use crate::server::voice_transcriber::ServerVoiceTranscriber;
 use crate::settings::manager::SettingsManager;
 use crate::settings::{AISettings, PrivacySettings, init_and_register_user_preferences};
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
+use crate::terminal::model::session::active_session::ActiveSession;
+use crate::terminal::model::session::{SessionInfo, Sessions};
+use crate::terminal::model_events::ModelEventDispatcher;
 use crate::terminal::session_settings::SessionSettings;
+use crate::terminal::{History, HistoryEntry};
 use crate::user_config::WarpConfig;
 #[cfg(feature = "voice_input")]
 use crate::voice::transcriber::VoiceTranscriber;
@@ -72,6 +76,75 @@ pub fn blocklist_ai_history_model_with_queries(queries: Vec<String>) -> Blocklis
         .collect();
 
     BlocklistAIHistoryModel::new(persisted_queries, Vec::new(), &[])
+}
+
+/// Registers the settings singletons the shared input model needs when a test
+/// flips the input config (entering agent mode records usage on `AISettings`).
+pub fn register_tui_input_mode_settings(app: &mut warpui::App) {
+    if app.read(|ctx| ctx.has_singleton_model::<AISettings>()) {
+        return;
+    }
+    app.update(warp_core::telemetry::testing::MockTelemetryContextProvider::register);
+    app.update(init_and_register_user_preferences);
+    app.add_singleton_model(|_| SettingsManager::default());
+    app.update(AISettings::register_and_subscribe_to_events);
+}
+
+/// Registers shell-command-history plumbing for TUI history-menu tests.
+///
+/// Seeds a `History` singleton for one bootstrapped test session —
+/// `history_file_commands` model other-session (histfile) entries and
+/// `session_commands` are `(command, is_agent_executed)` pairs executed in the
+/// session, both oldest-first — and wires the `Sessions`/dispatcher/
+/// `ActiveSession` chain so the returned handle resolves that session as
+/// active.
+pub fn register_tui_command_history_session(
+    app: &mut warpui::App,
+    history_file_commands: Vec<String>,
+    session_commands: Vec<(String, bool)>,
+) -> warpui::ModelHandle<ActiveSession> {
+    app.update(|ctx| {
+        let session_info = SessionInfo::new_for_test();
+        let session_id = session_info.session_id;
+        let sessions = ctx.add_model(|_| Sessions::new_for_test());
+        sessions.update(ctx, |sessions, _| {
+            sessions.register_session_for_test(session_info);
+        });
+        let session = sessions
+            .as_ref(ctx)
+            .get(session_id)
+            .expect("the test session was just registered");
+        let (_tx, model_events_rx) = async_channel::unbounded();
+        let dispatcher =
+            ctx.add_model(|ctx| ModelEventDispatcher::new(model_events_rx, sessions.clone(), ctx));
+        dispatcher.update(ctx, |dispatcher, _| {
+            dispatcher.set_active_session_id(session_id);
+        });
+        let active_session =
+            ctx.add_model(|ctx| ActiveSession::new(sessions.clone(), dispatcher, ctx));
+
+        if !ctx.has_singleton_model::<History>() {
+            ctx.add_singleton_model(|_| History::default());
+        }
+        History::handle(ctx).update(ctx, |history, ctx| {
+            history.init_session_with_history_file_commands_for_test(
+                &session,
+                history_file_commands,
+                ctx,
+            );
+            let entries = session_commands
+                .into_iter()
+                .map(|(command, is_agent_executed)| {
+                    let mut entry = HistoryEntry::command_only(command);
+                    entry.session_id = Some(session_id);
+                    entry.is_agent_executed = is_agent_executed;
+                    entry
+                })
+                .collect();
+            history.append_commands(session_id, entries);
+        });
+        active_session
+    })
 }
 
 /// Queues an action as the active confirmation request for a TUI view test.

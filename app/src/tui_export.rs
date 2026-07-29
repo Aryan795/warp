@@ -220,9 +220,10 @@ pub use crate::terminal::terminal_manager::BlockSpacing;
 pub use crate::terminal::view::blocklist_filter::should_show_task_in_blocklist;
 pub use crate::terminal::view::{ExecuteCommandEvent, WAKEUP_THROTTLE_PERIOD};
 pub use crate::terminal::{
-    BlockPadding, PtyIntent, PtyIntentEvent, ShellLaunchData, SizeInfo, SizeUpdate,
-    TerminalManager as TerminalManagerTrait, TerminalModel, TerminalSurface,
-    prompt_history_for_terminal_view,
+    BlockPadding, History, HistoryEvent, PtyIntent, PtyIntentEvent, ShellLaunchData, SizeInfo,
+    SizeUpdate, TerminalManager as TerminalManagerTrait, TerminalModel, TerminalSurface,
+    UpArrowHistoryEntry, UpArrowHistoryEntryKind, prompt_history_for_terminal_view,
+    up_arrow_history_for_terminal_view,
 };
 pub use crate::themes::default_themes::{dark_theme, light_theme};
 pub use crate::throttle::throttle;
@@ -233,6 +234,7 @@ pub use crate::tui::{
 #[cfg(any(test, feature = "test-util"))]
 pub use crate::tui_test_support::{
     blocklist_ai_history_model_with_queries, queue_tui_permission_action,
+    register_tui_command_history_session, register_tui_input_mode_settings,
     register_tui_session_view_test_singletons,
 };
 pub use crate::util::image::{

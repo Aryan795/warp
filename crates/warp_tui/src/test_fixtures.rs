@@ -62,6 +62,16 @@ pub(crate) fn add_test_semantic_selection(ctx: &mut impl AddSingletonModel) {
     ctx.add_singleton_model(|_| SemanticSelection::mock(true, ""));
 }
 
+/// Builds an `ActiveSession` chain that resolves no live session, for tests
+/// that need the handle but no shell command history.
+pub(crate) fn add_empty_active_session(ctx: &mut AppContext) -> ModelHandle<ActiveSession> {
+    let sessions = ctx.add_model(|_| Sessions::new_for_test());
+    let (_tx, model_events_rx) = async_channel::unbounded();
+    let dispatcher =
+        ctx.add_model(|ctx| ModelEventDispatcher::new(model_events_rx, sessions.clone(), ctx));
+    ctx.add_model(|ctx| ActiveSession::new(sessions, dispatcher, ctx))
+}
+
 pub(crate) fn add_test_conversation_selection(ctx: &mut AppContext) -> ConversationSelectionHandle {
     if !ctx.has_singleton_model::<AppExecutionMode>() {
         ctx.add_singleton_model(|ctx| AppExecutionMode::new(ExecutionMode::App, false, ctx));

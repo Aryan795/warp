@@ -35,11 +35,12 @@ use warp::tui_export::{
     SlashCommandKind, SlashCommandSelectionBehavior, StartAgentExecutorEvent, StartAgentRequest,
     StaticCommand, TerminalModel, TerminalSurface, TerminalSurfaceInit, TranscriptScope,
     TuiMcpAction, TuiMcpManager, TuiSlashCommandDataSource, TuiSlashCommandDataSourceArgs,
-    TuiZeroStateDataSource, UserTakeOverReason, WAKEUP_THROTTLE_PERIOD,
-    block_context_from_terminal_model, build_slash_command_mixer, detect_possible_git_repo,
-    export_conversation_markdown, log_out_tui, maybe_build_ai_query_upsert_event,
-    prepare_conversation_block_restoration, record_autodetection_toggle_from_slash_command,
-    record_saved_prompt_accepted, record_static_slash_command_accepted, saved_prompt_text_for_id,
+    TuiZeroStateDataSource, UpArrowHistoryEntry, UpArrowHistoryEntryKind, UserTakeOverReason,
+    WAKEUP_THROTTLE_PERIOD, block_context_from_terminal_model, build_slash_command_mixer,
+    detect_possible_git_repo, export_conversation_markdown, log_out_tui,
+    maybe_build_ai_query_upsert_event, prepare_conversation_block_restoration,
+    record_autodetection_toggle_from_slash_command, record_saved_prompt_accepted,
+    record_static_slash_command_accepted, saved_prompt_text_for_id,
     slash_command_selection_behavior, slash_commands, throttle,
 };
 use warp_core::channel::{Channel, ChannelState};
@@ -74,6 +75,7 @@ use crate::conversation_selection::TuiConversationSelection;
 use crate::editor_interaction::TuiEditorCommand;
 use crate::exit_confirmation::{CTRL_C_EXIT_WINDOW, ExitConfirmation};
 use crate::handoff::TuiHandoffBlock;
+use crate::history_menu::{TuiHistoryMenuEvent, TuiHistoryMenuModel};
 use crate::inline_menu::{MAX_INLINE_MENU_ROWS, TuiInlineMenu, active_inline_menu};
 use crate::input::view::TuiInputAction;
 use crate::input::{TuiInputView, TuiInputViewEvent};
@@ -95,7 +97,6 @@ use crate::orchestration_tab_bar::{
     render_orchestration_tab_footer,
 };
 use crate::platform::reveal_path_in_file_manager;
-use crate::prompt_history_menu::{TuiPromptHistoryMenuEvent, TuiPromptHistoryMenuModel};
 use crate::resume::TuiExitSummaryHandle;
 use crate::session_registry::TuiSessions;
 use crate::skills_menu::{TuiSkillMenuEvent, TuiSkillMenuModel};
@@ -1448,16 +1449,18 @@ impl TuiTerminalSessionView {
             let TuiMcpMenuEvent::Updated = event;
             ctx.notify();
         });
-        let prompt_history_menu = ctx.add_model(|ctx| {
-            TuiPromptHistoryMenuModel::new(
+        let history_menu = ctx.add_model(|ctx| {
+            TuiHistoryMenuModel::new(
                 input_editor_model.clone(),
+                ai_input_model.clone(),
                 suggestions_mode.clone(),
+                active_session.clone(),
                 terminal_surface_id,
                 ctx,
             )
         });
-        ctx.subscribe_to_model(&prompt_history_menu, |_, _, event, ctx| {
-            let TuiPromptHistoryMenuEvent::Updated = event;
+        ctx.subscribe_to_model(&history_menu, |_, _, event, ctx| {
+            let TuiHistoryMenuEvent::Updated = event;
             ctx.notify();
         });
         let completion_menu =
@@ -1512,7 +1515,7 @@ impl TuiTerminalSessionView {
             TuiInlineMenu::new(model_menu.clone()),
             TuiInlineMenu::new(skills_menu.clone()),
             TuiInlineMenu::new(mcp_menu.clone()),
-            TuiInlineMenu::new(prompt_history_menu.clone()),
+            TuiInlineMenu::new(history_menu.clone()),
             TuiInlineMenu::new(completion_menu.clone()),
         ];
         let inline_menus_for_input = inline_menus.clone();
@@ -1615,8 +1618,8 @@ impl TuiTerminalSessionView {
             TuiInputViewEvent::AcceptedMcp(action) => {
                 view.handle_accepted_mcp_action(*action, ctx);
             }
-            TuiInputViewEvent::AcceptedPromptHistory(text) => {
-                view.handle_accepted_prompt_history(text.clone(), ctx);
+            TuiInputViewEvent::AcceptedHistory(entry) => {
+                view.handle_accepted_history(entry.clone(), ctx);
             }
             TuiInputViewEvent::RequestShellCompletion => {
                 view.request_shell_completion(ctx);
@@ -3563,14 +3566,24 @@ impl TuiTerminalSessionView {
         ctx.notify();
     }
 
-    /// Fills the accepted prompt-history prompt into the input and submits it
-    /// immediately, matching the GUI's accept-a-prompt-from-history behavior.
-    /// The menu has already closed itself.
-    fn handle_accepted_prompt_history(&mut self, text: String, ctx: &mut ViewContext<Self>) {
-        self.input_view.update(ctx, |input, ctx| {
-            input.set_text(&text, ctx);
-        });
-        self.handle_submitted(text, ctx);
+    /// Applies an accepted up-arrow history item, matching the GUI's
+    /// accept-from-history behavior. The menu has already closed itself and
+    /// previewed the item into the input: a command (previewed in shell mode)
+    /// executes in the session's PTY, and a prompt fills the input and submits
+    /// immediately.
+    fn handle_accepted_history(&mut self, entry: UpArrowHistoryEntry, ctx: &mut ViewContext<Self>) {
+        match entry.kind {
+            UpArrowHistoryEntryKind::Command => {
+                self.execute_user_command(&entry.text, ctx);
+                ctx.notify();
+            }
+            UpArrowHistoryEntryKind::Prompt => {
+                self.input_view.update(ctx, |input, ctx| {
+                    input.set_text(&entry.text, ctx);
+                });
+                self.handle_submitted(entry.text, ctx);
+            }
+        }
     }
 
     fn select_tui_slash_command(&mut self, command: &StaticCommand, ctx: &mut ViewContext<Self>) {

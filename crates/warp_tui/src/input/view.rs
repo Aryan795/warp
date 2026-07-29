@@ -27,7 +27,7 @@ use string_offset::{ByteOffset, CharOffset};
 use warp::editor::{CodeEditorModel, CodeEditorModelEvent};
 use warp::tui_export::{
     AcceptSlashCommandOrSavedPrompt, BlocklistAIInputModel, InputType,
-    InputTypeAutoDetectionSource, LLMId, TuiMcpAction,
+    InputTypeAutoDetectionSource, LLMId, TuiMcpAction, UpArrowHistoryEntry,
 };
 use warp_editor::model::CoreEditorModel;
 use warpui_core::elements::MouseStateHandle;
@@ -135,9 +135,9 @@ pub enum TuiInputViewEvent {
     AcceptedMcp(TuiMcpAction),
     /// Shift+Up should move focus from the first visual row to the region above.
     MoveFocusUp,
-    /// The user accepted a prompt from the up-arrow prompt-history menu. Carries
-    /// the prompt text to fill into the input and submit.
-    AcceptedPromptHistory(String),
+    /// The user accepted an item from the up-arrow history menu. Carries the
+    /// prompt to fill and submit or the shell command to execute.
+    AcceptedHistory(UpArrowHistoryEntry),
     /// Tab requested shell completion for the current input snapshot.
     RequestShellCompletion,
     /// Selected prompt text was copied to the host clipboard.
@@ -671,10 +671,9 @@ impl TypedActionView for TuiInputView {
                     self.open_inline_menu(TuiInputSuggestionsMode::ConversationMenu, ctx);
                     TuiEditorInteractionOutcome::FollowCursor
                 } else if matches!(*command, TuiEditorCommand::MoveUp)
-                    && !self.is_shell_mode(ctx)
                     && self.single_cursor_on_first_row(ctx)
                 {
-                    self.open_inline_menu(TuiInputSuggestionsMode::PromptHistory, ctx);
+                    self.open_inline_menu(TuiInputSuggestionsMode::History, ctx);
                     TuiEditorInteractionOutcome::FollowCursor
                 // With nothing left to delete, backspace removes the `!`
                 // affordance instead; typed text is preserved.
@@ -1041,8 +1040,8 @@ impl TuiInputView {
                         TuiInlineMenuAccepted::Mcp(action) => {
                             ctx.emit(TuiInputViewEvent::AcceptedMcp(action));
                         }
-                        TuiInlineMenuAccepted::PromptHistory(text) => {
-                            ctx.emit(TuiInputViewEvent::AcceptedPromptHistory(text));
+                        TuiInlineMenuAccepted::History(entry) => {
+                            ctx.emit(TuiInputViewEvent::AcceptedHistory(entry));
                         }
                         TuiInlineMenuAccepted::Completion(acceptance) => {
                             self.apply_shell_completion(acceptance, ctx);

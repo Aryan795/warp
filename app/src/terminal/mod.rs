@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 mod package_installers;
 pub(crate) use history::UpArrowHistoryConfig;
 pub use history::{
-    History, HistoryEntry, HistoryEvent, ShellHost, prompt_history_for_terminal_view,
+    History, HistoryEntry, HistoryEvent, ShellHost, UpArrowHistoryEntry, UpArrowHistoryEntryKind,
+    prompt_history_for_terminal_view, up_arrow_history_for_terminal_view,
 };
 pub use view::{Event, TerminalView};
 pub use warp_terminal::shell::{self, ShellLaunchData};

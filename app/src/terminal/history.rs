@@ -22,7 +22,10 @@ use crate::workflows::{WorkflowId, WorkflowSource, WorkflowType};
 
 mod up_arrow;
 pub(crate) use up_arrow::UpArrowHistoryConfig;
-pub use up_arrow::prompt_history_for_terminal_view;
+pub use up_arrow::{
+    UpArrowHistoryEntry, UpArrowHistoryEntryKind, prompt_history_for_terminal_view,
+    up_arrow_history_for_terminal_view,
+};
 
 /// Data model for a history command persisted to sqlite, used as an intermediate representation
 /// between the sqlite schema (sqlite::model::Command) and the [`History`] model.
@@ -704,6 +707,51 @@ impl History {
             }
             self.session_skip_indices.insert(session_id, skip_index_set);
             ctx.emit(HistoryEvent::Initialized(session_id));
+        }
+    }
+
+    /// Registers `session` and seeds its history synchronously for tests.
+    ///
+    /// Unlike [`Self::init_session_with`], no background histfile read is
+    /// spawned: `history_file_commands` become the host's histfile commands on
+    /// the first call for a host, and later calls for the same host reuse the
+    /// already-loaded histfile (mirroring a second session on that host).
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn init_session_with_history_file_commands_for_test(
+        &mut self,
+        session: &Session,
+        history_file_commands: Vec<String>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let host = ShellHost::from_session(session);
+        let session_id = session.id();
+        self.session_id_to_shell_host
+            .insert(session_id, host.clone());
+        let mut session_ids = HashSet::new();
+        session_ids.insert(session_id);
+        match self
+            .read_history_file_state
+            .insert(host.clone(), ReadHistoryFileState::Done)
+        {
+            None => {
+                self.load_history_file_commands(
+                    history_file_commands,
+                    None,
+                    session_ids,
+                    host,
+                    ctx,
+                );
+            }
+            Some(_) => {
+                let session_start_index = self.history_file_commands.get(&host).map_or(0, Vec::len)
+                    + self.session_commands.get(&host).map_or(0, Vec::len);
+                self.initialize_session_start_and_skip_indices(
+                    session_ids,
+                    host,
+                    session_start_index,
+                    ctx,
+                );
+            }
         }
     }
 

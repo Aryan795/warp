@@ -536,7 +536,7 @@ impl Sessions {
     ///
     /// Prefer using [`Self::initialize_bootstrapped_session`] to properly register
     /// a session (e.g. emit the appropriate events).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-util"))]
     pub fn register_session_for_test(&mut self, session: SessionInfo) {
         use command_executor::testing::TestCommandExecutor;
         self.sessions.insert(
@@ -1726,7 +1726,7 @@ pub fn get_local_hostname() -> Result<String> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 pub mod testing {
     use super::command_executor::testing::TestCommandExecutor;
     use super::*;
