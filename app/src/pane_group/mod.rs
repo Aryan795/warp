@@ -6956,9 +6956,21 @@ impl PaneGroup {
         ctx: &mut ViewContext<Self>,
     ) -> bool {
         let Some(terminal_view) = self.terminal_view_from_pane_id(pane_id, ctx) else {
-            log::warn!("Tried to attach execution session to non-terminal pane {pane_id:?}");
+            log::warn!(
+                "[orchestration-unified-debug] attach_execution_session: no terminal view for \
+                 pane_id={pane_id:?}"
+            );
             return false;
         };
+
+        let has_ambient_model = terminal_view
+            .as_ref(ctx)
+            .ambient_agent_view_model()
+            .is_some();
+        log::info!(
+            "[orchestration-unified-debug] attach_execution_session entry \
+             pane_id={pane_id:?} has_ambient_agent_view_model={has_ambient_model}"
+        );
 
         if let Some(ambient_agent_view_model) = terminal_view
             .as_ref(ctx)
@@ -6968,6 +6980,10 @@ impl PaneGroup {
             ambient_agent_view_model.update(ctx, |model, ctx| {
                 model.attach_execution_session(session_id, ctx);
             });
+            log::info!(
+                "[orchestration-unified-debug] attach_execution_session via ambient model \
+                 pane_id={pane_id:?} -> ok"
+            );
             return true;
         }
 
@@ -6975,7 +6991,10 @@ impl PaneGroup {
             .terminal_session_by_id(pane_id)
             .map(|session| session.terminal_manager(ctx))
         else {
-            log::warn!("Tried to attach execution session to pane without terminal manager");
+            log::warn!(
+                "[orchestration-unified-debug] attach_execution_session: no terminal manager for \
+                 pane_id={pane_id:?}"
+            );
             return false;
         };
 
@@ -6984,11 +7003,18 @@ impl PaneGroup {
                 .as_any_mut()
                 .downcast_mut::<shared_session::viewer::TerminalManager>()
             else {
-                log::warn!("Tried to attach execution session to non-viewer terminal manager");
+                log::warn!(
+                    "[orchestration-unified-debug] attach_execution_session: non-viewer \
+                     terminal manager for pane_id={pane_id:?}"
+                );
                 return;
             };
             manager.attach_execution_session(session_id, ctx);
         });
+        log::info!(
+            "[orchestration-unified-debug] attach_execution_session via viewer TerminalManager \
+             pane_id={pane_id:?} -> ok"
+        );
         true
     }
 

@@ -586,9 +586,10 @@ impl OrchestrationEventStreamer {
             match classify_family_event(&event, self_run_id) {
                 FamilyEvent::ParentSelf(event) => parent_self_events.push(event),
                 FamilyEvent::ChildStarted { child_run_id } => {
-                    log::debug!(
-                        "[orch-drain] ChildStarted child_run_id={child_run_id} \
-                         parent={cursor_conversation_id:?} mode={mode:?}"
+                    log::info!(
+                        "[orchestration-unified-debug] drain ChildStarted \
+                         parent_conversation_id={cursor_conversation_id:?} \
+                         child_run_id={child_run_id} mode={mode:?}"
                     );
                     // Create a local placeholder so the pill bar reflects the new
                     // child immediately, without waiting for the tracker's async
@@ -614,9 +615,10 @@ impl OrchestrationEventStreamer {
                     child_run_id,
                     session_uuid,
                 } => {
-                    log::debug!(
-                        "[orch-drain] ChildSessionLinked child_run_id={child_run_id} \
-                         parent={cursor_conversation_id:?}"
+                    log::info!(
+                        "[orchestration-unified-debug] drain ChildSessionLinked \
+                         parent_conversation_id={cursor_conversation_id:?} \
+                         child_run_id={child_run_id} session_id={session_uuid} mode={mode:?}"
                     );
                     tracker.observe_child(
                         &child_run_id,
@@ -626,9 +628,10 @@ impl OrchestrationEventStreamer {
                     );
                 }
                 FamilyEvent::ChildLifecycle { child_run_id, kind } => {
-                    log::debug!(
-                        "[orch-drain] ChildLifecycle child_run_id={child_run_id} \
-                         parent={cursor_conversation_id:?} mode={mode:?}"
+                    log::info!(
+                        "[orchestration-unified-debug] drain ChildLifecycle \
+                         parent_conversation_id={cursor_conversation_id:?} \
+                         child_run_id={child_run_id} kind={kind:?} mode={mode:?}"
                     );
                     // Backstop: if this lifecycle arrives before (or instead of)
                     // `child_agent_started`, ensure a placeholder still exists.
@@ -697,16 +700,24 @@ impl OrchestrationEventStreamer {
         child_run_id: String,
         ctx: &mut ModelContext<Self>,
     ) {
-        if BlocklistAIHistoryModel::as_ref(ctx)
-            .conversation_id_for_agent_id(&child_run_id)
-            .is_some()
-        {
+        let existing_conversation_id = BlocklistAIHistoryModel::as_ref(ctx)
+            .conversation_id_for_agent_id(&child_run_id);
+        if let Some(existing_conversation_id) = existing_conversation_id {
+            log::info!(
+                "[orchestration-unified-debug] ensure placeholder skip-existing \
+                 parent_conversation_id={parent_conversation_id:?} child_run_id={child_run_id} \
+                 child_conversation_id={existing_conversation_id:?}"
+            );
             // Already represented locally; nothing to do.
             return;
         }
         // Don't create placeholders on behalf of passive views — the actual
         // owning process (in another window/machine) handles those.
         if self.is_remote_run_view(parent_conversation_id, ctx) {
+            log::info!(
+                "[orchestration-unified-debug] ensure placeholder skip-remote-view \
+                 parent_conversation_id={parent_conversation_id:?} child_run_id={child_run_id}"
+            );
             return;
         }
         let Ok(task_id) = child_run_id.parse::<AmbientAgentTaskId>() else {
@@ -717,8 +728,9 @@ impl OrchestrationEventStreamer {
             return;
         };
         log::info!(
-            "[orch-drain] fetching metadata for out-of-band child \
-             child_run_id={child_run_id} parent={parent_conversation_id:?}"
+            "[orchestration-unified-debug] ensure placeholder fetch-start \
+             parent_conversation_id={parent_conversation_id:?} child_run_id={child_run_id} \
+             task_id={task_id}"
         );
         let ai_client = self.ai_client.clone();
         ctx.spawn(
@@ -751,19 +763,32 @@ impl OrchestrationEventStreamer {
             Ok(task) => task,
             Err(err) => {
                 log::warn!(
-                    "[orch-drain] finish_remote_child_placeholder: failed to fetch \
-                     metadata for child_run_id={child_run_id}: {err:#}; \
-                     no owner-side placeholder created"
+                    "[orchestration-unified-debug] finish placeholder fetch-error \
+                     parent_conversation_id={parent_conversation_id:?} \
+                     child_run_id={child_run_id} error={err:#}"
                 );
                 return;
             }
         };
+        log::info!(
+            "[orchestration-unified-debug] finish placeholder fetch-success \
+             parent_conversation_id={parent_conversation_id:?} child_run_id={child_run_id} \
+             task_id={} state={:?} session_id={:?} has_conversation_token={}",
+            task.task_id,
+            task.state,
+            task.session_id,
+            task.conversation_id().is_some(),
+        );
         // Re-check: a locally-started child may have stamped this run_id
         // while the fetch was in flight.
-        if BlocklistAIHistoryModel::as_ref(ctx)
+        if let Some(existing_conversation_id) = BlocklistAIHistoryModel::as_ref(ctx)
             .conversation_id_for_agent_id(&child_run_id)
-            .is_some()
         {
+            log::info!(
+                "[orchestration-unified-debug] finish placeholder skip-existing \
+                 parent_conversation_id={parent_conversation_id:?} child_run_id={child_run_id} \
+                 child_conversation_id={existing_conversation_id:?}"
+            );
             return;
         }
         let Some(terminal_surface_id) = BlocklistAIHistoryModel::as_ref(ctx)
@@ -784,7 +809,8 @@ impl OrchestrationEventStreamer {
             "[orch-drain] creating remote-child placeholder for \
              child_run_id={child_run_id} name={name:?} parent={parent_conversation_id:?}"
         );
-        BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+        let child_conversation_id =
+            BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
             let child_conversation_id = history.start_new_child_conversation(
                 terminal_surface_id,
                 name,
@@ -800,12 +826,19 @@ impl OrchestrationEventStreamer {
             }
             history.assign_run_id_for_conversation(
                 child_conversation_id,
-                child_run_id,
+                child_run_id.clone(),
                 Some(task_id),
                 terminal_surface_id,
                 ctx,
             );
+            child_conversation_id
         });
+        log::info!(
+            "[orchestration-unified-debug] finish placeholder created \
+             parent_conversation_id={parent_conversation_id:?} child_run_id={child_run_id} \
+             child_conversation_id={child_conversation_id:?} \
+             terminal_surface_id={terminal_surface_id:?}"
+        );
     }
 
     /// Flag-on owner drain: reads the conversation's family SSE buffer and

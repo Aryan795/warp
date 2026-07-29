@@ -176,8 +176,18 @@ impl PaneGroup {
         ctx: &mut ViewContext<Self>,
     ) {
         let child_id = child_conversation.id();
+        let flag_on = FeatureFlag::OrchestrationUnifiedStack.is_enabled();
+        log::info!(
+            "[orchestration-unified-debug] create_hidden_child_agent_pane entry \
+             child_conversation_id={child_id:?} \
+             is_remote_child={} is_viewing_shared_session={} task_id={:?} \
+             flag_OrchestrationUnifiedStack={flag_on}",
+            child_conversation.is_remote_child(),
+            child_conversation.is_viewing_shared_session(),
+            child_conversation.task_id()
+        );
 
-        if FeatureFlag::OrchestrationUnifiedStack.is_enabled() {
+        if flag_on {
             // flag-ON (M2): unified placeholder dispatch — viewer and owner
             // both route through `materialize_child_placeholder_pane`, which
             // fetches the task and routes on `decide_child_pane_materialization`.

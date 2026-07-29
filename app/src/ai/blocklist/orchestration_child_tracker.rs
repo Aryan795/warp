@@ -251,7 +251,16 @@ impl OrchestrationChildTracker {
         kind: api::LifecycleEventType,
         ctx: &mut ModelContext<OrchestrationEventStreamer>,
     ) {
-        if self.children.contains_key(&task_id) {
+        let tracker_known = self.children.contains_key(&task_id);
+        let fetch_in_flight = self.metadata_fetches.contains(run_id);
+        log::info!(
+            "[orchestration-unified-debug] apply_lifecycle entry \
+             run_id={run_id} kind={kind:?} \
+             tracker_known={tracker_known} fetch_in_flight={fetch_in_flight} \
+             parent_task_id={}",
+            self.parent_task_id
+        );
+        if tracker_known {
             let status = conversation_status_from_lifecycle_event_type(kind);
             // Write the new status through to the history model so the pill
             // bar badge reflects the lifecycle transition immediately. Lookup
@@ -269,7 +278,17 @@ impl OrchestrationChildTracker {
                                 .map(|surface_id| (child_conv_id, surface_id))
                         })
                 };
+                log::info!(
+                    "[orchestration-unified-debug] apply_lifecycle history-lookup \
+                     run_id={run_id} status={status:?} child_info_found={}",
+                    child_info.is_some()
+                );
                 if let Some((child_conv_id, surface_id)) = child_info {
+                    log::info!(
+                        "[orchestration-unified-debug] apply_lifecycle update_conversation_status \
+                         run_id={run_id} child_conversation_id={child_conv_id:?} \
+                         surface_id={surface_id:?} status={status:?}"
+                    );
                     BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
                         history.update_conversation_status(
                             surface_id,
@@ -278,8 +297,15 @@ impl OrchestrationChildTracker {
                             ctx,
                         );
                     });
+                    log::info!(
+                        "[orchestration-unified-debug] apply_lifecycle update_done run_id={run_id}"
+                    );
                 }
             }
+            log::info!(
+                "[orchestration-unified-debug] apply_lifecycle emit ChildStatusChanged \
+                 run_id={run_id} status={status:?}"
+            );
             ctx.emit(OrchestrationEventStreamerEvent::ChildStatusChanged {
                 parent_task_id: self.parent_task_id,
                 run_id: run_id.to_string(),
@@ -291,7 +317,12 @@ impl OrchestrationChildTracker {
         }
         // Lifecycle for an unknown run: only self-heal a real discovery miss,
         // not a run whose fetch is already in flight.
-        if !self.metadata_fetches.contains(run_id) {
+        if !fetch_in_flight {
+            log::info!(
+                "[orchestration-unified-debug] apply_lifecycle spawn_metadata_fetch \
+                 run_id={run_id} parent_task_id={}",
+                self.parent_task_id
+            );
             self.spawn_metadata_fetch(task_id, run_id, ctx);
         }
     }
