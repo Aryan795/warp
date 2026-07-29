@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ai::api_keys::ApiKeyManager;
+use ai::api_keys::{ApiKeyManager, AwsCredentialsState};
 use anyhow::Context as _;
 use chrono::{DateTime, Local, Utc};
 use futures::channel::oneshot::{self, Receiver};
@@ -547,14 +547,22 @@ impl AIRequestUsageModel {
         ) && Self::has_usable_byo_inference_path(ctx)
     }
 
-    /// Whether a BYO inference path is actually usable from this client: a
-    /// locally stored API key, custom endpoint, or connected Grok subscription
-    /// (when the BYOK policy allows it). Server-managed paths (team-managed
-    /// keys/endpoints, enterprise custom LLM) are already reflected in the
-    /// server's availability decision.
+    /// Whether a BYO inference path is usable with credentials held on this
+    /// machine: a stored API key, custom endpoint, or Grok subscription (when
+    /// the BYOK policy allows it), or loaded local-chain AWS credentials for
+    /// an enabled Bedrock host. Server-managed paths are already reflected in
+    /// the server's availability decision.
     fn has_usable_byo_inference_path(ctx: &AppContext) -> bool {
-        UserWorkspaces::as_ref(ctx).is_byo_api_key_enabled(ctx)
-            && ApiKeyManager::as_ref(ctx).has_any_key()
+        let user_workspaces = UserWorkspaces::as_ref(ctx);
+        let api_keys = ApiKeyManager::as_ref(ctx);
+        if user_workspaces.is_byo_api_key_enabled(ctx) && api_keys.has_any_key() {
+            return true;
+        }
+        user_workspaces.is_aws_bedrock_credentials_enabled(ctx)
+            && matches!(
+                api_keys.aws_credentials_state(),
+                AwsCredentialsState::Loaded { .. }
+            )
     }
 
     /// Legacy locally derived availability check. Returns `true` if the user

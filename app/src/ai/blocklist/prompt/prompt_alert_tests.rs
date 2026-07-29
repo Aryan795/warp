@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use ai::LLMProvider;
 use warpui::App;
 
 use super::*;
@@ -148,7 +149,7 @@ fn test_out_of_credits_with_local_key_maps_to_no_alert() {
         initialize_app_with_workspaces(&mut app, vec![workspace]);
 
         ApiKeyManager::handle(&app).update(&mut app, |manager, ctx| {
-            manager.set_openai_key(Some("test-key".to_string()), ctx);
+            manager.set_provider_key(LLMProvider::OpenAI, Some("test-key".to_string()), ctx);
         });
 
         // The server cannot see the locally stored key; the client refines

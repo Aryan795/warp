@@ -1,7 +1,8 @@
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use ai::LLMProvider;
-use ai::api_keys::{ApiKeyManager, GrokTokens};
+use ai::api_keys::{ApiKeyManager, AwsCredentials, AwsCredentialsState, GrokTokens};
 use chrono::Duration;
 use warp_core::features::FeatureFlag;
 use warp_graphql::billing::{AddonCreditsOption, OveragesPricing, PricingInfo};
@@ -1050,13 +1051,62 @@ fn test_out_of_credits_refined_by_local_byo_key() {
 
         // Storing a key supplies the one fact the server cannot know.
         ApiKeyManager::handle(&app).update(&mut app, |manager, ctx| {
-            manager.set_openai_key(Some("test-key".to_string()), ctx);
+            manager.set_provider_key(LLMProvider::OpenAI, Some("test-key".to_string()), ctx);
         });
         request_usage_model.read(&app, |model, ctx| {
             assert!(
                 model.has_any_ai_remaining(ctx),
                 "out of credits with a stored key should permit AI",
             );
+        });
+    });
+}
+
+#[test]
+fn test_out_of_credits_refined_by_local_bedrock_credentials() {
+    App::test((), |mut app| async move {
+        // Bedrock via the local AWS chain: the org enables the host, but the
+        // credentials live on this machine.
+        let (_uid, mut workspace) = create_test_workspace();
+        workspace.settings.llm_settings.enabled = true;
+        workspace.settings.llm_settings.host_configs.insert(
+            crate::ai::llms::LLMModelHost::AwsBedrock,
+            crate::workspaces::workspace::LlmHostSettings {
+                enabled: true,
+                enablement_setting: crate::workspaces::workspace::HostEnablementSetting::Enforce,
+                ..Default::default()
+            },
+        );
+        add_user_workspaces_with_workspace(&mut app, workspace);
+        let request_usage_model = add_request_usage_model(&mut app);
+
+        request_usage_model.update(&mut app, |model, ctx| {
+            model.request_limit_info = RequestLimitInfo::new_for_test(10, 10);
+            model.apply_server_availability(
+                Ok(AICreditAvailability::unavailable(
+                    AICreditDenialReason::OutOfCredits,
+                )),
+                ctx,
+            );
+            assert!(!model.has_any_ai_remaining(ctx));
+        });
+
+        ApiKeyManager::handle(&app).update(&mut app, |manager, ctx| {
+            manager.set_aws_credentials_state(
+                AwsCredentialsState::Loaded {
+                    credentials: AwsCredentials::new(
+                        "access".to_string(),
+                        "secret".to_string(),
+                        None,
+                        None,
+                    ),
+                    loaded_at: SystemTime::now(),
+                },
+                ctx,
+            );
+        });
+        request_usage_model.read(&app, |model, ctx| {
+            assert!(model.has_any_ai_remaining(ctx));
         });
     });
 }
@@ -1093,7 +1143,7 @@ fn test_server_unavailable_overrides_local_byo_key() {
         let request_usage_model = add_request_usage_model(&mut app);
 
         ApiKeyManager::handle(&app).update(&mut app, |manager, ctx| {
-            manager.set_openai_key(Some("test-key".to_string()), ctx);
+            manager.set_provider_key(LLMProvider::OpenAI, Some("test-key".to_string()), ctx);
         });
 
         request_usage_model.update(&mut app, |model, ctx| {
