@@ -90,6 +90,11 @@ async fn followup_submits_before_polling_and_ignores_previous_session_id() {
         move |observed_run_id, request| {
             assert_eq!(observed_run_id.to_string(), run_id().to_string());
             assert_eq!(request.message, "continue from here");
+            assert_eq!(
+                request.attachment_ids,
+                ["server-issued-attachment-id".to_string()],
+                "submit_run_followup must preserve server-issued attachment IDs"
+            );
             submitted.store(true, Ordering::SeqCst);
             Ok(())
         }
@@ -125,7 +130,7 @@ async fn followup_submits_before_polling_and_ignores_previous_session_id() {
     let ai_client = Arc::new(mock);
     let mut stream = Box::pin(submit_run_followup(
         "continue from here".to_string(),
-        vec![],
+        vec!["server-issued-attachment-id".to_string()],
         run_id(),
         Some(previous_session_id),
         ai_client,

@@ -1843,7 +1843,7 @@ enum TaskAttachmentUploadOutcome {
 /// entries so each caller can choose its own error-handling policy (fail-fast vs. best-effort).
 async fn upload_pending_attachments_to_task(
     ai_client: Arc<dyn AIClient>,
-    server_api: Arc<ServerApi>,
+    http_client: Arc<http_client::Client>,
     task_id: crate::ai::ambient_agents::AmbientAgentTaskId,
     pending_attachments: Vec<PendingAttachment>,
 ) -> anyhow::Result<Vec<TaskAttachmentUploadOutcome>> {
@@ -1907,8 +1907,7 @@ async fn upload_pending_attachments_to_task(
             .iter()
             .zip(prepare_response.attachments.iter())
         {
-            let result = server_api
-                .http_client()
+            let result = http_client
                 .put(&upload_info.upload_url)
                 .header("Content-Type", mime_type.as_str())
                 .body(file_bytes.clone())
@@ -14594,11 +14593,11 @@ impl Input {
         true
     }
 
-    /// Upload pending attachments to the task definition before emitting the text-only cloud
-    /// follow-up event. `SubmitCloudFollowup` only carries the prompt text, so this helper owns
-    /// the prompt and attachment payloads until the async upload either succeeds and submits the
-    /// prompt or fails and restores the input. A new VM execution downloads these task attachments
-    /// during startup.
+    /// Upload pending attachments to the task definition before emitting the cloud
+    /// follow-up event. On success, emits `Event::SubmitCloudFollowup` carrying both
+    /// the prompt text and the server-issued `attachment_ids` returned by the upload so
+    /// the new VM execution can download them at startup. On failure, restores the input
+    /// buffer so the user can retry.
     fn upload_files_then_submit_cloud_followup(
         &mut self,
         task_id: crate::ai::ambient_agents::AmbientAgentTaskId,
@@ -14607,15 +14606,38 @@ impl Input {
         ctx: &mut ViewContext<Self>,
     ) -> SpawnedFutureHandle {
         let ai_client = ServerApiProvider::as_ref(ctx).get_ai_client();
-        let server_api = ServerApiProvider::as_ref(ctx).get();
+        let http_client = ServerApiProvider::as_ref(ctx).get_http_client();
+        self.upload_files_then_submit_cloud_followup_with_clients(
+            task_id,
+            prompt,
+            pending_attachments,
+            ai_client,
+            http_client,
+            ctx,
+        )
+    }
 
+    /// Injectable implementation of `upload_files_then_submit_cloud_followup` that
+    /// accepts explicit `ai_client` and `http_client` arguments instead of sourcing
+    /// them from the `ServerApiProvider`. This is the testable entry point; production
+    /// code calls `upload_files_then_submit_cloud_followup` which injects the live
+    /// clients.
+    fn upload_files_then_submit_cloud_followup_with_clients(
+        &mut self,
+        task_id: crate::ai::ambient_agents::AmbientAgentTaskId,
+        prompt: String,
+        pending_attachments: Vec<PendingAttachment>,
+        ai_client: Arc<dyn AIClient>,
+        http_client: Arc<http_client::Client>,
+        ctx: &mut ViewContext<Self>,
+    ) -> SpawnedFutureHandle {
         ctx.spawn(
             async move {
                 // Fail fast: any per-attachment failure (decode, size-limit, or HTTP) is fatal
                 // on the VM-down follow-up path; the user can fix the attachment and retry.
                 let outcomes = upload_pending_attachments_to_task(
                     ai_client,
-                    server_api,
+                    http_client,
                     task_id,
                     pending_attachments,
                 )
@@ -14740,7 +14762,7 @@ impl Input {
         ctx: &mut ViewContext<Self>,
     ) {
         let ai_client = ServerApiProvider::as_ref(ctx).get_ai_client();
-        let server_api = ServerApiProvider::as_ref(ctx).get();
+        let http_client = ServerApiProvider::as_ref(ctx).get_http_client();
 
         // Combine images and files into a unified list so
         // `upload_pending_attachments_to_task` can handle both kinds uniformly.
@@ -14759,7 +14781,7 @@ impl Input {
                 // the prepare call fails entirely (maps to the "too many attachments" toast).
                 let outcomes = match upload_pending_attachments_to_task(
                     ai_client,
-                    server_api,
+                    http_client,
                     task_id,
                     pending_attachments,
                 )
