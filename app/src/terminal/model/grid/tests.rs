@@ -583,6 +583,77 @@ fn grow_reflow_full_grid_clear_behavior() {
     assert_eq!(row[2], Cell::default());
 }
 
+/// Regression test for APP-5010 (normal-terminal path): soft-wrapped content
+/// in a **finished** normal (FullGridClearBehavior::Scroll) block must reflow
+/// when the pane grows wider.
+///
+/// The reporter's screenshot was taken in a plain terminal (no CLI-agent
+/// session), where a command produced multiple soft-wrapped rows at the
+/// original narrow width.  After widening the pane those rows should merge,
+/// but before the fix the data model was not being exercised for finished
+/// blocks in this code path.
+///
+/// At 2 cols, "123456" wraps to 3 rows: ["12"(WRAP), "34"(WRAP), "56"].
+/// After `finish()` and a grow to 4 cols the rows should merge to 2:
+/// ["1234"(WRAP), "56"].
+#[test]
+fn grow_reflow_finished_normal_block() {
+    // 4 visible rows, 2 cols, generous scrollback limit.
+    let mut grid = GridHandler::new_for_test_with_scroll_limit(4, 2, 100);
+    // Writing 6 chars at 2 cols produces:
+    //   row 0: "12" (WRAPLINE)
+    //   row 1: "34" (WRAPLINE)
+    //   row 2: "56"  (cursor ends here; row 3 stays empty)
+    grid.input_at_cursor("123456");
+
+    // Finish the block — this truncates trailing blank rows so only rows 0-2
+    // remain, mirroring what happens when a shell command completes.
+    grid.finish();
+
+    // After finish, the block-grid's finished_len() (used for rendering) must
+    // equal 3: rows_to_cursor (2) + 1 because cursor.col (1) != 0.
+    // This is what BlockGrid::len() returns for finished blocks.
+    assert_eq!(
+        grid.rows_to_cursor() + (grid.cursor_point().col != 0) as usize,
+        3,
+        "finished_len should be 3 (3 rows of content including cursor row)"
+    );
+
+    // Grow from 2 cols to 4 cols.  The two soft-wrapped rows should merge:
+    //   row 0: "1234" (WRAPLINE)
+    //   row 1: "56"
+    grid.resize(SizeInfo::new_without_font_metrics(4, 4));
+
+    // After grow-reflow, the block-grid's finished_len() must drop to 2
+    // (rows_to_cursor is now 1; cursor is at row 1, col >=1 → +1).
+    let finished_len_after = grid.rows_to_cursor() + (grid.cursor_point().col != 0) as usize;
+    assert!(
+        finished_len_after < 3,
+        "grow reflow on a finished normal block should reduce finished_len (was 3, got {finished_len_after})"
+    );
+    assert_eq!(
+        grid.history_size(),
+        0,
+        "no scrollback rows should remain in flat_storage"
+    );
+
+    // Row 0: "1234" with WRAPLINE (continues onto row 1).
+    let row = grid.row(0).expect("row should exist");
+    assert_eq!(row[0], cell('1'), "row0[0] should be '1'");
+    assert_eq!(row[1], cell('2'), "row0[1] should be '2'");
+    assert_eq!(row[2], cell('3'), "row0[2] should be '3'");
+    assert_eq!(
+        row[3],
+        wrap_cell('4'),
+        "row0[3] should be '4' with WRAPLINE"
+    );
+
+    // Row 1 should start with '5' (the tail of the original wrapped content;
+    // the character at the cursor position may differ by implementation).
+    let row = grid.row(1).expect("row should exist");
+    assert_eq!(row[0], cell('5'), "row1[0] should be '5'");
+}
+
 /// Complementary to `grow_reflow_full_grid_clear_behavior`: verifies that
 /// column *shrink* in an active FullGridClearBehavior::Clear session still does
 /// NOT reflow, leaving visible rows in-place (truncated to the new width) rather
