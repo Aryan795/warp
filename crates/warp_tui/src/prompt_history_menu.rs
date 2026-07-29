@@ -281,10 +281,10 @@ impl TuiPromptHistoryMenuModel {
         ctx.emit(TuiPromptHistoryMenuEvent::Updated);
     }
 
-    /// Accepts the current selection, closing the menu and returning the text to
-    /// submit. With a highlighted prompt that is its text; with an empty or
-    /// filtered-to-nothing list it is the current input, so Enter behaves as a
-    /// normal submit.
+    /// Accepts the current selection, closing the menu and returning the typed
+    /// item to act on. With an empty or filtered-to-nothing list there is no
+    /// selection, so this returns `None` and Enter is a no-op (the menu stays
+    /// open).
     pub(crate) fn accept_selected(
         &mut self,
         ctx: &mut ModelContext<Self>,
