@@ -1041,6 +1041,8 @@ pub enum Event {
     /// A disconnected Cloud Mode pane is requesting to submit a cloud follow-up.
     SubmitCloudFollowup {
         prompt: String,
+        /// IDs of attachments uploaded during this follow-up (empty when none were uploaded).
+        attachment_ids: Vec<String>,
     },
     /// A viewer in a shared session is requesting to cancel the active agent conversation.
     CancelSharedSessionConversation {
@@ -4265,7 +4267,10 @@ impl Input {
                                 "Cannot upload cloud follow-up attachments: CloudModeImageContext is disabled"
                             );
                         }
-                        ctx.emit(Event::SubmitCloudFollowup { prompt });
+                        ctx.emit(Event::SubmitCloudFollowup {
+                            prompt,
+                            attachment_ids: vec![],
+                        });
                     }
                 } else {
                     // Cloud-to-cloud follow-up is unavailable; block rather than run locally.
@@ -14062,7 +14067,10 @@ impl Input {
                     "Dropping attachments on a queued cloud follow-up prompt; cloud follow-up does not support attachments"
                 );
             }
-            ctx.emit(Event::SubmitCloudFollowup { prompt });
+            ctx.emit(Event::SubmitCloudFollowup {
+                prompt,
+                attachment_ids: vec![],
+            });
             return;
         }
 
@@ -14613,31 +14621,45 @@ impl Input {
                 )
                 .await
                 .map_err(|e| format!("Failed to prepare attachment uploads: {e:#}"))?;
-                for outcome in &outcomes {
-                    if let TaskAttachmentUploadOutcome::Failed { error, .. } = outcome {
-                        return Err(error.clone());
+                let mut attachment_ids = Vec::new();
+                for outcome in outcomes {
+                    match outcome {
+                        TaskAttachmentUploadOutcome::Uploaded { attachment_id, .. } => {
+                            attachment_ids.push(attachment_id);
+                        }
+                        TaskAttachmentUploadOutcome::Failed { error, .. } => {
+                            return Err(error);
+                        }
                     }
                 }
-                Ok::<(), String>(())
+                Ok::<Vec<String>, String>(attachment_ids)
             },
             move |input, result, ctx| {
-                if let Err(error) = result {
-                    input.restore_cloud_followup_input_after_upload_failure(&prompt, ctx);
-                    let window_id = ctx.window_id();
-                    ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
-                        toast_stack.add_ephemeral_toast(
-                            DismissibleToast::error(format!("Couldn't upload attachment: {error}")),
-                            window_id,
-                            ctx,
-                        );
-                    });
-                    return;
-                }
+                let attachment_ids = match result {
+                    Err(error) => {
+                        input.restore_cloud_followup_input_after_upload_failure(&prompt, ctx);
+                        let window_id = ctx.window_id();
+                        ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                            toast_stack.add_ephemeral_toast(
+                                DismissibleToast::error(format!(
+                                    "Couldn't upload attachment: {error}"
+                                )),
+                                window_id,
+                                ctx,
+                            );
+                        });
+                        return;
+                    }
+                    Ok(ids) => ids,
+                };
 
                 input.ai_context_model.update(ctx, |context_model, ctx| {
                     context_model.clear_pending_attachments(ctx);
                 });
-                ctx.emit(Event::SubmitCloudFollowup { prompt });
+                ctx.emit(Event::SubmitCloudFollowup {
+                    prompt,
+                    attachment_ids,
+                });
             },
         )
     }

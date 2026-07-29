@@ -125,6 +125,7 @@ async fn followup_submits_before_polling_and_ignores_previous_session_id() {
     let ai_client = Arc::new(mock);
     let mut stream = Box::pin(submit_run_followup(
         "continue from here".to_string(),
+        vec![],
         run_id(),
         Some(previous_session_id),
         ai_client,
@@ -169,6 +170,7 @@ async fn followup_api_error_does_not_poll() {
     let ai_client = Arc::new(mock);
     let mut stream = Box::pin(submit_run_followup(
         "continue".to_string(),
+        vec![],
         run_id(),
         Some(SessionId::new()),
         ai_client,
@@ -217,6 +219,7 @@ async fn followup_terminal_failure_surfaces_status_message() {
     let ai_client = Arc::new(mock);
     let mut stream = Box::pin(submit_run_followup(
         "continue".to_string(),
+        vec![],
         run_id(),
         Some(SessionId::new()),
         ai_client,
@@ -282,6 +285,7 @@ async fn followup_without_previous_session_id_accepts_joinable_session() {
     let ai_client = Arc::new(mock);
     let mut stream = Box::pin(submit_run_followup(
         "continue".to_string(),
+        vec![],
         run_id(),
         None,
         ai_client,
@@ -345,6 +349,7 @@ async fn followup_without_previous_session_id_errors_if_run_finishes_before_sess
     let ai_client = Arc::new(mock);
     let mut stream = Box::pin(submit_run_followup(
         "continue".to_string(),
+        vec![],
         run_id(),
         None,
         ai_client,
@@ -431,6 +436,7 @@ async fn followup_skips_prior_terminal_state_until_working_then_attaches() {
     let ai_client = Arc::new(mock);
     let mut stream = Box::pin(submit_run_followup(
         "continue".to_string(),
+        vec![],
         run_id(),
         Some(previous_session_id),
         ai_client,
@@ -520,6 +526,7 @@ async fn followup_skips_prior_terminal_then_surfaces_real_failure() {
     let ai_client = Arc::new(mock);
     let mut stream = Box::pin(submit_run_followup(
         "continue".to_string(),
+        vec![],
         run_id(),
         Some(SessionId::new()),
         ai_client,
@@ -586,6 +593,7 @@ async fn followup_cancelled_state_breaks_skip_loop() {
     let ai_client = Arc::new(mock);
     let mut stream = Box::pin(submit_run_followup(
         "continue".to_string(),
+        vec![],
         run_id(),
         Some(SessionId::new()),
         ai_client,
@@ -639,6 +647,7 @@ async fn followup_bounded_skip_for_server_stall() {
     let ai_client = Arc::new(mock);
     let mut stream = Box::pin(submit_run_followup(
         "continue".to_string(),
+        vec![],
         run_id(),
         Some(SessionId::new()),
         ai_client,
