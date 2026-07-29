@@ -496,6 +496,24 @@ impl UserWorkspaces {
     /// workspaces-metadata response. Must be called on every path that
     /// applies such a response so the teamless fallback can't go stale.
     pub fn set_user_purchase_policy(&mut self, policy: Option<PurchaseAddOnCreditsPolicy>) {
+        // State-change diagnostic for purchase-surface gating: fires only
+        // when the resolved policy changes (not on every metadata poll), so
+        // one log line explains why teamless purchase surfaces appeared or
+        // disappeared. Policy flags and bps only; no user data.
+        if self.user_purchase_policy != policy {
+            match policy {
+                Some(PurchaseAddOnCreditsPolicy {
+                    enabled,
+                    premium_enabled,
+                    price_premium_bps,
+                }) => log::info!(
+                    "[Add-on credits] user-level purchase policy changed: \
+                    enabled={enabled} premium_enabled={premium_enabled} \
+                    price_premium_bps={price_premium_bps}"
+                ),
+                None => log::info!("[Add-on credits] user-level purchase policy changed: none"),
+            }
+        }
         self.user_purchase_policy = policy;
     }
 
