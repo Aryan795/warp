@@ -939,8 +939,16 @@ pub struct PaneGroup {
     /// Entries are removed as each task's data arrives and the pane is replaced.
     pending_ambient_agent_conversation_restorations: HashMap<AmbientAgentTaskId, PaneId>,
 
+    /// Hidden remote-child placeholders waiting on task data, keyed by
+    /// task id; the value is the placeholder's canonical
+    /// `child_agent_panes` key. Kept separate from
+    /// `pending_ambient_agent_conversation_restorations` so the
+    /// visible-tree `replace_pane` flow doesn't swap a hidden child pane.
+    /// Only populated when `OrchestrationUnifiedStack` is disabled.
+    pending_remote_child_hydrations: HashMap<AmbientAgentTaskId, AIConversationId>,
+
     /// Whether `ensure_pending_ambient_restoration_subscription` has been
-    /// called.
+    /// called; the subscription is shared by both pending maps.
     pending_ambient_restoration_subscription_installed: bool,
 
     /// Maps child agent conversation IDs to their hidden pane IDs, so they can
@@ -3146,6 +3154,7 @@ impl PaneGroup {
             left_panel_open: false,
             is_right_panel_maximized: false,
             pending_ambient_agent_conversation_restorations: HashMap::new(),
+            pending_remote_child_hydrations: HashMap::new(),
             pending_ambient_restoration_subscription_installed: false,
             child_agent_panes: HashMap::new(),
             transitively_shared_child_panes: HashMap::new(),
@@ -3258,8 +3267,9 @@ impl PaneGroup {
     }
 
     /// Installs the long-lived AgentConversationsModel subscription used by
-    /// `pending_ambient_agent_conversation_restorations` if it has not been
-    /// installed yet. Idempotent across multiple callers.
+    /// both `pending_ambient_agent_conversation_restorations` and
+    /// `pending_remote_child_hydrations` if it has not been installed yet.
+    /// Idempotent across multiple callers.
     fn ensure_pending_ambient_restoration_subscription(&mut self, ctx: &mut ViewContext<Self>) {
         if self.pending_ambient_restoration_subscription_installed {
             return;
@@ -3287,6 +3297,7 @@ impl PaneGroup {
         }
 
         self.process_pending_ambient_restorations(ctx);
+        self.process_pending_remote_child_hydrations(ctx);
     }
 
     /// Initial layout for a [`PaneGroup`] with a single ambient agent pane.

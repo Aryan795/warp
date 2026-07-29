@@ -1008,6 +1008,7 @@ fn test_restored_remote_hidden_child_pane_enters_existing_ambient_session() {
 /// session-linked event.
 #[test]
 fn test_restored_remote_hidden_child_pane_pending_when_task_data_unavailable() {
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
     App::test((), |mut app| async move {
         initialize_app(&mut app);
         let pane_group = mock_pane_group(&mut app, Default::default());
@@ -1116,6 +1117,7 @@ fn test_restored_remote_hidden_child_pane_terminal_owner_loads_transcript() {
 /// viewer access), instead of leaving a bare loading placeholder.
 #[test]
 fn test_restored_viewer_hidden_child_pane_terminal_loads_transcript() {
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
     App::test((), |mut app| async move {
         initialize_app(&mut app);
         let pane_group = mock_pane_group(&mut app, Default::default());
