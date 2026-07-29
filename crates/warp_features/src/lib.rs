@@ -708,6 +708,13 @@ pub enum FeatureFlag {
     /// receives events for children created out-of-band (Oz CLI / web API).
     WaitForEventsParentRegistration,
 
+    /// Gates the unified north-star orchestration child-tracking stack:
+    /// a single `OrchestrationChildTracker` as the sole entry point for
+    /// child state, one `include_self` ancestor SSE per parent family, and
+    /// the unified `is_remote_child` placeholder for both owner and viewer.
+    /// Flag-off is identical to the pre-unification master baseline.
+    OrchestrationUnifiedStack,
+
     /// Shows a pending user query indicator during summarization when a follow-up
     /// prompt is queued via `/fork-and-compact` or `/compact-and`.
     PendingUserQueryIndicator,
@@ -1003,6 +1010,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::ContextWindowUsageBreakdown,
     FeatureFlag::JupyterNotebookRendering,
     FeatureFlag::WaitForEventsParentRegistration,
+    FeatureFlag::OrchestrationUnifiedStack,
     FeatureFlag::McpJsonTreeView,
     FeatureFlag::GeminiEnterprise,
     FeatureFlag::BoxDrawingGlyphs,
