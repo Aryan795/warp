@@ -179,8 +179,9 @@ impl OrchestrationChildTracker {
     /// Discovery via `child_agent_started`. Idempotent: an already-known child
     /// (in-band `Registered`, existing placeholder) or a run with an in-flight
     /// fetch only re-drives step 3/4; the first sighting of a genuinely new
-    /// out-of-band run kicks a single metadata fetch to create its
-    /// placeholder.
+    /// out-of-band run inserts a pending `TrackedChild` immediately — before the
+    /// async metadata fetch completes — so that subsequent `Lifecycle` and
+    /// `SessionLinked` signals see `tracker_known=true` and are processed.
     fn apply_started(
         &mut self,
         task_id: AmbientAgentTaskId,
@@ -193,9 +194,28 @@ impl OrchestrationChildTracker {
             self.maybe_request_pane_materialization(task_id, ctx);
             return;
         }
-        // New out-of-band child: start (or dedupe) discovery. The placeholder
-        // is created when the fetch completes (a cache hit resolves inline; an
-        // in-flight fetch resolves on a later re-drive).
+        // Insert a placeholder TrackedChild immediately so lifecycle and
+        // session-linked signals that arrive before the async metadata fetch
+        // completes see tracker_known=true. The entry's conversation_id is
+        // the mode's stand-in; it will be updated by stamp_conversation_id_for_run
+        // once finish_remote_child_placeholder creates the real placeholder.
+        // Any session_id that arrived before this signal is also applied now.
+        let session_id = self.pending_session_ids.remove(&task_id);
+        let conversation_id = self.placeholder_conversation_id();
+        self.insert_child(
+            task_id,
+            run_id,
+            TrackedChild {
+                conversation_id,
+                session_id,
+                last_state: None,
+                pane_materialized: false,
+                is_remote_child: true,
+            },
+            ctx,
+        );
+        // Also kick the metadata fetch to get real task state, session_id,
+        // and conversation token for transcript / live-attach decisions.
         self.spawn_metadata_fetch(task_id, run_id, ctx);
     }
 
