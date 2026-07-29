@@ -89,6 +89,36 @@ fn renders_carousel_position_and_truncates_at_narrow_width() {
 }
 
 #[test]
+fn empty_snapshot_does_not_render_loading_placeholder() {
+    // Regression: when all attachments are removed, `render_attachment_snapshot`
+    // must not paint "loading image…" — it should produce a blank element so
+    // stale placeholder text doesn't remain visible above the input prompt.
+    App::test((), |mut app| async move {
+        app.update(|ctx| {
+            ctx.add_singleton_model(|_| Appearance::mock());
+            let lines = render_lines(
+                ctx,
+                TuiAttachmentSnapshot {
+                    selected: None,
+                    position: None,
+                    count: 0,
+                    is_processing: false,
+                    selected_is_processing: false,
+                },
+                60,
+            );
+            // The empty snapshot must not render "loading image…".
+            // After the fix the element is 0-height (no lines); before the fix
+            // it rendered a single "loading image…" line.
+            assert!(
+                lines.is_empty() || !lines[0].contains("loading image"),
+                "expected no 'loading image' for empty snapshot, got: {lines:?}"
+            );
+        });
+    });
+}
+
+#[test]
 fn renders_provisional_filename_while_image_is_loading() {
     App::test((), |mut app| async move {
         app.update(|ctx| {
