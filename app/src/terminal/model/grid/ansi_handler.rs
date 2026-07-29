@@ -534,6 +534,19 @@ impl ansi::Handler for GridHandler {
 
     fn carriage_return(&mut self) {
         log::trace!("Carriage return");
+
+        // A carriage return on a soft-wrapped continuation row starts
+        // overwriting that physical row.  The preceding row is no longer a
+        // continuation of the rewritten content, so keeping WRAPLINE set would
+        // concatenate its stale prefix with the new content during reflow.
+        let cursor_row = self.grid.cursor().point.row;
+        if cursor_row > VisibleRow(0) {
+            let previous_row = cursor_row - 1;
+            let last_col = self.columns() - 1;
+            self.grid[previous_row][last_col]
+                .flags
+                .remove(Flags::WRAPLINE);
+        }
         self.update_cursor(|cursor| {
             cursor.point.col = 0;
             cursor.input_needs_wrap = false;

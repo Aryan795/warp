@@ -6,7 +6,7 @@ use warp_terminal::model::grid::cell;
 use super::*;
 use crate::features::FeatureFlag;
 use crate::terminal::SizeInfo;
-use crate::terminal::model::ansi::Handler;
+use crate::terminal::model::ansi::{Handler, LineClearMode};
 use crate::terminal::model::cell::{Cell, Flags};
 use crate::terminal::model::grid::Dimensions;
 use crate::terminal::model::index::{Point, VisiblePoint, VisibleRow};
@@ -503,6 +503,39 @@ fn grow_reflow_multiline() {
         for c in 0..6 {
             assert_eq!(row[c], Cell::default());
         }
+    }
+}
+
+#[test]
+fn grow_reflow_does_not_merge_carriage_return_overwritten_soft_wraps() {
+    let mut grid = GridHandler::new_for_test(4, 5);
+
+    for c in "abcdefgh".chars() {
+        grid.input(c);
+    }
+    grid.carriage_return();
+    grid.clear_line(LineClearMode::Right);
+
+    for c in "12345678".chars() {
+        grid.input(c);
+    }
+    grid.carriage_return();
+    grid.clear_line(LineClearMode::Right);
+
+    for c in "WXYZ".chars() {
+        grid.input(c);
+    }
+
+    grid.resize(SizeInfo::new_without_font_metrics(4, 10));
+
+    let expected_rows = ["abcde", "12345", "WXYZ"];
+    for (row_idx, expected) in expected_rows.into_iter().enumerate() {
+        let row = grid.row(row_idx).expect("row should exist");
+        let actual = (0..expected.len())
+            .map(|col| row[col].c)
+            .collect::<String>();
+        assert_eq!(actual, expected);
+        assert!(!grid.row_wraps(row_idx));
     }
 }
 
