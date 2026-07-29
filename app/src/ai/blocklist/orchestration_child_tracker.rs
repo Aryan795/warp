@@ -445,6 +445,23 @@ impl OrchestrationChildTracker {
         }
     }
 
+    /// Test-only: number of metadata-fetch dispatches issued so far. Lets
+    /// drain-integration tests in `orchestration_event_streamer_tests.rs`
+    /// (a sibling module without access to private fields) assert fetch
+    /// dedup.
+    #[cfg(test)]
+    pub(crate) fn metadata_fetch_dispatch_count(&self) -> usize {
+        self.metadata_fetch_dispatch_count
+    }
+
+    /// Test-only: whether a metadata fetch is currently in flight for
+    /// `run_id`. Used by sibling-module drain tests to assert discovery and
+    /// lifecycle signals were routed into the tracker.
+    #[cfg(test)]
+    pub(crate) fn has_in_flight_fetch(&self, run_id: &str) -> bool {
+        self.metadata_fetches.contains(run_id)
+    }
+
     /// Resolves the placeholder conversation id to associate a tracked child
     /// with before T2's per-child placeholder creation lands. Both modes reuse
     /// the mode's conversation id as a stable stand-in.

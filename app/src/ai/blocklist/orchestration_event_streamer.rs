@@ -15,6 +15,9 @@ use warpui::{
 };
 
 use super::history_model::{BlocklistAIHistoryEvent, BlocklistAIHistoryModel};
+use super::orchestration_child_tracker::{
+    ChildSignal, ChildTrackingMode, OrchestrationChildTracker,
+};
 use super::orchestration_events::{
     LifecycleEventDetailPayload, LifecycleEventDetailStage, OrchestrationEventService,
     PendingEvent, PendingEventDetail, build_lifecycle_event,
@@ -45,6 +48,16 @@ const MAX_KILLED_RUN_IDS: usize = 1024;
 /// viewer mode. Matches the legacy `OrchestrationViewerModel` poller's value
 /// (the server caps at 100 anyway).
 const VIEWER_MODE_SEED_FETCH_LIMIT: i32 = 100;
+
+/// Wire `event_type` for a parent's own inbox message events.
+const EVENT_NEW_MESSAGE: &str = "new_message";
+/// Wire `event_type` emitted on a PARENT run when a child task is created
+/// (`AddTask` with `parent_run_id`); the child run id is carried in `ref_id`.
+/// Consumed only under `OrchestrationUnifiedStack`. See TECH QUALITY-928 §3.2.
+const EVENT_CHILD_AGENT_STARTED: &str = "child_agent_started";
+/// Wire `event_type` emitted on a CHILD run when its sandbox session links;
+/// the session UUID is carried in `ref_id`. See TECH QUALITY-928 §3.2 (S5).
+const EVENT_RUN_SESSION_LINKED: &str = "run_session_linked";
 
 /// Per-event item delivered from the SSE background task to the entity.
 struct SseStreamItem {
@@ -226,6 +239,10 @@ struct ConversationStreamState {
     /// Consecutive `get_ambient_agent_task` failure count for the
     /// post-restore retry loop; resets on success.
     restore_fetch_failures: usize,
+    /// Owner-mode child tracker for this orchestrator family. Created lazily
+    /// by the flag-on family drain (`OrchestrationUnifiedStack`); `None` on
+    /// the flag-off baseline, where the legacy `drain_sse_events` path runs.
+    tracker: Option<OrchestrationChildTracker>,
 }
 
 /// Per-orchestrator SSE stream state. Parallels [`ConversationStreamState`]
@@ -265,6 +282,11 @@ struct OrchestratorStreamState {
     /// cursor, so a replay does not generate spurious `ChildSpawned` events
     /// for already-known children.
     seeded: bool,
+    /// Viewer-mode child tracker for this orchestrator family. Created lazily
+    /// by the flag-on family drain (`OrchestrationUnifiedStack`); `None` on
+    /// the flag-off baseline, where the legacy `drain_ancestor_events` path
+    /// runs.
+    tracker: Option<OrchestrationChildTracker>,
 }
 
 /// Async network coordinator for v2 orchestration event delivery via SSE.
@@ -329,6 +351,90 @@ enum DesiredSseFilter {
     Filter(AgentEventFilter),
     /// Nothing to watch yet; do not open a stream.
     NoFilter,
+}
+
+/// Which side of the family stream a drain is servicing. Captures the only
+/// two behavioral differences the fan-out dispatches on (TECH QUALITY-928
+/// §7.3): parent-inbox delivery (owner only) and cursor authority (owner
+/// pushes the server cursor, viewer persists locally only).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FamilyDrainMode {
+    Owner,
+    Viewer,
+}
+
+/// Classification of a single event from a parent-family (`include_self`)
+/// SSE stream. Produced by [`classify_family_event`] and fanned out by
+/// [`OrchestrationEventStreamer::drain_family_events`]. See TECH QUALITY-928
+/// §3.5 / §7.3.
+#[derive(Debug, PartialEq)]
+enum FamilyEvent {
+    /// Inbox message or lifecycle event on the parent's own run. Delivered to
+    /// the owner inbox; dropped by a viewer (which has no inbox).
+    ParentSelf(AgentRunEvent),
+    /// `child_agent_started` on the parent run; the child run id is the
+    /// event's `ref_id`.
+    ChildStarted { child_run_id: String },
+    /// `run_session_linked` on a child run; the session UUID is the event's
+    /// `ref_id`, letting the tracker fill in `session_id` without a fetch.
+    ChildSessionLinked {
+        child_run_id: String,
+        session_uuid: String,
+    },
+    /// A recognised lifecycle event on a child run.
+    ChildLifecycle {
+        child_run_id: String,
+        kind: api::LifecycleEventType,
+    },
+    /// Anything else (unrecognised type, malformed discovery/session event):
+    /// advances the cursor only, for forward compatibility.
+    Opaque,
+}
+
+/// Classifies one family-stream event relative to the parent's own
+/// `self_run_id`. Discovery (`child_agent_started`) is recognised only on
+/// the parent's own run; session links and lifecycle events are recognised
+/// only on other (child) runs; the parent's own inbox/lifecycle events
+/// become [`FamilyEvent::ParentSelf`]; everything else is
+/// [`FamilyEvent::Opaque`]. See TECH QUALITY-928 §3.5.
+fn classify_family_event(event: &AgentRunEvent, self_run_id: &str) -> FamilyEvent {
+    let is_self = event.run_id == self_run_id;
+    match (is_self, event.event_type.as_str()) {
+        (true, EVENT_CHILD_AGENT_STARTED) => match event.ref_id.as_deref() {
+            Some(child_run_id) if !child_run_id.is_empty() => FamilyEvent::ChildStarted {
+                child_run_id: child_run_id.to_string(),
+            },
+            // A discovery event with no child run id is unusable.
+            _ => FamilyEvent::Opaque,
+        },
+        (false, EVENT_RUN_SESSION_LINKED) => match event.ref_id.as_deref() {
+            Some(session_uuid) if !session_uuid.is_empty() => FamilyEvent::ChildSessionLinked {
+                child_run_id: event.run_id.clone(),
+                session_uuid: session_uuid.to_string(),
+            },
+            _ => FamilyEvent::Opaque,
+        },
+        (false, event_type) => match lifecycle_event_type_from_wire(event_type) {
+            Some(kind) => FamilyEvent::ChildLifecycle {
+                child_run_id: event.run_id.clone(),
+                kind,
+            },
+            // A child `new_message` or any unrecognised type: not actionable
+            // by the tracker (the viewer drops it, the owner has no delivery
+            // path for another run's inbox).
+            None => FamilyEvent::Opaque,
+        },
+        (true, EVENT_NEW_MESSAGE) => FamilyEvent::ParentSelf(event.clone()),
+        (true, event_type) => {
+            // The parent's own lifecycle events are ParentSelf; unrecognised
+            // self events advance the cursor only.
+            if lifecycle_event_type_from_wire(event_type).is_some() {
+                FamilyEvent::ParentSelf(event.clone())
+            } else {
+                FamilyEvent::Opaque
+            }
+        }
+    }
 }
 
 impl OrchestrationEventStreamer {
@@ -406,6 +512,304 @@ impl OrchestrationEventStreamer {
                     }
                 },
             );
+        }
+    }
+
+    // ---- Unified family drain (OrchestrationUnifiedStack) --------------
+
+    /// Owner-side cursor authority for the family drain: persist the cursor to
+    /// SQLite and push it to the server. The owner process is the
+    /// authoritative writer of its run's server cursor. Delegates to
+    /// [`Self::persist_event_cursor`], whose owner-side branch (a non
+    /// shared-session conversation) performs exactly this.
+    fn persist_cursor_local_and_server(
+        &mut self,
+        conversation_id: AIConversationId,
+        sequence: i64,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.persist_event_cursor(conversation_id, sequence, ctx);
+    }
+
+    /// Viewer-side cursor authority for the family drain: persist to SQLite
+    /// only, never pushing the server cursor (the orchestrator's owning
+    /// process is the authoritative writer). Monotonic: folds in the
+    /// conversation's already-persisted sequence.
+    fn persist_cursor_local_only(
+        &mut self,
+        conversation_id: AIConversationId,
+        sequence: i64,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let persisted = BlocklistAIHistoryModel::as_ref(ctx)
+            .conversation(&conversation_id)
+            .and_then(|conversation| conversation.last_event_sequence())
+            .unwrap_or(0);
+        let effective = sequence.max(persisted);
+        BlocklistAIHistoryModel::handle(ctx).update(ctx, |model, ctx| {
+            model.update_event_sequence(conversation_id, effective, ctx);
+        });
+    }
+
+    /// Fans out one family (`include_self`) SSE batch: classifies each event
+    /// and routes it to the tracker (discovery / session-link / lifecycle) or
+    /// the owner inbox (`ParentSelf`), then advances the cursor with
+    /// mode-appropriate authority. See TECH QUALITY-928 §3.5 / §7.3.
+    ///
+    /// The tracker is passed by value and returned so callers can keep it in
+    /// `self` state without a borrow conflict against `handle_event_batch`
+    /// and `killed_run_ids`. The tracker is the sole status writer and emits
+    /// `ChildStatusChanged` from `observe_child`, so the drain does not
+    /// re-broadcast lifecycle status here.
+    #[allow(clippy::too_many_arguments)]
+    fn drain_family_events(
+        &mut self,
+        cursor_conversation_id: AIConversationId,
+        self_run_id: &str,
+        mode: FamilyDrainMode,
+        mut tracker: OrchestrationChildTracker,
+        previous_cursor: i64,
+        events: Vec<AgentRunEvent>,
+        messages: Vec<ReceivedMessageInput>,
+        ctx: &mut ModelContext<Self>,
+    ) -> OrchestrationChildTracker {
+        let max_seq = events
+            .iter()
+            .map(|event| event.sequence)
+            .max()
+            .unwrap_or(previous_cursor);
+
+        let mut parent_self_events = Vec::new();
+        for event in events {
+            match classify_family_event(&event, self_run_id) {
+                FamilyEvent::ParentSelf(event) => parent_self_events.push(event),
+                FamilyEvent::ChildStarted { child_run_id } => {
+                    tracker.observe_child(
+                        &child_run_id,
+                        ChildSignal::Started,
+                        &self.killed_run_ids,
+                        ctx,
+                    );
+                }
+                FamilyEvent::ChildSessionLinked {
+                    child_run_id,
+                    session_uuid,
+                } => {
+                    tracker.observe_child(
+                        &child_run_id,
+                        ChildSignal::SessionLinked { session_uuid },
+                        &self.killed_run_ids,
+                        ctx,
+                    );
+                }
+                FamilyEvent::ChildLifecycle { child_run_id, kind } => {
+                    tracker.observe_child(
+                        &child_run_id,
+                        ChildSignal::Lifecycle(kind),
+                        &self.killed_run_ids,
+                        ctx,
+                    );
+                }
+                FamilyEvent::Opaque => {}
+            }
+        }
+
+        match mode {
+            FamilyDrainMode::Owner => {
+                // Deliver the parent's own inbox + lifecycle through the
+                // existing sink (which also persists the owner cursor).
+                if !parent_self_events.is_empty() || !messages.is_empty() {
+                    self.handle_event_batch(
+                        cursor_conversation_id,
+                        self_run_id,
+                        previous_cursor,
+                        parent_self_events,
+                        messages,
+                        ctx,
+                    );
+                }
+                // Ensure a child-only batch still advances the owner cursor.
+                self.persist_cursor_local_and_server(cursor_conversation_id, max_seq, ctx);
+            }
+            FamilyDrainMode::Viewer => {
+                // Viewer has no inbox: `ParentSelf` events are dropped. The
+                // cursor is persisted locally only.
+                self.persist_cursor_local_only(cursor_conversation_id, max_seq, ctx);
+            }
+        }
+
+        tracker
+    }
+
+    /// Flag-on owner drain: reads the conversation's family SSE buffer and
+    /// routes it through [`Self::drain_family_events`]. Falls back to the
+    /// legacy [`Self::drain_sse_events`] when no `self_run_id` is available
+    /// yet (nothing to key a tracker on), preserving delivery.
+    fn drain_owner_family_events(
+        &mut self,
+        conversation_id: AIConversationId,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let Some(self_run_id) = self.self_run_id(conversation_id, ctx) else {
+            self.drain_sse_events(conversation_id, ctx);
+            return;
+        };
+        let Ok(parent_task_id) = self_run_id.parse::<AmbientAgentTaskId>() else {
+            self.drain_sse_events(conversation_id, ctx);
+            return;
+        };
+
+        let cursor;
+        let mut events = Vec::new();
+        let mut messages = Vec::new();
+        {
+            let Some(stream) = self.streams.get_mut(&conversation_id) else {
+                return;
+            };
+            cursor = stream.event_cursor;
+            let Some(sse) = stream.sse_connection.as_mut() else {
+                return;
+            };
+            while let Ok(Some(item)) = sse.event_receiver.try_next() {
+                if item.event.sequence > cursor {
+                    if let Some(message) = item.fetched_message {
+                        messages.push(message);
+                    }
+                    events.push(item.event);
+                }
+            }
+        }
+        if events.is_empty() {
+            return;
+        }
+
+        let tracker = self
+            .streams
+            .get_mut(&conversation_id)
+            .and_then(|stream| stream.tracker.take())
+            .unwrap_or_else(|| {
+                OrchestrationChildTracker::new(
+                    parent_task_id,
+                    ChildTrackingMode::Owner {
+                        orchestrator_conversation_id: conversation_id,
+                    },
+                )
+            });
+        let tracker = self.drain_family_events(
+            conversation_id,
+            &self_run_id,
+            FamilyDrainMode::Owner,
+            tracker,
+            cursor,
+            events,
+            messages,
+            ctx,
+        );
+        if let Some(stream) = self.streams.get_mut(&conversation_id) {
+            stream.tracker = Some(tracker);
+        }
+    }
+
+    /// Flag-on viewer drain: reads the orchestrator's ancestor SSE buffer and
+    /// routes it through [`Self::drain_family_events`] in viewer mode, then
+    /// mirrors the advanced cursor onto every registered viewer placeholder
+    /// (local-only) and the in-memory entry cursor.
+    fn drain_viewer_family_events(
+        &mut self,
+        parent_task_id: AmbientAgentTaskId,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let self_run_id = parent_task_id.to_string();
+
+        let cursor;
+        let mut events = Vec::new();
+        {
+            let Some(entry) = self.viewer_mode_orchestrators.get_mut(&parent_task_id) else {
+                return;
+            };
+            cursor = entry.event_cursor;
+            let Some(sse) = entry.sse_connection.as_mut() else {
+                return;
+            };
+            while let Ok(Some(item)) = sse.event_receiver.try_next() {
+                if item.event.sequence > cursor {
+                    events.push(item.event);
+                }
+            }
+        }
+        if events.is_empty() {
+            return;
+        }
+
+        let placeholders = self.viewer_mode_placeholders(parent_task_id);
+        let Some(primary_placeholder) = placeholders.first().copied() else {
+            return;
+        };
+        let max_seq = events
+            .iter()
+            .map(|event| event.sequence)
+            .max()
+            .unwrap_or(cursor);
+
+        let tracker = self
+            .viewer_mode_orchestrators
+            .get_mut(&parent_task_id)
+            .and_then(|entry| entry.tracker.take())
+            .unwrap_or_else(|| {
+                OrchestrationChildTracker::new(
+                    parent_task_id,
+                    ChildTrackingMode::Viewer {
+                        placeholder_conversation_id: primary_placeholder,
+                    },
+                )
+            });
+        let tracker = self.drain_family_events(
+            primary_placeholder,
+            &self_run_id,
+            FamilyDrainMode::Viewer,
+            tracker,
+            cursor,
+            events,
+            Vec::new(),
+            ctx,
+        );
+        if let Some(entry) = self.viewer_mode_orchestrators.get_mut(&parent_task_id) {
+            entry.tracker = Some(tracker);
+            entry.event_cursor = entry.event_cursor.max(max_seq);
+        }
+        // Mirror the advanced cursor onto every registered viewer placeholder.
+        for placeholder in placeholders {
+            self.persist_cursor_local_only(placeholder, max_seq, ctx);
+        }
+    }
+
+    /// Owner drain dispatcher: the unified family drain when
+    /// `OrchestrationUnifiedStack` is on, else the legacy per-conversation
+    /// drain (flag-off baseline is unchanged).
+    fn drain_owner_events(
+        &mut self,
+        conversation_id: AIConversationId,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if FeatureFlag::OrchestrationUnifiedStack.is_enabled() {
+            self.drain_owner_family_events(conversation_id, ctx);
+        } else {
+            self.drain_sse_events(conversation_id, ctx);
+        }
+    }
+
+    /// Viewer drain dispatcher: the unified family drain when
+    /// `OrchestrationUnifiedStack` is on, else the legacy ancestor drain
+    /// (flag-off baseline is unchanged).
+    fn drain_viewer_events(
+        &mut self,
+        parent_task_id: AmbientAgentTaskId,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if FeatureFlag::OrchestrationUnifiedStack.is_enabled() {
+            self.drain_viewer_family_events(parent_task_id, ctx);
+        } else {
+            self.drain_ancestor_events(parent_task_id, ctx);
         }
     }
 
@@ -936,7 +1340,7 @@ impl OrchestrationEventStreamer {
                 if !is_current {
                     return;
                 }
-                me.drain_ancestor_events(parent_task_id, ctx);
+                me.drain_viewer_events(parent_task_id, ctx);
                 if let Err(err) = result {
                     log::warn!(
                         "Ancestor SSE driver exited for parent_task_id={parent_task_id} \
@@ -980,7 +1384,7 @@ impl OrchestrationEventStreamer {
                 if !is_current {
                     return;
                 }
-                me.drain_ancestor_events(parent_task_id, ctx);
+                me.drain_viewer_events(parent_task_id, ctx);
                 me.start_ancestor_sse_drain_timer(parent_task_id, generation, ctx);
             },
         );
@@ -1066,7 +1470,7 @@ impl OrchestrationEventStreamer {
         parent_task_id: AmbientAgentTaskId,
         ctx: &mut ModelContext<Self>,
     ) {
-        self.drain_ancestor_events(parent_task_id, ctx);
+        self.drain_viewer_events(parent_task_id, ctx);
         let cursor;
         {
             let Some(entry) = self.viewer_mode_orchestrators.get_mut(&parent_task_id) else {
@@ -1944,7 +2348,7 @@ impl OrchestrationEventStreamer {
                     return;
                 }
 
-                me.drain_sse_events(conversation_id, ctx);
+                me.drain_owner_events(conversation_id, ctx);
 
                 if let Err(err) = result {
                     log::warn!(
@@ -2013,7 +2417,7 @@ impl OrchestrationEventStreamer {
                 if !is_current {
                     return;
                 }
-                me.drain_sse_events(conversation_id, ctx);
+                me.drain_owner_events(conversation_id, ctx);
                 me.start_sse_drain_timer(conversation_id, generation, ctx);
             },
         );
@@ -2146,7 +2550,7 @@ impl OrchestrationEventStreamer {
     fn reconnect_sse(&mut self, conversation_id: AIConversationId, ctx: &mut ModelContext<Self>) {
         // Drain buffered events before dropping the channel so we don't
         // discard already-fetched message bodies.
-        self.drain_sse_events(conversation_id, ctx);
+        self.drain_owner_events(conversation_id, ctx);
         if let Some(stream) = self.streams.get_mut(&conversation_id)
             && let Some(connection) = stream.sse_connection.take()
         {
@@ -2163,7 +2567,7 @@ impl OrchestrationEventStreamer {
     /// external state and are pruned through their own paths.
     fn teardown_sse(&mut self, conversation_id: AIConversationId, ctx: &mut ModelContext<Self>) {
         // Drain anything buffered so we don't lose hydrated messages.
-        self.drain_sse_events(conversation_id, ctx);
+        self.drain_owner_events(conversation_id, ctx);
         if let Some(stream) = self.streams.get_mut(&conversation_id)
             && let Some(connection) = stream.sse_connection.take()
         {
