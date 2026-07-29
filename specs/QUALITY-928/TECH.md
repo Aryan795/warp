@@ -1,36 +1,35 @@
-# TECH: Orchestration Child Tracking — `child_agent_started` Push Discovery (Phase 0) and Unification Roadmap (Phases 1–3)
+# TECH: Orchestration Child Tracking — Unified North-Star Implementation
 
 Linear: QUALITY-928 — Emit a `child_agent_started` event so parents discover
-children via push, and remove orchestration child-discovery polling.
+children via push, and implement the full north-star orchestration tracking
+architecture in a two-PR client stack.
 Follow-up to QUALITY-919 (PR #13208), whose spec sketched this work under
 "Always-on child discovery (lazy listening at first wait)".
 
 ## 1. Scope and status
 This document is the single spec for orchestration child tracking. It covers:
-- **Phase 0 — lands in the initial PR** (branch
-  `matthew/child-agent-started-events`, base `origin/master`): push-based
-  child discovery via `child_agent_started`, owner-side representation of
-  out-of-band children, the remote-child pane hydration fix, event-driven
-  refresh replacing the polling timer, and the self-heal, kill-tombstone,
-  and stall-recovery guards. §3 specifies it; §4 documents the resulting
-  runtime architecture. The whole owner-side feature is dogfood-gated
-  (§3.3).
-- **Phases 1–3 — the unification roadmap** (unscheduled): collapsing the
-  owner and viewer child-tracking stacks onto one tracker, one placeholder
-  flavor, one pane path, and one ancestor stream per parent. §5–§11.
+- **M1 — Core tracker + unified stream** (branch `matthew/orch-unified-m1`,
+  base `origin/master`): `OrchestrationChildTracker` as the sole entry point
+  for child state; `classify_family_event` + `drain_family_events` replacing
+  both separate drain pipelines; unified `is_remote_child` placeholder;
+  `OrchestrationUnifiedStack` dogfood flag; rolled-out flag cleanup. §3
+  specifies it.
+- **M2 — Pane path + transcript** (branch `matthew/orch-unified-m2`, base M1
+  branch): `ChildPaneMaterialization` unified dispatch; converged attach;
+  transcript for both owner and viewer. §7.5 specifies the design.
+- **Phases 1–3 of the earlier incremental roadmap are superseded**: the full
+  north-star is implemented directly, avoiding ~600 lines of intermediate
+  scaffold that would have been written and then deleted.
 
-The server-side emit (S1–S4, §3.2) is a separate warp-server PR against
-`develop`; it is additive and safe to ship first. End-to-end manual
-validation of Phase 0 requires it. Pinned research SHAs: warp `c0902a2`,
-warp-server `029c643`, warp-proto-apis `ac1af73`. No `warp-proto-apis` change
+The server-side emits (S1–S5 + ACL propagation, §3.2) are in a separate
+warp-server PR against `develop`; they are additive and safe to ship first.
+Pinned research SHAs: warp-server `029c643`. No `warp-proto-apis` change
 is needed: event types are Go string constants surfaced via `openapi.yaml`,
-and the client deserializes generically into `AgentRunEvent` (the child id
-rides in `ref_id`).
+and the client deserializes generically into `AgentRunEvent`.
 
 A reader should come away with: (a) a working mental model of how child
-agents are discovered, represented, and shown, on both the owner and viewer
-sides; (b) what the initial PR changes and why; and (c) the target
-architecture and the phased, flag-gated path to it.
+agents are discovered, represented, and shown in the north-star system;
+(b) what M1 changes and why; and (c) the design decisions behind M2.
 
 ## 2. Background: concepts and vocabulary
 - **Run / task**: a server-side agent run (`ai_tasks` row), identified by a
@@ -89,25 +88,22 @@ architecture and the phased, flag-gated path to it.
   discovery machinery only *creates* for kind 3, but refetch and pane
   hydration serve both. Kind 1 is deliberately different (§9.4).
 
-## 3. Phase 0 — what the initial PR lands
+## 3. M1 — Core Tracker + Unified Stream
 **Behavioral contract.** Whenever a child task is created with
 `parent_run_id = P` (by any method), a parent client watching `P` discovers
 that child within one SSE round-trip — no polling — and surfaces its
-subsequent lifecycle and inbox events. Out-of-band children render as named
-child pills (not "Unknown agent") with their inbox messages attributed
-correctly, and clicking a remote-child pill hydrates its pane (live session
-join while running; transcript once terminal).
+subsequent lifecycle and inbox events. Children render as named child pills
+with inbox messages attributed correctly. Clicking a child pill hydrates its
+pane: live session join while running; transcript for both owner and viewer
+once terminal (M2 implements the unified pane path).
 
-### 3.1 Precondition: orchestration flags removed
-`origin/master` (the PR base) already deletes the fully-rolled-out
-`OrchestrationViewerStreamer` and `OwnerOrchestrationAncestorStreamer`
-feature flags along with the legacy viewer REST poller, so the parent's
-`AncestorRunId { include_self: true }` filter selection is unconditional.
-The third rolled-out orchestration flag, `RunAgentsTool`, is being removed
-in a separate change: unlike the streamer flags its removal is not a local
-code collapse — the flag drives `RequestSettings.SupportsOrchestrate`
-negotiation (wire-visible) and its off-branch is the legacy
-`start_agent`/`start_agent_v2` flow.
+### 3.1 Precondition: rolled-out flag cleanup
+M1 deletes `FeatureFlag::OrchestrationViewerStreamer` and
+`FeatureFlag::OwnerOrchestrationAncestorStreamer` (both already in the
+`default` cargo set, i.e. on for all channels) along with the legacy viewer
+REST polling path (`fetch_children` / `schedule_next_poll` / `maybe_kick_polling`
+/ `apply_children_fetch`). The SSE-driven path is now unconditional on the
+flag-off baseline.
 
 ### 3.2 Server: emit `child_agent_started` (separate warp-server PR)
 **S1 — event-type constant.** In `logic/agent_lifecycle.go`, alongside the
@@ -186,20 +182,29 @@ if sharedSessionUUID != nil {
 }
 ```
 Old clients ignore this via the `_ => None` catch-all. The session UUID in
-`ref_id` is an optimization (clients could extract it directly), but Phase 0
-consumption triggers a coalesced metadata refetch via `refresh_task_data`
-instead, reusing the existing fetch path. The event surfaces on the child's
-run in both owner (`include_self=true`) and viewer (`include_self=false`)
-ancestor streams.
+`ref_id` is consumed directly by M1: `classify_family_event` produces
+`FamilyEvent::ChildSessionLinked { session_uuid }` and `observe_child` fills
+in `session_id` without a metadata fetch. The event surfaces on the child's
+run in both owner (`include_self=true`) and viewer (same stream, `ParentSelf`
+drops) ancestor streams.
 
-### 3.3 Client: open the family stream at first wait
-A root orchestrator becomes stream-eligible in two ways: by having watched
-children — the `StartAgentExecutor` registers every in-band child via
-`register_watched_run_id` at spawn time, and the post-restore fetch installs
-`task.children` — or, behind `FeatureFlag::WaitForEventsParentRegistration`,
-at its first `wait_for_events`, before any child exists
-(`app/src/ai/blocklist/orchestration_event_streamer.rs`,
-`register_root_on_wait`):
+### 3.3 Client: OrchestrationUnifiedStack flag and stream opening
+`FeatureFlag::OrchestrationUnifiedStack` (dogfood-only) gates the entire M1
+system. Flag-off: behavior identical to the pre-M1 master baseline. Flag-on:
+one `include_self: true` ancestor SSE per parent (`drain_family_events`), tracker
+owns all child state.
+
+`register_root_on_wait` is preserved: a root orchestrator registers for the
+family stream at its first `wait_for_events` when the flag is on, before any
+child exists. `WaitForEventsParentRegistration` continues to guard this
+mechanism on the flag-off baseline and is superseded (not deleted) in M1.
+
+On the flag-on path, both owner and viewer open a single `include_self: true`
+ancestor SSE. The viewer drops `ParentSelf` events (no inbox). Owner and
+viewer each hold one `OrchestrationChildTracker` — the streamer hosts it in
+`ConversationStreamState` (owner) and `OrchestratorStreamState` (viewer).
+
+`register_root_on_wait` (flag-on path):
 ```rust
 pub fn register_root_on_wait(&mut self, conversation_id: AIConversationId, ctx: ...) {
     if !FeatureFlag::WaitForEventsParentRegistration.is_enabled() { return; }
@@ -236,339 +241,171 @@ optimization, not a correctness-critical upgrade trigger; a child created
 during an already-blocked wait before the stream opens is caught by replay
 from the cursor when it connects (self-healing).
 
-**Gating.** The whole owner-side feature is behind
-`WaitForEventsParentRegistration` (dogfood-only, reused from #13208 since it
-gates exactly this trigger; redefining its unshipped meaning is safe) — both
-the wait-time registration *and* the consumption steps (§3.4–3.5's
-discovery, placeholder creation, self-heal, and refetch each early-return
-when the flag is off). Gating consumption matters because a
-`run_agents`/restore parent holds an open ancestor stream even with the
-flag off; without consumption gates the new machinery would ship ungated to
-production the moment the server starts emitting. Off ⇒ behavior identical
-to the pre-branch baseline: roots discovered only via `run_agents`/restore,
-`ancestor_on_wait` never set, and drained events feed only delivery.
+**Gating.** `OrchestrationUnifiedStack` gates the whole system. Off ⇒
+behavior identical to master: roots discovered only via `run_agents`/restore,
+`drain_family_events` never called, `observe_child` never called. Gating the
+consumption is necessary because a `run_agents`/restore parent holds an open
+ancestor stream even with the flag off; without consumption gates the new
+machinery would ship ungated to production the moment the server starts emitting.
 
-**None-handling and timing (as-built).** When a parent or wait-root has no
-`self_run_id` yet, `desired_sse_filter` returns `NoFilter` (with a warn) and
-defers until `on_server_token_assigned` re-evaluates. `register_root_on_wait`
-similarly requires `self_run_id` and relies on a later wait to re-check;
-`on_server_token_assigned` does not retro-register. Safe in practice because
-the run id arrives via StreamInit / task creation before the model can emit
-any tool call.
+**`WaitForEventsParentRegistration`** remains as a secondary gate on the
+`register_root_on_wait` call site (flag-off baseline), superseded when
+`OrchestrationUnifiedStack` is on. Safe to promote/remove separately.
 
-### 3.4 Client: consume the event; represent out-of-band children
-The drain pipeline (§4.2) calls `register_children_from_events` on every
-batch: each `child_agent_started` inserts `ref_id` (the child run id) into
-`watched_run_ids` — flipping `is_parent_agent_conversation` true, with no
-reconnect since the ancestor filter's shape is unchanged; unparseable
-`ref_id`s are rejected before registration so garbage cannot flip the
-parent role — and, for children with no local conversation, creates an
-owner-side representation:
-- **Fetch-first placeholder creation.** `ensure_remote_child_placeholder`
-  fetches task metadata, then `finish_remote_child_placeholder` creates the
-  placeholder from it: `start_new_child_conversation`,
-  `mark_conversation_as_remote_child` (so `is_remote_run_view` is true and
-  the streamer opens no redundant per-child SSE — the child's events already
-  arrive on the parent's `include_self` stream; `is_remote_child`, NOT
-  `is_viewing_shared_session`, which would mislabel it), fallback display
-  title from `task.title`, and `assign_run_id_for_conversation` so
-  `conversation_id_for_agent_id` resolves (pill appears; inbox messages
-  attribute to the child).
-- **Self-heal from lifecycle events.** A fetch can fail, and
-  `child_agent_started` is one-shot — so `drain_sse_events` also calls
-  `ensure_placeholders_for_child_lifecycle_events`: any child lifecycle
-  event whose child still has no local conversation re-attempts placeholder
-  creation. This also covers a child whose first observed signal is a
-  lifecycle event (e.g. a stream opened after the `child_agent_started`
-  sequence). A per-child in-flight guard
-  (`remote_child_placeholder_fetches`) prevents overlapping fetches; guard
-  entries age out after 30s because the request layer has no per-call
-  timeout, so a hung fetch cannot block the child's representation forever.
-  The post-restore fetch also runs placeholder creation for installed
-  children with no local conversation — a crash between cursor persistence
-  and placeholder creation would otherwise leave a watched child with no
-  pill, and a terminal child emits no further lifecycle events for
-  self-heal to catch.
-- **Killed-run tombstones.** Discovery and refetch skip runs in
-  `killed_run_ids`, and `ensure_remote_child_placeholder` refuses them at
-  the creation chokepoint — necessary because these steps run *before*
-  `handle_event_batch`'s delivery-side killed filter, so a late lifecycle
-  event for a locally-killed child would otherwise resurrect its
-  placeholder. The tombstones are re-checked *after* the metadata fetch
-  await too (`finish_remote_child_placeholder`): a kill landing mid-fetch
-  (stamp → kill → delete clears the agent-id index) must not be resurrected
-  by the callback. A spawn that races a cancellation tombstones its run id
-  at `TaskSpawned` for the same reason — the id was never stamped locally,
-  so the duplicate-representation guard alone cannot catch it.
-- **Duplicate-representation guard + race reconciliation.** The server emits
-  `child_agent_started` for every child, including in-band ones that already
-  have a conversation; placeholder creation is gated on
-  `conversation_id_for_agent_id(child_run_id).is_none()` (re-checked in the
-  fetch callback). For the event-before-stamp race,
-  `assign_run_id_for_conversation` (`history_model.rs:1377`) drops a stale
-  `is_remote_child` placeholder when a locally-started child claims the same
-  run id, so a child never ends up with two conversations.
+**None-handling.** When a parent or wait-root has no `self_run_id` yet,
+`desired_sse_filter` returns `NoFilter` (with a warn) and defers until
+`on_server_token_assigned` re-evaluates. Safe in practice because the run id
+arrives via StreamInit / task creation before the model can emit any tool call.
+
+### 3.4 Client: OrchestrationChildTracker and observe_child
+All child state changes on both owner and viewer funnel through
+`OrchestrationChildTracker::observe_child` (see §7.2 for the full design
+and `ChildSignal` variant list). The four-step logic:
+
+0. Drop tombstoned runs and runs owned by a non-placeholder local conversation.
+1. Create-or-update the placeholder (`is_remote_child = true`, both modes).
+2. Write status through on `Lifecycle` signals (tracker is sole status writer).
+3. Refetch metadata via `AgentConversationsModel::refresh_task_data` while
+   `session_id` is missing or pane not materialized.
+4. Request pane materialization once `session_id` is known, or transcript once terminal.
+
+`ChildSignal::SessionLinked { session_uuid }` is handled directly from
+`run_session_linked` events: the session UUID is extracted from `ref_id`
+and fills in `session_id` without a metadata fetch, then pane materialization
+is requested immediately. This eliminates the metadata-fetch round-trip
+for the attach-time window.
+
+`ChildSignal::Started` (from `child_agent_started`) is idempotent:
+calling it again for the same run id is a no-op (explicit tracker state
+replaces the old `conversation_id_for_agent_id(...).is_none()` implicit guard).
+`ChildSignal::Registered` (from `StartAgentExecutor`) prevents placeholder
+creation for in-band children — tracker marks them as already-represented.
+Tombstoned runs are checked at step 0 so kills mid-fetch cannot resurrect placeholders.
 
 ```mermaid
 flowchart TD
   Create["AddTask(parent_run_id=P)"] --> Emit["server: emit child_agent_started on run P (ref_id=child)"]
-  Wait["client: first wait_for_events (root)"] --> Anc["register_root_on_wait: open AncestorRunId include_self=true (since = persisted cursor)"]
-  Emit --> Recv["client receives child_agent_started: register child run id, create is_remote_child placeholder"]
+  Wait["client: first wait_for_events (root)"] --> Anc["register_root_on_wait: open AncestorRunId include_self=true"]
+  Emit --> Recv["drain_family_events: ChildStarted → tracker.observe_child(Started)"]
   Anc --> Recv
-  Anc --> Track["child lifecycle + inbox delivered; no filter change ever needed"]
+  Anc --> Track["child lifecycle + inbox delivered via drain_family_events"]
 ```
 
-### 3.5 Client: pane hydration + event-driven refresh
-**Hydration (click).** Clicking a remote-child pill routes through
-`create_hidden_child_agent_pane`'s `is_remote_child` branch into
-`hydrate_task_backed_hidden_child_pane`
-(`app/src/pane_group/child_agent/hydration.rs`), dispatching on a pure
-decision function over the fetched `AmbientAgentTask`:
-```rust
-pub(in crate::pane_group) enum RemoteChildHydrationAction {
-    /// Attachable live session — join it in place.
-    LiveAttach { session_id: SessionId },
-    /// No live session but a server conversation token is available.
-    LoadTranscript { server_token: ServerConversationToken, task_is_terminal: bool },
-    /// Neither live nor cloud transcript available.
-    Fallback { task_is_terminal: bool },
-}
-```
-Terminality comes from `task.is_terminal_run_state()`, not live-session
-state. `LiveAttach` joins the session via `attach_execution_session` (the
-pane's cloud-mode viewer terminal manager actually streams). `settles()`
-gates the pending entry: `LiveAttach` always settles; transcript/fallback
-settle only when terminal — a non-terminal child stays in
-`pending_remote_child_hydrations` and is re-driven by
-`process_pending_remote_child_hydrations` on `TasksUpdated`. The cloud
-zero-state block is suppressed for `is_remote_child` conversations.
+### 3.5 M1 drain: drain_family_events and classify_family_event
+`drain_family_events` replaces both `drain_sse_events` (owner) and
+`drain_ancestor_events` (viewer). Events are classified by
+`classify_family_event(event, self_run_id)` into `FamilyEvent` variants
+(see §7.3 for the full sketch):
 
-**Event-driven refresh (replaces polling).** `trigger_child_task_refreshes`
-(called from the drain) refetches each child's task via
-`AgentConversationsModel::refresh_task_data` on that child's lifecycle
-events and on `run_session_linked` → `TasksUpdated` → re-drives pending
-hydrations. `refresh_task_data` *coalesces* with any in-flight fetch — a
-refresh arriving mid-fetch is recorded and one follow-up fetch issues on
-completion — so the refetch carrying a state transition cannot be swallowed
-by a stale request started before the transition (failure cooldowns still
-apply to the follow-up). This replaced the unbounded ~3s tracked-refresh
-timer approach. The `run_session_linked` event (S5) closes the
-click-before-first-event window for the owner side: `child_task_ids_to_refresh`
-includes it, so a child whose `session_id` links between lifecycle events
-still triggers an immediate refetch rather than requiring a polling fallback.
-Refetch fires for in-band and out-of-band children alike; tombstoned runs
-are skipped (the pure selection is `child_task_ids_to_refresh`).
+- **`ChildStarted`** → `tracker.observe_child(Started)`
+- **`ChildSessionLinked`** → `tracker.observe_child(SessionLinked { session_uuid })`
+  (extracts UUID from `ref_id`; no metadata fetch needed)
+- **`ChildLifecycle`** → `tracker.observe_child(Lifecycle(kind))`
+- **`ParentSelf`** → owner: `handle_event_batch` (inbox + lifecycle);
+  viewer: dropped (viewer has no inbox)
+- **`Opaque`** → cursor advances only (forward compat)
 
-**Viewer-side changes in Phase 0.** The viewer's unbounded `session_id`
-polling timer is deleted; `spawn_task_metadata_fetch` is driven event-wise —
-on `ChildSpawned` and, from `handle_child_status_changed`, while a tracked
-child's `session_id` is still missing or its pane isn't materialized.
-`drain_ancestor_events` now also handles `run_session_linked` on a child run:
-emits `ChildSpawned` on first observation, then `ChildStatusChanged` (with
-`InProgress` as the signal status) to drive `spawn_task_metadata_fetch` —
-replacing the former bounded polling fallback entirely.
-Viewer discovery scope is otherwise unchanged: the viewer stream stays
-`include_self: false`, so `child_agent_started` is not delivered to viewers
-and viewer child discovery remains the child's first lifecycle event
-(creation-time viewer discovery folds into Phases 1/3).
+Cursor authority: owner calls `persist_cursor_local_and_server`; viewer
+calls `persist_cursor_local_only`. `refresh_task_data` coalesces in-flight
+fetches: a refetch arriving mid-fetch is recorded and one follow-up issues
+on completion.
 
-### 3.6 Phase 0 validation
-Client (all landed on the branch; `cargo nextest run -p warp`, `./script/format`
-and the presubmit clippy clean):
-- First wait on a root opens `AncestorRunId { include_self: true }` with no
-  server fetch (`streamer_with_no_fetch_expected` asserts no
-  `get_ambient_agent_task`); a wait-registered root is eligible.
-- `child_agent_started` registers the child and flips the parent role with
-  no reconnect; duplicates and pre-registered (`run_agents`) children cause
-  no churn.
-- Out-of-band placeholder creation (named `is_remote_child` pill, indexed
-  run id, no per-child SSE); guard for children with existing conversations;
-  event-before-stamp race drops the stale placeholder.
-- Self-heal: an unrepresented child's lifecycle event dispatches a
-  placeholder fetch; already-represented children and the parent's own run
-  are skipped. Discovery-path dispatch has the same coverage, including
-  rejection of unparseable `ref_id`s.
-- Killed-run tombstones block discovery, refetch
-  (`child_task_ids_to_refresh` unit contract), and placeholder creation
-  while live siblings on the same drain still dispatch; a kill landing
-  mid-fetch is refused by the fetch callback.
-- Flag off ⇒ `register_root_on_wait` is a no-op; children
-  (`has_parent_agent`) and remote-run views never wait-register; and the
-  consumption steps (discovery, self-heal, refetch) are inert even when
-  called with events for unrepresented children.
-- Refetch coalescing: a `refresh_task_data` arriving during an in-flight
-  fetch is recorded and dispatches exactly one follow-up on completion.
-- `run_session_linked` triggers `trigger_child_task_refreshes` owner-side
-  and a `ChildStatusChanged`-driven `spawn_task_metadata_fetch` viewer-side;
-  self/killed filters apply as for lifecycle events.
-- Unknown `event_type` is ignored and advances the cursor (forward compat).
-- Hydration: `decide_remote_child_hydration_action` contract (attachable →
-  `LiveAttach`; terminality from run state; empty tokens → `Fallback`);
-  `settles()` matrix; viewer model rewritten to the event-driven path.
+### 3.6 M1 validation
+`cargo nextest run -p warp --no-fail-fast`, `./script/format`, and clippy
+(`-D warnings`) all pass.
+- Flag OFF: all pre-M1 tests pass; `OrchestrationEventStreamer` keeps the two
+  drain paths; viewer children NOT persisted. Behavior identical to master.
+- Flag ON: `drain_family_events` is the sole drain; `observe_child` is the
+  sole entry point for child state; viewer children persisted as
+  `is_remote_child = true`.
+- `observe_child` idempotency: two `Started` signals for the same run id
+  issue exactly one metadata fetch.
+- Tombstoned-run skip: `observe_child(Lifecycle)` for a killed run id is a no-op.
+- `Registered` prevents placeholder creation for in-band children.
+- `SessionLinked { session_uuid }` fills in `session_id` without a fetch.
+- `classify_family_event`: all five variants covered by unit tests.
+- Cursor authority: flag-ON + viewer → cursor advance does NOT push to server.
+- Rolled-out flags deleted; legacy REST polling path absent.
 
-Manual (dogfood, flag on, with the server PR deployed): create a child via
-the Oz CLI/web API with `parent_run_id`, have the parent `wait_for_events`;
-verify the child surfaces without polling cadence and appears as a named
-pill with attributed messages. Click a child pill early (Queued/Pending),
-mid-run, and after completion — expect re-drive → live join → transcript
-respectively (§4.5). Verify the viewer pill bar still populates.
+Manual (dogfood, `OrchestrationUnifiedStack` on, server PR deployed): create
+a child via Oz CLI/web API with `parent_run_id`, have the parent
+`wait_for_events`; verify the child surfaces without polling latency as a
+named pill with attributed messages. Click a child pill at three lifecycle
+moments (early/Queued, running, completed) and verify re-drive → live join →
+transcript respectively (§4.5 empirical contract).
 
-## 4. Architecture after Phase 0: the two stacks
+## 4. North-star architecture
 ### 4.1 At a glance
 ```mermaid
 flowchart LR
-  LOG[("server<br/>ai_run_event_log")] --> OS["owner SSE<br/>AncestorRunId include_self=true"]
-  LOG --> VS["viewer SSE<br/>AncestorRunId include_self=false"]
-  subgraph OWNER["Owner process (orchestrator)"]
-    OS --> OD["drain_sse_events"]
-    OD --> RCE["register_children_from_events<br/>+ is_remote_child placeholder"]
-    OD --> TCR["trigger_child_task_refreshes"]
-    OD --> HEB["handle_event_batch<br/>inbox + lifecycle; cursor → SQLite + server"]
-    RCE --> OPILL["pill bar / participants"]
-    TCR --> ACM["AgentConversationsModel<br/>refresh_task_data → TasksUpdated"]
-    ACM --> HYD["hydrate_task_backed_hidden_child_pane<br/>LiveAttach / LoadTranscript / Fallback"]
-  end
-  subgraph VIEWER["Viewer process (shared-session viewer)"]
-    SEED["REST seed<br/>?ancestor_run_id="] --> VD
-    VS --> VD["drain_ancestor_events"]
-    VD --> BC["ChildSpawned / ChildStatusChanged<br/>(broadcast events)"]
-    BC --> OVM["OrchestrationViewerModel<br/>register_child (is_viewing_shared_session)"]
-    OVM --> VPANE["ensure_shared_session_viewer_child_pane<br/>dedicated viewer pane"]
-    VD --> VCUR["cursor → placeholder rows only"]
+  LOG[("server<br/>ai_run_event_log")] --> FS["one family SSE<br/>AncestorRunId include_self=true"]
+  subgraph STREAMER["OrchestrationEventStreamer"]
+    FS --> CF["classify_family_event"]
+    CF -->|ChildStarted/SessionLinked/Lifecycle| TRK["OrchestrationChildTracker<br/>observe_child"]
+    CF -->|ParentSelf| HEB["handle_event_batch<br/>inbox + lifecycle; cursor authority"]
+    TRK --> PILL["pill bar (both modes)"]
+    TRK --> PANE["create_hidden_child_agent_pane<br/>ChildPaneMaterialization dispatch (M2)"]
   end
 ```
-Both stacks live in `app/src/ai/blocklist/orchestration_event_streamer.rs`
-(one model, two disjoint state maps): owner state in
-`streams: HashMap<AIConversationId, ConversationStreamState>`, viewer state in
-`viewer_mode_orchestrators: HashMap<AmbientAgentTaskId, OrchestratorStreamState>`.
 
-### 4.2 Owner-side stack
-Stream open per §3.3. A 500ms timer drains buffered events
-(`drain_sse_events`):
-```rust
-self.register_children_from_events(conversation_id, &events, ctx);      // discovery
-let self_run_id = self.self_run_id(conversation_id, ctx).unwrap_or_default();
-self.trigger_child_task_refreshes(&self_run_id, &events, ctx);          // refetch
-self.ensure_placeholders_for_child_lifecycle_events(                    // self-heal
-    conversation_id, &self_run_id, &events, ctx);
-self.handle_event_batch(conversation_id, &self_run_id, cursor, events, messages, ctx);
-```
-- **Discovery / self-heal / tombstones** per §3.4.
-- **Refetch** per §3.5.
-- **Delivery** (`handle_event_batch`): advances + persists the cursor
-  (SQLite and, for the owner, the server), drops killed-run events, converts
-  lifecycle events, and enqueues inbox messages and lifecycle items into
-  `OrchestrationEventService` — which delivers them to the parent's model as
-  `AIAgentInput::MessagesReceivedFromAgents` /
-  `AIAgentInput::EventsFromAgents` (LLM inputs; `orchestration_events.rs`,
-  `drain_and_convert_events`). Note what this path does *not* do: nothing
-  here writes a child placeholder's `ConversationStatus`. Owner-side
-  cloud-child pill status is corrected only opportunistically when the
-  child's pane attaches (ambient-view priming), and can lag otherwise — see
-  §6, item 3. Note also the ordering: discovery/refetch/self-heal run
-  *before* this step's killed-run filter, which is why they consult the kill
-  tombstones themselves (§3.4).
+One SSE per parent family; `OrchestrationEventStreamer` hosts both owner and
+viewer tracker instances. The streamer's state maps (`streams` for owner,
+`viewer_mode_orchestrators` for viewer) each carry an
+`OrchestrationChildTracker`. The tracker is the sole entry point for child
+state changes; `OrchestrationViewerModel` and the owner drain both delegate
+to it.
 
-Pane hydration per §3.5.
+### 4.2 Delivery path
+`handle_event_batch` is called for `ParentSelf` events in owner mode only.
+It advances and persists the cursor (SQLite + server for owner, SQLite-only
+for viewer), drops killed-run events, and enqueues inbox messages and
+lifecycle items into `OrchestrationEventService` for the parent's LLM
+input path (`drain_and_convert_events`). The tracker, not `handle_event_batch`,
+writes child `ConversationStatus` — this fixes the owner-side pill-staleness
+gap (§6, item 3) where status lagged until pane attach.
 
-### 4.3 Viewer-side stack
-**Registration.** Each viewer pane owns an `OrchestrationViewerModel`
-(`terminal/shared_session/viewer/orchestration_viewer_model.rs`). It
-registers with the streamer only when the pane's active conversation is the
-orchestrator's `is_viewing_shared_session` parent placeholder
-(`register_viewer_mode_consumer_if_possible`). Registration is refcounted
-per `parent_task_id` (`register_viewer_mode_consumer`).
+### 4.3 Pane path (M2)
+See §7.5. `ChildPaneMaterialization` with three variants:
+- **`AttachLive { session_id }`**: `attach_child_session` (converged owner +
+  viewer attach, M2's core).
+- **`LoadTranscript { server_token }`**: transcript for both modes; viewer
+  access granted via parent session ACL propagation (§9.1, server prerequisite
+  in warp-server PR #12252).
+- **`Pending`**: tracker re-drives when state changes via `observe_child`.
 
-**Seed + stream.** First registration issues a one-shot REST seed
-(`?ancestor_run_id=`, limit 100) that populates `known_children` and the
-cursor; only then does the ancestor SSE open (`start_ancestor_sse`) with
-`include_self: false` — the viewer never needs the parent's inbox.
+### 4.4 Empirical grounding (three click-timing cases)
+Validated against a healthy session-sharing server:
+- **Early click (Queued/Pending)**: child not attachable for ~10s; pane
+  re-drives as the task advances. `run_session_linked` fires at sandbox claim;
+  `SessionLinked` signal fills in `session_id` directly without a metadata fetch.
+- **Running click**: single immediate `AttachLive`.
+- **Completed click**: single terminal `LoadTranscript` (owner and viewer).
 
-**Drain → broadcasts.** `drain_ancestor_events` drops `new_message`
-outright, emits `ChildSpawned` exactly once per run id (deduped via
-`known_children`, pre-seeded so reconnect replay is quiet) and
-`ChildStatusChanged` per lifecycle event, then persists the cursor to every
-registered viewer placeholder — but not to the server
-(`persist_event_cursor`'s viewer-mode short-circuit).
+## 5. Differences that drove the unified design
+*These were the gaps in the pre-M1 baseline; all are closed by M1 + M2.*
 
-**OVM consumption.** `handle_child_spawned` → `spawn_task_metadata_fetch` →
-`register_child`, which creates the `is_viewing_shared_session` placeholder
-(name, fallback title, harness, run id index, status) and — once a
-`session_id` is known — emits `EnsureSharedSessionViewerChildPane`.
-`handle_child_status_changed` writes status through and refetches metadata
-while `session_id` is still missing or the pane isn't materialized: the
-event-driven claim-time wait the owner side now mirrors.
-
-**Pane materialization.** `ensure_shared_session_viewer_child_pane`
-(`pane_group/child_agent/restoration.rs`) builds a dedicated shared-session
-viewer pane with its own `BlocklistAIController` and viewer `Network`,
-swapping out the loading placeholder a too-early pill click may have left.
-There is **no terminal-transcript branch**: a viewer child without a live
-`session_id` never materializes beyond the loading state.
-
-### 4.4 Duplication map
-| Concern | Owner-side | Viewer-side (OVM) |
-| --- | --- | --- |
-| Discovery | `register_children_from_events` (`child_agent_started` + lifecycle self-heal) | REST seed + `ChildSpawned` from `drain_ancestor_events` |
-| Claim-time wait for `session_id` | `trigger_child_task_refreshes` (coalesced) + bounded click fallback | `ChildStatusChanged` → `spawn_task_metadata_fetch` + bounded pre-claim fallback |
-| Placeholder conversation | `is_remote_child` (persisted) | `is_viewing_shared_session` (runtime-only) |
-| Placeholder creation | `finish_remote_child_placeholder` | `register_child` |
-| Attach live session | `LiveAttach` → `attach_execution_session` on a cloud-mode ambient pane | `EnsureSharedSessionViewerChildPane` → dedicated viewer pane |
-| Terminal transcript | `LoadTranscript` (terminal only) | none |
-| Ancestor SSE | `streams` (`include_self=true`, inbox + discovery + cursor→server) | `viewer_mode_orchestrators` (`include_self=false`, lifecycle only, cursor local) |
-| Broadcast events | none (drain feeds `handle_event_batch` directly) | `ChildSpawned` / `ChildStatusChanged` |
-
-The streamer already flags the intended convergence: `OrchestratorStreamState`
-notes "Today the only consumers are shared-session viewer panes … See the note
-on `AncestorForwardingConsumer` for the future direction", and
-`AncestorForwardingConsumer`'s doc sketches exactly the single-family-stream
-generalization in §7.
-
-### 4.5 Empirical grounding (why the owner pieces exist)
-Validated against a healthy session-sharing server by clicking a child pill
-at three lifecycle moments:
-- **Early click (Queued/Pending)**: the child is not attachable for ~10s;
-  the pane must re-drive as the task advances (Pending → Claimed →
-  InProgress+Attachable). A refetch mechanism is genuinely required even
-  with a healthy server, because `child_agent_started` fires at task
-  creation.
-- **Running click**: a single immediate `LiveAttach`, no fallback churn.
-- **Completed click**: a single terminal `LoadTranscript`.
-
-Conclusions applied in Phase 0: non-terminal `LoadTranscript` was not
-observed empirically (its reload guard was removed; the decide function can
-still return it when a token exists without an attachable session, in which
-case the unsettled re-drive re-loads — see `settles()`); `LiveAttach`
-session-join and terminal `LoadTranscript` are essential; the refresh
-mechanism is load-bearing for the early-click window (now event-driven).
-
-## 5. Differences that block naive reuse
-1. **Consumer gating.** OVM registers only in the `is_viewing_shared_session`
-   viewer context; the owner is not viewing a shared session, so OVM is inert
-   for it. §3.4's owner-side representation exists precisely to fill that gap.
-2. **Placeholder flavor.** `is_remote_child` vs `is_viewing_shared_session`
-   drive different branches of `create_hidden_child_agent_pane`. (Server
-   status reporting is *not* a differentiator: `LocalAgentTaskSyncModel`
-   skips both flavors.)
-3. **Persistence asymmetry.** `is_remote_child` is persisted; the viewer
-   flavor is not (§2). Any unification must decide the on-disk story.
-4. **Broadcast events are viewer-only.** `ChildSpawned`/`ChildStatusChanged`
-   are emitted only by `drain_ancestor_events`; the owner drain feeds
-   `handle_event_batch` directly.
-5. **Two ancestor SSEs with different wire filters and cursor authority.**
-   Owner: `include_self=true`, needs `new_message`, pushes the server cursor.
-   Viewer: `include_self=false`, drops `new_message`, local cursor only.
-6. **Pane materialization differs.** Owner reuses the cloud-mode ambient pane
-   + `attach_execution_session`; viewer builds a dedicated viewer pane with
-   its own `Network`. Only the owner has a terminal-transcript path.
+1. **Consumer gating.** OVM registered only in the viewer context; the owner
+   drain maintained separate helpers. M1: both delegate to `observe_child`.
+2. **Placeholder flavor.** `is_remote_child` (owner, persisted) vs
+   `is_viewing_shared_session` (viewer, runtime-only). M1: unified to
+   `is_remote_child = true` for all child placeholders, fixing the viewer
+   restore-after-restart bug.
+3. **Broadcast events were viewer-only.** `ChildSpawned`/`ChildStatusChanged`
+   emitted only by `drain_ancestor_events`; owner drain fed `handle_event_batch`
+   directly (no status writes). M1: tracker emits them for both modes and is
+   the sole status writer.
+4. **Two ancestor SSEs with different wire filters and cursor authority.**
+   M1: one `include_self: true` family SSE; viewer drops `ParentSelf` events;
+   cursor authority dispatched by mode inside `drain_family_events`.
+5. **Pane materialization differed.** Owner had `LoadTranscript`; viewer
+   dead-ended at loading state for completed children. M2: `ChildPaneMaterialization`
+   with `LoadTranscript` for both modes.
 
 ## 6. Why unify (the value)
-1. **Duplication and drift.** Six near-identical concerns (§4.4) implemented
+1. **Duplication and drift.** Six near-identical concerns implemented
    twice, in one file plus two pane paths. Each fix must be discovered and
-   applied twice; the Phase 0 work is itself evidence — the owner side had
-   to re-grow refetch, self-heal, and placeholder logic OVM already had, and
-   initially shipped without the self-heal (the "Unknown agent on failed
-   fetch" gap, fixed later on the same branch).
+   applied twice. Historical evidence: the pre-M1 owner side had to re-grow
+   refetch, self-heal, and placeholder logic that OVM already had.
 2. **Two ancestor SSE connections per parent** when an owner and a viewer run
    in the same process family (and always two server-side query shapes to
    maintain). One JOIN-backed stream per parent family is strictly cheaper
@@ -582,18 +419,14 @@ mechanism is load-bearing for the early-click window (now event-driven).
    - The **terminal-transcript gap**: clicking a finished child works
      owner-side (`LoadTranscript`) but dead-ends viewer-side (loading
      placeholder forever), because only one stack grew the branch.
-   - The **owner-side pill-staleness gap**: viewer children get
-     `ConversationStatus` writes from OVM, but owner-side cloud-child
-     placeholders have *no event-driven status writer at all* — lifecycle
-     events are consumed as LLM inputs (§4.2 Delivery), and
-     `LocalAgentTaskSyncModel` is outbound-only and skips remote children.
-     The pill bar reads `conversation.status()`, so an owner's cloud-child
-     pill can sit at its creation status until the child's pane is opened.
+   - The **owner-side pill-staleness gap**: owner-side cloud-child
+     placeholders had no event-driven status writer (lifecycle events were
+     consumed as LLM inputs, not status writes). M1 fix: tracker is sole
+     status writer for both modes.
 4. **Bespoke machinery outlives its cause.** The pending/settle re-drive
-   (`pending_remote_child_hydrations`, `settles()`, bounded fallback) exists
-   because the owner pane path can be entered before task data is complete.
-   The viewer path solves the same window with claim-time refetch + a single
-   materialization gate. One pane path needs only one such mechanism.
+   (`pending_remote_child_hydrations`, `settles()`) existed because the owner
+   pane path could be entered before task data was complete. M2 fix: tracker
+   re-drives `Pending` children from `observe_child`; no bespoke machinery.
 5. **Reviewability.** `orchestration_event_streamer.rs` is ~2600 lines
    hosting two parallel pipelines with different key types, cursor rules,
    and event contracts. Collapsing them is the single biggest lever on
@@ -976,64 +809,57 @@ restoring old rows see no viewer children (status quo). No migration needed.
   representation.
 
 ## 10. Deletion scorecard
-- **Phase 0 (this PR):** the viewer's unbounded `session_id` polling timer;
-  both bounded polling fallbacks (`begin_bounded_task_refresh` owner-side
-  via `begin_remote_child_task_refresh`, and the viewer's pre-claim
-  `arm_bounded_session_refetch` + `schedule_bounded_session_refetch` +
-  `run_bounded_session_refetch_tick` in `OrchestrationViewerModel`); and
-  QUALITY-919's per-wait `get_ambient_agent_task` fetch
-  (`finish_register_parent_on_wait`). All are replaced by the `run_session_linked`
-  event-driven path (S5). (An unbounded owner-side tracked-refresh timer was
-  introduced and replaced within this branch's own history; the event-driven
-  refetch is net-new relative to base, not a base-relative deletion.)
-- **After Phase 1:** `ensure_remote_child_placeholder` /
-  `finish_remote_child_placeholder` /
-  `ensure_placeholders_for_child_lifecycle_events` /
-  `trigger_child_task_refreshes` (folded into `observe_child`); OVM's
-  `handle_child_spawned` / `handle_child_status_changed` /
-  `spawn_task_metadata_fetch` / `register_child` bodies (delegated); the
-  `is_viewing_shared_session` child-placeholder flavor (new writes); the
-  streamer's bespoke `get_ambient_agent_task` paths
-  (`remote_child_placeholder_fetches` guard, restore-fetch backoff timers,
-  `spawn_task_harness_fetch_if_needed`) routed through
-  `AgentConversationsModel` (§7.6); the mirrored status-mapping pair
-  (`conversation_status_from_lifecycle_event_type` /
-  `conversation_status_from_state`) collapsed to one module.
-- **After Phase 2a:** `decide_remote_child_hydration_action`,
-  `RemoteChildHydrationAction` + `settles()`,
-  `pending_remote_child_hydrations` +
-  `process_pending_remote_child_hydrations`
-  (all subsumed by tracker re-drive and the unified dispatch).
-- **After Phase 2b:** `hydrate_task_backed_hidden_child_pane`, the
-  `is_remote_child` branch of `create_hidden_child_agent_pane`, and the
-  second live-attach construction path.
-- **After Phase 3:** one of the two ancestor SSE pipelines
-  (`OrchestratorStreamState` or the family portion of
-  `ConversationStreamState`), `drain_ancestor_events` as a separate path, the
-  seed-vs-restore duality (one cold-start seed).
+**M1 deletes (never written or deleted from baseline):**
+- `FeatureFlag::OrchestrationViewerStreamer`, `FeatureFlag::OwnerOrchestrationAncestorStreamer`
+  and all usage sites (fully rolled out, deleted from `features.rs`)
+- Legacy viewer REST polling path: `fetch_children`, `schedule_next_poll`,
+  `maybe_kick_polling`, `apply_children_fetch` + interval constants
+- Both separate drain pipelines: `drain_sse_events` + `drain_ancestor_events`
+  replaced by `drain_family_events`; `drain_sse_events`' helpers
+  `register_children_from_events`, `ensure_placeholders_for_child_lifecycle_events`,
+  `trigger_child_task_refreshes` (all subsumed by `observe_child`)
+- OVM's bespoke fetch paths: `handle_child_spawned`, `handle_child_status_changed`,
+  `spawn_task_metadata_fetch`, `register_child` bodies (delegated to tracker);
+  the bounded pre-claim refetch fallback (replaced by `ChildSignal::SessionLinked`)
+- `remote_child_placeholder_fetches` guard; restore-fetch backoff timers;
+  `spawn_task_harness_fetch_if_needed` bespoke paths — all route through
+  `AgentConversationsModel` exclusively
+- `is_viewing_shared_session` child-placeholder flavor (new writes); the
+  mirrored status-mapping pair (`conversation_status_from_lifecycle_event_type`
+  / `conversation_status_from_state`) collapsed to one module in the tracker
+- `WatchedRunIds` per-child run-id sets as filter inputs (child membership
+  lives in the tracker; streamer uses only `self_run_id` for the ancestor filter)
+
+**M2 deletes:**
+- `decide_remote_child_hydration_action`, `RemoteChildHydrationAction`, `settles()`
+- `pending_remote_child_hydrations`, `process_pending_remote_child_hydrations`
+- `hydrate_task_backed_hidden_child_pane`
+- `live_attach_ambient_session_to_pane`, `ensure_shared_session_viewer_child_pane`
+  (converged into `attach_child_session`)
+- Second live-attach construction path; `is_remote_child` and
+  `is_viewing_shared_session` separate branches of `create_hidden_child_agent_pane`
+  (unified to one placeholder branch)
 
 ## 11. Risks, validation, open questions
 **Risks**
-- *Viewer regression*: OVM is load-bearing. Every phase keeps OVM's tests
-  green and adds owner-mode coverage; flag-off is byte-identical behavior.
+- *Viewer regression*: OVM is load-bearing. M1 keeps all pre-M1 tests
+  green and adds tracker coverage; flag-off is byte-identical to master.
 - *Cursor authority*: the owner is the authoritative server-cursor writer; a
   shared stream must preserve the viewer's read-only cursor (mode dispatch,
   §7.3), else a viewer could fast-forward the owner's resume point.
 - *One-level-tree invariant*: discovery assumes direct children; preserve
   `register_root_on_wait`'s child guard and revisit alongside the server JOIN
   if multi-level trees arrive.
-- *Forward/backward compat*: old clients ignore `child_agent_started`; new
-  clients with `WaitForEventsParentRegistration` off do no wait-time
-  registration. The server emit is safe to ship first.
-- *`include_self` semantics* (Phase 3): changing the viewer's wire filter
-  changes its event volume; measure before choosing drop-client-side vs
-  keep-parameterized (§9.2).
-- *Kill tombstones*: discovery, refetch, and placeholder creation must
-  consult `killed_run_ids` before acting, because the drain runs them
-  *before* `handle_event_batch`'s killed-run filter — including across the
-  placeholder fetch await and the cancel-during-spawn race. Guarded in
-  Phase 0 (§3.4); `observe_child` step 0 is the structural successor that
-  replaces the scattered checks with one gate.
+- *Forward/backward compat*: old clients ignore `child_agent_started` and
+  `run_session_linked` (unknown event types, cursor advances harmlessly). The
+  server PR is safe to ship before the client. `OrchestrationUnifiedStack`
+  off ⇒ flag-off baseline, no exposure.
+- *`include_self` semantics*: resolved in M1 — viewer receives the same
+  `include_self: true` stream and drops `ParentSelf` events client-side.
+  See `classify_family_event` in §3.5.
+- *Kill tombstones*: `observe_child` step 0 is the sole tombstone gate;
+  it runs before any placeholder creation or pane request, including across
+  the metadata-fetch await and the cancel-during-spawn race.
 - *Reconciliation SSE churn (known transient)*: dropping a stale placeholder
   in `assign_run_id_for_conversation` emits removal events whose run id the
   streamer prunes from every watched set — including the parent mid-claiming
@@ -1041,18 +867,18 @@ restoring old rows see no viewer children (status quo). No migration needed.
   down and reopens the parent SSE (the executor's `register_watched_run_id`
   re-adds it); drain-before-teardown prevents data loss and the cursor is
   preserved, but correctness leans on the emission order of three history
-  events. Phase 1 should make re-pointing explicit (prune the index without
+  events. M1 should make re-pointing explicit (prune the run-id index without
   treating it as child death) rather than relying on event ordering.
 
-**Validation (Phases 1–3; Phase 0's is in §3.6)**
+**Validation (M1 validation in §3.6; M2 below)**
 - Re-run the three click-timing cases (early / running / completed)
-  owner-side and viewer-side after each phase; the completed case is new
-  viewer coverage in Phase 2a.
+  owner-side and viewer-side after M2 lands; the completed viewer case is
+  new coverage delivered by M2.
 - Restart-restore case: orchestrator with out-of-band children restores with
-  named pills in both modes (Phase 1 fixes the viewer variant).
-- Owner-side pill status updates while the child pane stays closed (new
-  coverage: the tracker writes status in owner mode; today it lags until the
-  pane attaches).
+  named pills in both modes (M1 fixes the viewer variant via persisted
+  `is_remote_child` rows).
+- Owner-side pill status updates while the child pane stays closed (M1:
+  tracker is sole status writer in both modes).
 - Unit surfaces: tracker state machine (`observe_child` idempotency, signal
   ordering, tombstone skip, fetch dedup), drain classification,
   cursor-authority dispatch, pane-path branch selection.
@@ -1062,14 +888,12 @@ restoring old rows see no viewer children (status quo). No migration needed.
 
 **Open questions**
 - **RESOLVED.** Does the server reliably emit a lifecycle event at (or just
-  after) `session_id` linking? Yes: the server now emits `run_session_linked`
-  (S5) on the child run when `updateSharedSessionLink` commits, with the
-  session UUID in `ref_id`. Both bounded fallbacks have been deleted in Phase
-  0. The `ref_id` carries the session UUID; a future optimization could
-  extract it directly to skip the on-demand metadata fetch entirely.
-- Phase 3 topology: one shared family stream per parent even when owner and
-  viewer coexist in one process, or per-mode connections with a shared drain
-  core? (Depends on §9.2 hydration/scale answers.)
+  after) `session_id` linking? Yes: `run_session_linked` (S5) is emitted
+  and M1 consumes it via `ChildSignal::SessionLinked`, filling in `session_id`
+  without a metadata fetch. No polling fallback needed.
+- **RESOLVED.** Phase 3 topology: M1 ships one `include_self: true` family
+  SSE per parent; viewer drops `ParentSelf` events client-side (simplest;
+  avoids a second wire shape). Resolved by implementation decision in M1.
 - Should the unified placeholder eventually rename `is_remote_child` to a
   neutral `is_child_placeholder` (serde alias for compatibility), or is the
   legacy name acceptable indefinitely?
