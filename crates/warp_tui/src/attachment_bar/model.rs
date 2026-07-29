@@ -409,6 +409,16 @@ impl Entity for TuiAttachmentModel {
     type Event = TuiAttachmentModelEvent;
 }
 
+#[cfg(test)]
+impl TuiAttachmentModel {
+    /// Emit `Updated` from the model directly so tests can exercise the view's
+    /// `TuiAttachmentModelEvent::Updated` subscription path without needing a
+    /// real attachment or in-flight image-processing task.
+    pub(crate) fn emit_updated_for_test(&mut self, ctx: &mut ModelContext<Self>) {
+        ctx.emit(TuiAttachmentModelEvent::Updated);
+    }
+}
+
 fn reconciled_selected_index(
     previous_count: usize,
     count: usize,
