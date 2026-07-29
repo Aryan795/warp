@@ -1,23 +1,76 @@
 //! Tests for [`TuiPromptHistoryMenuModel`]: population/ordering/dedupe, default
 //! selection and initial preview, prefix filtering, buffer snapshot/restore,
 //! acceptance, and empty states.
+//!
+//! These exercise the prompt side of the combined history menu (no command
+//! history model is registered and the session resolver returns `None`, so the
+//! shared projection yields prompts only). Command interleaving, ordering, and
+//! filtering are covered by the shared app-crate tests for
+//! `up_arrow_history_for_terminal_view`.
+use std::rc::Rc;
+
 use warp::appearance::Appearance;
 use warp::editor::CodeEditorModel;
-use warp::tui_export::blocklist_ai_history_model_with_queries;
+use warp::settings::AISettingsChangedEvent;
+use warp::tui_export::{
+    BlocklistAIInputModel, ConversationSelectionEvent, InputConfig, InputModePolicy,
+    PolicyConfigUpdate, TuiUpArrowHistoryKind, blocklist_ai_history_model_with_queries,
+};
 use warp_editor::model::CoreEditorModel;
 use warpui_core::elements::tui::{TuiBufferExt, TuiRect};
 use warpui_core::presenter::tui::TuiPresenter;
 use warpui_core::{App, AppContext, EntityId, ModelHandle};
 
-use super::{TuiPromptHistoryMenuModel, TuiPromptHistoryRow, reconciled_selection_index};
+use super::{
+    TuiHistoryAcceptance, TuiHistoryRow, TuiPromptHistoryMenuModel, reconciled_selection_index,
+};
 use crate::inline_menu::{render_inline_menu, single_line_menu_title};
+use crate::input_mode_policy::AI_LOCKED_CONFIG;
 use crate::input_suggestions_mode::TuiInputSuggestionsModeModel;
 use crate::tui_builder::TuiUiBuilder;
 
 const W: u16 = 80;
 
-/// Builds a closed prompt-history menu over a fresh editor and a history model
-/// seeded with `prompts` (oldest-first).
+/// A minimal input-mode policy that avoids reading `AISettings`, so the menu
+/// tests can build a `BlocklistAIInputModel` without a full singleton setup.
+struct TestInputModePolicy;
+
+impl InputModePolicy for TestInputModePolicy {
+    fn initial_config(&self, _app: &AppContext) -> InputConfig {
+        AI_LOCKED_CONFIG
+    }
+
+    fn allows_locked_ai_input(&self, _app: &AppContext) -> bool {
+        true
+    }
+
+    fn is_autodetection_enabled(&self, _app: &AppContext) -> bool {
+        false
+    }
+
+    fn config_on_conversation_selection_changed(
+        &self,
+        _event: &ConversationSelectionEvent,
+        _current: InputConfig,
+        _app: &AppContext,
+    ) -> Option<PolicyConfigUpdate> {
+        None
+    }
+
+    fn config_on_ai_settings_changed(
+        &self,
+        _event: &AISettingsChangedEvent,
+        _current: InputConfig,
+        _is_autodetection_enabled_for_current_context: bool,
+        _app: &AppContext,
+    ) -> Option<PolicyConfigUpdate> {
+        None
+    }
+}
+
+/// Builds a closed history menu over a fresh editor and a history model seeded
+/// with `prompts` (oldest-first). The input starts in agent mode, so the menu
+/// interleaves prompts (there are no commands without a session).
 fn setup(
     ctx: &mut AppContext,
     prompts: &[&str],
@@ -32,11 +85,14 @@ fn setup(
         )
     });
     let input_model = ctx.add_model(|ctx| CodeEditorModel::new_tui(W, ctx));
+    let input_mode = BlocklistAIInputModel::mock(Rc::new(TestInputModePolicy), ctx);
     let suggestions_mode = ctx.add_model(|_| TuiInputSuggestionsModeModel::new());
     let menu = ctx.add_model(|ctx| {
         TuiPromptHistoryMenuModel::new(
             input_model.clone(),
+            input_mode.clone(),
             suggestions_mode.clone(),
+            Rc::new(|_| None),
             EntityId::new(),
             ctx,
         )
@@ -99,6 +155,24 @@ fn open_selects_and_previews_last_row() {
 }
 
 #[test]
+fn prompt_rows_have_no_shell_command_affordance() {
+    App::test((), |mut app| async move {
+        app.update(|ctx| {
+            let (_input, menu) = setup(ctx, &["deploy", "test"]);
+            menu.update(ctx, |m, ctx| m.open(ctx));
+            let snapshot = menu.as_ref(ctx).snapshot(ctx).expect("menu is open");
+            assert!(
+                snapshot
+                    .rows
+                    .iter()
+                    .all(|row| !row.shell_command_affordance),
+                "prompt rows must not carry the shell `!` affordance"
+            );
+        });
+    });
+}
+
+#[test]
 fn open_with_typed_text_prefix_filters_rows() {
     App::test((), |mut app| async move {
         app.update(|ctx| {
@@ -152,7 +226,10 @@ fn accept_selected_returns_highlighted_prompt_and_closes() {
             menu.update(ctx, |m, ctx| m.open(ctx));
             // Default selection is the newest (last) row.
             let accepted = menu.update(ctx, |m, ctx| m.accept_selected(ctx));
-            assert_eq!(accepted, Some("newest prompt".to_owned()));
+            assert_eq!(
+                accepted,
+                Some(TuiHistoryAcceptance::Prompt("newest prompt".to_owned()))
+            );
             assert!(!menu.as_ref(ctx).is_open(ctx));
         });
     });
@@ -171,7 +248,7 @@ fn multiline_prompt_uses_single_line_title_without_changing_prompt_text() {
             assert_eq!(buffer_text(&input, ctx), prompt);
             assert_eq!(
                 menu.update(ctx, |m, ctx| m.accept_selected(ctx)),
-                Some(prompt.to_owned())
+                Some(TuiHistoryAcceptance::Prompt(prompt.to_owned()))
             );
         });
     });
@@ -195,8 +272,41 @@ fn empty_history_shows_explicit_empty_state() {
             assert!(snapshot.rows.is_empty());
             assert!(matches!(
                 snapshot.status,
-                Some(crate::inline_menu::TuiInlineMenuStatus::Empty(_))
+                Some(crate::inline_menu::TuiInlineMenuStatus::Empty(label)) if label == "No history"
             ));
+        });
+    });
+}
+
+#[test]
+fn filtered_to_nothing_shows_no_match_state() {
+    App::test((), |mut app| async move {
+        app.update(|ctx| {
+            let (input, menu) = setup(ctx, &["deploy the app"]);
+            set_text(&input, "no match", ctx);
+            menu.update(ctx, |m, ctx| m.open(ctx));
+            let snapshot = menu.as_ref(ctx).snapshot(ctx).expect("menu is open");
+            assert!(snapshot.rows.is_empty());
+            assert!(matches!(
+                snapshot.status,
+                Some(crate::inline_menu::TuiInlineMenuStatus::Empty(label))
+                    if label == "No matching history"
+            ));
+        });
+    });
+}
+
+#[test]
+fn accept_on_empty_list_is_a_noop() {
+    App::test((), |mut app| async move {
+        app.update(|ctx| {
+            let (input, menu) = setup(ctx, &["deploy the app"]);
+            set_text(&input, "no match", ctx);
+            menu.update(ctx, |m, ctx| m.open(ctx));
+            let accepted = menu.update(ctx, |m, ctx| m.accept_selected(ctx));
+            // Nothing is selected, so Enter does nothing and the menu stays open.
+            assert_eq!(accepted, None);
+            assert!(menu.as_ref(ctx).is_open(ctx));
         });
     });
 }
@@ -230,7 +340,7 @@ fn down_dismisses_filtered_to_empty_history_and_restores_query() {
     });
 }
 #[test]
-fn open_menu_renders_prompt_history_surface_to_lines() {
+fn open_menu_renders_history_surface_to_lines() {
     App::test((), |mut app| async move {
         app.update(|ctx| {
             let (_input, menu) = setup(ctx, &["deploy the app", "run the tests"]);
@@ -244,7 +354,7 @@ fn open_menu_renders_prompt_history_surface_to_lines() {
             );
             let rendered = frame.buffer.to_lines().join("\n");
             assert!(
-                rendered.contains("Prompt history"),
+                rendered.contains("History"),
                 "rendered menu should show the header:\n{rendered}"
             );
             assert!(rendered.contains("deploy the app"));
@@ -254,31 +364,58 @@ fn open_menu_renders_prompt_history_surface_to_lines() {
 }
 
 #[test]
-fn reconciled_selection_prefers_text_then_index_then_last_row() {
+fn reconciled_selection_prefers_identity_then_index_then_last_row() {
     let rows = vec![
-        TuiPromptHistoryRow {
+        TuiHistoryRow {
             text: "one".to_owned(),
+            kind: TuiUpArrowHistoryKind::Prompt,
         },
-        TuiPromptHistoryRow {
+        TuiHistoryRow {
             text: "two".to_owned(),
+            kind: TuiUpArrowHistoryKind::Prompt,
         },
-        TuiPromptHistoryRow {
+        TuiHistoryRow {
             text: "three".to_owned(),
+            kind: TuiUpArrowHistoryKind::Command,
         },
     ];
 
-    // Stable selection by text wins over the previous index.
+    // Stable selection by (text, kind) wins over the previous index.
     assert_eq!(
-        reconciled_selection_index(&rows, Some("two"), Some(0)),
+        reconciled_selection_index(
+            &rows,
+            Some(&("two".to_owned(), TuiUpArrowHistoryKind::Prompt)),
+            Some(0)
+        ),
         Some(1)
     );
-    // No text match falls back to the (clamped) previous index.
+    // Matching text but a different kind is not the same item.
     assert_eq!(
-        reconciled_selection_index(&rows[..2], Some("gone"), Some(5)),
+        reconciled_selection_index(
+            &rows,
+            Some(&("three".to_owned(), TuiUpArrowHistoryKind::Prompt)),
+            Some(0)
+        ),
+        Some(0)
+    );
+    // No identity match falls back to the (clamped) previous index.
+    assert_eq!(
+        reconciled_selection_index(
+            &rows[..2],
+            Some(&("gone".to_owned(), TuiUpArrowHistoryKind::Prompt)),
+            Some(5)
+        ),
         Some(1)
     );
     // No prior selection defaults to the last (most-recent) row.
     assert_eq!(reconciled_selection_index(&rows, None, None), Some(2));
     // An empty list has nothing to select.
-    assert_eq!(reconciled_selection_index(&[], Some("x"), Some(0)), None);
+    assert_eq!(
+        reconciled_selection_index(
+            &[],
+            Some(&("x".to_owned(), TuiUpArrowHistoryKind::Prompt)),
+            Some(0)
+        ),
+        None
+    );
 }

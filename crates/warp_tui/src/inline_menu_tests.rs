@@ -56,6 +56,7 @@ fn rows_snapshot(
                 state_suffix: None,
                 is_selectable: true,
                 style: TuiInlineMenuRowStyle::Default,
+                shell_command_affordance: false,
             })
             .collect(),
         selected_index: Some(selected_index),
@@ -189,6 +190,7 @@ fn conversation_like_snapshot_reuses_header_tabs_rows_and_selection() {
                 state_suffix: None,
                 is_selectable: true,
                 style: TuiInlineMenuRowStyle::Default,
+                shell_command_affordance: false,
             },
             TuiInlineMenuRow {
                 title: "Archived".to_owned(),
@@ -196,6 +198,7 @@ fn conversation_like_snapshot_reuses_header_tabs_rows_and_selection() {
                 state_suffix: None,
                 is_selectable: false,
                 style: TuiInlineMenuRowStyle::Default,
+                shell_command_affordance: false,
             },
         ],
         selected_index: Some(0),
@@ -235,6 +238,7 @@ fn conversation_like_snapshot_keeps_selection_visible_within_production_height()
                     state_suffix: None,
                     is_selectable: true,
                     style: TuiInlineMenuRowStyle::Default,
+                    shell_command_affordance: false,
                 })
                 .collect(),
             selected_index: Some(7),
@@ -270,6 +274,7 @@ fn slash_command_rows_match_figma_layout_and_colors() {
                         state_suffix: Some("(currently on)".to_owned()),
                         is_selectable: true,
                         style: TuiInlineMenuRowStyle::InlineMenuItem,
+                        shell_command_affordance: false,
                     },
                     TuiInlineMenuRow {
                         title: "/plan".to_owned(),
@@ -277,6 +282,7 @@ fn slash_command_rows_match_figma_layout_and_colors() {
                         state_suffix: Some("(currently off)".to_owned()),
                         is_selectable: true,
                         style: TuiInlineMenuRowStyle::InlineMenuItem,
+                        shell_command_affordance: false,
                     },
                 ],
                 selected_index: Some(0),
@@ -366,6 +372,7 @@ fn long_slash_command_titles_are_ellipsized_before_the_description() {
             state_suffix: None,
             is_selectable: true,
             style: TuiInlineMenuRowStyle::InlineMenuItem,
+            shell_command_affordance: false,
         }],
         selected_index: Some(0),
         scroll_offset: 0,
@@ -387,6 +394,7 @@ fn wide_slash_command_rows_expand_to_show_long_titles() {
                 state_suffix: None,
                 is_selectable: true,
                 style: TuiInlineMenuRowStyle::InlineMenuItem,
+                shell_command_affordance: false,
             }],
             selected_index: Some(0),
             scroll_offset: 0,
@@ -415,6 +423,7 @@ fn boundary_width_preserves_useful_title_and_description_columns() {
                 state_suffix: None,
                 is_selectable: true,
                 style: TuiInlineMenuRowStyle::InlineMenuItem,
+                shell_command_affordance: false,
             }],
             selected_index: Some(0),
             scroll_offset: 0,
@@ -439,6 +448,7 @@ fn narrow_slash_command_rows_use_the_full_width_for_titles() {
                 state_suffix: None,
                 is_selectable: true,
                 style: TuiInlineMenuRowStyle::InlineMenuItem,
+                shell_command_affordance: false,
             }],
             selected_index: Some(0),
             scroll_offset: 0,
@@ -450,6 +460,49 @@ fn narrow_slash_command_rows_use_the_full_width_for_titles() {
     );
 
     assert_eq!(lines[0], "/123456789012345...");
+}
+
+#[test]
+fn shell_command_affordance_renders_a_bang_prefix_before_the_title() {
+    let lines = render(TuiInlineMenuSnapshot {
+        header: None,
+        rows: vec![
+            TuiInlineMenuRow {
+                title: "git status".to_owned(),
+                description: None,
+                state_suffix: None,
+                is_selectable: true,
+                style: TuiInlineMenuRowStyle::Default,
+                shell_command_affordance: true,
+            },
+            TuiInlineMenuRow {
+                title: "explain this repo".to_owned(),
+                description: None,
+                state_suffix: None,
+                is_selectable: true,
+                style: TuiInlineMenuRowStyle::Default,
+                shell_command_affordance: false,
+            },
+        ],
+        selected_index: Some(0),
+        scroll_offset: 0,
+        max_visible_rows: 8,
+        status: None,
+    });
+
+    // The command row is prefixed with the `!` shell affordance; the prompt row
+    // has no prefix.
+    assert!(
+        lines[0].starts_with("! git status"),
+        "command row should show the `!` affordance: {:?}",
+        lines[0]
+    );
+    assert!(
+        lines[1].trim_start().starts_with("explain this repo")
+            && !lines[1].contains('!'),
+        "prompt row should have no `!` affordance: {:?}",
+        lines[1]
+    );
 }
 
 #[test]

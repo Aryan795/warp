@@ -46,7 +46,7 @@ use crate::inline_menu::{
 use crate::input_mode_policy::AI_LOCKED_CONFIG;
 use crate::input_suggestions_mode::{TuiInputSuggestionsMode, TuiInputSuggestionsModeModel};
 use crate::model_menu::TuiModelMenuModel;
-use crate::prompt_history_menu::TuiPromptHistoryMenuModel;
+use crate::prompt_history_menu::{TuiHistoryAcceptance, TuiPromptHistoryMenuModel};
 use crate::slash_commands::{TuiSlashCommandModel, TuiSlashCommandRow};
 use crate::test_fixtures::{add_test_conversation_selection, add_test_semantic_selection};
 use crate::tui_builder::TuiUiBuilder;
@@ -315,15 +315,19 @@ fn add_suggestions_mode(
 fn add_prompt_history_menu(
     ctx: &mut AppContext,
     input_model: &ModelHandle<CodeEditorModel>,
+    input_mode: &ModelHandle<BlocklistAIInputModel>,
     suggestions_mode: &ModelHandle<TuiInputSuggestionsModeModel>,
 ) -> ModelHandle<TuiPromptHistoryMenuModel> {
     if !ctx.has_singleton_model::<BlocklistAIHistoryModel>() {
         ctx.add_singleton_model(|_| BlocklistAIHistoryModel::default());
     }
+    let input_mode = input_mode.clone();
     ctx.add_model(|ctx| {
         TuiPromptHistoryMenuModel::new(
             input_model.clone(),
+            input_mode,
             suggestions_mode.clone(),
+            Rc::new(|_| None),
             EntityId::new(),
             ctx,
         )
@@ -351,13 +355,18 @@ fn build_view_with_prompt_history(
     let input_model = ctx.add_model(|ctx| CodeEditorModel::new_tui(W, ctx));
     let input_mode = BlocklistAIInputModel::mock(Rc::new(TestInputModePolicy), ctx);
     let suggestions_mode = add_suggestions_mode(ctx, TuiInputSuggestionsMode::Closed);
-    let prompt_history_menu = ctx.add_model(|ctx| {
-        TuiPromptHistoryMenuModel::new(
-            input_model.clone(),
-            suggestions_mode.clone(),
-            EntityId::new(),
-            ctx,
-        )
+    let prompt_history_menu = ctx.add_model({
+        let input_mode = input_mode.clone();
+        |ctx| {
+            TuiPromptHistoryMenuModel::new(
+                input_model.clone(),
+                input_mode,
+                suggestions_mode.clone(),
+                Rc::new(|_| None),
+                EntityId::new(),
+                ctx,
+            )
+        }
     });
     let menu_for_return = prompt_history_menu.clone();
     let inline_menu = TuiInlineMenu::new(prompt_history_menu.clone());
@@ -427,7 +436,7 @@ fn enter_and_escape_stop_listening_while_escape_cancels_transcribing() {
                 | TuiInputViewEvent::AcceptedModel(_)
                 | TuiInputViewEvent::AcceptedMcp(_)
                 | TuiInputViewEvent::MoveFocusUp
-                | TuiInputViewEvent::AcceptedPromptHistory(_)
+                | TuiInputViewEvent::AcceptedHistory(_)
                 | TuiInputViewEvent::RequestShellCompletion
                 | TuiInputViewEvent::ClipboardCopySucceeded
                 | TuiInputViewEvent::ClipboardCopyFailed => {}
@@ -861,7 +870,7 @@ fn build_view_with_orchestration_tabs(
     let input_model = ctx.add_model(|ctx| CodeEditorModel::new_tui(W, ctx));
     let input_mode = BlocklistAIInputModel::mock(Rc::new(TestInputModePolicy), ctx);
     let suggestions_mode = add_suggestions_mode(ctx, TuiInputSuggestionsMode::Closed);
-    let prompt_history_menu = add_prompt_history_menu(ctx, &input_model, &suggestions_mode);
+    let prompt_history_menu = add_prompt_history_menu(ctx, &input_model, &input_mode, &suggestions_mode);
     let orchestration_tabs_available_for_view = orchestration_tabs_available.clone();
     let (_window_id, view) = ctx.add_tui_window(
         AddWindowOptions {
@@ -968,7 +977,7 @@ fn build_view_with_conversation_menu(
     });
     let inline_menu = TuiInlineMenu::new(TestConversationMenuHandle(menu_model.clone()));
     let inline_menu_for_view = inline_menu.clone();
-    let prompt_history_menu = add_prompt_history_menu(ctx, &input_model, &suggestions_mode);
+    let prompt_history_menu = add_prompt_history_menu(ctx, &input_model, &input_mode, &suggestions_mode);
     let prompt_history_inline_menu = TuiInlineMenu::new(prompt_history_menu);
     let (_window_id, view) = ctx.add_tui_window(
         AddWindowOptions {
@@ -1034,7 +1043,7 @@ fn build_view_with_inline_menu_gate(
             0,
         )
     });
-    let prompt_history_menu = add_prompt_history_menu(ctx, &input_model, &suggestions_mode);
+    let prompt_history_menu = add_prompt_history_menu(ctx, &input_model, &input_mode, &suggestions_mode);
     let inline_menu = TuiInlineMenu::new(menu_model.clone());
     let prompt_history_inline_menu = TuiInlineMenu::new(prompt_history_menu);
     let (_window_id, view) = ctx.add_tui_window(
@@ -1079,7 +1088,7 @@ fn build_view_with_model_menu(
             0,
         )
     });
-    let prompt_history_menu = add_prompt_history_menu(ctx, &input_model, &suggestions_mode);
+    let prompt_history_menu = add_prompt_history_menu(ctx, &input_model, &input_mode, &suggestions_mode);
     let inline_menu = TuiInlineMenu::new(menu_model.clone());
     let prompt_history_inline_menu = TuiInlineMenu::new(prompt_history_menu);
     let (_window_id, view) = ctx.add_tui_window(
@@ -1295,7 +1304,7 @@ fn multiline_paste_emits_once_and_fallback_inserts_without_submitting() {
                 | TuiInputViewEvent::AcceptedConversation(_)
                 | TuiInputViewEvent::AcceptedModel(_)
                 | TuiInputViewEvent::AcceptedMcp(_)
-                | TuiInputViewEvent::AcceptedPromptHistory(_)
+                | TuiInputViewEvent::AcceptedHistory(_)
                 | TuiInputViewEvent::RequestShellCompletion
                 | TuiInputViewEvent::BackspaceAtEmptyInput
                 | TuiInputViewEvent::MoveFocusUp
@@ -3316,7 +3325,8 @@ fn submit_accepts_highlighted_prompt_history_entry() {
             let accepted = Rc::new(RefCell::new(Vec::new()));
             let accepted_for_subscription = accepted.clone();
             ctx.subscribe_to_view(&view, move |_, event, _| {
-                if let TuiInputViewEvent::AcceptedPromptHistory(text) = event {
+                if let TuiInputViewEvent::AcceptedHistory(TuiHistoryAcceptance::Prompt(text)) = event
+                {
                     accepted_for_subscription.borrow_mut().push(text.clone());
                 }
             });

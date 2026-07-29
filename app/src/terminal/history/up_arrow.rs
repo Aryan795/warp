@@ -70,6 +70,72 @@ fn sort_and_dedupe_suggestions<'a>(
         .map(|(_, suggestion)| suggestion)
         .collect()
 }
+/// A single up-arrow history item projected for the headless TUI, decoupled from
+/// the GUI's borrowed [`HistoryInputSuggestion`] so the TUI owns its own data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiUpArrowHistoryKind {
+    /// A previously executed shell command.
+    Command,
+    /// A previously submitted agent prompt.
+    Prompt,
+}
+
+/// An owned up-arrow history entry for the headless TUI history menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiUpArrowHistoryEntry {
+    /// The command or prompt text to display, preview, and accept.
+    pub text: String,
+    /// Whether this entry is a shell command or an agent prompt.
+    pub kind: TuiUpArrowHistoryKind,
+}
+
+/// Returns the combined command + prompt up-arrow history for a terminal view,
+/// projected into owned, frontend-agnostic entries for the headless TUI.
+///
+/// Commands are always included; prompts are included only when `include_prompts`
+/// is set (the TUI's agent input mode, versus commands-only `!` shell mode).
+/// Ordering, de-duplication, ignored-suggestion, session-scope, and
+/// agent-executed filtering all match the shared
+/// [`History::up_arrow_suggestions_for_terminal_view`] logic. Whitespace-only or
+/// empty items are dropped so they never appear as blank rows.
+pub fn up_arrow_history_for_terminal_view(
+    terminal_view_id: EntityId,
+    session_id: Option<SessionId>,
+    include_prompts: bool,
+    app: &AppContext,
+) -> Vec<TuiUpArrowHistoryEntry> {
+    let suggestions = if app.has_singleton_model::<History>() {
+        History::handle(app).as_ref(app).up_arrow_history_suggestions(
+            terminal_view_id,
+            session_id,
+            true,
+            include_prompts,
+            app,
+        )
+    } else if include_prompts {
+        // Without a command history model (e.g. isolated menu tests), fall back
+        // to prompts only so the shared prompt path keeps working.
+        prompt_history_for_terminal_view(terminal_view_id, app)
+            .into_iter()
+            .map(|entry| HistoryInputSuggestion::AIQuery { entry })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    suggestions
+        .into_iter()
+        .filter_map(|suggestion| {
+            let kind = match &suggestion {
+                HistoryInputSuggestion::Command { .. } => TuiUpArrowHistoryKind::Command,
+                HistoryInputSuggestion::AIQuery { .. } => TuiUpArrowHistoryKind::Prompt,
+            };
+            let text = suggestion.text().to_owned();
+            (!text.trim().is_empty()).then_some(TuiUpArrowHistoryEntry { text, kind })
+        })
+        .collect()
+}
+
 /// Returns de-duplicated prompt history ordered for up-arrow presentation.
 ///
 /// Prompts from other terminal surfaces precede prompts from the requested
@@ -111,6 +177,41 @@ impl History {
         config: UpArrowHistoryConfig,
         app: &'a AppContext,
     ) -> Vec<HistoryInputSuggestion<'a>> {
+        // Prompts are only surfaced in the GUI when agent mode is available and
+        // AI is enabled for the account; commands are unconditional.
+        let should_include_prompts = config.include_prompts
+            && FeatureFlag::AgentMode.is_enabled()
+            && AISettings::handle(app).as_ref(app).is_any_ai_enabled(app);
+        self.up_arrow_history_suggestions(
+            terminal_view_id,
+            session_id,
+            config.include_commands,
+            should_include_prompts,
+            app,
+        )
+    }
+
+    /// Frontend-agnostic core shared by the GUI up-arrow menu and the headless
+    /// TUI history menu.
+    ///
+    /// Gathers the session's executed commands and (optionally) agent prompts,
+    /// applying ignored-suggestion, agent-executed, and session-scope filtering,
+    /// then sorts and de-dupes them for up-arrow presentation: other-session
+    /// entries precede current-session entries, oldest-first within each group,
+    /// and repeated text keeps its newest occurrence (de-duplicated separately
+    /// for commands and prompts).
+    ///
+    /// Unlike [`Self::up_arrow_suggestions_for_terminal_view`], this core performs
+    /// no agent-availability gating — the caller decides whether prompts are
+    /// included, so the same combining logic serves both frontends.
+    fn up_arrow_history_suggestions<'a>(
+        &'a self,
+        terminal_view_id: EntityId,
+        session_id: Option<SessionId>,
+        include_commands: bool,
+        include_prompts: bool,
+        app: &'a AppContext,
+    ) -> Vec<HistoryInputSuggestion<'a>> {
         let ignored_suggestions = IgnoredSuggestionsModel::handle(app).as_ref(app);
 
         let include_agent_commands = *AISettings::handle(app)
@@ -127,12 +228,9 @@ impl History {
             .filter(move |entry| include_agent_commands || !entry.is_agent_executed)
             .map(|entry| HistoryInputSuggestion::Command { entry });
 
-        let should_include_prompts = config.include_prompts
-            && FeatureFlag::AgentMode.is_enabled()
-            && AISettings::handle(app).as_ref(app).is_any_ai_enabled(app);
         let all_live_session_ids = self.all_live_session_ids();
-        if !should_include_prompts {
-            if !config.include_commands {
+        if !include_prompts {
+            if !include_commands {
                 return vec![];
             }
             return sort_and_dedupe_suggestions(
@@ -147,7 +245,7 @@ impl History {
             .map(|entry| HistoryInputSuggestion::AIQuery { entry });
 
         let suggestions: Vec<HistoryInputSuggestion<'a>> =
-            match (config.include_commands, config.include_prompts) {
+            match (include_commands, include_prompts) {
                 (true, true) => commands.chain(ai_queries).collect(),
                 (true, false) => commands.collect(),
                 (false, true) => ai_queries.collect(),

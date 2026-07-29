@@ -173,6 +173,7 @@ impl TuiSkillMenuModel {
                     state_suffix: None,
                     is_selectable: true,
                     style: TuiInlineMenuRowStyle::InlineMenuItem,
+                    shell_command_affordance: false,
                 })
                 .collect(),
             selected_index: list.selected_index(),

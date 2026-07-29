@@ -195,6 +195,7 @@ impl TuiConversationMenuModel {
                     state_suffix: None,
                     is_selectable: true,
                     style: TuiInlineMenuRowStyle::Default,
+                    shell_command_affordance: false,
                 })
                 .collect(),
             selected_index: list.selected_index(),

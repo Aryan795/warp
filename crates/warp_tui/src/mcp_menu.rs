@@ -188,6 +188,7 @@ impl TuiMcpMenuModel {
                     state_suffix: None,
                     is_selectable: row.action.is_some(),
                     style: TuiInlineMenuRowStyle::Default,
+                    shell_command_affordance: false,
                 })
                 .collect(),
             selected_index: selection.selected_index(),

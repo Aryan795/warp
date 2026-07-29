@@ -270,6 +270,7 @@ impl TuiSlashCommandModel {
                     state_suffix: self.state_suffix(&row.title, ctx),
                     is_selectable: true,
                     style: TuiInlineMenuRowStyle::InlineMenuItem,
+                    shell_command_affordance: false,
                 })
                 .collect(),
             selected_index: list.selected_index(),

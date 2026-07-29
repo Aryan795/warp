@@ -20,7 +20,7 @@ use crate::conversation_menu::TuiConversationMenuModel;
 use crate::input_suggestions_mode::TuiInputSuggestionsMode;
 use crate::mcp_menu::TuiMcpMenuModel;
 use crate::model_menu::TuiModelMenuModel;
-use crate::prompt_history_menu::TuiPromptHistoryMenuModel;
+use crate::prompt_history_menu::{TuiHistoryAcceptance, TuiPromptHistoryMenuModel};
 use crate::skills_menu::TuiSkillMenuModel;
 use crate::slash_commands::TuiSlashCommandModel;
 use crate::tui_builder::TuiUiBuilder;
@@ -106,6 +106,9 @@ pub(crate) struct TuiInlineMenuRow {
     pub(crate) state_suffix: Option<String>,
     pub(crate) is_selectable: bool,
     pub(crate) style: TuiInlineMenuRowStyle,
+    /// When set, the row is prefixed with the green `!` shell-command affordance
+    /// (matching the input's shell prefix, without the transcript background).
+    pub(crate) shell_command_affordance: bool,
 }
 /// Returns a single-line menu title while leaving the source text unchanged.
 pub(crate) fn single_line_menu_title(text: &str) -> String {
@@ -273,8 +276,9 @@ pub(crate) enum TuiInlineMenuAccepted {
     Conversation(AgentConversationEntryId),
     Model(LLMId),
     Mcp(TuiMcpAction),
-    /// The text of a prompt accepted from the up-arrow prompt-history menu.
-    PromptHistory(String),
+    /// An item accepted from the up-arrow history menu: either a shell command
+    /// to execute or an agent prompt to submit.
+    History(TuiHistoryAcceptance),
     /// A shell completion and the exact input span it replaces.
     Completion(TuiCompletionAcceptance),
 }
@@ -464,7 +468,7 @@ impl TuiInlineMenuHandle for ModelHandle<TuiPromptHistoryMenuModel> {
 
     fn accept(&self, ctx: &mut AppContext) -> Option<TuiInlineMenuAccepted> {
         self.update(ctx, |model, ctx| model.accept_selected(ctx))
-            .map(TuiInlineMenuAccepted::PromptHistory)
+            .map(TuiInlineMenuAccepted::History)
     }
 
     fn dismiss(&self, ctx: &mut AppContext) {
@@ -946,17 +950,29 @@ fn menu_result_row(
         }
     };
 
-    let mut content = TuiFlex::row()
-        .with_cross_axis_alignment(CrossAxisAlignment::Center)
-        .child(match row.style {
-            TuiInlineMenuRowStyle::Default => title,
-            TuiInlineMenuRowStyle::InlineMenuItem => TuiConstrainedBox::new(title)
-                .with_max_cols(
-                    u16::try_from(title_columns)
-                        .expect("title columns come from the u16 width constraint"),
-                )
-                .finish(),
-        });
+    let mut content = TuiFlex::row().with_cross_axis_alignment(CrossAxisAlignment::Center);
+    if row.shell_command_affordance {
+        // Mirror the input's green `!` shell prefix. The affordance keeps its
+        // accent color even on the selected row so shell rows stay recognizable.
+        content = content.child(
+            TuiContainer::new(
+                TuiText::new("!")
+                    .with_style(builder.shell_command_accent_style())
+                    .finish(),
+            )
+            .with_padding_right(1)
+            .finish(),
+        );
+    }
+    content = content.child(match row.style {
+        TuiInlineMenuRowStyle::Default => title,
+        TuiInlineMenuRowStyle::InlineMenuItem => TuiConstrainedBox::new(title)
+            .with_max_cols(
+                u16::try_from(title_columns)
+                    .expect("title columns come from the u16 width constraint"),
+            )
+            .finish(),
+    });
     if let Some(description) = row.description.as_ref().filter(|_| show_description) {
         let description_prefix = match row.style {
             TuiInlineMenuRowStyle::Default => format!("  {description}"),

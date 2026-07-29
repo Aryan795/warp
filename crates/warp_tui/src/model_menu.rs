@@ -182,6 +182,7 @@ impl TuiModelMenuModel {
                     state_suffix: None,
                     is_selectable: row.is_selectable,
                     style: TuiInlineMenuRowStyle::Default,
+                    shell_command_affordance: false,
                 })
                 .collect(),
             selected_index: list.selected_index(),
