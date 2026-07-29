@@ -114,13 +114,9 @@ fn collect_label_candidates(actions: &[TargetedAction]) -> Vec<LabelCandidate> {
                     pressed_keys.remove(index);
                 }
             }
-            Action::TypeText { .. } => {
-                flush_keys(&mut candidates, &mut current_keys, &mut pressed_keys);
-            }
-            Action::MouseWheel { .. } => {
-                flush_keys(&mut candidates, &mut current_keys, &mut pressed_keys);
-            }
-            Action::Wait(_)
+            Action::TypeText { .. }
+            | Action::MouseWheel { .. }
+            | Action::Wait(_)
             | Action::MouseDown { .. }
             | Action::MouseUp { .. }
             | Action::MouseMove { .. } => {
@@ -162,13 +158,9 @@ fn flush_keys(
 
 fn redact_printable_key(label: String) -> Option<String> {
     let mut chars = label.chars();
-    if chars.next().is_some_and(|ch| !ch.is_control()) && chars.next().is_none()
-        || label.eq_ignore_ascii_case("space")
-    {
-        None
-    } else {
-        Some(label)
-    }
+    let is_single_printable =
+        chars.next().is_some_and(|ch| !ch.is_control()) && chars.next().is_none();
+    (!is_single_printable && !label.eq_ignore_ascii_case("space")).then_some(label)
 }
 
 fn key_label_from_summary(summary: &str) -> String {
