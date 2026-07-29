@@ -1735,7 +1735,6 @@ impl BillingAndUsagePageView {
         let team_can_purchase_addon_credits = workspace
             .billing_metadata
             .is_purchase_add_on_credits_policy_enabled();
-        let is_premium_purchase = workspace.billing_metadata.is_premium_addon_credits_purchase();
         let premium_bps = workspace.billing_metadata.addon_credits_price_premium_bps();
         let can_upgrade_to_build = workspace.billing_metadata.can_upgrade_to_build_plan();
 
@@ -1968,13 +1967,10 @@ impl BillingAndUsagePageView {
 
         let selected_option = addon_credits_options.get(selected_topup_denomination);
 
-        // Auto-reload only applies to plans with standard (list price)
-        // purchasing; premium-purchase plans always use one-time purchases.
-        let auto_reload_enabled = !is_premium_purchase
-            && workspace
-                .settings
-                .addon_credits_settings
-                .auto_reload_enabled;
+        let auto_reload_enabled = workspace
+            .settings
+            .addon_credits_settings
+            .auto_reload_enabled;
 
         let auto_reload_amount = selected_option
             .map(|option| option.credits.to_string())
@@ -1997,6 +1993,17 @@ impl BillingAndUsagePageView {
                 .finish()
         };
 
+        let mut auto_reload_description = format!(
+            "When enabled, auto reload will automatically purchase {auto_reload_amount} \
+            credits when your add-on credit balance reaches 100 credits remaining."
+        );
+        if premium_bps > 0 {
+            let percent = format_addon_premium_percent(premium_bps);
+            auto_reload_description.push_str(&format!(
+                " Auto-reload purchases include the {percent} Free plan surcharge."
+            ));
+        }
+
         let auto_reload_switch = Container::new(render_body_item::<BillingAndUsagePageAction>(
             "Auto reload".into(),
             None,
@@ -2004,10 +2011,7 @@ impl BillingAndUsagePageView {
             Default::default(),
             appearance,
             auto_reload_switch,
-            Some(format!(
-                "When enabled, auto reload will automatically purchase {auto_reload_amount} \
-                credits when your add-on credit balance reaches 100 credits remaining."
-            )),
+            Some(auto_reload_description),
         ))
         .with_padding_right(-TOGGLE_BUTTON_RIGHT_PADDING)
         .finish();
@@ -2028,9 +2032,7 @@ impl BillingAndUsagePageView {
         if let Some(purchased_row) = purchased_this_month_row {
             card_content_upper.add_child(purchased_row);
         }
-        if !is_premium_purchase {
-            card_content_upper.add_child(auto_reload_switch);
-        }
+        card_content_upper.add_child(auto_reload_switch);
 
         let base_rate = addon_credits_options
             .first()
@@ -2142,6 +2144,13 @@ impl BillingAndUsagePageView {
 
         if auto_reload_enabled {
             card_content_upper.add_child(buy_row.finish());
+            if premium_bps > 0 {
+                card_content_upper.add_child(render_premium_surcharge_note(
+                    team_uid,
+                    premium_bps,
+                    appearance,
+                ));
+            }
             if delinquent_due_to_payment_issue {
                 card_content_upper.add_child(self.render_warning_row(
                     appearance,

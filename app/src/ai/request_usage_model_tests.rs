@@ -654,6 +654,65 @@ fn test_has_any_ai_remaining_true_with_self_serve_auto_reload() {
 }
 
 #[test]
+fn test_has_any_ai_remaining_true_with_premium_auto_reload() {
+    App::test((), |mut app| async move {
+        let (_uid, mut workspace) = create_test_workspace();
+        workspace
+            .billing_metadata
+            .tier
+            .purchase_add_on_credits_policy = Some(premium_purchase_policy());
+        enable_auto_reload(&mut workspace);
+
+        add_user_workspaces_with_workspace(&mut app, workspace);
+        let request_usage_model = add_request_usage_model(&mut app);
+        set_addon_credits_pricing_info(&mut app);
+
+        request_usage_model.update(&mut app, |model, ctx| {
+            model.request_limit_info = RequestLimitInfo::new_for_test(10, 10);
+            model.bonus_grants.clear();
+
+            assert!(
+                model.has_any_ai_remaining(ctx),
+                "expected has_any_ai_remaining to be true when premium-plan auto-reload is enabled",
+            );
+        });
+    });
+}
+
+#[test]
+fn test_has_any_ai_remaining_false_when_premium_auto_reload_would_exceed_limit() {
+    App::test((), |mut app| async move {
+        let (_uid, mut workspace) = create_test_workspace();
+        workspace
+            .billing_metadata
+            .tier
+            .purchase_add_on_credits_policy = Some(premium_purchase_policy());
+        enable_auto_reload(&mut workspace);
+        // The reload's list price is $10.00 but the premium price is $11.00;
+        // a $10.50 monthly limit only blocks the reload when the premium
+        // surcharge is included in the check.
+        workspace
+            .settings
+            .addon_credits_settings
+            .max_monthly_spend_cents = Some(1050);
+
+        add_user_workspaces_with_workspace(&mut app, workspace);
+        let request_usage_model = add_request_usage_model(&mut app);
+        set_addon_credits_pricing_info(&mut app);
+
+        request_usage_model.update(&mut app, |model, ctx| {
+            model.request_limit_info = RequestLimitInfo::new_for_test(10, 10);
+            model.bonus_grants.clear();
+
+            assert!(
+                !model.has_any_ai_remaining(ctx),
+                "expected has_any_ai_remaining to be false when the premium-priced reload would exceed the monthly spend limit",
+            );
+        });
+    });
+}
+
+#[test]
 fn test_has_any_ai_remaining_true_with_self_serve_auto_reload_and_billing_v2_disabled() {
     App::test((), |mut app| async move {
         let _guard = FeatureFlag::BillingAndUsagePageV2.override_enabled(false);

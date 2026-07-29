@@ -175,7 +175,8 @@ impl Workspace {
         }
     }
 
-    /// Returns the price in cents for the selected auto-reload credit denomination.
+    /// Returns the price in cents for the selected auto-reload credit denomination,
+    /// including any plan surcharge (premium plans reload at the premium price).
     /// Returns None if auto-reload is not configured or if the denomination can't be found in pricing options.
     pub fn get_auto_reload_price_cents(
         &self,
@@ -189,7 +190,11 @@ impl Workspace {
         addon_credits_options
             .iter()
             .find(|option| option.credits == selected_credits)
-            .map(|option| option.price_usd_cents)
+            .map(|option| {
+                option.price_usd_cents_with_premium(
+                    self.billing_metadata.addon_credits_price_premium_bps(),
+                )
+            })
     }
 }
 

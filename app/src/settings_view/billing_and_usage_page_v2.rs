@@ -35,7 +35,7 @@ use super::billing_and_usage::usage_history_model::UsageHistoryModel;
 pub use super::billing_and_usage_page::BillingAndUsagePageEvent;
 use super::billing_and_usage_page::{
     BillingAndUsagePageAction, BillingUsageTab, CHECKOUT_PENDING_MESSAGE,
-    create_premium_surcharge_badge, render_premium_surcharge_note,
+    create_premium_surcharge_badge, format_addon_premium_percent, render_premium_surcharge_note,
 };
 use super::settings_page::{AdditionalInfo, render_customer_type_badge, render_info_icon};
 use crate::ai::AIRequestUsageModel;
@@ -170,9 +170,6 @@ struct AddonCreditsPurchaseState {
     price_label: String,
     auto_reload_tooltip_text: String,
     warning_text: Option<&'static str>,
-    /// True when purchases on this plan go through the premium (surcharged)
-    /// path; hides auto-reload, which only applies to list-price plans.
-    is_premium_purchase: bool,
     /// Surcharge in basis points applied to displayed prices (0 = none).
     premium_bps: i32,
 }
@@ -1104,7 +1101,6 @@ impl BillingAndUsagePageV2View {
         let team_can_purchase = workspace
             .billing_metadata
             .is_purchase_add_on_credits_policy_enabled();
-        let is_premium_purchase = workspace.billing_metadata.is_premium_addon_credits_purchase();
         let premium_bps = workspace.billing_metadata.addon_credits_price_premium_bps();
         let can_upgrade = workspace.billing_metadata.can_upgrade_to_build_plan();
 
@@ -1130,13 +1126,10 @@ impl BillingAndUsagePageV2View {
             .addon_credits
             .options
             .get(self.addon_credits.selected_denomination);
-        // Auto-reload only applies to plans with standard (list price)
-        // purchasing; premium-purchase plans always use one-time purchases.
-        let auto_reload_enabled = !is_premium_purchase
-            && workspace
-                .settings
-                .addon_credits_settings
-                .auto_reload_enabled;
+        let auto_reload_enabled = workspace
+            .settings
+            .addon_credits_settings
+            .auto_reload_enabled;
 
         let team_count = UserWorkspaces::as_ref(app)
             .team_for_view_handle(&self.self_handle, app)
@@ -1178,10 +1171,16 @@ impl BillingAndUsagePageV2View {
         let auto_reload_credit_amount = selected_credit_option
             .map(|o| format!("{} credits", o.credits.separate_with_commas()))
             .unwrap_or_else(|| "selected credit amount".to_string());
-        let auto_reload_tooltip_text = format!(
+        let mut auto_reload_tooltip_text = format!(
             "When any member on your team’s credit balance reaches 100 credits remaining, \
             automatically purchase {auto_reload_credit_amount}."
         );
+        if premium_bps > 0 {
+            let percent = format_addon_premium_percent(premium_bps);
+            auto_reload_tooltip_text.push_str(&format!(
+                " Auto-reload purchases include the {percent} Free plan surcharge."
+            ));
+        }
         let warning_text = if delinquent && has_admin_permissions {
             Some(ADDON_CREDITS_DELINQUENT_WARNING_STRING)
         } else if delinquent {
@@ -1229,7 +1228,10 @@ impl BillingAndUsagePageV2View {
             let description_text = match configured_auto_reload_option {
                 Some(option) => {
                     let credits = option.credits.separate_with_commas();
-                    let price = format!("${:.2}", option.price_usd_cents as f64 / 100.0);
+                    let price = format!(
+                        "${:.2}",
+                        option.price_usd_cents_with_premium(premium_bps) as f64 / 100.0
+                    );
                     format!(
                         "Your admin has enabled auto-reload for add-on credits. When your personal add-on credit balance runs low, Warp will automatically purchase {credits} credits for {price} and add them to your balance."
                     )
@@ -1253,7 +1255,6 @@ impl BillingAndUsagePageV2View {
             price_label,
             auto_reload_tooltip_text,
             warning_text,
-            is_premium_purchase,
             premium_bps,
         })
     }
@@ -1619,7 +1620,7 @@ impl BillingAndUsagePageV2View {
         }
 
         let mut right_group = Flex::row().with_cross_axis_alignment(CrossAxisAlignment::Center);
-        if state.has_admin_permissions && !state.is_premium_purchase {
+        if state.has_admin_permissions {
             let auto_reload_switch_element = {
                 let switch_builder = appearance
                     .ui_builder()
@@ -1666,13 +1667,7 @@ impl BillingAndUsagePageV2View {
         }
         right_group.add_child(
             Container::new(purchase_button)
-                .with_margin_left(
-                    if state.has_admin_permissions && !state.is_premium_purchase {
-                        16.
-                    } else {
-                        0.
-                    },
-                )
+                .with_margin_left(if state.has_admin_permissions { 16. } else { 0. })
                 .finish(),
         );
         let lower_row = Flex::row()
