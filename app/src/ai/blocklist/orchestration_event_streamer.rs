@@ -28,6 +28,7 @@ use crate::ai::agent_events::{
     AgentEventConsumer, AgentEventConsumerControlFlow, AgentEventDriverConfig, AgentEventFilter,
     AgentMessageEventMetadata, MessageHydrator, ServerApiAgentEventSource, run_agent_event_driver,
 };
+use crate::ai::agent_conversations_model::AgentConversationsModel;
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::server::retry_strategies::is_transient_http_error;
 use crate::server::server_api::ai::{AIClient, AgentRunEvent, TaskListFilter};
@@ -622,10 +623,25 @@ impl OrchestrationEventStreamer {
                     );
                     tracker.observe_child(
                         &child_run_id,
-                        ChildSignal::SessionLinked { session_uuid },
+                        ChildSignal::SessionLinked {
+                            session_uuid: session_uuid.clone(),
+                        },
                         &self.killed_run_ids,
                         ctx,
                     );
+                    // Update the AgentConversationsModel task cache with the
+                    // linked session so the next pill click's
+                    // decide_child_pane_materialization gets AttachLive instead
+                    // of Pending (stale Queued/Inactive from the initial fetch).
+                    if let Ok(task_id) = child_run_id.parse::<AmbientAgentTaskId>() {
+                        AgentConversationsModel::handle(ctx).update(ctx, |model, ctx| {
+                            model.update_task_as_running_with_session(
+                                &task_id,
+                                session_uuid,
+                                ctx,
+                            );
+                        });
+                    }
                 }
                 FamilyEvent::ChildLifecycle { child_run_id, kind } => {
                     log::info!(
@@ -651,6 +667,35 @@ impl OrchestrationEventStreamer {
                         &self.killed_run_ids,
                         ctx,
                     );
+                    // On terminal lifecycle events, evict the stale cached task
+                    // (typically showing Queued from the initial discovery fetch)
+                    // and re-fetch it so the next pill click's
+                    // decide_child_pane_materialization returns LoadTranscript
+                    // instead of Pending. InProgress events are left alone
+                    // since session-linked handles the running case above.
+                    // Idle is deprecated in the proto (Succeeded supersedes it)
+                    // but can still arrive from older server builds.
+                    #[allow(deprecated)]
+                    let is_terminal = matches!(
+                        kind,
+                        api::LifecycleEventType::Succeeded
+                            | api::LifecycleEventType::Idle
+                            | api::LifecycleEventType::Failed
+                            | api::LifecycleEventType::Errored
+                            | api::LifecycleEventType::Cancelled
+                            | api::LifecycleEventType::Unspecified
+                    );
+                    if is_terminal {
+                        if let Ok(task_id) = child_run_id.parse::<AmbientAgentTaskId>() {
+                            log::info!(
+                                "[orchestration-unified-debug] drain ChildLifecycle terminal \
+                                 child_run_id={child_run_id} kind={kind:?}: evict+refetch task"
+                            );
+                            AgentConversationsModel::handle(ctx).update(ctx, |model, ctx| {
+                                model.evict_and_refetch_task(&task_id, ctx);
+                            });
+                        }
+                    }
                 }
                 FamilyEvent::Opaque => {}
             }
@@ -839,6 +884,15 @@ impl OrchestrationEventStreamer {
              child_conversation_id={child_conversation_id:?} \
              terminal_surface_id={terminal_surface_id:?}"
         );
+        // Update the tracker's TrackedChild entry to record the real
+        // conversation_id, replacing the orchestrator stand-in that was
+        // inserted eagerly in apply_started. This ensures apply_lifecycle's
+        // history lookup (conversation_id_for_agent_id) resolves correctly.
+        if let Some(stream) = self.streams.get_mut(&parent_conversation_id)
+            && let Some(tracker) = stream.tracker.as_mut()
+        {
+            tracker.stamp_conversation_id_for_run(&child_run_id, child_conversation_id);
+        }
     }
 
     /// Flag-on owner drain: reads the conversation's family SSE buffer and

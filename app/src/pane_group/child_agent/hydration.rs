@@ -217,14 +217,17 @@ impl PaneGroup {
                 );
             }
             Some(ChildPaneMaterialization::Pending) | None => {
-                // Pending: the bare ambient shell stays un-materialized; the
-                // tracker re-drives on the next lifecycle / session-linked
-                // signal (an async task fetch was already kicked above).
+                // Pending: the bare ambient shell exists; register so that
+                // process_pending_remote_child_hydrations re-drives when
+                // evict_and_refetch_task fires TasksUpdated with fresh data.
                 log::info!(
                     "[orchestration-unified-debug] materialize_owner Pending: \
                      child_conversation_id={child_id:?} pane_id={pane_id:?}; \
-                     waiting for tracker re-drive"
+                     registering pending hydration for re-drive on TasksUpdated"
                 );
+                self.pending_remote_child_hydrations
+                    .insert(task_id, child_id);
+                self.ensure_pending_ambient_restoration_subscription(ctx);
             }
         }
     }
@@ -975,8 +978,15 @@ impl PaneGroup {
 
     /// Drains entries from `pending_remote_child_hydrations` for which task
     /// data is now available, hydrating each hidden child pane in place.
-    /// Only active when `OrchestrationUnifiedStack` is disabled; the map is
-    /// never populated when the flag is on.
+    ///
+    /// When `OrchestrationUnifiedStack` is enabled (M2), the fresh task data
+    /// is obtained from `AgentConversationsModel` and re-dispatched via the
+    /// unified path: `AttachLive` calls `attach_child_session` directly on the
+    /// existing pane; `LoadTranscript` calls `hydrate_child_transcript_in_place`;
+    /// `Pending` leaves the entry for the next `TasksUpdated` cycle.
+    ///
+    /// When the flag is off, the original `attempt_remote_child_hydration` path
+    /// is used unchanged.
     pub(in crate::pane_group) fn process_pending_remote_child_hydrations(
         &mut self,
         ctx: &mut ViewContext<Self>,
@@ -997,12 +1007,59 @@ impl PaneGroup {
             .collect();
 
         for task_id in ready_tasks {
-            let Some(placeholder_conversation_id) =
+            let Some(child_id) =
                 self.pending_remote_child_hydrations.remove(&task_id)
             else {
                 continue;
             };
-            self.attempt_remote_child_hydration(placeholder_conversation_id, task_id, ctx);
+
+            if crate::features::FeatureFlag::OrchestrationUnifiedStack.is_enabled() {
+                // M2 unified path: call attach/transcript directly on the
+                // existing pane without going through the idempotency-guarded
+                // materialize_child_placeholder_pane.
+                let Some(task) = AgentConversationsModel::as_ref(ctx).get_task_data(&task_id)
+                else {
+                    continue;
+                };
+                match decide_child_pane_materialization(&task) {
+                    ChildPaneMaterialization::AttachLive { session_id } => {
+                        log::info!(
+                            "[orchestration-unified-debug] process_pending re-drive AttachLive \
+                             child_id={child_id:?} task_id={task_id}"
+                        );
+                        self.attach_child_session(
+                            child_id,
+                            session_id,
+                            ChildPaneMaterializationMode::Owner,
+                            ctx,
+                        );
+                    }
+                    ChildPaneMaterialization::LoadTranscript { server_token } => {
+                        let pane_id = self
+                            .child_agent_panes
+                            .get(&child_id)
+                            .copied()
+                            .filter(|p| self.has_pane_id(*p));
+                        if let Some(pane_id) = pane_id {
+                            log::info!(
+                                "[orchestration-unified-debug] process_pending re-drive \
+                                 LoadTranscript child_id={child_id:?} task_id={task_id}"
+                            );
+                            self.hydrate_child_transcript_in_place(
+                                pane_id, child_id, task_id, server_token, ctx,
+                            );
+                        }
+                    }
+                    ChildPaneMaterialization::Pending => {
+                        // Still pending: re-register and wait for the next
+                        // TasksUpdated (e.g. a second evict_and_refetch cycle).
+                        self.pending_remote_child_hydrations
+                            .insert(task_id, child_id);
+                    }
+                }
+            } else {
+                self.attempt_remote_child_hydration(child_id, task_id, ctx);
+            }
         }
     }
 }
