@@ -1655,7 +1655,7 @@ impl BillingAndUsagePageView {
     fn render_addon_credits_panel(
         &self,
         selected_topup_denomination: usize,
-        workspace: &Workspace,
+        workspace: Option<&Workspace>,
         team_uid: Option<ServerId>,
         has_admin_permissions: bool,
         bonus_credit_balance: i32,
@@ -1706,7 +1706,10 @@ impl BillingAndUsagePageView {
         let team_can_purchase_addon_credits =
             purchase_policy.is_some_and(|policy| policy.allows_purchases());
         let premium_bps = purchase_policy.map_or(0, |policy| policy.effective_premium_bps());
-        let can_upgrade_to_build = workspace.billing_metadata.can_upgrade_to_build_plan();
+        // Teamless users have no workspace yet; they're on the free tier and
+        // can always upgrade.
+        let can_upgrade_to_build = workspace
+            .is_none_or(|workspace| workspace.billing_metadata.can_upgrade_to_build_plan());
         let upgrade_url = match team_uid {
             Some(team_uid) => UserWorkspaces::upgrade_link_for_team(team_uid),
             None => UserWorkspaces::upgrade_link(
@@ -1730,7 +1733,8 @@ impl BillingAndUsagePageView {
             // and the current user is an admin, then we show them a nudge to switch to Build.
             (false, true, true) => {
                 let upgrade_url = upgrade_url.clone();
-                let is_legacy_paid = workspace.billing_metadata.is_on_legacy_paid_plan();
+                let is_legacy_paid = workspace
+                    .is_some_and(|workspace| workspace.billing_metadata.is_on_legacy_paid_plan());
                 let (link_text, suffix) = if is_legacy_paid {
                     ("Switch to the Build plan", " to purchase add-on credits.")
                 } else {
@@ -1820,7 +1824,7 @@ impl BillingAndUsagePageView {
                 .finish();
         }
 
-        let team_member_count = workspace.members.len();
+        let team_member_count = workspace.map_or(1, |workspace| workspace.members.len());
 
         let paragraph_text = if team_member_count > 1 {
             format!("{ADDON_CREDITS_DESCRIPTION} {ADDITIONAL_ADDON_CREDITS_DESCRIPTION_FOR_TEAM}")
@@ -1849,9 +1853,12 @@ impl BillingAndUsagePageView {
         );
 
         let spend_limit_text = workspace
-            .settings
-            .addon_credits_settings
-            .max_monthly_spend_cents
+            .and_then(|workspace| {
+                workspace
+                    .settings
+                    .addon_credits_settings
+                    .max_monthly_spend_cents
+            })
             .map(|cents| format!("${:.2}", cents as f64 / 100.0))
             .unwrap_or_else(|| "$200.00".to_string());
 
@@ -1946,10 +1953,12 @@ impl BillingAndUsagePageView {
 
         let selected_option = addon_credits_options.get(selected_topup_denomination);
 
-        let auto_reload_enabled = workspace
-            .settings
-            .addon_credits_settings
-            .auto_reload_enabled;
+        let auto_reload_enabled = workspace.is_some_and(|workspace| {
+            workspace
+                .settings
+                .addon_credits_settings
+                .auto_reload_enabled
+        });
 
         let auto_reload_amount = selected_option
             .map(|option| option.credits.to_string())
@@ -2058,18 +2067,22 @@ impl BillingAndUsagePageView {
             "Buy".to_string()
         };
 
-        let would_exceed_limit = selected_option.is_some_and(|option| {
-            let purchase_cost_cents = option.price_usd_cents_with_premium(premium_bps);
-            let monthly_limit_cents = workspace
-                .settings
-                .addon_credits_settings
-                .max_monthly_spend_cents
-                .unwrap_or(20000); // Default $200 limit
+        let would_exceed_limit =
+            workspace
+                .zip(selected_option)
+                .is_some_and(|(workspace, option)| {
+                    let purchase_cost_cents = option.price_usd_cents_with_premium(premium_bps);
+                    let monthly_limit_cents = workspace
+                        .settings
+                        .addon_credits_settings
+                        .max_monthly_spend_cents
+                        .unwrap_or(20000); // Default $200 limit
 
-            let already_spent_cents = workspace.bonus_grants_purchased_this_month.cents_spent;
+                    let already_spent_cents =
+                        workspace.bonus_grants_purchased_this_month.cents_spent;
 
-            (already_spent_cents + purchase_cost_cents) > monthly_limit_cents
-        });
+                    (already_spent_cents + purchase_cost_cents) > monthly_limit_cents
+                });
 
         let is_buy_button_disabled =
             purchase_addon_credits_loading || would_exceed_limit || delinquent_due_to_payment_issue;
@@ -2170,10 +2183,11 @@ impl BillingAndUsagePageView {
                     appearance,
                     AUTO_RELOAD_DELINQUENT_WARNING_STRING.to_string(),
                 ));
-            } else if workspace
-                .billing_metadata
-                .has_failed_addon_credit_auto_reload_status()
-            {
+            } else if workspace.is_some_and(|workspace| {
+                workspace
+                    .billing_metadata
+                    .has_failed_addon_credit_auto_reload_status()
+            }) {
                 card_content_lower_children.push(self.render_warning_row(
                     appearance,
                     RESTRICTED_BILLING_USAGE_WARNING_STRING.to_string(),
@@ -2945,15 +2959,28 @@ impl BillingAndUsagePageView {
             usage.add_child(ambient_trial_widget);
         }
 
-        if let Some(workspace) = workspace {
-            let bonus_credit_balance =
-                ai_request_usage_model.total_workspace_bonus_credits_remaining(workspace.uid);
+        // A teamless fresh free user has no (non-placeholder) workspace at
+        // all, so `workspace` alone can't gate the purchase panel: still
+        // render it whenever the resolved purchase policy allows purchases
+        // (the user-level leg covers the teamless case).
+        let show_addon_credits_panel = workspace.is_some()
+            || workspaces
+                .purchase_policy(None)
+                .is_some_and(|policy| policy.allows_purchases());
+        if show_addon_credits_panel {
+            let bonus_credit_balance = workspace.map_or_else(
+                || ai_request_usage_model.total_user_interactive_bonus_credits_remaining(),
+                |workspace| {
+                    ai_request_usage_model.total_workspace_bonus_credits_remaining(workspace.uid)
+                },
+            );
 
             // Hide addon credits panel for Enterprise PAYG users when they have 0 credits.
-            let is_enterprise_payg_with_zero_credits = workspace
-                .billing_metadata
-                .is_enterprise_pay_as_you_go_enabled()
-                && bonus_credit_balance == 0;
+            let is_enterprise_payg_with_zero_credits = workspace.is_some_and(|workspace| {
+                workspace
+                    .billing_metadata
+                    .is_enterprise_pay_as_you_go_enabled()
+            }) && bonus_credit_balance == 0;
 
             // A teamless user manages their own personal purchases; the
             // server creates their team on first purchase.

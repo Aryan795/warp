@@ -1064,7 +1064,7 @@ impl BillingAndUsagePageV2View {
 
     fn render_addon_credits_panel(
         &self,
-        workspace: &Workspace,
+        workspace: Option<&Workspace>,
         team_uid: Option<ServerId>,
         has_admin_permissions: bool,
         delinquent: bool,
@@ -1097,7 +1097,7 @@ impl BillingAndUsagePageV2View {
 
     fn addon_credits_panel_state(
         &self,
-        workspace: &Workspace,
+        workspace: Option<&Workspace>,
         team_uid: Option<ServerId>,
         has_admin_permissions: bool,
         delinquent: bool,
@@ -1108,7 +1108,10 @@ impl BillingAndUsagePageV2View {
             .purchase_policy(team_uid.and_then(|team_uid| workspaces.team_from_uid(team_uid)));
         let team_can_purchase = purchase_policy.is_some_and(|policy| policy.allows_purchases());
         let premium_bps = purchase_policy.map_or(0, |policy| policy.effective_premium_bps());
-        let can_upgrade = workspace.billing_metadata.can_upgrade_to_build_plan();
+        // Teamless users have no workspace yet; they're on the free tier and
+        // can always upgrade.
+        let can_upgrade = workspace
+            .is_none_or(|workspace| workspace.billing_metadata.can_upgrade_to_build_plan());
         let upgrade_url = match team_uid {
             Some(team_uid) => UserWorkspaces::upgrade_link_for_team(team_uid),
             None => UserWorkspaces::upgrade_link(self.auth_state.user_id().unwrap_or_default()),
@@ -1136,10 +1139,12 @@ impl BillingAndUsagePageV2View {
             .addon_credits
             .options
             .get(self.addon_credits.selected_denomination);
-        let auto_reload_enabled = workspace
-            .settings
-            .addon_credits_settings
-            .auto_reload_enabled;
+        let auto_reload_enabled = workspace.is_some_and(|workspace| {
+            workspace
+                .settings
+                .addon_credits_settings
+                .auto_reload_enabled
+        });
 
         let team_count = workspaces
             .team_for_view_handle(&self.self_handle, app)
@@ -1151,16 +1156,18 @@ impl BillingAndUsagePageV2View {
             ADDON_CREDITS_DESCRIPTION.to_string()
         };
 
-        let would_exceed = selected_credit_option.is_some_and(|opt| {
-            let limit = workspace
-                .settings
-                .addon_credits_settings
-                .max_monthly_spend_cents
-                .unwrap_or(DEFAULT_MAX_MONTHLY_SPEND_CENTS);
-            (workspace.bonus_grants_purchased_this_month.cents_spent
-                + opt.price_usd_cents_with_premium(premium_bps))
-                > limit
-        });
+        let would_exceed = workspace
+            .zip(selected_credit_option)
+            .is_some_and(|(workspace, opt)| {
+                let limit = workspace
+                    .settings
+                    .addon_credits_settings
+                    .max_monthly_spend_cents
+                    .unwrap_or(DEFAULT_MAX_MONTHLY_SPEND_CENTS);
+                (workspace.bonus_grants_purchased_this_month.cents_spent
+                    + opt.price_usd_cents_with_premium(premium_bps))
+                    > limit
+            });
         let purchase_disabled = self.addon_credits.purchase_loading
             || would_exceed
             || delinquent
@@ -1189,10 +1196,11 @@ impl BillingAndUsagePageV2View {
             Some(ADDON_CREDITS_DELINQUENT_WARNING_STRING)
         } else if delinquent {
             Some(ADDON_CREDITS_NON_ADMIN_DELINQUENT_WARNING_STRING)
-        } else if workspace
-            .billing_metadata
-            .has_failed_addon_credit_auto_reload_status()
-        {
+        } else if workspace.is_some_and(|workspace| {
+            workspace
+                .billing_metadata
+                .has_failed_addon_credit_auto_reload_status()
+        }) {
             Some(if has_admin_permissions {
                 RESTRICTED_BILLING_USAGE_WARNING_STRING
             } else {
@@ -1219,9 +1227,12 @@ impl BillingAndUsagePageV2View {
 
         if !has_admin_permissions && auto_reload_enabled {
             let configured_auto_reload_option = workspace
-                .settings
-                .addon_credits_settings
-                .selected_auto_reload_credit_denomination
+                .and_then(|workspace| {
+                    workspace
+                        .settings
+                        .addon_credits_settings
+                        .selected_auto_reload_credit_denomination
+                })
                 .and_then(|credits| {
                     self.addon_credits
                         .options
@@ -1382,7 +1393,7 @@ impl BillingAndUsagePageV2View {
 
     fn render_addon_credits_purchase_card(
         &self,
-        workspace: &Workspace,
+        workspace: Option<&Workspace>,
         team_uid: Option<ServerId>,
         state: AddonCreditsPurchaseState,
         appearance: &Appearance,
@@ -1404,7 +1415,7 @@ impl BillingAndUsagePageV2View {
 
     fn render_addon_credits_upper_section(
         &self,
-        workspace: &Workspace,
+        workspace: Option<&Workspace>,
         state: &AddonCreditsPurchaseState,
         appearance: &Appearance,
     ) -> Box<dyn Element> {
@@ -1440,9 +1451,12 @@ impl BillingAndUsagePageV2View {
                 },
             );
             let spend_limit = workspace
-                .settings
-                .addon_credits_settings
-                .max_monthly_spend_cents
+                .and_then(|workspace| {
+                    workspace
+                        .settings
+                        .addon_credits_settings
+                        .max_monthly_spend_cents
+                })
                 .map(|c| format!("${:.2}", c as f64 / 100.0))
                 .unwrap_or_else(|| "$200.00".to_string());
             let spend_row = Flex::row()
@@ -1466,8 +1480,8 @@ impl BillingAndUsagePageV2View {
                 .finish();
             upper_section.add_child(spend_row);
 
-            if let Some(purchased_row) =
-                Self::render_purchased_this_month_row(workspace, appearance)
+            if let Some(purchased_row) = workspace
+                .and_then(|workspace| Self::render_purchased_this_month_row(workspace, appearance))
             {
                 upper_section.add_child(purchased_row);
             }
@@ -1749,11 +1763,21 @@ impl BillingAndUsagePageV2View {
                 .is_delinquent_due_to_payment_issue()
         });
 
-        if let Some(ws) = workspaces.current_workspace() {
+        // A teamless fresh free user has no (non-placeholder) workspace at
+        // all, so the workspace alone can't gate the purchase panel: still
+        // render it whenever the resolved purchase policy allows purchases
+        // (the user-level leg covers the teamless case).
+        let ws = workspaces.current_workspace();
+        let show_addon_credits_panel = ws.is_some()
+            || workspaces
+                .purchase_policy(None)
+                .is_some_and(|policy| policy.allows_purchases());
+        if show_addon_credits_panel {
             let team = workspaces.team_for_view_handle(&self.self_handle, app);
-            let workspace_bonus_credits = ai_model.total_workspace_bonus_credits_remaining(ws.uid);
-            let is_payg_zero = ws.billing_metadata.is_enterprise_pay_as_you_go_enabled()
-                && workspace_bonus_credits == 0;
+            let is_payg_zero = ws.is_some_and(|ws| {
+                ws.billing_metadata.is_enterprise_pay_as_you_go_enabled()
+                    && ai_model.total_workspace_bonus_credits_remaining(ws.uid) == 0
+            });
 
             if !is_payg_zero {
                 // A teamless user manages their own personal purchases; the
