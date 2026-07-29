@@ -1,15 +1,18 @@
 //! Tests for the shared [`prompt_history_for_terminal_view`] getter used by the
 //! GUI and TUI up-arrow prompt-history menus.
-use chrono::Local;
-use warpui::{App, EntityId};
-
-use super::prompt_history_for_terminal_view;
+use super::{prompt_history_for_terminal_view, sort_and_dedupe_suggestions};
 use crate::ai::agent::AIAgentExchangeId;
 use crate::ai::agent::conversation::AIConversationId;
-use crate::ai::blocklist::history_model::AIQueryHistoryOutputStatus;
+use crate::ai::blocklist::history_model::{AIQueryHistory, AIQueryHistoryOutputStatus};
 use crate::ai::blocklist::{BlocklistAIHistoryModel, PersistedAIInput, PersistedAIInputType};
 use crate::ai::llms::LLMId;
+use crate::input_suggestions::{HistoryInputSuggestion, HistoryOrder};
 use crate::suggestions::ignored_suggestions_model::{IgnoredSuggestionsModel, SuggestionType};
+use crate::terminal::history::HistoryEntry;
+use crate::terminal::model::session::SessionId;
+use chrono::Local;
+use std::collections::HashSet;
+use warpui::{App, EntityId};
 
 /// Builds a [`BlocklistAIHistoryModel`] seeded with `prompts` (oldest-first)
 /// as persisted queries, matching how `ai_queries` rows are restored at startup.
@@ -52,6 +55,98 @@ fn assert_prompt_history(prompts: &[&str], expected: &[&str]) {
             assert_eq!(texts, expected);
         });
     });
+}
+
+#[test]
+fn combined_history_groups_sessions_and_dedupes_commands_and_prompts_separately() {
+    let current_session_id = SessionId::from(1);
+    let other_session_id = SessionId::from(2);
+    let base = Local::now();
+
+    let other_command = HistoryEntry::command_at_time(
+        "other command".to_owned(),
+        base,
+        Some(other_session_id),
+        false,
+    );
+    let duplicate_other_command = HistoryEntry::command_at_time(
+        "current command".to_owned(),
+        base + chrono::Duration::seconds(30),
+        Some(other_session_id),
+        false,
+    );
+    let current_command = HistoryEntry::command_at_time(
+        "current command".to_owned(),
+        base - chrono::Duration::seconds(30),
+        Some(current_session_id),
+        false,
+    );
+    let same_text_command = HistoryEntry::command_at_time(
+        "same".to_owned(),
+        base - chrono::Duration::seconds(20),
+        Some(current_session_id),
+        false,
+    );
+    let other_prompt = AIQueryHistory::new_for_test(
+        "other prompt",
+        base + chrono::Duration::seconds(10),
+        HistoryOrder::DifferentSession,
+    );
+    let duplicate_other_prompt = AIQueryHistory::new_for_test(
+        "same",
+        base + chrono::Duration::seconds(20),
+        HistoryOrder::DifferentSession,
+    );
+    let same_text_prompt = AIQueryHistory::new_for_test(
+        "same",
+        base - chrono::Duration::seconds(10),
+        HistoryOrder::CurrentSession,
+    );
+
+    let suggestions = vec![
+        HistoryInputSuggestion::Command {
+            entry: &same_text_command,
+        },
+        HistoryInputSuggestion::AIQuery {
+            entry: same_text_prompt,
+        },
+        HistoryInputSuggestion::Command {
+            entry: &other_command,
+        },
+        HistoryInputSuggestion::Command {
+            entry: &duplicate_other_command,
+        },
+        HistoryInputSuggestion::AIQuery {
+            entry: duplicate_other_prompt,
+        },
+        HistoryInputSuggestion::Command {
+            entry: &current_command,
+        },
+        HistoryInputSuggestion::AIQuery {
+            entry: other_prompt,
+        },
+    ];
+
+    let result = sort_and_dedupe_suggestions(
+        suggestions,
+        Some(current_session_id),
+        &HashSet::from([current_session_id, other_session_id]),
+    );
+    let entries = result
+        .iter()
+        .map(|entry| (entry.is_ai_query(), entry.text()))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        entries,
+        vec![
+            (false, "other command"),
+            (true, "other prompt"),
+            (false, "current command"),
+            (false, "same"),
+            (true, "same"),
+        ]
+    );
 }
 
 #[test]

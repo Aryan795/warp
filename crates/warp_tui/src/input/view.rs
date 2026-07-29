@@ -27,7 +27,7 @@ use string_offset::{ByteOffset, CharOffset};
 use warp::editor::{CodeEditorModel, CodeEditorModelEvent};
 use warp::tui_export::{
     AcceptSlashCommandOrSavedPrompt, BlocklistAIInputModel, InputType,
-    InputTypeAutoDetectionSource, LLMId, TuiMcpAction,
+    InputTypeAutoDetectionSource, LLMId, TuiHistoryEntry, TuiMcpAction,
 };
 use warp_editor::model::CoreEditorModel;
 use warpui_core::elements::MouseStateHandle;
@@ -135,9 +135,8 @@ pub enum TuiInputViewEvent {
     AcceptedMcp(TuiMcpAction),
     /// Shift+Up should move focus from the first visual row to the region above.
     MoveFocusUp,
-    /// The user accepted a prompt from the up-arrow prompt-history menu. Carries
-    /// the prompt text to fill into the input and submit.
-    AcceptedPromptHistory(String),
+    /// The user accepted a command or prompt from the up-arrow history menu.
+    AcceptedHistory(TuiHistoryEntry),
     /// Tab requested shell completion for the current input snapshot.
     RequestShellCompletion,
     /// Selected prompt text was copied to the host clipboard.
@@ -596,6 +595,15 @@ impl TypedActionView for TuiInputView {
         if self.handle_inline_menu_action(action, ctx) {
             return;
         }
+        if matches!(
+            action,
+            TuiInputAction::Editor(_)
+                | TuiInputAction::EditorCommand(_)
+                | TuiInputAction::SetCursor { .. }
+        ) && let Some(inline_menu) = self.active_inline_menu(ctx)
+        {
+            inline_menu.prepare_for_editor_action(ctx);
+        }
         let outcome = match action {
             TuiInputAction::Editor(editor_action) => {
                 if let TuiEditorAction::PasteText(text) = editor_action {
@@ -671,7 +679,6 @@ impl TypedActionView for TuiInputView {
                     self.open_inline_menu(TuiInputSuggestionsMode::ConversationMenu, ctx);
                     TuiEditorInteractionOutcome::FollowCursor
                 } else if matches!(*command, TuiEditorCommand::MoveUp)
-                    && !self.is_shell_mode(ctx)
                     && self.single_cursor_on_first_row(ctx)
                 {
                     self.open_inline_menu(TuiInputSuggestionsMode::PromptHistory, ctx);
@@ -1041,8 +1048,8 @@ impl TuiInputView {
                         TuiInlineMenuAccepted::Mcp(action) => {
                             ctx.emit(TuiInputViewEvent::AcceptedMcp(action));
                         }
-                        TuiInlineMenuAccepted::PromptHistory(text) => {
-                            ctx.emit(TuiInputViewEvent::AcceptedPromptHistory(text));
+                        TuiInlineMenuAccepted::History(entry) => {
+                            ctx.emit(TuiInputViewEvent::AcceptedHistory(entry));
                         }
                         TuiInlineMenuAccepted::Completion(acceptance) => {
                             self.apply_shell_completion(acceptance, ctx);

@@ -121,6 +121,7 @@ impl History {
             .and_then(|session_id| self.commands(session_id))
             .unwrap_or_default()
             .into_iter()
+            .filter(|entry| !entry.command.trim().is_empty())
             .filter(|entry| {
                 !ignored_suggestions.is_ignored(&entry.command, SuggestionType::ShellCommand)
             })

@@ -357,6 +357,61 @@ fn slash_command_rows_match_figma_layout_and_colors() {
 }
 
 #[test]
+fn shell_history_row_uses_green_bang_without_transcript_background() {
+    App::test((), |app| async move {
+        app.add_singleton_model(|_| Appearance::mock());
+        app.read(|ctx| {
+            let builder = TuiUiBuilder::from_app(ctx);
+            let snapshot = TuiInlineMenuSnapshot {
+                header: Some(TuiInlineMenuHeader {
+                    title: Some("History".to_owned()),
+                    tabs: Vec::new(),
+                }),
+                rows: vec![
+                    TuiInlineMenuRow {
+                        title: "cargo test".to_owned(),
+                        description: None,
+                        state_suffix: None,
+                        is_selectable: true,
+                        style: TuiInlineMenuRowStyle::ShellCommand,
+                    },
+                    TuiInlineMenuRow {
+                        title: "explain the failure".to_owned(),
+                        description: None,
+                        state_suffix: None,
+                        is_selectable: true,
+                        style: TuiInlineMenuRowStyle::Default,
+                    },
+                ],
+                selected_index: Some(1),
+                scroll_offset: 0,
+                max_visible_rows: 8,
+                status: None,
+            };
+            let mut presenter = TuiPresenter::new();
+            let frame = presenter.present_element(
+                render_inline_menu(&snapshot, &builder),
+                TuiRect::new(0, 0, 50, 3),
+                ctx,
+            );
+            let lines = frame.buffer.to_lines();
+
+            assert!(lines[1].starts_with("! cargo test"));
+            assert!(lines[2].starts_with("explain the failure"));
+            assert_eq!(
+                frame.buffer[(0, 1)].fg,
+                builder
+                    .shell_command_accent_style()
+                    .fg
+                    .expect("shell-command accent has a foreground")
+            );
+            assert!(frame.buffer[(0, 1)].modifier.contains(Modifier::BOLD));
+            assert_ne!(frame.buffer[(0, 1)].bg, builder.shell_command_background());
+        });
+    });
+}
+
+#[test]
 fn long_slash_command_titles_are_ellipsized_before_the_description() {
     let lines = render(TuiInlineMenuSnapshot {
         header: None,

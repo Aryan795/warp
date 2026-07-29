@@ -1,5 +1,7 @@
 //! Public app APIs used by the `warp_tui` frontend.
 
+use crate::input_suggestions::HistoryInputSuggestion;
+use crate::terminal::history::{History, UpArrowHistoryConfig};
 pub use ::ai::agent::action::{AskUserQuestionItem, AskUserQuestionOption, AskUserQuestionType};
 pub use ::ai::agent::action_result::AskUserQuestionAnswerItem;
 pub use ::ai::agent::{
@@ -211,8 +213,8 @@ pub use crate::terminal::model::blocks::{
 pub use crate::terminal::model::escape_sequences::{KeystrokeWithDetails, ToEscapeSequence};
 pub use crate::terminal::model::grid::grid_handler::{GridHandler, TermMode};
 pub use crate::terminal::model::rich_content::RichContentType;
-pub use crate::terminal::model::session::Sessions;
 pub use crate::terminal::model::session::active_session::{ActiveSession, ActiveSessionEvent};
+pub use crate::terminal::model::session::{SessionId, Sessions};
 pub use crate::terminal::model::terminal_model::BlockIndex;
 pub use crate::terminal::model_events::{ModelEvent, ModelEventDispatcher};
 pub use crate::terminal::shared_session::IsSharedSessionCreator;
@@ -244,6 +246,56 @@ pub use crate::util::time_format::format_elapsed_seconds;
 #[cfg(feature = "voice_input")]
 pub use crate::voice::transcriber::{Transcriber, VoiceTranscriber};
 pub use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
+/// The kind of input represented by one owned TUI history entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TuiHistoryEntryKind {
+    Command,
+    Prompt,
+}
+
+/// An owned command or prompt projected from the shared up-arrow history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TuiHistoryEntry {
+    pub kind: TuiHistoryEntryKind,
+    pub text: String,
+}
+
+/// Returns the TUI's combined up-arrow history in the shared GUI ordering.
+///
+/// Commands are always included. Agent mode also includes prompts, while shell
+/// mode passes `include_prompts = false`. The shared history model owns
+/// session scoping, ignored-suggestion filtering, agent-command filtering,
+/// ordering, and type-specific de-duplication; this function only converts the
+/// borrowed results into a frontend-owned snapshot.
+pub fn tui_history_entries_for_terminal_view(
+    terminal_view_id: warpui::EntityId,
+    session_id: Option<SessionId>,
+    include_prompts: bool,
+    app: &warpui::AppContext,
+) -> Vec<TuiHistoryEntry> {
+    History::as_ref(app)
+        .up_arrow_suggestions_for_terminal_view(
+            terminal_view_id,
+            session_id,
+            UpArrowHistoryConfig {
+                include_commands: true,
+                include_prompts,
+            },
+            app,
+        )
+        .into_iter()
+        .map(|entry| match entry {
+            HistoryInputSuggestion::Command { entry } => TuiHistoryEntry {
+                kind: TuiHistoryEntryKind::Command,
+                text: entry.command.clone(),
+            },
+            HistoryInputSuggestion::AIQuery { entry } => TuiHistoryEntry {
+                kind: TuiHistoryEntryKind::Prompt,
+                text: entry.query_text,
+            },
+        })
+        .collect()
+}
 
 /// Builds the live-shell completion context used to parse TUI input for NLD.
 pub fn tui_completion_session_context(
