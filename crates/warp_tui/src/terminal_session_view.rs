@@ -5497,15 +5497,6 @@ impl TerminalSurface for TuiTerminalSessionView {
 }
 
 #[cfg(test)]
-impl TuiTerminalSessionView {
-    /// Returns the attachment bar's view handle for use in cross-module tests
-    /// that need to subscribe to its events or inspect its state.
-    pub(crate) fn attachment_bar_for_test(&self) -> ViewHandle<TuiAttachmentBar> {
-        self.attachment_bar.clone()
-    }
-}
-
-#[cfg(test)]
 #[path = "handoff/tests.rs"]
 mod handoff_tests;
 #[cfg(test)]
