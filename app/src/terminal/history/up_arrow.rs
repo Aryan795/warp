@@ -20,13 +20,14 @@ pub(crate) struct UpArrowHistoryConfig {
 
 impl UpArrowHistoryConfig {
     /// Derives the config from the current input config.
-    /// When the input is locked to a specific type, only that type is included.
-    /// When unlocked (auto-detection), both types are included.
+    /// Explicit shell mode includes commands only. Agent mode includes both
+    /// commands and prompts, regardless of whether input auto-detection is
+    /// enabled.
     pub fn for_input_config(input_config: &InputConfig) -> Self {
-        if input_config.is_locked {
+        if input_config.is_locked && input_config.is_shell() {
             Self {
-                include_commands: input_config.is_shell(),
-                include_prompts: input_config.is_ai(),
+                include_commands: true,
+                include_prompts: false,
             }
         } else {
             Self {

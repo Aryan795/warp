@@ -43,6 +43,7 @@ use crate::server::voice_transcriber::ServerVoiceTranscriber;
 use crate::settings::manager::SettingsManager;
 use crate::settings::{AISettings, PrivacySettings, init_and_register_user_preferences};
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
+use crate::terminal::safe_mode_settings::SafeModeSettings;
 use crate::terminal::session_settings::SessionSettings;
 use crate::user_config::WarpConfig;
 #[cfg(feature = "voice_input")]
@@ -142,6 +143,7 @@ pub fn register_tui_session_view_test_singletons(app: &mut warpui::App) {
     });
 
     app.add_singleton_model(|_| BlocklistAIHistoryModel::default());
+    app.add_singleton_model(|_| crate::persistence::PersistenceWriter::new(None));
     app.add_singleton_model(QueuedQueryModel::new);
     app.add_singleton_model(|_| CLIAgentSessionsModel::new());
     app.add_singleton_model(OrchestrationEventService::new);
@@ -173,6 +175,7 @@ pub fn register_tui_session_view_test_singletons(app: &mut warpui::App) {
     app.update(crate::settings::ScrollSettings::register);
     app.update(crate::settings::EmacsBindingsSettings::register);
     app.update(crate::terminal::general_settings::GeneralSettings::register);
+    SafeModeSettings::register(app);
     SessionSettings::register(app);
 
     app.add_singleton_model(|_| repo_metadata::repositories::DetectedRepositories::default());

@@ -175,19 +175,10 @@ impl TuiPromptHistoryMenuModel {
             terminal_surface_id,
             Rc::new(|_| None),
             Rc::new(move |_, _, config, _| {
+                let explicit_shell = config.is_locked && config.is_shell();
                 items
                     .iter()
-                    .filter(|item| {
-                        !config.is_locked
-                            || matches!(
-                                (config.input_type, item),
-                                (warp::tui_export::InputType::AI, TuiHistoryItem::Prompt(_))
-                                    | (
-                                        warp::tui_export::InputType::Shell,
-                                        TuiHistoryItem::Command(_)
-                                    )
-                            )
-                    })
+                    .filter(|item| !explicit_shell || matches!(item, TuiHistoryItem::Command(_)))
                     .cloned()
                     .collect()
             }),

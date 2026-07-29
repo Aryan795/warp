@@ -336,7 +336,11 @@ pub fn tui_history_for_terminal_view(
     input_config: InputConfig,
     app: &warpui::AppContext,
 ) -> Vec<TuiHistoryItem> {
-    let config = crate::terminal::history::UpArrowHistoryConfig::for_input_config(&input_config);
+    let explicit_shell = input_config.is_locked && input_config.is_shell();
+    let config = crate::terminal::history::UpArrowHistoryConfig {
+        include_commands: true,
+        include_prompts: !explicit_shell,
+    };
     History::as_ref(app)
         .up_arrow_suggestions_for_terminal_view(terminal_view_id, session_id, config, app)
         .into_iter()

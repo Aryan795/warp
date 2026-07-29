@@ -80,7 +80,7 @@ fn input_config_selects_the_expected_history_types() {
         input_type: InputType::AI,
         is_locked: true,
     });
-    assert!(!ai.include_commands);
+    assert!(ai.include_commands);
     assert!(ai.include_prompts);
 }
 

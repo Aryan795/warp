@@ -6,7 +6,7 @@ use warp::editor::CodeEditorModel;
 use warp::settings::AISettingsChangedEvent;
 use warp::tui_export::{
     BlocklistAIInputModel, ConversationSelectionEvent, InputConfig, InputModePolicy, InputType,
-    PolicyConfigUpdate, TuiHistoryItem,
+    PolicyConfigUpdate, TuiHistoryItem, register_tui_session_view_test_singletons,
 };
 use warp_editor::model::CoreEditorModel;
 use warpui_core::elements::tui::{Color, TuiBufferExt, TuiRect};
@@ -15,7 +15,7 @@ use warpui_core::{App, AppContext, EntityId, ModelHandle};
 
 use super::{TuiPromptHistoryMenuModel, TuiPromptHistoryRow, reconciled_selection_index};
 use crate::inline_menu::{render_inline_menu, single_line_menu_title};
-use crate::input_mode_policy::{AI_UNLOCKED_CONFIG, SHELL_LOCKED_CONFIG};
+use crate::input_mode_policy::{AI_LOCKED_CONFIG, AI_UNLOCKED_CONFIG, SHELL_LOCKED_CONFIG};
 use crate::input_suggestions_mode::TuiInputSuggestionsModeModel;
 use crate::tui_builder::TuiUiBuilder;
 
@@ -149,6 +149,28 @@ fn unlocked_agent_mode_interleaves_prompt_and_command_rows() {
 }
 
 #[test]
+fn locked_agent_mode_interleaves_prompt_and_command_rows() {
+    App::test((), |mut app| async move {
+        app.update(|ctx| {
+            let (_input, _mode, menu) = setup_items(
+                ctx,
+                vec![
+                    TuiHistoryItem::Prompt("explain this error".to_owned()),
+                    TuiHistoryItem::Command("cargo test".to_owned()),
+                ],
+                AI_LOCKED_CONFIG,
+            );
+            menu.update(ctx, |menu, ctx| menu.open(ctx));
+
+            assert_eq!(
+                row_titles(&menu, ctx),
+                vec!["explain this error", "cargo test"]
+            );
+        });
+    });
+}
+
+#[test]
 fn explicit_shell_mode_includes_commands_only() {
     App::test((), |mut app| async move {
         app.update(|ctx| {
@@ -213,21 +235,22 @@ fn typed_prefix_filters_both_types_and_matches_any_line() {
 #[test]
 fn preview_switches_type_and_dismiss_restores_buffer_and_config() {
     App::test((), |mut app| async move {
+        register_tui_session_view_test_singletons(&mut app);
         let (input, input_mode, menu) = app.update(|ctx| {
             let handles = setup_items(
                 ctx,
                 vec![
-                    TuiHistoryItem::Prompt("older prompt".to_owned()),
-                    TuiHistoryItem::Command("newest-command".to_owned()),
+                    TuiHistoryItem::Prompt("draft older prompt".to_owned()),
+                    TuiHistoryItem::Command("draft newest-command".to_owned()),
                 ],
-                AI_UNLOCKED_CONFIG,
+                AI_LOCKED_CONFIG,
             );
             set_text(&handles.0, "draft", ctx);
             handles.2.update(ctx, |menu, ctx| menu.open(ctx));
-            assert_eq!(buffer_text(&handles.0, ctx), "newest-command");
+            assert_eq!(buffer_text(&handles.0, ctx), "draft newest-command");
             assert_eq!(handles.1.as_ref(ctx).input_type(), InputType::Shell);
             handles.2.update(ctx, |menu, ctx| menu.select_previous(ctx));
-            assert_eq!(buffer_text(&handles.0, ctx), "older prompt");
+            assert_eq!(buffer_text(&handles.0, ctx), "draft older prompt");
             assert_eq!(handles.1.as_ref(ctx).input_type(), InputType::AI);
             handles
         });
@@ -235,7 +258,7 @@ fn preview_switches_type_and_dismiss_restores_buffer_and_config() {
         app.update(|ctx| menu.update(ctx, |menu, ctx| menu.dismiss(ctx)));
         app.read(|ctx| {
             assert_eq!(buffer_text(&input, ctx), "draft");
-            assert_eq!(input_mode.as_ref(ctx).input_config(), AI_UNLOCKED_CONFIG);
+            assert_eq!(input_mode.as_ref(ctx).input_config(), AI_LOCKED_CONFIG);
         });
     });
 }

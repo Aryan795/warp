@@ -145,6 +145,44 @@ fn accepted_command_history_executes_as_a_user_command() {
         assert_eq!(app.read(|ctx| input_text(&view, ctx)), "");
     });
 }
+
+#[test]
+fn accepted_prompt_history_submits_to_the_selected_agent_conversation() {
+    App::test((), |mut app| async move {
+        let fixture = focus_test_fixture(&mut app);
+        let (view, _) = add_focus_test_session(&mut app, &fixture, true);
+        let commands = Rc::new(RefCell::new(Vec::new()));
+        let commands_for_subscription = commands.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_view(&view, move |_, event, _| {
+                if let TuiTerminalSessionEvent::ExecuteCommand(event) = event {
+                    commands_for_subscription
+                        .borrow_mut()
+                        .push(event.command.clone());
+                }
+            });
+        });
+
+        view.update(&mut app, |view, ctx| {
+            view.handle_accepted_history(
+                TuiHistoryItem::Prompt("explain this failure".to_owned()),
+                ctx,
+            );
+        });
+
+        app.read(|ctx| {
+            let terminal_surface_id = view.as_ref(ctx).terminal_surface_id;
+            let prompts: Vec<_> = BlocklistAIHistoryModel::as_ref(ctx)
+                .all_live_root_task_exchanges_for_terminal_surface(terminal_surface_id)
+                .flat_map(|exchange| &exchange.input)
+                .filter_map(|input| input.user_query())
+                .collect();
+            assert_eq!(prompts, vec!["explain this failure".to_owned()]);
+            assert_eq!(input_text(&view, ctx), "");
+        });
+        assert!(commands.borrow().is_empty());
+    });
+}
 #[test]
 fn footer_supports_arbitrary_order_and_figma_group_dividers() {
     App::test((), |mut app| async move {
