@@ -3,8 +3,10 @@
 //! These exercise `observe_child` against a real
 //! `ModelContext<OrchestrationEventStreamer>` (so the pill-bar broadcasts
 //! have somewhere to go) but assert only on the tracker's own state — the
-//! placeholder-creation, metadata-fetch, and pane-materialization side
-//! effects are stubbed in T1, so no history / network plumbing is required.
+//! persisted placeholder write, metadata-fetch dispatch, and pane
+//! materialization are exercised through the tracker's in-memory bookkeeping
+//! (including the unified `is_remote_child` intent), so no history / network
+//! plumbing is required.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -14,7 +16,7 @@ use warpui::App;
 
 use super::*;
 use crate::ai::agent::conversation::AIConversationId;
-use crate::ai::ambient_agents::AmbientAgentTaskId;
+use crate::ai::ambient_agents::{AmbientAgentTask, AmbientAgentTaskId, AmbientAgentTaskState};
 use crate::ai::blocklist::history_model::BlocklistAIHistoryModel;
 use crate::server::server_api::ServerApiProvider;
 use crate::server::server_api::ai::{AIClient, MockAIClient};
@@ -25,6 +27,37 @@ const SESSION_A: &str = "44444444-4444-4444-4444-444444444444";
 
 fn task_id(s: &str) -> AmbientAgentTaskId {
     s.parse().expect("hardcoded task id parses")
+}
+
+/// Builds a minimal child task row for `ChildSignal::Seeded`, parented under
+/// `PARENT_RUN_ID` so `apply_seeded` treats it as a real child rather than
+/// the parent's own row.
+fn child_task(task_id: AmbientAgentTaskId) -> AmbientAgentTask {
+    use chrono::Utc;
+    AmbientAgentTask {
+        task_id,
+        parent_run_id: Some(PARENT_RUN_ID.to_string()),
+        title: "child".to_string(),
+        state: AmbientAgentTaskState::InProgress,
+        prompt: "prompt".to_string(),
+        created_at: Utc::now(),
+        started_at: Some(Utc::now()),
+        updated_at: Utc::now(),
+        run_time: None,
+        status_message: None,
+        source: None,
+        session_id: None,
+        session_link: None,
+        creator: None,
+        executor: None,
+        conversation_id: None,
+        request_usage: None,
+        agent_config_snapshot: None,
+        artifacts: vec![],
+        is_sandbox_running: false,
+        last_event_sequence: None,
+        children: vec![],
+    }
 }
 
 /// Installs the singletons `OrchestrationEventStreamer` depends on and
@@ -134,6 +167,10 @@ fn registered_prevents_placeholder_creation() {
                 "the executor-supplied conversation id is stored on the entry"
             );
             assert!(
+                !entry.is_remote_child,
+                "an in-band child owns a real local conversation, not an is_remote_child placeholder"
+            );
+            assert!(
                 tracker.metadata_fetches.is_empty(),
                 "an in-band child needs no discovery fetch"
             );
@@ -218,6 +255,39 @@ fn two_started_signals_issue_one_metadata_fetch() {
                 "two Started signals for the same run id must dedupe to one fetch"
             );
             assert!(tracker.metadata_fetches.contains(CHILD_A_RUN_ID));
+        });
+    });
+}
+
+#[test]
+fn seeded_child_placeholder_is_remote_child_in_viewer_mode() {
+    // Validation criterion 4 (TECH QUALITY-928 §7.4): a child placeholder
+    // materialized by the tracker uses the single unified `is_remote_child`
+    // marker even in viewer mode. The tracker never sets
+    // `is_viewing_shared_session` on a child — that flavor stays reserved for
+    // the parent viewer placeholder — so a viewer-created child persists as an
+    // `is_remote_child` row and survives restart.
+    App::test((), |mut app| async move {
+        let streamer = install_streamer(&mut app);
+        streamer.update(&mut app, |_streamer, ctx| {
+            let mut tracker = viewer_tracker();
+            let killed = HashSet::new();
+
+            tracker.observe_child(
+                CHILD_A_RUN_ID,
+                ChildSignal::Seeded(Box::new(child_task(task_id(CHILD_A_RUN_ID)))),
+                &killed,
+                ctx,
+            );
+
+            let entry = tracker
+                .children
+                .get(&task_id(CHILD_A_RUN_ID))
+                .expect("seeded child placeholder is tracked immediately");
+            assert!(
+                entry.is_remote_child,
+                "viewer-created child placeholders use the unified is_remote_child marker"
+            );
         });
     });
 }

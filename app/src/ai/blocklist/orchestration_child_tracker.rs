@@ -9,27 +9,41 @@
 //! between them is captured by [`ChildTrackingMode`] (see TECH QUALITY-928
 //! §7.2).
 //!
-//! This is the M1 T1 slice: the tracker owns its internal state machine and
-//! the classification of signals into placeholder / status / fetch / pane
-//! actions. The side effects that require the broader streamer plumbing —
-//! creating the persisted placeholder conversation, routing metadata fetches
-//! through `AgentConversationsModel`, and materializing the child pane — are
-//! stubbed here and wired up by T2 (drain integration) and M2 (unified pane
-//! path). The `ctx`-driven pill-bar broadcasts (`ChildSpawned` /
-//! `ChildStatusChanged`) are already emitted so downstream views can be
-//! developed against them.
+//! The tracker owns its internal state machine and the classification of
+//! signals into placeholder / status / fetch / pane actions. Every child
+//! placeholder it materializes is the single unified `is_remote_child` flavor
+//! (TECH QUALITY-928 §7.4) regardless of owner/viewer mode; viewer-ness is a
+//! runtime property of [`ChildTrackingMode`], never a persisted conversation
+//! flavor. Claim-time metadata fetches route through the shared
+//! `AgentConversationsModel` fetch authority (§7.6, item 1).
+//!
+//! The remaining side effect — persisting the placeholder conversation and
+//! materializing the child pane through `BlocklistAIHistoryModel` — is tracked
+//! in the tracker's in-memory map here and wired to the history/pane path by
+//! M2 (unified pane path). The `ctx`-driven pill-bar broadcasts
+//! (`ChildSpawned` / `ChildStatusChanged`) are already emitted so downstream
+//! views can be developed against them.
 
 use std::collections::{HashMap, HashSet};
 
 use session_sharing_protocol::common::SessionId;
 use warp_multi_agent_api as api;
 use warpui::ModelContext;
+#[cfg(not(test))]
+use warpui::SingletonEntity;
 
 use super::orchestration_event_streamer::{
     OrchestrationEventStreamer, OrchestrationEventStreamerEvent,
     conversation_status_from_lifecycle_event_type,
 };
 use crate::ai::agent::conversation::AIConversationId;
+// The real metadata-fetch dispatch routes through the shared
+// `AgentConversationsModel` fetch authority (TECH QUALITY-928 §7.6, item 1).
+// It is compiled out of unit-test builds so the tracker state machine can be
+// exercised without installing the model's singleton dependency graph; the
+// `#[cfg(test)]` dispatch-counter path stands in for it there.
+#[cfg(not(test))]
+use crate::ai::agent_conversations_model::AgentConversationsModel;
 use crate::ai::ambient_agents::{AmbientAgentTask, AmbientAgentTaskId, AmbientAgentTaskState};
 
 /// How this process relates to the orchestrator whose children are tracked.
@@ -83,6 +97,15 @@ pub struct TrackedChild {
     pub last_state: Option<AmbientAgentTaskState>,
     /// True once pane materialization has been requested for this child.
     pub pane_materialized: bool,
+    /// Intended persisted placeholder flavor for this child (TECH
+    /// QUALITY-928 §7.4). `true` for every tracker-materialized placeholder
+    /// — owner-side discoveries and viewer-created children alike write the
+    /// single unified `is_remote_child` marker, never `is_viewing_shared_session`
+    /// (which stays reserved for the parent viewer placeholder). `false` only
+    /// for in-band children, which already own a real local conversation and
+    /// are observed for status only. The M2 pane path consumes this when
+    /// persisting the placeholder conversation.
+    pub is_remote_child: bool,
 }
 
 /// Owns discovery, placeholder bookkeeping, claim-time metadata refetch, and
@@ -202,13 +225,14 @@ impl OrchestrationChildTracker {
     ) {
         if self.children.contains_key(&task_id) {
             // Already represented; keep hydrating if not yet complete.
-            self.refetch_metadata_if_incomplete(task_id, run_id);
+            self.refetch_metadata_if_incomplete(task_id, run_id, ctx);
             self.maybe_request_pane_materialization(task_id, ctx);
             return;
         }
         // New out-of-band child: start (or dedupe) discovery. The placeholder
-        // is created when the fetch completes (T2 wires the completion path).
-        self.spawn_metadata_fetch(run_id);
+        // is created when the fetch completes (a cache hit resolves inline; an
+        // in-flight fetch resolves on a later re-drive).
+        self.spawn_metadata_fetch(task_id, run_id, ctx);
     }
 
     /// Sole status writer for placeholder children (step 2). Emits the pill-bar
@@ -231,14 +255,14 @@ impl OrchestrationChildTracker {
                 run_id: run_id.to_string(),
                 status,
             });
-            self.refetch_metadata_if_incomplete(task_id, run_id);
+            self.refetch_metadata_if_incomplete(task_id, run_id, ctx);
             self.maybe_request_pane_materialization(task_id, ctx);
             return;
         }
         // Lifecycle for an unknown run: only self-heal a real discovery miss,
         // not a run whose fetch is already in flight.
         if !self.metadata_fetches.contains(run_id) {
-            self.spawn_metadata_fetch(run_id);
+            self.spawn_metadata_fetch(task_id, run_id, ctx);
         }
     }
 
@@ -271,6 +295,9 @@ impl OrchestrationChildTracker {
                 session_id,
                 last_state: None,
                 pane_materialized: false,
+                // In-band children own a real local conversation; they are
+                // never persisted as `is_remote_child` placeholders.
+                is_remote_child: false,
             },
             ctx,
         );
@@ -309,10 +336,15 @@ impl OrchestrationChildTracker {
             return;
         }
 
-        // T2 creates the persisted `is_remote_child` placeholder conversation
-        // via `BlocklistAIHistoryModel`; T1 records the tracked entry against a
-        // placeholder id so the state machine is exercisable. Until that
-        // plumbing lands, fall back to any pending session link.
+        // Materialize the unified child placeholder (TECH QUALITY-928 §7.4).
+        // The tracker records the intended `is_remote_child = true` state here
+        // in both owner and viewer mode; the M2 pane path performs the
+        // corresponding `BlocklistAIHistoryModel` write (a
+        // `start_new_child_conversation` stamped with `is_remote_child = true`,
+        // `parent_conversation_id`, and the child `run_id`), keyed off this
+        // entry. Until that lands, the tracked entry stands in against the
+        // mode's placeholder conversation id so the state machine is
+        // exercisable end to end. Fall back to any pending session link.
         let session_id = seed_session_id.or_else(|| self.pending_session_ids.remove(&task_id));
         let conversation_id = self.placeholder_conversation_id();
         self.insert_child(
@@ -323,6 +355,7 @@ impl OrchestrationChildTracker {
                 session_id,
                 last_state: Some(state),
                 pane_materialized: false,
+                is_remote_child: true,
             },
             ctx,
         );
@@ -359,7 +392,12 @@ impl OrchestrationChildTracker {
 
     /// Re-drives step 3: refetch while `session_id` is missing or the pane has
     /// not been materialized. No-op once the child is fully hydrated.
-    fn refetch_metadata_if_incomplete(&mut self, task_id: AmbientAgentTaskId, run_id: &str) {
+    fn refetch_metadata_if_incomplete(
+        &mut self,
+        task_id: AmbientAgentTaskId,
+        run_id: &str,
+        ctx: &mut ModelContext<OrchestrationEventStreamer>,
+    ) {
         // In-band children are hydrated by the executor, not the tracker.
         if self.in_band_children.contains(&task_id) {
             return;
@@ -369,7 +407,7 @@ impl OrchestrationChildTracker {
             .get(&task_id)
             .is_some_and(|child| child.session_id.is_none() || !child.pane_materialized);
         if incomplete {
-            self.spawn_metadata_fetch(run_id);
+            self.spawn_metadata_fetch(task_id, run_id, ctx);
         }
     }
 
@@ -414,25 +452,52 @@ impl OrchestrationChildTracker {
         });
     }
 
-    /// Starts (or dedupes) a metadata fetch for a run. T2 routes this through
-    /// `AgentConversationsModel::get_or_async_fetch_task_data` (the one fetch
-    /// authority with in-flight dedup, cooldowns, and a shared cache); T1
-    /// tracks the in-flight guard and, in tests, counts dispatches so fetch
-    /// dedup can be asserted.
-    fn spawn_metadata_fetch(&mut self, run_id: &str) {
+    /// Starts (or dedupes) a metadata fetch for a run. Routes through
+    /// `AgentConversationsModel::get_or_async_fetch_task_data` — the one fetch
+    /// authority with in-flight dedup, failure cooldowns, and a shared cache
+    /// (TECH QUALITY-928 §7.6, item 1). A synchronous cache hit resolves the
+    /// placeholder inline via [`Self::apply_seeded`]; a cache miss spawns the
+    /// shared fetch and resolves on a later re-drive (a subsequent
+    /// `child_agent_started`/lifecycle signal finds the cache warm). The
+    /// tracker's own `metadata_fetches` guard suppresses redundant dispatches
+    /// while a fetch is outstanding.
+    ///
+    /// The `run_id` guard is inserted first so the cache-hit `apply_seeded`
+    /// (which clears it) and the in-flight case are both handled correctly.
+    fn spawn_metadata_fetch(
+        &mut self,
+        task_id: AmbientAgentTaskId,
+        run_id: &str,
+        ctx: &mut ModelContext<OrchestrationEventStreamer>,
+    ) {
         if !self.metadata_fetches.insert(run_id.to_string()) {
             // Already in flight: do not issue a second fetch.
             return;
-        }
-        #[cfg(test)]
-        {
-            self.metadata_fetch_dispatch_count += 1;
         }
         log::debug!(
             "[orch-tracker] metadata fetch queued for run_id={run_id} \
              (parent_task_id={})",
             self.parent_task_id,
         );
+        #[cfg(test)]
+        {
+            // Unit tests exercise the state machine without the model's
+            // singleton graph; count the dispatch instead of issuing it.
+            let _ = (task_id, &ctx);
+            self.metadata_fetch_dispatch_count += 1;
+        }
+        #[cfg(not(test))]
+        {
+            let cached = AgentConversationsModel::handle(ctx).update(ctx, |model, ctx| {
+                model.get_or_async_fetch_task_data(&task_id, ctx)
+            });
+            // Cache hit: create/refresh the unified placeholder immediately.
+            // A miss leaves the guard set; the shared fetch populates the cache
+            // and a later re-drive completes discovery.
+            if let Some(task) = cached {
+                self.apply_seeded(task, ctx);
+            }
+        }
     }
 
     /// Drops all tracked state for a run (tombstone / kill path).
