@@ -20,15 +20,21 @@ fn elide_footer_path_elides_progressively_as_width_shrinks() {
     let path = "/one/two/three/four/five";
     let full = text_width(path);
     // Just under the full width: elide the least possible while keeping the
-    // root and basename, and stay within budget.
+    // root and basename, and stay within budget. A prefix-preserving elision
+    // that fits must win over a leading-component-free form of equal or greater
+    // width, so the root stays visible.
     let budget = full - 1;
-    let elided = elide_footer_path(path, budget);
-    assert!(elided.contains('…'), "expected middle elision: {elided:?}");
-    assert!(elided.starts_with("/one"), "root preserved: {elided:?}");
-    assert!(elided.ends_with("five"), "basename preserved: {elided:?}");
-    assert!(text_width(&elided) <= budget);
-    // Much tighter: elide down toward `/…/basename`, still within budget.
+    assert_eq!(budget, 23);
+    assert_eq!(elide_footer_path(path, budget), "/one/…/three/four/five");
+    // Tighter still: the widest prefix-preserving form no longer fits, but a
+    // shorter one does. It must be chosen ahead of a wider leading-component-
+    // free candidate (`/…/three/four/five`) that also fits, since retaining the
+    // root prefix takes priority over preserving one more interior component.
+    assert_eq!(elide_footer_path(path, 21), "/one/…/four/five");
+    // Much tighter: no prefix-preserving form fits, so we fall back to the
+    // leading-component-free `/…/basename`, still within budget.
     let tight = elide_footer_path(path, 8);
+    assert!(tight.starts_with('/'), "leading separator kept: {tight:?}");
     assert!(tight.ends_with("five"), "basename preserved: {tight:?}");
     assert!(text_width(&tight) <= 8);
 }

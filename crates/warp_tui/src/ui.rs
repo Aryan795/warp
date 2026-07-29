@@ -65,39 +65,45 @@ pub(crate) fn elide_footer_path(path: &str, budget: u16) -> String {
 
     let count = components.len();
     let first = components[0];
-    let mut candidates: Vec<String> = Vec::new();
-    // Keep the root/first component and a growing suffix of trailing
-    // components, eliding the interior with `…`.
+    // Prefix-preserving candidates: keep the root/first component and a growing
+    // suffix of trailing components, eliding the interior with `…`.
+    let mut prefix_candidates: Vec<String> = Vec::new();
     for kept in (1..=count - 2).rev() {
         let suffix = components[count - kept..].join(&separator_str);
-        candidates.push(if leading {
+        prefix_candidates.push(if leading {
             format!("{separator}{first}{separator}…{separator}{suffix}")
         } else {
             format!("{first}{separator}…{separator}{suffix}")
         });
     }
-    // Drop the leading component too, keeping only `…` plus a trailing suffix.
+    // Fallback candidates: drop the leading component too, keeping only `…` plus
+    // a trailing suffix. These sacrifice the root/home prefix, so they are only
+    // considered when no prefix-preserving form fits.
+    let mut fallback_candidates: Vec<String> = Vec::new();
     for kept in (1..=count - 1).rev() {
         let suffix = components[count - kept..].join(&separator_str);
-        candidates.push(if leading {
+        fallback_candidates.push(if leading {
             format!("{separator}…{separator}{suffix}")
         } else {
             format!("…{separator}{suffix}")
         });
     }
 
-    // Pick the widest candidate that still fits the budget, so the most
-    // context-preserving form wins.
-    let mut best: Option<String> = None;
-    let mut best_width = 0;
-    for candidate in candidates {
-        let width = text_width(&candidate);
-        if width <= budget && width > best_width {
-            best_width = width;
-            best = Some(candidate);
-        }
-    }
-    best.unwrap_or_else(|| truncate_with_ellipsis(last, usize::from(budget)))
+    // Prefer the widest prefix-preserving candidate that fits, so a useful
+    // root/home prefix is retained whenever possible. Only when no
+    // prefix-preserving form fits do we fall back to the leading-component-free
+    // forms; and only when nothing fits at all do we grapheme-truncate the
+    // basename as a last resort.
+    let widest_fitting = |candidates: Vec<String>| -> Option<String> {
+        candidates
+            .into_iter()
+            .filter(|candidate| text_width(candidate) <= budget)
+            .max_by_key(|candidate| text_width(candidate))
+    };
+
+    widest_fitting(prefix_candidates)
+        .or_else(|| widest_fitting(fallback_candidates))
+        .unwrap_or_else(|| truncate_with_ellipsis(last, usize::from(budget)))
 }
 
 /// The footer's working-directory segment: a width-aware label that defers path
