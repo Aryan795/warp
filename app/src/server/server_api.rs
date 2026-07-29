@@ -8,6 +8,7 @@ pub mod harness_support;
 pub mod integrations;
 pub mod managed_mcp;
 pub mod managed_secrets;
+pub mod mock_mcp;
 pub mod object;
 pub(crate) mod presigned_upload;
 pub mod referral;
@@ -29,6 +30,7 @@ use chrono::{DateTime, FixedOffset};
 use factory::FactoryClient;
 use instant::Instant;
 use managed_mcp::ManagedMcpClient;
+use mock_mcp::MockMcpClient;
 use object::ObjectClient;
 use parking_lot::Mutex;
 use referral::ReferralsClient;
@@ -1384,6 +1386,11 @@ impl ServerApiProvider {
 
     #[cfg_attr(target_family = "wasm", expect(dead_code))]
     pub fn get_managed_mcp_client(&self) -> Arc<dyn ManagedMcpClient> {
+        self.server_api.clone()
+    }
+
+    #[cfg_attr(target_family = "wasm", expect(dead_code))]
+    pub fn get_mock_mcp_client(&self) -> Arc<dyn MockMcpClient> {
         self.server_api.clone()
     }
 

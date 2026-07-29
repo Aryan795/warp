@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime};
 use ai::api_keys::{ApiKeyManager, AwsCredentialsRefreshStrategy};
 use ai::skills::{ParsedSkill, SKILL_PROVIDER_DEFINITIONS};
 use anyhow::{Context as _, anyhow};
+use cloud_object_models::mcp::MCPMockConfigRef;
 use futures::FutureExt as _;
 use futures::channel::oneshot;
 use futures::future::{self, Either, join_all};
@@ -70,8 +71,8 @@ use crate::ai::mcp::file_based_manager::{FileBasedMCPManager, FileBasedMCPManage
 use crate::ai::mcp::parsing::{ParsedTemplatableMCPServerResult, normalize_mcp_json, resolve_json};
 use crate::ai::mcp::templatable_manager::TemplatableMCPServerManagerEvent;
 use crate::ai::mcp::{
-    JSONMCPServer, MCPServerState, TemplatableMCPServerInstallation, TemplatableMCPServerManager,
-    VariableType, VariableValue,
+    JSONMCPServer, MCPServerState, TemplatableMCPServer, TemplatableMCPServerInstallation,
+    TemplatableMCPServerManager, VariableType, VariableValue,
 };
 use crate::ai::skills::{
     SkillManager, SkillWatcher, filter_skills_by_spec, read_skills_from_directories,
@@ -87,6 +88,7 @@ use crate::server::server_api::harness_support::{
     HarnessSupportClient, ResolvePromptAttachedSkill, ResolvePromptRequest,
 };
 use crate::server::server_api::managed_mcp::ManagedMcpClient;
+use crate::server::server_api::mock_mcp::MockMcpClient;
 use crate::terminal::cli_agent_sessions::plugin_manager::{
     CliAgentPluginManager, plugin_manager_for,
 };
@@ -478,6 +480,8 @@ pub enum AgentDriverError {
     MCPServerNotFound(uuid::Uuid),
     #[error("Failed to resolve managed MCP server {uid}: {message}")]
     ManagedMcpResolutionFailed { uid: Uuid, message: String },
+    #[error("Failed to resolve mock MCP server for template '{template}': {message}")]
+    MockMcpResolutionFailed { template: String, message: String },
     #[error("Failed to start MCP servers: {}", .details.join("; "))]
     MCPStartupFailed {
         /// One line per unavailable server (e.g. "'datadog' failed to start:
@@ -605,6 +609,23 @@ register_error!(AgentDriverError);
 struct ResolvedMcpSpecs {
     local_uuids: Vec<Uuid>,
     ephemeral_installations: Vec<TemplatableMCPServerInstallation>,
+    /// Mock-backed ephemeral installations paired with their mock config, keyed
+    /// by installation UUID. Registered with the MCP manager after startup so the
+    /// tool executor can inject `_meta` (instructions + session state) on each
+    /// `tools/call`.
+    mock_configs: Vec<(Uuid, MCPMockConfigRef)>,
+}
+
+/// A mock-backed MCP server entry extracted from an inline JSON spec, before it
+/// is resolved to a URL-backed connection via `createMockMCPClientConfig`.
+struct MockServerEntry {
+    /// The server name as declared in the MCP config map.
+    name: String,
+    /// The mock backend reference (template, instructions, model id).
+    mock: MCPMockConfigRef,
+    /// Additional headers declared alongside `mock`, passed through to the
+    /// resolved URL-backed connection. These never override `Authorization`.
+    extra_headers: HashMap<String, String>,
 }
 
 impl From<warpui::ModelDropped> for AgentDriverError {
@@ -1134,9 +1155,11 @@ impl AgentDriver {
         specs: &[MCPSpec],
         secrets: Arc<HashMap<String, ManagedSecretValue>>,
         managed_mcp_client: Arc<dyn ManagedMcpClient>,
+        mock_mcp_client: Arc<dyn MockMcpClient>,
         foreground: &ModelSpawner<Self>,
     ) -> Result<HashMap<String, JSONMCPServer>, AgentDriverError> {
-        let resolved_specs = Self::resolve_mcp_specs(specs, managed_mcp_client, foreground).await?;
+        let resolved_specs =
+            Self::resolve_mcp_specs(specs, managed_mcp_client, mock_mcp_client, foreground).await?;
 
         let local_uuids = resolved_specs.local_uuids;
         let mut installations = foreground
@@ -1180,6 +1203,7 @@ impl AgentDriver {
     async fn resolve_mcp_specs(
         specs: &[MCPSpec],
         managed_mcp_client: Arc<dyn ManagedMcpClient>,
+        mock_mcp_client: Arc<dyn MockMcpClient>,
         foreground: &ModelSpawner<Self>,
     ) -> Result<ResolvedMcpSpecs, AgentDriverError> {
         let local_installed_uuids = foreground
@@ -1192,14 +1216,20 @@ impl AgentDriver {
             })
             .await?;
 
-        Self::resolve_mcp_specs_with_local_uuids(specs, &local_installed_uuids, managed_mcp_client)
-            .await
+        Self::resolve_mcp_specs_with_local_uuids(
+            specs,
+            &local_installed_uuids,
+            managed_mcp_client,
+            mock_mcp_client,
+        )
+        .await
     }
 
     async fn resolve_mcp_specs_with_local_uuids(
         specs: &[MCPSpec],
         local_installed_uuids: &HashSet<Uuid>,
         managed_mcp_client: Arc<dyn ManagedMcpClient>,
+        mock_mcp_client: Arc<dyn MockMcpClient>,
     ) -> Result<ResolvedMcpSpecs, AgentDriverError> {
         let mut resolved = ResolvedMcpSpecs::default();
 
@@ -1263,14 +1293,135 @@ impl AgentDriver {
                     }
                 }
                 MCPSpec::Json(json_str) => {
-                    resolved
-                        .ephemeral_installations
-                        .extend(Self::installations_from_user_mcp_json(json_str)?);
+                    // Split mock-backed servers out of the inline JSON: the mock
+                    // backend must be resolved to a URL-backed connection via
+                    // GraphQL before it can be started, while any remaining
+                    // servers follow the ordinary user-JSON path.
+                    let (plain_json, mock_entries) = Self::split_mock_servers(json_str)?;
+                    if let Some(plain_json) = plain_json {
+                        resolved
+                            .ephemeral_installations
+                            .extend(Self::installations_from_user_mcp_json(&plain_json)?);
+                    }
+                    for entry in mock_entries {
+                        Self::resolve_mock_entry(entry, &mock_mcp_client, &mut resolved).await?;
+                    }
                 }
             }
         }
 
         Ok(resolved)
+    }
+
+    /// Splits an inline MCP JSON spec into the non-mock server JSON (if any) and
+    /// the list of mock-backed server entries. Mock entries carry their
+    /// `MCPMockConfigRef` plus any sibling `headers` to pass through to the
+    /// resolved URL-backed connection.
+    fn split_mock_servers(
+        json_str: &str,
+    ) -> Result<(Option<String>, Vec<MockServerEntry>), AgentDriverError> {
+        let normalized_json = normalize_mcp_json(json_str)
+            .map_err(|e| AgentDriverError::MCPJsonParseError(e.to_string()))?;
+        let value: serde_json::Value = serde_json::from_str(&normalized_json)
+            .map_err(|e| AgentDriverError::MCPJsonParseError(e.to_string()))?;
+        let server_map = TemplatableMCPServer::find_template_map(value)
+            .map_err(|e| AgentDriverError::MCPJsonParseError(e.to_string()))?;
+
+        let mut plain = serde_json::Map::new();
+        let mut mocks = Vec::new();
+        for (name, config) in server_map {
+            let mock_value = config.as_object().and_then(|obj| obj.get("mock"));
+            let Some(mock_value) = mock_value else {
+                plain.insert(name, config);
+                continue;
+            };
+            let mock: MCPMockConfigRef = serde_json::from_value(mock_value.clone())
+                .map_err(|e| AgentDriverError::MCPJsonParseError(e.to_string()))?;
+            let extra_headers = config
+                .as_object()
+                .and_then(|obj| obj.get("headers"))
+                .and_then(|headers| headers.as_object())
+                .map(|map| {
+                    map.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
+                        .collect::<HashMap<String, String>>()
+                })
+                .unwrap_or_default();
+            mocks.push(MockServerEntry {
+                name,
+                mock,
+                extra_headers,
+            });
+        }
+
+        let plain_json = if plain.is_empty() {
+            None
+        } else {
+            Some(serde_json::Value::Object(plain).to_string())
+        };
+        Ok((plain_json, mocks))
+    }
+
+    /// Resolves a single mock-backed server entry: mints a URL + bearer token via
+    /// `createMockMCPClientConfig`, converts it to a URL-backed installation, and
+    /// records the mock config so `_meta` can be injected on each tools/call.
+    async fn resolve_mock_entry(
+        entry: MockServerEntry,
+        mock_mcp_client: &Arc<dyn MockMcpClient>,
+        resolved: &mut ResolvedMcpSpecs,
+    ) -> Result<(), AgentDriverError> {
+        let MockServerEntry {
+            name,
+            mock,
+            extra_headers,
+        } = entry;
+
+        let config = mock_mcp_client
+            .create_mock_mcp_client_config(mock.template.clone(), mock.model_id.clone())
+            .await
+            .map_err(|err| AgentDriverError::MockMcpResolutionFailed {
+                template: mock.template.clone(),
+                message: format!("{err:#}"),
+            })?;
+
+        let url_json =
+            Self::build_mock_server_json(&name, &config.mcp_url, &config.token, &extra_headers);
+        // Reuse the managed-config path so server-issued literal values (URL,
+        // Authorization) are preserved verbatim and can't be clobbered by a
+        // colliding local secret during `apply_secrets`.
+        let installations = Self::installations_from_managed_client_config_json(&url_json)
+            .map_err(|err| AgentDriverError::MockMcpResolutionFailed {
+                template: mock.template.clone(),
+                message: err.to_string(),
+            })?;
+        for installation in installations {
+            resolved
+                .mock_configs
+                .push((installation.uuid(), mock.clone()));
+            resolved.ephemeral_installations.push(installation);
+        }
+        Ok(())
+    }
+
+    /// Builds a single-server URL-backed MCP JSON config for a resolved mock
+    /// backend. `extra_headers` are merged in first so the server-issued
+    /// `Authorization` header always wins.
+    fn build_mock_server_json(
+        name: &str,
+        url: &str,
+        token: &str,
+        extra_headers: &HashMap<String, String>,
+    ) -> String {
+        let mut headers = serde_json::Map::new();
+        for (key, value) in extra_headers {
+            headers.insert(key.clone(), serde_json::Value::String(value.clone()));
+        }
+        headers.insert(
+            "Authorization".to_owned(),
+            serde_json::Value::String(format!("Bearer {token}")),
+        );
+        let server = serde_json::json!({ "url": url, "headers": headers });
+        serde_json::json!({ name: server }).to_string()
     }
 
     fn installations_from_user_mcp_json(
@@ -2206,14 +2357,22 @@ impl AgentDriver {
             let managed_mcp_client = foreground
                 .spawn(|_, ctx| ServerApiProvider::as_ref(ctx).get_managed_mcp_client())
                 .await?;
+            let mock_mcp_client = foreground
+                .spawn(|_, ctx| ServerApiProvider::as_ref(ctx).get_mock_mcp_client())
+                .await?;
 
             let mcp_startup_result = setup_events
                 .record_result(SetupStep::McpServerStartup, async {
-                    let resolved_mcp_specs =
-                        Self::resolve_mcp_specs(&mcp_specs, managed_mcp_client, &foreground)
-                            .await?;
+                    let resolved_mcp_specs = Self::resolve_mcp_specs(
+                        &mcp_specs,
+                        managed_mcp_client,
+                        mock_mcp_client,
+                        &foreground,
+                    )
+                    .await?;
                     let existing_uuids = resolved_mcp_specs.local_uuids;
                     let ephemeral_installations = resolved_mcp_specs.ephemeral_installations;
+                    let mock_configs = resolved_mcp_specs.mock_configs;
 
                     log::info!(
                         "Starting {} existing and {} ephemeral MCP servers",
@@ -2241,6 +2400,23 @@ impl AgentDriver {
                             .await?
                             .await;
                         Self::collect_mcp_degradation(result, &mut degraded)?;
+                    }
+                    // Register resolved mock configs so the tool executor can
+                    // inject `_meta` (instructions + session state) on each
+                    // tools/call to a mock-backed server.
+                    if !mock_configs.is_empty() {
+                        foreground
+                            .spawn(move |_, ctx| {
+                                TemplatableMCPServerManager::handle(ctx).update(
+                                    ctx,
+                                    |manager, _| {
+                                        for (uuid, mock) in mock_configs {
+                                            manager.set_mock_config(uuid, mock);
+                                        }
+                                    },
+                                );
+                            })
+                            .await?;
                     }
                     if degraded.is_empty() {
                         Ok(())
@@ -2805,7 +2981,14 @@ impl AgentDriver {
         harness: &dyn ThirdPartyHarness,
         foreground: &ModelSpawner<Self>,
     ) -> Result<Arc<dyn harness::HarnessRunner>, AgentDriverError> {
-        let (working_dir, task_id, server_api, managed_mcp_client, terminal_driver) = foreground
+        let (
+            working_dir,
+            task_id,
+            server_api,
+            managed_mcp_client,
+            mock_mcp_client,
+            terminal_driver,
+        ) = foreground
             .spawn(|me, ctx| {
                 if me.harness.is_some() {
                     log::error!(
@@ -2819,6 +3002,7 @@ impl AgentDriver {
                     me.task_id,
                     ServerApiProvider::as_ref(ctx).get(),
                     ServerApiProvider::as_ref(ctx).get_managed_mcp_client(),
+                    ServerApiProvider::as_ref(ctx).get_mock_mcp_client(),
                     me.terminal_driver.clone(),
                 ))
             })
@@ -2877,9 +3061,14 @@ impl AgentDriver {
 
         // Resolve MCP specs into harness-native JSON format.
         let mcp_specs = mcp_specs.to_vec();
-        let resolved_mcp_servers =
-            Self::resolve_mcp_specs_to_json(&mcp_specs, secrets, managed_mcp_client, foreground)
-                .await?;
+        let resolved_mcp_servers = Self::resolve_mcp_specs_to_json(
+            &mcp_specs,
+            secrets,
+            managed_mcp_client,
+            mock_mcp_client,
+            foreground,
+        )
+        .await?;
         if !resolved_mcp_servers.is_empty() {
             log::info!(
                 "Resolved {} MCP server(s) for third-party harness",

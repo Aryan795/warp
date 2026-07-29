@@ -1945,8 +1945,6 @@ impl TemplatableMCPServerManager {
 
     /// Stores the resolved mock-backend configuration for an installation. Invoked
     /// when a mock-backed server connection is established.
-    // Populated by mock backend resolution (createMockMCPClientConfig wiring).
-    #[allow(dead_code)]
     pub fn set_mock_config(
         &mut self,
         installation_uuid: Uuid,
