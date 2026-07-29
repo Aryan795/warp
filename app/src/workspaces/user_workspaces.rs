@@ -451,6 +451,18 @@ impl UserWorkspaces {
             .map(|workspace| &workspace.billing_metadata)
     }
 
+    /// Billing metadata governing add-on credit purchase surfaces: the given
+    /// team's when one exists, otherwise the current workspace's. Fresh free
+    /// users have no team until their first purchase creates one server-side,
+    /// but their workspace billing metadata still carries the purchase policy.
+    pub fn purchase_billing_metadata<'a>(
+        &'a self,
+        team: Option<&'a Team>,
+    ) -> Option<&'a BillingMetadata> {
+        team.map(|team| &team.billing_metadata)
+            .or_else(|| self.current_workspace_billing_metadata())
+    }
+
     pub fn current_workspace_mut(&mut self) -> Option<&mut Workspace> {
         self.current_workspace_uid
             .and_then(|workspace_uid| self.workspace_from_uid_mut(workspace_uid))
@@ -1466,9 +1478,11 @@ impl UserWorkspaces {
         ctx.notify();
     }
 
+    /// Purchases add-on credits. `team_uid` may be `None` for teamless (fresh
+    /// free) users; the server then auto-creates their personal team.
     pub fn purchase_addon_credits(
         &mut self,
-        team_uid: ServerId,
+        team_uid: Option<ServerId>,
         credits: i32,
         ctx: &mut ModelContext<Self>,
     ) {

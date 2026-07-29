@@ -29,7 +29,7 @@ use crate::workspaces::update_manager::TeamUpdateManager;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::workspaces::workspace::{
     AdminEnablementSetting, CodebaseContextSettings, HostEnablementSetting, LlmHostSettings,
-    Workspace,
+    PurchaseAddOnCreditsPolicy, Workspace,
 };
 
 #[derive(Default)]
@@ -1389,5 +1389,163 @@ fn test_leaving_team_moves_objects() {
                 .space(ctx);
             assert_eq!(space, Space::Shared);
         });
+    })
+}
+
+#[test]
+fn test_purchase_billing_metadata_prefers_team_over_workspace() {
+    let mut team = team_for_test();
+    team.billing_metadata.customer_type = CustomerType::Build;
+    let mut workspace = workspace_for_test(&team);
+    workspace.billing_metadata.customer_type = CustomerType::Free;
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            let team = user_workspaces.team_from_uid(123.into());
+            assert!(team.is_some(), "test team should exist");
+            assert_eq!(
+                user_workspaces
+                    .purchase_billing_metadata(team)
+                    .map(|billing| billing.customer_type),
+                Some(CustomerType::Build),
+                "the team's billing metadata should win when a team exists"
+            );
+            assert_eq!(
+                user_workspaces
+                    .purchase_billing_metadata(None)
+                    .map(|billing| billing.customer_type),
+                Some(CustomerType::Free),
+                "the workspace's billing metadata should be used without a team"
+            );
+        });
+    })
+}
+
+#[test]
+fn test_purchase_billing_metadata_enables_teamless_premium_purchases() {
+    let team = team_for_test();
+    let mut workspace = workspace_for_test(&team);
+    workspace.teams.clear();
+    workspace
+        .billing_metadata
+        .tier
+        .purchase_add_on_credits_policy = Some(PurchaseAddOnCreditsPolicy {
+        enabled: false,
+        premium_enabled: true,
+        price_premium_bps: 1000,
+    });
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert!(!user_workspaces.has_teams(), "user should be teamless");
+            let billing = user_workspaces.purchase_billing_metadata(None);
+            assert!(
+                billing.is_some_and(|billing| billing.is_purchase_add_on_credits_policy_enabled()),
+                "premiumEnabled on the workspace policy should enable purchases without a team"
+            );
+            assert_eq!(
+                billing.map_or(0, |billing| billing.addon_credits_price_premium_bps()),
+                1000
+            );
+        });
+    })
+}
+
+#[test]
+fn test_purchase_billing_metadata_disabled_policy_stays_disabled_without_team() {
+    let team = team_for_test();
+    let mut workspace = workspace_for_test(&team);
+    workspace.teams.clear();
+    workspace
+        .billing_metadata
+        .tier
+        .purchase_add_on_credits_policy = Some(PurchaseAddOnCreditsPolicy {
+        enabled: false,
+        premium_enabled: false,
+        price_premium_bps: 0,
+    });
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        app.read(|ctx| {
+            let billing = UserWorkspaces::as_ref(ctx).purchase_billing_metadata(None);
+            assert!(
+                !billing.is_some_and(|billing| billing.is_purchase_add_on_credits_policy_enabled()),
+                "a fully disabled policy should keep purchases disabled without a team"
+            );
+        });
+    })
+}
+
+#[test]
+fn test_purchase_addon_credits_forwards_teamless_team_uid() {
+    App::test((), |mut app| async move {
+        let mut workspace_client = MockWorkspaceClient::new();
+        workspace_client
+            .expect_purchase_addon_credits()
+            .withf(|team_uid, credits| team_uid.is_none() && *credits == 1_000)
+            .times(1)
+            .returning(|_, _| {
+                Ok(PurchaseAddonCreditsOutcome::CheckoutRequired {
+                    checkout_url: "https://example.com/checkout".to_string(),
+                })
+            });
+
+        app.add_singleton_model(|ctx| {
+            UserWorkspaces::mock(
+                Arc::new(MockTeamClient::new()),
+                Arc::new(workspace_client),
+                vec![],
+                ctx,
+            )
+        });
+
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.purchase_addon_credits(None, 1_000, ctx);
+        });
+
+        // Give the spawned client call time to run so the mock expectation is
+        // exercised before the test ends.
+        warpui::r#async::Timer::after(Duration::from_millis(100)).await;
+    })
+}
+
+#[test]
+fn test_purchase_addon_credits_forwards_team_uid_when_present() {
+    App::test((), |mut app| async move {
+        let mut workspace_client = MockWorkspaceClient::new();
+        workspace_client
+            .expect_purchase_addon_credits()
+            .withf(|team_uid, credits| *team_uid == Some(123.into()) && *credits == 2_000)
+            .times(1)
+            .returning(|_, _| {
+                Ok(PurchaseAddonCreditsOutcome::CheckoutRequired {
+                    checkout_url: "https://example.com/checkout".to_string(),
+                })
+            });
+
+        app.add_singleton_model(|ctx| {
+            UserWorkspaces::mock(
+                Arc::new(MockTeamClient::new()),
+                Arc::new(workspace_client),
+                vec![],
+                ctx,
+            )
+        });
+
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.purchase_addon_credits(Some(123.into()), 2_000, ctx);
+        });
+
+        // Give the spawned client call time to run so the mock expectation is
+        // exercised before the test ends.
+        warpui::r#async::Timer::after(Duration::from_millis(100)).await;
     })
 }

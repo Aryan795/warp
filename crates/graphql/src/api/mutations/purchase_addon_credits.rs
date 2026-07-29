@@ -6,7 +6,9 @@ use crate::schema;
 #[derive(cynic::InputObject, Debug)]
 pub struct PurchaseAddonCreditsInput {
     pub credits: i32,
-    pub team_uid: cynic::Id,
+    /// Optional server-side: omitting it lets the server auto-create a
+    /// personal team for teamless (fresh free) purchasers.
+    pub team_uid: Option<cynic::Id>,
 }
 
 #[derive(cynic::QueryVariables, Debug)]

@@ -137,7 +137,7 @@ pub(crate) const CHECKOUT_PENDING_MESSAGE: &str =
 /// plans that purchase at a premium over list price, linking to the upgrade
 /// page.
 pub(crate) fn render_premium_upgrade_savings_note(
-    team_uid: ServerId,
+    upgrade_url: String,
     premium_bps: i32,
     appearance: &Appearance,
 ) -> Box<dyn Element> {
@@ -145,10 +145,7 @@ pub(crate) fn render_premium_upgrade_savings_note(
     let percent = format_addon_premium_percent(premium_bps);
     let fragments = vec![
         FormattedTextFragment::plain_text(format!("Save {percent} on add-on credits by ")),
-        FormattedTextFragment::hyperlink(
-            "upgrading to a Build plan",
-            UserWorkspaces::upgrade_link_for_team(team_uid),
-        ),
+        FormattedTextFragment::hyperlink("upgrading to a Build plan", upgrade_url),
         FormattedTextFragment::plain_text("."),
     ];
 
@@ -1108,7 +1105,7 @@ pub enum BillingAndUsagePageAction {
     RenderMoreUsageEntries,
     SelectTopupDenomination(usize),
     PurchaseAddonCredits {
-        team_uid: ServerId,
+        team_uid: Option<ServerId>,
     },
     ShowAddOnCreditModal,
     UpdateAutoReloadEnabled {
@@ -1659,7 +1656,7 @@ impl BillingAndUsagePageView {
         &self,
         selected_topup_denomination: usize,
         workspace: &Workspace,
-        team_uid: ServerId,
+        team_uid: Option<ServerId>,
         has_admin_permissions: bool,
         bonus_credit_balance: i32,
         addon_credits_options: &[AddonCreditsOption],
@@ -1703,11 +1700,24 @@ impl BillingAndUsagePageView {
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .finish();
 
-        let team_can_purchase_addon_credits = workspace
-            .billing_metadata
-            .is_purchase_add_on_credits_policy_enabled();
-        let premium_bps = workspace.billing_metadata.addon_credits_price_premium_bps();
+        let workspaces = UserWorkspaces::as_ref(app);
+        let purchase_billing_metadata = workspaces.purchase_billing_metadata(
+            team_uid.and_then(|team_uid| workspaces.team_from_uid(team_uid)),
+        );
+        let team_can_purchase_addon_credits = purchase_billing_metadata
+            .is_some_and(|billing| billing.is_purchase_add_on_credits_policy_enabled());
+        let premium_bps = purchase_billing_metadata
+            .map_or(0, |billing| billing.addon_credits_price_premium_bps());
         let can_upgrade_to_build = workspace.billing_metadata.can_upgrade_to_build_plan();
+        let upgrade_url = match team_uid {
+            Some(team_uid) => UserWorkspaces::upgrade_link_for_team(team_uid),
+            None => UserWorkspaces::upgrade_link(
+                AuthStateProvider::as_ref(app)
+                    .get()
+                    .user_id()
+                    .unwrap_or_default(),
+            ),
+        };
 
         let no_credits_access_explanation = match (
             team_can_purchase_addon_credits,
@@ -1721,7 +1731,7 @@ impl BillingAndUsagePageView {
             // If the team cannot purchase addon credits, but they can upgrade to a Build-like plan,
             // and the current user is an admin, then we show them a nudge to switch to Build.
             (false, true, true) => {
-                let upgrade_url = UserWorkspaces::upgrade_link_for_team(team_uid);
+                let upgrade_url = upgrade_url.clone();
                 let is_legacy_paid = workspace.billing_metadata.is_on_legacy_paid_plan();
                 let (link_text, suffix) = if is_legacy_paid {
                     ("Switch to the Build plan", " to purchase add-on credits.")
@@ -1956,10 +1966,14 @@ impl BillingAndUsagePageView {
             auto_reload_switch
                 .build()
                 .on_click(move |ctx, _, _| {
-                    ctx.dispatch_typed_action(BillingAndUsagePageAction::UpdateAutoReloadEnabled {
-                        team_uid,
-                        enabled: !auto_reload_enabled,
-                    });
+                    if let Some(team_uid) = team_uid {
+                        ctx.dispatch_typed_action(
+                            BillingAndUsagePageAction::UpdateAutoReloadEnabled {
+                                team_uid,
+                                enabled: !auto_reload_enabled,
+                            },
+                        );
+                    }
                 })
                 .finish()
         };
@@ -1989,13 +2003,21 @@ impl BillingAndUsagePageView {
             .finish();
 
         let mut card_content_upper = Flex::column()
-            .with_children([card_header, paragraph, monthly_spend_row])
+            .with_children([card_header, paragraph])
             .with_spacing(8.);
 
+        // Monthly spend limits and auto-reload persist team settings; a
+        // teamless user has no team to configure until their first purchase
+        // creates one server-side.
+        if team_uid.is_some() {
+            card_content_upper.add_child(monthly_spend_row);
+        }
         if let Some(purchased_row) = purchased_this_month_row {
             card_content_upper.add_child(purchased_row);
         }
-        card_content_upper.add_child(auto_reload_switch);
+        if team_uid.is_some() {
+            card_content_upper.add_child(auto_reload_switch);
+        }
 
         let base_rate = addon_credits_options
             .first()
@@ -2101,7 +2123,7 @@ impl BillingAndUsagePageView {
             card_content_upper.add_child(buy_row.finish());
             if premium_bps > 0 {
                 card_content_upper.add_child(render_premium_upgrade_savings_note(
-                    team_uid,
+                    upgrade_url.clone(),
                     premium_bps,
                     appearance,
                 ));
@@ -2139,7 +2161,7 @@ impl BillingAndUsagePageView {
 
             if premium_bps > 0 {
                 card_content_lower_children.push(render_premium_upgrade_savings_note(
-                    team_uid,
+                    upgrade_url.clone(),
                     premium_bps,
                     appearance,
                 ));
@@ -2925,7 +2947,7 @@ impl BillingAndUsagePageView {
             usage.add_child(ambient_trial_widget);
         }
 
-        if let (Some(workspace), Some(team)) = (workspace, team) {
+        if let Some(workspace) = workspace {
             let bonus_credit_balance =
                 ai_request_usage_model.total_workspace_bonus_credits_remaining(workspace.uid);
 
@@ -2935,12 +2957,17 @@ impl BillingAndUsagePageView {
                 .is_enterprise_pay_as_you_go_enabled()
                 && bonus_credit_balance == 0;
 
+            // A teamless user manages their own personal purchases; the
+            // server creates their team on first purchase.
+            let can_manage_addon_credits =
+                team.is_none_or(|team| team.has_admin_permissions(&current_user_email));
+
             if !is_enterprise_payg_with_zero_credits {
                 usage.add_child(self.render_addon_credits_panel(
                     self.selected_addon_denomination,
                     workspace,
-                    team.uid,
-                    has_admin_permissions,
+                    team.map(|team| team.uid),
+                    can_manage_addon_credits,
                     bonus_credit_balance,
                     &self.addon_credits_options,
                     &self.addon_credit_denomination_buttons,

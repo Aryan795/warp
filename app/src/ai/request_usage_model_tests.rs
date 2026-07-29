@@ -283,6 +283,9 @@ fn test_buy_credits_banner_shows_with_only_ambient_bonus_credits() {
 #[test]
 fn test_buy_credits_banner_shows_for_premium_enabled_plan_out_of_credits() {
     App::test((), |mut app| async move {
+        // The test workspace has no teams: this covers the teamless fresh
+        // free user, whose purchase policy lives on the workspace billing
+        // metadata until their first purchase creates a team server-side.
         let (_uid, mut workspace) = create_test_workspace();
         workspace
             .billing_metadata
@@ -293,6 +296,10 @@ fn test_buy_credits_banner_shows_for_premium_enabled_plan_out_of_credits() {
         let request_usage_model = add_request_usage_model(&mut app);
 
         request_usage_model.update(&mut app, |model, ctx| {
+            assert!(
+                !UserWorkspaces::as_ref(ctx).has_teams(),
+                "this test covers the teamless case"
+            );
             model.request_limit_info = RequestLimitInfo::new_for_test(10, 10);
             model.bonus_grants.clear();
 
@@ -307,6 +314,8 @@ fn test_buy_credits_banner_shows_for_premium_enabled_plan_out_of_credits() {
 #[test]
 fn test_buy_credits_banner_hidden_when_policy_fully_disabled() {
     App::test((), |mut app| async move {
+        // Also a teamless workspace: without premiumEnabled the purchase
+        // surfaces must stay hidden for fresh free users.
         let (_uid, mut workspace) = create_test_workspace();
         workspace
             .billing_metadata

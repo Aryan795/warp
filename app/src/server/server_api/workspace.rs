@@ -56,7 +56,7 @@ pub trait WorkspaceClient: 'static + Send + Sync {
 
     async fn purchase_addon_credits(
         &self,
-        team_uid: ServerId,
+        team_uid: Option<ServerId>,
         credits: i32,
     ) -> Result<PurchaseAddonCreditsOutcome>;
 
@@ -162,12 +162,12 @@ impl WorkspaceClient for ServerApi {
 
     async fn purchase_addon_credits(
         &self,
-        team_uid: ServerId,
+        team_uid: Option<ServerId>,
         credits: i32,
     ) -> Result<PurchaseAddonCreditsOutcome> {
         let variables = PurchaseAddonCreditsVariables {
             input: PurchaseAddonCreditsInput {
-                team_uid: team_uid.into(),
+                team_uid: team_uid.map(Into::into),
                 credits,
             },
             request_context: get_request_context(),

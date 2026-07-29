@@ -151,11 +151,10 @@ impl EnableAutoReloadModalBody {
             .map(|opts| opts.to_vec())
             .unwrap_or_default();
 
-        let premium_bps = UserWorkspaces::as_ref(ctx)
-            .team_for_view(ctx)
-            .map_or(0, |team| {
-                team.billing_metadata.addon_credits_price_premium_bps()
-            });
+        let workspaces = UserWorkspaces::as_ref(ctx);
+        let premium_bps = workspaces
+            .purchase_billing_metadata(workspaces.team_for_view(ctx))
+            .map_or(0, |billing| billing.addon_credits_price_premium_bps());
         let base_rate = self
             .addon_credits_options
             .first()

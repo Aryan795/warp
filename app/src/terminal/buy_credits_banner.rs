@@ -389,11 +389,10 @@ impl BuyCreditsBanner {
             .map(|opts| opts.to_vec())
             .unwrap_or_default();
 
-        let premium_bps = UserWorkspaces::as_ref(ctx)
-            .team_for_view(ctx)
-            .map_or(0, |team| {
-                team.billing_metadata.addon_credits_price_premium_bps()
-            });
+        let workspaces = UserWorkspaces::as_ref(ctx);
+        let premium_bps = workspaces
+            .purchase_billing_metadata(workspaces.team_for_view(ctx))
+            .map_or(0, |billing| billing.addon_credits_price_premium_bps());
         let base_rate = self
             .addon_credits_options
             .first()
@@ -679,27 +678,30 @@ impl BuyCreditsBanner {
         };
 
         let auth_state = AuthStateProvider::as_ref(app).get();
-        let current_team = UserWorkspaces::as_ref(app).team_for_view_handle(&self.view_handle, app);
-        let has_admin_permissions = auth_state
-            .user_email()
-            .zip(current_team)
-            .map(|(email, team)| team.has_admin_permissions(&email))
-            .unwrap_or_default();
-        let delinquent_due_to_payment_issue = current_team
-            .is_some_and(|team| team.billing_metadata.is_delinquent_due_to_payment_issue());
+        let workspaces = UserWorkspaces::as_ref(app);
+        let current_team = workspaces.team_for_view_handle(&self.view_handle, app);
+        let purchase_billing_metadata = workspaces.purchase_billing_metadata(current_team);
+        // A teamless user manages their own personal purchases; the server
+        // creates their team on first purchase.
+        let has_admin_permissions = current_team.is_none_or(|team| {
+            auth_state
+                .user_email()
+                .is_some_and(|email| team.has_admin_permissions(&email))
+        });
+        let delinquent_due_to_payment_issue = purchase_billing_metadata
+            .is_some_and(|billing| billing.is_delinquent_due_to_payment_issue());
         let auto_reload_banner_toggle_ff =
             FeatureFlag::BuildPlanAutoReloadBannerToggle.is_enabled();
 
         // Check if user has reached their monthly addon credits limit
-        let current_workspace = UserWorkspaces::as_ref(app).current_workspace();
+        let current_workspace = workspaces.current_workspace();
         let is_at_monthly_limit = current_workspace
             .map(|workspace| workspace.is_at_addon_credits_monthly_limit())
             .unwrap_or(false);
 
         // Check if the selected purchase would reach/exceed the monthly limit
-        let premium_bps = current_team.map_or(0, |team| {
-            team.billing_metadata.addon_credits_price_premium_bps()
-        });
+        let premium_bps = purchase_billing_metadata
+            .map_or(0, |billing| billing.addon_credits_price_premium_bps());
         let selected_option = self
             .addon_credits_options
             .get(self.selected_denomination_index);
@@ -794,6 +796,8 @@ impl BuyCreditsBanner {
         };
 
         let make_buy_button = || {
+            // May be None for teamless users; the server auto-creates their
+            // personal team on purchase.
             let team_uid = current_team.map(|team| team.uid);
 
             let buy_button_disabled = self.purchase_addon_credits_loading
@@ -836,9 +840,7 @@ impl BuyCreditsBanner {
                 .with_text_label(button_text)
                 .build()
                 .on_click(move |ctx, _, _| {
-                    if let Some(team_uid) = team_uid {
-                        ctx.dispatch_typed_action(Action::PurchaseAddonCredits { team_uid });
-                    }
+                    ctx.dispatch_typed_action(Action::PurchaseAddonCredits { team_uid });
                 });
 
             if buy_button_disabled {
@@ -1006,7 +1008,7 @@ impl View for BuyCreditsBanner {
 pub enum Action {
     SelectDenomination(usize),
     Close,
-    PurchaseAddonCredits { team_uid: ServerId },
+    PurchaseAddonCredits { team_uid: Option<ServerId> },
     ManageBilling,
     ToggleAutoReload,
 }

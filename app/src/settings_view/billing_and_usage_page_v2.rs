@@ -165,6 +165,11 @@ struct AddonCreditsPurchaseState {
     description_text: String,
     auto_reload_enabled: bool,
     has_admin_permissions: bool,
+    /// Whether team-level purchase settings (spend limit, auto-reload) can be
+    /// edited: requires admin permission AND an existing team. Teamless users
+    /// can purchase, but have no team settings until their first purchase
+    /// creates a team server-side.
+    can_edit_team_settings: bool,
     purchase_disabled: bool,
     auto_reload_switch_disabled: bool,
     price_label: String,
@@ -1060,7 +1065,7 @@ impl BillingAndUsagePageV2View {
     fn render_addon_credits_panel(
         &self,
         workspace: &Workspace,
-        team_uid: ServerId,
+        team_uid: Option<ServerId>,
         has_admin_permissions: bool,
         delinquent: bool,
         app: &AppContext,
@@ -1093,16 +1098,24 @@ impl BillingAndUsagePageV2View {
     fn addon_credits_panel_state(
         &self,
         workspace: &Workspace,
-        team_uid: ServerId,
+        team_uid: Option<ServerId>,
         has_admin_permissions: bool,
         delinquent: bool,
         app: &AppContext,
     ) -> AddonCreditsPanelState {
-        let team_can_purchase = workspace
-            .billing_metadata
-            .is_purchase_add_on_credits_policy_enabled();
-        let premium_bps = workspace.billing_metadata.addon_credits_price_premium_bps();
+        let workspaces = UserWorkspaces::as_ref(app);
+        let purchase_billing_metadata = workspaces.purchase_billing_metadata(
+            team_uid.and_then(|team_uid| workspaces.team_from_uid(team_uid)),
+        );
+        let team_can_purchase = purchase_billing_metadata
+            .is_some_and(|billing| billing.is_purchase_add_on_credits_policy_enabled());
+        let premium_bps = purchase_billing_metadata
+            .map_or(0, |billing| billing.addon_credits_price_premium_bps());
         let can_upgrade = workspace.billing_metadata.can_upgrade_to_build_plan();
+        let upgrade_url = match team_uid {
+            Some(team_uid) => UserWorkspaces::upgrade_link_for_team(team_uid),
+            None => UserWorkspaces::upgrade_link(self.auth_state.user_id().unwrap_or_default()),
+        };
 
         if !team_can_purchase {
             if !has_admin_permissions {
@@ -1113,7 +1126,7 @@ impl BillingAndUsagePageV2View {
                 return AddonCreditsPanelState::IneligiblePlan(
                     AddonCreditsRestriction::UpgradeToBuild {
                         link_text: "Upgrade to Build",
-                        url: UserWorkspaces::upgrade_link_for_team(team_uid),
+                        url: upgrade_url,
                     },
                 );
             }
@@ -1131,7 +1144,7 @@ impl BillingAndUsagePageV2View {
             .addon_credits_settings
             .auto_reload_enabled;
 
-        let team_count = UserWorkspaces::as_ref(app)
+        let team_count = workspaces
             .team_for_view_handle(&self.self_handle, app)
             .map(|team| team.members.len())
             .unwrap_or(1);
@@ -1244,6 +1257,7 @@ impl BillingAndUsagePageV2View {
             description_text,
             auto_reload_enabled,
             has_admin_permissions,
+            can_edit_team_settings: has_admin_permissions && team_uid.is_some(),
             purchase_disabled,
             auto_reload_switch_disabled,
             price_label,
@@ -1372,7 +1386,7 @@ impl BillingAndUsagePageV2View {
     fn render_addon_credits_purchase_card(
         &self,
         workspace: &Workspace,
-        team_uid: ServerId,
+        team_uid: Option<ServerId>,
         state: AddonCreditsPurchaseState,
         appearance: &Appearance,
     ) -> Box<dyn Element> {
@@ -1416,7 +1430,7 @@ impl BillingAndUsagePageV2View {
             .with_children([header, paragraph])
             .with_spacing(8.);
 
-        if state.has_admin_permissions {
+        if state.can_edit_team_settings {
             let info_icon = render_info_icon(
                 appearance,
                 AdditionalInfo::<BillingAndUsagePageAction> {
@@ -1549,7 +1563,7 @@ impl BillingAndUsagePageV2View {
 
     fn render_addon_credits_lower_section(
         &self,
-        team_uid: ServerId,
+        team_uid: Option<ServerId>,
         state: &AddonCreditsPurchaseState,
         appearance: &Appearance,
     ) -> Box<dyn Element> {
@@ -1604,7 +1618,7 @@ impl BillingAndUsagePageV2View {
             );
 
         let mut right_group = Flex::row().with_cross_axis_alignment(CrossAxisAlignment::Center);
-        if state.has_admin_permissions {
+        if state.can_edit_team_settings {
             let auto_reload_switch_element = {
                 let switch_builder = appearance
                     .ui_builder()
@@ -1616,12 +1630,14 @@ impl BillingAndUsagePageV2View {
                     switch_builder
                         .build()
                         .on_click(move |ctx, _, _| {
-                            ctx.dispatch_typed_action(
-                                BillingAndUsagePageAction::UpdateAutoReloadEnabled {
-                                    team_uid,
-                                    enabled: !auto_reload_enabled,
-                                },
-                            );
+                            if let Some(team_uid) = team_uid {
+                                ctx.dispatch_typed_action(
+                                    BillingAndUsagePageAction::UpdateAutoReloadEnabled {
+                                        team_uid,
+                                        enabled: !auto_reload_enabled,
+                                    },
+                                );
+                            }
                         })
                         .finish()
                 }
@@ -1651,7 +1667,11 @@ impl BillingAndUsagePageV2View {
         }
         right_group.add_child(
             Container::new(purchase_button)
-                .with_margin_left(if state.has_admin_permissions { 16. } else { 0. })
+                .with_margin_left(if state.can_edit_team_settings {
+                    16.
+                } else {
+                    0.
+                })
                 .finish(),
         );
         let lower_row = Flex::row()
@@ -1663,8 +1683,12 @@ impl BillingAndUsagePageV2View {
         let mut lower_children: Vec<Box<dyn Element>> = vec![lower_row.finish()];
 
         if state.premium_bps > 0 {
+            let upgrade_url = match team_uid {
+                Some(team_uid) => UserWorkspaces::upgrade_link_for_team(team_uid),
+                None => UserWorkspaces::upgrade_link(self.auth_state.user_id().unwrap_or_default()),
+            };
             lower_children.push(render_premium_upgrade_savings_note(
-                team_uid,
+                upgrade_url,
                 state.premium_bps,
                 appearance,
             ));
@@ -1728,25 +1752,25 @@ impl BillingAndUsagePageV2View {
                 .is_delinquent_due_to_payment_issue()
         });
 
-        if let (Some(ws), Some(team)) = (
-            workspaces.current_workspace(),
-            workspaces.team_for_view_handle(&self.self_handle, app),
-        ) {
+        if let Some(ws) = workspaces.current_workspace() {
+            let team = workspaces.team_for_view_handle(&self.self_handle, app);
             let workspace_bonus_credits = ai_model.total_workspace_bonus_credits_remaining(ws.uid);
             let is_payg_zero = ws.billing_metadata.is_enterprise_pay_as_you_go_enabled()
                 && workspace_bonus_credits == 0;
 
             if !is_payg_zero {
-                let current_user_is_admin = {
+                // A teamless user manages their own personal purchases; the
+                // server creates their team on first purchase.
+                let current_user_is_admin = team.is_none_or(|team| {
                     let email = AuthStateProvider::as_ref(app)
                         .get()
                         .user_email()
                         .unwrap_or_default();
                     team.has_admin_permissions(&email)
-                };
+                });
                 content.add_child(self.render_addon_credits_panel(
                     ws,
-                    team.uid,
+                    team.map(|team| team.uid),
                     current_user_is_admin,
                     delinquent,
                     app,
