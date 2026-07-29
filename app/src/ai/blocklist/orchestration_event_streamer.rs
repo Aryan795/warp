@@ -584,6 +584,23 @@ impl OrchestrationEventStreamer {
             match classify_family_event(&event, self_run_id) {
                 FamilyEvent::ParentSelf(event) => parent_self_events.push(event),
                 FamilyEvent::ChildStarted { child_run_id } => {
+                    log::debug!(
+                        "[orch-drain] ChildStarted child_run_id={child_run_id} \
+                         parent={cursor_conversation_id:?} mode={mode:?}"
+                    );
+                    // Create a local placeholder so the pill bar reflects the new
+                    // child immediately, without waiting for the tracker's async
+                    // metadata fetch to resolve.
+                    if mode == FamilyDrainMode::Owner {
+                        self.ensure_remote_child_placeholder(
+                            cursor_conversation_id,
+                            child_run_id.clone(),
+                            ctx,
+                        );
+                    }
+                    log::debug!(
+                        "[orch-drain] calling observe_child(Started) for child_run_id={child_run_id}"
+                    );
                     tracker.observe_child(
                         &child_run_id,
                         ChildSignal::Started,
@@ -595,6 +612,10 @@ impl OrchestrationEventStreamer {
                     child_run_id,
                     session_uuid,
                 } => {
+                    log::debug!(
+                        "[orch-drain] ChildSessionLinked child_run_id={child_run_id} \
+                         parent={cursor_conversation_id:?}"
+                    );
                     tracker.observe_child(
                         &child_run_id,
                         ChildSignal::SessionLinked { session_uuid },
@@ -603,6 +624,22 @@ impl OrchestrationEventStreamer {
                     );
                 }
                 FamilyEvent::ChildLifecycle { child_run_id, kind } => {
+                    log::debug!(
+                        "[orch-drain] ChildLifecycle child_run_id={child_run_id} \
+                         parent={cursor_conversation_id:?} mode={mode:?}"
+                    );
+                    // Backstop: if this lifecycle arrives before (or instead of)
+                    // `child_agent_started`, ensure a placeholder still exists.
+                    if mode == FamilyDrainMode::Owner {
+                        self.ensure_remote_child_placeholder(
+                            cursor_conversation_id,
+                            child_run_id.clone(),
+                            ctx,
+                        );
+                    }
+                    log::debug!(
+                        "[orch-drain] calling observe_child(Lifecycle) for child_run_id={child_run_id}"
+                    );
                     tracker.observe_child(
                         &child_run_id,
                         ChildSignal::Lifecycle(kind),
@@ -639,6 +676,134 @@ impl OrchestrationEventStreamer {
         }
 
         tracker
+    }
+
+    // ---- Remote-child placeholder creation (flag-on owner path) ----------
+
+    /// Creates a local `is_remote_child` placeholder for an out-of-band
+    /// (cloud) child announced by a `child_agent_started` event on the owner's
+    /// family SSE stream, so the orchestrator pill bar renders the child
+    /// immediately without waiting for the tracker's async metadata fetch.
+    ///
+    /// Idempotent: a no-op if the history model already knows this `run_id`
+    /// (e.g. an in-band child registered by `StartAgentExecutor`, a restored
+    /// placeholder, or a race-completed fetch). Passive remote views are also
+    /// skipped since they are not the authoritative process for the run.
+    fn ensure_remote_child_placeholder(
+        &mut self,
+        parent_conversation_id: AIConversationId,
+        child_run_id: String,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if BlocklistAIHistoryModel::as_ref(ctx)
+            .conversation_id_for_agent_id(&child_run_id)
+            .is_some()
+        {
+            // Already represented locally; nothing to do.
+            return;
+        }
+        // Don't create placeholders on behalf of passive views — the actual
+        // owning process (in another window/machine) handles those.
+        if self.is_remote_run_view(parent_conversation_id, ctx) {
+            return;
+        }
+        let Ok(task_id) = child_run_id.parse::<AmbientAgentTaskId>() else {
+            log::warn!(
+                "[orch-drain] ensure_remote_child_placeholder: malformed \
+                 child_run_id={child_run_id:?}; skipping"
+            );
+            return;
+        };
+        log::info!(
+            "[orch-drain] fetching metadata for out-of-band child \
+             child_run_id={child_run_id} parent={parent_conversation_id:?}"
+        );
+        let ai_client = self.ai_client.clone();
+        ctx.spawn(
+            async move { ai_client.get_ambient_agent_task(&task_id).await },
+            move |me, result, ctx| {
+                me.finish_remote_child_placeholder(
+                    parent_conversation_id,
+                    child_run_id,
+                    result,
+                    ctx,
+                );
+            },
+        );
+    }
+
+    /// Completion callback for [`Self::ensure_remote_child_placeholder`].
+    /// Creates the remote-child `AIConversation` from the fetched task
+    /// metadata, mirroring the shared-session viewer's `register_child`.
+    /// Marked `is_remote_child` so the streamer opens no redundant per-child
+    /// SSE — the child is cloud and its events already arrive on the parent's
+    /// ancestor stream.
+    fn finish_remote_child_placeholder(
+        &mut self,
+        parent_conversation_id: AIConversationId,
+        child_run_id: String,
+        result: anyhow::Result<crate::ai::ambient_agents::task::AmbientAgentTask>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let task = match result {
+            Ok(task) => task,
+            Err(err) => {
+                log::warn!(
+                    "[orch-drain] finish_remote_child_placeholder: failed to fetch \
+                     metadata for child_run_id={child_run_id}: {err:#}; \
+                     no owner-side placeholder created"
+                );
+                return;
+            }
+        };
+        // Re-check: a locally-started child may have stamped this run_id
+        // while the fetch was in flight.
+        if BlocklistAIHistoryModel::as_ref(ctx)
+            .conversation_id_for_agent_id(&child_run_id)
+            .is_some()
+        {
+            return;
+        }
+        let Some(terminal_surface_id) = BlocklistAIHistoryModel::as_ref(ctx)
+            .terminal_surface_id_for_conversation(&parent_conversation_id)
+        else {
+            log::warn!(
+                "[orch-drain] finish_remote_child_placeholder: parent conversation \
+                 {parent_conversation_id:?} has no terminal surface; \
+                 cannot create placeholder for child_run_id={child_run_id}"
+            );
+            return;
+        };
+        let name = task.display_name().to_string();
+        let fallback_title = task.title.trim().to_string();
+        let harness = agent_task_harness(&task);
+        let task_id = task.task_id;
+        log::info!(
+            "[orch-drain] creating remote-child placeholder for \
+             child_run_id={child_run_id} name={name:?} parent={parent_conversation_id:?}"
+        );
+        BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+            let child_conversation_id = history.start_new_child_conversation(
+                terminal_surface_id,
+                name,
+                parent_conversation_id,
+                harness,
+                ctx,
+            );
+            history.mark_conversation_as_remote_child(child_conversation_id, ctx);
+            if !fallback_title.is_empty()
+                && let Some(conversation) = history.conversation_mut(&child_conversation_id)
+            {
+                conversation.set_fallback_display_title(fallback_title);
+            }
+            history.assign_run_id_for_conversation(
+                child_conversation_id,
+                child_run_id,
+                Some(task_id),
+                terminal_surface_id,
+                ctx,
+            );
+        });
     }
 
     /// Flag-on owner drain: reads the conversation's family SSE buffer and
