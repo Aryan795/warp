@@ -1104,13 +1104,10 @@ impl BillingAndUsagePageV2View {
         app: &AppContext,
     ) -> AddonCreditsPanelState {
         let workspaces = UserWorkspaces::as_ref(app);
-        let purchase_billing_metadata = workspaces.purchase_billing_metadata(
-            team_uid.and_then(|team_uid| workspaces.team_from_uid(team_uid)),
-        );
-        let team_can_purchase = purchase_billing_metadata
-            .is_some_and(|billing| billing.is_purchase_add_on_credits_policy_enabled());
-        let premium_bps = purchase_billing_metadata
-            .map_or(0, |billing| billing.addon_credits_price_premium_bps());
+        let purchase_policy = workspaces
+            .purchase_policy(team_uid.and_then(|team_uid| workspaces.team_from_uid(team_uid)));
+        let team_can_purchase = purchase_policy.is_some_and(|policy| policy.allows_purchases());
+        let premium_bps = purchase_policy.map_or(0, |policy| policy.effective_premium_bps());
         let can_upgrade = workspace.billing_metadata.can_upgrade_to_build_plan();
         let upgrade_url = match team_uid {
             Some(team_uid) => UserWorkspaces::upgrade_link_for_team(team_uid),

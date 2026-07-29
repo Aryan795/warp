@@ -485,8 +485,8 @@ pub(super) fn maybe_add_buy_credits_banner(
 ) {
     let workspaces = UserWorkspaces::as_ref(app);
     let can_purchase_addon_credits = workspaces
-        .purchase_billing_metadata(workspaces.team_for_view_handle(input_view_handle, app))
-        .is_some_and(|billing| billing.is_purchase_add_on_credits_policy_enabled());
+        .purchase_policy(workspaces.team_for_view_handle(input_view_handle, app))
+        .is_some_and(|policy| policy.allows_purchases());
 
     // Show buy credits banner if billing policy allows purchasing, input is focused,
     // and either:

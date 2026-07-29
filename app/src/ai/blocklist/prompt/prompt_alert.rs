@@ -385,8 +385,8 @@ impl View for PromptAlertView {
         });
 
         let can_purchase_addon_credits = workspaces
-            .purchase_billing_metadata(current_team)
-            .is_some_and(|billing| billing.is_purchase_add_on_credits_policy_enabled());
+            .purchase_policy(current_team)
+            .is_some_and(|policy| policy.allows_purchases());
 
         let suggest_buy_credits = can_purchase_addon_credits
             && has_admin_permissions

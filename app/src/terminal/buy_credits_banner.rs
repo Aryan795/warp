@@ -391,8 +391,8 @@ impl BuyCreditsBanner {
 
         let workspaces = UserWorkspaces::as_ref(ctx);
         let premium_bps = workspaces
-            .purchase_billing_metadata(workspaces.team_for_view(ctx))
-            .map_or(0, |billing| billing.addon_credits_price_premium_bps());
+            .purchase_policy(workspaces.team_for_view(ctx))
+            .map_or(0, |policy| policy.effective_premium_bps());
         let base_rate = self
             .addon_credits_options
             .first()
@@ -680,7 +680,6 @@ impl BuyCreditsBanner {
         let auth_state = AuthStateProvider::as_ref(app).get();
         let workspaces = UserWorkspaces::as_ref(app);
         let current_team = workspaces.team_for_view_handle(&self.view_handle, app);
-        let purchase_billing_metadata = workspaces.purchase_billing_metadata(current_team);
         // A teamless user manages their own personal purchases; the server
         // creates their team on first purchase.
         let has_admin_permissions = current_team.is_none_or(|team| {
@@ -688,7 +687,10 @@ impl BuyCreditsBanner {
                 .user_email()
                 .is_some_and(|email| team.has_admin_permissions(&email))
         });
-        let delinquent_due_to_payment_issue = purchase_billing_metadata
+        // Delinquency stays team/workspace-scoped: teamless users have no
+        // subscription to be delinquent on.
+        let delinquent_due_to_payment_issue = workspaces
+            .purchase_billing_metadata(current_team)
             .is_some_and(|billing| billing.is_delinquent_due_to_payment_issue());
         let auto_reload_banner_toggle_ff =
             FeatureFlag::BuildPlanAutoReloadBannerToggle.is_enabled();
@@ -700,8 +702,9 @@ impl BuyCreditsBanner {
             .unwrap_or(false);
 
         // Check if the selected purchase would reach/exceed the monthly limit
-        let premium_bps = purchase_billing_metadata
-            .map_or(0, |billing| billing.addon_credits_price_premium_bps());
+        let premium_bps = workspaces
+            .purchase_policy(current_team)
+            .map_or(0, |policy| policy.effective_premium_bps());
         let selected_option = self
             .addon_credits_options
             .get(self.selected_denomination_index);
