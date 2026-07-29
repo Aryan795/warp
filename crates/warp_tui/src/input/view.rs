@@ -53,6 +53,7 @@ use crate::input_suggestions_mode::{TuiInputSuggestionsMode, TuiInputSuggestions
 use crate::keybindings::{
     KEYBOARD_ENHANCEMENT_AVAILABLE_FLAG, PLAN_TOGGLE_AVAILABLE_FLAG, TUI_BINDING_GROUP,
 };
+use crate::prompt_history_menu::TuiPromptHistoryMenuAcceptance;
 use crate::terminal_session_view::state::TuiTerminalSessionStateModel;
 use crate::tui_builder::TuiUiBuilder;
 use crate::voice_input::{TuiVoiceInputModel, TuiVoiceInputState, VoiceInputStartSource};
@@ -138,6 +139,8 @@ pub enum TuiInputViewEvent {
     /// The user accepted a prompt from the up-arrow prompt-history menu. Carries
     /// the prompt text to fill into the input and submit.
     AcceptedPromptHistory(String),
+    /// The user accepted a shell command from the up-arrow history menu.
+    AcceptedCommandHistory(String),
     /// Tab requested shell completion for the current input snapshot.
     RequestShellCompletion,
     /// Selected prompt text was copied to the host clipboard.
@@ -671,7 +674,6 @@ impl TypedActionView for TuiInputView {
                     self.open_inline_menu(TuiInputSuggestionsMode::ConversationMenu, ctx);
                     TuiEditorInteractionOutcome::FollowCursor
                 } else if matches!(*command, TuiEditorCommand::MoveUp)
-                    && !self.is_shell_mode(ctx)
                     && self.single_cursor_on_first_row(ctx)
                 {
                     self.open_inline_menu(TuiInputSuggestionsMode::PromptHistory, ctx);
@@ -1041,9 +1043,14 @@ impl TuiInputView {
                         TuiInlineMenuAccepted::Mcp(action) => {
                             ctx.emit(TuiInputViewEvent::AcceptedMcp(action));
                         }
-                        TuiInlineMenuAccepted::PromptHistory(text) => {
-                            ctx.emit(TuiInputViewEvent::AcceptedPromptHistory(text));
-                        }
+                        TuiInlineMenuAccepted::History(acceptance) => match acceptance {
+                            TuiPromptHistoryMenuAcceptance::Command(text) => {
+                                ctx.emit(TuiInputViewEvent::AcceptedCommandHistory(text));
+                            }
+                            TuiPromptHistoryMenuAcceptance::Prompt(text) => {
+                                ctx.emit(TuiInputViewEvent::AcceptedPromptHistory(text));
+                            }
+                        },
                         TuiInlineMenuAccepted::Completion(acceptance) => {
                             self.apply_shell_completion(acceptance, ctx);
                         }

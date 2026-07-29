@@ -1,18 +1,23 @@
-//! Up-arrow prompt-history inline menu state for the TUI.
+//! Up-arrow command-and-prompt history inline menu state for the TUI.
 //!
 //! Mirrors the GUI's inline prompt-history recall (see `CODE-1871`): pressing Up
 //! with the caret on the first visual row opens this menu of previously-submitted
-//! agent prompts, filtered by whatever is already typed. Selection previews the
-//! highlighted prompt into the input, Enter fills + submits it, and Escape (or
+//! agent prompts and executed commands, filtered by whatever is already typed.
+//! Selection previews the highlighted item in its input mode, Enter accepts it,
+//! and Escape (or
 //! moving down past the newest row) restores the buffer the user started with.
 //!
-//! The prompt list comes from the shared [`prompt_history_for_terminal_view`]
-//! getter so the TUI and GUI read identically ordered and de-duplicated history.
+//! The list comes from the shared [`tui_history_for_terminal_view`] projection
+//! so the TUI and GUI read identically ordered and de-duplicated history.
 //! The model owns filtering, menu lifecycle, selection, preview, and buffer
 //! snapshot/restore; the terminal session view submits an accepted prompt.
+use std::rc::Rc;
+
 use warp::editor::{CodeEditorModel, CodeEditorModelEvent};
 use warp::tui_export::{
-    BlocklistAIHistoryEvent, BlocklistAIHistoryModel, prompt_history_for_terminal_view,
+    ActiveSession, BlocklistAIHistoryEvent, BlocklistAIHistoryModel, BlocklistAIInputModel,
+    History, HistoryEvent, InputConfig, InputType, InputTypeAutoDetectionSource,
+    TuiHistorySuggestion, tui_history_for_terminal_view,
 };
 use warp_editor::model::CoreEditorModel;
 use warpui_core::{AppContext, Entity, EntityId, ModelContext, ModelHandle, SingletonEntity};
@@ -28,7 +33,13 @@ const MAX_VISIBLE_ROWS: usize = result_row_capacity(MAX_INLINE_MENU_ROWS, true, 
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TuiPromptHistoryRow {
-    text: String,
+    suggestion: TuiHistorySuggestion,
+}
+
+impl TuiPromptHistoryRow {
+    fn text(&self) -> &str {
+        self.suggestion.text()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -43,6 +54,12 @@ enum TuiPromptHistoryMenuState {
         /// so selection previews (which overwrite the buffer) do not change what
         /// the list filters against.
         query: String,
+        /// Whether prompts were enabled when the menu opened. Previewing a
+        /// command switches the editor to shell mode, but must not make prompt
+        /// rows disappear from an agent-mode menu.
+        include_prompts: bool,
+        /// Exact input mode restored when the menu is dismissed.
+        original_input_config: Option<InputConfig>,
     },
 }
 
@@ -51,13 +68,22 @@ enum TuiPromptHistoryMenuState {
 pub(crate) enum TuiPromptHistoryMenuEvent {
     Updated,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TuiPromptHistoryMenuAcceptance {
+    Command(String),
+    Prompt(String),
+}
+
+type HistoryProvider = Rc<dyn Fn(bool, &AppContext) -> Vec<TuiHistorySuggestion>>;
 
 /// Query, selection, preview, and model-subscription state for the up-arrow
 /// prompt-history menu.
 pub(crate) struct TuiPromptHistoryMenuModel {
     input_editor: ModelHandle<CodeEditorModel>,
+    input_mode: Option<ModelHandle<BlocklistAIInputModel>>,
     suggestions_mode: ModelHandle<TuiInputSuggestionsModeModel>,
-    terminal_surface_id: EntityId,
+    history_provider: HistoryProvider,
+    shell_mode_override: Option<bool>,
     state: TuiPromptHistoryMenuState,
     /// The text most recently written into the input as a preview. Content
     /// changes matching it are the editor echoing our own preview write and are
@@ -72,7 +98,9 @@ impl TuiPromptHistoryMenuModel {
     /// changes.
     pub(crate) fn new(
         input_editor: ModelHandle<CodeEditorModel>,
+        input_mode: ModelHandle<BlocklistAIInputModel>,
         suggestions_mode: ModelHandle<TuiInputSuggestionsModeModel>,
+        active_session: ModelHandle<ActiveSession>,
         terminal_surface_id: EntityId,
         ctx: &mut ModelContext<Self>,
     ) -> Self {
@@ -89,10 +117,61 @@ impl TuiPromptHistoryMenuModel {
                 }
             },
         );
+        if ctx.has_singleton_model::<History>() {
+            ctx.subscribe_to_model(&History::handle(ctx), |model, _, _: &HistoryEvent, ctx| {
+                if model.is_open(ctx) {
+                    model.refresh_rows(ctx);
+                }
+            });
+        }
+        let history_provider = Rc::new(move |include_prompts, app: &AppContext| {
+            tui_history_for_terminal_view(
+                terminal_surface_id,
+                active_session.as_ref(app),
+                include_prompts,
+                app,
+            )
+        });
         Self {
             input_editor,
+            input_mode: Some(input_mode),
             suggestions_mode,
-            terminal_surface_id,
+            history_provider,
+            shell_mode_override: None,
+            state: TuiPromptHistoryMenuState::Closed,
+            preview_text: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        input_editor: ModelHandle<CodeEditorModel>,
+        input_mode: Option<ModelHandle<BlocklistAIInputModel>>,
+        suggestions_mode: ModelHandle<TuiInputSuggestionsModeModel>,
+        suggestions: Vec<TuiHistorySuggestion>,
+        shell_mode: bool,
+        ctx: &mut ModelContext<Self>,
+    ) -> Self {
+        ctx.subscribe_to_model(&input_editor, |model, _, event, ctx| {
+            if model.is_open(ctx) && matches!(event, CodeEditorModelEvent::ContentChanged { .. }) {
+                model.on_content_changed(ctx);
+            }
+        });
+        let history_provider = Rc::new(move |include_prompts, _: &AppContext| {
+            suggestions
+                .iter()
+                .filter(|suggestion| {
+                    include_prompts || matches!(suggestion, TuiHistorySuggestion::Command(_))
+                })
+                .cloned()
+                .collect()
+        });
+        Self {
+            input_editor,
+            shell_mode_override: input_mode.is_none().then_some(shell_mode),
+            input_mode,
+            suggestions_mode,
+            history_provider,
             state: TuiPromptHistoryMenuState::Closed,
             preview_text: None,
         }
@@ -122,11 +201,18 @@ impl TuiPromptHistoryMenuModel {
         }
         let original_buffer = input_text(&self.input_editor, ctx);
         let query = original_buffer.clone();
+        let include_prompts = !self.is_shell_mode(ctx);
+        let original_input_config = self
+            .input_mode
+            .as_ref()
+            .map(|input_mode| input_mode.as_ref(ctx).input_config());
         self.preview_text = None;
         self.state = TuiPromptHistoryMenuState::Open {
             list: TuiInlineMenuListState::default(),
             original_buffer,
             query,
+            include_prompts,
+            original_input_config,
         };
         self.refresh_rows(ctx);
         self.preview_selection(ctx);
@@ -137,13 +223,27 @@ impl TuiPromptHistoryMenuModel {
         if !self.is_open(ctx) {
             return;
         }
-        let original_buffer = match &self.state {
+        let (original_buffer, original_input_config) = match &self.state {
             TuiPromptHistoryMenuState::Open {
-                original_buffer, ..
-            } => original_buffer.clone(),
+                original_buffer,
+                original_input_config,
+                ..
+            } => (original_buffer.clone(), *original_input_config),
             TuiPromptHistoryMenuState::Closed => return,
         };
         self.close(ctx);
+        if let (Some(input_mode), Some(original_input_config)) =
+            (&self.input_mode, original_input_config)
+        {
+            input_mode.update(ctx, |input_mode, ctx| {
+                input_mode.set_input_config(
+                    original_input_config,
+                    original_buffer.is_empty(),
+                    None,
+                    ctx,
+                );
+            });
+        }
         self.set_input_text(&original_buffer, ctx);
     }
 
@@ -185,19 +285,25 @@ impl TuiPromptHistoryMenuModel {
     /// submit. With a highlighted prompt that is its text; with an empty or
     /// filtered-to-nothing list it is the current input, so Enter behaves as a
     /// normal submit.
-    pub(crate) fn accept_selected(&mut self, ctx: &mut ModelContext<Self>) -> Option<String> {
+    pub(crate) fn accept_selected(
+        &mut self,
+        ctx: &mut ModelContext<Self>,
+    ) -> Option<TuiPromptHistoryMenuAcceptance> {
         if !self.is_open(ctx) {
             return None;
         }
         let selected = match &self.state {
             TuiPromptHistoryMenuState::Open { list, .. } => {
-                list.selected_row().map(|row| row.text.clone())
+                list.selected_row().map(|row| row.suggestion.clone())
             }
             TuiPromptHistoryMenuState::Closed => None,
         };
-        let submit_text = selected.unwrap_or_else(|| input_text(&self.input_editor, ctx));
+        let selected = selected?;
         self.close(ctx);
-        Some(submit_text)
+        Some(match selected {
+            TuiHistorySuggestion::Command(text) => TuiPromptHistoryMenuAcceptance::Command(text),
+            TuiHistorySuggestion::Prompt(text) => TuiPromptHistoryMenuAcceptance::Prompt(text),
+        })
     }
 
     /// Returns the render snapshot for the open menu.
@@ -210,25 +316,28 @@ impl TuiPromptHistoryMenuModel {
         };
         let status = list.rows().is_empty().then(|| {
             if query.trim().is_empty() {
-                TuiInlineMenuStatus::Empty("No prompt history".to_owned())
+                TuiInlineMenuStatus::Empty("No history".to_owned())
             } else {
-                TuiInlineMenuStatus::Empty("No matching prompts".to_owned())
+                TuiInlineMenuStatus::Empty("No matching history".to_owned())
             }
         });
         Some(TuiInlineMenuSnapshot {
             header: Some(TuiInlineMenuHeader {
-                title: Some("Prompt history".to_owned()),
+                title: Some("History".to_owned()),
                 tabs: Vec::new(),
             }),
             rows: list
                 .rows()
                 .iter()
                 .map(|row| TuiInlineMenuRow {
-                    title: single_line_menu_title(&row.text),
+                    title: single_line_menu_title(row.text()),
                     description: None,
                     state_suffix: None,
                     is_selectable: true,
-                    style: TuiInlineMenuRowStyle::Default,
+                    style: match row.suggestion {
+                        TuiHistorySuggestion::Command(_) => TuiInlineMenuRowStyle::ShellCommand,
+                        TuiHistorySuggestion::Prompt(_) => TuiInlineMenuRowStyle::Default,
+                    },
                 })
                 .collect(),
             selected_index: list.selected_index(),
@@ -267,29 +376,32 @@ impl TuiPromptHistoryMenuModel {
     /// Rebuilds rows from the current query while preserving stable selection,
     /// defaulting to the row nearest the input on first populate.
     fn refresh_rows(&mut self, ctx: &mut ModelContext<Self>) {
-        let (query, previous_text, previous_index) = match &self.state {
-            TuiPromptHistoryMenuState::Open { list, query, .. } => (
+        let (query, include_prompts, previous_text, previous_index) = match &self.state {
+            TuiPromptHistoryMenuState::Open {
+                list,
+                query,
+                include_prompts,
+                ..
+            } => (
                 query.clone(),
-                list.selected_row().map(|row| row.text.clone()),
+                *include_prompts,
+                list.selected_row().map(|row| row.text().to_owned()),
                 list.selected_index(),
             ),
             TuiPromptHistoryMenuState::Closed => return,
         };
         let trimmed_query = query.trim();
-        let rows: Vec<TuiPromptHistoryRow> =
-            prompt_history_for_terminal_view(self.terminal_surface_id, ctx)
-                .into_iter()
-                .filter(|entry| {
-                    trimmed_query.is_empty()
-                        || entry
-                            .query_text
-                            .lines()
-                            .any(|line| line.starts_with(trimmed_query))
-                })
-                .map(|entry| TuiPromptHistoryRow {
-                    text: entry.query_text,
-                })
-                .collect();
+        let rows: Vec<TuiPromptHistoryRow> = (self.history_provider)(include_prompts, ctx)
+            .into_iter()
+            .filter(|entry| {
+                trimmed_query.is_empty()
+                    || entry
+                        .text()
+                        .lines()
+                        .any(|line| line.starts_with(trimmed_query))
+            })
+            .map(|suggestion| TuiPromptHistoryRow { suggestion })
+            .collect();
         let preferred_index =
             reconciled_selection_index(&rows, previous_text.as_deref(), previous_index);
         let TuiPromptHistoryMenuState::Open { list, .. } = &mut self.state else {
@@ -301,17 +413,59 @@ impl TuiPromptHistoryMenuModel {
 
     /// Writes the highlighted prompt into the input as an undo-agnostic preview.
     fn preview_selection(&mut self, ctx: &mut ModelContext<Self>) {
-        let text = match &self.state {
+        let suggestion = match &self.state {
             TuiPromptHistoryMenuState::Open { list, .. } => {
-                list.selected_row().map(|row| row.text.clone())
+                list.selected_row().map(|row| row.suggestion.clone())
             }
             TuiPromptHistoryMenuState::Closed => None,
         };
-        let Some(text) = text else {
+        let Some(suggestion) = suggestion else {
             return;
         };
+        let text = suggestion.text().to_owned();
+        self.preview_input_mode(&suggestion, text.is_empty(), ctx);
         self.preview_text = Some(text.clone());
         self.set_input_text(&text, ctx);
+    }
+
+    fn is_shell_mode(&self, ctx: &AppContext) -> bool {
+        self.shell_mode_override.unwrap_or_else(|| {
+            self.input_mode
+                .as_ref()
+                .is_some_and(|input_mode| input_mode.as_ref(ctx).input_type() == InputType::Shell)
+        })
+    }
+
+    fn preview_input_mode(
+        &self,
+        suggestion: &TuiHistorySuggestion,
+        is_input_buffer_empty: bool,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let Some(input_mode) = &self.input_mode else {
+            return;
+        };
+        let input_type = match suggestion {
+            TuiHistorySuggestion::Command(_) => InputType::Shell,
+            TuiHistorySuggestion::Prompt(_) => InputType::AI,
+        };
+        input_mode.update(ctx, |input_mode, ctx| {
+            input_mode.set_input_type(
+                input_type,
+                Some(InputTypeAutoDetectionSource::HistorySelection),
+                ctx,
+            );
+            if is_input_buffer_empty {
+                // Preserve the shared model's empty-buffer bookkeeping when a
+                // history item happens to be empty (normally filtered out).
+                input_mode.set_input_config(
+                    input_mode.input_config(),
+                    true,
+                    Some(InputTypeAutoDetectionSource::HistorySelection),
+                    ctx,
+                );
+            }
+        });
     }
 
     /// Replaces the input buffer text. Preview and restore both go through here.
@@ -346,7 +500,7 @@ fn reconciled_selection_index(
     }
     let last = rows.len() - 1;
     if let Some(text) = previous_text
-        && let Some(index) = rows.iter().position(|row| row.text == text)
+        && let Some(index) = rows.iter().position(|row| row.text() == text)
     {
         return Some(index);
     }

@@ -70,6 +70,16 @@ fn sort_and_dedupe_suggestions<'a>(
         .map(|(_, suggestion)| suggestion)
         .collect()
 }
+
+fn should_include_command(
+    entry: &crate::terminal::HistoryEntry,
+    ignored_commands: &HashSet<String>,
+    include_agent_commands: bool,
+) -> bool {
+    !entry.command.trim().is_empty()
+        && !ignored_commands.contains(&entry.command)
+        && (include_agent_commands || !entry.is_agent_executed)
+}
 /// Returns de-duplicated prompt history ordered for up-arrow presentation.
 ///
 /// Prompts from other terminal surfaces precede prompts from the requested
@@ -116,15 +126,16 @@ impl History {
         let include_agent_commands = *AISettings::handle(app)
             .as_ref(app)
             .include_agent_commands_in_history;
+        let ignored_commands =
+            ignored_suggestions.get_ignored_suggestions_for_type(SuggestionType::ShellCommand);
 
         let commands = session_id
             .and_then(|session_id| self.commands(session_id))
             .unwrap_or_default()
             .into_iter()
             .filter(|entry| {
-                !ignored_suggestions.is_ignored(&entry.command, SuggestionType::ShellCommand)
+                should_include_command(entry, &ignored_commands, include_agent_commands)
             })
-            .filter(move |entry| include_agent_commands || !entry.is_agent_executed)
             .map(|entry| HistoryInputSuggestion::Command { entry });
 
         let should_include_prompts = config.include_prompts

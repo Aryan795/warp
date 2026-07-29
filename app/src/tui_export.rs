@@ -220,9 +220,8 @@ pub use crate::terminal::terminal_manager::BlockSpacing;
 pub use crate::terminal::view::blocklist_filter::should_show_task_in_blocklist;
 pub use crate::terminal::view::{ExecuteCommandEvent, WAKEUP_THROTTLE_PERIOD};
 pub use crate::terminal::{
-    BlockPadding, PtyIntent, PtyIntentEvent, ShellLaunchData, SizeInfo, SizeUpdate,
-    TerminalManager as TerminalManagerTrait, TerminalModel, TerminalSurface,
-    prompt_history_for_terminal_view,
+    BlockPadding, History, HistoryEvent, PtyIntent, PtyIntentEvent, ShellLaunchData, SizeInfo,
+    SizeUpdate, TerminalManager as TerminalManagerTrait, TerminalModel, TerminalSurface,
 };
 pub use crate::themes::default_themes::{dark_theme, light_theme};
 pub use crate::throttle::throttle;
@@ -260,6 +259,65 @@ pub fn tui_completion_session_context(
         current_working_directory,
         app,
     ))
+}
+
+/// Owned history item projected for the headless TUI.
+///
+/// The shared history implementation uses borrowed command entries and
+/// GUI-facing suggestion types. Keeping this owned boundary here lets the TUI
+/// consume identical ordering/filtering semantics without depending on those
+/// presentation details.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TuiHistorySuggestion {
+    Command(String),
+    Prompt(String),
+}
+
+impl TuiHistorySuggestion {
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Command(text) | Self::Prompt(text) => text,
+        }
+    }
+}
+
+/// Returns the shared up-arrow history as an owned TUI projection.
+///
+/// Agent input combines commands and prompts, while explicit shell input
+/// includes commands only. Ordering, session scoping, deduplication, ignored
+/// suggestions, and agent-executed-command filtering remain owned by
+/// [`crate::terminal::History`].
+pub fn tui_history_for_terminal_view(
+    terminal_view_id: warpui::EntityId,
+    active_session: &ActiveSession,
+    include_prompts: bool,
+    app: &warpui::AppContext,
+) -> Vec<TuiHistorySuggestion> {
+    if !app.has_singleton_model::<crate::terminal::History>() {
+        return Vec::new();
+    }
+    let session_id = active_session.session(app).map(|session| session.id());
+    crate::terminal::History::handle(app)
+        .as_ref(app)
+        .up_arrow_suggestions_for_terminal_view(
+            terminal_view_id,
+            session_id,
+            crate::terminal::UpArrowHistoryConfig {
+                include_commands: true,
+                include_prompts,
+            },
+            app,
+        )
+        .into_iter()
+        .map(|suggestion| match suggestion {
+            crate::input_suggestions::HistoryInputSuggestion::Command { entry } => {
+                TuiHistorySuggestion::Command(entry.command.clone())
+            }
+            crate::input_suggestions::HistoryInputSuggestion::AIQuery { entry } => {
+                TuiHistorySuggestion::Prompt(entry.query_text)
+            }
+        })
+        .collect()
 }
 
 /// Returns whether `command` exactly matches a top-level command available in

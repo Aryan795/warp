@@ -14,8 +14,8 @@ use warp::settings::AISettingsChangedEvent;
 use warp::tui_export::{
     AcceptSlashCommandOrSavedPrompt, BlocklistAIHistoryModel, BlocklistAIInputModel,
     ConversationSelectionEvent, InputConfig, InputModePolicy, InputType, LLMId, PolicyConfigUpdate,
-    SlashCommandId, SlashCommandMixer, VoiceInput, blocklist_ai_history_model_with_queries,
-    register_tui_session_view_test_singletons,
+    SlashCommandId, SlashCommandMixer, TuiHistorySuggestion, VoiceInput,
+    blocklist_ai_history_model_with_queries, register_tui_session_view_test_singletons,
 };
 use warp_editor::model::CoreEditorModel;
 use warpui::EntityIdMap;
@@ -28,8 +28,7 @@ use warpui_core::event::{KeyEventDetails, ModifiersState};
 use warpui_core::keymap::Keystroke;
 use warpui_core::platform::WindowStyle;
 use warpui_core::{
-    AddWindowOptions, App, AppContext, Entity, EntityId, ModelHandle, TuiView, TypedActionView,
-    ViewHandle,
+    AddWindowOptions, App, AppContext, Entity, ModelHandle, TuiView, TypedActionView, ViewHandle,
 };
 
 use super::{
@@ -87,6 +86,42 @@ impl InputModePolicy for TestInputModePolicy {
     ) -> Option<PolicyConfigUpdate> {
         None
     }
+}
+
+#[test]
+fn submit_accepts_highlighted_command_history_entry_in_shell_mode() {
+    App::test((), |mut app| async move {
+        let (view, accepted) = app.update(|ctx| {
+            let (view, _menu) = build_view_with_history(
+                ctx,
+                vec![
+                    TuiHistorySuggestion::Prompt("explain this".to_owned()),
+                    TuiHistorySuggestion::Command("echo hello".to_owned()),
+                ],
+            );
+            dispatch(
+                &view,
+                ctx,
+                &[TuiInputAction::EditorCommand(TuiEditorCommand::MoveUp)],
+            );
+            assert!(view.as_ref(ctx).is_shell_mode(ctx));
+            assert_eq!(text(&view, ctx), "echo hello");
+            let accepted = Rc::new(RefCell::new(Vec::new()));
+            let accepted_for_subscription = accepted.clone();
+            ctx.subscribe_to_view(&view, move |_, event, _| {
+                if let TuiInputViewEvent::AcceptedCommandHistory(text) = event {
+                    accepted_for_subscription.borrow_mut().push(text.clone());
+                }
+            });
+            (view, accepted)
+        });
+        app.update(|ctx| {
+            dispatch(&view, ctx, &[TuiInputAction::Submit]);
+        });
+        app.read(|_| {
+            assert_eq!(accepted.borrow().as_slice(), &["echo hello".to_owned()]);
+        });
+    });
 }
 
 #[test]
@@ -321,10 +356,12 @@ fn add_prompt_history_menu(
         ctx.add_singleton_model(|_| BlocklistAIHistoryModel::default());
     }
     ctx.add_model(|ctx| {
-        TuiPromptHistoryMenuModel::new(
+        TuiPromptHistoryMenuModel::new_for_test(
             input_model.clone(),
+            None,
             suggestions_mode.clone(),
-            EntityId::new(),
+            Vec::new(),
+            false,
             ctx,
         )
     })
@@ -341,21 +378,35 @@ fn build_view_with_prompt_history(
     ViewHandle<TuiInputView>,
     ModelHandle<TuiPromptHistoryMenuModel>,
 ) {
+    build_view_with_history(
+        ctx,
+        prompts
+            .iter()
+            .map(|prompt| TuiHistorySuggestion::Prompt((*prompt).to_owned()))
+            .collect(),
+    )
+}
+
+fn build_view_with_history(
+    ctx: &mut AppContext,
+    suggestions: Vec<TuiHistorySuggestion>,
+) -> (
+    ViewHandle<TuiInputView>,
+    ModelHandle<TuiPromptHistoryMenuModel>,
+) {
     ctx.add_singleton_model(|_| Appearance::mock());
     add_test_semantic_selection(ctx);
-    ctx.add_singleton_model(|_| {
-        blocklist_ai_history_model_with_queries(
-            prompts.iter().map(|prompt| (*prompt).to_owned()).collect(),
-        )
-    });
+    ctx.add_singleton_model(|_| blocklist_ai_history_model_with_queries(Vec::new()));
     let input_model = ctx.add_model(|ctx| CodeEditorModel::new_tui(W, ctx));
     let input_mode = BlocklistAIInputModel::mock(Rc::new(TestInputModePolicy), ctx);
     let suggestions_mode = add_suggestions_mode(ctx, TuiInputSuggestionsMode::Closed);
     let prompt_history_menu = ctx.add_model(|ctx| {
-        TuiPromptHistoryMenuModel::new(
+        TuiPromptHistoryMenuModel::new_for_test(
             input_model.clone(),
+            Some(input_mode.clone()),
             suggestions_mode.clone(),
-            EntityId::new(),
+            suggestions,
+            false,
             ctx,
         )
     });
@@ -428,6 +479,7 @@ fn enter_and_escape_stop_listening_while_escape_cancels_transcribing() {
                 | TuiInputViewEvent::AcceptedMcp(_)
                 | TuiInputViewEvent::MoveFocusUp
                 | TuiInputViewEvent::AcceptedPromptHistory(_)
+                | TuiInputViewEvent::AcceptedCommandHistory(_)
                 | TuiInputViewEvent::RequestShellCompletion
                 | TuiInputViewEvent::ClipboardCopySucceeded
                 | TuiInputViewEvent::ClipboardCopyFailed => {}
@@ -1296,6 +1348,7 @@ fn multiline_paste_emits_once_and_fallback_inserts_without_submitting() {
                 | TuiInputViewEvent::AcceptedModel(_)
                 | TuiInputViewEvent::AcceptedMcp(_)
                 | TuiInputViewEvent::AcceptedPromptHistory(_)
+                | TuiInputViewEvent::AcceptedCommandHistory(_)
                 | TuiInputViewEvent::RequestShellCompletion
                 | TuiInputViewEvent::BackspaceAtEmptyInput
                 | TuiInputViewEvent::MoveFocusUp
@@ -3057,9 +3110,9 @@ fn up_on_lower_row_moves_cursor_without_opening_prompt_history() {
     });
 }
 
-/// In `!` shell mode Up does not open the agent prompt-history menu.
+/// In `!` shell mode Up opens history but excludes prompt rows.
 #[test]
-fn shell_mode_up_does_not_open_prompt_history() {
+fn shell_mode_up_opens_commands_only_history() {
     App::test((), |mut app| async move {
         app.update(|ctx| {
             let (view, menu) = build_view_with_prompt_history(ctx, &["deploy the app"]);
@@ -3071,8 +3124,8 @@ fn shell_mode_up_does_not_open_prompt_history() {
                 ctx,
                 &[TuiInputAction::EditorCommand(TuiEditorCommand::MoveUp)],
             );
-
-            assert!(!menu.as_ref(ctx).is_open(ctx));
+            assert!(menu.as_ref(ctx).is_open(ctx));
+            assert!(prompt_history_rows(&menu, ctx).is_empty());
         });
     });
 }

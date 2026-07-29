@@ -1,15 +1,20 @@
 //! Tests for [`TuiPromptHistoryMenuModel`]: population/ordering/dedupe, default
 //! selection and initial preview, prefix filtering, buffer snapshot/restore,
 //! acceptance, and empty states.
+use std::collections::HashSet;
+
 use warp::appearance::Appearance;
 use warp::editor::CodeEditorModel;
-use warp::tui_export::blocklist_ai_history_model_with_queries;
+use warp::tui_export::{TuiHistorySuggestion, blocklist_ai_history_model_with_queries};
 use warp_editor::model::CoreEditorModel;
 use warpui_core::elements::tui::{TuiBufferExt, TuiRect};
 use warpui_core::presenter::tui::TuiPresenter;
-use warpui_core::{App, AppContext, EntityId, ModelHandle};
+use warpui_core::{App, AppContext, ModelHandle};
 
-use super::{TuiPromptHistoryMenuModel, TuiPromptHistoryRow, reconciled_selection_index};
+use super::{
+    TuiPromptHistoryMenuAcceptance, TuiPromptHistoryMenuModel, TuiPromptHistoryRow,
+    reconciled_selection_index,
+};
 use crate::inline_menu::{render_inline_menu, single_line_menu_title};
 use crate::input_suggestions_mode::TuiInputSuggestionsModeModel;
 use crate::tui_builder::TuiUiBuilder;
@@ -26,18 +31,173 @@ fn setup(
     ModelHandle<TuiPromptHistoryMenuModel>,
 ) {
     ctx.add_singleton_model(|_| Appearance::mock());
-    ctx.add_singleton_model(|_| {
-        blocklist_ai_history_model_with_queries(
-            prompts.iter().map(|prompt| (*prompt).to_owned()).collect(),
+    ctx.add_singleton_model(|_| blocklist_ai_history_model_with_queries(Vec::new()));
+    let input_model = ctx.add_model(|ctx| CodeEditorModel::new_tui(W, ctx));
+    let suggestions_mode = ctx.add_model(|_| TuiInputSuggestionsModeModel::new());
+    let mut seen = HashSet::new();
+    let mut suggestions = prompts
+        .iter()
+        .rev()
+        .filter(|prompt| !prompt.trim().is_empty())
+        .filter(|prompt| seen.insert(**prompt))
+        .map(|prompt| TuiHistorySuggestion::Prompt((*prompt).to_owned()))
+        .collect::<Vec<_>>();
+    suggestions.reverse();
+    let menu = ctx.add_model(|ctx| {
+        TuiPromptHistoryMenuModel::new_for_test(
+            input_model.clone(),
+            None,
+            suggestions_mode.clone(),
+            suggestions,
+            false,
+            ctx,
         )
     });
+    (input_model, menu)
+}
+
+#[test]
+fn agent_mode_interleaves_commands_and_prompts_in_provider_order() {
+    App::test((), |mut app| async move {
+        app.update(|ctx| {
+            let (_input, menu) = setup_suggestions(
+                ctx,
+                vec![
+                    TuiHistorySuggestion::Command("other command".to_owned()),
+                    TuiHistorySuggestion::Prompt("other prompt".to_owned()),
+                    TuiHistorySuggestion::Command("current command".to_owned()),
+                    TuiHistorySuggestion::Prompt("current prompt".to_owned()),
+                ],
+                false,
+            );
+            menu.update(ctx, |menu, ctx| menu.open(ctx));
+            assert_eq!(
+                row_titles(&menu, ctx),
+                vec![
+                    "other command",
+                    "other prompt",
+                    "current command",
+                    "current prompt"
+                ]
+            );
+        });
+    });
+}
+
+#[test]
+fn shell_mode_shows_commands_only_and_accepts_a_command() {
+    App::test((), |mut app| async move {
+        app.update(|ctx| {
+            let (_input, menu) = setup_suggestions(
+                ctx,
+                vec![
+                    TuiHistorySuggestion::Prompt("prompt".to_owned()),
+                    TuiHistorySuggestion::Command("echo one".to_owned()),
+                    TuiHistorySuggestion::Command("echo two".to_owned()),
+                ],
+                true,
+            );
+            menu.update(ctx, |menu, ctx| menu.open(ctx));
+            assert_eq!(row_titles(&menu, ctx), vec!["echo one", "echo two"]);
+            assert_eq!(
+                menu.update(ctx, |menu, ctx| menu.accept_selected(ctx)),
+                Some(TuiPromptHistoryMenuAcceptance::Command(
+                    "echo two".to_owned()
+                ))
+            );
+        });
+    });
+}
+
+#[test]
+fn enter_on_empty_or_no_match_is_a_no_op() {
+    App::test((), |mut app| async move {
+        app.update(|ctx| {
+            let (input, menu) = setup(ctx, &[]);
+            menu.update(ctx, |menu, ctx| menu.open(ctx));
+            assert_eq!(
+                menu.update(ctx, |menu, ctx| menu.accept_selected(ctx)),
+                None
+            );
+            assert!(menu.as_ref(ctx).is_open(ctx));
+
+            menu.update(ctx, |menu, ctx| menu.dismiss(ctx));
+            set_text(&input, "missing", ctx);
+            menu.update(ctx, |menu, ctx| menu.open(ctx));
+            assert_eq!(
+                menu.update(ctx, |menu, ctx| menu.accept_selected(ctx)),
+                None
+            );
+            assert!(menu.as_ref(ctx).is_open(ctx));
+            assert!(matches!(
+                menu.as_ref(ctx).snapshot(ctx).and_then(|snapshot| snapshot.status),
+                Some(crate::inline_menu::TuiInlineMenuStatus::Empty(label))
+                    if label == "No matching history"
+            ));
+        });
+    });
+}
+
+#[test]
+fn command_rows_render_a_green_bang_without_transcript_background() {
+    App::test((), |mut app| async move {
+        app.update(|ctx| {
+            let (_input, menu) = setup_suggestions(
+                ctx,
+                vec![
+                    TuiHistorySuggestion::Command("echo hello".to_owned()),
+                    TuiHistorySuggestion::Prompt("explain this".to_owned()),
+                ],
+                false,
+            );
+            menu.update(ctx, |menu, ctx| menu.open(ctx));
+            let snapshot = menu.as_ref(ctx).snapshot(ctx).expect("menu is open");
+            let mut presenter = TuiPresenter::new();
+            let frame = presenter.present_element(
+                render_inline_menu(&snapshot, &TuiUiBuilder::from_app(ctx)),
+                TuiRect::new(0, 0, 50, 12),
+                ctx,
+            );
+            let lines = frame.buffer.to_lines();
+            assert!(lines.iter().any(|line| line.contains("! echo hello")));
+            assert!(lines.iter().any(|line| line.contains("explain this")));
+            let command_row = lines
+                .iter()
+                .position(|line| line.contains("! echo hello"))
+                .expect("command row");
+            let bang = &frame.buffer[(0, command_row as u16)];
+            let builder = TuiUiBuilder::from_app(ctx);
+            assert_eq!(
+                bang.fg,
+                builder
+                    .shell_command_accent_style()
+                    .fg
+                    .expect("shell command accent has a foreground")
+            );
+            assert_ne!(bang.bg, builder.shell_command_background());
+        });
+    });
+}
+
+fn setup_suggestions(
+    ctx: &mut AppContext,
+    suggestions: Vec<TuiHistorySuggestion>,
+    shell_mode: bool,
+) -> (
+    ModelHandle<CodeEditorModel>,
+    ModelHandle<TuiPromptHistoryMenuModel>,
+) {
+    ctx.add_singleton_model(|_| Appearance::mock());
+    ctx.add_singleton_model(|_| blocklist_ai_history_model_with_queries(Vec::new()));
     let input_model = ctx.add_model(|ctx| CodeEditorModel::new_tui(W, ctx));
     let suggestions_mode = ctx.add_model(|_| TuiInputSuggestionsModeModel::new());
     let menu = ctx.add_model(|ctx| {
-        TuiPromptHistoryMenuModel::new(
+        TuiPromptHistoryMenuModel::new_for_test(
             input_model.clone(),
-            suggestions_mode.clone(),
-            EntityId::new(),
+            None,
+            suggestions_mode,
+            suggestions,
+            shell_mode,
             ctx,
         )
     });
@@ -152,7 +312,12 @@ fn accept_selected_returns_highlighted_prompt_and_closes() {
             menu.update(ctx, |m, ctx| m.open(ctx));
             // Default selection is the newest (last) row.
             let accepted = menu.update(ctx, |m, ctx| m.accept_selected(ctx));
-            assert_eq!(accepted, Some("newest prompt".to_owned()));
+            assert_eq!(
+                accepted,
+                Some(TuiPromptHistoryMenuAcceptance::Prompt(
+                    "newest prompt".to_owned()
+                ))
+            );
             assert!(!menu.as_ref(ctx).is_open(ctx));
         });
     });
@@ -171,7 +336,7 @@ fn multiline_prompt_uses_single_line_title_without_changing_prompt_text() {
             assert_eq!(buffer_text(&input, ctx), prompt);
             assert_eq!(
                 menu.update(ctx, |m, ctx| m.accept_selected(ctx)),
-                Some(prompt.to_owned())
+                Some(TuiPromptHistoryMenuAcceptance::Prompt(prompt.to_owned()))
             );
         });
     });
@@ -195,7 +360,8 @@ fn empty_history_shows_explicit_empty_state() {
             assert!(snapshot.rows.is_empty());
             assert!(matches!(
                 snapshot.status,
-                Some(crate::inline_menu::TuiInlineMenuStatus::Empty(_))
+                Some(crate::inline_menu::TuiInlineMenuStatus::Empty(ref label))
+                    if label == "No history"
             ));
         });
     });
@@ -244,7 +410,7 @@ fn open_menu_renders_prompt_history_surface_to_lines() {
             );
             let rendered = frame.buffer.to_lines().join("\n");
             assert!(
-                rendered.contains("Prompt history"),
+                rendered.contains("History"),
                 "rendered menu should show the header:\n{rendered}"
             );
             assert!(rendered.contains("deploy the app"));
@@ -257,13 +423,13 @@ fn open_menu_renders_prompt_history_surface_to_lines() {
 fn reconciled_selection_prefers_text_then_index_then_last_row() {
     let rows = vec![
         TuiPromptHistoryRow {
-            text: "one".to_owned(),
+            suggestion: TuiHistorySuggestion::Prompt("one".to_owned()),
         },
         TuiPromptHistoryRow {
-            text: "two".to_owned(),
+            suggestion: TuiHistorySuggestion::Prompt("two".to_owned()),
         },
         TuiPromptHistoryRow {
-            text: "three".to_owned(),
+            suggestion: TuiHistorySuggestion::Prompt("three".to_owned()),
         },
     ];
 

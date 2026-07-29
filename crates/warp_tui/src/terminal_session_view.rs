@@ -1451,7 +1451,9 @@ impl TuiTerminalSessionView {
         let prompt_history_menu = ctx.add_model(|ctx| {
             TuiPromptHistoryMenuModel::new(
                 input_editor_model.clone(),
+                ai_input_model.clone(),
                 suggestions_mode.clone(),
+                active_session.clone(),
                 terminal_surface_id,
                 ctx,
             )
@@ -1617,6 +1619,9 @@ impl TuiTerminalSessionView {
             }
             TuiInputViewEvent::AcceptedPromptHistory(text) => {
                 view.handle_accepted_prompt_history(text.clone(), ctx);
+            }
+            TuiInputViewEvent::AcceptedCommandHistory(text) => {
+                view.handle_accepted_command_history(text, ctx);
             }
             TuiInputViewEvent::RequestShellCompletion => {
                 view.request_shell_completion(ctx);
@@ -3571,6 +3576,16 @@ impl TuiTerminalSessionView {
             input.set_text(&text, ctx);
         });
         self.handle_submitted(text, ctx);
+    }
+
+    /// Executes an accepted command-history item immediately. The menu preview
+    /// has already selected shell mode, so this follows the ordinary shell
+    /// submission path and preserves its busy-session safeguards.
+    fn handle_accepted_command_history(&mut self, text: &str, ctx: &mut ViewContext<Self>) {
+        self.input_view.update(ctx, |input, ctx| {
+            input.set_text(text, ctx);
+        });
+        self.execute_user_command(text, ctx);
     }
 
     fn select_tui_slash_command(&mut self, command: &StaticCommand, ctx: &mut ViewContext<Self>) {
