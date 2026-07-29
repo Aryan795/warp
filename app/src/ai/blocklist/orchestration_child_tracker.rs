@@ -32,6 +32,8 @@ use warpui::ModelContext;
 #[cfg(not(test))]
 use warpui::SingletonEntity;
 
+#[cfg(not(test))]
+use super::history_model::BlocklistAIHistoryModel;
 use super::orchestration_event_streamer::{
     OrchestrationEventStreamer, OrchestrationEventStreamerEvent,
     conversation_status_from_lifecycle_event_type,
@@ -236,8 +238,8 @@ impl OrchestrationChildTracker {
     }
 
     /// Sole status writer for placeholder children (step 2). Emits the pill-bar
-    /// broadcast in both modes; the actual `update_conversation_status` write
-    /// is wired in T2 once the tracker owns a history handle. Unknown children
+    /// broadcast in both modes; also writes the new status through to the
+    /// history model so the pill badge updates immediately. Unknown children
     /// fall back to the discovery path so lifecycle acts as a self-healing
     /// backstop for a missed `child_agent_started`.
     fn apply_lifecycle(
@@ -249,7 +251,33 @@ impl OrchestrationChildTracker {
     ) {
         if self.children.contains_key(&task_id) {
             let status = conversation_status_from_lifecycle_event_type(kind);
-            // T2: also write status through `BlocklistAIHistoryModel`.
+            // Write the new status through to the history model so the pill
+            // bar badge reflects the lifecycle transition immediately. Lookup
+            // is by run_id (the agent-id index populated by
+            // `assign_run_id_for_conversation` when the placeholder is created).
+            #[cfg(not(test))]
+            {
+                let child_info = {
+                    let history = BlocklistAIHistoryModel::as_ref(ctx);
+                    history
+                        .conversation_id_for_agent_id(run_id)
+                        .and_then(|child_conv_id| {
+                            history
+                                .terminal_surface_id_for_conversation(&child_conv_id)
+                                .map(|surface_id| (child_conv_id, surface_id))
+                        })
+                };
+                if let Some((child_conv_id, surface_id)) = child_info {
+                    BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+                        history.update_conversation_status(
+                            surface_id,
+                            child_conv_id,
+                            status.clone(),
+                            ctx,
+                        );
+                    });
+                }
+            }
             ctx.emit(OrchestrationEventStreamerEvent::ChildStatusChanged {
                 parent_task_id: self.parent_task_id,
                 run_id: run_id.to_string(),
