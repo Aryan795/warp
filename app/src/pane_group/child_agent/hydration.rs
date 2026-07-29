@@ -269,6 +269,7 @@ impl PaneGroup {
                     return;
                 };
                 self.apply_existing_ambient_task_to_pane(pane_id, child_id, task_id, ctx);
+                self.attach_execution_session_to_ambient_pane(pane_id, session_id, ctx);
             }
             ChildPaneMaterializationMode::Viewer => {
                 self.attach_viewer_child_session(child_id, session_id, ctx);
