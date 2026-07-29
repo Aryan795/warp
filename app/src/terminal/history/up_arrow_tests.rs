@@ -1,15 +1,21 @@
 //! Tests for the shared [`prompt_history_for_terminal_view`] getter used by the
 //! GUI and TUI up-arrow prompt-history menus.
+use std::collections::HashSet;
+
 use chrono::Local;
 use warpui::{App, EntityId};
 
-use super::prompt_history_for_terminal_view;
+use super::{UpArrowHistoryConfig, prompt_history_for_terminal_view, sort_and_dedupe_suggestions};
 use crate::ai::agent::AIAgentExchangeId;
 use crate::ai::agent::conversation::AIConversationId;
-use crate::ai::blocklist::history_model::AIQueryHistoryOutputStatus;
-use crate::ai::blocklist::{BlocklistAIHistoryModel, PersistedAIInput, PersistedAIInputType};
+use crate::ai::blocklist::history_model::{AIQueryHistory, AIQueryHistoryOutputStatus};
+use crate::ai::blocklist::{
+    BlocklistAIHistoryModel, InputConfig, InputType, PersistedAIInput, PersistedAIInputType,
+};
 use crate::ai::llms::LLMId;
+use crate::input_suggestions::{HistoryInputSuggestion, HistoryOrder};
 use crate::suggestions::ignored_suggestions_model::{IgnoredSuggestionsModel, SuggestionType};
+use crate::terminal::HistoryEntry;
 
 /// Builds a [`BlocklistAIHistoryModel`] seeded with `prompts` (oldest-first)
 /// as persisted queries, matching how `ai_queries` rows are restored at startup.
@@ -52,6 +58,68 @@ fn assert_prompt_history(prompts: &[&str], expected: &[&str]) {
             assert_eq!(texts, expected);
         });
     });
+}
+
+#[test]
+fn input_config_selects_the_expected_history_types() {
+    let unlocked = UpArrowHistoryConfig::for_input_config(&InputConfig {
+        input_type: InputType::AI,
+        is_locked: false,
+    });
+    assert!(unlocked.include_commands);
+    assert!(unlocked.include_prompts);
+
+    let shell = UpArrowHistoryConfig::for_input_config(&InputConfig {
+        input_type: InputType::Shell,
+        is_locked: true,
+    });
+    assert!(shell.include_commands);
+    assert!(!shell.include_prompts);
+
+    let ai = UpArrowHistoryConfig::for_input_config(&InputConfig {
+        input_type: InputType::AI,
+        is_locked: true,
+    });
+    assert!(!ai.include_commands);
+    assert!(ai.include_prompts);
+}
+
+#[test]
+fn combined_history_dedupes_commands_and_prompts_separately() {
+    let base = Local::now();
+    let old_command = HistoryEntry::command_at_time("same text".to_owned(), base, None, false);
+    let prompt = AIQueryHistory::new_for_test(
+        "same text",
+        base + chrono::Duration::milliseconds(1),
+        HistoryOrder::DifferentSession,
+    );
+    let new_command = HistoryEntry::command_at_time(
+        "same text".to_owned(),
+        base + chrono::Duration::milliseconds(2),
+        None,
+        false,
+    );
+    let suggestions = vec![
+        HistoryInputSuggestion::Command {
+            entry: &old_command,
+        },
+        HistoryInputSuggestion::AIQuery { entry: prompt },
+        HistoryInputSuggestion::Command {
+            entry: &new_command,
+        },
+    ];
+
+    let deduped = sort_and_dedupe_suggestions(suggestions, None, &HashSet::new());
+
+    assert_eq!(deduped.len(), 2);
+    assert!(deduped[0].is_ai_query());
+    assert_eq!(deduped[0].text(), "same text");
+    match &deduped[1] {
+        HistoryInputSuggestion::Command { entry } => {
+            assert_eq!(entry.start_ts, new_command.start_ts);
+        }
+        HistoryInputSuggestion::AIQuery { .. } => panic!("expected newest command"),
+    }
 }
 
 #[test]

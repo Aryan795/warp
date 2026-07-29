@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use string_offset::CharOffset;
 use warp::tui_export::{
-    AcceptSlashCommandOrSavedPrompt, AgentConversationEntryId, LLMId, TuiMcpAction,
+    AcceptSlashCommandOrSavedPrompt, AgentConversationEntryId, LLMId, TuiHistoryItem, TuiMcpAction,
 };
 use warp_search_core::inline_menu::{InlineMenuResultsUpdate, InlineMenuSelection};
 use warpui_core::elements::CrossAxisAlignment;
@@ -44,6 +44,7 @@ const MIN_REAL_ROWS_WITH_SCROLL_INDICATORS: usize = 3;
 pub(crate) enum TuiInlineMenuRowStyle {
     Default,
     InlineMenuItem,
+    HistoryCommand,
 }
 
 pub(crate) fn active_inline_menu(
@@ -273,8 +274,8 @@ pub(crate) enum TuiInlineMenuAccepted {
     Conversation(AgentConversationEntryId),
     Model(LLMId),
     Mcp(TuiMcpAction),
-    /// The text of a prompt accepted from the up-arrow prompt-history menu.
-    PromptHistory(String),
+    /// A typed prompt or command accepted from the up-arrow history menu.
+    History(TuiHistoryItem),
     /// A shell completion and the exact input span it replaces.
     Completion(TuiCompletionAcceptance),
 }
@@ -464,7 +465,7 @@ impl TuiInlineMenuHandle for ModelHandle<TuiPromptHistoryMenuModel> {
 
     fn accept(&self, ctx: &mut AppContext) -> Option<TuiInlineMenuAccepted> {
         self.update(ctx, |model, ctx| model.accept_selected(ctx))
-            .map(TuiInlineMenuAccepted::PromptHistory)
+            .map(TuiInlineMenuAccepted::History)
     }
 
     fn dismiss(&self, ctx: &mut AppContext) {
@@ -908,14 +909,21 @@ fn menu_result_row(
     } else {
         match (row.is_selectable, row.style) {
             (true, TuiInlineMenuRowStyle::InlineMenuItem) => builder.slash_command_text_style(),
-            (true, TuiInlineMenuRowStyle::Default) => builder.primary_text_style(),
-            (false, TuiInlineMenuRowStyle::Default | TuiInlineMenuRowStyle::InlineMenuItem) => {
-                builder.dim_text_style()
+            (true, TuiInlineMenuRowStyle::Default | TuiInlineMenuRowStyle::HistoryCommand) => {
+                builder.primary_text_style()
             }
+            (
+                false,
+                TuiInlineMenuRowStyle::Default
+                | TuiInlineMenuRowStyle::InlineMenuItem
+                | TuiInlineMenuRowStyle::HistoryCommand,
+            ) => builder.dim_text_style(),
         }
     };
     let show_description = match row.style {
-        TuiInlineMenuRowStyle::Default => row.description.is_some(),
+        TuiInlineMenuRowStyle::Default | TuiInlineMenuRowStyle::HistoryCommand => {
+            row.description.is_some()
+        }
         TuiInlineMenuRowStyle::InlineMenuItem => {
             slash_command_columns.show_second && row.description.is_some()
         }
@@ -927,21 +935,33 @@ fn menu_result_row(
     };
     let single_line_title = single_line_menu_title(&row.title);
     let title = match row.style {
-        TuiInlineMenuRowStyle::Default => single_line_title,
+        TuiInlineMenuRowStyle::Default | TuiInlineMenuRowStyle::HistoryCommand => single_line_title,
         TuiInlineMenuRowStyle::InlineMenuItem => format_tui_first_column(
             &single_line_title,
             slash_command_columns.with_second_visible(show_description),
         ),
     };
-    let title = TuiText::new(title)
-        .with_style(title_style)
+    let title = match row.style {
+        TuiInlineMenuRowStyle::HistoryCommand => TuiText::from_spans([
+            ("! ".to_owned(), builder.shell_command_accent_style()),
+            (title, title_style),
+        ])
         .truncate_with_ellipsis()
-        .finish();
+        .finish(),
+        TuiInlineMenuRowStyle::Default | TuiInlineMenuRowStyle::InlineMenuItem => {
+            TuiText::new(title)
+                .with_style(title_style)
+                .truncate_with_ellipsis()
+                .finish()
+        }
+    };
     let description_style = if is_selected {
         builder.slash_command_selection_text_style()
     } else {
         match row.style {
-            TuiInlineMenuRowStyle::Default => builder.muted_text_style(),
+            TuiInlineMenuRowStyle::Default | TuiInlineMenuRowStyle::HistoryCommand => {
+                builder.muted_text_style()
+            }
             TuiInlineMenuRowStyle::InlineMenuItem => builder.primary_text_style(),
         }
     };
@@ -949,7 +969,7 @@ fn menu_result_row(
     let mut content = TuiFlex::row()
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
         .child(match row.style {
-            TuiInlineMenuRowStyle::Default => title,
+            TuiInlineMenuRowStyle::Default | TuiInlineMenuRowStyle::HistoryCommand => title,
             TuiInlineMenuRowStyle::InlineMenuItem => TuiConstrainedBox::new(title)
                 .with_max_cols(
                     u16::try_from(title_columns)
@@ -959,7 +979,9 @@ fn menu_result_row(
         });
     if let Some(description) = row.description.as_ref().filter(|_| show_description) {
         let description_prefix = match row.style {
-            TuiInlineMenuRowStyle::Default => format!("  {description}"),
+            TuiInlineMenuRowStyle::Default | TuiInlineMenuRowStyle::HistoryCommand => {
+                format!("  {description}")
+            }
             TuiInlineMenuRowStyle::InlineMenuItem => description.clone(),
         };
         let mut description_spans = vec![(description_prefix, description_style)];

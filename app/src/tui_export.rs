@@ -220,8 +220,8 @@ pub use crate::terminal::terminal_manager::BlockSpacing;
 pub use crate::terminal::view::blocklist_filter::should_show_task_in_blocklist;
 pub use crate::terminal::view::{ExecuteCommandEvent, WAKEUP_THROTTLE_PERIOD};
 pub use crate::terminal::{
-    BlockPadding, PtyIntent, PtyIntentEvent, ShellLaunchData, SizeInfo, SizeUpdate,
-    TerminalManager as TerminalManagerTrait, TerminalModel, TerminalSurface,
+    BlockPadding, History, HistoryEvent, PtyIntent, PtyIntentEvent, ShellLaunchData, SizeInfo,
+    SizeUpdate, TerminalManager as TerminalManagerTrait, TerminalModel, TerminalSurface,
     prompt_history_for_terminal_view,
 };
 pub use crate::themes::default_themes::{dark_theme, light_theme};
@@ -302,4 +302,50 @@ pub fn tui_completion_context_has_exact_command(
 pub fn agent_conversations_cloud_metadata_load_failed(app: &warpui::AppContext) -> bool {
     crate::ai::agent_conversations_model::AgentConversationsModel::as_ref(app)
         .cloud_conversation_metadata_load_failed()
+}
+
+/// An owned, presentation-neutral up-arrow history item for the TUI frontend.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TuiHistoryItem {
+    Command(String),
+    Prompt(String),
+}
+
+impl TuiHistoryItem {
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Command(text) | Self::Prompt(text) => text,
+        }
+    }
+
+    pub fn input_type(&self) -> InputType {
+        match self {
+            Self::Command(_) => InputType::Shell,
+            Self::Prompt(_) => InputType::AI,
+        }
+    }
+}
+
+/// Returns the shared GUI-ordered up-arrow history as owned TUI-facing items.
+///
+/// The shared history model remains responsible for session scoping, ignored
+/// suggestions, agent-command policy, ordering, and per-type deduplication.
+pub fn tui_history_for_terminal_view(
+    terminal_view_id: warpui::EntityId,
+    session_id: Option<warp_core::SessionId>,
+    input_config: InputConfig,
+    app: &warpui::AppContext,
+) -> Vec<TuiHistoryItem> {
+    let config = crate::terminal::history::UpArrowHistoryConfig::for_input_config(&input_config);
+    History::as_ref(app)
+        .up_arrow_suggestions_for_terminal_view(terminal_view_id, session_id, config, app)
+        .into_iter()
+        .map(|suggestion| {
+            if suggestion.is_ai_query() {
+                TuiHistoryItem::Prompt(suggestion.text().to_owned())
+            } else {
+                TuiHistoryItem::Command(suggestion.text().to_owned())
+            }
+        })
+        .collect()
 }

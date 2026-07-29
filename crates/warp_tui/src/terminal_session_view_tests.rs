@@ -17,8 +17,8 @@ use warp::tui_export::{
     AgentViewEntryOrigin, BlockPadding, BlocklistAIHistoryModel, ConversationStatus,
     ConversationUsageTotals, Harness, LLMPreferences, LongRunningCommandControlState, PtyIntent,
     PtyIntentEvent, QueuedQueryModel, SizeInfo, SizeUpdate, TaskId, TranscriptScope,
-    UserTakeOverReason, export_conversation_markdown, register_tui_session_view_test_singletons,
-    slash_commands,
+    TuiHistoryItem, UserTakeOverReason, export_conversation_markdown,
+    register_tui_session_view_test_singletons, slash_commands,
 };
 use warp_core::channel::Channel;
 use warp_core::settings::Setting as _;
@@ -113,6 +113,36 @@ fn statusline_datetime_requests_a_periodic_repaint() {
                 "visible date/time items must repaint so their value cannot freeze"
             );
         });
+    });
+}
+
+#[test]
+fn accepted_command_history_executes_as_a_user_command() {
+    App::test((), |mut app| async move {
+        let fixture = focus_test_fixture(&mut app);
+        let (view, _) = add_focus_test_session(&mut app, &fixture, true);
+        let commands = Rc::new(RefCell::new(Vec::new()));
+        let commands_for_subscription = commands.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_view(&view, move |_, event, _| {
+                if let TuiTerminalSessionEvent::ExecuteCommand(event) = event {
+                    assert!(matches!(
+                        event.source,
+                        warp::tui_export::CommandExecutionSource::User
+                    ));
+                    commands_for_subscription
+                        .borrow_mut()
+                        .push(event.command.clone());
+                }
+            });
+        });
+
+        view.update(&mut app, |view, ctx| {
+            view.handle_accepted_history(TuiHistoryItem::Command("cargo test".to_owned()), ctx);
+        });
+
+        assert_eq!(commands.borrow().as_slice(), &["cargo test".to_owned()]);
+        assert_eq!(app.read(|ctx| input_text(&view, ctx)), "");
     });
 }
 #[test]
