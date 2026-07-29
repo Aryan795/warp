@@ -1,21 +1,50 @@
 use warp::appearance::Appearance;
 use warpui_core::App;
-use warpui_core::elements::tui::{TuiBufferExt, TuiRect};
+use warpui_core::elements::tui::{TuiBufferExt, TuiRect, text_width};
 use warpui_core::presenter::tui::TuiPresenter;
 
-use super::{compact_footer_path, conversation_restoring, login_placeholder};
+use super::{conversation_restoring, elide_footer_path, login_placeholder};
 
 #[test]
-fn compact_footer_path_preserves_short_paths() {
-    assert_eq!(compact_footer_path("/erica/project"), "/erica/project");
+fn elide_footer_path_keeps_full_path_when_it_fits() {
+    // The regression this fixes: with ample width the cwd is shown in full,
+    // never eagerly collapsed to `root/…/basename`.
+    let path = "/erica/projects/research";
+    assert_eq!(elide_footer_path(path, 100), path);
+    // A two-component path is likewise untouched when it fits.
+    assert_eq!(elide_footer_path("/erica/project", 100), "/erica/project");
 }
 
 #[test]
-fn compact_footer_path_elides_middle_components() {
-    assert_eq!(compact_footer_path("~/Documents/GitHub/warp"), "~/…/warp");
-    assert_eq!(compact_footer_path("/long/path/to/project"), "/…/project");
+fn elide_footer_path_elides_progressively_as_width_shrinks() {
+    let path = "/one/two/three/four/five";
+    let full = text_width(path);
+    // Just under the full width: elide the least possible while keeping the
+    // root and basename, and stay within budget.
+    let budget = full - 1;
+    let elided = elide_footer_path(path, budget);
+    assert!(elided.contains('…'), "expected middle elision: {elided:?}");
+    assert!(elided.starts_with("/one"), "root preserved: {elided:?}");
+    assert!(elided.ends_with("five"), "basename preserved: {elided:?}");
+    assert!(text_width(&elided) <= budget);
+    // Much tighter: elide down toward `/…/basename`, still within budget.
+    let tight = elide_footer_path(path, 8);
+    assert!(tight.ends_with("five"), "basename preserved: {tight:?}");
+    assert!(text_width(&tight) <= 8);
+}
+
+#[test]
+fn elide_footer_path_truncates_basename_as_last_resort() {
+    // Even the minimal `…/basename` cannot fit, so the basename is
+    // grapheme-truncated with an ellipsis without panicking or overflowing.
+    let elided = elide_footer_path("/one/two/threeeeeeeeeeeeee", 6);
+    assert!(text_width(&elided) <= 6, "stays within budget: {elided:?}");
+}
+
+#[test]
+fn elide_footer_path_handles_windows_paths() {
     assert_eq!(
-        compact_footer_path(r"C:\Users\erica\project"),
+        elide_footer_path(r"C:\Users\erica\project", 12),
         r"C:\…\project"
     );
 }
