@@ -42,6 +42,8 @@ use crate::server::sync_queue::SyncQueue;
 use crate::server::voice_transcriber::ServerVoiceTranscriber;
 use crate::settings::manager::SettingsManager;
 use crate::settings::{AISettings, PrivacySettings, init_and_register_user_preferences};
+use crate::suggestions::ignored_suggestions_model::IgnoredSuggestionsModel;
+use crate::terminal::History;
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::terminal::session_settings::SessionSettings;
 use crate::user_config::WarpConfig;
@@ -115,7 +117,9 @@ pub fn register_tui_session_view_test_singletons(app: &mut warpui::App) {
     app.add_singleton_model(SyncQueue::mock);
     app.add_singleton_model(CloudModel::mock);
     app.add_singleton_model(CloudEnvironmentCatalog::new);
-    app.add_singleton_model(|_| crate::appearance::Appearance::mock());
+    if !app.read(|ctx| ctx.has_singleton_model::<crate::appearance::Appearance>()) {
+        app.add_singleton_model(|_| crate::appearance::Appearance::mock());
+    }
 
     app.add_singleton_model(|_| TemplatableMCPServerManager::default());
     app.add_singleton_model(LLMPreferences::new);
@@ -141,7 +145,9 @@ pub fn register_tui_session_view_test_singletons(app: &mut warpui::App) {
         crate::ai::document::ai_document_model::AIDocumentModel::new_for_test()
     });
 
-    app.add_singleton_model(|_| BlocklistAIHistoryModel::default());
+    if !app.read(|ctx| ctx.has_singleton_model::<BlocklistAIHistoryModel>()) {
+        app.add_singleton_model(|_| BlocklistAIHistoryModel::default());
+    }
     app.add_singleton_model(QueuedQueryModel::new);
     app.add_singleton_model(|_| CLIAgentSessionsModel::new());
     app.add_singleton_model(OrchestrationEventService::new);
@@ -185,4 +191,21 @@ pub fn register_tui_session_view_test_singletons(app: &mut warpui::App) {
     );
     app.add_singleton_model(crate::workflows::local_workflows::LocalWorkflows::new);
     app.add_singleton_model(crate::ai::skills::SkillManager::new);
+}
+
+/// Registers the history singletons (`History`, `IgnoredSuggestionsModel`) that
+/// the TUI up-arrow history menu reads via `history_suggestions_for_terminal_view`.
+///
+/// `AISettings` and the broader app singletons it depends on are registered by
+/// [`register_tui_session_view_test_singletons`]; call both when a test drives
+/// the combined prompt+command history menu. [`History`] is registered empty
+/// (no bootstrapped session), so prompts still surface and commands require a
+/// seeded session.
+pub fn register_tui_history_test_singletons(app: &mut warpui::App) {
+    if !app.read(|ctx| ctx.has_singleton_model::<History>()) {
+        app.add_singleton_model(|_| History::default());
+    }
+    if !app.read(|ctx| ctx.has_singleton_model::<IgnoredSuggestionsModel>()) {
+        app.add_singleton_model(|_| IgnoredSuggestionsModel::new(vec![]));
+    }
 }

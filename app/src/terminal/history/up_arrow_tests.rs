@@ -4,6 +4,7 @@ use chrono::Local;
 use warpui::{App, EntityId};
 
 use super::prompt_history_for_terminal_view;
+use super::{UpArrowHistoryConfig, history_suggestions_for_terminal_view};
 use crate::ai::agent::AIAgentExchangeId;
 use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::blocklist::history_model::AIQueryHistoryOutputStatus;
@@ -96,6 +97,27 @@ fn prompt_history_excludes_ignored_prompts() {
                 texts,
                 vec!["deploy the app".to_owned(), "build the project".to_owned()]
             );
+        });
+    });
+}
+
+#[test]
+fn history_suggestions_for_terminal_view_returns_empty_without_singletons() {
+    App::test((), |app| async move {
+        app.read(|ctx| {
+            // With no `History`/`AISettings`/`IgnoredSuggestionsModel` singletons
+            // registered (e.g. a bare test fixture), the TUI-facing wrapper falls
+            // back to an empty list instead of panicking.
+            let suggestions = history_suggestions_for_terminal_view(
+                EntityId::new(),
+                None,
+                UpArrowHistoryConfig {
+                    include_commands: true,
+                    include_prompts: true,
+                },
+                ctx,
+            );
+            assert!(suggestions.is_empty());
         });
     });
 }

@@ -27,7 +27,7 @@ use warp::tui_export::{
     ChangelogRequestType, CloudConversationData, CommandExecutionSource, ConversationFileExport,
     ConversationSelection, ConversationSelectionHandle, ConversationUsageTotals,
     ExecuteCommandEvent, GetRelevantFilesController, GitRepoModels, GitRepoStatusModel,
-    GitStatusMetadata, LLMId, LLMPreferences, LLMPreferencesEvent,
+    GitStatusMetadata, InputTypeAutoDetectionSource, LLMId, LLMPreferences, LLMPreferencesEvent,
     LOCAL_SKILLS_REMOTE_EXECUTION_ERROR_MESSAGE, ModelEvent, ParsedSlashCommandInput,
     PersistenceWriter, PtyIntent, PtyIntentEvent, QueuedQueryEvent, QueuedQueryModel,
     RepoDetectionSessionType, RepoDetectionSource, ServerConversationToken, Sessions,
@@ -78,7 +78,7 @@ use crate::inline_menu::{MAX_INLINE_MENU_ROWS, TuiInlineMenu, active_inline_menu
 use crate::input::view::TuiInputAction;
 use crate::input::{TuiInputView, TuiInputViewEvent};
 use crate::input_hints;
-use crate::input_mode_policy::{self, TuiInputModePolicy};
+use crate::input_mode_policy::{self, AI_LOCKED_CONFIG, SHELL_LOCKED_CONFIG, TuiInputModePolicy};
 use crate::input_suggestions_mode::{TuiInputSuggestionsMode, TuiInputSuggestionsModeModel};
 use crate::keybindings::{
     ATTACHMENTS_AVAILABLE_FLAG, CONTEXTUAL_PLAN_TOGGLE_BINDING_NAME,
@@ -95,7 +95,9 @@ use crate::orchestration_tab_bar::{
     render_orchestration_tab_footer,
 };
 use crate::platform::reveal_path_in_file_manager;
-use crate::prompt_history_menu::{TuiPromptHistoryMenuEvent, TuiPromptHistoryMenuModel};
+use crate::prompt_history_menu::{
+    TuiHistoryAcceptedItem, TuiHistoryKind, TuiPromptHistoryMenuEvent, TuiPromptHistoryMenuModel,
+};
 use crate::resume::TuiExitSummaryHandle;
 use crate::session_registry::TuiSessions;
 use crate::skills_menu::{TuiSkillMenuEvent, TuiSkillMenuModel};
@@ -1451,6 +1453,8 @@ impl TuiTerminalSessionView {
         let prompt_history_menu = ctx.add_model(|ctx| {
             TuiPromptHistoryMenuModel::new(
                 input_editor_model.clone(),
+                ai_input_model.clone(),
+                active_session.clone(),
                 suggestions_mode.clone(),
                 terminal_surface_id,
                 ctx,
@@ -1615,8 +1619,8 @@ impl TuiTerminalSessionView {
             TuiInputViewEvent::AcceptedMcp(action) => {
                 view.handle_accepted_mcp_action(*action, ctx);
             }
-            TuiInputViewEvent::AcceptedPromptHistory(text) => {
-                view.handle_accepted_prompt_history(text.clone(), ctx);
+            TuiInputViewEvent::AcceptedPromptHistory(item) => {
+                view.handle_accepted_prompt_history(item.clone(), ctx);
             }
             TuiInputViewEvent::RequestShellCompletion => {
                 view.request_shell_completion(ctx);
@@ -3563,14 +3567,32 @@ impl TuiTerminalSessionView {
         ctx.notify();
     }
 
-    /// Fills the accepted prompt-history prompt into the input and submits it
-    /// immediately, matching the GUI's accept-a-prompt-from-history behavior.
-    /// The menu has already closed itself.
-    fn handle_accepted_prompt_history(&mut self, text: String, ctx: &mut ViewContext<Self>) {
+    /// Routes an accepted up-arrow history entry. Commands are executed as shell
+    /// commands (after locking shell mode so submit routing matches a typed `!`
+    /// command); prompts are submitted to the agent conversation. The menu has
+    /// already closed itself and previewed the entry's text and input mode.
+    fn handle_accepted_prompt_history(
+        &mut self,
+        item: TuiHistoryAcceptedItem,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let is_empty = item.text.is_empty();
         self.input_view.update(ctx, |input, ctx| {
-            input.set_text(&text, ctx);
+            input.set_text(&item.text, ctx);
         });
-        self.handle_submitted(text, ctx);
+        let config = match item.kind {
+            TuiHistoryKind::Command => SHELL_LOCKED_CONFIG,
+            TuiHistoryKind::Prompt => AI_LOCKED_CONFIG,
+        };
+        self.ai_input_model.update(ctx, |input_mode, ctx| {
+            input_mode.set_input_config(
+                config,
+                is_empty,
+                Some(InputTypeAutoDetectionSource::HistorySelection),
+                ctx,
+            );
+        });
+        self.handle_submitted(item.text, ctx);
     }
 
     fn select_tui_slash_command(&mut self, command: &StaticCommand, ctx: &mut ViewContext<Self>) {

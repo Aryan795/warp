@@ -15,8 +15,9 @@ use warp::tui_export::{
     AcceptSlashCommandOrSavedPrompt, BlocklistAIHistoryModel, BlocklistAIInputModel,
     ConversationSelectionEvent, InputConfig, InputModePolicy, InputType, LLMId, PolicyConfigUpdate,
     SlashCommandId, SlashCommandMixer, VoiceInput, blocklist_ai_history_model_with_queries,
-    register_tui_session_view_test_singletons,
+    register_tui_history_test_singletons, register_tui_session_view_test_singletons,
 };
+use warp_core::features::FeatureFlag;
 use warp_editor::model::CoreEditorModel;
 use warpui::EntityIdMap;
 use warpui_core::elements::tui::{
@@ -48,7 +49,9 @@ use crate::input_suggestions_mode::{TuiInputSuggestionsMode, TuiInputSuggestions
 use crate::model_menu::TuiModelMenuModel;
 use crate::prompt_history_menu::TuiPromptHistoryMenuModel;
 use crate::slash_commands::{TuiSlashCommandModel, TuiSlashCommandRow};
-use crate::test_fixtures::{add_test_conversation_selection, add_test_semantic_selection};
+use crate::test_fixtures::{
+    add_test_active_session, add_test_conversation_selection, add_test_semantic_selection,
+};
 use crate::tui_builder::TuiUiBuilder;
 use crate::voice_input::{TuiVoiceInputModel, TuiVoiceInputState};
 
@@ -315,14 +318,18 @@ fn add_suggestions_mode(
 fn add_prompt_history_menu(
     ctx: &mut AppContext,
     input_model: &ModelHandle<CodeEditorModel>,
+    input_mode: &ModelHandle<BlocklistAIInputModel>,
     suggestions_mode: &ModelHandle<TuiInputSuggestionsModeModel>,
 ) -> ModelHandle<TuiPromptHistoryMenuModel> {
     if !ctx.has_singleton_model::<BlocklistAIHistoryModel>() {
         ctx.add_singleton_model(|_| BlocklistAIHistoryModel::default());
     }
+    let active_session = add_test_active_session(ctx);
     ctx.add_model(|ctx| {
         TuiPromptHistoryMenuModel::new(
             input_model.clone(),
+            input_mode.clone(),
+            active_session,
             suggestions_mode.clone(),
             EntityId::new(),
             ctx,
@@ -330,30 +337,40 @@ fn add_prompt_history_menu(
     })
 }
 
+/// Registers the singletons the combined history getter reads (`History`,
+/// `IgnoredSuggestionsModel`, `AISettings`, auth, etc.) and seeds a
+/// `BlocklistAIHistoryModel` with `prompts` (oldest-first). Run on the `App`
+/// before the `app.update` that builds the view. Tests that drive the menu must
+/// also hold a `FeatureFlag::AgentMode.override_enabled(true)` guard so prompts
+/// surface.
+fn prepare_prompt_history_app(app: &mut App, prompts: &[&str]) {
+    let prompts_owned: Vec<String> = prompts.iter().map(|prompt| (*prompt).to_owned()).collect();
+    // Seeded model first so `register_tui_session_view_test_singletons` skips
+    // its empty `BlocklistAIHistoryModel` default.
+    app.add_singleton_model(move |_| blocklist_ai_history_model_with_queries(prompts_owned));
+    register_tui_session_view_test_singletons(app);
+    register_tui_history_test_singletons(app);
+}
+
 /// Builds an input view whose prompt-history menu is registered in
-/// `inline_menus` (so Up/Down/Submit/Escape route to it) and backed by a
-/// history model seeded with `prompts` (oldest-first). Returns the view and the
-/// menu handle so tests can assert on menu state.
+/// `inline_menus` (so Up/Down/Submit/Escape route to it). Call after
+/// [`prepare_prompt_history_app`]. Returns the view and the menu handle.
 fn build_view_with_prompt_history(
     ctx: &mut AppContext,
-    prompts: &[&str],
 ) -> (
     ViewHandle<TuiInputView>,
     ModelHandle<TuiPromptHistoryMenuModel>,
 ) {
-    ctx.add_singleton_model(|_| Appearance::mock());
     add_test_semantic_selection(ctx);
-    ctx.add_singleton_model(|_| {
-        blocklist_ai_history_model_with_queries(
-            prompts.iter().map(|prompt| (*prompt).to_owned()).collect(),
-        )
-    });
     let input_model = ctx.add_model(|ctx| CodeEditorModel::new_tui(W, ctx));
     let input_mode = BlocklistAIInputModel::mock(Rc::new(TestInputModePolicy), ctx);
     let suggestions_mode = add_suggestions_mode(ctx, TuiInputSuggestionsMode::Closed);
+    let active_session = add_test_active_session(ctx);
     let prompt_history_menu = ctx.add_model(|ctx| {
         TuiPromptHistoryMenuModel::new(
             input_model.clone(),
+            input_mode.clone(),
+            active_session,
             suggestions_mode.clone(),
             EntityId::new(),
             ctx,
@@ -861,7 +878,8 @@ fn build_view_with_orchestration_tabs(
     let input_model = ctx.add_model(|ctx| CodeEditorModel::new_tui(W, ctx));
     let input_mode = BlocklistAIInputModel::mock(Rc::new(TestInputModePolicy), ctx);
     let suggestions_mode = add_suggestions_mode(ctx, TuiInputSuggestionsMode::Closed);
-    let prompt_history_menu = add_prompt_history_menu(ctx, &input_model, &suggestions_mode);
+    let prompt_history_menu =
+        add_prompt_history_menu(ctx, &input_model, &input_mode, &suggestions_mode);
     let orchestration_tabs_available_for_view = orchestration_tabs_available.clone();
     let (_window_id, view) = ctx.add_tui_window(
         AddWindowOptions {
@@ -968,7 +986,8 @@ fn build_view_with_conversation_menu(
     });
     let inline_menu = TuiInlineMenu::new(TestConversationMenuHandle(menu_model.clone()));
     let inline_menu_for_view = inline_menu.clone();
-    let prompt_history_menu = add_prompt_history_menu(ctx, &input_model, &suggestions_mode);
+    let prompt_history_menu =
+        add_prompt_history_menu(ctx, &input_model, &input_mode, &suggestions_mode);
     let prompt_history_inline_menu = TuiInlineMenu::new(prompt_history_menu);
     let (_window_id, view) = ctx.add_tui_window(
         AddWindowOptions {
@@ -1034,7 +1053,8 @@ fn build_view_with_inline_menu_gate(
             0,
         )
     });
-    let prompt_history_menu = add_prompt_history_menu(ctx, &input_model, &suggestions_mode);
+    let prompt_history_menu =
+        add_prompt_history_menu(ctx, &input_model, &input_mode, &suggestions_mode);
     let inline_menu = TuiInlineMenu::new(menu_model.clone());
     let prompt_history_inline_menu = TuiInlineMenu::new(prompt_history_menu);
     let (_window_id, view) = ctx.add_tui_window(
@@ -1079,7 +1099,8 @@ fn build_view_with_model_menu(
             0,
         )
     });
-    let prompt_history_menu = add_prompt_history_menu(ctx, &input_model, &suggestions_mode);
+    let prompt_history_menu =
+        add_prompt_history_menu(ctx, &input_model, &input_mode, &suggestions_mode);
     let inline_menu = TuiInlineMenu::new(menu_model.clone());
     let prompt_history_inline_menu = TuiInlineMenu::new(prompt_history_menu);
     let (_window_id, view) = ctx.add_tui_window(
@@ -2976,9 +2997,10 @@ fn prompt_history_rows(
 #[test]
 fn up_on_first_row_opens_prompt_history_menu() {
     App::test((), |mut app| async move {
+        let _agent_mode = FeatureFlag::AgentMode.override_enabled(true);
+        prepare_prompt_history_app(&mut app, &["deploy the app", "run the tests"]);
         app.update(|ctx| {
-            let (view, menu) =
-                build_view_with_prompt_history(ctx, &["deploy the app", "run the tests"]);
+            let (view, menu) = build_view_with_prompt_history(ctx);
             assert!(!menu.as_ref(ctx).is_open(ctx));
 
             dispatch(
@@ -3000,9 +3022,10 @@ fn up_on_first_row_opens_prompt_history_menu() {
 #[test]
 fn up_from_shortcuts_replaces_it_with_prompt_history() {
     App::test((), |mut app| async move {
+        let _agent_mode = FeatureFlag::AgentMode.override_enabled(true);
+        prepare_prompt_history_app(&mut app, &["deploy the app", "run the tests"]);
         app.update(|ctx| {
-            let (view, menu) =
-                build_view_with_prompt_history(ctx, &["deploy the app", "run the tests"]);
+            let (view, menu) = build_view_with_prompt_history(ctx);
             type_str(&view, ctx, "?");
             assert_eq!(
                 view.as_ref(ctx).suggestions_mode.as_ref(ctx).mode(),
@@ -3028,8 +3051,10 @@ fn up_from_shortcuts_replaces_it_with_prompt_history() {
 #[test]
 fn up_on_lower_row_moves_cursor_without_opening_prompt_history() {
     App::test((), |mut app| async move {
+        let _agent_mode = FeatureFlag::AgentMode.override_enabled(true);
+        prepare_prompt_history_app(&mut app, &["deploy the app"]);
         app.update(|ctx| {
-            let (view, menu) = build_view_with_prompt_history(ctx, &["deploy the app"]);
+            let (view, menu) = build_view_with_prompt_history(ctx);
             // Two visual rows; the caret starts on the last (row 1).
             type_str(&view, ctx, "a");
             dispatch(
@@ -3057,12 +3082,15 @@ fn up_on_lower_row_moves_cursor_without_opening_prompt_history() {
     });
 }
 
-/// In `!` shell mode Up does not open the agent prompt-history menu.
+/// In `!` shell mode Up opens the combined history menu (commands only; with
+/// an empty session there are no commands, so it shows the empty state).
 #[test]
-fn shell_mode_up_does_not_open_prompt_history() {
+fn shell_mode_up_opens_history_menu() {
     App::test((), |mut app| async move {
+        let _agent_mode = FeatureFlag::AgentMode.override_enabled(true);
+        prepare_prompt_history_app(&mut app, &["deploy the app"]);
         app.update(|ctx| {
-            let (view, menu) = build_view_with_prompt_history(ctx, &["deploy the app"]);
+            let (view, menu) = build_view_with_prompt_history(ctx);
             type_str(&view, ctx, "!");
             assert!(view.as_ref(ctx).is_shell_mode(ctx));
 
@@ -3072,7 +3100,10 @@ fn shell_mode_up_does_not_open_prompt_history() {
                 &[TuiInputAction::EditorCommand(TuiEditorCommand::MoveUp)],
             );
 
-            assert!(!menu.as_ref(ctx).is_open(ctx));
+            assert!(
+                menu.as_ref(ctx).is_open(ctx),
+                "Up in shell mode opens the combined history menu"
+            );
         });
     });
 }
@@ -3082,9 +3113,10 @@ fn shell_mode_up_does_not_open_prompt_history() {
 #[test]
 fn escape_closes_prompt_history_and_restores_typed_buffer() {
     App::test((), |mut app| async move {
+        let _agent_mode = FeatureFlag::AgentMode.override_enabled(true);
+        prepare_prompt_history_app(&mut app, &["deploy alpha", "deploy beta"]);
         let (view, menu) = app.update(|ctx| {
-            let (view, menu) =
-                build_view_with_prompt_history(ctx, &["deploy alpha", "deploy beta"]);
+            let (view, menu) = build_view_with_prompt_history(ctx);
             type_str(&view, ctx, "deploy");
             dispatch(
                 &view,
@@ -3116,9 +3148,10 @@ fn escape_closes_prompt_history_and_restores_typed_buffer() {
 #[test]
 fn preview_on_select_keeps_query_stable() {
     App::test((), |mut app| async move {
+        let _agent_mode = FeatureFlag::AgentMode.override_enabled(true);
+        prepare_prompt_history_app(&mut app, &["deploy alpha", "deploy beta", "unrelated"]);
         let (view, menu) = app.update(|ctx| {
-            let (view, menu) =
-                build_view_with_prompt_history(ctx, &["deploy alpha", "deploy beta", "unrelated"]);
+            let (view, menu) = build_view_with_prompt_history(ctx);
             type_str(&view, ctx, "deploy");
             dispatch(
                 &view,
@@ -3172,9 +3205,10 @@ fn preview_on_select_keeps_query_stable() {
 #[test]
 fn preview_and_restore_do_not_leave_undoable_states() {
     App::test((), |mut app| async move {
+        let _agent_mode = FeatureFlag::AgentMode.override_enabled(true);
+        prepare_prompt_history_app(&mut app, &["deploy alpha", "deploy beta"]);
         let (view, menu) = app.update(|ctx| {
-            let (view, menu) =
-                build_view_with_prompt_history(ctx, &["deploy alpha", "deploy beta"]);
+            let (view, menu) = build_view_with_prompt_history(ctx);
             type_str(&view, ctx, "deploy");
             dispatch(
                 &view,
@@ -3306,8 +3340,10 @@ fn copy_on_mouse_highlight_does_not_copy_empty_selection() {
 #[test]
 fn submit_accepts_highlighted_prompt_history_entry() {
     App::test((), |mut app| async move {
+        let _agent_mode = FeatureFlag::AgentMode.override_enabled(true);
+        prepare_prompt_history_app(&mut app, &["deploy the app"]);
         let (view, accepted) = app.update(|ctx| {
-            let (view, _menu) = build_view_with_prompt_history(ctx, &["deploy the app"]);
+            let (view, _menu) = build_view_with_prompt_history(ctx);
             dispatch(
                 &view,
                 ctx,
@@ -3316,8 +3352,10 @@ fn submit_accepts_highlighted_prompt_history_entry() {
             let accepted = Rc::new(RefCell::new(Vec::new()));
             let accepted_for_subscription = accepted.clone();
             ctx.subscribe_to_view(&view, move |_, event, _| {
-                if let TuiInputViewEvent::AcceptedPromptHistory(text) = event {
-                    accepted_for_subscription.borrow_mut().push(text.clone());
+                if let TuiInputViewEvent::AcceptedPromptHistory(item) = event {
+                    accepted_for_subscription
+                        .borrow_mut()
+                        .push(item.text.clone());
                 }
             });
             (view, accepted)
