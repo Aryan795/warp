@@ -23,8 +23,8 @@ fn credential_refresh_display_delays_and_clears() {
         });
         let stream_id = ResponseStreamId::new_for_test();
 
-        controller.update(&mut app, |controller, _| {
-            controller.set_credential_refresh_waiting_for_test(stream_id.clone(), true);
+        controller.update(&mut app, |controller, ctx| {
+            controller.set_credential_refresh_waiting_for_test(stream_id.clone(), true, ctx);
         });
         status_bar.update(&mut app, |status_bar, ctx| {
             status_bar.latest_response_stream_id = Some(stream_id.clone());
@@ -35,8 +35,8 @@ fn credential_refresh_display_delays_and_clears() {
 
         // A fast refresh must end before the delayed text becomes visible.
         Timer::after(Duration::from_millis(100)).await;
-        controller.update(&mut app, |controller, _| {
-            controller.set_credential_refresh_waiting_for_test(stream_id.clone(), false);
+        controller.update(&mut app, |controller, ctx| {
+            controller.set_credential_refresh_waiting_for_test(stream_id.clone(), false, ctx);
         });
         status_bar.update(&mut app, |status_bar, ctx| {
             status_bar.update_credential_refresh_display(ctx);
@@ -49,8 +49,8 @@ fn credential_refresh_display_delays_and_clears() {
         });
 
         // A refresh that outlives the delay must show the alternate text.
-        controller.update(&mut app, |controller, _| {
-            controller.set_credential_refresh_waiting_for_test(stream_id.clone(), true);
+        controller.update(&mut app, |controller, ctx| {
+            controller.set_credential_refresh_waiting_for_test(stream_id.clone(), true, ctx);
         });
         status_bar.update(&mut app, |status_bar, ctx| {
             status_bar.update_credential_refresh_display(ctx);
@@ -63,8 +63,8 @@ fn credential_refresh_display_delays_and_clears() {
 
         // Completion, timeout/failure, and cancellation all clear controller
         // waiting state and must therefore hide the text synchronously.
-        controller.update(&mut app, |controller, _| {
-            controller.set_credential_refresh_waiting_for_test(stream_id.clone(), false);
+        controller.update(&mut app, |controller, ctx| {
+            controller.set_credential_refresh_waiting_for_test(stream_id.clone(), false, ctx);
         });
         status_bar.update(&mut app, |status_bar, ctx| {
             status_bar.update_credential_refresh_display(ctx);

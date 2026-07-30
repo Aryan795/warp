@@ -84,7 +84,7 @@ impl ResponseStreamId {
         Self(format!("{}-{}", init_event.request_id, Uuid::new_v4()))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "integration_tests"))]
     pub fn new_for_test() -> Self {
         Self(Uuid::new_v4().to_string())
     }

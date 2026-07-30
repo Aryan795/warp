@@ -661,18 +661,24 @@ impl BlocklistAIController {
     }
 
     /// Test helper: set whether `stream_id` is blocked on a GEAP credential refresh.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "integration_tests"))]
     pub fn set_credential_refresh_waiting_for_test(
         &mut self,
         stream_id: ResponseStreamId,
         waiting: bool,
+        ctx: &mut ModelContext<Self>,
     ) {
         if waiting {
             self.credential_refresh_waiting_streams
-                .insert(stream_id, LLMProvider::Google);
+                .insert(stream_id.clone(), LLMProvider::Google);
         } else {
             self.credential_refresh_waiting_streams.remove(&stream_id);
         }
+        ctx.emit(BlocklistAIControllerEvent::WaitingForCredentialRefresh {
+            stream_id,
+            provider: LLMProvider::Google,
+            waiting,
+        });
     }
 
     /// Internal method to send a query to the AI model. External callers should use either

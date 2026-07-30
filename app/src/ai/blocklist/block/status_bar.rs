@@ -462,6 +462,11 @@ impl BlocklistAIStatusBar {
                 .as_ref()
                 .is_some_and(|model| model.is_conversation_summarization_active(app))
     }
+
+    #[cfg(feature = "integration_tests")]
+    pub(crate) fn is_credential_refresh_text_visible_for_integration_test(&self) -> bool {
+        self.credential_refresh_text_visible
+    }
     pub fn summarization_cancel_dialog_handle(&self) -> &ViewHandle<SummarizationCancelDialog> {
         &self.summarization_cancel_dialog
     }
