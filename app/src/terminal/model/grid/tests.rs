@@ -519,8 +519,9 @@ fn grow_reflow_does_not_merge_carriage_return_overwritten_soft_wraps() {
     for c in "12345678".chars() {
         grid.input(c);
     }
+    // Exercise direct input as the first post-CR mutation; the first CR above
+    // exercises line erase as the first mutation.
     grid.carriage_return();
-    grid.clear_line(LineClearMode::Right);
 
     for c in "WXYZ".chars() {
         grid.input(c);
@@ -537,6 +538,43 @@ fn grow_reflow_does_not_merge_carriage_return_overwritten_soft_wraps() {
         assert_eq!(actual, expected);
         assert!(!grid.row_wraps(row_idx));
     }
+}
+
+/// Regression test for the key correctness invariant: a bare carriage return
+/// that is not followed by any mutation before the resize must NOT break the
+/// soft-wrap logical line. Only an actual write (or erase) should unlink the
+/// WRAPLINE. A lone \r just repositions the cursor; any resize occurring
+/// between the \r and the first mutation must still reflowing the two physical
+/// rows as one logical line.
+#[test]
+fn grow_reflow_preserves_soft_wrap_on_bare_cr_then_resize() {
+    // 5-col grid; "abcdefgh" soft-wraps:
+    //   row 0: "abcde" [WRAPLINE]
+    //   row 1: "fgh"   (cursor at col 3)
+    let mut grid = GridHandler::new_for_test(2, 5);
+    for c in "abcdefgh".chars() {
+        grid.input(c);
+    }
+
+    // Carriage return: cursor → (row 1, col 0). No content mutation.
+    grid.carriage_return();
+
+    // Resize to 10 cols immediately, with no write between CR and resize.
+    // The logical line "abcdefgh" must be preserved as one unit.
+    grid.resize(SizeInfo::new_without_font_metrics(2, 10));
+
+    // Correct reflow: "abcdefgh" (8 chars) fits on row 0 in 10 cols.
+    let row = grid.row(0).expect("row 0 should exist");
+    assert_eq!(row[0].c, 'a');
+    assert_eq!(row[1].c, 'b');
+    assert_eq!(row[2].c, 'c');
+    assert_eq!(row[3].c, 'd');
+    assert_eq!(row[4].c, 'e');
+    assert_eq!(row[5].c, 'f');
+    assert_eq!(row[6].c, 'g');
+    assert_eq!(row[7].c, 'h');
+    // Row 0 should not wrap any further.
+    assert!(!grid.row_wraps(0));
 }
 
 #[test]
