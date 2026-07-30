@@ -585,37 +585,64 @@ impl PaneGroup {
                 }
             };
 
-            let replaced = group
-                .replace_loading_pane_with_restored_owner_ambient_cloud_mode_pane(
-                    pane_id,
-                    CloudConversationData::Oz(Box::new(merged)),
-                    task_id,
-                    ctx,
-                );
-            if !replaced {
-                log::warn!(
-                    "[orchestration-unified-debug] owner completed replacement failed \
-                     child_conversation_id={child_id:?} pane_id={pane_id:?}"
+            // Child panes normally live off-tree, while generic replace_pane
+            // only accepts panes already present in the layout tree. Follow
+            // the child-specific replacement lifecycle used by AttachLive.
+            let fallback_was_swapped_anchor =
+                group.panes.original_pane_for_replacement(pane_id);
+            log::info!(
+                "[orchestration-unified-debug] owner completed replacement discard-loading \
+                 child_conversation_id={child_id:?} pane_id={pane_id:?} was_visible={}",
+                fallback_was_swapped_anchor.is_some()
+            );
+            group.discard_child_agent_pane_for_conversation(child_id, ctx);
+
+            let resources = TerminalViewResources {
+                tips_completed: group.tips_completed.clone(),
+                server_api: group.server_api.clone(),
+                model_event_sender: group.model_event_sender.clone(),
+            };
+            let view_size = Self::estimated_view_bounds(ctx).size();
+            let (terminal_view, terminal_manager) =
+                Self::create_cloud_mode_terminal(resources, view_size, false, ctx);
+            Self::load_data_into_restored_ambient_cloud_mode_view(
+                terminal_view.clone(),
+                CloudConversationData::Oz(Box::new(merged)),
+                task_id,
+                false,
+                ctx,
+            );
+            let pane_data = TerminalPane::new(
+                Uuid::new_v4().as_bytes().to_vec(),
+                terminal_manager,
+                terminal_view.clone(),
+                group.model_event_sender.clone(),
+                ctx,
+            );
+            let replacement_pane_id = pane_data.terminal_pane_id();
+            if group
+                .attach_child_pane_off_tree(Box::new(pane_data), ctx)
+                .is_none()
+            {
+                report_error!(
+                    "hydrate_owner_child_transcript: failed to attach restored child pane",
+                    extra: { "child_conversation_id" => ?child_id }
                 );
                 return;
             }
-
-            let replacement_pane_id = group.pane_id_for_conversation_owner(child_id, ctx);
-            if let Some(replacement_pane_id) = replacement_pane_id {
-                group
-                    .child_agent_panes
-                    .insert(child_id, replacement_pane_id);
+            group
+                .child_agent_panes
+                .insert(child_id, replacement_pane_id.into());
+            if let Some(anchor) = fallback_was_swapped_anchor {
+                group.swap_active_pane_to_conversation(anchor, child_id, ctx);
             }
-            let state = replacement_pane_id.and_then(|replacement_pane_id| {
-                group
-                    .terminal_view_from_pane_id(replacement_pane_id, ctx)
-                    .map(|view| {
-                        (
-                            view.as_ref(ctx).owned_ambient_agent_task_id(ctx).is_some(),
-                            view.as_ref(ctx).is_read_only(),
-                        )
-                    })
-            });
+            let state = (
+                terminal_view
+                    .as_ref(ctx)
+                    .owned_ambient_agent_task_id(ctx)
+                    .is_some(),
+                terminal_view.as_ref(ctx).is_read_only(),
+            );
             log::info!(
                 "[orchestration-unified-debug] owner completed replacement complete \
                  child_conversation_id={child_id:?} replacement_pane_id={replacement_pane_id:?} \
