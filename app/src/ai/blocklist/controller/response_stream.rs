@@ -853,6 +853,7 @@ pub enum ResponseStreamEvent {
     /// Only emitted from the non-wasm GEAP branch of [`ResponseStream::spawn_request`].
     /// `waiting: false` is emitted unconditionally so the status bar reverts even
     /// if the attempt was superseded or cancelled.
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
     WaitingForCredentialRefresh {
         provider: LLMProvider,
         waiting: bool,

@@ -660,11 +660,19 @@ impl BlocklistAIController {
             .copied()
     }
 
-    /// Test helper: treat `stream_id` as if it is blocked on a GEAP credential refresh.
+    /// Test helper: set whether `stream_id` is blocked on a GEAP credential refresh.
     #[cfg(test)]
-    pub fn set_credential_refresh_waiting_for_test(&mut self, stream_id: ResponseStreamId) {
-        self.credential_refresh_waiting_streams
-            .insert(stream_id, LLMProvider::Google);
+    pub fn set_credential_refresh_waiting_for_test(
+        &mut self,
+        stream_id: ResponseStreamId,
+        waiting: bool,
+    ) {
+        if waiting {
+            self.credential_refresh_waiting_streams
+                .insert(stream_id, LLMProvider::Google);
+        } else {
+            self.credential_refresh_waiting_streams.remove(&stream_id);
+        }
     }
 
     /// Internal method to send a query to the AI model. External callers should use either
