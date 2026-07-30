@@ -805,14 +805,16 @@ impl AgentViewController {
         }
 
         let history_model = BlocklistAIHistoryModel::handle(ctx);
-        let (conversation_id, exchange_count, is_existing_remote_child) =
+        let (conversation_id, exchange_count, is_existing_child_placeholder) =
             if let Some(conversation) =
                 conversation_id.and_then(|id| history_model.as_ref(ctx).conversation(&id))
             {
                 (
                     conversation.id(),
                     conversation.exchange_count(),
-                    conversation.is_remote_child(),
+                    conversation.is_remote_child()
+                        || (conversation.is_viewing_shared_session()
+                            && conversation.parent_conversation_id().is_some()),
                 )
             } else {
                 let id = history_model.update(ctx, |history_model, ctx| {
@@ -847,16 +849,17 @@ impl AgentViewController {
             .block_list_mut()
             .enter_conversation_context(conversation_id, display_mode.is_inline(), is_cloud);
 
-        // An empty remote-child placeholder is still an existing run, not a
-        // brand-new cloud conversation. Preserve that distinction under the
-        // unified stack so TerminalView does not insert the generic
-        // "New Oz cloud agent conversation" zero-state block while the child
-        // is restoring or waiting for its first streamed exchange.
+        // An empty child placeholder is still an existing run, not a brand-new
+        // cloud conversation. This applies to owner-side remote children and
+        // viewer-side shared-session children. Preserve that distinction so
+        // TerminalView does not insert cloud composition UI while the child is
+        // restoring or waiting for its first streamed exchange.
         let is_new = exchange_count == 0
-            && !(FeatureFlag::OrchestrationUnifiedStack.is_enabled() && is_existing_remote_child);
-        if is_existing_remote_child {
+            && !(FeatureFlag::OrchestrationUnifiedStack.is_enabled()
+                && is_existing_child_placeholder);
+        if is_existing_child_placeholder {
             log::info!(
-                "[orchestration-unified-debug] enter_agent_view existing remote child \
+                "[orchestration-unified-debug] enter_agent_view existing child placeholder \
                  conversation_id={conversation_id:?} exchange_count={exchange_count} \
                  emitted_is_new={is_new}"
             );

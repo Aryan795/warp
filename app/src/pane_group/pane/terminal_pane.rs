@@ -1345,7 +1345,6 @@ fn handle_terminal_view_event(
                 if FeatureFlag::OrchestrationUnifiedStack.is_enabled() {
                     group.materialize_viewer_child_pane_from_task(
                         *conversation_id,
-                        pane_id,
                         task.as_ref().clone(),
                         ctx,
                     );

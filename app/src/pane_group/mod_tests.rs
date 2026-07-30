@@ -1111,10 +1111,10 @@ fn test_restored_remote_hidden_child_pane_terminal_owner_loads_transcript() {
 }
 
 /// A terminal *viewer* child (`is_viewing_shared_session`, `Succeeded` run
-/// with a server `conversation_id`, no live session) also resolves to
-/// `LoadTranscript` — the new viewer transcript path. It reuses the same
-/// hidden ambient pane construction as the owner (server ACLs grant the
-/// viewer access), instead of leaving a bare loading placeholder.
+/// with a server `conversation_id`, no live session) resolves to
+/// `LoadTranscript` in a passive transcript pane. It must not expose the
+/// ambient cloud-composition model or its new-conversation zero state while
+/// the transcript fetch is in flight.
 #[test]
 fn test_restored_viewer_hidden_child_pane_terminal_loads_transcript() {
     let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
@@ -1147,12 +1147,30 @@ fn test_restored_viewer_hidden_child_pane_terminal_loads_transcript() {
                 .child_agent_panes
                 .get(&child_conversation_id)
                 .copied()
-                .expect("terminal viewer child must materialize an ambient transcript pane");
-            // The viewer transcript path builds an ambient pane (not a loading
-            // placeholder), so it has an ambient agent view model.
-            let (_task_id, _running, active_conversation_id) =
-                ambient_child_session_state(panes, child_pane_id, ctx);
-            assert_eq!(active_conversation_id, Some(child_conversation_id));
+                .expect("terminal viewer child must materialize a transcript pane");
+            let terminal_view = panes
+                .terminal_view_from_pane_id(child_pane_id, ctx)
+                .expect("terminal viewer child pane has a terminal view");
+            let view = terminal_view.as_ref(ctx);
+            assert_eq!(
+                view.active_conversation_id(ctx),
+                Some(child_conversation_id),
+            );
+            assert!(
+                view.ambient_agent_view_model().is_none(),
+                "passive viewer transcripts must not retain a configuring cloud-agent model",
+            );
+            assert!(
+                !view.has_agent_view_zero_state_for_test(),
+                "viewer child placeholders must not insert new-cloud composition zero state",
+            );
+            let model = view.model.lock();
+            assert!(model.is_conversation_transcript_viewer());
+            assert!(model.is_read_only());
+            assert_eq!(
+                model.conversation_transcript_viewer_status(),
+                Some(&ConversationTranscriptViewerStatus::Loading),
+            );
         });
     });
 }
