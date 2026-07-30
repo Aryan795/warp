@@ -123,6 +123,14 @@ impl EventLoop {
                 });
         }
 
+        let should_suppress_existing_agent_conversation_replay = matches!(
+            load_mode,
+            SharedSessionInitialLoadMode::AppendFollowupScrollback
+        );
+        log::info!(
+            "[orchestration-unified-debug] shared_session EventLoop identity \
+             load_mode={load_mode:?} suppress_existing_replay={should_suppress_existing_agent_conversation_replay}"
+        );
         let mut event_loop = Self {
             terminal_model,
             terminal_view,
@@ -134,10 +142,7 @@ impl EventLoop {
             next_event_no: 0,
             buffer: HashMap::new(),
             catching_up_to_event_no,
-            should_suppress_existing_agent_conversation_replay: matches!(
-                load_mode,
-                SharedSessionInitialLoadMode::AppendFollowupScrollback
-            ),
+            should_suppress_existing_agent_conversation_replay,
         };
 
         // Respect the sharer's window size.

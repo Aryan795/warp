@@ -584,6 +584,15 @@ impl PaneGroup {
                     return;
                 }
             };
+            let root_task = merged.get_root_task();
+            log::info!(
+                "[orchestration-unified-debug] owner completed merged identity \
+                 conversation_id={child_id:?} root_task_id={} root_has_server_data={} \
+                 has_server_conversation_token={}",
+                merged.get_root_task_id(),
+                root_task.is_some_and(|task| task.source().is_some()),
+                merged.server_conversation_token().is_some(),
+            );
 
             // Child panes normally live off-tree, while generic replace_pane
             // only accepts panes already present in the layout tree. Follow

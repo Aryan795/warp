@@ -165,6 +165,28 @@ impl BlocklistAIController {
                     h.start_new_conversation(terminal_surface_id, false, true, false, ctx)
                 })
             });
+        let selected_conversation_id = self
+            .context_model
+            .as_ref(ctx)
+            .selected_conversation_id(ctx);
+        let root_identity = history
+            .as_ref(ctx)
+            .conversation(&conversation_id)
+            .map(|conversation| {
+                (
+                    conversation.get_root_task_id().clone(),
+                    conversation
+                        .get_root_task()
+                        .is_some_and(|task| task.source().is_some()),
+                )
+            });
+        log::info!(
+            "[orchestration-unified-debug] shared_init identity \
+             request_id={} existing_conversation_id={existing_conversation_id:?} \
+             selected_conversation_id={selected_conversation_id:?} \
+             resolved_conversation_id={conversation_id:?} root_identity={root_identity:?}",
+            init_event.request_id,
+        );
         if self.should_skip_replayed_response_for_existing_conversation(
             existing_conversation_id,
             &init_event.request_id,
