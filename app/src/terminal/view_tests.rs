@@ -126,6 +126,7 @@ fn owned_resumable_oz_task(task_id: AmbientAgentTaskId) -> AmbientAgentTask {
             display_name: None,
         }),
         executor: None,
+        scope: None,
         conversation_id: None,
         request_usage: None,
         is_sandbox_running: false,

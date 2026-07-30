@@ -70,6 +70,7 @@ fn create_test_task(
             display_name: Some(format!("User {creator_uid}")),
         }),
         executor: None,
+        scope: None,
         conversation_id: None,
         request_usage: None,
         agent_config_snapshot: None,

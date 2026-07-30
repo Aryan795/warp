@@ -1706,6 +1706,16 @@ impl AgentConversationsModel {
         self.tasks.get(task_id).cloned()
     }
 
+    /// Stores a task snapshot supplied by another authoritative fetch path.
+    /// This lets pane hydration reuse ownership and source policy without
+    /// issuing a second request.
+    pub(crate) fn cache_task_data(&mut self, task: AmbientAgentTask, ctx: &mut ModelContext<Self>) {
+        let task_id = task.task_id;
+        self.tasks.insert(task_id, task);
+        self.task_fetch_state.remove(&task_id);
+        ctx.emit(AgentConversationsModelEvent::TasksUpdated);
+    }
+
     /// Returns the error details when the most recent fetch for `task_id` ended in a
     /// permanent or transient failure and the cooldown has not yet elapsed. The caller
     /// can use this to display an error state in the details panel.

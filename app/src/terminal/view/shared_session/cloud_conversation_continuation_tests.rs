@@ -12,7 +12,8 @@ use crate::ai::agent::api::ServerConversationToken;
 use crate::ai::agent::conversation::{AIAgentHarness, ServerAIConversationMetadata};
 use crate::ai::agent_conversations_model::AgentConversationsModel;
 use crate::ai::ambient_agents::task::{
-    AgentConfigSnapshot, HarnessConfig, TaskPrincipalInfo, TaskStatusErrorCode, TaskStatusMessage,
+    AgentConfigSnapshot, HarnessConfig, TaskPrincipalInfo, TaskScope, TaskStatusErrorCode,
+    TaskStatusMessage,
 };
 use crate::ai::ambient_agents::{
     AgentSource, AmbientAgentTask, AmbientAgentTaskId, AmbientAgentTaskState,
@@ -38,6 +39,31 @@ const CONVERSATION_TOKEN: &str = "server-conversation-token";
 enum AuthFixture {
     LoggedIn,
     LoggedOut,
+}
+
+#[test]
+fn routing_allows_live_input_only_for_executable_shared_session_role() {
+    App::test((), |mut app| async move {
+        let task_id = ambient_task_id(1);
+        let reader = ambient_pane_model(task_id, SharedSessionStatus::reader());
+        let executor = ambient_pane_model(task_id, SharedSessionStatus::executor());
+        app.update(|ctx| {
+            assert_eq!(
+                resolve_ai_query_routing(EntityId::new(), None, &reader, ctx),
+                AIQueryRouting::LiveRemoteVm {
+                    is_executor: false,
+                    ambient_agent_task_id: Some(task_id),
+                }
+            );
+            assert_eq!(
+                resolve_ai_query_routing(EntityId::new(), None, &executor, ctx),
+                AIQueryRouting::LiveRemoteVm {
+                    is_executor: true,
+                    ambient_agent_task_id: Some(task_id),
+                }
+            );
+        });
+    });
 }
 
 #[derive(Clone, Copy)]
@@ -186,6 +212,7 @@ fn ambient_agent_task(
             display_name: None,
         }),
         executor: None,
+        scope: None,
         conversation_id: Some(conversation_token.to_string()),
         request_usage: None,
         is_sandbox_running: false,
@@ -210,6 +237,7 @@ fn active_ambient_agent_task(task_id: AmbientAgentTaskId) -> AmbientAgentTask {
 trait AmbientAgentTaskTestExt {
     fn with_creator(self, creator_uid: &str) -> Self;
     fn with_harness(self, harness: Harness) -> Self;
+    fn with_scope(self, scope: TaskScope) -> Self;
 }
 
 impl AmbientAgentTaskTestExt for AmbientAgentTask {
@@ -231,6 +259,11 @@ impl AmbientAgentTaskTestExt for AmbientAgentTask {
             }),
             ..Default::default()
         });
+        self
+    }
+
+    fn with_scope(mut self, scope: TaskScope) -> Self {
+        self.scope = Some(scope);
         self
     }
 }
@@ -684,6 +717,24 @@ fn missing_metadata_returns_error() {
 }
 
 #[test]
+fn completed_child_presentation_requires_edit_access() {
+    assert_eq!(
+        completed_child_presentation(ConversationAccess::Edit, false),
+        CompletedChildPresentation::Continuation
+    );
+    for access in [ConversationAccess::ViewOnly, ConversationAccess::Unknown] {
+        assert_eq!(
+            completed_child_presentation(access, false),
+            CompletedChildPresentation::PassiveTranscript
+        );
+    }
+    assert_eq!(
+        completed_child_presentation(ConversationAccess::Edit, true),
+        CompletedChildPresentation::PassiveTranscript
+    );
+}
+
+#[test]
 fn owned_oz_task_without_metadata_shows_inline_followup_input() {
     App::test((), |mut app| async move {
         let TestHandles {
@@ -731,6 +782,99 @@ fn owned_third_party_task_without_metadata_shows_continue_in_cloud_tombstone() {
                 Ok(CloudConversationContinuationUiState::Tombstone {
                     cta: Some(TombstoneCta::ContinueInCloud { task_id }),
                 })
+            );
+        });
+    });
+}
+
+#[test]
+fn authoritative_owned_scope_allows_metadata_free_fallback() {
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    App::test((), |mut app| async move {
+        let TestHandles {
+            terminal_view_id,
+            task_id,
+        } = setup_task_without_server_metadata(&mut app);
+        AgentConversationsModel::handle(&app).update(&mut app, |model, _| {
+            model.insert_task_for_test(
+                ambient_agent_task(
+                    task_id,
+                    CONVERSATION_TOKEN,
+                    AmbientAgentTaskState::Succeeded,
+                )
+                .with_creator("other-user")
+                .with_scope(TaskScope::User {
+                    uid: TEST_USER_UID.to_string(),
+                }),
+            );
+        });
+
+        app.update(|ctx| {
+            assert_eq!(
+                resolve_cloud_conversation_continuation_ui_state(terminal_view_id, task_id, ctx),
+                Ok(CloudConversationContinuationUiState::FollowupInput)
+            );
+        });
+    });
+}
+
+#[test]
+fn task_scope_does_not_change_flag_off_creator_fallback() {
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(false);
+    App::test((), |mut app| async move {
+        let TestHandles {
+            terminal_view_id,
+            task_id,
+        } = setup_task_without_server_metadata(&mut app);
+        AgentConversationsModel::handle(&app).update(&mut app, |model, _| {
+            model.insert_task_for_test(
+                ambient_agent_task(
+                    task_id,
+                    CONVERSATION_TOKEN,
+                    AmbientAgentTaskState::Succeeded,
+                )
+                .with_creator("other-user")
+                .with_scope(TaskScope::User {
+                    uid: TEST_USER_UID.to_string(),
+                }),
+            );
+        });
+
+        app.update(|ctx| {
+            assert_eq!(
+                resolve_cloud_conversation_continuation_ui_state(terminal_view_id, task_id, ctx),
+                Err(CloudConversationContinuationError::MissingServerConversationMetadata)
+            );
+        });
+    });
+}
+
+#[test]
+fn authoritative_non_owned_scope_overrides_creator_fallback() {
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    App::test((), |mut app| async move {
+        let TestHandles {
+            terminal_view_id,
+            task_id,
+        } = setup_task_without_server_metadata(&mut app);
+        AgentConversationsModel::handle(&app).update(&mut app, |model, _| {
+            model.insert_task_for_test(
+                ambient_agent_task(
+                    task_id,
+                    CONVERSATION_TOKEN,
+                    AmbientAgentTaskState::Succeeded,
+                )
+                .with_creator(TEST_USER_UID)
+                .with_scope(TaskScope::User {
+                    uid: "other-user".to_string(),
+                }),
+            );
+        });
+
+        app.update(|ctx| {
+            assert_eq!(
+                resolve_cloud_conversation_continuation_ui_state(terminal_view_id, task_id, ctx),
+                Err(CloudConversationContinuationError::MissingServerConversationMetadata)
             );
         });
     });

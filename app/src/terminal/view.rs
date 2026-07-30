@@ -122,7 +122,8 @@ use session_sharing_protocol::sharer::{
 use settings::{Setting, ToggleableSetting};
 use shared_session::cloud_conversation_continuation::CloudConversationContinuationUiState;
 pub(crate) use shared_session::cloud_conversation_continuation::{
-    AIQueryRouting, resolve_ai_query_routing,
+    AIQueryRouting, CompletedChildPresentation, ConversationAccess,
+    completed_child_conversation_access, completed_child_presentation, resolve_ai_query_routing,
 };
 use shared_session::{SharedSessionAdapter, Viewer};
 use ssh_file_upload::{FileUpload, FileUploadEvent};

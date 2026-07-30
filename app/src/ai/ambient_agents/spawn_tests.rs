@@ -34,6 +34,7 @@ fn task_with(
         session_link,
         creator: None,
         executor: None,
+        scope: None,
         conversation_id: None,
         request_usage: None,
         agent_config_snapshot: None,

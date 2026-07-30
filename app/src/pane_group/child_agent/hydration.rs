@@ -4,7 +4,7 @@ use warp_errors::report_error;
 use warpui::{SingletonEntity, ViewContext};
 
 use super::materialization::{
-    ChildPaneMaterialization, ChildPaneMaterializationMode, decide_child_pane_materialization,
+    ChildPaneMaterialization, ChildPaneOrigin, decide_child_pane_materialization,
 };
 use crate::ai::agent::api::ServerConversationToken;
 use crate::ai::agent::conversation::{AIConversation, AIConversationId};
@@ -21,6 +21,10 @@ use crate::pane_group::{
 use crate::terminal::model::terminal_model::ConversationTranscriptViewerStatus;
 use crate::terminal::view::load_ai_conversation::{
     RestoreConversationEntryBehavior, RestoredAIConversation,
+};
+use crate::terminal::view::{
+    CompletedChildPresentation, ConversationAccess, completed_child_conversation_access,
+    completed_child_presentation,
 };
 
 // flag-OFF path (OrchestrationUnifiedStack disabled)
@@ -96,6 +100,9 @@ impl PaneGroup {
             return;
         };
         let task_id = child_conversation.task_id().or(Some(task.task_id));
+        AgentConversationsModel::handle(ctx).update(ctx, |model, ctx| {
+            model.cache_task_data(task.clone(), ctx);
+        });
         let materialization = decide_child_pane_materialization(&task);
         self.materialize_viewer_child_pane(child_conversation, task_id, Some(materialization), ctx);
     }
@@ -105,7 +112,7 @@ impl PaneGroup {
     ///
     /// Fetches the child's [`AmbientAgentTask`](crate::ai::ambient_agents::AmbientAgentTask)
     /// and dispatches on [`decide_child_pane_materialization`], which makes the
-    /// same live / transcript / pending choice for both modes. `mode` selects
+    /// same live / transcript / pending choice for both origins. `origin` selects
     /// only the pane *construction* strategy.
     ///
     /// Idempotent: skipped when the placeholder already has a live tracked
@@ -114,7 +121,7 @@ impl PaneGroup {
     pub(in crate::pane_group) fn materialize_child_placeholder_pane(
         &mut self,
         child_conversation: AIConversation,
-        mode: ChildPaneMaterializationMode,
+        origin: ChildPaneOrigin,
         ctx: &mut ViewContext<Self>,
     ) {
         let child_id = child_conversation.id();
@@ -125,7 +132,7 @@ impl PaneGroup {
         {
             log::info!(
                 "[orchestration-unified-debug] materialize idempotent-skip \
-                 child_conversation_id={child_id:?} mode={mode:?} \
+                 child_conversation_id={child_id:?} origin={origin:?} \
                  existing_pane_id={existing_pane_id:?}"
             );
             return;
@@ -142,7 +149,7 @@ impl PaneGroup {
             .map(decide_child_pane_materialization);
         log::info!(
             "[orchestration-unified-debug] materialize entry \
-             child_conversation_id={child_id:?} mode={mode:?} task_id={task_id:?} \
+             child_conversation_id={child_id:?} origin={origin:?} task_id={task_id:?} \
              task_found={} materialization={materialization:?}",
             task_for_decision.is_some()
         );
@@ -158,8 +165,8 @@ impl PaneGroup {
             );
         }
 
-        match mode {
-            ChildPaneMaterializationMode::Owner => {
+        match origin {
+            ChildPaneOrigin::HostedConversation => {
                 self.materialize_owner_child_pane(
                     child_conversation,
                     task_id,
@@ -167,7 +174,7 @@ impl PaneGroup {
                     ctx,
                 );
             }
-            ChildPaneMaterializationMode::Viewer => {
+            ChildPaneOrigin::SharedSession => {
                 self.materialize_viewer_child_pane(
                     child_conversation,
                     task_id,
@@ -212,7 +219,7 @@ impl PaneGroup {
                 self.attach_child_session(
                     child_id,
                     session_id,
-                    ChildPaneMaterializationMode::Owner,
+                    ChildPaneOrigin::HostedConversation,
                     ctx,
                 );
             }
@@ -286,7 +293,7 @@ impl PaneGroup {
                 self.attach_child_session(
                     child_id,
                     session_id,
-                    ChildPaneMaterializationMode::Viewer,
+                    ChildPaneOrigin::SharedSession,
                     ctx,
                 );
             }
@@ -345,22 +352,22 @@ impl PaneGroup {
         &mut self,
         child_id: AIConversationId,
         session_id: SessionId,
-        mode: ChildPaneMaterializationMode,
+        origin: ChildPaneOrigin,
         ctx: &mut ViewContext<Self>,
     ) {
         log::info!(
             "[orchestration-unified-debug] attach_child_session entry \
-             child_conversation_id={child_id:?} mode={mode:?} \
+             child_conversation_id={child_id:?} origin={origin:?} \
              pane_in_map={}",
             self.child_agent_panes
                 .get(&child_id)
                 .is_some_and(|p| self.has_pane_id(*p))
         );
-        match mode {
-            ChildPaneMaterializationMode::Owner => {
+        match origin {
+            ChildPaneOrigin::HostedConversation => {
                 self.attach_owner_child_session(child_id, session_id, ctx);
             }
-            ChildPaneMaterializationMode::Viewer => {
+            ChildPaneOrigin::SharedSession => {
                 self.attach_viewer_child_session(child_id, session_id, ctx);
             }
         }
@@ -513,10 +520,8 @@ impl PaneGroup {
         });
     }
 
-    /// Restores a completed owner child into an ambient cloud-mode
-    /// continuation pane. Unlike a passive transcript viewer, this path
-    /// resolves task ownership and naturally exposes the established
-    /// follow-up input for resumable owned Oz conversations.
+    /// Loads a completed hosted-conversation child and chooses continuation
+    /// or passive presentation from conversation access.
     fn hydrate_owner_child_transcript(
         &mut self,
         pane_id: PaneId,
@@ -553,6 +558,9 @@ impl PaneGroup {
                 );
                 return;
             };
+            let task = AgentConversationsModel::as_ref(ctx).get_task_data(&task_id);
+            let access =
+                completed_child_conversation_access(cloud.server_metadata(), task.as_ref(), ctx);
             let tasks = cloud
                 .all_tasks()
                 .filter_map(|task| task.source().cloned())
@@ -583,75 +591,123 @@ impl PaneGroup {
                 merged.server_conversation_token().is_some(),
             );
 
-            // Child panes normally live off-tree, while generic replace_pane
-            // only accepts panes already present in the layout tree. Follow
-            // the child-specific replacement lifecycle used by AttachLive.
-            let fallback_was_swapped_anchor =
-                group.panes.original_pane_for_replacement(pane_id);
-            log::info!(
-                "[orchestration-unified-debug] owner completed replacement discard-loading \
-                 child_conversation_id={child_id:?} pane_id={pane_id:?} was_visible={}",
-                fallback_was_swapped_anchor.is_some()
-            );
-            group.discard_child_agent_pane_for_conversation(child_id, ctx);
-
-            let resources = TerminalViewResources {
-                tips_completed: group.tips_completed.clone(),
-                server_api: group.server_api.clone(),
-                model_event_sender: group.model_event_sender.clone(),
-            };
-            let view_size = Self::estimated_view_bounds(ctx).size();
-            let (terminal_view, terminal_manager) =
-                Self::create_cloud_mode_terminal(resources, view_size, false, ctx);
-            Self::load_data_into_restored_ambient_cloud_mode_view(
-                terminal_view.clone(),
-                CloudConversationData::Oz(Box::new(merged)),
-                task_id,
-                false,
-                ctx,
-            );
-            let pane_data = TerminalPane::new(
-                Uuid::new_v4().as_bytes().to_vec(),
-                terminal_manager,
-                terminal_view.clone(),
-                group.model_event_sender.clone(),
-                ctx,
-            );
-            let replacement_pane_id = pane_data.terminal_pane_id();
-            if group
-                .attach_child_pane_off_tree(Box::new(pane_data), ctx)
-                .is_none()
-            {
-                report_error!(
-                    "hydrate_owner_child_transcript: failed to attach restored child pane",
-                    extra: { "child_conversation_id" => ?child_id }
-                );
-                return;
+            let blocks_cloud_followups =
+                task.as_ref().is_none_or(AmbientAgentTask::blocks_cloud_followups);
+            match completed_child_presentation(access, blocks_cloud_followups) {
+                CompletedChildPresentation::Continuation => {
+                    group.replace_child_loading_with_continuation_pane(
+                        pane_id, child_id, task_id, merged, ctx,
+                    );
+                }
+                CompletedChildPresentation::PassiveTranscript => {
+                    group.restore_child_passive_transcript(
+                        pane_id, child_id, task_id, merged, ctx,
+                    );
+                }
             }
-            group
-                .child_agent_panes
-                .insert(child_id, replacement_pane_id.into());
-            if let Some(anchor) = fallback_was_swapped_anchor {
-                group.swap_active_pane_to_conversation(anchor, child_id, ctx);
-            }
-            let state = (
-                terminal_view
-                    .as_ref(ctx)
-                    .owned_ambient_agent_task_id(ctx)
-                    .is_some(),
-                terminal_view.as_ref(ctx).is_read_only(),
-            );
-            log::info!(
-                "[orchestration-unified-debug] owner completed replacement complete \
-                 child_conversation_id={child_id:?} replacement_pane_id={replacement_pane_id:?} \
-                 state_owned_and_read_only={state:?}"
-            );
         });
     }
 
-    /// Restores a completed passive-viewer child as a read-only transcript.
-    /// Owner children use [`Self::hydrate_owner_child_transcript`] so task
-    /// ownership can surface the established cloud continuation affordance.
+    /// Replaces an off-tree child loading pane with the established ambient
+    /// cloud-mode continuation presentation.
+    pub(in crate::pane_group) fn replace_child_loading_with_continuation_pane(
+        &mut self,
+        pane_id: PaneId,
+        child_id: AIConversationId,
+        task_id: AmbientAgentTaskId,
+        merged: AIConversation,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let fallback_was_swapped_anchor = self.panes.original_pane_for_replacement(pane_id);
+        self.discard_child_agent_pane_for_conversation(child_id, ctx);
+
+        let resources = TerminalViewResources {
+            tips_completed: self.tips_completed.clone(),
+            server_api: self.server_api.clone(),
+            model_event_sender: self.model_event_sender.clone(),
+        };
+        let view_size = Self::estimated_view_bounds(ctx).size();
+        let (terminal_view, terminal_manager) =
+            Self::create_cloud_mode_terminal(resources, view_size, false, ctx);
+        Self::load_data_into_restored_ambient_cloud_mode_view(
+            terminal_view.clone(),
+            CloudConversationData::Oz(Box::new(merged)),
+            task_id,
+            false,
+            ctx,
+        );
+        terminal_view.update(ctx, |view, ctx| {
+            view.enable_completed_cloud_continuation(task_id, ctx);
+        });
+        let pane_data = TerminalPane::new(
+            Uuid::new_v4().as_bytes().to_vec(),
+            terminal_manager,
+            terminal_view,
+            self.model_event_sender.clone(),
+            ctx,
+        );
+        let replacement_pane_id = pane_data.terminal_pane_id();
+        if self
+            .attach_child_pane_off_tree(Box::new(pane_data), ctx)
+            .is_none()
+        {
+            report_error!(
+                "replace_child_loading_with_continuation_pane: failed to attach restored child pane",
+                extra: { "child_conversation_id" => ?child_id }
+            );
+            return;
+        }
+        self.child_agent_panes
+            .insert(child_id, replacement_pane_id.into());
+        if let Some(anchor) = fallback_was_swapped_anchor {
+            self.swap_active_pane_to_conversation(anchor, child_id, ctx);
+        }
+    }
+
+    /// Restores a child transcript in place without enabling continuation.
+    fn restore_child_passive_transcript(
+        &mut self,
+        pane_id: PaneId,
+        child_id: AIConversationId,
+        task_id: AmbientAgentTaskId,
+        merged: AIConversation,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if let Some(terminal_manager) = self
+            .terminal_session_by_id(pane_id)
+            .map(|session| session.terminal_manager(ctx))
+        {
+            terminal_manager.update(ctx, |manager, _ctx| {
+                let model_handle = manager.model();
+                let mut model = model_handle.lock();
+                model.set_shared_session_status(
+                    crate::terminal::shared_session::SharedSessionStatus::FinishedViewer,
+                );
+                model.set_conversation_transcript_viewer_status(Some(
+                    ConversationTranscriptViewerStatus::ViewingAmbientConversation(task_id),
+                ));
+            });
+        }
+        if let Some(terminal_view) = self.terminal_view_from_pane_id(pane_id, ctx) {
+            BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, _ctx| {
+                history.mark_terminal_surface_as_conversation_transcript_viewer(terminal_view.id());
+            });
+            terminal_view.update(ctx, |view, ctx| {
+                view.set_orchestration_child_live_unavailable(false, ctx);
+                view.restore_conversation_after_view_creation(
+                    RestoredAIConversation::new(merged),
+                    true,
+                    RestoreConversationEntryBehavior::PreserveAgentViewState,
+                    ctx,
+                );
+                view.insert_conversation_ended_tombstone_with_resolved_cta(ctx);
+            });
+        }
+        self.child_agent_panes.insert(child_id, pane_id);
+    }
+
+    /// Loads a completed shared-session child and chooses continuation or
+    /// passive presentation from conversation access.
     fn hydrate_viewer_child_transcript_in_place(
         &mut self,
         pane_id: PaneId,
@@ -691,6 +747,17 @@ impl PaneGroup {
                 );
                 return;
             }
+            let task = AgentConversationsModel::as_ref(ctx).get_task_data(&task_id);
+            let access = match conversation.as_ref() {
+                Some(CloudConversationData::Oz(cloud)) => {
+                    completed_child_conversation_access(
+                        cloud.server_metadata(),
+                        task.as_ref(),
+                        ctx,
+                    )
+                }
+                _ => ConversationAccess::Unknown,
+            };
 
             let merged = match conversation {
                 Some(CloudConversationData::Oz(cloud)) => {
@@ -732,41 +799,21 @@ impl PaneGroup {
                 }
             };
 
-            // Keep the generic agent input out of this transition: change the
-            // loading model to a read-only ambient transcript before restoring
-            // the merged conversation.
-            if let Some(terminal_manager) = group
-                .terminal_session_by_id(pane_id)
-                .map(|session| session.terminal_manager(ctx))
-            {
-                terminal_manager.update(ctx, |manager, _ctx| {
-                    let model_handle = manager.model();
-                    let mut model = model_handle.lock();
-                    model.set_shared_session_status(
-                        crate::terminal::shared_session::SharedSessionStatus::FinishedViewer,
+            let blocks_cloud_followups =
+                task.as_ref().is_none_or(AmbientAgentTask::blocks_cloud_followups);
+            match completed_child_presentation(access, blocks_cloud_followups) {
+                CompletedChildPresentation::Continuation => {
+                    group.replace_child_loading_with_continuation_pane(
+                        pane_id, child_id, task_id, merged, ctx,
                     );
-                    model.set_conversation_transcript_viewer_status(Some(
-                        ConversationTranscriptViewerStatus::ViewingAmbientConversation(task_id),
-                    ));
-                });
+                    return;
+                }
+                CompletedChildPresentation::PassiveTranscript => {}
             }
-            if let Some(terminal_view) = group.terminal_view_from_pane_id(pane_id, ctx) {
-                BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, _ctx| {
-                    history.mark_terminal_surface_as_conversation_transcript_viewer(
-                        terminal_view.id(),
-                    );
-                });
-                terminal_view.update(ctx, |view, ctx| {
-                    view.set_orchestration_child_live_unavailable(false, ctx);
-                    view.restore_conversation_after_view_creation(
-                        RestoredAIConversation::new(merged),
-                        true,
-                        RestoreConversationEntryBehavior::PreserveAgentViewState,
-                        ctx,
-                    );
-                    view.insert_conversation_ended_tombstone_with_resolved_cta(ctx);
-                });
-            }
+
+            group.restore_child_passive_transcript(
+                pane_id, child_id, task_id, merged, ctx,
+            );
             log::info!(
                 "[orchestration-unified-debug] viewer transcript upgrade complete \
                  child_conversation_id={child_id:?} pane_id={pane_id:?}"
@@ -776,7 +823,7 @@ impl PaneGroup {
 
     /// Renders the shared loading placeholder presentation used while a child
     /// has neither an attachable session nor a loadable transcript.
-    fn create_child_loading_placeholder(
+    pub(in crate::pane_group) fn create_child_loading_placeholder(
         &mut self,
         child_conversation: AIConversation,
         origin: AgentViewEntryOrigin,
@@ -1071,7 +1118,7 @@ impl PaneGroup {
                     self.attach_child_session(
                         child_id,
                         session_id,
-                        ChildPaneMaterializationMode::Viewer,
+                        ChildPaneOrigin::SharedSession,
                         ctx,
                     );
                 }
@@ -1410,7 +1457,7 @@ impl PaneGroup {
                         self.attach_child_session(
                             child_id,
                             session_id,
-                            ChildPaneMaterializationMode::Owner,
+                            ChildPaneOrigin::HostedConversation,
                             ctx,
                         );
                     }

@@ -172,6 +172,7 @@ fn make_task_with_name(
         session_link: None,
         creator: None,
         executor: None,
+        scope: None,
         conversation_id: None,
         request_usage: None,
         is_sandbox_running: false,

@@ -3,22 +3,18 @@ use session_sharing_protocol::common::SessionId;
 use crate::ai::agent::api::ServerConversationToken;
 use crate::ai::ambient_agents::{AmbientAgentLiveSessionState, AmbientAgentTask};
 
-/// Whether a child pane is materialized for the process that owns the
-/// orchestrator run (`Owner`) or for a passive viewer of a shared session
-/// (`Viewer`).
+/// The context from which a child pane is being constructed.
 ///
 /// Selects the pane *construction* strategy in
 /// [`PaneGroup::attach_child_session`]; the materialization *decision*
-/// ([`decide_child_pane_materialization`]) is mode-agnostic — owner and
-/// viewer make the same choice given identical task state.
+/// ([`decide_child_pane_materialization`]) is origin-agnostic. Origin never
+/// grants live input or terminal continuation capability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ChildPaneMaterializationMode {
-    /// This process owns the orchestrator run: the child attaches to a
-    /// cloud-mode ambient pane.
-    Owner,
-    /// Passive view of a shared session: the child gets its own dedicated
-    /// shared-session viewer pane.
-    Viewer,
+pub(crate) enum ChildPaneOrigin {
+    /// Child discovered from a conversation hosted by this process.
+    HostedConversation,
+    /// Child discovered while observing a shared session.
+    SharedSession,
 }
 
 /// How to materialize a child agent pane given its [`AmbientAgentTask`].
@@ -37,8 +33,8 @@ pub(crate) enum ChildPaneMaterialization {
     Pending,
 }
 
-/// Mode-agnostic pane dispatch: the same decision is made for owner and
-/// viewer given identical task state.
+/// Origin-agnostic pane dispatch: identical task state produces the same
+/// materialization action.
 ///
 /// Free-standing so it's unit-testable without a `PaneGroup`.
 pub(crate) fn decide_child_pane_materialization(
