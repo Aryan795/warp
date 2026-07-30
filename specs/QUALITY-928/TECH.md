@@ -666,10 +666,16 @@ and passive links remain ephemeral. When OVM resolves the parent task as
 `is_durable_observer_parent` marker and the real task/run ID. This exception
 allows the shared parent conversation, its local-only cursor, and child links
 to persist. Startup eagerly hydrates only marked parents; the existing
-`AmbientAgentPaneSnapshot.task_id` identifies the exact pane/task, and
-`TerminalManager` reattaches the local conversation before OVM registration
-and shared-session response replay. Arbitrary shared links never receive the
-marker. Older rows default it to false.
+`AmbientAgentPaneSnapshot.task_id` identifies the exact pane/task. Running
+parents select the shared-session attach path; `TerminalManager` reattaches
+the local conversation before OVM registration and response replay. Terminal
+parents resolve to `RestoreOrNavigateToConversation`; the ambient app-state
+restorer recognizes that action only for the durable marker and replaces the
+loading pane with the established restored cloud-mode conversation. This
+installs the existing conversation ID/exchanges before agent view entry and
+prevents the New cloud agent zero state. Arbitrary shared links never receive
+the marker, and flag-off retains the fresh-pane fallback. Older rows default
+the field to false.
 
 ### 7.5 One pane path
 `create_hidden_child_agent_pane` collapses to a single child-placeholder
@@ -957,6 +963,8 @@ is needed.
 - Restart-restore case: an owned `/cloud-agent` Observer parent restores from
   its ambient pane task ID with the persisted local cursor, re-registers OVM,
   and reconstructs named child pills from persisted `is_remote_child` rows.
+  App-state tests cover both running shared-session selection and terminal
+  existing-conversation restoration with exchanges and no compose zero state.
 - Owner-side pill status updates while the child pane stays closed (M1:
   tracker is sole status writer in both modes).
 - Unit surfaces: tracker state machine (`observe_child` idempotency, signal

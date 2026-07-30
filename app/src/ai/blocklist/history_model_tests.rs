@@ -71,6 +71,41 @@ fn create_persisted_query(
 }
 
 #[test]
+fn test_durable_observer_parent_marker_is_written_before_shutdown() {
+    App::test((), |mut app| async move {
+        initialize_settings_for_tests(&mut app);
+
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let mut global_resource_handles = GlobalResourceHandles::mock(&mut app);
+        global_resource_handles.model_event_sender = Some(sender);
+        app.add_singleton_model(|_| GlobalResourceHandlesProvider::new(global_resource_handles));
+
+        let history_model =
+            app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
+        let terminal_view_id = EntityId::new();
+        let task_id: AmbientAgentTaskId = "11111111-1111-1111-1111-111111111111".parse().unwrap();
+        let conversation_id = history_model.update(&mut app, |history, ctx| {
+            let conversation_id =
+                history.start_new_conversation(terminal_view_id, false, true, false, ctx);
+            history.mark_conversation_as_durable_observer_parent(conversation_id, task_id, ctx);
+            conversation_id
+        });
+
+        let ModelEvent::UpdateMultiAgentConversation {
+            conversation_id: persisted_id,
+            conversation_data,
+            ..
+        } = receiver.recv_timeout(Duration::from_secs(1)).unwrap()
+        else {
+            panic!("expected durable Observer persistence event");
+        };
+        assert_eq!(persisted_id, conversation_id.to_string());
+        assert!(conversation_data.is_durable_observer_parent);
+        assert_eq!(conversation_data.run_id, Some(task_id.to_string()));
+    });
+}
+
+#[test]
 fn ensure_remote_child_conversation_creates_one_named_run_mapping() {
     App::test((), |mut app| async move {
         initialize_history_persistence_for_tests(&mut app);
