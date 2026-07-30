@@ -204,7 +204,7 @@ impl PaneGroup {
                 else {
                     return;
                 };
-                self.hydrate_child_transcript_in_place(
+                self.hydrate_owner_child_transcript(
                     pane_id,
                     child_id,
                     task_id,
@@ -266,7 +266,7 @@ impl PaneGroup {
                 else {
                     return;
                 };
-                self.hydrate_child_transcript_in_place(
+                self.hydrate_viewer_child_transcript_in_place(
                     pane_id,
                     child_id,
                     task_id,
@@ -524,13 +524,11 @@ impl PaneGroup {
         });
     }
 
-    /// Fetches the cloud transcript identified by `server_token`, hydrates the
-    /// placeholder via
-    /// `hydrate_remote_child_placeholder_with_cloud_transcript`, and
-    /// re-restores the merged conversation into the pane. Used for terminal
-    /// (completed) children in both owner and viewer modes; a completed run
-    /// always ends with the conversation-ended tombstone.
-    fn hydrate_child_transcript_in_place(
+    /// Restores a completed owner child into an ambient cloud-mode
+    /// continuation pane. Unlike a passive transcript viewer, this path
+    /// resolves task ownership and naturally exposes the established
+    /// follow-up input for resumable owned Oz conversations.
+    fn hydrate_owner_child_transcript(
         &mut self,
         pane_id: PaneId,
         child_id: AIConversationId,
@@ -539,7 +537,106 @@ impl PaneGroup {
         ctx: &mut ViewContext<Self>,
     ) {
         log::info!(
-            "[orchestration-unified-debug] owner transcript upgrade fetch-start \
+            "[orchestration-unified-debug] owner completed replacement fetch-start \
+             child_conversation_id={child_id:?} pane_id={pane_id:?} task_id={task_id}"
+        );
+        let future = BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+            history.load_conversation_by_server_token(&server_token, ctx)
+        });
+        ctx.spawn(future, move |group, conversation, ctx| {
+            let still_canonical = group
+                .child_agent_panes
+                .get(&child_id)
+                .copied()
+                .is_some_and(|candidate| candidate == pane_id && group.has_pane_id(candidate));
+            if !still_canonical {
+                log::info!(
+                    "[orchestration-unified-debug] owner completed replacement stale-pane \
+                     child_conversation_id={child_id:?} pane_id={pane_id:?}"
+                );
+                return;
+            }
+
+            let Some(CloudConversationData::Oz(cloud)) = conversation else {
+                log::warn!(
+                    "[orchestration-unified-debug] owner completed replacement missing Oz transcript \
+                     child_conversation_id={child_id:?}"
+                );
+                return;
+            };
+            let tasks = cloud
+                .all_tasks()
+                .filter_map(|task| task.source().cloned())
+                .collect();
+            let merged = match BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, _ctx| {
+                history.hydrate_remote_child_placeholder_with_cloud_transcript(
+                    child_id,
+                    tasks,
+                    *cloud,
+                )
+            }) {
+                Ok(merged) => merged,
+                Err(err) => {
+                    log::warn!(
+                        "[orchestration-unified-debug] owner completed replacement merge-error \
+                         child_conversation_id={child_id:?} error={err:#}"
+                    );
+                    return;
+                }
+            };
+
+            let replaced = group
+                .replace_loading_pane_with_restored_owner_ambient_cloud_mode_pane(
+                    pane_id,
+                    CloudConversationData::Oz(Box::new(merged)),
+                    task_id,
+                    ctx,
+                );
+            if !replaced {
+                log::warn!(
+                    "[orchestration-unified-debug] owner completed replacement failed \
+                     child_conversation_id={child_id:?} pane_id={pane_id:?}"
+                );
+                return;
+            }
+
+            let replacement_pane_id = group.pane_id_for_conversation_owner(child_id, ctx);
+            if let Some(replacement_pane_id) = replacement_pane_id {
+                group
+                    .child_agent_panes
+                    .insert(child_id, replacement_pane_id);
+            }
+            let state = replacement_pane_id.and_then(|replacement_pane_id| {
+                group
+                    .terminal_view_from_pane_id(replacement_pane_id, ctx)
+                    .map(|view| {
+                        (
+                            view.as_ref(ctx).owned_ambient_agent_task_id(ctx).is_some(),
+                            view.as_ref(ctx).is_read_only(),
+                        )
+                    })
+            });
+            log::info!(
+                "[orchestration-unified-debug] owner completed replacement complete \
+                 child_conversation_id={child_id:?} replacement_pane_id={replacement_pane_id:?} \
+                 state_owned_and_read_only={state:?}"
+            );
+        });
+    }
+
+    /// Restores a completed passive-viewer child as a read-only transcript.
+    /// Owner children use [`Self::hydrate_owner_child_transcript`] so task
+    /// ownership can surface the established cloud continuation affordance.
+    fn hydrate_viewer_child_transcript_in_place(
+        &mut self,
+        pane_id: PaneId,
+        child_id: AIConversationId,
+        task_id: AmbientAgentTaskId,
+        server_token: ServerConversationToken,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        log::info!(
+            "[orchestration-unified-debug] viewer transcript upgrade fetch-start \
              child_conversation_id={child_id:?} pane_id={pane_id:?} task_id={task_id}"
         );
         let history_handle = BlocklistAIHistoryModel::handle(ctx);
@@ -554,7 +651,7 @@ impl PaneGroup {
                 .is_some_and(|p| p == pane_id && group.has_pane_id(p));
             if !still_canonical {
                 log::info!(
-                    "[orchestration-unified-debug] owner transcript upgrade stale-pane \
+                    "[orchestration-unified-debug] viewer transcript upgrade stale-pane \
                      child_conversation_id={child_id:?} pane_id={pane_id:?}"
                 );
                 return;
@@ -564,7 +661,7 @@ impl PaneGroup {
                 .and_then(|view| view.as_ref(ctx).active_conversation_id(ctx));
             if active_conversation != Some(child_id) {
                 log::info!(
-                    "[orchestration-unified-debug] owner transcript upgrade stale-conversation \
+                    "[orchestration-unified-debug] viewer transcript upgrade stale-conversation \
                      child_conversation_id={child_id:?} active={active_conversation:?}"
                 );
                 return;
@@ -587,7 +684,7 @@ impl PaneGroup {
                         Ok(merged) => merged,
                         Err(err) => {
                             log::warn!(
-                                "[orchestration-unified-debug] owner transcript upgrade merge-error \
+                                "[orchestration-unified-debug] viewer transcript upgrade merge-error \
                                  child_conversation_id={child_id:?} error={err:#}"
                             );
                             return;
@@ -596,14 +693,14 @@ impl PaneGroup {
                 }
                 Some(CloudConversationData::CLIAgent(_)) => {
                     log::warn!(
-                        "[orchestration-unified-debug] owner transcript upgrade unsupported \
+                        "[orchestration-unified-debug] viewer transcript upgrade unsupported \
                          CLI transcript child_conversation_id={child_id:?}"
                     );
                     return;
                 }
                 None => {
                     log::warn!(
-                        "[orchestration-unified-debug] owner transcript upgrade fetch-empty \
+                        "[orchestration-unified-debug] viewer transcript upgrade fetch-empty \
                          child_conversation_id={child_id:?}"
                     );
                     return;
@@ -643,7 +740,7 @@ impl PaneGroup {
                 });
             }
             log::info!(
-                "[orchestration-unified-debug] owner transcript upgrade complete \
+                "[orchestration-unified-debug] viewer transcript upgrade complete \
                  child_conversation_id={child_id:?} pane_id={pane_id:?}"
             );
         });
@@ -1134,8 +1231,8 @@ impl PaneGroup {
     /// When `OrchestrationUnifiedStack` is enabled (M2), the fresh task data
     /// is obtained from `AgentConversationsModel` and re-dispatched via the
     /// unified path: `AttachLive` calls `attach_child_session` directly on the
-    /// existing pane; `LoadTranscript` calls `hydrate_child_transcript_in_place`;
-    /// `Pending` leaves the entry for the next `TasksUpdated` cycle.
+    /// existing pane; `LoadTranscript` restores an owner ambient continuation
+    /// pane; `Pending` leaves the entry for the next `TasksUpdated` cycle.
     ///
     /// When the flag is off, the original `attempt_remote_child_hydration` path
     /// is used unchanged.
@@ -1197,7 +1294,7 @@ impl PaneGroup {
                                 "[orchestration-unified-debug] process_pending re-drive \
                                  LoadTranscript child_id={child_id:?} task_id={task_id}"
                             );
-                            self.hydrate_child_transcript_in_place(
+                            self.hydrate_owner_child_transcript(
                                 pane_id, child_id, task_id, server_token, ctx,
                             );
                         }
