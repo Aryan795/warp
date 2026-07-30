@@ -3704,6 +3704,7 @@ impl PaneGroup {
                     terminal_view,
                     cloud_conversation,
                     task_id,
+                    true,
                     ctx,
                 );
                 ctx.notify();
@@ -5301,6 +5302,42 @@ impl PaneGroup {
         task_id: AmbientAgentTaskId,
         ctx: &mut ViewContext<Self>,
     ) -> bool {
+        self.replace_loading_pane_with_restored_ambient_cloud_mode_pane_inner(
+            loading_pane_id,
+            cloud_conversation,
+            task_id,
+            true,
+            ctx,
+        )
+    }
+
+    /// Owner-side remote children are restored into the same ambient cloud
+    /// continuation surface without being persisted as passive shared-session
+    /// viewers.
+    fn replace_loading_pane_with_restored_owner_ambient_cloud_mode_pane(
+        &mut self,
+        loading_pane_id: PaneId,
+        cloud_conversation: CloudConversationData,
+        task_id: AmbientAgentTaskId,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        self.replace_loading_pane_with_restored_ambient_cloud_mode_pane_inner(
+            loading_pane_id,
+            cloud_conversation,
+            task_id,
+            false,
+            ctx,
+        )
+    }
+
+    fn replace_loading_pane_with_restored_ambient_cloud_mode_pane_inner(
+        &mut self,
+        loading_pane_id: PaneId,
+        cloud_conversation: CloudConversationData,
+        task_id: AmbientAgentTaskId,
+        mark_as_viewing_shared_session: bool,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
         let resources = TerminalViewResources {
             tips_completed: self.tips_completed.clone(),
             server_api: self.server_api.clone(),
@@ -5315,6 +5352,7 @@ impl PaneGroup {
             terminal_view.clone(),
             cloud_conversation,
             task_id,
+            mark_as_viewing_shared_session,
             ctx,
         );
 
@@ -5341,6 +5379,7 @@ impl PaneGroup {
         terminal_view: ViewHandle<TerminalView>,
         cloud_conversation: CloudConversationData,
         task_id: AmbientAgentTaskId,
+        mark_as_viewing_shared_session: bool,
         ctx: &mut ViewContext<Self>,
     ) {
         // URL-loaded conversation transcripts (e.g. Warp-on-Web deep links)
@@ -5368,7 +5407,8 @@ impl PaneGroup {
             match cloud_conversation {
                 CloudConversationData::Oz(mut conversation) => {
                     let id = conversation.id();
-                    conversation.set_is_viewing_shared_session(true);
+                    conversation
+                        .set_is_viewing_shared_session(mark_as_viewing_shared_session);
                     view.restore_conversation_after_view_creation(
                         RestoredAIConversation::new(*conversation),
                         true,
