@@ -2703,14 +2703,17 @@ type PullRequestArtifact {
 
 type PurchaseAddOnCreditsPolicy {
   enabled: Boolean!
+  premiumEnabled: Boolean!
+  pricePremiumBps: Int!
 }
 
 input PurchaseAddonCreditsInput {
   credits: Int!
-  teamUid: ID!
+  teamUid: ID
 }
 
 type PurchaseAddonCreditsOutput implements Response {
+  checkoutUrl: String
   responseContext: ResponseContext!
   success: Boolean!
 }

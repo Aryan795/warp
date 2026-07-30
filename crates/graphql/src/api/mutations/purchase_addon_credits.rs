@@ -6,7 +6,9 @@ use crate::schema;
 #[derive(cynic::InputObject, Debug)]
 pub struct PurchaseAddonCreditsInput {
     pub credits: i32,
-    pub team_uid: cynic::Id,
+    /// Optional server-side: omitting it lets the server auto-create a
+    /// personal team for teamless (fresh free) purchasers.
+    pub team_uid: Option<cynic::Id>,
 }
 
 #[derive(cynic::QueryVariables, Debug)]
@@ -39,5 +41,9 @@ pub enum PurchaseAddonCreditsResult {
 #[derive(cynic::QueryFragment, Debug)]
 pub struct PurchaseAddonCreditsOutput {
     pub success: bool,
+    /// When set, the purchase could not be charged synchronously (no saved
+    /// payment method) and the user must complete checkout in the browser at
+    /// this URL. Credits are granted via webhook after checkout completes.
+    pub checkout_url: Option<String>,
     pub response_context: ResponseContext,
 }
