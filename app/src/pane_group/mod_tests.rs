@@ -35,7 +35,7 @@ use crate::ai::agent::conversation::{
 };
 use crate::ai::agent_conversations_model::AgentConversationsModel;
 use crate::ai::ambient_agents::github_auth_notifier::GitHubAuthNotifier;
-use crate::ai::ambient_agents::task::TaskPrincipalInfo;
+use crate::ai::ambient_agents::task::{TaskPrincipalInfo, TaskScope};
 use crate::ai::ambient_agents::{
     AgentSource, AmbientAgentTask, AmbientAgentTaskId, AmbientAgentTaskState,
 };
@@ -298,6 +298,7 @@ fn ambient_agent_task_for_current_user(task_id: AmbientAgentTaskId) -> AmbientAg
         session_id: None,
         session_link: None,
         executor: None,
+        scope: None,
         creator: Some(TaskPrincipalInfo {
             creator_type: "USER".to_string(),
             uid: TEST_USER_UID.to_string(),
@@ -1171,6 +1172,70 @@ fn test_restored_viewer_hidden_child_pane_terminal_loads_transcript() {
                 model.conversation_transcript_viewer_status(),
                 Some(&ConversationTranscriptViewerStatus::Loading),
             );
+        });
+    });
+}
+
+#[test]
+fn completed_shared_session_child_with_edit_access_uses_continuation_pane() {
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    let _handoff = FeatureFlag::HandoffCloudCloud.override_enabled(true);
+    let _cloud_mode = FeatureFlag::CloudMode.override_enabled(true);
+    let _setup_v2 = FeatureFlag::CloudModeSetupV2.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+
+        pane_group.update(&mut app, |panes, ctx| {
+            let task_id = new_ambient_agent_task_id();
+            let mut task = ambient_agent_task_for_current_user(task_id);
+            task.creator = Some(TaskPrincipalInfo {
+                creator_type: "USER".to_string(),
+                uid: "other-user".to_string(),
+                display_name: None,
+            });
+            task.scope = Some(TaskScope::User {
+                uid: "other-user".to_string(),
+            });
+            task.conversation_id = Some("test-server-token".to_string());
+            AgentConversationsModel::handle(ctx).update(ctx, |model, _| {
+                model.insert_task_for_test(task);
+            });
+
+            let mut child = AIConversation::new(true, false);
+            child.set_task_id(task_id);
+            let child_id = child.id();
+            let mut merged = child.clone();
+            merged.set_server_metadata(test_server_conversation_metadata(Some(task_id)));
+
+            let loading_pane_id = panes
+                .create_child_loading_placeholder(
+                    child,
+                    AgentViewEntryOrigin::SharedSessionSelection,
+                    ctx,
+                )
+                .expect("viewer child loading pane");
+            panes.replace_child_loading_with_continuation_pane(
+                loading_pane_id,
+                child_id,
+                task_id,
+                merged,
+                ctx,
+            );
+
+            let pane_id = panes.child_agent_panes[&child_id];
+            assert_ne!(pane_id, loading_pane_id);
+            let view = panes
+                .terminal_view_from_pane_id(pane_id, ctx)
+                .expect("continuation pane");
+            assert!(view.as_ref(ctx).ambient_agent_view_model().is_some());
+            let model = view.as_ref(ctx).model.lock();
+            assert!(!model.is_conversation_transcript_viewer());
+            assert!(!model.is_read_only());
+            assert!(matches!(
+                model.shared_session_status(),
+                SharedSessionStatus::NotShared
+            ));
         });
     });
 }

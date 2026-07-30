@@ -2,8 +2,8 @@ use chrono::{Duration, Utc};
 use serde_json::{Value, json};
 
 use super::{
-    AgentConfigSnapshot, AgentSource, AmbientAgentTask, AmbientAgentTaskState, TaskStatusErrorCode,
-    TaskStatusMessage,
+    AgentConfigSnapshot, AgentSource, AmbientAgentTask, AmbientAgentTaskState, TaskOwnership,
+    TaskPrincipalInfo, TaskScope, TaskStatusErrorCode, TaskStatusMessage,
 };
 
 fn make_task(snapshot_name: Option<&str>, title: &str) -> AmbientAgentTask {
@@ -28,6 +28,7 @@ fn make_task(snapshot_name: Option<&str>, title: &str) -> AmbientAgentTask {
         session_link: None,
         creator: None,
         executor: None,
+        scope: None,
         conversation_id: None,
         request_usage: None,
         is_sandbox_running: false,
@@ -153,4 +154,113 @@ fn ambient_agent_task_deserializes_github_webhook_source() {
 
     assert_eq!(task.source, Some(AgentSource::GitHubWebhook));
     assert!(task.blocks_cloud_followups());
+}
+
+#[test]
+fn ambient_agent_task_deserializes_user_and_team_scope() {
+    let mut user = task_json_with_run_time("run_time", json!("PT1S"));
+    user["scope"] = json!({"type": "User", "uid": "user-1"});
+    let user: AmbientAgentTask = serde_json::from_value(user).unwrap();
+    assert_eq!(
+        user.scope,
+        Some(TaskScope::User {
+            uid: "user-1".to_string(),
+        })
+    );
+
+    let mut team = task_json_with_run_time("run_time", json!("PT1S"));
+    team["scope"] = json!({"type": "Team", "uid": "team-1"});
+    let team: AmbientAgentTask = serde_json::from_value(team).unwrap();
+    assert_eq!(
+        team.scope,
+        Some(TaskScope::Team {
+            uid: "team-1".to_string(),
+        })
+    );
+}
+
+#[test]
+fn ambient_agent_task_scope_is_compatible_when_absent_unknown_or_malformed() {
+    let absent: AmbientAgentTask =
+        serde_json::from_value(task_json_with_run_time("run_time", json!("PT1S"))).unwrap();
+    assert_eq!(absent.scope, None);
+
+    for scope in [
+        json!({"type": "Organization", "uid": "org-1"}),
+        json!({"type": "User"}),
+        json!({"uid": "user-1"}),
+        json!({"type": "Team", "uid": ""}),
+    ] {
+        let mut task = task_json_with_run_time("run_time", json!("PT1S"));
+        task["scope"] = scope;
+        let task: AmbientAgentTask = serde_json::from_value(task).unwrap();
+        assert_eq!(task.scope, Some(TaskScope::Unknown));
+    }
+}
+
+#[test]
+fn task_scope_is_authoritative_for_user_and_team_ownership() {
+    let mut task = make_task(None, "Task");
+    task.scope = Some(TaskScope::User {
+        uid: "current-user".to_string(),
+    });
+    assert_eq!(
+        task.resolve_ownership(Some("current-user"), Some("user"), |_| false),
+        TaskOwnership::Owned
+    );
+    assert_eq!(
+        task.resolve_ownership(Some("other-user"), Some("user"), |_| false),
+        TaskOwnership::NotOwned
+    );
+
+    task.scope = Some(TaskScope::Team {
+        uid: "team-1".to_string(),
+    });
+    assert_eq!(
+        task.resolve_ownership(
+            Some("service-account"),
+            Some("service_account"),
+            |team| team == "team-1"
+        ),
+        TaskOwnership::Owned
+    );
+    assert_eq!(
+        task.resolve_ownership(Some("current-user"), Some("user"), |_| false),
+        TaskOwnership::NotOwned
+    );
+}
+
+#[test]
+fn task_ownership_falls_back_to_exact_creator_match_only_when_scope_absent() {
+    let mut task = make_task(None, "Task");
+    task.creator = Some(TaskPrincipalInfo {
+        creator_type: "user".to_string(),
+        uid: "current-user".to_string(),
+        display_name: None,
+    });
+    assert_eq!(
+        task.resolve_ownership(Some("current-user"), Some("user"), |_| false),
+        TaskOwnership::Owned
+    );
+    assert_eq!(
+        task.resolve_ownership(Some("other-user"), Some("user"), |_| false),
+        TaskOwnership::Unknown,
+        "creator mismatch is not authoritative non-ownership"
+    );
+    assert_eq!(
+        task.resolve_ownership(Some("current-user"), Some("service_account"), |_| false),
+        TaskOwnership::Unknown,
+        "creator fallback requires principal type as well as UID"
+    );
+
+    task.scope = Some(TaskScope::Unknown);
+    assert_eq!(
+        task.resolve_ownership(Some("current-user"), Some("user"), |_| false),
+        TaskOwnership::Unknown,
+        "present but unknown scope must not use creator fallback"
+    );
+    assert_eq!(
+        task.resolve_ownership(None, Some("user"), |_| true),
+        TaskOwnership::Unknown
+    );
 }

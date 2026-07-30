@@ -44,7 +44,7 @@ use crate::features::FeatureFlag;
 #[cfg(feature = "local_fs")]
 use crate::pane_group::CodeSource;
 use crate::pane_group::Event::OpenConversationHistory;
-use crate::pane_group::child_agent::materialization::ChildPaneMaterializationMode;
+use crate::pane_group::child_agent::materialization::ChildPaneOrigin;
 use crate::pane_group::child_agent::{
     ErrorChildAgentConversationRequest, create_error_child_agent_conversation,
 };
@@ -1457,7 +1457,7 @@ fn handle_terminal_view_event(
                     group.attach_child_session(
                         *conversation_id,
                         *session_id,
-                        ChildPaneMaterializationMode::Viewer,
+                        ChildPaneOrigin::SharedSession,
                         ctx,
                     );
                 } else {

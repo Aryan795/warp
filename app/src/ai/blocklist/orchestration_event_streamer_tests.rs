@@ -211,6 +211,7 @@ fn make_ambient_task_with_event_seq(
         session_link: None,
         creator: None,
         executor: None,
+        scope: None,
         conversation_id: None,
         request_usage: None,
         agent_config_snapshot: None,
@@ -2683,6 +2684,8 @@ fn drain_family_events_observer_advances_cursor_without_server_push() {
     // locally, but must NEVER push the server cursor (only Primary may write
     // it). The bare MockAIClient panics if update_event_sequence_on_server is
     // called — that is the proof Observer never pushes server cursor.
+    // TaskOwnership is deliberately not an input to this API, so an
+    // authenticated owner observing via a shared link remains an Observer.
     App::test((), |mut app| async move {
         initialize_settings_for_tests(&mut app);
         let (sender, _receiver) = std::sync::mpsc::sync_channel::<ModelEvent>(4);

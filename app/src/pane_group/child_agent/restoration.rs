@@ -6,7 +6,7 @@ use uuid::Uuid;
 use warp_errors::report_error;
 use warpui::{SingletonEntity, ViewContext};
 
-use super::materialization::ChildPaneMaterializationMode;
+use super::materialization::ChildPaneOrigin;
 use super::{HiddenChildAgentTaskContext, apply_hidden_child_agent_task_context};
 use crate::ai::agent::conversation::{AIConversation, AIConversationId};
 use crate::ai::blocklist::BlocklistAIHistoryModel;
@@ -192,15 +192,15 @@ impl PaneGroup {
             // both route through `materialize_child_placeholder_pane`, which
             // fetches the task and routes on `decide_child_pane_materialization`.
             // The local in-process child branch below stays separate.
-            let placeholder_mode = if child_conversation.is_viewing_shared_session() {
-                Some(ChildPaneMaterializationMode::Viewer)
+            let pane_origin = if child_conversation.is_viewing_shared_session() {
+                Some(ChildPaneOrigin::SharedSession)
             } else if child_conversation.is_remote_child() {
-                Some(ChildPaneMaterializationMode::Owner)
+                Some(ChildPaneOrigin::HostedConversation)
             } else {
                 None
             };
-            if let Some(mode) = placeholder_mode {
-                self.materialize_child_placeholder_pane(child_conversation, mode, ctx);
+            if let Some(origin) = pane_origin {
+                self.materialize_child_placeholder_pane(child_conversation, origin, ctx);
                 return;
             }
         } else {
