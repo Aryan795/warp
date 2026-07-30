@@ -853,8 +853,7 @@ impl AgentViewController {
         // "New Oz cloud agent conversation" zero-state block while the child
         // is restoring or waiting for its first streamed exchange.
         let is_new = exchange_count == 0
-            && !(FeatureFlag::OrchestrationUnifiedStack.is_enabled()
-                && is_existing_remote_child);
+            && !(FeatureFlag::OrchestrationUnifiedStack.is_enabled() && is_existing_remote_child);
         if is_existing_remote_child {
             log::info!(
                 "[orchestration-unified-debug] enter_agent_view existing remote child \

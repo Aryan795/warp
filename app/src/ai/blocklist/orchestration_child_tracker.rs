@@ -624,14 +624,14 @@ impl OrchestrationChildTracker {
         if let Some(task_id) = self.children_by_run_id.get(run_id).copied() {
             // Only update remote-child entries, not in-band children which
             // already own their own real conversation.
-            if !self.in_band_children.contains(&task_id) {
-                if let Some(child) = self.children.get_mut(&task_id) {
-                    child.conversation_id = conversation_id;
-                    log::info!(
-                        "[orchestration-unified-debug] stamp_conversation_id_for_run \
-                         run_id={run_id} conversation_id={conversation_id:?}"
-                    );
-                }
+            if !self.in_band_children.contains(&task_id)
+                && let Some(child) = self.children.get_mut(&task_id)
+            {
+                child.conversation_id = conversation_id;
+                log::info!(
+                    "[orchestration-unified-debug] stamp_conversation_id_for_run \
+                     run_id={run_id} conversation_id={conversation_id:?}"
+                );
             }
         }
     }

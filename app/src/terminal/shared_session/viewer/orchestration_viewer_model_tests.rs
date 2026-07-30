@@ -41,6 +41,44 @@ fn maps_working_states_to_in_progress() {
 }
 
 #[test]
+fn unified_terminal_child_with_stale_session_requests_current_state_materialization() {
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    App::test((), |mut app| async move {
+        let parent = task_id(PARENT_TASK_ID);
+        let (_, _, model) = setup_model(&mut app, parent);
+        let model_handle = app.add_model(|_| model);
+        let mut task = make_task(
+            CHILD_A_TASK_ID,
+            AmbientAgentTaskState::Succeeded,
+            "Worker",
+            Some(SESSION_A),
+        );
+        task.conversation_id = Some("completed-child-token".to_string());
+
+        model_handle.update(&mut app, |model, ctx| {
+            model.register_child(task, ctx);
+        });
+
+        model_handle.read(&app, |model, _| {
+            let entry = model.children.get(&task_id(CHILD_A_TASK_ID)).unwrap();
+            assert!(
+                entry.pane_materialization_requested,
+                "terminal child transcript materialization should be requested eagerly",
+            );
+            assert_eq!(
+                entry.session_id,
+                Some(SESSION_A.parse().unwrap()),
+                "the stale id remains metadata, but must not determine the unified route",
+            );
+            assert!(
+                !model.has_pending_session_id_children(),
+                "terminal transcript materialization must stop legacy session-id polling",
+            );
+        });
+    });
+}
+
+#[test]
 fn maps_succeeded_to_success() {
     assert!(matches!(
         conversation_status_from_state(&AmbientAgentTaskState::Succeeded),

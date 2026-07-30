@@ -1157,6 +1157,67 @@ fn test_restored_viewer_hidden_child_pane_terminal_loads_transcript() {
     });
 }
 
+#[test]
+fn failed_viewer_child_session_stays_unavailable_without_retrying_same_session() {
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+        let task_id = new_ambient_agent_task_id();
+        let failed_session_id = SessionId::new();
+
+        pane_group.update(&mut app, |panes, ctx| {
+            let parent_pane_id = get_newly_created_pane_id(panes, &[]);
+            let parent_conversation_id = start_parent_conversation(panes, parent_pane_id, ctx);
+
+            let mut pending_task = ambient_agent_task_for_current_user(task_id);
+            pending_task.state = AmbientAgentTaskState::Pending;
+            pending_task.is_sandbox_running = false;
+            pending_task.session_id = None;
+            AgentConversationsModel::handle(ctx).update(ctx, |model, _| {
+                model.insert_task_for_test(pending_task);
+            });
+
+            let mut child_conversation = AIConversation::new(false, false);
+            child_conversation.set_parent_conversation_id(parent_conversation_id);
+            child_conversation.set_task_id(task_id);
+            child_conversation.set_is_viewing_shared_session(true);
+            let child_id = child_conversation.id();
+            panes.create_hidden_child_agent_pane(child_conversation, parent_pane_id, ctx);
+            let pane_id = panes.child_agent_panes[&child_id];
+
+            panes.recover_viewer_child_join_failure(pane_id, child_id, failed_session_id, ctx);
+
+            let mut running_task = ambient_agent_task_for_current_user(task_id);
+            running_task.state = AmbientAgentTaskState::InProgress;
+            running_task.is_sandbox_running = true;
+            running_task.session_id = Some(failed_session_id.to_string());
+            AgentConversationsModel::handle(ctx).update(ctx, |model, _| {
+                model.insert_task_for_test(running_task);
+            });
+            panes.process_pending_viewer_child_hydrations(ctx);
+
+            assert_eq!(panes.child_agent_panes[&child_id], pane_id);
+            assert_eq!(
+                panes.failed_viewer_child_sessions.get(&child_id),
+                Some(&failed_session_id),
+            );
+            assert_eq!(
+                panes.pending_viewer_child_hydrations.get(&task_id),
+                Some(&child_id),
+            );
+            let view = panes
+                .terminal_view_from_pane_id(pane_id, ctx)
+                .expect("pending child pane remains available");
+            assert!(
+                view.as_ref(ctx)
+                    .is_orchestration_child_live_unavailable_for_test(),
+                "failed child join should leave bounded non-error unavailable UI",
+            );
+        });
+    });
+}
+
 /// Phase 1 integration coverage: validates that after `BlocklistAIHistoryModel`
 /// restoration (the same code path the disk-load Fix C unblocks), the
 /// orchestration topology is fully wired BEFORE the parent's fullscreen

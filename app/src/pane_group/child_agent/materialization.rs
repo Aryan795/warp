@@ -12,7 +12,7 @@ use crate::ai::ambient_agents::{AmbientAgentLiveSessionState, AmbientAgentTask};
 /// ([`decide_child_pane_materialization`]) is mode-agnostic — owner and
 /// viewer make the same choice given identical task state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::pane_group) enum ChildPaneMaterializationMode {
+pub(crate) enum ChildPaneMaterializationMode {
     /// This process owns the orchestrator run: the child attaches to a
     /// cloud-mode ambient pane.
     Owner,
@@ -24,7 +24,7 @@ pub(in crate::pane_group) enum ChildPaneMaterializationMode {
 /// How to materialize a child agent pane given its [`AmbientAgentTask`].
 /// See [`decide_child_pane_materialization`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::pane_group) enum ChildPaneMaterialization {
+pub(crate) enum ChildPaneMaterialization {
     /// Attachable live session — join it in place using `session_id`.
     AttachLive { session_id: SessionId },
     /// No live session but a server conversation token is available; load
@@ -41,7 +41,7 @@ pub(in crate::pane_group) enum ChildPaneMaterialization {
 /// viewer given identical task state.
 ///
 /// Free-standing so it's unit-testable without a `PaneGroup`.
-pub(in crate::pane_group) fn decide_child_pane_materialization(
+pub(crate) fn decide_child_pane_materialization(
     task: &AmbientAgentTask,
 ) -> ChildPaneMaterialization {
     if let AmbientAgentLiveSessionState::Attachable { session_id } =
