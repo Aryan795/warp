@@ -200,12 +200,7 @@ impl PaneGroup {
                 None
             };
             if let Some(mode) = placeholder_mode {
-                self.materialize_child_placeholder_pane(
-                    child_conversation,
-                    parent_pane_id,
-                    mode,
-                    ctx,
-                );
+                self.materialize_child_placeholder_pane(child_conversation, mode, ctx);
                 return;
             }
         } else {

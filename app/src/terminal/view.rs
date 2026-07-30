@@ -8079,6 +8079,12 @@ impl TerminalView {
     pub(crate) fn is_orchestration_child_live_unavailable_for_test(&self) -> bool {
         self.orchestration_child_live_unavailable
     }
+    #[cfg(test)]
+    pub(crate) fn has_agent_view_zero_state_for_test(&self) -> bool {
+        self.rich_content_views
+            .iter()
+            .any(|view| view.is_agent_view_zero_state())
+    }
 
     #[cfg(test)]
     pub(crate) fn is_initial_conversation_details_panel_auto_open_suppressed_for_test(

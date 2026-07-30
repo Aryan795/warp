@@ -83,7 +83,6 @@ impl PaneGroup {
     pub(in crate::pane_group) fn materialize_viewer_child_pane_from_task(
         &mut self,
         child_id: AIConversationId,
-        parent_pane_id: PaneId,
         task: AmbientAgentTask,
         ctx: &mut ViewContext<Self>,
     ) {
@@ -98,13 +97,7 @@ impl PaneGroup {
         };
         let task_id = child_conversation.task_id().or(Some(task.task_id));
         let materialization = decide_child_pane_materialization(&task);
-        self.materialize_viewer_child_pane(
-            child_conversation,
-            parent_pane_id,
-            task_id,
-            Some(materialization),
-            ctx,
-        );
+        self.materialize_viewer_child_pane(child_conversation, task_id, Some(materialization), ctx);
     }
     /// Single dispatch for every placeholder-child pane — the `is_remote_child`
     /// (owner) and `is_viewing_shared_session` (viewer) branches of
@@ -121,7 +114,6 @@ impl PaneGroup {
     pub(in crate::pane_group) fn materialize_child_placeholder_pane(
         &mut self,
         child_conversation: AIConversation,
-        parent_pane_id: PaneId,
         mode: ChildPaneMaterializationMode,
         ctx: &mut ViewContext<Self>,
     ) {
@@ -178,7 +170,6 @@ impl PaneGroup {
             ChildPaneMaterializationMode::Viewer => {
                 self.materialize_viewer_child_pane(
                     child_conversation,
-                    parent_pane_id,
                     task_id,
                     materialization,
                     ctx,
@@ -266,7 +257,6 @@ impl PaneGroup {
     fn materialize_viewer_child_pane(
         &mut self,
         child_conversation: AIConversation,
-        parent_pane_id: PaneId,
         task_id: Option<AmbientAgentTaskId>,
         materialization: Option<ChildPaneMaterialization>,
         ctx: &mut ViewContext<Self>,
@@ -307,9 +297,9 @@ impl PaneGroup {
                     .copied()
                     .filter(|pane_id| self.has_pane_id(*pane_id))
                     .or_else(|| {
-                        self.create_hidden_ambient_child_pane(
+                        self.create_child_loading_placeholder(
                             child_conversation,
-                            parent_pane_id,
+                            AgentViewEntryOrigin::SharedSessionSelection,
                             ctx,
                         )
                     });
@@ -492,67 +482,6 @@ impl PaneGroup {
             "[orchestration-unified-debug] owner live replacement complete \
              child_conversation_id={child_id:?} new_pane_id={new_pane_id:?}"
         );
-    }
-
-    /// Creates a hidden cloud-mode ambient pane for a child placeholder,
-    /// restores the placeholder conversation into it, enters agent view, and
-    /// registers the pane in `child_agent_panes` keyed by the placeholder's
-    /// local `AIConversationId`. Returns the new pane id, or `None` if pane or
-    /// view creation failed.
-    fn create_hidden_ambient_child_pane(
-        &mut self,
-        child_conversation: AIConversation,
-        parent_pane_id: PaneId,
-        ctx: &mut ViewContext<Self>,
-    ) -> Option<PaneId> {
-        let child_id = child_conversation.id();
-        let new_pane_id =
-            self.insert_ambient_agent_pane_hidden_for_child_agent(parent_pane_id, ctx);
-
-        let Some(new_terminal_view) = self.terminal_view_from_pane_id(new_pane_id, ctx) else {
-            report_error!(
-                "Failed to get terminal view for remote child agent pane",
-                extra: { "child_id" => ?child_id }
-            );
-            self.discard_pane(new_pane_id.into(), ctx);
-            return None;
-        };
-
-        // Restore the placeholder so the pane has parent linkage + agent name
-        // before materialization runs.
-        let mut restored = false;
-        new_terminal_view.update(ctx, |terminal_view, ctx| {
-            terminal_view.restore_conversation_after_view_creation(
-                RestoredAIConversation::new(child_conversation),
-                true,
-                RestoreConversationEntryBehavior::PreserveAgentViewState,
-                ctx,
-            );
-            terminal_view.enter_agent_view(
-                None,
-                Some(child_id),
-                AgentViewEntryOrigin::CloudAgent,
-                ctx,
-            );
-            restored = terminal_view
-                .ambient_agent_view_model()
-                .into_optional_handle()
-                .is_some();
-        });
-
-        if !restored {
-            report_error!(
-                "Failed to restore remote child agent pane: missing ambient agent view model",
-                extra: { "child_id" => ?child_id }
-            );
-            self.discard_pane(new_pane_id.into(), ctx);
-            return None;
-        }
-
-        // Placeholder's local id stays the canonical `child_agent_panes` key
-        // across live-attach and transcript hydration.
-        self.child_agent_panes.insert(child_id, new_pane_id.into());
-        Some(new_pane_id.into())
     }
 
     /// Attaches the hidden child pane's ambient agent view model to the live
