@@ -6,7 +6,7 @@ use warp_terminal::model::grid::cell;
 use super::*;
 use crate::features::FeatureFlag;
 use crate::terminal::SizeInfo;
-use crate::terminal::model::ansi::{Handler, LineClearMode};
+use crate::terminal::model::ansi::{Handler, LineClearMode, Mode};
 use crate::terminal::model::cell::{Cell, Flags};
 use crate::terminal::model::grid::Dimensions;
 use crate::terminal::model::index::{Point, VisiblePoint, VisibleRow};
@@ -575,6 +575,30 @@ fn grow_reflow_preserves_soft_wrap_on_bare_cr_then_resize() {
     assert_eq!(row[7].c, 'h');
     // Row 0 should not wrap any further.
     assert!(!grid.row_wraps(0));
+}
+#[test]
+fn grow_reflow_preserves_soft_wrap_with_line_feed_new_line_mode() {
+    let mut grid = GridHandler::new_for_test(3, 5);
+    for c in "abcdefgh".chars() {
+        grid.input(c);
+    }
+
+    // In LINE_FEED_NEW_LINE mode, newline() performs a linefeed before its
+    // carriage return. The resulting write is on a new hard line and must not
+    // unlink the preceding soft-wrapped logical line.
+    grid.set_mode(Mode::LineFeedNewLine);
+    grid.newline();
+    grid.input('X');
+
+    grid.resize(SizeInfo::new_without_font_metrics(3, 10));
+
+    let first_row = grid.row(0).expect("row 0 should exist");
+    let first_line = (0..8).map(|col| first_row[col].c).collect::<String>();
+    assert_eq!(first_line, "abcdefgh");
+    assert!(!grid.row_wraps(0));
+
+    let second_row = grid.row(1).expect("row 1 should exist");
+    assert_eq!(second_row[0].c, 'X');
 }
 
 #[test]
