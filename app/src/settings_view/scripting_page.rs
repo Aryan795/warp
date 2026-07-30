@@ -13,6 +13,8 @@ use warpui::ui_components::button::ButtonVariant;
 use warpui::ui_components::components::UiComponent;
 use warpui::{AppContext, Entity, SingletonEntity, TypedActionView, View, ViewContext, ViewHandle};
 
+#[cfg(target_os = "macos")]
+use super::settings_page::render_separator;
 use super::settings_page::{
     LocalOnlyIconState, MatchData, PageType, SettingsPageMeta, SettingsPageViewHandle,
     SettingsWidget, render_body_item,
@@ -26,6 +28,10 @@ use crate::view_components::DismissibleToast;
 use crate::view_components::{Dropdown, DropdownItem};
 #[cfg(target_os = "macos")]
 use crate::workspace::{ToastStack, cli_install};
+#[cfg(any(target_os = "macos", test))]
+const WARP_CONTROL_CLI_INSTALL_SEARCH_TERMS: &str = "warp control command install terminal";
+const LOCAL_CONTROL_MODE_SEARCH_TERMS: &str =
+    "scripting automation local scripts disabled enabled permission warpctrl cli";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ScriptingSettingsPageAction {
@@ -64,6 +70,7 @@ impl ScriptingSettingsPageView {
         #[cfg(target_os = "macos")]
         let widgets: Vec<Box<dyn SettingsWidget<View = Self>>> = vec![
             Box::new(WarpControlCliInstallWidget::default()),
+            Box::new(DividerWidget),
             Box::new(LocalControlModeWidget),
         ];
         #[cfg(not(target_os = "macos"))]
@@ -219,7 +226,7 @@ impl SettingsWidget for WarpControlCliInstallWidget {
     type View = ScriptingSettingsPageView;
 
     fn search_terms(&self) -> &str {
-        "warp control cli command warpctrl install scripting"
+        WARP_CONTROL_CLI_INSTALL_SEARCH_TERMS
     }
 
     fn render(
@@ -269,13 +276,35 @@ impl SettingsWidget for WarpControlCliInstallWidget {
         )
     }
 }
+
+#[cfg(target_os = "macos")]
+struct DividerWidget;
+
+#[cfg(target_os = "macos")]
+impl SettingsWidget for DividerWidget {
+    type View = ScriptingSettingsPageView;
+
+    fn search_terms(&self) -> &str {
+        ""
+    }
+
+    fn render(
+        &self,
+        _view: &Self::View,
+        appearance: &Appearance,
+        _app: &AppContext,
+    ) -> Box<dyn Element> {
+        render_separator(appearance)
+    }
+}
+
 struct LocalControlModeWidget;
 
 impl SettingsWidget for LocalControlModeWidget {
     type View = ScriptingSettingsPageView;
 
     fn search_terms(&self) -> &str {
-        "scripting warp control automation warpctrl local cli scripts disabled enabled"
+        LOCAL_CONTROL_MODE_SEARCH_TERMS
     }
 
     fn render(
@@ -300,3 +329,7 @@ impl SettingsWidget for LocalControlModeWidget {
         )
     }
 }
+
+#[cfg(test)]
+#[path = "scripting_page_tests.rs"]
+mod tests;
