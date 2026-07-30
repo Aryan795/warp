@@ -278,9 +278,11 @@ All child state changes on both owner and viewer funnel through
 and `ChildSignal` variant list). The four-step logic:
 
 0. Drop tombstoned runs and runs owned by a non-placeholder local conversation.
-1. Create-or-update the placeholder (`is_remote_child = true`, both modes).
-2. Write status through on `Lifecycle` signals (tracker is sole status writer).
-3. Refetch metadata via `AgentConversationsModel::refresh_task_data` while
+1. Create-or-update child membership, then converge the fetched task metadata
+   through `BlocklistAIHistoryModel::ensure_remote_child_conversation`
+   (`is_remote_child = true`, both modes).
+2. Write status through on `Lifecycle` signals and emit the shared status event.
+3. Refetch metadata via the shared task cache while
    `session_id` is missing or pane not materialized.
 4. Request pane materialization once `session_id` is known, or transcript once terminal.
 
@@ -293,6 +295,9 @@ for the attach-time window.
 `ChildSignal::Started` (from `child_agent_started`) is idempotent:
 calling it again for the same run id is a no-op (explicit tracker state
 replaces the old `conversation_id_for_agent_id(...).is_none()` implicit guard).
+An unknown `ChildSignal::Lifecycle` performs the same eager membership insert
+and emits `ChildSpawned` before the metadata fetch, so lifecycle-before-started
+is a complete discovery backstop rather than a tracker-only fetch.
 `ChildSignal::Registered` (from `StartAgentExecutor`) prevents placeholder
 creation for in-band children — tracker marks them as already-represented.
 Tombstoned runs are checked at step 0 so kills mid-fetch cannot resurrect placeholders.
@@ -312,10 +317,12 @@ flowchart TD
 `classify_family_event(event, self_run_id)` into `FamilyEvent` variants
 (see §7.3 for the full sketch):
 
-- **`ChildStarted`** → `tracker.observe_child(Started)`
+- **`ChildStarted`** → start/dedupe real task metadata hydration and
+  `tracker.observe_child(Started)`
 - **`ChildSessionLinked`** → `tracker.observe_child(SessionLinked { session_uuid })`
   (extracts UUID from `ref_id`; no metadata fetch needed)
-- **`ChildLifecycle`** → `tracker.observe_child(Lifecycle(kind))`
+- **`ChildLifecycle`** → the same metadata backstop plus
+  `tracker.observe_child(Lifecycle(kind))`
 - **`ParentSelf`** → Primary: `handle_event_batch` (inbox + lifecycle);
   Observer: dropped (no parent-self delivery)
 - **`Opaque`** → cursor advances only (forward compat)
@@ -626,14 +633,11 @@ Message hydration becomes an opt-in on the forwarding consumer (exactly the
 flag `AncestorForwardingConsumer`'s doc comment anticipates), enabled for
 Primary and disabled for Observer.
 
-**Single status writer.** The tracker is the sole writer of placeholder-child
-`ConversationStatus` in both modes. This is not just tidiness: it *fixes* the
-owner-side pill-staleness gap (§6, item 3) — today no one writes owner-side
-cloud-child status from events. The broadcasts are notifications for views,
-never a license for consumers to write status. Local in-band children keep
-their own controller as their status writer (the tracker is read-only for
-them), and the `EventsFromAgents` injection path (§4.2 Delivery) is
-orthogonal — it feeds the parent's model, not UI state — and is unchanged.
+The tracker maps lifecycle status and writes through when the durable mapping
+already exists. OVM consumes the same broadcast and writes the identical
+status for its pane; task-snapshot registration also initializes status.
+These writes are idempotent and converge on the one history conversation.
+Local in-band children keep their own controller as their status authority.
 
 ### 7.4 One placeholder flavor
 Persist a single child-placeholder kind; keep the on-disk shape
@@ -643,21 +647,29 @@ backward-compatible by reusing the existing fields:
   builds already have it).
 - Represent viewer-ness as a **runtime mode on the tracker**, not a persisted
   conversation flavor. Viewer-created placeholders start persisting with the
-  same marker, which fixes the restore-after-restart bug. Note the viewer
-  restore mechanism precisely: a pure viewer's parent is an
-  `is_viewing_shared_session` placeholder that the streamer's restore path
-  skips entirely (no owner restore fetch runs viewer-side), so the rebuild
-  must come from the persisted placeholder rows plus `children_by_parent`
-  alone — workable, but Phase 1 must not assume a `task.children` fetch.
-- Server-status-report suppression keys off the tracker mode at write time
-  instead of `is_viewing_shared_session()` on the conversation.
+  same marker, which fixes child restore and run-id attribution.
+- Server-status-report suppression keys off the unified
+  `is_remote_child` marker instead of `is_viewing_shared_session()`.
 `is_viewing_shared_session` remains for the *parent* viewer placeholder (a
 genuine shared-session concept); only the child-placeholder use retires.
+`BlocklistAIHistoryModel::ensure_remote_child_conversation` is the atomic
+run-id mapping authority. The Primary placeholder callback and OVM metadata
+callback may race, but both create-or-adopt this mapping, so exactly one named
+conversation populates `agent_id_to_conversation_id`. OVM retains only its
+per-pane materialization state and adopts the durable `is_remote_child`
+conversation. Restored pane origin is derived from the restored parent being
+a shared-session Observer, never from child ownership.
 
-**Current implementation drift.** M2's OVM child creation still stamps
-`is_viewing_shared_session` on child placeholders. Capability-aware pane
-construction must support both flavors until the persisted single-flavor
-migration is complete; it must not infer permissions from either marker.
+**Durable Observer parent.** `is_viewing_shared_session` stays runtime-only
+and passive links remain ephemeral. When OVM resolves the parent task as
+`TaskOwnership::Owned`, it stamps the narrow, serde-defaulted
+`is_durable_observer_parent` marker and the real task/run ID. This exception
+allows the shared parent conversation, its local-only cursor, and child links
+to persist. Startup eagerly hydrates only marked parents; the existing
+`AmbientAgentPaneSnapshot.task_id` identifies the exact pane/task, and
+`TerminalManager` reattaches the local conversation before OVM registration
+and shared-session response replay. Arbitrary shared links never receive the
+marker. Older rows default it to false.
 
 ### 7.5 One pane path
 `create_hidden_child_agent_pane` collapses to a single child-placeholder
@@ -690,7 +702,7 @@ unified path replaces only the two placeholder branches.
 Walking the full taxonomy (§2) surfaces four further consolidations that the
 tracker makes cheap; the first three belong to Phase 1, the fourth to
 Phase 3+.
-1. **One task-metadata fetch authority.** Today `get_ambient_agent_task` for
+1. **Task-metadata fetch convergence.** `get_ambient_agent_task` for
    children runs through five independent paths with three different
    retry/dedup schemes: the post-restore fetch (own exponential backoff,
    `RESTORE_FETCH_BACKOFF_STEPS`), the harness fetch
@@ -698,9 +710,11 @@ Phase 3+.
    in-flight guard), OVM's `spawn_task_metadata_fetch` (raw client, no
    dedup), and `AgentConversationsModel::async_fetch_task` — the only one
    with in-flight dedup, failure cooldowns, a cache, and a `TasksUpdated`
-   signal. The tracker fetches exclusively through `AgentConversationsModel`;
-   the bespoke retry/guard machinery deletes and every consumer shares one
-   cache (pane hydration already reads it).
+   signal. The tracker and pane hydration use `AgentConversationsModel`.
+   Streamer placeholder completion and OVM still have raw fetch adapters, but
+   OVM dedupes in flight and both callbacks converge atomically through
+   `ensure_remote_child_conversation`; a later cleanup can move the remaining
+   requests behind the shared cache without changing identity semantics.
 2. **One status-mapping module.** Child status exists in three
    representations — wire `event_type`, REST `AmbientAgentTaskState`, client
    `ConversationStatus` — with mirrored mappings in two files:
@@ -850,7 +864,10 @@ Old builds must restore rows written by new builds and vice versa. Reusing
 `is_remote_child` as the persisted marker (§7.4) makes new viewer-child rows
 look like owner placeholders to old builds — acceptable (they render as
 pills; click-through degrades to transcript-when-terminal). New builds
-restoring old rows see no viewer children (status quo). No migration needed.
+restoring old rows see no viewer children (status quo). The new parent
+`is_durable_observer_parent` field is serde-defaulted and skipped when false;
+old builds ignore it, while new builds treat absent as false. No migration
+is needed.
 
 ### 9.4 What stays deliberately un-unified
 - The **wake-only listener** for dormant local Claude children
@@ -876,15 +893,10 @@ restoring old rows see no viewer children (status quo). No migration needed.
   replaced by `drain_family_events`; `drain_sse_events`' helpers
   `register_children_from_events`, `ensure_placeholders_for_child_lifecycle_events`,
   `trigger_child_task_refreshes` (all subsumed by `observe_child`)
-- OVM's bespoke fetch paths: `handle_child_spawned`, `handle_child_status_changed`,
-  `spawn_task_metadata_fetch`, `register_child` bodies (delegated to tracker);
-  the bounded pre-claim refetch fallback (replaced by `ChildSignal::SessionLinked`)
-- `remote_child_placeholder_fetches` guard; restore-fetch backoff timers;
-  `spawn_task_harness_fetch_if_needed` bespoke paths — all route through
-  `AgentConversationsModel` exclusively
-- `is_viewing_shared_session` child-placeholder flavor (new writes); the
-  mirrored status-mapping pair (`conversation_status_from_lifecycle_event_type`
-  / `conversation_status_from_state`) collapsed to one module in the tracker
+- OVM child creation no longer writes a second
+  `is_viewing_shared_session` flavor; its fetch/status handlers remain thin
+  pane-state adapters and adopt the history model's mapping.
+- `is_viewing_shared_session` child-placeholder flavor for new writes
 - `WatchedRunIds` per-child run-id sets as filter inputs (child membership
   lives in the tracker; streamer uses only `self_run_id` for the ancestor filter)
 
@@ -942,9 +954,9 @@ restoring old rows see no viewer children (status quo). No migration needed.
 - Re-run the three click-timing cases (early / running / completed) for
   HostedConversation and SharedSession origins after M2 lands; the completed
   shared-session case is new coverage delivered by M2.
-- Restart-restore case: orchestrator with out-of-band children restores with
-  named pills in both modes (M1 fixes the viewer variant via persisted
-  `is_remote_child` rows).
+- Restart-restore case: an owned `/cloud-agent` Observer parent restores from
+  its ambient pane task ID with the persisted local cursor, re-registers OVM,
+  and reconstructs named child pills from persisted `is_remote_child` rows.
 - Owner-side pill status updates while the child pane stays closed (M1:
   tracker is sole status writer in both modes).
 - Unit surfaces: tracker state machine (`observe_child` idempotency, signal

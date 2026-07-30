@@ -41,6 +41,57 @@ fn maps_working_states_to_in_progress() {
 }
 
 #[test]
+fn flag_off_preserves_viewing_shared_session_child_flavor() {
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(false);
+    App::test((), |mut app| async move {
+        let parent = task_id(PARENT_TASK_ID);
+        let (_, parent_conv_id, model) = setup_model(&mut app, parent);
+        let model_handle = app.add_model(|_| model);
+        model_handle.update(&mut app, |model, ctx| {
+            model.register_child(
+                make_task(
+                    CHILD_A_TASK_ID,
+                    AmbientAgentTaskState::InProgress,
+                    "Worker",
+                    None,
+                ),
+                ctx,
+            );
+        });
+
+        BlocklistAIHistoryModel::handle(&app).read(&app, |history, _| {
+            let child_id = history.child_conversation_ids_of(&parent_conv_id)[0];
+            let child = history.conversation(&child_id).unwrap();
+            assert!(child.is_viewing_shared_session());
+            assert!(!child.is_remote_child());
+        });
+    });
+}
+
+#[test]
+fn child_status_changed_before_spawn_retries_valid_run_once() {
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    App::test((), |mut app| async move {
+        let parent = task_id(PARENT_TASK_ID);
+        let (_, _, model) = setup_model(&mut app, parent);
+        let model_handle = app.add_model(|_| model);
+
+        model_handle.update(&mut app, |model, ctx| {
+            model.handle_child_status_changed(CHILD_A_TASK_ID, ConversationStatus::InProgress, ctx);
+            model.handle_child_status_changed(CHILD_A_TASK_ID, ConversationStatus::Success, ctx);
+        });
+
+        model_handle.read(&app, |model, _| {
+            assert_eq!(
+                model.metadata_fetch_dispatch_count, 1,
+                "lifecycle-before-spawn retries through the same in-flight fetch",
+            );
+            assert!(model.metadata_fetches.contains(&task_id(CHILD_A_TASK_ID)));
+        });
+    });
+}
+
+#[test]
 fn unified_terminal_child_with_stale_session_requests_current_state_materialization() {
     let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
     App::test((), |mut app| async move {
@@ -207,6 +258,7 @@ fn setup_model(
         terminal_view: terminal_view.downgrade(),
         children: HashMap::new(),
         children_by_run_id: HashMap::new(),
+        metadata_fetches: HashSet::new(),
         pending_session_id_poll_handle: None,
         metadata_fetch_dispatch_count: 0,
     };
@@ -218,6 +270,7 @@ fn setup_model(
 
 #[test]
 fn registers_new_child_conversation() {
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
     App::test((), |mut app| async move {
         let parent = task_id(PARENT_TASK_ID);
         let (_, parent_conv_id, model) = setup_model(&mut app, parent);
@@ -268,7 +321,8 @@ fn registers_new_child_conversation() {
                 Some(parent_conv_id),
                 "child linked to parent conversation"
             );
-            assert!(child.is_viewing_shared_session());
+            assert!(child.is_remote_child());
+            assert!(!child.is_viewing_shared_session());
             assert!(matches!(child.status(), ConversationStatus::InProgress));
         });
     });
@@ -329,6 +383,7 @@ fn skips_child_when_no_active_parent_conversation() {
             terminal_view: terminal_view.downgrade(),
             children: HashMap::new(),
             children_by_run_id: HashMap::new(),
+            metadata_fetches: HashSet::new(),
             pending_session_id_poll_handle: None,
             metadata_fetch_dispatch_count: 0,
         };

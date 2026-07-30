@@ -6,10 +6,11 @@
 //! by a one-shot REST snapshot) and broadcasts `ChildSpawned` /
 //! `ChildStatusChanged` events.
 //!
-//! Each viewer pane has its own model with its own placeholder
-//! conversations; the streamer is a shared singleton.
+//! Each viewer pane has its own materialization model; durable child identity
+//! is shared through `BlocklistAIHistoryModel`, and the streamer is a shared
+//! singleton.
 //! Pill clicks navigate via `SwapPaneToConversation`.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use session_sharing_protocol::common::SessionId;
@@ -17,7 +18,10 @@ use warpui::r#async::{SpawnedFutureHandle, Timer};
 use warpui::{Entity, EntityId, ModelContext, SingletonEntity, WeakViewHandle};
 
 use crate::ai::agent::conversation::{AIConversationId, ConversationStatus};
-use crate::ai::ambient_agents::{AmbientAgentTask, AmbientAgentTaskId, AmbientAgentTaskState};
+use crate::ai::agent_conversations_model::{AgentConversationsModel, AgentConversationsModelEvent};
+use crate::ai::ambient_agents::{
+    AmbientAgentTask, AmbientAgentTaskId, AmbientAgentTaskState, TaskOwnership,
+};
 use crate::ai::blocklist::BlocklistAIHistoryModel;
 use crate::ai::blocklist::history_model::BlocklistAIHistoryEvent;
 use crate::ai::blocklist::orchestration_event_streamer::{
@@ -54,6 +58,9 @@ pub struct OrchestrationViewerModel {
     /// Secondary index keyed by stringified `run_id`, used by the streamer
     /// broadcast event handler. Kept in sync with `children`.
     children_by_run_id: HashMap<String, AmbientAgentTaskId>,
+    /// Task metadata requests in flight. Discovery and lifecycle can race;
+    /// only one request may create/adopt the durable run-id mapping.
+    metadata_fetches: HashSet<AmbientAgentTaskId>,
     /// Periodic timer fetching the claim-time `session_id` for
     /// not-yet-claimed children.
     pending_session_id_poll_handle: Option<SpawnedFutureHandle>,
@@ -91,6 +98,18 @@ impl OrchestrationViewerModel {
                 me.handle_history_event(event, ctx);
             },
         );
+        ctx.subscribe_to_model(
+            &AgentConversationsModel::handle(ctx),
+            |me, _, event, ctx| match event {
+                AgentConversationsModelEvent::ConversationsLoaded
+                | AgentConversationsModelEvent::NewTasksReceived
+                | AgentConversationsModelEvent::TasksUpdated => {
+                    me.register_viewer_mode_consumer_if_possible(ctx);
+                }
+                AgentConversationsModelEvent::ConversationUpdated { .. }
+                | AgentConversationsModelEvent::ConversationArtifactsUpdated { .. } => {}
+            },
+        );
 
         let model = Self {
             parent_task_id,
@@ -98,6 +117,7 @@ impl OrchestrationViewerModel {
             terminal_view,
             children: HashMap::new(),
             children_by_run_id: HashMap::new(),
+            metadata_fetches: HashSet::new(),
             pending_session_id_poll_handle: None,
             #[cfg(test)]
             metadata_fetch_dispatch_count: 0,
@@ -170,6 +190,25 @@ impl OrchestrationViewerModel {
             return;
         }
 
+        if FeatureFlag::OrchestrationUnifiedStack.is_enabled()
+            && AgentConversationsModel::as_ref(ctx)
+                .get_task_data(&self.parent_task_id)
+                .is_some_and(|task| {
+                    matches!(
+                        task.ownership_for_current_principal(ctx),
+                        TaskOwnership::Owned
+                    )
+                })
+        {
+            BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+                history.mark_conversation_as_durable_observer_parent(
+                    parent_conversation_id,
+                    self.parent_task_id,
+                    ctx,
+                );
+            });
+        }
+
         let parent_task_id = self.parent_task_id;
         let consumer_id = ctx.model_id();
         OrchestrationEventStreamer::handle(ctx).update(ctx, move |streamer, ctx| {
@@ -234,7 +273,10 @@ impl OrchestrationViewerModel {
         ctx: &mut ModelContext<Self>,
     ) {
         let Some(task_id) = self.children_by_run_id.get(run_id).copied() else {
-            // No placeholder yet; the ChildSpawned handler will create one.
+            // Lifecycle may arrive before (or instead of) ChildStarted.
+            if FeatureFlag::OrchestrationUnifiedStack.is_enabled() {
+                self.handle_child_spawned(run_id.to_string(), ctx);
+            }
             return;
         };
         let Some(entry) = self.children.get(&task_id) else {
@@ -261,6 +303,13 @@ impl OrchestrationViewerModel {
         trigger: &'static str,
         ctx: &mut ModelContext<Self>,
     ) {
+        if FeatureFlag::OrchestrationUnifiedStack.is_enabled() {
+            if !self.metadata_fetches.insert(task_id) {
+                return;
+            }
+        } else {
+            self.metadata_fetches.insert(task_id);
+        }
         #[cfg(test)]
         {
             self.metadata_fetch_dispatch_count += 1;
@@ -270,6 +319,7 @@ impl OrchestrationViewerModel {
         ctx.spawn(
             async move { ai_client.get_ambient_agent_task(&task_id).await },
             move |me, result, ctx| {
+                me.metadata_fetches.remove(&task_id);
                 let task = match result {
                     Ok(task) => task,
                     Err(err) => {
@@ -365,31 +415,42 @@ impl OrchestrationViewerModel {
         let terminal_view_id = self.terminal_view_id;
         let status_for_initial = conversation_status.clone();
 
+        let unified_stack = FeatureFlag::OrchestrationUnifiedStack.is_enabled();
         let conversation_id = BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
-            let conversation_id = history.start_new_child_conversation(
-                terminal_view_id,
-                name,
-                parent_conversation_id,
-                harness,
-                ctx,
-            );
-            // Suppress server-side status reporting (viewer-side); also
-            // disambiguates viewer-spawned children downstream.
-            history.set_viewing_shared_session_for_conversation(conversation_id, true);
-            if let Some(conversation) = history.conversation_mut(&conversation_id)
-                && !fallback_title.is_empty()
-            {
-                conversation.set_fallback_display_title(fallback_title);
-            }
-            // Stamp run_id/task_id and populate the agent_id index so
-            // transcript references resolve to this child.
-            history.assign_run_id_for_conversation(
-                conversation_id,
-                task_id.to_string(),
-                Some(task_id),
-                terminal_view_id,
-                ctx,
-            );
+            let conversation_id = if unified_stack {
+                history.ensure_remote_child_conversation(
+                    terminal_view_id,
+                    parent_conversation_id,
+                    task_id.to_string(),
+                    task_id,
+                    name,
+                    fallback_title,
+                    harness,
+                    ctx,
+                )
+            } else {
+                let conversation_id = history.start_new_child_conversation(
+                    terminal_view_id,
+                    name,
+                    parent_conversation_id,
+                    harness,
+                    ctx,
+                );
+                history.set_viewing_shared_session_for_conversation(conversation_id, true);
+                if !fallback_title.is_empty()
+                    && let Some(conversation) = history.conversation_mut(&conversation_id)
+                {
+                    conversation.set_fallback_display_title(fallback_title);
+                }
+                history.assign_run_id_for_conversation(
+                    conversation_id,
+                    task_id.to_string(),
+                    Some(task_id),
+                    terminal_view_id,
+                    ctx,
+                );
+                conversation_id
+            };
             history.update_conversation_status(
                 terminal_view_id,
                 conversation_id,

@@ -29,6 +29,36 @@ fn task_id(s: &str) -> AmbientAgentTaskId {
     s.parse().expect("hardcoded task id parses")
 }
 
+#[test]
+fn lifecycle_before_started_creates_one_pending_child() {
+    App::test((), |mut app| async move {
+        let streamer = install_streamer(&mut app);
+        streamer.update(&mut app, |_streamer, ctx| {
+            let mut tracker = observer_tracker();
+            let killed = HashSet::new();
+
+            tracker.observe_child(
+                CHILD_A_RUN_ID,
+                ChildSignal::Lifecycle(api::LifecycleEventType::InProgress),
+                &killed,
+                ctx,
+            );
+            tracker.observe_child(CHILD_A_RUN_ID, ChildSignal::Started, &killed, ctx);
+
+            let child = tracker
+                .children
+                .get(&task_id(CHILD_A_RUN_ID))
+                .expect("lifecycle is a discovery backstop");
+            assert!(child.is_remote_child);
+            assert_eq!(tracker.children.len(), 1);
+            assert_eq!(
+                tracker.metadata_fetch_dispatch_count, 1,
+                "reordered lifecycle and Started signals share one fetch",
+            );
+        });
+    });
+}
+
 /// Builds a minimal child task row for `ChildSignal::Seeded`, parented under
 /// `PARENT_RUN_ID` so `apply_seeded` treats it as a real child rather than
 /// the parent's own row.
@@ -92,16 +122,13 @@ fn started_creates_pending_entry_and_is_idempotent() {
 
             tracker.observe_child(CHILD_A_RUN_ID, ChildSignal::Started, &killed, ctx);
 
-            // A pending entry is an in-flight metadata fetch; the placeholder
-            // itself is created once the fetch returns (T2).
+            // Membership is inserted before the metadata fetch returns so a
+            // lifecycle-first race can update the same child.
             assert!(
                 tracker.metadata_fetches.contains(CHILD_A_RUN_ID),
                 "first Started must record an in-flight fetch"
             );
-            assert!(
-                tracker.children.is_empty(),
-                "no placeholder is created before the fetch completes"
-            );
+            assert!(tracker.children.contains_key(&task_id(CHILD_A_RUN_ID)));
             assert_eq!(tracker.metadata_fetch_dispatch_count, 1);
 
             // Second Started for the same run id is a no-op.

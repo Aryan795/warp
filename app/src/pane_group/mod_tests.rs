@@ -402,6 +402,7 @@ fn persisted_remote_child_conversation(
                 orchestration_harness_type: None,
                 parent_conversation_id: parent_conversation_id.map(|id| id.to_string()),
                 is_remote_child: true,
+                is_durable_observer_parent: false,
                 root_task_is_optimistic: None,
                 run_id: Some(task_id.to_string()),
                 autoexecute_override: None,
@@ -1004,7 +1005,7 @@ fn test_restored_remote_hidden_child_pane_enters_existing_ambient_session() {
 /// `create_hidden_child_agent_pane` time, the unified dispatch resolves to
 /// `Pending`: the hidden pane is still created and registered in
 /// `child_agent_panes` keyed by its local AIConversationId (so the pill can
-/// reveal it), but it is left un-materialized (no live attach, no transcript).
+/// reveal it), using a passive loading transcript vehicle with no live attach.
 /// The tracker re-drives materialization on the next lifecycle /
 /// session-linked event.
 #[test]
@@ -1021,10 +1022,9 @@ fn test_restored_remote_hidden_child_pane_pending_when_task_data_unavailable() {
 
             // Deliberately do NOT inject a task into AgentConversationsModel.
             // `get_or_async_fetch_task_data` returns `None`, so the unified
-            // dispatch resolves to `Pending`: the hidden pane is created and
-            // tracked (so the pill can reveal it) but left un-materialized.
-            // The tracker re-drives on the next lifecycle / session-linked
-            // event; there is no pending-hydration map anymore.
+            // dispatch resolves to `Pending`: the hidden passive loading pane
+            // is created and tracked so the pill can reveal it.
+            // A later TasksUpdated re-drives the retained pending hydration.
 
             let mut child_conversation = AIConversation::new(false, false);
             child_conversation.set_parent_conversation_id(parent_conversation_id);
@@ -1046,20 +1046,29 @@ fn test_restored_remote_hidden_child_pane_pending_when_task_data_unavailable() {
                 "placeholder AIConversationId must stay the child_agent_panes key in fallback path",
             );
 
-            // Pending: the pane exists but is NOT attached to any ambient
-            // session (no live attach, no transcript). The ambient view model
-            // has no task id and is not running until the tracker re-drives.
-            let (ambient_task_id, is_agent_running, active_conversation_id) =
-                ambient_child_session_state(panes, child_pane_id, ctx);
-            assert_eq!(
-                ambient_task_id, None,
-                "pending placeholder must not attach to an ambient session yet",
-            );
+            // Pending uses the passive loading presentation: no ambient
+            // composer is exposed before task metadata can select live or
+            // transcript materialization.
+            let terminal_view = panes
+                .terminal_view_from_pane_id(child_pane_id, ctx)
+                .expect("pending child pane has a terminal view");
+            let view = terminal_view.as_ref(ctx);
+            assert!(view.ambient_agent_view_model().is_none());
             assert!(
-                !is_agent_running,
-                "pending placeholder must not enter the agent-running state",
+                !view.has_agent_view_zero_state_for_test(),
+                "pending child must not expose the cloud composition zero state",
             );
-            assert_eq!(active_conversation_id, Some(child_conversation_id));
+            assert_eq!(
+                view.active_conversation_id(ctx),
+                Some(child_conversation_id)
+            );
+            let model = view.model.lock();
+            assert!(model.is_conversation_transcript_viewer());
+            assert!(model.is_read_only());
+            assert_eq!(
+                model.conversation_transcript_viewer_status(),
+                Some(&ConversationTranscriptViewerStatus::Loading),
+            );
         });
     });
 }
