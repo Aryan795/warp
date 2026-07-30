@@ -293,16 +293,17 @@ impl OrchestrationChildTracker {
             self.maybe_request_pane_materialization(task_id, ctx);
             return;
         }
-        // Lifecycle for an unknown run: only self-heal a real discovery miss,
-        // not a run whose fetch is already in flight.
-        if !fetch_in_flight {
-            log::info!(
-                "[orchestration-unified-debug] apply_lifecycle spawn_metadata_fetch \
-                 run_id={run_id} parent_task_id={}",
-                self.parent_task_id
-            );
-            self.spawn_metadata_fetch(task_id, run_id, ctx);
-        }
+        // Lifecycle for an unknown run is a complete discovery backstop:
+        // insert once (emitting ChildSpawned), start/dedupe metadata hydration,
+        // and publish the status immediately. This handles a missed or
+        // reordered child_agent_started event without a tracker-only ghost.
+        self.apply_started(task_id, run_id, ctx);
+        let status = conversation_status_from_lifecycle_event_type(kind);
+        ctx.emit(OrchestrationEventStreamerEvent::ChildStatusChanged {
+            parent_task_id: self.parent_task_id,
+            run_id: run_id.to_string(),
+            status,
+        });
     }
 
     /// Registers an in-band child (created by this process) with its existing

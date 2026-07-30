@@ -577,16 +577,12 @@ impl OrchestrationEventStreamer {
                          parent_conversation_id={cursor_conversation_id:?} \
                          child_run_id={child_run_id} mode={mode:?}"
                     );
-                    // Create a local placeholder so the pill bar reflects the new
-                    // child immediately, without waiting for the tracker's async
-                    // metadata fetch to resolve.
-                    if mode == FamilyDrainMode::Primary {
-                        self.ensure_remote_child_placeholder(
-                            cursor_conversation_id,
-                            child_run_id.clone(),
-                            ctx,
-                        );
-                    }
+                    self.ensure_remote_child_placeholder(
+                        cursor_conversation_id,
+                        child_run_id.clone(),
+                        mode,
+                        ctx,
+                    );
                     log::debug!(
                         "[orch-drain] calling observe_child(Started) for child_run_id={child_run_id}"
                     );
@@ -632,13 +628,12 @@ impl OrchestrationEventStreamer {
                     );
                     // Backstop: if this lifecycle arrives before (or instead of)
                     // `child_agent_started`, ensure a placeholder still exists.
-                    if mode == FamilyDrainMode::Primary {
-                        self.ensure_remote_child_placeholder(
-                            cursor_conversation_id,
-                            child_run_id.clone(),
-                            ctx,
-                        );
-                    }
+                    self.ensure_remote_child_placeholder(
+                        cursor_conversation_id,
+                        child_run_id.clone(),
+                        mode,
+                        ctx,
+                    );
                     log::debug!(
                         "[orch-drain] calling observe_child(Lifecycle) for child_run_id={child_run_id}"
                     );
@@ -712,7 +707,7 @@ impl OrchestrationEventStreamer {
         tracker
     }
 
-    // ---- Remote-child placeholder creation (flag-on owner path) ----------
+    // ---- Remote-child placeholder creation (flag-on family path) ---------
 
     /// Creates a local `is_remote_child` placeholder for an out-of-band
     /// (cloud) child announced by a `child_agent_started` event on the owner's
@@ -727,6 +722,7 @@ impl OrchestrationEventStreamer {
         &mut self,
         parent_conversation_id: AIConversationId,
         child_run_id: String,
+        mode: FamilyDrainMode,
         ctx: &mut ModelContext<Self>,
     ) {
         let existing_conversation_id =
@@ -740,9 +736,11 @@ impl OrchestrationEventStreamer {
             // Already represented locally; nothing to do.
             return;
         }
-        // Don't create placeholders on behalf of passive views — the actual
-        // owning process (in another window/machine) handles those.
-        if self.is_remote_run_view(parent_conversation_id, ctx) {
+        // A Primary passive view must not impersonate the owning process.
+        // Observer is the explicit exception: its local placeholder and cursor
+        // are the representation consumed by the viewer hierarchy.
+        if mode == FamilyDrainMode::Primary && self.is_remote_run_view(parent_conversation_id, ctx)
+        {
             log::info!(
                 "[orchestration-unified-debug] ensure placeholder skip-remote-view \
                  parent_conversation_id={parent_conversation_id:?} child_run_id={child_run_id}"
@@ -768,6 +766,7 @@ impl OrchestrationEventStreamer {
                 me.finish_remote_child_placeholder(
                     parent_conversation_id,
                     child_run_id,
+                    mode,
                     result,
                     ctx,
                 );
@@ -785,6 +784,7 @@ impl OrchestrationEventStreamer {
         &mut self,
         parent_conversation_id: AIConversationId,
         child_run_id: String,
+        mode: FamilyDrainMode,
         result: anyhow::Result<crate::ai::ambient_agents::task::AmbientAgentTask>,
         ctx: &mut ModelContext<Self>,
     ) {
@@ -840,27 +840,16 @@ impl OrchestrationEventStreamer {
         );
         let child_conversation_id =
             BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
-                let child_conversation_id = history.start_new_child_conversation(
+                history.ensure_remote_child_conversation(
                     terminal_surface_id,
-                    name,
                     parent_conversation_id,
+                    child_run_id.clone(),
+                    task_id,
+                    name,
+                    fallback_title,
                     harness,
                     ctx,
-                );
-                history.mark_conversation_as_remote_child(child_conversation_id, ctx);
-                if !fallback_title.is_empty()
-                    && let Some(conversation) = history.conversation_mut(&child_conversation_id)
-                {
-                    conversation.set_fallback_display_title(fallback_title);
-                }
-                history.assign_run_id_for_conversation(
-                    child_conversation_id,
-                    child_run_id.clone(),
-                    Some(task_id),
-                    terminal_surface_id,
-                    ctx,
-                );
-                child_conversation_id
+                )
             });
         log::info!(
             "[orchestration-unified-debug] finish placeholder created \
@@ -872,10 +861,27 @@ impl OrchestrationEventStreamer {
         // conversation_id, replacing the orchestrator stand-in that was
         // inserted eagerly in apply_started. This ensures apply_lifecycle's
         // history lookup (conversation_id_for_agent_id) resolves correctly.
-        if let Some(stream) = self.streams.get_mut(&parent_conversation_id)
-            && let Some(tracker) = stream.tracker.as_mut()
-        {
-            tracker.stamp_conversation_id_for_run(&child_run_id, child_conversation_id);
+        match mode {
+            FamilyDrainMode::Primary => {
+                if let Some(stream) = self.streams.get_mut(&parent_conversation_id)
+                    && let Some(tracker) = stream.tracker.as_mut()
+                {
+                    tracker.stamp_conversation_id_for_run(&child_run_id, child_conversation_id);
+                }
+            }
+            FamilyDrainMode::Observer => {
+                let parent_task_id = BlocklistAIHistoryModel::as_ref(ctx)
+                    .conversation(&parent_conversation_id)
+                    .and_then(|conversation| conversation.task_id());
+                if let Some(parent_task_id) = parent_task_id
+                    && let Some(tracker) = self
+                        .viewer_mode_orchestrators
+                        .get_mut(&parent_task_id)
+                        .and_then(|entry| entry.tracker.as_mut())
+                {
+                    tracker.stamp_conversation_id_for_run(&child_run_id, child_conversation_id);
+                }
+            }
         }
     }
 

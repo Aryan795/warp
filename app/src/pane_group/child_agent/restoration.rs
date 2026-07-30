@@ -192,7 +192,13 @@ impl PaneGroup {
             // both route through `materialize_child_placeholder_pane`, which
             // fetches the task and routes on `decide_child_pane_materialization`.
             // The local in-process child branch below stays separate.
-            let pane_origin = if child_conversation.is_viewing_shared_session() {
+            let parent_is_shared_observer = child_conversation
+                .parent_conversation_id()
+                .and_then(|parent_id| BlocklistAIHistoryModel::as_ref(ctx).conversation(&parent_id))
+                .is_some_and(|parent| parent.is_viewing_shared_session());
+            let pane_origin = if child_conversation.is_viewing_shared_session()
+                || (child_conversation.is_remote_child() && parent_is_shared_observer)
+            {
                 Some(ChildPaneOrigin::SharedSession)
             } else if child_conversation.is_remote_child() {
                 Some(ChildPaneOrigin::HostedConversation)
