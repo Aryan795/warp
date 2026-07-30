@@ -131,6 +131,28 @@ impl EventLoop {
             "[orchestration-unified-debug] shared_session EventLoop identity \
              load_mode={load_mode:?} suppress_existing_replay={should_suppress_existing_agent_conversation_replay}"
         );
+        // Append mode means the local conversation already contains the prior
+        // transcript. Arm both halves of the replay gate before this event
+        // loop can dispatch its first ordered response event: some sessions
+        // deliver replayed Init/CreateTask events before (or without) the
+        // explicit ReplayStarted marker. The request-aware controller gate
+        // still allows new live request IDs through.
+        if should_suppress_existing_agent_conversation_replay {
+            terminal_model
+                .lock()
+                .set_is_receiving_agent_conversation_replay(true);
+            if let Some(view) = terminal_view.upgrade(ctx) {
+                view.update(ctx, |view, ctx| {
+                    view.ai_controller().update(ctx, |controller, _ctx| {
+                        controller
+                            .set_should_suppress_existing_agent_conversation_replay(true);
+                    });
+                });
+            }
+            log::info!(
+                "[orchestration-unified-debug] shared_session replay gate armed at EventLoop creation"
+            );
+        }
         let mut event_loop = Self {
             terminal_model,
             terminal_view,
