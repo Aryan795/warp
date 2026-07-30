@@ -46,6 +46,24 @@ fn task(
 }
 
 #[test]
+fn terminal_task_with_stale_session_id_loads_transcript() {
+    let task = task(
+        AmbientAgentTaskState::Succeeded,
+        false,
+        Some("22222222-2222-2222-2222-222222222222"),
+        Some("completed-child-token"),
+    );
+
+    assert_eq!(
+        decide_child_pane_materialization(&task),
+        ChildPaneMaterialization::LoadTranscript {
+            server_token: ServerConversationToken::new("completed-child-token".to_string()),
+        },
+        "a terminal child must never join its stale execution session",
+    );
+}
+
+#[test]
 fn attachable_task_attaches_live_with_session_id() {
     let task = task(
         AmbientAgentTaskState::InProgress,

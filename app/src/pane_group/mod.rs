@@ -173,6 +173,9 @@ use crate::{cmd_or_ctrl_shift, send_telemetry_from_ctx};
 
 mod ambient_pane_restoration;
 mod child_agent;
+pub(crate) use child_agent::materialization::{
+    ChildPaneMaterialization, decide_child_pane_materialization,
+};
 pub mod focus_state;
 pub mod pane;
 pub mod tree;
@@ -946,6 +949,16 @@ pub struct PaneGroup {
     /// visible-tree `replace_pane` flow doesn't swap a hidden child pane.
     /// Only populated when `OrchestrationUnifiedStack` is disabled.
     pending_remote_child_hydrations: HashMap<AmbientAgentTaskId, AIConversationId>,
+
+    /// Unified-stack viewer children waiting for a task state that can be
+    /// materialized. Unlike owner restorations, these remain passive and
+    /// re-drive through the viewer construction path.
+    pending_viewer_child_hydrations: HashMap<AmbientAgentTaskId, AIConversationId>,
+
+    /// The most recent live session that failed to join for each viewer child.
+    /// Re-drive does not retry the same session, but a later execution with a
+    /// new session id may still attach.
+    failed_viewer_child_sessions: HashMap<AIConversationId, SessionId>,
 
     /// Whether `ensure_pending_ambient_restoration_subscription` has been
     /// called; the subscription is shared by both pending maps.
@@ -3155,6 +3168,8 @@ impl PaneGroup {
             is_right_panel_maximized: false,
             pending_ambient_agent_conversation_restorations: HashMap::new(),
             pending_remote_child_hydrations: HashMap::new(),
+            pending_viewer_child_hydrations: HashMap::new(),
+            failed_viewer_child_sessions: HashMap::new(),
             pending_ambient_restoration_subscription_installed: false,
             child_agent_panes: HashMap::new(),
             transitively_shared_child_panes: HashMap::new(),
@@ -3298,6 +3313,7 @@ impl PaneGroup {
 
         self.process_pending_ambient_restorations(ctx);
         self.process_pending_remote_child_hydrations(ctx);
+        self.process_pending_viewer_child_hydrations(ctx);
     }
 
     /// Initial layout for a [`PaneGroup`] with a single ambient agent pane.
@@ -4617,6 +4633,9 @@ impl PaneGroup {
         let children = self.child_pane_ids_for_parent(parent_terminal_view_id, ctx);
         for (conv_id, child_pane_id) in children {
             self.child_agent_panes.remove(&conv_id);
+            self.failed_viewer_child_sessions.remove(&conv_id);
+            self.pending_viewer_child_hydrations
+                .retain(|_, child_id| *child_id != conv_id);
             self.panes.remove_hidden_pane(child_pane_id);
             self.discard_pane(child_pane_id, ctx);
         }
@@ -4629,6 +4648,9 @@ impl PaneGroup {
         ctx: &mut ViewContext<Self>,
     ) -> bool {
         let tracked_child_pane = self.child_agent_panes.remove(&conversation_id);
+        self.failed_viewer_child_sessions.remove(&conversation_id);
+        self.pending_viewer_child_hydrations
+            .retain(|_, child_id| *child_id != conversation_id);
         let split_off_child_pane = self.child_agent_origin.as_ref().and_then(|origin| {
             (origin.conversation_id == conversation_id)
                 .then(|| self.pane_id_for_conversation_owner(conversation_id, ctx))
@@ -5388,8 +5410,7 @@ impl PaneGroup {
             match cloud_conversation {
                 CloudConversationData::Oz(mut conversation) => {
                     let id = conversation.id();
-                    conversation
-                        .set_is_viewing_shared_session(mark_as_viewing_shared_session);
+                    conversation.set_is_viewing_shared_session(mark_as_viewing_shared_session);
                     view.restore_conversation_after_view_creation(
                         RestoredAIConversation::new(*conversation),
                         true,
@@ -6174,6 +6195,30 @@ impl PaneGroup {
             }
         }
 
+        (terminal_view, terminal_manager)
+    }
+
+    fn create_orchestration_child_shared_session_viewer(
+        session_id: SessionId,
+        conversation_id: AIConversationId,
+        resources: TerminalViewResources,
+        initial_size: Vector2F,
+        ctx: &mut ViewContext<Self>,
+    ) -> (
+        ViewHandle<TerminalView>,
+        ModelHandle<Box<dyn TerminalManager>>,
+    ) {
+        let terminal_init = shared_session::viewer::TerminalManager::new_for_orchestration_child(
+            session_id,
+            conversation_id,
+            resources,
+            initial_size,
+            ctx.window_id(),
+            ctx,
+        );
+        let terminal_view = terminal_init.view;
+        let terminal_manager =
+            ctx.add_model(|_ctx| Box::new(terminal_init.manager) as Box<dyn TerminalManager>);
         (terminal_view, terminal_manager)
     }
 

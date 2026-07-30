@@ -22,11 +22,11 @@ use super::orchestration_events::{
 };
 use crate::ai::agent::conversation::{AIAgentHarness, AIConversationId, ConversationStatus};
 use crate::ai::agent::{AIAgentExchangeId, AIAgentOutputMessageType, ReceivedMessageInput};
+use crate::ai::agent_conversations_model::AgentConversationsModel;
 use crate::ai::agent_events::{
     AgentEventConsumer, AgentEventConsumerControlFlow, AgentEventDriverConfig, AgentEventFilter,
     AgentMessageEventMetadata, MessageHydrator, ServerApiAgentEventSource, run_agent_event_driver,
 };
-use crate::ai::agent_conversations_model::AgentConversationsModel;
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::server::retry_strategies::is_transient_http_error;
 use crate::server::server_api::ai::{AIClient, AgentRunEvent, TaskListFilter};
@@ -620,11 +620,7 @@ impl OrchestrationEventStreamer {
                     // of Pending (stale Queued/Inactive from the initial fetch).
                     if let Ok(task_id) = child_run_id.parse::<AmbientAgentTaskId>() {
                         AgentConversationsModel::handle(ctx).update(ctx, |model, ctx| {
-                            model.update_task_as_running_with_session(
-                                &task_id,
-                                session_uuid,
-                                ctx,
-                            );
+                            model.update_task_as_running_with_session(&task_id, session_uuid, ctx);
                         });
                     }
                 }
@@ -675,16 +671,14 @@ impl OrchestrationEventStreamer {
                             | api::LifecycleEventType::Cancelled
                             | api::LifecycleEventType::Unspecified
                     );
-                    if is_terminal {
-                        if let Ok(task_id) = child_run_id.parse::<AmbientAgentTaskId>() {
-                            log::info!(
-                                "[orchestration-unified-debug] drain ChildLifecycle terminal \
-                                 child_run_id={child_run_id} kind={kind:?}: evict+refetch task"
-                            );
-                            AgentConversationsModel::handle(ctx).update(ctx, |model, ctx| {
-                                model.evict_and_refetch_task(&task_id, ctx);
-                            });
-                        }
+                    if is_terminal && let Ok(task_id) = child_run_id.parse::<AmbientAgentTaskId>() {
+                        log::info!(
+                            "[orchestration-unified-debug] drain ChildLifecycle terminal \
+                             child_run_id={child_run_id} kind={kind:?}: evict+refetch task"
+                        );
+                        AgentConversationsModel::handle(ctx).update(ctx, |model, ctx| {
+                            model.evict_and_refetch_task(&task_id, ctx);
+                        });
                     }
                 }
                 FamilyEvent::Opaque => {}
@@ -735,8 +729,8 @@ impl OrchestrationEventStreamer {
         child_run_id: String,
         ctx: &mut ModelContext<Self>,
     ) {
-        let existing_conversation_id = BlocklistAIHistoryModel::as_ref(ctx)
-            .conversation_id_for_agent_id(&child_run_id);
+        let existing_conversation_id =
+            BlocklistAIHistoryModel::as_ref(ctx).conversation_id_for_agent_id(&child_run_id);
         if let Some(existing_conversation_id) = existing_conversation_id {
             log::info!(
                 "[orchestration-unified-debug] ensure placeholder skip-existing \
@@ -816,8 +810,8 @@ impl OrchestrationEventStreamer {
         );
         // Re-check: a locally-started child may have stamped this run_id
         // while the fetch was in flight.
-        if let Some(existing_conversation_id) = BlocklistAIHistoryModel::as_ref(ctx)
-            .conversation_id_for_agent_id(&child_run_id)
+        if let Some(existing_conversation_id) =
+            BlocklistAIHistoryModel::as_ref(ctx).conversation_id_for_agent_id(&child_run_id)
         {
             log::info!(
                 "[orchestration-unified-debug] finish placeholder skip-existing \
@@ -846,28 +840,28 @@ impl OrchestrationEventStreamer {
         );
         let child_conversation_id =
             BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
-            let child_conversation_id = history.start_new_child_conversation(
-                terminal_surface_id,
-                name,
-                parent_conversation_id,
-                harness,
-                ctx,
-            );
-            history.mark_conversation_as_remote_child(child_conversation_id, ctx);
-            if !fallback_title.is_empty()
-                && let Some(conversation) = history.conversation_mut(&child_conversation_id)
-            {
-                conversation.set_fallback_display_title(fallback_title);
-            }
-            history.assign_run_id_for_conversation(
-                child_conversation_id,
-                child_run_id.clone(),
-                Some(task_id),
-                terminal_surface_id,
-                ctx,
-            );
-            child_conversation_id
-        });
+                let child_conversation_id = history.start_new_child_conversation(
+                    terminal_surface_id,
+                    name,
+                    parent_conversation_id,
+                    harness,
+                    ctx,
+                );
+                history.mark_conversation_as_remote_child(child_conversation_id, ctx);
+                if !fallback_title.is_empty()
+                    && let Some(conversation) = history.conversation_mut(&child_conversation_id)
+                {
+                    conversation.set_fallback_display_title(fallback_title);
+                }
+                history.assign_run_id_for_conversation(
+                    child_conversation_id,
+                    child_run_id.clone(),
+                    Some(task_id),
+                    terminal_surface_id,
+                    ctx,
+                );
+                child_conversation_id
+            });
         log::info!(
             "[orchestration-unified-debug] finish placeholder created \
              parent_conversation_id={parent_conversation_id:?} child_run_id={child_run_id} \

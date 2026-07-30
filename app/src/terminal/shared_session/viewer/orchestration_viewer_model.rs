@@ -23,6 +23,8 @@ use crate::ai::blocklist::history_model::BlocklistAIHistoryEvent;
 use crate::ai::blocklist::orchestration_event_streamer::{
     OrchestrationEventStreamer, OrchestrationEventStreamerEvent,
 };
+use crate::features::FeatureFlag;
+use crate::pane_group::{ChildPaneMaterialization, decide_child_pane_materialization};
 use crate::server::server_api::ServerApiProvider;
 use crate::terminal::{Event as TerminalViewEvent, TerminalView};
 
@@ -222,10 +224,9 @@ impl OrchestrationViewerModel {
         self.spawn_task_metadata_fetch(task_id, "ChildSpawned", ctx);
     }
 
-    /// Writes the new status through `BlocklistAIHistoryModel`. If the
-    /// entry hasn't been fully materialized yet (no `session_id` or no
-    /// pane), also kicks a metadata refetch so the claim-time
-    /// `session_id` eventually lands.
+    /// Writes the new status through `BlocklistAIHistoryModel`. If the entry
+    /// has not reached a live, transcript, or legacy-session materialization
+    /// yet, also refreshes its task metadata.
     fn handle_child_status_changed(
         &mut self,
         run_id: &str,
@@ -240,8 +241,7 @@ impl OrchestrationViewerModel {
             return;
         };
         let conversation_id = entry.conversation_id;
-        let needs_metadata_refetch =
-            entry.session_id.is_none() || !entry.pane_materialization_requested;
+        let needs_metadata_refetch = Self::entry_needs_materialization_metadata(entry);
         let terminal_view_id = self.terminal_view_id;
         BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
             history.update_conversation_status(terminal_view_id, conversation_id, status, ctx);
@@ -288,11 +288,10 @@ impl OrchestrationViewerModel {
 
     // ---- Shared child registration (used by both paths) -----------------
 
-    /// Creates the local placeholder conversation for a child task,
-    /// records it in the per-pane map, and emits
-    /// `EnsureSharedSessionViewerChildPane` if a session id is already
-    /// known. Idempotent: a second call for the same `task_id` updates
-    /// status / session-id only.
+    /// Creates the local placeholder conversation for a child task, records
+    /// it in the per-pane map, and requests materialization when current task
+    /// state is attachable or transcript-loadable. Idempotent: a second call
+    /// for the same `task_id` updates status and materialization state only.
     fn register_child(&mut self, task: AmbientAgentTask, ctx: &mut ModelContext<Self>) {
         // The server-side ancestor endpoint includes the parent itself in
         // the response; skip it.
@@ -305,6 +304,7 @@ impl OrchestrationViewerModel {
             .session_id
             .as_deref()
             .and_then(|s| s.parse::<SessionId>().ok());
+        let materialization_ready = Self::materialization_is_ready(&task);
         let new_state = task.state.clone();
         let conversation_status = conversation_status_from_state(&new_state);
 
@@ -326,18 +326,13 @@ impl OrchestrationViewerModel {
                 });
                 entry.last_state = new_state;
             }
-            let was_missing_session_id = entry.session_id.is_none();
-            if entry.session_id.is_none() {
-                entry.session_id = session_id;
-            }
-            if was_missing_session_id
-                && entry.session_id.is_some()
-                && !entry.pane_materialization_requested
-            {
+            entry.session_id = session_id;
+            let should_request_materialization =
+                materialization_ready && !entry.pane_materialization_requested;
+            if should_request_materialization {
                 let conversation_id = entry.conversation_id;
-                let sid = entry.session_id.expect("session_id checked just above");
                 entry.pane_materialization_requested = true;
-                self.request_child_pane_materialization(conversation_id, sid, ctx);
+                self.request_child_pane_materialization(conversation_id, task, ctx);
             }
             // Re-arm the session_id timer; no-op once all children are materialized.
             self.maybe_schedule_pending_session_id_poll(ctx);
@@ -404,7 +399,7 @@ impl OrchestrationViewerModel {
             conversation_id
         });
 
-        let pane_materialization_requested = session_id.is_some();
+        let pane_materialization_requested = materialization_ready;
         self.children.insert(
             task_id,
             ChildAgentEntry {
@@ -422,8 +417,8 @@ impl OrchestrationViewerModel {
             self.parent_task_id,
         );
 
-        if let Some(sid) = session_id {
-            self.request_child_pane_materialization(conversation_id, sid, ctx);
+        if pane_materialization_requested {
+            self.request_child_pane_materialization(conversation_id, task, ctx);
         }
 
         // Arm the session_id refetch timer if the child arrived pre-claim.
@@ -436,7 +431,7 @@ impl OrchestrationViewerModel {
     fn has_pending_session_id_children(&self) -> bool {
         self.children
             .values()
-            .any(|entry| entry.session_id.is_none() || !entry.pane_materialization_requested)
+            .any(Self::entry_needs_materialization_metadata)
     }
 
     /// Schedules the next session_id refetch tick.
@@ -460,16 +455,13 @@ impl OrchestrationViewerModel {
         self.pending_session_id_poll_handle = Some(handle);
     }
 
-    /// Body of the session_id timer tick. Refetches metadata for every
-    /// child still missing a `session_id`/pane, then reschedules until
-    /// the pending set is empty.
+    /// Body of the metadata timer tick. Refetches every child that has not
+    /// reached a materializable state, then reschedules until none remain.
     fn run_pending_session_id_poll(&mut self, ctx: &mut ModelContext<Self>) {
         let pending: Vec<AmbientAgentTaskId> = self
             .children
             .iter()
-            .filter(|(_, entry)| {
-                entry.session_id.is_none() || !entry.pane_materialization_requested
-            })
+            .filter(|(_, entry)| Self::entry_needs_materialization_metadata(entry))
             .map(|(task_id, _)| *task_id)
             .collect();
 
@@ -537,12 +529,33 @@ impl OrchestrationViewerModel {
         BlocklistAIHistoryModel::as_ref(ctx).active_conversation_id(self.terminal_view_id)
     }
 
-    /// Tells the parent's `TerminalView` to materialize a hidden
-    /// shared-session viewer pane for this child.
+    fn materialization_is_ready(task: &AmbientAgentTask) -> bool {
+        if FeatureFlag::OrchestrationUnifiedStack.is_enabled() {
+            return !matches!(
+                decide_child_pane_materialization(task),
+                ChildPaneMaterialization::Pending
+            );
+        }
+
+        task.session_id
+            .as_deref()
+            .and_then(|session_id| session_id.parse::<SessionId>().ok())
+            .is_some()
+    }
+
+    fn entry_needs_materialization_metadata(entry: &ChildAgentEntry) -> bool {
+        !entry.pane_materialization_requested
+            || (!FeatureFlag::OrchestrationUnifiedStack.is_enabled() && entry.session_id.is_none())
+    }
+
+    /// Tells the parent's `TerminalView` to materialize a hidden viewer pane
+    /// for this child. Unified-stack routing carries the task snapshot so the
+    /// pane group can distinguish live, transcript, and pending state; the
+    /// legacy flag-off route preserves its raw-session-id behavior.
     fn request_child_pane_materialization(
         &self,
         conversation_id: AIConversationId,
-        session_id: SessionId,
+        task: AmbientAgentTask,
         ctx: &mut ModelContext<Self>,
     ) {
         let Some(view) = self.terminal_view.upgrade(ctx) else {
@@ -553,10 +566,21 @@ impl OrchestrationViewerModel {
             return;
         };
         view.update(ctx, |_view, ctx| {
-            ctx.emit(TerminalViewEvent::EnsureSharedSessionViewerChildPane {
-                conversation_id,
-                session_id,
-            });
+            if FeatureFlag::OrchestrationUnifiedStack.is_enabled() {
+                ctx.emit(TerminalViewEvent::EnsureUnifiedViewerChildPane {
+                    conversation_id,
+                    task: Box::new(task),
+                });
+            } else if let Some(session_id) = task
+                .session_id
+                .as_deref()
+                .and_then(|session_id| session_id.parse::<SessionId>().ok())
+            {
+                ctx.emit(TerminalViewEvent::EnsureSharedSessionViewerChildPane {
+                    conversation_id,
+                    session_id,
+                });
+            }
         });
     }
 }

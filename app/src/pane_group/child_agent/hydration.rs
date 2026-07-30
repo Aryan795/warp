@@ -78,6 +78,34 @@ pub(in crate::pane_group) fn decide_remote_child_hydration_action(
 }
 
 impl PaneGroup {
+    /// Applies the unified viewer materialization decision to a task snapshot
+    /// supplied by the parent shared-session viewer.
+    pub(in crate::pane_group) fn materialize_viewer_child_pane_from_task(
+        &mut self,
+        child_id: AIConversationId,
+        parent_pane_id: PaneId,
+        task: AmbientAgentTask,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(child_conversation) = BlocklistAIHistoryModel::as_ref(ctx)
+            .conversation(&child_id)
+            .cloned()
+        else {
+            log::warn!(
+                "materialize_viewer_child_pane_from_task: no child conversation {child_id:?}"
+            );
+            return;
+        };
+        let task_id = child_conversation.task_id().or(Some(task.task_id));
+        let materialization = decide_child_pane_materialization(&task);
+        self.materialize_viewer_child_pane(
+            child_conversation,
+            parent_pane_id,
+            task_id,
+            Some(materialization),
+            ctx,
+        );
+    }
     /// Single dispatch for every placeholder-child pane — the `is_remote_child`
     /// (owner) and `is_viewing_shared_session` (viewer) branches of
     /// [`Self::create_hidden_child_agent_pane`] both funnel here.
@@ -112,12 +140,11 @@ impl PaneGroup {
         }
 
         let task_id = child_conversation.task_id();
-        let task_for_decision = task_id
-            .and_then(|task_id| {
-                AgentConversationsModel::handle(ctx).update(ctx, |model, ctx| {
-                    model.get_or_async_fetch_task_data(&task_id, ctx)
-                })
-            });
+        let task_for_decision = task_id.and_then(|task_id| {
+            AgentConversationsModel::handle(ctx).update(ctx, |model, ctx| {
+                model.get_or_async_fetch_task_data(&task_id, ctx)
+            })
+        });
         let materialization = task_for_decision
             .as_ref()
             .map(decide_child_pane_materialization);
@@ -204,13 +231,7 @@ impl PaneGroup {
                 else {
                     return;
                 };
-                self.hydrate_owner_child_transcript(
-                    pane_id,
-                    child_id,
-                    task_id,
-                    server_token,
-                    ctx,
-                );
+                self.hydrate_owner_child_transcript(pane_id, child_id, task_id, server_token, ctx);
             }
             Some(ChildPaneMaterialization::Pending) | None => {
                 // Pending: show the child loading presentation rather than the
@@ -252,7 +273,26 @@ impl PaneGroup {
     ) {
         let child_id = child_conversation.id();
         match (materialization, task_id) {
-            (Some(ChildPaneMaterialization::AttachLive { session_id }), _) => {
+            (Some(ChildPaneMaterialization::AttachLive { session_id }), task_id) => {
+                if self.failed_viewer_child_sessions.get(&child_id) == Some(&session_id) {
+                    if let Some(task_id) = task_id {
+                        self.pending_viewer_child_hydrations
+                            .insert(task_id, child_id);
+                        self.ensure_pending_ambient_restoration_subscription(ctx);
+                    }
+                    if let Some(pane_id) = self.child_agent_panes.get(&child_id).copied()
+                        && let Some(view) = self.terminal_view_from_pane_id(pane_id, ctx)
+                    {
+                        view.update(ctx, |view, ctx| {
+                            view.set_orchestration_child_live_unavailable(true, ctx);
+                        });
+                    }
+                    return;
+                }
+                self.failed_viewer_child_sessions.remove(&child_id);
+                if let Some(task_id) = task_id {
+                    self.pending_viewer_child_hydrations.remove(&task_id);
+                }
                 self.attach_child_session(
                     child_id,
                     session_id,
@@ -261,11 +301,23 @@ impl PaneGroup {
                 );
             }
             (Some(ChildPaneMaterialization::LoadTranscript { server_token }), Some(task_id)) => {
-                let Some(pane_id) =
-                    self.create_hidden_ambient_child_pane(child_conversation, parent_pane_id, ctx)
-                else {
+                let pane_id = self
+                    .child_agent_panes
+                    .get(&child_id)
+                    .copied()
+                    .filter(|pane_id| self.has_pane_id(*pane_id))
+                    .or_else(|| {
+                        self.create_hidden_ambient_child_pane(
+                            child_conversation,
+                            parent_pane_id,
+                            ctx,
+                        )
+                    });
+                let Some(pane_id) = pane_id else {
                     return;
                 };
+                self.pending_viewer_child_hydrations.remove(&task_id);
+                self.failed_viewer_child_sessions.remove(&child_id);
                 self.hydrate_viewer_child_transcript_in_place(
                     pane_id,
                     child_id,
@@ -276,9 +328,20 @@ impl PaneGroup {
             }
             _ => {
                 // Pending / no task data yet: render a loading placeholder. The
-                // real pane is swapped in by `attach_child_session` (viewer
-                // arm) once `OrchestrationViewerModel` surfaces a session id.
-                self.create_viewer_loading_child_placeholder(child_conversation, ctx);
+                // task subscription re-drives through this same decision once
+                // current metadata arrives.
+                if !self
+                    .child_agent_panes
+                    .get(&child_id)
+                    .is_some_and(|pane_id| self.has_pane_id(*pane_id))
+                {
+                    self.create_viewer_loading_child_placeholder(child_conversation, ctx);
+                }
+                if let Some(task_id) = task_id {
+                    self.pending_viewer_child_hydrations
+                        .insert(task_id, child_id);
+                    self.ensure_pending_ambient_restoration_subscription(ctx);
+                }
             }
         }
     }
@@ -372,9 +435,7 @@ impl PaneGroup {
         };
         let view_size = Self::estimated_view_bounds(ctx).size();
         let (new_terminal_view, terminal_manager) = Self::create_shared_session_viewer(
-            session_id,
-            resources,
-            view_size,
+            session_id, resources, view_size,
             false, // parent already owns orchestration polling
             true,  // owner child is an ambient agent
             ctx,
@@ -423,8 +484,7 @@ impl PaneGroup {
             }
         });
 
-        self.child_agent_panes
-            .insert(child_id, new_pane_id.into());
+        self.child_agent_panes.insert(child_id, new_pane_id.into());
         if let Some(anchor) = fallback_was_swapped_anchor {
             self.swap_active_pane_to_conversation(anchor, child_id, ctx);
         }
@@ -751,12 +811,14 @@ impl PaneGroup {
                 .map(|session| session.terminal_manager(ctx))
             {
                 terminal_manager.update(ctx, |manager, _ctx| {
-                    manager
-                        .model()
-                        .lock()
-                        .set_conversation_transcript_viewer_status(Some(
-                            ConversationTranscriptViewerStatus::ViewingAmbientConversation(task_id),
-                        ));
+                    let model_handle = manager.model();
+                    let mut model = model_handle.lock();
+                    model.set_shared_session_status(
+                        crate::terminal::shared_session::SharedSessionStatus::FinishedViewer,
+                    );
+                    model.set_conversation_transcript_viewer_status(Some(
+                        ConversationTranscriptViewerStatus::ViewingAmbientConversation(task_id),
+                    ));
                 });
             }
             if let Some(terminal_view) = group.terminal_view_from_pane_id(pane_id, ctx) {
@@ -766,6 +828,7 @@ impl PaneGroup {
                     );
                 });
                 terminal_view.update(ctx, |view, ctx| {
+                    view.set_orchestration_child_live_unavailable(false, ctx);
                     view.restore_conversation_after_view_creation(
                         RestoredAIConversation::new(merged),
                         true,
@@ -834,12 +897,7 @@ impl PaneGroup {
                 RestoreConversationEntryBehavior::PreserveAgentViewState,
                 ctx,
             );
-            terminal_view.enter_agent_view(
-                None,
-                Some(child_id),
-                origin,
-                ctx,
-            );
+            terminal_view.enter_agent_view(None, Some(child_id), origin, ctx);
         });
 
         self.child_agent_panes.insert(child_id, new_pane_id.into());
@@ -927,14 +985,14 @@ impl PaneGroup {
         // Per-child viewer: parent's model already discovers descendants, and
         // hidden child viewers aren't snapshotted, so `is_cloud_mode` stays
         // `false` (no `ambient_agent_view_model` needed for snapshot round-trip).
-        let (new_terminal_view, terminal_manager) = Self::create_shared_session_viewer(
-            child_session_id,
-            resources,
-            view_size,
-            false, // enable_orchestration_polling
-            false, // is_ambient_agent
-            ctx,
-        );
+        let (new_terminal_view, terminal_manager) =
+            Self::create_orchestration_child_shared_session_viewer(
+                child_session_id,
+                child_conversation_id,
+                resources,
+                view_size,
+                ctx,
+            );
 
         let pane_data = TerminalPane::new(
             Uuid::new_v4().as_bytes().to_vec(),
@@ -993,6 +1051,116 @@ impl PaneGroup {
         // replacement, re-swap so the user lands on the new pane.
         if let Some(anchor) = fallback_was_swapped_anchor {
             self.swap_active_pane_to_conversation(anchor, child_conversation_id, ctx);
+        }
+    }
+
+    /// Recovers a child viewer whose live session no longer exists or is not
+    /// accessible. The same session is not retried; refreshed task metadata
+    /// can upgrade this pane to a transcript or attach a later execution.
+    pub(in crate::pane_group) fn recover_viewer_child_join_failure(
+        &mut self,
+        pane_id: PaneId,
+        child_id: AIConversationId,
+        session_id: SessionId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if self.child_agent_panes.get(&child_id) != Some(&pane_id) {
+            return;
+        }
+        let Some(task_id) = BlocklistAIHistoryModel::as_ref(ctx)
+            .conversation(&child_id)
+            .filter(|conversation| conversation.is_viewing_shared_session())
+            .and_then(|conversation| conversation.task_id())
+        else {
+            return;
+        };
+
+        self.failed_viewer_child_sessions
+            .insert(child_id, session_id);
+        self.pending_viewer_child_hydrations
+            .insert(task_id, child_id);
+        self.ensure_pending_ambient_restoration_subscription(ctx);
+        if let Some(view) = self.terminal_view_from_pane_id(pane_id, ctx) {
+            view.update(ctx, |view, ctx| {
+                view.set_orchestration_child_live_unavailable(true, ctx);
+            });
+        }
+        AgentConversationsModel::handle(ctx).update(ctx, |model, ctx| {
+            model.evict_and_refetch_task(&task_id, ctx);
+        });
+    }
+
+    /// Re-drives viewer children after task metadata changes. A failed live
+    /// session stays unavailable without retrying, while terminal tasks
+    /// upgrade the existing pane to a passive transcript.
+    pub(in crate::pane_group) fn process_pending_viewer_child_hydrations(
+        &mut self,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if !crate::features::FeatureFlag::OrchestrationUnifiedStack.is_enabled()
+            || self.pending_viewer_child_hydrations.is_empty()
+        {
+            return;
+        }
+
+        let ready_tasks: Vec<_> = self
+            .pending_viewer_child_hydrations
+            .keys()
+            .filter(|task_id| {
+                AgentConversationsModel::as_ref(ctx)
+                    .get_task_data(task_id)
+                    .is_some()
+            })
+            .copied()
+            .collect();
+
+        for task_id in ready_tasks {
+            let Some(child_id) = self.pending_viewer_child_hydrations.remove(&task_id) else {
+                continue;
+            };
+            let Some(task) = AgentConversationsModel::as_ref(ctx).get_task_data(&task_id) else {
+                continue;
+            };
+            let Some(pane_id) = self
+                .child_agent_panes
+                .get(&child_id)
+                .copied()
+                .filter(|pane_id| self.has_pane_id(*pane_id))
+            else {
+                continue;
+            };
+
+            match decide_child_pane_materialization(&task) {
+                ChildPaneMaterialization::AttachLive { session_id }
+                    if self.failed_viewer_child_sessions.get(&child_id) == Some(&session_id) =>
+                {
+                    self.pending_viewer_child_hydrations
+                        .insert(task_id, child_id);
+                }
+                ChildPaneMaterialization::AttachLive { session_id } => {
+                    self.failed_viewer_child_sessions.remove(&child_id);
+                    self.attach_child_session(
+                        child_id,
+                        session_id,
+                        ChildPaneMaterializationMode::Viewer,
+                        ctx,
+                    );
+                }
+                ChildPaneMaterialization::LoadTranscript { server_token } => {
+                    self.failed_viewer_child_sessions.remove(&child_id);
+                    self.hydrate_viewer_child_transcript_in_place(
+                        pane_id,
+                        child_id,
+                        task_id,
+                        server_token,
+                        ctx,
+                    );
+                }
+                ChildPaneMaterialization::Pending => {
+                    self.pending_viewer_child_hydrations
+                        .insert(task_id, child_id);
+                }
+            }
         }
     }
 
@@ -1292,9 +1460,7 @@ impl PaneGroup {
             .collect();
 
         for task_id in ready_tasks {
-            let Some(child_id) =
-                self.pending_remote_child_hydrations.remove(&task_id)
-            else {
+            let Some(child_id) = self.pending_remote_child_hydrations.remove(&task_id) else {
                 continue;
             };
 
@@ -1331,7 +1497,11 @@ impl PaneGroup {
                                  LoadTranscript child_id={child_id:?} task_id={task_id}"
                             );
                             self.hydrate_owner_child_transcript(
-                                pane_id, child_id, task_id, server_token, ctx,
+                                pane_id,
+                                child_id,
+                                task_id,
+                                server_token,
+                                ctx,
                             );
                         }
                     }

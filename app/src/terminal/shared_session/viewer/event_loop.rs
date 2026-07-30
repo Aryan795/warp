@@ -144,8 +144,7 @@ impl EventLoop {
             if let Some(view) = terminal_view.upgrade(ctx) {
                 view.update(ctx, |view, ctx| {
                     view.ai_controller().update(ctx, |controller, _ctx| {
-                        controller
-                            .set_should_suppress_existing_agent_conversation_replay(true);
+                        controller.set_should_suppress_existing_agent_conversation_replay(true);
                     });
                 });
             }

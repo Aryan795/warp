@@ -1338,6 +1338,32 @@ fn handle_terminal_view_event(
                     );
                 }
             }
+            Event::EnsureUnifiedViewerChildPane {
+                conversation_id,
+                task,
+            } => {
+                if FeatureFlag::OrchestrationUnifiedStack.is_enabled() {
+                    group.materialize_viewer_child_pane_from_task(
+                        *conversation_id,
+                        pane_id,
+                        task.as_ref().clone(),
+                        ctx,
+                    );
+                }
+            }
+            Event::OrchestrationChildSharedSessionJoinFailed {
+                conversation_id,
+                session_id,
+            } => {
+                if FeatureFlag::OrchestrationUnifiedStack.is_enabled() {
+                    group.recover_viewer_child_join_failure(
+                        pane_id,
+                        *conversation_id,
+                        *session_id,
+                        ctx,
+                    );
+                }
+            }
             Event::HideAIDocumentPanes => {
                 group.close_all_ai_document_panes(ctx);
             }
