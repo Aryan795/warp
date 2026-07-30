@@ -2570,10 +2570,10 @@ fn classify_unknown_type_is_opaque() {
 // ---- drain_family_events (QUALITY-928 M1 T2) ----------------------------
 
 #[test]
-fn drain_family_events_owner_routes_mixed_batch_and_delivers_inbox() {
-    // A mixed family batch under owner mode routes discovery/lifecycle to the
-    // tracker, delivers the parent's own inbox through handle_event_batch, and
-    // advances the owner cursor.
+fn drain_family_events_primary_routes_mixed_batch_and_delivers_inbox() {
+    // A mixed family batch under Primary consumption routes discovery/lifecycle
+    // to the tracker, delivers parent-self through handle_event_batch, and
+    // advances the Primary cursor (local + server).
     App::test((), |mut app| async move {
         initialize_settings_for_tests(&mut app);
         let (sender, _receiver) = std::sync::mpsc::sync_channel::<ModelEvent>(4);
@@ -2599,7 +2599,7 @@ fn drain_family_events_owner_routes_mixed_batch_and_delivers_inbox() {
         });
 
         let mut mock = MockAIClient::new();
-        // Owner mode is the authoritative server-cursor writer.
+        // Primary consumer is the authoritative server-cursor writer.
         mock.expect_update_event_sequence_on_server()
             .returning(|_, _| Ok(()));
         let ai_client: Arc<dyn AIClient> = Arc::new(mock);
@@ -2630,14 +2630,14 @@ fn drain_family_events_owner_routes_mixed_batch_and_delivers_inbox() {
         streamer.update(&mut app, |me, ctx| {
             let tracker = OrchestrationChildTracker::new(
                 parent_task_id,
-                ChildTrackingMode::Owner {
+                OrchestrationEventConsumer::Primary {
                     orchestrator_conversation_id: conversation_id,
                 },
             );
             let tracker = me.drain_family_events(
                 conversation_id,
                 &parent_run_id,
-                FamilyDrainMode::Owner,
+                FamilyDrainMode::Primary,
                 tracker,
                 0,
                 events,
@@ -2671,18 +2671,18 @@ fn drain_family_events_owner_routes_mixed_batch_and_delivers_inbox() {
                     .conversation(&conversation_id)
                     .and_then(|c| c.last_event_sequence()),
                 Some(13),
-                "owner cursor must advance to the batch max sequence"
+                "Primary cursor must advance to the batch max sequence"
             );
         });
     });
 }
 
 #[test]
-fn drain_family_events_viewer_advances_cursor_without_server_push() {
-    // Viewer mode routes child lifecycle to the tracker and persists the
-    // cursor locally, but must NEVER push the server cursor (the owning
-    // process is the authoritative writer). The bare MockAIClient panics if
-    // update_event_sequence_on_server is called.
+fn drain_family_events_observer_advances_cursor_without_server_push() {
+    // Observer routes child lifecycle to the tracker and persists the cursor
+    // locally, but must NEVER push the server cursor (only Primary may write
+    // it). The bare MockAIClient panics if update_event_sequence_on_server is
+    // called — that is the proof Observer never pushes server cursor.
     App::test((), |mut app| async move {
         initialize_settings_for_tests(&mut app);
         let (sender, _receiver) = std::sync::mpsc::sync_channel::<ModelEvent>(4);
@@ -2720,14 +2720,14 @@ fn drain_family_events_viewer_advances_cursor_without_server_push() {
         streamer.update(&mut app, |me, ctx| {
             let tracker = OrchestrationChildTracker::new(
                 parent_task_id,
-                ChildTrackingMode::Viewer {
+                OrchestrationEventConsumer::Observer {
                     placeholder_conversation_id: placeholder_id,
                 },
             );
             let tracker = me.drain_family_events(
                 placeholder_id,
                 &parent_run_id,
-                FamilyDrainMode::Viewer,
+                FamilyDrainMode::Observer,
                 tracker,
                 0,
                 events,
@@ -2736,7 +2736,7 @@ fn drain_family_events_viewer_advances_cursor_without_server_push() {
             );
             assert!(
                 tracker.has_in_flight_fetch(&child),
-                "child lifecycle must route into the viewer tracker"
+                "child lifecycle must route into the Observer tracker"
             );
         });
 
@@ -2746,7 +2746,7 @@ fn drain_family_events_viewer_advances_cursor_without_server_push() {
                     .conversation(&placeholder_id)
                     .and_then(|c| c.last_event_sequence()),
                 Some(8),
-                "viewer cursor must advance locally to the batch max sequence"
+                "Observer cursor must advance locally to the batch max sequence"
             );
         });
     });

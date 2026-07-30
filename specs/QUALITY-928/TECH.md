@@ -301,11 +301,11 @@ flowchart TD
 - **`ChildSessionLinked`** → `tracker.observe_child(SessionLinked { session_uuid })`
   (extracts UUID from `ref_id`; no metadata fetch needed)
 - **`ChildLifecycle`** → `tracker.observe_child(Lifecycle(kind))`
-- **`ParentSelf`** → owner: `handle_event_batch` (inbox + lifecycle);
-  viewer: dropped (viewer has no inbox)
+- **`ParentSelf`** → Primary: `handle_event_batch` (inbox + lifecycle);
+  Observer: dropped (no parent-self delivery)
 - **`Opaque`** → cursor advances only (forward compat)
 
-Cursor authority: owner calls `persist_cursor_local_and_server`; viewer
+Cursor authority: Primary calls `persist_cursor_local_and_server`; Observer
 calls `persist_cursor_local_only`. `refresh_task_data` coalesces in-flight
 fetches: a refetch arriving mid-fetch is recorded and one follow-up issues
 on completion.
@@ -324,7 +324,7 @@ on completion.
 - `Registered` prevents placeholder creation for in-band children.
 - `SessionLinked { session_uuid }` fills in `session_id` without a fetch.
 - `classify_family_event`: all five variants covered by unit tests.
-- Cursor authority: flag-ON + viewer → cursor advance does NOT push to server.
+- Cursor authority: flag-ON + Observer → cursor advance does NOT push to server.
 - Rolled-out flags deleted; legacy REST polling path absent.
 
 Manual (dogfood, `OrchestrationUnifiedStack` on, server PR deployed): create
@@ -470,15 +470,14 @@ flowchart LR
 Extract OVM's core into a model keyed on the orchestrator, running in both
 modes. The mode captures the only real behavioral differences:
 ```rust
-/// How this process relates to the orchestrator whose children are tracked.
-enum ChildTrackingMode {
-    /// This process owns the orchestrator run: consume the parent inbox and
-    /// authoritatively push the server-side event cursor.
-    Owner { orchestrator_conversation_id: AIConversationId },
-    /// Passive view of an orchestrator owned elsewhere: lifecycle only;
-    /// cursor persisted locally, never pushed to the server; server-side
-    /// status reporting suppressed on placeholders.
-    Viewer { placeholder_conversation_id: AIConversationId },
+/// Family-event consumption role (not authenticated ownership / permissions).
+enum OrchestrationEventConsumer {
+    /// Primary family-event consumer: deliver parent-self events and
+    /// persist local + authoritative server cursor.
+    Primary { orchestrator_conversation_id: AIConversationId },
+    /// Observer family-event consumer: drop parent-self events; persist
+    /// local cursor only (never push server cursor).
+    Observer { placeholder_conversation_id: AIConversationId },
 }
 
 struct TrackedChild {
@@ -490,7 +489,7 @@ struct TrackedChild {
 
 pub struct OrchestrationChildTracker {
     parent_task_id: AmbientAgentTaskId,
-    mode: ChildTrackingMode,
+    mode: OrchestrationEventConsumer,
     children: HashMap<AmbientAgentTaskId, TrackedChild>,
     children_by_run_id: HashMap<String, AmbientAgentTaskId>,
     /// In-flight metadata fetches (today's `remote_child_placeholder_fetches`
@@ -552,12 +551,15 @@ through `AgentConversationsModel`, not raw client calls (§7.6, item 1).
 `parent_task_id` per process, hosted in a singleton registry with refcounted
 consumers — exactly the shape of today's `viewer_mode_orchestrators` entries.
 OVM and the owner's agent view become thin per-pane consumers that register
-and unregister. Mode is *derived*, not configured: `Owner` iff this process
-hosts the orchestrator conversation; a viewer pane opened on your own run
-registers as another consumer of the owner-mode tracker rather than creating
-a second tracker. Owner-mode trackers live as long as the orchestrator
-conversation; viewer-mode trackers tear down when the last consumer
-unregisters (today's refcounting rule).
+and unregister. Mode is *derived*, not configured: `Primary` when this process is the
+family-event primary (delivers parent-self + server cursor); `Observer`
+otherwise. A second local pane on the same family registers as another
+consumer of the existing tracker rather than creating a second tracker.
+Primary trackers live as long as the orchestrator conversation; Observer
+trackers tear down when the last consumer unregisters (today's refcounting
+rule). This type describes family-event consumption and cursor
+responsibility only — not authenticated ownership, permissions, or pane
+capability.
 
 ### 7.3 One family stream per parent (sketch)
 The streamer keeps one connection per parent family, always
@@ -591,8 +593,8 @@ fn drain_family_events(&mut self, parent_task_id: AmbientAgentTaskId, ctx: ...) 
     }
     // Cursor authority: one scalar per family stream.
     match mode {
-        Owner { .. }  => self.persist_cursor_local_and_server(max_seq, ctx),
-        Viewer { .. } => self.persist_cursor_local_only(max_seq, ctx),
+        Primary { .. }  => self.persist_cursor_local_and_server(max_seq, ctx),
+        Observer { .. } => self.persist_cursor_local_only(max_seq, ctx),
     }
 }
 ```

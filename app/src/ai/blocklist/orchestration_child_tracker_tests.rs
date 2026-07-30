@@ -72,10 +72,10 @@ fn install_streamer(app: &mut App) -> warpui::ModelHandle<OrchestrationEventStre
     })
 }
 
-fn viewer_tracker() -> OrchestrationChildTracker {
+fn observer_tracker() -> OrchestrationChildTracker {
     OrchestrationChildTracker::new(
         task_id(PARENT_RUN_ID),
-        ChildTrackingMode::Viewer {
+        OrchestrationEventConsumer::Observer {
             placeholder_conversation_id: AIConversationId::new(),
         },
     )
@@ -86,7 +86,7 @@ fn started_creates_pending_entry_and_is_idempotent() {
     App::test((), |mut app| async move {
         let streamer = install_streamer(&mut app);
         streamer.update(&mut app, |_streamer, ctx| {
-            let mut tracker = viewer_tracker();
+            let mut tracker = observer_tracker();
             let killed = HashSet::new();
 
             tracker.observe_child(CHILD_A_RUN_ID, ChildSignal::Started, &killed, ctx);
@@ -118,7 +118,7 @@ fn lifecycle_for_tombstoned_run_is_noop() {
     App::test((), |mut app| async move {
         let streamer = install_streamer(&mut app);
         streamer.update(&mut app, |_streamer, ctx| {
-            let mut tracker = viewer_tracker();
+            let mut tracker = observer_tracker();
             let mut killed = HashSet::new();
             killed.insert(CHILD_A_RUN_ID.to_string());
 
@@ -147,7 +147,7 @@ fn registered_prevents_placeholder_creation() {
     App::test((), |mut app| async move {
         let streamer = install_streamer(&mut app);
         streamer.update(&mut app, |_streamer, ctx| {
-            let mut tracker = viewer_tracker();
+            let mut tracker = observer_tracker();
             let killed = HashSet::new();
             let conversation_id = AIConversationId::new();
 
@@ -196,7 +196,7 @@ fn session_linked_fills_session_id_and_requests_pane_without_fetch() {
     App::test((), |mut app| async move {
         let streamer = install_streamer(&mut app);
         streamer.update(&mut app, |_streamer, ctx| {
-            let mut tracker = viewer_tracker();
+            let mut tracker = observer_tracker();
             let killed = HashSet::new();
 
             // Establish a tracked child first (no session id yet).
@@ -244,7 +244,7 @@ fn two_started_signals_issue_one_metadata_fetch() {
     App::test((), |mut app| async move {
         let streamer = install_streamer(&mut app);
         streamer.update(&mut app, |_streamer, ctx| {
-            let mut tracker = viewer_tracker();
+            let mut tracker = observer_tracker();
             let killed = HashSet::new();
 
             tracker.observe_child(CHILD_A_RUN_ID, ChildSignal::Started, &killed, ctx);
@@ -270,7 +270,7 @@ fn seeded_child_placeholder_is_remote_child_in_viewer_mode() {
     App::test((), |mut app| async move {
         let streamer = install_streamer(&mut app);
         streamer.update(&mut app, |_streamer, ctx| {
-            let mut tracker = viewer_tracker();
+            let mut tracker = observer_tracker();
             let killed = HashSet::new();
 
             tracker.observe_child(

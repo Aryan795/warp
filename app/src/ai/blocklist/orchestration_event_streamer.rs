@@ -16,7 +16,7 @@ use warpui::{
 
 use super::history_model::{BlocklistAIHistoryEvent, BlocklistAIHistoryModel};
 use super::orchestration_child_tracker::{
-    ChildSignal, ChildTrackingMode, OrchestrationChildTracker,
+    ChildSignal, OrchestrationChildTracker, OrchestrationEventConsumer,
 };
 use super::orchestration_events::{
     LifecycleEventDetailPayload, LifecycleEventDetailStage, OrchestrationEventService,
@@ -353,14 +353,16 @@ enum DesiredSseFilter {
     NoFilter,
 }
 
-/// Which side of the family stream a drain is servicing. Captures the only
+/// Which family-event consumer role a drain is servicing. Captures the only
 /// two behavioral differences the fan-out dispatches on (TECH QUALITY-928
-/// §7.3): parent-inbox delivery (owner only) and cursor authority (owner
-/// pushes the server cursor, viewer persists locally only).
+/// §7.3): parent-self delivery (Primary only) and cursor authority (Primary
+/// pushes the server cursor, Observer persists locally only). This is the
+/// streamer's counterpart to [`OrchestrationEventConsumer`] and likewise says
+/// nothing about authenticated ownership or pane capability.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum FamilyDrainMode {
-    Owner,
-    Viewer,
+    Primary,
+    Observer,
 }
 
 /// Classification of a single event from a parent-family (`include_self`)
@@ -369,8 +371,8 @@ enum FamilyDrainMode {
 /// §3.5 / §7.3.
 #[derive(Debug, PartialEq)]
 enum FamilyEvent {
-    /// Inbox message or lifecycle event on the parent's own run. Delivered to
-    /// the owner inbox; dropped by a viewer (which has no inbox).
+    /// Inbox message or lifecycle event on the parent's own run. Delivered by
+    /// a Primary consumer; dropped by an Observer.
     ParentSelf(AgentRunEvent),
     /// `child_agent_started` on the parent run; the child run id is the
     /// event's `ref_id`.
@@ -517,11 +519,11 @@ impl OrchestrationEventStreamer {
 
     // ---- Unified family drain (OrchestrationUnifiedStack) --------------
 
-    /// Owner-side cursor authority for the family drain: persist the cursor to
-    /// SQLite and push it to the server. The owner process is the
+    /// Primary cursor authority for the family drain: persist the cursor to
+    /// SQLite and push it to the server. The Primary consumer is the
     /// authoritative writer of its run's server cursor. Delegates to
-    /// [`Self::persist_event_cursor`], whose owner-side branch (a non
-    /// shared-session conversation) performs exactly this.
+    /// [`Self::persist_event_cursor`], whose non-shared-session branch
+    /// performs exactly this.
     fn persist_cursor_local_and_server(
         &mut self,
         conversation_id: AIConversationId,
@@ -531,10 +533,10 @@ impl OrchestrationEventStreamer {
         self.persist_event_cursor(conversation_id, sequence, ctx);
     }
 
-    /// Viewer-side cursor authority for the family drain: persist to SQLite
-    /// only, never pushing the server cursor (the orchestrator's owning
-    /// process is the authoritative writer). Monotonic: folds in the
-    /// conversation's already-persisted sequence.
+    /// Observer cursor authority for the family drain: persist to SQLite
+    /// only, never pushing the server cursor (only a Primary consumer may
+    /// write the server-side cursor). Monotonic: folds in the conversation's
+    /// already-persisted sequence.
     fn persist_cursor_local_only(
         &mut self,
         conversation_id: AIConversationId,
@@ -553,8 +555,8 @@ impl OrchestrationEventStreamer {
 
     /// Fans out one family (`include_self`) SSE batch: classifies each event
     /// and routes it to the tracker (discovery / session-link / lifecycle) or
-    /// the owner inbox (`ParentSelf`), then advances the cursor with
-    /// mode-appropriate authority. See TECH QUALITY-928 §3.5 / §7.3.
+    /// Primary parent-self delivery (`ParentSelf`), then advances the cursor
+    /// with consumer-appropriate authority. See TECH QUALITY-928 §3.5 / §7.3.
     ///
     /// The tracker is passed by value and returned so callers can keep it in
     /// `self` state without a borrow conflict against `handle_event_batch`
@@ -591,7 +593,7 @@ impl OrchestrationEventStreamer {
                     // Create a local placeholder so the pill bar reflects the new
                     // child immediately, without waiting for the tracker's async
                     // metadata fetch to resolve.
-                    if mode == FamilyDrainMode::Owner {
+                    if mode == FamilyDrainMode::Primary {
                         self.ensure_remote_child_placeholder(
                             cursor_conversation_id,
                             child_run_id.clone(),
@@ -630,7 +632,7 @@ impl OrchestrationEventStreamer {
                     );
                     // Backstop: if this lifecycle arrives before (or instead of)
                     // `child_agent_started`, ensure a placeholder still exists.
-                    if mode == FamilyDrainMode::Owner {
+                    if mode == FamilyDrainMode::Primary {
                         self.ensure_remote_child_placeholder(
                             cursor_conversation_id,
                             child_run_id.clone(),
@@ -652,9 +654,9 @@ impl OrchestrationEventStreamer {
         }
 
         match mode {
-            FamilyDrainMode::Owner => {
+            FamilyDrainMode::Primary => {
                 // Deliver the parent's own inbox + lifecycle through the
-                // existing sink (which also persists the owner cursor).
+                // existing sink (which also persists the Primary cursor).
                 if !parent_self_events.is_empty() || !messages.is_empty() {
                     self.handle_event_batch(
                         cursor_conversation_id,
@@ -665,12 +667,12 @@ impl OrchestrationEventStreamer {
                         ctx,
                     );
                 }
-                // Ensure a child-only batch still advances the owner cursor.
+                // Ensure a child-only batch still advances the Primary cursor.
                 self.persist_cursor_local_and_server(cursor_conversation_id, max_seq, ctx);
             }
-            FamilyDrainMode::Viewer => {
-                // Viewer has no inbox: `ParentSelf` events are dropped. The
-                // cursor is persisted locally only.
+            FamilyDrainMode::Observer => {
+                // Observer drops parent-self events and persists the cursor
+                // locally only (never pushes the server cursor).
                 self.persist_cursor_local_only(cursor_conversation_id, max_seq, ctx);
             }
         }
@@ -855,7 +857,7 @@ impl OrchestrationEventStreamer {
             .unwrap_or_else(|| {
                 OrchestrationChildTracker::new(
                     parent_task_id,
-                    ChildTrackingMode::Owner {
+                    OrchestrationEventConsumer::Primary {
                         orchestrator_conversation_id: conversation_id,
                     },
                 )
@@ -863,7 +865,7 @@ impl OrchestrationEventStreamer {
         let tracker = self.drain_family_events(
             conversation_id,
             &self_run_id,
-            FamilyDrainMode::Owner,
+            FamilyDrainMode::Primary,
             tracker,
             cursor,
             events,
@@ -923,7 +925,7 @@ impl OrchestrationEventStreamer {
             .unwrap_or_else(|| {
                 OrchestrationChildTracker::new(
                     parent_task_id,
-                    ChildTrackingMode::Viewer {
+                    OrchestrationEventConsumer::Observer {
                         placeholder_conversation_id: primary_placeholder,
                     },
                 )
@@ -931,7 +933,7 @@ impl OrchestrationEventStreamer {
         let tracker = self.drain_family_events(
             primary_placeholder,
             &self_run_id,
-            FamilyDrainMode::Viewer,
+            FamilyDrainMode::Observer,
             tracker,
             cursor,
             events,

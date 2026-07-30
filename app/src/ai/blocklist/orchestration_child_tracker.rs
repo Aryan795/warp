@@ -4,17 +4,18 @@
 //! child run can become known — creation-time discovery
 //! (`child_agent_started`), lifecycle events, sandbox session links
 //! (`run_session_linked`), REST seeds/restore rows, and in-band children
-//! registered by the local `StartAgentExecutor`. Owner and viewer processes
-//! each hold one tracker per parent family; the only behavioral difference
-//! between them is captured by [`ChildTrackingMode`] (see TECH QUALITY-928
-//! §7.2).
+//! registered by the local `StartAgentExecutor`. Each parent family holds one
+//! tracker; the only behavioral difference between consumers is captured by
+//! [`OrchestrationEventConsumer`] (see TECH QUALITY-928 §7.2).
 //!
 //! The tracker owns its internal state machine and the classification of
 //! signals into placeholder / status / fetch / pane actions. Every child
 //! placeholder it materializes is the single unified `is_remote_child` flavor
-//! (TECH QUALITY-928 §7.4) regardless of owner/viewer mode; viewer-ness is a
-//! runtime property of [`ChildTrackingMode`], never a persisted conversation
-//! flavor. Claim-time metadata fetches route through the shared
+//! (TECH QUALITY-928 §7.4) regardless of Primary/Observer consumption.
+//! [`OrchestrationEventConsumer`] is a runtime property of family-event
+//! consumption and cursor responsibility only — not authenticated ownership,
+//! permissions, or pane capability, and never a persisted conversation flavor.
+//! Claim-time metadata fetches route through the shared
 //! `AgentConversationsModel` fetch authority (§7.6, item 1).
 //!
 //! The remaining side effect — persisting the placeholder conversation and
@@ -48,22 +49,23 @@ use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::agent_conversations_model::AgentConversationsModel;
 use crate::ai::ambient_agents::{AmbientAgentTask, AmbientAgentTaskId, AmbientAgentTaskState};
 
-/// How this process relates to the orchestrator whose children are tracked.
+/// Family-event consumption role for one parent family stream.
 ///
-/// Mode is derived from process ownership, not configured: `Owner` iff this
-/// process hosts the orchestrator conversation. It captures the only real
-/// behavioral differences — inbox consumption and server-cursor authority —
-/// which the drain (T2) dispatches on.
-pub enum ChildTrackingMode {
-    /// This process owns the orchestrator run: it consumes the parent inbox
-    /// and authoritatively pushes the server-side event cursor.
-    Owner {
+/// Describes how this process consumes the family's SSE events and who may
+/// push the server cursor. It is **not** authenticated ownership, permissions,
+/// or pane capability:
+/// - [`Self::Primary`] delivers parent-self events and persists local +
+///   authoritative server cursor.
+/// - [`Self::Observer`] drops parent-self events and persists local cursor only.
+pub enum OrchestrationEventConsumer {
+    /// Primary consumer: deliver parent-self events and persist local +
+    /// authoritative server cursor.
+    Primary {
         orchestrator_conversation_id: AIConversationId,
     },
-    /// Passive view of an orchestrator owned elsewhere: lifecycle only; the
-    /// cursor is persisted locally and never pushed to the server, and
-    /// server-side status reporting is suppressed on placeholders.
-    Viewer {
+    /// Observer consumer: drop parent-self events; persist local cursor only
+    /// (never push the server cursor).
+    Observer {
         placeholder_conversation_id: AIConversationId,
     },
 }
@@ -111,11 +113,11 @@ pub struct TrackedChild {
 }
 
 /// Owns discovery, placeholder bookkeeping, claim-time metadata refetch, and
-/// pane-materialization requests for one parent family, in both owner and
-/// viewer modes.
+/// pane-materialization requests for one parent family under either
+/// [`OrchestrationEventConsumer`] role.
 pub struct OrchestrationChildTracker {
     parent_task_id: AmbientAgentTaskId,
-    mode: ChildTrackingMode,
+    mode: OrchestrationEventConsumer,
     /// Materialized children keyed by task id.
     children: HashMap<AmbientAgentTaskId, TrackedChild>,
     /// Secondary index from stringified `run_id` to task id, kept in sync
@@ -141,7 +143,7 @@ pub struct OrchestrationChildTracker {
 
 impl OrchestrationChildTracker {
     /// Builds an empty tracker for the given parent family and mode.
-    pub fn new(parent_task_id: AmbientAgentTaskId, mode: ChildTrackingMode) -> Self {
+    pub fn new(parent_task_id: AmbientAgentTaskId, mode: OrchestrationEventConsumer) -> Self {
         Self {
             parent_task_id,
             mode,
@@ -560,10 +562,10 @@ impl OrchestrationChildTracker {
     /// the mode's conversation id as a stable stand-in.
     fn placeholder_conversation_id(&self) -> AIConversationId {
         match &self.mode {
-            ChildTrackingMode::Owner {
+            OrchestrationEventConsumer::Primary {
                 orchestrator_conversation_id,
             } => *orchestrator_conversation_id,
-            ChildTrackingMode::Viewer {
+            OrchestrationEventConsumer::Observer {
                 placeholder_conversation_id,
             } => *placeholder_conversation_id,
         }
