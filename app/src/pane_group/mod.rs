@@ -5311,25 +5311,6 @@ impl PaneGroup {
         )
     }
 
-    /// Owner-side remote children are restored into the same ambient cloud
-    /// continuation surface without being persisted as passive shared-session
-    /// viewers.
-    fn replace_loading_pane_with_restored_owner_ambient_cloud_mode_pane(
-        &mut self,
-        loading_pane_id: PaneId,
-        cloud_conversation: CloudConversationData,
-        task_id: AmbientAgentTaskId,
-        ctx: &mut ViewContext<Self>,
-    ) -> bool {
-        self.replace_loading_pane_with_restored_ambient_cloud_mode_pane_inner(
-            loading_pane_id,
-            cloud_conversation,
-            task_id,
-            false,
-            ctx,
-        )
-    }
-
     fn replace_loading_pane_with_restored_ambient_cloud_mode_pane_inner(
         &mut self,
         loading_pane_id: PaneId,
