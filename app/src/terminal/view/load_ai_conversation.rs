@@ -939,7 +939,6 @@ impl TerminalView {
             orchestration_harness_type: None,
             parent_conversation_id: None,
             is_remote_child: false,
-            is_durable_observer_parent: false,
             root_task_is_optimistic: None,
             run_id: None,
             autoexecute_override: None,
