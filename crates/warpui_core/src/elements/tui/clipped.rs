@@ -4,11 +4,18 @@
 //! seam: the viewport owns the scroll offset, while children render as if they
 //! are unscrolled. When an item starts above the viewport, this wrapper hides
 //! the child rows before the first visible row.
+//!
+//! The child paints **straight into the destination surface** at a negative
+//! y-offset, through a screen-space clip — the row-grid counterpart of the GUI
+//! viewport's `start_layer(ClipBounds)` plus translation. Paint cost therefore
+//! tracks the visible window instead of the child's full height, which matters
+//! for a transcript where one agent block can be thousands of rows tall while
+//! only a screenful is on-screen.
 
 use super::{
-    TuiBuffer, TuiClipBounds, TuiConstraint, TuiElement, TuiEvent, TuiEventContext,
-    TuiLayoutContext, TuiPaintContext, TuiPaintSurface, TuiPresentationContext, TuiRect,
-    TuiScreenPoint, TuiScreenPosition, TuiScreenRect, TuiSize,
+    TuiClipBounds, TuiConstraint, TuiElement, TuiEvent, TuiEventContext, TuiLayoutContext,
+    TuiPaintContext, TuiPaintSurface, TuiPresentationContext, TuiScreenPoint, TuiScreenPosition,
+    TuiScreenRect, TuiSize,
 };
 use crate::AppContext;
 
@@ -119,33 +126,16 @@ impl TuiElement for TuiClipped {
         if size.width == 0 || size.height == 0 {
             return;
         }
-        let child_size = self
-            .child
-            .size()
-            .expect("TuiClipped child size must be retained after layout");
-        let child_area = TuiRect::new(
-            0,
-            0,
-            size.width.max(child_size.width),
-            self.child_height(size.height).max(child_size.height),
+        debug_assert!(
+            self.child.size().is_some(),
+            "TuiClipped child size must be retained after layout"
         );
-        let mut child_buffer = TuiBuffer::empty(child_area);
         let clip = TuiScreenRect::new(screen_origin, size);
         let child_origin = origin.offset(0, -i32::from(self.viewport_origin_y));
         ctx.with_scene_layer(TuiClipBounds::BoundedByActiveLayerAnd(clip), |ctx| {
-            let mut child_surface = TuiPaintSurface::mapped(&mut child_buffer, child_origin);
+            let mut child_surface = surface.clipped(origin, size);
             self.child.render(child_origin, &mut child_surface, ctx);
         });
-
-        for y in 0..size.height {
-            let source_y = y.saturating_add(self.viewport_origin_y);
-            for x in 0..size.width {
-                surface.set_cell(
-                    origin.offset(i32::from(x), i32::from(y)),
-                    child_buffer[(x, source_y)].clone(),
-                );
-            }
-        }
     }
 
     fn size(&self) -> Option<TuiSize> {

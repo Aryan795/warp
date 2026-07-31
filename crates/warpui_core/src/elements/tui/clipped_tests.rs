@@ -11,6 +11,77 @@ use crate::elements::tui::{
 use crate::event::ModifiersState;
 use crate::presenter::tui::TuiPresenter;
 use crate::{App, AppContext, EntityIdMap};
+
+/// A one-row labelled element that counts how many times it was painted, so a
+/// test can assert that a clipped column only paints the rows on screen.
+struct CountedRow {
+    label: String,
+    paints: Rc<Cell<usize>>,
+    size: Option<TuiSize>,
+    origin: Option<TuiScreenPoint>,
+}
+
+impl CountedRow {
+    fn new(label: impl Into<String>, paints: &Rc<Cell<usize>>) -> Self {
+        Self {
+            label: label.into(),
+            paints: paints.clone(),
+            size: None,
+            origin: None,
+        }
+    }
+}
+
+impl TuiElement for CountedRow {
+    fn layout(
+        &mut self,
+        constraint: TuiConstraint,
+        _ctx: &mut TuiLayoutContext,
+        _app: &AppContext,
+    ) -> TuiSize {
+        let width = u16::try_from(self.label.chars().count()).unwrap_or(u16::MAX);
+        let size = constraint.clamp(TuiSize::new(width, 1));
+        self.size = Some(size);
+        size
+    }
+
+    fn render(
+        &mut self,
+        origin: TuiScreenPosition,
+        surface: &mut TuiPaintSurface<'_>,
+        ctx: &mut TuiPaintContext,
+    ) {
+        self.origin = Some(ctx.scene_point(origin));
+        self.paints.set(self.paints.get() + 1);
+        let Some(size) = self.size else {
+            return;
+        };
+        for (column, character) in self.label.chars().take(usize::from(size.width)).enumerate() {
+            let position = origin.offset(i32::try_from(column).unwrap_or(i32::MAX), 0);
+            if let Some(cell) = surface.cell_mut(position) {
+                cell.set_symbol(&character.to_string());
+            }
+        }
+    }
+
+    fn size(&self) -> Option<TuiSize> {
+        self.size
+    }
+
+    fn origin(&self) -> Option<TuiScreenPoint> {
+        self.origin
+    }
+}
+
+/// A tall column of counted rows clipped to a small window at `viewport_origin_y`.
+fn counted_column(rows: usize, viewport_origin_y: usize, paints: &Rc<Cell<usize>>) -> TuiClipped {
+    let mut column = TuiFlex::column();
+    for index in 0..rows {
+        column = column.child(CountedRow::new(format!("{index}"), paints).finish());
+    }
+    TuiClipped::new(column.finish()).with_viewport_origin_y(viewport_origin_y)
+}
+
 struct MissingRetainedSize;
 
 impl TuiElement for MissingRetainedSize {
@@ -63,6 +134,80 @@ fn renders_from_the_requested_logical_row() {
         render_to_lines(clipped, TuiSize::new(3, 2)),
         vec!["b  ", "c  "],
     );
+}
+
+/// Paint cost tracks the visible window, not the clipped child's full height:
+/// a tall column scrolled deep into view paints only the rows on screen.
+/// Regression guard for the transcript scroll stall, where a multi-thousand-row
+/// agent block was painted in full every frame to show ~40 rows.
+#[test]
+fn clipped_column_paints_only_the_rows_inside_the_viewport() {
+    let paints = Rc::new(Cell::new(0));
+    let clipped = counted_column(400, 380, &paints);
+
+    let lines = render_to_lines(clipped, TuiSize::new(3, 3));
+
+    assert_eq!(lines, vec!["380", "381", "382"]);
+    assert_eq!(
+        paints.get(),
+        3,
+        "a clipped column must paint one row per visible row, not the whole child"
+    );
+}
+
+/// A multi-row child straddling the top of the window keeps painting the rows
+/// that are inside it. Painting the child directly into the destination surface
+/// means such a child is clipped mid-widget, which must not drop or shift rows.
+#[test]
+fn clipped_column_renders_children_that_straddle_the_window() {
+    let column = TuiFlex::column()
+        .child(TuiText::new("a1\na2\na3").truncate().finish())
+        .child(TuiText::new("b1\nb2\nb3").truncate().finish());
+    let clipped = TuiClipped::new(column.finish()).with_viewport_origin_y(2);
+
+    assert_eq!(
+        render_to_lines(clipped, TuiSize::new(2, 3)),
+        vec!["a3", "b1", "b2"],
+    );
+}
+
+/// A child skipped during paint must not be hit-tested against the origin it
+/// retained from an earlier frame, so a click inside the viewport can never
+/// activate content that scrolled out of it.
+#[test]
+fn clipped_out_children_do_not_receive_pointer_events() {
+    App::test((), |app| async move {
+        app.read(|app_ctx| {
+            let offscreen_hits = Rc::new(Cell::new(0));
+            let visible_hits = Rc::new(Cell::new(0));
+            let offscreen_counter = offscreen_hits.clone();
+            let visible_counter = visible_hits.clone();
+            let offscreen =
+                TuiHoverable::new(MouseStateHandle::default(), TuiText::new("off").finish())
+                    .on_click(move |_, _| offscreen_counter.set(offscreen_counter.get() + 1));
+            let visible =
+                TuiHoverable::new(MouseStateHandle::default(), TuiText::new("vis").finish())
+                    .on_click(move |_, _| visible_counter.set(visible_counter.get() + 1));
+            let column = TuiFlex::column()
+                .child(offscreen.finish())
+                .child(visible.finish());
+            let clipped = TuiClipped::new(column.finish()).with_viewport_origin_y(1);
+            let mut presenter = TuiPresenter::new();
+            presenter.present_element(clipped.finish(), TuiRect::new(0, 0, 3, 1), app_ctx);
+
+            // Row 0 of the viewport is the column's *second* child; the first
+            // one is clipped above it and was never painted.
+            dispatch_presented_event(&mut presenter, &left_mouse_down(1, 0), app_ctx);
+            let released = TuiEvent::LeftMouseUp {
+                position: TuiPoint::new(1, 0),
+                modifiers: ModifiersState::default(),
+            };
+            dispatch_presented_event(&mut presenter, &released, app_ctx);
+
+            assert_eq!(visible_hits.get(), 1);
+            assert_eq!(offscreen_hits.get(), 0);
+        });
+    });
 }
 
 #[test]

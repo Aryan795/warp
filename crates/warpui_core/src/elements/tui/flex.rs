@@ -68,6 +68,11 @@ pub struct TuiFlex {
     /// so `render`, `cursor_position`, and `dispatch_event` have consistent slot
     /// information.
     child_sizes: Vec<TuiSize>,
+    /// Whether each child was painted by the most recent `render`, in child
+    /// order. A child clipped entirely out of the surface is skipped, so its
+    /// retained screen origin is stale; positional events skip those children
+    /// too rather than hit-testing against last frame's geometry.
+    painted_children: Vec<bool>,
     size: Option<TuiSize>,
     origin: Option<TuiScreenPoint>,
 }
@@ -80,6 +85,7 @@ impl TuiFlex {
             cross_axis_alignment: CrossAxisAlignment::Start,
             spacing: 0,
             child_sizes: Vec::new(),
+            painted_children: Vec::new(),
             size: None,
             origin: None,
         }
@@ -397,6 +403,7 @@ impl TuiElement for TuiFlex {
         ctx: &mut TuiPaintContext,
     ) {
         self.origin = Some(ctx.scene_point(origin));
+        self.painted_children.clear();
         let Some(size) = self.size else {
             return;
         };
@@ -415,11 +422,21 @@ impl TuiElement for TuiFlex {
                 ))
         {
             let rect = Self::child_rect_for(axis, alignment, slot, *size);
-            child.element.render(
-                origin.offset(i32::from(rect.x), i32::from(rect.y)),
-                surface,
-                ctx,
-            );
+            let child_origin = origin.offset(i32::from(rect.x), i32::from(rect.y));
+            // A child whose rows are entirely clipped away paints nothing, so
+            // skip its subtree instead of walking it to discard every write.
+            // This is what keeps a clipped tall column O(visible rows).
+            if rect.height > 0
+                && !surface.paints_any_row(
+                    child_origin.y,
+                    child_origin.y.saturating_add(i32::from(rect.height)),
+                )
+            {
+                self.painted_children.push(false);
+                continue;
+            }
+            child.element.render(child_origin, surface, ctx);
+            self.painted_children.push(true);
         }
     }
 
@@ -443,9 +460,21 @@ impl TuiElement for TuiFlex {
         event_ctx: &mut TuiEventContext<'_>,
         app: &AppContext,
     ) -> bool {
-        self.children.iter_mut().fold(false, |handled, child| {
-            child.element.dispatch_event(event, event_ctx, app) || handled
-        })
+        // Positional events hit-test against geometry retained during paint, so
+        // a child skipped by `render` would be tested against a stale origin.
+        // Non-positional events (keys, paste) carry no geometry and still reach
+        // every child.
+        let skip_unpainted = event.position().is_some();
+        let painted_children = &self.painted_children;
+        self.children
+            .iter_mut()
+            .enumerate()
+            .fold(false, |handled, (index, child)| {
+                if skip_unpainted && !painted_children.get(index).copied().unwrap_or(true) {
+                    return handled;
+                }
+                child.element.dispatch_event(event, event_ctx, app) || handled
+            })
     }
 }
 
