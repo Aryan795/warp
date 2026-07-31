@@ -474,7 +474,20 @@ impl OrchestrationChildTracker {
         ctx: &mut ModelContext<OrchestrationEventStreamer>,
     ) {
         if !self.metadata_fetches.insert(run_id.to_string()) {
-            // Already in flight: do not issue a second fetch.
+            // Guard is set from a prior dispatch. If the async fetch has since
+            // completed, the cache is now warm and will return the task
+            // synchronously; otherwise the in-flight dedup inside
+            // AgentConversationsModel suppresses a redundant network request.
+            #[cfg(not(test))]
+            {
+                let cached = AgentConversationsModel::handle(ctx).update(ctx, |model, ctx| {
+                    model.get_or_async_fetch_task_data(&task_id, ctx)
+                });
+                if let Some(task) = cached {
+                    self.metadata_fetches.remove(run_id);
+                    self.apply_seeded(task, ctx);
+                }
+            }
             return;
         }
         log::debug!(
