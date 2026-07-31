@@ -14,7 +14,7 @@ use crate::elements::MouseStateHandle;
 use crate::elements::tui::{
     TuiChildView, TuiConstraint, TuiElement, TuiEventHandler, TuiFlex, TuiHoverable,
     TuiLayoutContext, TuiPaintContext, TuiPaintSurface, TuiPoint, TuiScreenPoint,
-    TuiScreenPosition, TuiText,
+    TuiScreenPosition, TuiScrollable, TuiScrollableElement, TuiText,
 };
 use crate::keymap::FixedBinding;
 use crate::keymap::macros::*;
@@ -570,6 +570,121 @@ fn typed_action_from_embedded_child_reaches_parent_through_runtime_dispatch() {
         // to the parent's handler. (The legacy origin-only dispatch could not
         // do this.)
         assert_eq!(root.read(&app, |view, _| view.bumps), 1);
+    });
+}
+
+/// A scrollable leaf that records every scroll request it receives, so a test
+/// can assert how many scrolls a wheel burst produces and how far each moved.
+struct RecordingScrollable {
+    scrolls: Rc<RefCell<Vec<isize>>>,
+    size: Option<TuiSize>,
+    origin: Option<TuiScreenPoint>,
+}
+
+impl TuiElement for RecordingScrollable {
+    fn layout(
+        &mut self,
+        constraint: TuiConstraint,
+        _ctx: &mut TuiLayoutContext,
+        _app: &AppContext,
+    ) -> TuiSize {
+        self.size = Some(constraint.max);
+        constraint.max
+    }
+
+    fn render(
+        &mut self,
+        origin: TuiScreenPosition,
+        surface: &mut TuiPaintSurface<'_>,
+        ctx: &mut TuiPaintContext,
+    ) {
+        self.origin = Some(ctx.scene_point(origin));
+        if let Some(cell) = surface.cell_mut(origin) {
+            cell.set_char('s');
+        }
+    }
+
+    fn size(&self) -> Option<TuiSize> {
+        self.size
+    }
+
+    fn origin(&self) -> Option<TuiScreenPoint> {
+        self.origin
+    }
+}
+
+impl TuiScrollableElement for RecordingScrollable {
+    fn scroll_by_rows(&mut self, rows: isize, _viewport_height: usize) -> bool {
+        self.scrolls.borrow_mut().push(rows);
+        true
+    }
+}
+
+/// A root view whose whole area is one recording scrollable.
+struct ScrollingView {
+    scrolls: Rc<RefCell<Vec<isize>>>,
+}
+
+impl Entity for ScrollingView {
+    type Event = ();
+}
+
+impl TuiView for ScrollingView {
+    fn ui_name() -> &'static str {
+        "ScrollingView"
+    }
+
+    fn render(&self, _: &AppContext) -> Box<dyn TuiElement> {
+        Box::new(TuiScrollable::new(
+            RecordingScrollable {
+                scrolls: self.scrolls.clone(),
+                size: None,
+                origin: None,
+            }
+            .finish_scrollable(),
+        ))
+    }
+}
+
+impl TypedActionView for ScrollingView {
+    type Action = ();
+}
+
+/// A wheel burst buffered while a frame was painting applies as one scroll of
+/// the summed distance, not one scroll (and one full layout + paint) per notch.
+/// Regression guard for transcript scrolling falling seconds behind a gesture.
+#[test]
+fn a_buffered_wheel_burst_applies_as_a_single_scroll() {
+    App::test((), |mut app| async move {
+        let scrolls = Rc::new(RefCell::new(Vec::new()));
+        let view_scrolls = scrolls.clone();
+        let (window_id, root) = app.update(|ctx| {
+            ctx.add_tui_window(window_options(), move |_| ScrollingView {
+                scrolls: view_scrolls,
+            })
+        });
+
+        let mut terminal = TestTerminal::new(TuiSize::new(20, 5));
+        for _ in 0..6 {
+            terminal.events.push_back(CrosstermEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 2,
+                row: 2,
+                modifiers: KeyModifiers::empty(),
+            }));
+        }
+        let mut runtime = TuiRuntime::with_terminal(&app, window_id, root, terminal);
+
+        let mut iterations = 0;
+        runtime
+            .run_until(&mut app, |_| {
+                iterations += 1;
+                iterations > 1
+            })
+            .unwrap();
+
+        // Six notches at `WHEEL_STEP` rows each, delivered as one scroll.
+        assert_eq!(*scrolls.borrow(), vec![12]);
     });
 }
 

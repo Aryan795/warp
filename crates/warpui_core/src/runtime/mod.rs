@@ -48,11 +48,13 @@ use crate::{App, AppContext, TuiView, ViewHandle, WindowId};
 
 mod event_conversion;
 mod renderer;
+mod scroll_coalescing;
 mod terminal_probe;
 
 pub use event_conversion::crossterm_event_to_tui_event;
 use event_conversion::{ClickTracker, ShiftKeyTracker, ShiftRestoration};
 pub use renderer::TuiFrameRenderer;
+use scroll_coalescing::{MAX_BATCHED_EVENTS, TuiBatchedInput, coalesce_scroll_events};
 pub use terminal_probe::{
     BackgroundLuminance, ProbedRgb, TuiProbe, background_luminance, probe_terminal_background,
     read_terminal_background_reply, write_terminal_background_query,
@@ -207,6 +209,19 @@ impl<T: TuiView, R: TuiTerminal> TuiScreen<T, R> {
         }
         self.click_tracker.annotate(&mut tui_event, Instant::now());
         Some(tui_event)
+    }
+
+    /// Converts a drained batch of raw crossterm events, merging each run of
+    /// adjacent wheel events into one scroll (see [`scroll_coalescing`]).
+    fn convert_batch(&mut self, events: Vec<CrosstermEvent>) -> Vec<TuiBatchedInput> {
+        let converted = events
+            .into_iter()
+            .filter_map(|event| match event {
+                CrosstermEvent::Resize(_, _) => Some(TuiBatchedInput::Resize),
+                event => self.convert_event(event).map(TuiBatchedInput::Event),
+            })
+            .collect();
+        coalesce_scroll_events(converted)
     }
 
     /// Dispatches a converted input event into the cached element tree, returning
@@ -390,12 +405,23 @@ where
             return Ok(());
         };
 
-        match event {
-            CrosstermEvent::Resize(_, _) => self.dirty.set(true),
-            event => {
-                let screen = &mut self.screen;
-                if let Some(tui_event) = screen.convert_event(event) {
-                    let handled = app.update(|ctx| screen.dispatch_event(ctx, &tui_event));
+        // Drain everything already buffered before dispatching, so a wheel
+        // burst that piled up while the previous frame was painting applies as
+        // one scroll rather than one redraw per notch.
+        let mut pending = vec![event];
+        while pending.len() < MAX_BATCHED_EVENTS {
+            let Some(event) = self.screen.terminal.poll_event(Duration::ZERO)? else {
+                break;
+            };
+            pending.push(event);
+        }
+
+        for input in self.screen.convert_batch(pending) {
+            match input {
+                TuiBatchedInput::Resize => self.dirty.set(true),
+                TuiBatchedInput::Event(event) => {
+                    let screen = &mut self.screen;
+                    let handled = app.update(|ctx| screen.dispatch_event(ctx, &event));
                     if handled {
                         self.dirty.set(true);
                     }
@@ -657,20 +683,37 @@ pub fn spawn_tui_driver<T: TuiView>(
             let Some(mut app) = weak_app.upgrade() else {
                 break;
             };
-            let screen = dispatch_screen.clone();
-            // Dispatch reuses the shared screen's cached element tree (so embedded
-            // child views resolve their elements). Edits queue effects that flush
-            // when this `update` returns — firing the invalidation callback to
-            // repaint — so the screen is never borrowed re-entrantly.
-            app.update(move |ctx| match event {
-                CrosstermEvent::Resize(_, _) => ctx.invalidate_all_views(),
-                event => {
-                    let mut screen = screen.borrow_mut();
-                    if let Some(tui_event) = screen.convert_event(event) {
-                        screen.dispatch_event(ctx, &tui_event);
+            // Drain whatever else is already queued. Every dispatch that
+            // changes state ends in a flush that repaints the whole frame, so a
+            // wheel burst arriving while a slow frame paints would otherwise
+            // queue one full frame per notch and leave the viewport seconds
+            // behind the gesture.
+            let mut pending = vec![event];
+            while pending.len() < MAX_BATCHED_EVENTS {
+                let Ok(event) = receiver.try_recv() else {
+                    break;
+                };
+                pending.push(event);
+            }
+            // Conversion needs no app access, so it happens outside `update`
+            // and lets adjacent wheel events merge before any is dispatched.
+            // Everything else keeps its own `update`, so an event still sees
+            // the frame painted for the event before it.
+            let inputs = dispatch_screen.borrow_mut().convert_batch(pending);
+
+            for input in inputs {
+                let screen = dispatch_screen.clone();
+                // Dispatch reuses the shared screen's cached element tree (so embedded
+                // child views resolve their elements). Edits queue effects that flush
+                // when this `update` returns — firing the invalidation callback to
+                // repaint — so the screen is never borrowed re-entrantly.
+                app.update(move |ctx| match input {
+                    TuiBatchedInput::Resize => ctx.invalidate_all_views(),
+                    TuiBatchedInput::Event(event) => {
+                        screen.borrow_mut().dispatch_event(ctx, &event);
                     }
-                }
-            });
+                });
+            }
         }
     });
 

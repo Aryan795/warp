@@ -69,7 +69,7 @@ pub struct KeyEventDetails {
     pub key_without_modifiers: Option<String>,
 }
 
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct ModifiersState {
     pub alt: bool,
     pub cmd: bool,
