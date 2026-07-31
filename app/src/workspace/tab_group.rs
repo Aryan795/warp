@@ -51,6 +51,18 @@ impl TabGroup {
             pinned: false,
         }
     }
+
+    /// Creates the reserved group that collects local automation runs.
+    pub(crate) fn automations() -> Self {
+        let mut group = Self::new();
+        group.name = Some(AUTOMATIONS_TAB_GROUP_NAME.to_string());
+        group
+    }
+
+    /// Whether this is the reserved group that collects local automation runs.
+    pub(crate) fn is_automations(&self) -> bool {
+        self.name.as_deref() == Some(AUTOMATIONS_TAB_GROUP_NAME)
+    }
 }
 
 impl Default for TabGroup {

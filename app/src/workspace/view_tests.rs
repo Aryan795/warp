@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use ::settings::Setting as _;
 use ai::index::full_source_code_embedding::manager::CodebaseIndexManager;
 use ai::project_context::model::ProjectContextModel;
 use pane_group::{NotebookPane, PaneState, SplitPaneState, TerminalPaneId};
@@ -4186,6 +4187,37 @@ fn test_new_tab_in_group_expands_collapsed_group_member_active() {
             assert!(
                 !workspace.tab_groups[&group_id].collapsed,
                 "group should expand when a new tab is opened in it"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_automations_tab_group_is_retained_and_reused_after_its_last_run_closes() {
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    let _local_automations_guard = FeatureFlag::LocalAutomations.override_enabled(false);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| crate::settings::LocalAutomationsSettings::register(ctx));
+        app.add_singleton_model(crate::local_automations::LocalAutomationsScheduler::new);
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let group = TabGroup::automations();
+            let group_id = group.id;
+            workspace.tab_groups.insert(group_id, group);
+            assert!(workspace.tab_groups[&group_id].is_automations());
+
+            workspace.prune_empty_tab_group(group_id, ctx);
+
+            assert!(
+                workspace.tab_groups.contains_key(&group_id),
+                "the reserved Automations group should remain available after its last run closes"
+            );
+            assert_eq!(
+                workspace.existing_automations_tab_group_id(),
+                Some(group_id)
             );
         });
     });

@@ -301,6 +301,7 @@ struct TabGroupMouseStates {
     container: MouseStateHandle,
     header: MouseStateHandle,
     chevron: MouseStateHandle,
+    settings: MouseStateHandle,
     kebab: MouseStateHandle,
     close: MouseStateHandle,
 }
@@ -2824,6 +2825,16 @@ fn render_grouped_tabs_header(
         .finish();
 
     let action_buttons = if show_action_buttons {
+        let settings_button = group.is_automations().then(|| {
+            render_tab_group_header_icon_button(
+                WarpIcon::Gear,
+                TAB_GROUP_HEADER_ACTION_ICON_SIZE,
+                sub_text_color,
+                internal_colors::fg_overlay_2(theme),
+                mouse_states.settings.clone(),
+                Some(WorkspaceAction::OpenLocalAutomationsList),
+            )
+        });
         let kebab_button = SavePosition::new(
             render_tab_group_header_icon_button(
                 WarpIcon::DotsVertical,
@@ -2847,10 +2858,14 @@ fn render_grouped_tabs_header(
             mouse_states.close.clone(),
             Some(WorkspaceAction::CloseTabGroup(group_id)),
         );
-        Flex::row()
+        let mut action_buttons = Flex::row()
             .with_main_axis_size(MainAxisSize::Min)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_spacing(GROUP_ACTION_BUTTON_GAP)
+            .with_spacing(GROUP_ACTION_BUTTON_GAP);
+        if let Some(settings_button) = settings_button {
+            action_buttons = action_buttons.with_child(settings_button);
+        }
+        action_buttons
             .with_child(kebab_button)
             .with_child(close_button)
             .finish()

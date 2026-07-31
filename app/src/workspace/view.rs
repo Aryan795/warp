@@ -7087,9 +7087,15 @@ impl Workspace {
 
     /// Closes every tab in the given group and removes the group.
     pub fn close_tab_group(&mut self, group_id: TabGroupId, ctx: &mut ViewContext<Self>) {
+        let is_automations_group = self
+            .tab_groups
+            .get(&group_id)
+            .is_some_and(TabGroup::is_automations);
         let indices: Vec<usize> = group_member_indices(&self.tabs, group_id).collect();
         if indices.is_empty() {
-            self.tab_groups.remove(&group_id);
+            if !is_automations_group {
+                self.tab_groups.remove(&group_id);
+            }
             ctx.dispatch_global_action("workspace:save_app", ());
             ctx.notify();
             return;
@@ -7104,7 +7110,7 @@ impl Workspace {
             true,
             ctx,
         );
-        if closed {
+        if closed && !is_automations_group {
             self.tab_groups.remove(&group_id);
             ctx.notify();
         }
@@ -7137,6 +7143,9 @@ impl Workspace {
         let Some(group) = self.tab_groups.get(&group_id) else {
             return;
         };
+        if group.is_automations() {
+            return;
+        }
         // Seed the editor with the existing name, or the "New Group" default
         // label when the group is unnamed. `insert_selected_text` selects the
         // seeded text so the user can type to replace it instantly.
@@ -7299,6 +7308,10 @@ impl Workspace {
         // before mutating; we need them to relocate the block out of the
         // pinned region when the group was pinned.
         let was_pinned = self.tab_groups.get(&group_id).is_some_and(|g| g.pinned);
+        let is_automations_group = self
+            .tab_groups
+            .get(&group_id)
+            .is_some_and(TabGroup::is_automations);
         let member_range = group_member_index_range(&self.tabs, group_id);
 
         for tab in &mut self.tabs {
@@ -7306,7 +7319,9 @@ impl Workspace {
                 tab.group_id = None;
             }
         }
-        self.tab_groups.remove(&group_id);
+        if !is_automations_group {
+            self.tab_groups.remove(&group_id);
+        }
 
         // If the group was pinned, we must reposition the group's
         // members after the pinned area. They are now ungrouped and
@@ -7585,7 +7600,11 @@ impl Workspace {
     /// Removes a tab group from the workspace if no tabs reference it.
     fn prune_empty_tab_group(&mut self, group_id: TabGroupId, ctx: &mut ViewContext<Self>) {
         let has_members = group_member_indices(&self.tabs, group_id).next().is_some();
-        if !has_members {
+        let is_automations_group = self
+            .tab_groups
+            .get(&group_id)
+            .is_some_and(TabGroup::is_automations);
+        if !has_members && !is_automations_group {
             self.tab_groups.remove(&group_id);
             ctx.notify();
         }
@@ -10972,33 +10991,37 @@ impl Workspace {
                     .set_value(false, ctx));
             });
         }
-        let existing = self
-            .tab_groups
-            .values()
-            .find(|group| group.name.as_deref() == Some(AUTOMATIONS_TAB_GROUP_NAME))
-            .map(|group| group.id);
-        if let Some(group_id) = existing {
+        if let Some(group_id) = self.existing_automations_tab_group_id() {
             return Some(group_id);
         }
-        let mut group = TabGroup::new();
-        group.name = Some(AUTOMATIONS_TAB_GROUP_NAME.to_string());
+        let group = TabGroup::automations();
         let group_id = group.id;
         self.tab_groups.insert(group_id, group);
         ctx.notify();
         Some(group_id)
     }
 
+    fn existing_automations_tab_group_id(&self) -> Option<TabGroupId> {
+        self.tab_groups
+            .values()
+            .find(|group| group.is_automations())
+            .map(|group| group.id)
+    }
+
     /// True when the placeholder "Automations" tab group should render in the
     /// tab bars: local automations and tab groups are enabled, no real
-    /// Automations group exists yet, and the user hasn't dismissed it.
+    /// Automations group has a run tab yet, and the user hasn't dismissed it.
     pub(crate) fn should_show_automations_placeholder(&self, app: &AppContext) -> bool {
         FeatureFlag::LocalAutomations.is_enabled()
             && FeatureFlag::GroupedTabs.is_enabled()
             && !*GeneralSettings::as_ref(app).automations_group_placeholder_dismissed
-            && !self
-                .tab_groups
-                .values()
-                .any(|group| group.name.as_deref() == Some(AUTOMATIONS_TAB_GROUP_NAME))
+            && !self.tabs.iter().any(|tab| {
+                tab.group_id.is_some_and(|group_id| {
+                    self.tab_groups
+                        .get(&group_id)
+                        .is_some_and(TabGroup::is_automations)
+                })
+            })
     }
 
     /// Collapsed state of the placeholder "Automations" tab group.
