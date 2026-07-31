@@ -128,6 +128,12 @@ pub struct TuiEventContext<'a> {
     notified: HashSet<EntityId>,
     typed_actions: Vec<TuiDispatchedAction>,
     origin_view_id: Option<EntityId>,
+    /// Set during a wheel dispatch by an element that consumes wheel input,
+    /// whether or not it consumed this particular event.
+    wheel_contention: bool,
+    /// Whether the scroll owner that handled this wheel event can absorb the
+    /// rest of the burst. `None` when no scroll owner handled it.
+    wheel_coalescable: Option<bool>,
 }
 
 /// A typed action queued during element-tree dispatch, attributed to the view
@@ -150,6 +156,8 @@ impl<'a> TuiEventContext<'a> {
             notified: HashSet::new(),
             typed_actions: Vec::new(),
             origin_view_id: None,
+            wheel_contention: false,
+            wheel_coalescable: None,
         }
     }
 
@@ -228,6 +236,48 @@ impl<'a> TuiEventContext<'a> {
     /// view's subtree.
     pub fn set_origin_view(&mut self, view_id: Option<EntityId>) -> Option<EntityId> {
         std::mem::replace(&mut self.origin_view_id, view_id)
+    }
+
+    /// Records that this element consumes wheel input at some pointer position,
+    /// whether or not it consumed the event being dispatched.
+    ///
+    /// A scroll owner further up reads this to learn that scrolling could move
+    /// another consumer under the pointer, which is what decides whether a
+    /// buffered wheel burst may be applied as one scroll (see
+    /// [`set_wheel_coalescable`](Self::set_wheel_coalescable)).
+    pub fn note_wheel_contender(&mut self) {
+        self.wheel_contention = true;
+    }
+
+    /// Takes the contention flag, clearing it. A scroll owner brackets its
+    /// child dispatch with this and
+    /// [`restore_wheel_contention`](Self::restore_wheel_contention) so it sees
+    /// only the contenders *inside* itself.
+    pub fn take_wheel_contention(&mut self) -> bool {
+        std::mem::take(&mut self.wheel_contention)
+    }
+
+    /// Folds a previously taken contention flag back in, so a scroll owner's
+    /// bracketing stays invisible to its own ancestors.
+    pub fn restore_wheel_contention(&mut self, contended: bool) {
+        self.wheel_contention |= contended;
+    }
+
+    /// Records whether the scroll owner that just handled a wheel event can
+    /// absorb the rest of the burst without the dispatch target changing.
+    ///
+    /// Pass `false` whenever another wheel consumer sits inside the owner:
+    /// scrolling can move it under the pointer, and the following notch would
+    /// then belong to it rather than to the owner.
+    pub fn set_wheel_coalescable(&mut self, coalescable: bool) {
+        self.wheel_coalescable = Some(coalescable);
+    }
+
+    /// Takes the verdict recorded by
+    /// [`set_wheel_coalescable`](Self::set_wheel_coalescable). `None` means no
+    /// scroll owner handled the event, so nothing may be merged onto it.
+    pub(crate) fn take_wheel_coalescable(&mut self) -> Option<bool> {
+        self.wheel_coalescable.take()
     }
 }
 

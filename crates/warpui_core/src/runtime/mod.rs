@@ -54,7 +54,9 @@ mod terminal_probe;
 pub use event_conversion::crossterm_event_to_tui_event;
 use event_conversion::{ClickTracker, ShiftKeyTracker, ShiftRestoration};
 pub use renderer::TuiFrameRenderer;
-use scroll_coalescing::{MAX_BATCHED_EVENTS, TuiBatchedInput, coalesce_scroll_events};
+use scroll_coalescing::{
+    MAX_BATCHED_EVENTS, TuiBatchedInput, TuiInputGroup, group_wheel_runs, merge_wheel_events,
+};
 pub use terminal_probe::{
     BackgroundLuminance, ProbedRgb, TuiProbe, background_luminance, probe_terminal_background,
     read_terminal_background_reply, write_terminal_background_query,
@@ -211,9 +213,9 @@ impl<T: TuiView, R: TuiTerminal> TuiScreen<T, R> {
         Some(tui_event)
     }
 
-    /// Converts a drained batch of raw crossterm events, merging each run of
-    /// adjacent wheel events into one scroll (see [`scroll_coalescing`]).
-    fn convert_batch(&mut self, events: Vec<CrosstermEvent>) -> Vec<TuiBatchedInput> {
+    /// Converts a drained batch of raw crossterm events into dispatch units,
+    /// gathering runs of adjacent wheel notches (see [`scroll_coalescing`]).
+    fn convert_batch(&mut self, events: Vec<CrosstermEvent>) -> Vec<TuiInputGroup> {
         let converted = events
             .into_iter()
             .filter_map(|event| match event {
@@ -221,7 +223,7 @@ impl<T: TuiView, R: TuiTerminal> TuiScreen<T, R> {
                 event => self.convert_event(event).map(TuiBatchedInput::Event),
             })
             .collect();
-        coalesce_scroll_events(converted)
+        group_wheel_runs(converted)
     }
 
     /// Dispatches a converted input event into the cached element tree, returning
@@ -229,6 +231,16 @@ impl<T: TuiView, R: TuiTerminal> TuiScreen<T, R> {
     /// presenter (the same tree that was painted), with a `TuiLayoutContext` so
     /// `TuiChildView` can resolve its child from `rendered_views`.
     fn dispatch_event(&mut self, ctx: &mut AppContext, event: &TuiEvent) -> bool {
+        self.dispatch_event_with_outcome(ctx, event).handled
+    }
+
+    /// Dispatches `event` and also reports whether the scroll owner that
+    /// handled it can absorb the rest of a buffered wheel burst.
+    fn dispatch_event_with_outcome(
+        &mut self,
+        ctx: &mut AppContext,
+        event: &TuiEvent,
+    ) -> TuiDispatchOutcome {
         if let Some(position) = event.position() {
             self.last_mouse_position = Some(position);
         }
@@ -241,7 +253,7 @@ impl<T: TuiView, R: TuiTerminal> TuiScreen<T, R> {
             let responder_chain = ctx.get_responder_chain(self.window_id);
             match ctx.dispatch_keystroke(self.window_id, &responder_chain, keystroke, is_composing)
             {
-                Ok(true) => return true,
+                Ok(true) => return TuiDispatchOutcome::handled(),
                 Ok(false) => {}
                 Err(error) => report_error!(error.context("error dispatching keystroke")),
             }
@@ -253,12 +265,13 @@ impl<T: TuiView, R: TuiTerminal> TuiScreen<T, R> {
             self.presenter.last_element.as_mut(),
             self.presenter.last_scene.clone(),
         ) else {
-            return false; // no draw has happened yet
+            return TuiDispatchOutcome::default(); // no draw has happened yet
         };
         let root_view_id = self.root_view.id();
         let mut event_ctx = TuiEventContext::new(scene, &mut self.presenter.rendered_views);
         event_ctx.set_origin_view(Some(root_view_id));
         let handled = element.dispatch_event(event, &mut event_ctx, ctx);
+        let wheel_coalescable = event_ctx.take_wheel_coalescable();
 
         let notified = event_ctx.take_notified();
         for view_id in notified {
@@ -275,7 +288,28 @@ impl<T: TuiView, R: TuiTerminal> TuiScreen<T, R> {
                 action.action.as_ref(),
             );
         }
-        handled
+        TuiDispatchOutcome {
+            handled,
+            wheel_coalescable,
+        }
+    }
+}
+
+/// What one dispatch produced: whether the event was handled, and — for a wheel
+/// event — whether the scroll owner that took it can absorb the rest of the
+/// burst (see [`scroll_coalescing`]).
+#[derive(Clone, Copy, Debug, Default)]
+struct TuiDispatchOutcome {
+    handled: bool,
+    wheel_coalescable: Option<bool>,
+}
+
+impl TuiDispatchOutcome {
+    fn handled() -> Self {
+        Self {
+            handled: true,
+            wheel_coalescable: None,
+        }
     }
 }
 
@@ -406,8 +440,8 @@ where
         };
 
         // Drain everything already buffered before dispatching, so a wheel
-        // burst that piled up while the previous frame was painting applies as
-        // one scroll rather than one redraw per notch.
+        // burst that piled up while the previous frame was painting costs a
+        // couple of redraws rather than one per notch.
         let mut pending = vec![event];
         while pending.len() < MAX_BATCHED_EVENTS {
             let Some(event) = self.screen.terminal.poll_event(Duration::ZERO)? else {
@@ -416,19 +450,45 @@ where
             pending.push(event);
         }
 
-        for input in self.screen.convert_batch(pending) {
-            match input {
-                TuiBatchedInput::Resize => self.dirty.set(true),
-                TuiBatchedInput::Event(event) => {
-                    let screen = &mut self.screen;
-                    let handled = app.update(|ctx| screen.dispatch_event(ctx, &event));
-                    if handled {
-                        self.dirty.set(true);
-                    }
+        for group in self.screen.convert_batch(pending) {
+            match group {
+                TuiInputGroup::Single(TuiBatchedInput::Resize) => self.dirty.set(true),
+                TuiInputGroup::Single(TuiBatchedInput::Event(event)) => {
+                    self.dispatch_one(app, &event)
                 }
+                TuiInputGroup::WheelRun(events) => self.dispatch_wheel_run(app, &events),
             }
         }
         Ok(())
+    }
+
+    fn dispatch_one(&mut self, app: &mut App, event: &TuiEvent) {
+        let screen = &mut self.screen;
+        if app.update(|ctx| screen.dispatch_event(ctx, event)) {
+            self.dirty.set(true);
+        }
+    }
+
+    /// Dispatches a run of buffered wheel notches. The first goes on its own,
+    /// and the rest are applied as a single scroll only when that dispatch
+    /// reported a stable target (see [`scroll_coalescing`]).
+    fn dispatch_wheel_run(&mut self, app: &mut App, events: &[TuiEvent]) {
+        let Some((first, rest)) = events.split_first() else {
+            return;
+        };
+        let screen = &mut self.screen;
+        let outcome = app.update(|ctx| screen.dispatch_event_with_outcome(ctx, first));
+        if outcome.handled {
+            self.dirty.set(true);
+        }
+        match (outcome.wheel_coalescable, merge_wheel_events(rest)) {
+            (Some(true), Some(merged)) => self.dispatch_one(app, &merged),
+            _ => {
+                for event in rest {
+                    self.dispatch_one(app, event);
+                }
+            }
+        }
     }
 }
 
@@ -696,23 +756,53 @@ pub fn spawn_tui_driver<T: TuiView>(
                 pending.push(event);
             }
             // Conversion needs no app access, so it happens outside `update`
-            // and lets adjacent wheel events merge before any is dispatched.
+            // and groups adjacent wheel notches before any is dispatched.
             // Everything else keeps its own `update`, so an event still sees
             // the frame painted for the event before it.
-            let inputs = dispatch_screen.borrow_mut().convert_batch(pending);
+            let groups = dispatch_screen.borrow_mut().convert_batch(pending);
 
-            for input in inputs {
+            // Dispatch reuses the shared screen's cached element tree (so embedded
+            // child views resolve their elements). Edits queue effects that flush
+            // when each `update` returns — firing the invalidation callback to
+            // repaint — so the screen is never borrowed re-entrantly.
+            let dispatch = |app: &mut App, event: TuiEvent| {
                 let screen = dispatch_screen.clone();
-                // Dispatch reuses the shared screen's cached element tree (so embedded
-                // child views resolve their elements). Edits queue effects that flush
-                // when this `update` returns — firing the invalidation callback to
-                // repaint — so the screen is never borrowed re-entrantly.
-                app.update(move |ctx| match input {
-                    TuiBatchedInput::Resize => ctx.invalidate_all_views(),
-                    TuiBatchedInput::Event(event) => {
-                        screen.borrow_mut().dispatch_event(ctx, &event);
+                app.update(move |ctx| screen.borrow_mut().dispatch_event(ctx, &event))
+            };
+            for group in groups {
+                match group {
+                    TuiInputGroup::Single(TuiBatchedInput::Resize) => {
+                        app.update(|ctx| ctx.invalidate_all_views());
                     }
-                });
+                    TuiInputGroup::Single(TuiBatchedInput::Event(event)) => {
+                        dispatch(&mut app, event);
+                    }
+                    TuiInputGroup::WheelRun(events) => {
+                        let Some((first, rest)) = events.split_first() else {
+                            continue;
+                        };
+                        // The first notch goes on its own; the rest are applied
+                        // as one scroll only when that dispatch reported that
+                        // no other wheel consumer can take the next notch.
+                        let outcome = {
+                            let screen = dispatch_screen.clone();
+                            let first = first.clone();
+                            app.update(move |ctx| {
+                                screen.borrow_mut().dispatch_event_with_outcome(ctx, &first)
+                            })
+                        };
+                        match (outcome.wheel_coalescable, merge_wheel_events(rest)) {
+                            (Some(true), Some(merged)) => {
+                                dispatch(&mut app, merged);
+                            }
+                            _ => {
+                                for event in rest {
+                                    dispatch(&mut app, event.clone());
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     });

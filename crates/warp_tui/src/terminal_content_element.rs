@@ -183,6 +183,14 @@ impl TuiElement for TuiTerminalContentElement {
                 | TuiEvent::MiddleMouseDown { .. }
                 | TuiEvent::RightMouseDown { .. }
                 | TuiEvent::MouseMoved { .. } => {
+                    // Wheel input inside these bounds goes to the foreground
+                    // process rather than to the scroll owner above, and the
+                    // bounds move as that owner scrolls. Declaring the contest
+                    // stops a buffered burst from being applied as one scroll
+                    // that this element would otherwise have taken a share of.
+                    if matches!(event, TuiEvent::ScrollWheel { .. }) {
+                        event_ctx.note_wheel_contender();
+                    }
                     let bytes =
                         self.child
                             .origin()

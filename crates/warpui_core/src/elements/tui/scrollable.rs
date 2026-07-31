@@ -124,7 +124,14 @@ impl TuiElement for TuiScrollable {
         event_ctx: &mut TuiEventContext<'_>,
         app: &AppContext,
     ) -> bool {
-        if self.child.dispatch_event(event, event_ctx, app) {
+        // Bracket the child dispatch so the contention read back here comes
+        // only from wheel consumers *inside* this scrollable, not from
+        // siblings elsewhere in the tree.
+        let outer_contention = event_ctx.take_wheel_contention();
+        let handled_by_child = self.child.dispatch_event(event, event_ctx, app);
+        let inner_contention = event_ctx.take_wheel_contention();
+        event_ctx.restore_wheel_contention(outer_contention || inner_contention);
+        if handled_by_child {
             return true;
         }
         let Some(size) = self.size() else {
@@ -140,6 +147,11 @@ impl TuiElement for TuiScrollable {
                 if scrolled {
                     event_ctx.notify();
                 }
+                // A wheel consumer inside this viewport can claim the next
+                // notch as soon as scrolling moves it under the pointer, so a
+                // buffered burst may only be applied as one scroll when none is
+                // present. The runtime uses this to decide whether to merge.
+                event_ctx.set_wheel_coalescable(!inner_contention);
                 scrolled || !self.propagate_mousewheel_if_not_handled
             }
             _ => false,

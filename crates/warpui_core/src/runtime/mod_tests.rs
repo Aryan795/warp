@@ -575,8 +575,13 @@ fn typed_action_from_embedded_child_reaches_parent_through_runtime_dispatch() {
 
 /// A scrollable leaf that records every scroll request it receives, so a test
 /// can assert how many scrolls a wheel burst produces and how far each moved.
+///
+/// With `wheel_contender` set it also stands in for a wheel consumer living
+/// inside the viewport — an alt-screen terminal forwarding wheel input to its
+/// process — which is what makes the dispatch target able to change mid-burst.
 struct RecordingScrollable {
     scrolls: Rc<RefCell<Vec<isize>>>,
+    wheel_contender: bool,
     size: Option<TuiSize>,
     origin: Option<TuiScreenPoint>,
 }
@@ -611,6 +616,18 @@ impl TuiElement for RecordingScrollable {
     fn origin(&self) -> Option<TuiScreenPoint> {
         self.origin
     }
+
+    fn dispatch_event(
+        &mut self,
+        event: &TuiEvent,
+        event_ctx: &mut TuiEventContext<'_>,
+        _app: &AppContext,
+    ) -> bool {
+        if self.wheel_contender && matches!(event, TuiEvent::ScrollWheel { .. }) {
+            event_ctx.note_wheel_contender();
+        }
+        false
+    }
 }
 
 impl TuiScrollableElement for RecordingScrollable {
@@ -623,6 +640,7 @@ impl TuiScrollableElement for RecordingScrollable {
 /// A root view whose whole area is one recording scrollable.
 struct ScrollingView {
     scrolls: Rc<RefCell<Vec<isize>>>,
+    wheel_contender: bool,
 }
 
 impl Entity for ScrollingView {
@@ -638,6 +656,7 @@ impl TuiView for ScrollingView {
         Box::new(TuiScrollable::new(
             RecordingScrollable {
                 scrolls: self.scrolls.clone(),
+                wheel_contender: self.wheel_contender,
                 size: None,
                 origin: None,
             }
@@ -650,22 +669,21 @@ impl TypedActionView for ScrollingView {
     type Action = ();
 }
 
-/// A wheel burst buffered while a frame was painting applies as one scroll of
-/// the summed distance, not one scroll (and one full layout + paint) per notch.
-/// Regression guard for transcript scrolling falling seconds behind a gesture.
-#[test]
-fn a_buffered_wheel_burst_applies_as_a_single_scroll() {
+/// Drives `notches` buffered wheel notches over one cell through the real loop
+/// and returns the scrolls the viewport received.
+fn scrolls_from_wheel_burst(notches: usize, wheel_contender: bool) -> Vec<isize> {
     App::test((), |mut app| async move {
         let scrolls = Rc::new(RefCell::new(Vec::new()));
         let view_scrolls = scrolls.clone();
         let (window_id, root) = app.update(|ctx| {
             ctx.add_tui_window(window_options(), move |_| ScrollingView {
                 scrolls: view_scrolls,
+                wheel_contender,
             })
         });
 
         let mut terminal = TestTerminal::new(TuiSize::new(20, 5));
-        for _ in 0..6 {
+        for _ in 0..notches {
             terminal.events.push_back(CrosstermEvent::Mouse(MouseEvent {
                 kind: MouseEventKind::ScrollDown,
                 column: 2,
@@ -683,9 +701,26 @@ fn a_buffered_wheel_burst_applies_as_a_single_scroll() {
             })
             .unwrap();
 
-        // Six notches at `WHEEL_STEP` rows each, delivered as one scroll.
-        assert_eq!(*scrolls.borrow(), vec![12]);
-    });
+        scrolls.take()
+    })
+}
+
+/// A wheel burst buffered while a frame was painting costs two scrolls — the
+/// leading notch, then the rest applied together — instead of one full layout
+/// and paint per notch. Regression guard for transcript scrolling falling
+/// seconds behind a gesture.
+#[test]
+fn a_buffered_wheel_burst_applies_as_two_scrolls() {
+    // Six notches at `WHEEL_STEP` rows each: the first alone, then five merged.
+    assert_eq!(scrolls_from_wheel_burst(6, false), vec![2, 10]);
+}
+
+/// When another wheel consumer sits inside the viewport, scrolling can move it
+/// under the pointer and the next notch belongs to it, so the burst must keep
+/// its per-event boundaries instead of being applied wholesale to the viewport.
+#[test]
+fn a_burst_is_not_merged_when_another_wheel_consumer_is_inside_the_viewport() {
+    assert_eq!(scrolls_from_wheel_burst(6, true), vec![2, 2, 2, 2, 2, 2]);
 }
 
 /// The typed action that shifts [`ShiftingHoverView`]'s hover target down a row.
