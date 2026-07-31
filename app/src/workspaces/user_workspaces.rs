@@ -468,9 +468,6 @@ impl UserWorkspaces {
     /// team/workspace-scoped state (e.g. delinquency); for the purchase
     /// policy itself use [`Self::purchase_policy_for_team`], which adds the
     /// user-level fallback for teamless users.
-    ///
-    /// The explicit lifetime unifies `self` and `team`: the returned
-    /// reference may borrow from either, which elision cannot express.
     pub fn team_billing_metadata<'a>(
         &'a self,
         team: Option<&'a Team>,
