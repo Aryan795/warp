@@ -138,11 +138,8 @@ impl TuiAttachmentBar {
             TuiAttachmentModelEvent::Updated => {
                 // TUI notifications invalidate the whole window, including the
                 // parent that conditionally renders this attachment bar.
-                // Emit ReturnFocus regardless of focus state so the parent
-                // re-lays out and drops the bar from its element tree when
-                // there is nothing left to show. Without this, an unfocused
-                // remove (e.g. Backspace on empty input) leaves the parent
-                // holding the previous frame that still contains the bar child.
+                // Emit ReturnFocus to prevent holding a stale frame
+                // (ex. showing the image chip after it's removed).
                 if !model_for_subscription.as_ref(ctx).should_render(ctx) {
                     ctx.emit(TuiAttachmentBarEvent::ReturnFocus);
                 }
@@ -204,11 +201,6 @@ fn render_attachment_snapshot(
 ) -> Box<dyn TuiElement> {
     let builder = TuiUiBuilder::from_app(ctx);
     let Some(selected) = snapshot.selected else {
-        // No selected attachment and nothing is processing: render nothing.
-        // The parent gates on `should_render` to decide whether to include
-        // this bar in its layout at all, so this path is only reached while
-        // the previous frame still holds the child — returning an empty
-        // element prevents a stale "loading image…" placeholder from showing.
         return TuiFlex::row().finish();
     };
     let kind = match selected.attachment_type {
