@@ -463,12 +463,15 @@ impl UserWorkspaces {
             .map(|workspace| &workspace.billing_metadata)
     }
 
-    /// Billing metadata for purchase surfaces that need team/workspace-scoped
-    /// state (e.g. delinquency): the given team's when one exists, otherwise
-    /// the current workspace's. For the purchase POLICY itself, use
-    /// [`Self::purchase_policy`], which adds the user-level fallback for
-    /// teamless users.
-    pub fn purchase_billing_metadata<'a>(
+    /// The given team's billing metadata when the team is known, otherwise
+    /// the current workspace's. For purchase surfaces that need
+    /// team/workspace-scoped state (e.g. delinquency); for the purchase
+    /// policy itself use [`Self::purchase_policy_for_team`], which adds the
+    /// user-level fallback for teamless users.
+    ///
+    /// The explicit lifetime unifies `self` and `team`: the returned
+    /// reference may borrow from either, which elision cannot express.
+    pub fn team_billing_metadata<'a>(
         &'a self,
         team: Option<&'a Team>,
     ) -> Option<&'a BillingMetadata> {
@@ -476,44 +479,33 @@ impl UserWorkspaces {
             .or_else(|| self.current_workspace_billing_metadata())
     }
 
-    /// The add-on credits purchase policy governing purchase surfaces: the
-    /// given team's policy when set, else the current workspace's, else the
-    /// user-level policy from the workspaces-metadata response. The user leg
-    /// is what keeps purchases available for teamless (fresh free) users:
-    /// they have no team until their first purchase creates one server-side,
-    /// and their only workspace is the placeholder that is filtered out of
-    /// `workspaces` (REV-717).
-    pub fn purchase_policy(&self, team: Option<&Team>) -> Option<PurchaseAddOnCreditsPolicy> {
-        team.and_then(|team| team.billing_metadata.tier.purchase_add_on_credits_policy)
-            .or_else(|| {
-                self.current_workspace_billing_metadata()
-                    .and_then(|billing| billing.tier.purchase_add_on_credits_policy)
-            })
+    /// The add-on credits purchase policy for the current viewer context: the
+    /// current workspace's policy when one exists, else the user-level policy
+    /// from the workspaces-metadata response (how teamless users get one).
+    ///
+    /// Callers bound to a view/window should use
+    /// [`Self::purchase_policy_for_team`] instead, since their team can
+    /// differ from the current workspace's in multi-team situations.
+    pub fn purchase_policy(&self) -> Option<PurchaseAddOnCreditsPolicy> {
+        self.current_workspace_billing_metadata()
+            .and_then(|billing| billing.tier.purchase_add_on_credits_policy)
             .or(self.user_purchase_policy)
+    }
+
+    /// [`Self::purchase_policy`], preferring the given team's policy when the
+    /// team is known (e.g. resolved from a view or window).
+    pub fn purchase_policy_for_team(
+        &self,
+        team: Option<&Team>,
+    ) -> Option<PurchaseAddOnCreditsPolicy> {
+        team.and_then(|team| team.billing_metadata.tier.purchase_add_on_credits_policy)
+            .or_else(|| self.purchase_policy())
     }
 
     /// Updates the user-level add-on credits purchase policy captured from a
     /// workspaces-metadata response. Must be called on every path that
     /// applies such a response so the teamless fallback can't go stale.
     pub fn set_user_purchase_policy(&mut self, policy: Option<PurchaseAddOnCreditsPolicy>) {
-        // State-change diagnostic for purchase-surface gating: fires only
-        // when the resolved policy changes (not on every metadata poll), so
-        // one log line explains why teamless purchase surfaces appeared or
-        // disappeared. Policy flags and bps only; no user data.
-        if self.user_purchase_policy != policy {
-            match policy {
-                Some(PurchaseAddOnCreditsPolicy {
-                    enabled,
-                    premium_enabled,
-                    price_premium_bps,
-                }) => log::info!(
-                    "[Add-on credits] user-level purchase policy changed: \
-                    enabled={enabled} premium_enabled={premium_enabled} \
-                    price_premium_bps={price_premium_bps}"
-                ),
-                None => log::info!("[Add-on credits] user-level purchase policy changed: none"),
-            }
-        }
         self.user_purchase_policy = policy;
     }
 
@@ -1533,8 +1525,6 @@ impl UserWorkspaces {
         ctx.notify();
     }
 
-    /// Purchases add-on credits. `team_uid` may be `None` for teamless (fresh
-    /// free) users; the server then auto-creates their personal team.
     pub fn purchase_addon_credits(
         &mut self,
         team_uid: Option<ServerId>,

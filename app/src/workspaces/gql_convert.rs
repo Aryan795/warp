@@ -1167,6 +1167,12 @@ impl From<GqlUser> for WorkspacesMetadataResponse {
         // above, so the user-level policy is the only place their add-on
         // credits purchase policy survives (see
         // [`crate::workspaces::user_workspaces::UserWorkspaces::purchase_policy`]).
+        // Once free-plan purchasing is rolled out to 100%, purchase GATING can
+        // default to "can purchase" when workspace metadata is absent (only
+        // enterprise tiers can't purchase, and they always have a workspace).
+        // The policy also supplies price_premium_bps for teamless price
+        // display, though, so it can only be removed once final prices come
+        // from the server.
         let user_purchase_policy = gql_user
             .billing_metadata
             .and_then(|billing_metadata| billing_metadata.tier.purchase_add_on_credits_policy)

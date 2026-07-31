@@ -448,20 +448,13 @@ impl BillingAndUsagePageV2View {
                     .update(ctx, |m, ctx| m.refresh_request_usage_async(ctx));
             }
             UserWorkspacesEvent::PurchaseAddonCreditsCheckoutRequired { checkout_url } => {
-                // Multiple surfaces subscribe to purchase events; only the one
-                // that initiated the purchase should hand off to the browser.
                 if self.addon_credits.purchase_loading {
                     self.addon_credits.purchase_loading = false;
                     ctx.open_url(checkout_url);
                     self.show_toast(CHECKOUT_PENDING_MESSAGE, ToastFlavor::Default, ctx);
                     // Credits are granted via webhook once checkout completes;
-                    // refresh billing data so polling picks them up promptly.
-                    std::mem::drop(
-                        TeamUpdateManager::handle(ctx)
-                            .update(ctx, |mgr, ctx| mgr.refresh_workspace_metadata(ctx)),
-                    );
-                    AIRequestUsageModel::handle(ctx)
-                        .update(ctx, |m, ctx| m.refresh_request_usage_async(ctx));
+                    // `on_page_selected` refreshes billing data when the user
+                    // returns (e.g. via the confirmation page's Open Warp link).
                 }
             }
             UserWorkspacesEvent::PurchaseAddonCreditsRejected(err) => {
@@ -1104,12 +1097,11 @@ impl BillingAndUsagePageV2View {
         app: &AppContext,
     ) -> AddonCreditsPanelState {
         let workspaces = UserWorkspaces::as_ref(app);
-        let purchase_policy = workspaces
-            .purchase_policy(team_uid.and_then(|team_uid| workspaces.team_from_uid(team_uid)));
+        let purchase_policy = workspaces.purchase_policy_for_team(
+            team_uid.and_then(|team_uid| workspaces.team_from_uid(team_uid)),
+        );
         let team_can_purchase = purchase_policy.is_some_and(|policy| policy.allows_purchases());
         let premium_bps = purchase_policy.map_or(0, |policy| policy.effective_premium_bps());
-        // Teamless users have no workspace yet; they're on the free tier and
-        // can always upgrade.
         let can_upgrade = workspace
             .is_none_or(|workspace| workspace.billing_metadata.can_upgrade_to_build_plan());
         let upgrade_url = match team_uid {
@@ -1763,25 +1755,19 @@ impl BillingAndUsagePageV2View {
                 .is_delinquent_due_to_payment_issue()
         });
 
-        // A teamless fresh free user has no (non-placeholder) workspace at
-        // all, so the workspace alone can't gate the purchase panel: still
-        // render it whenever the resolved purchase policy allows purchases
-        // (the user-level leg covers the teamless case).
         let ws = workspaces.current_workspace();
+        let team = workspaces.team_for_view_handle(&self.self_handle, app);
         let show_addon_credits_panel = ws.is_some()
             || workspaces
-                .purchase_policy(None)
+                .purchase_policy_for_team(team)
                 .is_some_and(|policy| policy.allows_purchases());
         if show_addon_credits_panel {
-            let team = workspaces.team_for_view_handle(&self.self_handle, app);
             let is_payg_zero = ws.is_some_and(|ws| {
                 ws.billing_metadata.is_enterprise_pay_as_you_go_enabled()
                     && ai_model.total_workspace_bonus_credits_remaining(ws.uid) == 0
             });
 
             if !is_payg_zero {
-                // A teamless user manages their own personal purchases; the
-                // server creates their team on first purchase.
                 let current_user_is_admin = team.is_none_or(|team| {
                     let email = AuthStateProvider::as_ref(app)
                         .get()

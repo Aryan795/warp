@@ -1422,7 +1422,7 @@ fn test_leaving_team_moves_objects() {
 }
 
 #[test]
-fn test_purchase_billing_metadata_prefers_team_over_workspace() {
+fn test_team_billing_metadata_prefers_team_over_workspace() {
     let mut team = team_for_test();
     team.billing_metadata.customer_type = CustomerType::Build;
     let mut workspace = workspace_for_test(&team);
@@ -1437,14 +1437,14 @@ fn test_purchase_billing_metadata_prefers_team_over_workspace() {
             assert!(team.is_some(), "test team should exist");
             assert_eq!(
                 user_workspaces
-                    .purchase_billing_metadata(team)
+                    .team_billing_metadata(team)
                     .map(|billing| billing.customer_type),
                 Some(CustomerType::Build),
                 "the team's billing metadata should win when a team exists"
             );
             assert_eq!(
                 user_workspaces
-                    .purchase_billing_metadata(None)
+                    .team_billing_metadata(None)
                     .map(|billing| billing.customer_type),
                 Some(CustomerType::Free),
                 "the workspace's billing metadata should be used without a team"
@@ -1454,7 +1454,7 @@ fn test_purchase_billing_metadata_prefers_team_over_workspace() {
 }
 
 #[test]
-fn test_purchase_billing_metadata_enables_teamless_premium_purchases() {
+fn test_team_billing_metadata_enables_teamless_premium_purchases() {
     let team = team_for_test();
     let mut workspace = workspace_for_test(&team);
     workspace.teams.clear();
@@ -1473,7 +1473,7 @@ fn test_purchase_billing_metadata_enables_teamless_premium_purchases() {
         app.read(|ctx| {
             let user_workspaces = UserWorkspaces::as_ref(ctx);
             assert!(!user_workspaces.has_teams(), "user should be teamless");
-            let billing = user_workspaces.purchase_billing_metadata(None);
+            let billing = user_workspaces.team_billing_metadata(None);
             assert!(
                 billing.is_some_and(|billing| billing.is_purchase_add_on_credits_policy_enabled()),
                 "premiumEnabled on the workspace policy should enable purchases without a team"
@@ -1487,7 +1487,7 @@ fn test_purchase_billing_metadata_enables_teamless_premium_purchases() {
 }
 
 #[test]
-fn test_purchase_billing_metadata_disabled_policy_stays_disabled_without_team() {
+fn test_team_billing_metadata_disabled_policy_stays_disabled_without_team() {
     let team = team_for_test();
     let mut workspace = workspace_for_test(&team);
     workspace.teams.clear();
@@ -1504,7 +1504,7 @@ fn test_purchase_billing_metadata_disabled_policy_stays_disabled_without_team() 
         initialize_window_team_test_app(&mut app, vec![workspace]);
 
         app.read(|ctx| {
-            let billing = UserWorkspaces::as_ref(ctx).purchase_billing_metadata(None);
+            let billing = UserWorkspaces::as_ref(ctx).team_billing_metadata(None);
             assert!(
                 !billing.is_some_and(|billing| billing.is_purchase_add_on_credits_policy_enabled()),
                 "a fully disabled policy should keep purchases disabled without a team"
@@ -1773,7 +1773,7 @@ fn test_user_level_policy_survives_placeholder_filtering_for_teamless_users() {
                 user_workspaces.current_workspace().is_none(),
                 "teamless users keep having no workspace"
             );
-            let policy = user_workspaces.purchase_policy(None);
+            let policy = user_workspaces.purchase_policy();
             assert!(
                 policy.is_some_and(|policy| policy.allows_purchases()),
                 "the user-level policy should enable purchases without a team or workspace"
@@ -1817,7 +1817,7 @@ fn test_workspace_policy_wins_over_user_level_policy() {
         });
 
         app.read(|ctx| {
-            let policy = UserWorkspaces::as_ref(ctx).purchase_policy(None);
+            let policy = UserWorkspaces::as_ref(ctx).purchase_policy();
             assert_eq!(
                 policy.map(|policy| policy.enabled),
                 Some(true),
@@ -1865,7 +1865,7 @@ fn test_team_policy_wins_over_workspace_and_user_policy() {
             let team = user_workspaces.team_from_uid(123.into());
             assert_eq!(
                 user_workspaces
-                    .purchase_policy(team)
+                    .purchase_policy_for_team(team)
                     .map(|policy| policy.enabled),
                 Some(true),
                 "the team's policy should win over workspace and user legs"
@@ -1873,7 +1873,7 @@ fn test_team_policy_wins_over_workspace_and_user_policy() {
             // Without a team, the workspace's policy still beats the user leg.
             assert_eq!(
                 user_workspaces
-                    .purchase_policy(None)
+                    .purchase_policy()
                     .map_or(0, |policy| policy.effective_premium_bps()),
                 1000
             );

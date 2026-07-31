@@ -605,11 +605,8 @@ impl AIRequestUsageModel {
         }
         let user_workspaces = UserWorkspaces::as_ref(ctx);
         let current_workspace = user_workspaces.current_workspace();
-        // Resolved without a team on purpose: this is a model-level check and
-        // the policy-bearing team metadata mirrors the workspace's. The
-        // resolver's user-level leg keeps this working for teamless users.
         let policy_allows_purchasing = user_workspaces
-            .purchase_policy(None)
+            .purchase_policy()
             .is_some_and(|policy| policy.allows_purchases());
 
         // TODO: we might want to suggest credits purchase if request_remain/bonus credits is below certain threshold

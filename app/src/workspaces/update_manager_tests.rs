@@ -240,7 +240,7 @@ fn test_poll_path_apply_refreshes_user_purchase_policy() {
         app.read(|ctx| {
             assert!(
                 UserWorkspaces::as_ref(ctx)
-                    .purchase_policy(None)
+                    .purchase_policy()
                     .is_some_and(|policy| policy.allows_purchases()),
                 "a poll-path apply should store the user-level policy"
             );
@@ -260,7 +260,7 @@ fn test_poll_path_apply_refreshes_user_purchase_policy() {
         });
         app.read(|ctx| {
             assert!(
-                UserWorkspaces::as_ref(ctx).purchase_policy(None).is_none(),
+                UserWorkspaces::as_ref(ctx).purchase_policy().is_none(),
                 "a poll-path apply without the policy should clear the stored fallback"
             );
         });

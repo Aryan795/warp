@@ -83,9 +83,6 @@ impl BuyCreditsBanner {
             &AIRequestUsageModel::handle(ctx),
             |me, _handle, event, ctx| {
                 if let AIRequestUsageModelEvent::RequestUsageUpdated = event {
-                    // Once purchased credits land (the banner would hide),
-                    // clear any pending checkout so a future out-of-credits
-                    // banner starts fresh.
                     if me.checkout_pending
                         && matches!(
                             AIRequestUsageModel::as_ref(ctx)
@@ -158,8 +155,6 @@ impl BuyCreditsBanner {
                 ctx.notify();
             }
             UserWorkspacesEvent::PurchaseAddonCreditsCheckoutRequired { checkout_url } => {
-                // Multiple surfaces subscribe to purchase events; only the one
-                // that initiated the purchase should hand off to the browser.
                 if self.purchase_addon_credits_loading {
                     self.purchase_addon_credits_loading = false;
                     self.checkout_pending = true;
@@ -391,7 +386,7 @@ impl BuyCreditsBanner {
 
         let workspaces = UserWorkspaces::as_ref(ctx);
         let premium_bps = workspaces
-            .purchase_policy(workspaces.team_for_view(ctx))
+            .purchase_policy_for_team(workspaces.team_for_view(ctx))
             .map_or(0, |policy| policy.effective_premium_bps());
         let base_rate = self
             .addon_credits_options
@@ -614,7 +609,7 @@ impl BuyCreditsBanner {
                     .finish(),
                 appearance
                     .ui_builder()
-                    .paragraph("Credits will be added to your account shortly after checkout.")
+                    .paragraph("Credits will be added to your account after checkout.")
                     .with_style(UiComponentStyles {
                         font_color: Some(theme.sub_text_color(theme.surface_1()).into()),
                         ..Default::default()
@@ -680,17 +675,13 @@ impl BuyCreditsBanner {
         let auth_state = AuthStateProvider::as_ref(app).get();
         let workspaces = UserWorkspaces::as_ref(app);
         let current_team = workspaces.team_for_view_handle(&self.view_handle, app);
-        // A teamless user manages their own personal purchases; the server
-        // creates their team on first purchase.
         let has_admin_permissions = current_team.is_none_or(|team| {
             auth_state
                 .user_email()
                 .is_some_and(|email| team.has_admin_permissions(&email))
         });
-        // Delinquency stays team/workspace-scoped: teamless users have no
-        // subscription to be delinquent on.
         let delinquent_due_to_payment_issue = workspaces
-            .purchase_billing_metadata(current_team)
+            .team_billing_metadata(current_team)
             .is_some_and(|billing| billing.is_delinquent_due_to_payment_issue());
         let auto_reload_banner_toggle_ff =
             FeatureFlag::BuildPlanAutoReloadBannerToggle.is_enabled();
@@ -703,7 +694,7 @@ impl BuyCreditsBanner {
 
         // Check if the selected purchase would reach/exceed the monthly limit
         let premium_bps = workspaces
-            .purchase_policy(current_team)
+            .purchase_policy_for_team(current_team)
             .map_or(0, |policy| policy.effective_premium_bps());
         let selected_option = self
             .addon_credits_options
@@ -799,8 +790,6 @@ impl BuyCreditsBanner {
         };
 
         let make_buy_button = || {
-            // May be None for teamless users; the server auto-creates their
-            // personal team on purchase.
             let team_uid = current_team.map(|team| team.uid);
 
             let buy_button_disabled = self.purchase_addon_credits_loading

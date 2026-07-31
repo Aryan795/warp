@@ -376,8 +376,7 @@ impl View for PromptAlertView {
         let auth_state = AuthStateProvider::as_ref(app).get();
         let workspaces = UserWorkspaces::as_ref(app);
         let current_team = workspaces.team_for_view_handle(&self.view_handle, app);
-        // A teamless user manages their own personal purchases; the server
-        // creates their team on first purchase.
+        // A teamless user can be considered the admin of their non-existent team.
         let has_admin_permissions = current_team.is_none_or(|team| {
             auth_state
                 .user_email()
@@ -385,7 +384,7 @@ impl View for PromptAlertView {
         });
 
         let can_purchase_addon_credits = workspaces
-            .purchase_policy(current_team)
+            .purchase_policy_for_team(current_team)
             .is_some_and(|policy| policy.allows_purchases());
 
         let suggest_buy_credits = can_purchase_addon_credits

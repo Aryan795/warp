@@ -130,8 +130,7 @@ fn format_addon_premium_percent(premium_bps: i32) -> String {
     }
 }
 
-pub(crate) const CHECKOUT_PENDING_MESSAGE: &str =
-    "Finish your purchase in the browser — credits will appear shortly.";
+pub(crate) const CHECKOUT_PENDING_MESSAGE: &str = "Opening your browser to complete your purchase";
 
 /// Renders the savings-framed upsell shown in the add-on credits panel for
 /// plans that purchase at a premium over list price, linking to the upgrade
@@ -510,21 +509,13 @@ impl BillingAndUsagePageView {
                 });
             }
             UserWorkspacesEvent::PurchaseAddonCreditsCheckoutRequired { checkout_url } => {
-                // Multiple surfaces subscribe to purchase events; only the one
-                // that initiated the purchase should hand off to the browser.
                 if self.purchase_addon_credits_loading {
                     self.purchase_addon_credits_loading = false;
                     ctx.open_url(checkout_url);
                     self.show_toast(CHECKOUT_PENDING_MESSAGE, ToastFlavor::Default, ctx);
                     // Credits are granted via webhook once checkout completes;
-                    // refresh billing data so polling picks them up promptly.
-                    std::mem::drop(
-                        TeamUpdateManager::handle(ctx)
-                            .update(ctx, |manager, ctx| manager.refresh_workspace_metadata(ctx)),
-                    );
-                    AIRequestUsageModel::handle(ctx).update(ctx, |ai_request_usage_model, ctx| {
-                        ai_request_usage_model.refresh_request_usage_async(ctx)
-                    });
+                    // `on_page_selected` refreshes billing data when the user
+                    // returns (e.g. via the confirmation page's Open Warp link).
                 }
             }
             UserWorkspacesEvent::PurchaseAddonCreditsRejected(err) => {
@@ -1701,13 +1692,12 @@ impl BillingAndUsagePageView {
             .finish();
 
         let workspaces = UserWorkspaces::as_ref(app);
-        let purchase_policy = workspaces
-            .purchase_policy(team_uid.and_then(|team_uid| workspaces.team_from_uid(team_uid)));
+        let purchase_policy = workspaces.purchase_policy_for_team(
+            team_uid.and_then(|team_uid| workspaces.team_from_uid(team_uid)),
+        );
         let team_can_purchase_addon_credits =
             purchase_policy.is_some_and(|policy| policy.allows_purchases());
         let premium_bps = purchase_policy.map_or(0, |policy| policy.effective_premium_bps());
-        // Teamless users have no workspace yet; they're on the free tier and
-        // can always upgrade.
         let can_upgrade_to_build = workspace
             .is_none_or(|workspace| workspace.billing_metadata.can_upgrade_to_build_plan());
         let upgrade_url = match team_uid {
@@ -1725,9 +1715,10 @@ impl BillingAndUsagePageView {
             can_upgrade_to_build,
             has_admin_permissions,
         ) {
-            // If the team can purchase addon credits (which implies they're already on a Build-like plan)
-            // and the current user is a team admin, don't show any explanation, so that we show the
-            // fuller experience with the rest of the settings below this.
+            // If addon credits can be purchased in this context (any purchase-enabled plan,
+            // including free plans buying at a premium) and the current user can manage them,
+            // don't show any explanation, so that we show the fuller experience with the rest
+            // of the settings below this.
             (true, _, true) => None,
             // If the team cannot purchase addon credits, but they can upgrade to a Build-like plan,
             // and the current user is an admin, then we show them a nudge to switch to Build.
@@ -2013,9 +2004,6 @@ impl BillingAndUsagePageView {
             .with_children([card_header, paragraph])
             .with_spacing(8.);
 
-        // Monthly spend limits and auto-reload persist team settings; a
-        // teamless user has no team to configure until their first purchase
-        // creates one server-side.
         if team_uid.is_some() {
             card_content_upper.add_child(monthly_spend_row);
         }
@@ -2959,13 +2947,9 @@ impl BillingAndUsagePageView {
             usage.add_child(ambient_trial_widget);
         }
 
-        // A teamless fresh free user has no (non-placeholder) workspace at
-        // all, so `workspace` alone can't gate the purchase panel: still
-        // render it whenever the resolved purchase policy allows purchases
-        // (the user-level leg covers the teamless case).
         let show_addon_credits_panel = workspace.is_some()
             || workspaces
-                .purchase_policy(None)
+                .purchase_policy_for_team(team)
                 .is_some_and(|policy| policy.allows_purchases());
         if show_addon_credits_panel {
             let bonus_credit_balance = workspace.map_or_else(
@@ -2982,8 +2966,6 @@ impl BillingAndUsagePageView {
                     .is_enterprise_pay_as_you_go_enabled()
             }) && bonus_credit_balance == 0;
 
-            // A teamless user manages their own personal purchases; the
-            // server creates their team on first purchase.
             let can_manage_addon_credits =
                 team.is_none_or(|team| team.has_admin_permissions(&current_user_email));
 
