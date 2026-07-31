@@ -123,6 +123,30 @@ pub struct TuiLayoutContext<'a> {
     pub rendered_views: &'a mut EntityIdMap<Box<dyn TuiElement>>,
 }
 
+impl TuiLayoutContext<'_> {
+    /// Lays out the presenter's pre-rendered element for `view_id` against
+    /// `constraint` and returns its size, or `None` when no element is
+    /// registered for that view.
+    ///
+    /// This is for callers that need a child view's measured size *before* the
+    /// tree walk reaches its [`TuiChildView`] — a viewported list refreshing
+    /// cached item heights, for example. Measuring the element the presenter
+    /// already rendered is both cheaper and more faithful than re-rendering the
+    /// view into a throwaway tree: re-rendering rebuilds every section from the
+    /// model, and the height it reports can differ from the tree that is
+    /// actually laid out and painted this frame.
+    ///
+    /// [`TuiChildView`]: crate::elements::tui::TuiChildView
+    pub fn measure_view(
+        &mut self,
+        view_id: EntityId,
+        constraint: TuiConstraint,
+        app: &AppContext,
+    ) -> Option<TuiSize> {
+        self.use_view(view_id, |element, ctx| element.layout(constraint, ctx, app))
+    }
+}
+
 impl TuiViewMapContext for TuiLayoutContext<'_> {
     fn rendered_views_mut(&mut self) -> &mut EntityIdMap<Box<dyn TuiElement>> {
         self.rendered_views

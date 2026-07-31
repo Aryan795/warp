@@ -15,8 +15,9 @@ use warp::tui_export::{
 use warpui::platform::WindowStyle;
 use warpui::{AddWindowOptions, EntityId, EntityIdMap, ViewHandle};
 use warpui_core::elements::tui::{
-    TuiBufferExt, TuiConstraint, TuiGridPoint, TuiLayoutContext, TuiRect, TuiRowResize,
-    TuiSelectionSpan, TuiSize, TuiViewportContent, TuiViewportWindow, TuiViewportedElement,
+    TuiBufferExt, TuiConstraint, TuiElement, TuiGridPoint, TuiLayoutContext, TuiRect, TuiRowResize,
+    TuiSelectionSpan, TuiSize, TuiText, TuiViewportContent, TuiViewportWindow,
+    TuiViewportedElement,
 };
 use warpui_core::presenter::tui::TuiPresenter;
 use warpui_core::{App, AppContext, TuiView, TypedActionView, ViewContext};
@@ -378,6 +379,49 @@ fn tui_agent_streaming_block_remeasured_at_stable_width() {
         seed_clean_height(&app, &model, &agent_block, 1234.0, 80);
         request_top_window(&app, &source, 10);
         assert_ne!(rich_content_height(&model, agent_block.id()), Some(1234.0));
+    });
+}
+
+/// Re-measuring a rich-content block lays out the element the presenter already
+/// rendered for it, rather than rebuilding the block's element tree from the
+/// model only to throw it away. A stand-in element registered for the block's
+/// view id is what the measured height must come from.
+///
+/// Regression guard for the per-frame cost of a streaming block (or an
+/// expanded, still-running shell command, which asks to be re-measured every
+/// frame): rebuilding the tree re-extracts every section and re-renders every
+/// markdown block, on top of the layout the frame was going to do anyway.
+#[test]
+fn streaming_agent_height_measures_the_presenters_rendered_element() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|_| Appearance::mock());
+        let (source, _model, agent_block) = streaming_agent_block_source(&mut app);
+        let view_id = agent_block.id();
+
+        let content = app.read(|app| {
+            let mut rendered_views: EntityIdMap<Box<dyn TuiElement>> = EntityIdMap::default();
+            rendered_views.insert(
+                view_id,
+                TuiText::new("a\nb\nc\nd\ne\nf\ng").truncate().finish(),
+            );
+            let mut ctx = TuiLayoutContext {
+                rendered_views: &mut rendered_views,
+            };
+            source.visible_items(
+                TuiViewportWindow {
+                    scroll_top: 0,
+                    viewport_height: 40,
+                },
+                80,
+                &mut ctx,
+                app,
+            )
+        });
+
+        assert_eq!(
+            content.content_height, 7,
+            "the cached height must come from the presenter's rendered element"
+        );
     });
 }
 

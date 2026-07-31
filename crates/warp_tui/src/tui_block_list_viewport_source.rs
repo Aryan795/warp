@@ -14,8 +14,8 @@ use warp::tui_export::{BlockHeight, BlockHeightItem, BlockHeightSummary, BlockId
 use warpui::{EntityId, ViewHandle};
 use warpui_core::AppContext;
 use warpui_core::elements::tui::{
-    TuiChildView, TuiElement, TuiLayoutContext, TuiRowResize, TuiSelectionSpan, TuiViewportContent,
-    TuiViewportWindow, TuiViewportedElement, TuiVisibleViewportItem,
+    TuiChildView, TuiConstraint, TuiElement, TuiLayoutContext, TuiRowResize, TuiSelectionSpan,
+    TuiSize, TuiViewportContent, TuiViewportWindow, TuiViewportedElement, TuiVisibleViewportItem,
 };
 
 use super::agent_block::TuiAIBlock;
@@ -167,6 +167,15 @@ impl TuiBlockListViewportSource {
 
     /// Measures each agent block's wrapped height at `width`, returning heights
     /// in the block list's native line unit.
+    ///
+    /// The measurement lays out the element the presenter already rendered for
+    /// the view. The per-view `desired_height` fallback re-renders the view into
+    /// a throwaway element tree — re-extracting every section and rebuilding
+    /// every markdown block — and is only needed when the presenter has no
+    /// element for the view yet. Doing that on every frame is what made a
+    /// streaming exchange (or an expanded, still-running shell command, which
+    /// asks to be re-measured continuously) rebuild its whole tree per scroll
+    /// frame on top of the layout the frame was going to do anyway.
     fn measured_agent_heights(
         &self,
         view_ids: HashSet<EntityId>,
@@ -174,25 +183,32 @@ impl TuiBlockListViewportSource {
         ctx: &mut TuiLayoutContext,
         app: &AppContext,
     ) -> HashMap<EntityId, BlockHeight> {
+        let constraint = TuiConstraint::loose(TuiSize::new(width, u16::MAX));
         let agent_blocks = self.agent_blocks.borrow();
         let cli_subagent_blocks = self.cli_subagent_blocks.borrow();
         let handoff_blocks = self.handoff_blocks.borrow();
         view_ids
             .into_iter()
             .filter_map(|view_id| {
+                let rendered_height = ctx
+                    .measure_view(view_id, constraint, app)
+                    .map(|size| usize::from(size.height));
                 let height = if let Some(view) = agent_blocks.get(&view_id) {
                     let view = view.as_ref(app);
-                    let height = view.desired_height(width, ctx, app);
+                    let height =
+                        rendered_height.unwrap_or_else(|| view.desired_height(width, ctx, app));
                     view.record_height_measurement(width);
                     height
                 } else if let Some(view) = cli_subagent_blocks.get(&view_id) {
                     let view = view.as_ref(app);
-                    let height = view.desired_height(width, ctx, app);
+                    let height =
+                        rendered_height.unwrap_or_else(|| view.desired_height(width, ctx, app));
                     view.record_height_measurement(width);
                     height
                 } else {
                     let view = handoff_blocks.get(&view_id)?.as_ref(app);
-                    let height = view.desired_height(width, ctx, app);
+                    let height =
+                        rendered_height.unwrap_or_else(|| view.desired_height(width, ctx, app));
                     view.record_height_measurement(width);
                     height
                 };
