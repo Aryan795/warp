@@ -7,7 +7,7 @@ use crate::schema;
 pub struct PurchaseAddonCreditsInput {
     pub credits: i32,
     /// Optional server-side: omitting it lets the server auto-create a
-    /// personal team for teamless (fresh free) purchasers.
+    /// personal team for free plan purchasers.
     pub team_uid: Option<cynic::Id>,
 }
 
@@ -33,17 +33,24 @@ crate::client::define_operation! {
 #[derive(cynic::InlineFragments, Debug)]
 pub enum PurchaseAddonCreditsResult {
     PurchaseAddonCreditsOutput(PurchaseAddonCreditsOutput),
+    PurchaseAddonCreditsCheckoutOutput(PurchaseAddonCreditsCheckoutOutput),
     UserFacingError(UserFacingError),
     #[cynic(fallback)]
     Unknown,
 }
 
+/// The purchase was charged synchronously and credits were granted.
 #[derive(cynic::QueryFragment, Debug)]
 pub struct PurchaseAddonCreditsOutput {
     pub success: bool,
-    /// When set, the purchase could not be charged synchronously (no saved
-    /// payment method) and the user must complete checkout in the browser at
-    /// this URL. Credits are granted via webhook after checkout completes.
-    pub checkout_url: Option<String>,
+    pub response_context: ResponseContext,
+}
+
+/// The purchase could not be charged synchronously (no saved payment method):
+/// the user must complete checkout in the browser at `checkout_url`. Credits
+/// are granted via webhook after checkout completes.
+#[derive(cynic::QueryFragment, Debug)]
+pub struct PurchaseAddonCreditsCheckoutOutput {
+    pub checkout_url: String,
     pub response_context: ResponseContext,
 }

@@ -28,7 +28,8 @@ use crate::server::ids::ServerId;
 use crate::workspaces::user_workspaces::WorkspacesMetadataResponse;
 use crate::workspaces::workspace::AiOverages;
 
-/// Outcome of a successful `purchaseAddonCredits` mutation.
+/// Outcome of a successful `purchaseAddonCredits` mutation. Mirrors the
+/// server's `PurchaseAddonCreditsResult` union members one-to-one.
 pub enum PurchaseAddonCreditsOutcome {
     /// The saved payment method was charged synchronously and credits were
     /// granted immediately. Carries refreshed workspace metadata.
@@ -178,13 +179,15 @@ impl WorkspaceClient for ServerApi {
         match response {
             Err(_) => Err(anyhow!("Failed to purchase add-on credits")),
             Ok(response) => match response.purchase_addon_credits {
-                PurchaseAddonCreditsResult::PurchaseAddonCreditsOutput(output) => {
-                    if let Some(checkout_url) = output.checkout_url {
-                        return Ok(PurchaseAddonCreditsOutcome::CheckoutRequired { checkout_url });
-                    }
+                PurchaseAddonCreditsResult::PurchaseAddonCreditsOutput(_) => {
                     TeamClient::workspaces_metadata(self)
                         .await
                         .map(|w| PurchaseAddonCreditsOutcome::Completed(Box::new(w.metadata)))
+                }
+                PurchaseAddonCreditsResult::PurchaseAddonCreditsCheckoutOutput(output) => {
+                    Ok(PurchaseAddonCreditsOutcome::CheckoutRequired {
+                        checkout_url: output.checkout_url,
+                    })
                 }
                 PurchaseAddonCreditsResult::UserFacingError(error) => match error.error {
                     UserFacingErrorInterface::BudgetExceededError(budget_error) => {
