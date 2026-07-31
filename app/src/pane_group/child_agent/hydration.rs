@@ -142,8 +142,6 @@ impl PaneGroup {
         let materialization = task_for_decision
             .as_ref()
             .map(decide_child_pane_materialization);
-        if let Some(ref task) = task_for_decision {
-        }
 
         match origin {
             ChildPaneOrigin::HostedConversation => {
