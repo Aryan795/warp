@@ -20687,7 +20687,7 @@ impl Workspace {
             };
             // Tab-style border: left edge always (the placeholder trails the
             // real tabs), right edge only when collapsed; expanded groups end
-            // with the setup pseudo-tab's right border instead.
+            // with the dashed setup pseudo-tab's right edge instead.
             Container::new(
                 Container::new(content_row.finish())
                     .with_padding_left(8.)
@@ -20723,8 +20723,16 @@ impl Workspace {
         if !is_collapsed {
             let setup_tab =
                 Hoverable::new(mouse_states.horizontal_setup_row.clone(), move |state| {
+                    let hovered = state.is_hovered();
+                    // Muted at rest so the pseudo-tab reads as an empty slot
+                    // rather than a live tab; it comes forward on hover.
+                    let label_color = if hovered {
+                        main_text_color
+                    } else {
+                        sub_text_color
+                    };
                     let plus_icon =
-                        ConstrainedBox::new(Icon::Plus.to_warpui_icon(sub_text_color).finish())
+                        ConstrainedBox::new(Icon::Plus.to_warpui_icon(label_color).finish())
                             .with_width(TAB_INDICATOR_HEIGHT)
                             .with_height(TAB_INDICATOR_HEIGHT)
                             .finish();
@@ -20743,17 +20751,21 @@ impl Workspace {
                                     12.,
                                 )
                                 .with_clip(ClipConfig::end())
-                                .with_color(sub_text_color.into())
+                                .with_color(label_color.into())
                                 .finish(),
                             )
                             .finish(),
                         )
                         .finish();
-                    let bg: ElementFill = if state.is_hovered() {
+                    // Lighter than a real tab's hover fill so the dashes stay
+                    // legible.
+                    let bg: ElementFill = if hovered {
                         internal_colors::fg_overlay_1(theme).into()
                     } else {
                         ElementFill::None
                     };
+                    // Dashed ghost tab over a transparent backing: an empty slot
+                    // waiting to be filled, not a tab that already exists.
                     Container::new(
                         Container::new(label_row)
                             .with_padding_left(8.)
@@ -20764,8 +20776,12 @@ impl Workspace {
                     .with_background(bg)
                     .with_border(
                         Border::all(1.)
-                            .with_sides(false, false, false, true)
-                            .with_border_fill(internal_colors::fg_overlay_3(theme)),
+                            .with_border_fill(if hovered {
+                                internal_colors::fg_overlay_4(theme)
+                            } else {
+                                internal_colors::fg_overlay_3(theme)
+                            })
+                            .with_dashed_border(vertical_tabs::AUTOMATIONS_SETUP_ROW_DASH),
                     )
                     .finish()
                 })

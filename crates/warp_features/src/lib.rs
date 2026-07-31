@@ -909,7 +909,8 @@ pub enum FeatureFlag {
     McpJsonTreeView,
 
     /// Gates local automations: TOML-defined personal jobs under the user's
-    /// `automations/` data directory with a manual "Run now" execution path.
+    /// `automations/` data directory, started manually via "Run now" or fired
+    /// on their cron schedule by the in-process scheduler while Warp runs.
     LocalAutomations,
 }
 

@@ -19,7 +19,7 @@ use warp_core::ui::theme::{AnsiColorIdentifier, Fill as WarpThemeFill, WarpTheme
 use warp_core::ui::Icon as WarpIcon;
 use warpui::elements::{
     resizable_state_handle, Border, ChildAnchor, Clipped, ClippedScrollStateHandle,
-    ClippedScrollable, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
+    ClippedScrollable, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Dash,
     DispatchEventResult, DragAxis, DragBarSide, Draggable, DropShadow, DropTarget, Element, Empty,
     EventHandler, Expanded, Fill as ElementFill, Flex, Hoverable, MainAxisAlignment, MainAxisSize,
     MouseStateHandle, OffsetPositioning, Padding, ParentAnchor, ParentElement, ParentOffsetBounds,
@@ -2959,12 +2959,24 @@ fn render_grouped_tabs_header(
 }
 
 /// Terse value proposition rendered under the placeholder group's setup
-/// CTA label ("Set up an automation").
-const AUTOMATIONS_SETUP_ROW_DESCRIPTION: &str = "Run agents & commands on a schedule";
+/// CTA label ("Set up an automation"). Leads with the payoff rather than the
+/// mechanics, and stays short enough to avoid ellipsizing at the panel's
+/// minimum width.
+const AUTOMATIONS_SETUP_ROW_DESCRIPTION: &str = "Let agents handle recurring work";
 
 /// Label of the placeholder group's single body row. Shared with the
 /// horizontal tab bar rendering in `workspace/view.rs`.
 pub(crate) const AUTOMATIONS_SETUP_ROW_LABEL: &str = "Set up an automation";
+
+/// Dash pattern for the placeholder setup row's empty-state outline. Short
+/// dashes suit the row's scale; letting the gap flex keeps every edge starting
+/// and ending on a dash. Shared with the horizontal tab bar rendering in
+/// `workspace/view.rs` so both layouts outline the row identically.
+pub(crate) const AUTOMATIONS_SETUP_ROW_DASH: Dash = Dash {
+    dash_length: 3.,
+    gap_length: 3.,
+    force_consistent_gap_length: false,
+};
 
 /// Small accent-colored dot marking the placeholder "Automations" group as
 /// new. Shown until the user expands the group once.
@@ -3101,13 +3113,21 @@ fn render_automations_placeholder_group(
 
     if !is_collapsed {
         let setup_row = Hoverable::new(mouse_states.setup_row.clone(), move |state| {
-            let icon = ConstrainedBox::new(WarpIcon::Plus.to_warpui_icon(sub_text_color).finish())
+            let hovered = state.is_hovered();
+            // Muted at rest so the row reads as an empty slot rather than a
+            // live tab; it comes forward on hover.
+            let label_color = if hovered {
+                main_text_color
+            } else {
+                sub_text_color
+            };
+            let icon = ConstrainedBox::new(WarpIcon::Plus.to_warpui_icon(label_color).finish())
                 .with_width(TAB_GROUP_ICON_SIZE)
                 .with_height(TAB_GROUP_ICON_SIZE)
                 .finish();
             let label = Text::new_inline(AUTOMATIONS_SETUP_ROW_LABEL, font_family, 12.)
                 .with_clip(ClipConfig::ellipsis())
-                .with_color(main_text_color.into())
+                .with_color(label_color.into())
                 .finish();
             let description = Text::new_inline(AUTOMATIONS_SETUP_ROW_DESCRIPTION, font_family, 10.)
                 .with_clip(ClipConfig::ellipsis())
@@ -3127,11 +3147,24 @@ fn render_automations_placeholder_group(
                 .with_child(icon)
                 .with_child(Shrinkable::new(1., text_column).finish())
                 .finish();
+            // Dashed outline over a transparent backing: an empty slot waiting
+            // to be filled, not a tab that already exists. Corners stay sharp
+            // because dashed borders only render correctly without a radius
+            // (see `Border::with_dashed_border`).
             let mut container = Container::new(row)
                 .with_padding(Padding::uniform(GROUP_HORIZONTAL_PADDING))
-                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS)));
-            if state.is_hovered() {
-                container = container.with_background(internal_colors::fg_overlay_2(theme));
+                .with_border(
+                    Border::all(1.)
+                        .with_border_fill(if hovered {
+                            internal_colors::fg_overlay_4(theme)
+                        } else {
+                            internal_colors::fg_overlay_3(theme)
+                        })
+                        .with_dashed_border(AUTOMATIONS_SETUP_ROW_DASH),
+                );
+            if hovered {
+                // Lighter than a real row's hover fill so the dashes stay legible.
+                container = container.with_background(internal_colors::fg_overlay_1(theme));
             }
             container.finish()
         })

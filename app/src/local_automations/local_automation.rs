@@ -83,12 +83,15 @@ pub struct LocalAutomationWorktree {
 pub struct LocalAutomation {
     /// Display name shown in list UIs. May differ from the filename.
     pub name: String,
-    /// Whether the automation is considered active for (future) scheduling.
-    /// Run now still works on disabled automations, with a warning.
+    /// Whether the automation is considered active for scheduling. Disabled
+    /// automations are skipped by the scheduler; Run now still works on them,
+    /// with a warning.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
-    /// Cron expression or preset string. Stored for forward compatibility;
-    /// Slice A does not fire automations on a schedule.
+    /// Cron expression or preset string: a 5-field cron expression, or a
+    /// preset such as `@daily`. Evaluated in the machine's local timezone by
+    /// the local automations scheduler, which fires due runs while Warp is
+    /// running (including a bounded catch-up for recently missed fires).
     pub schedule: String,
     /// Working directory for the run (supports `~`). Exactly one of `cwd` or
     /// `worktree` must be set.
