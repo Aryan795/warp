@@ -858,11 +858,6 @@ impl AgentViewController {
             && !(FeatureFlag::OrchestrationUnifiedStack.is_enabled()
                 && is_existing_child_placeholder);
         if is_existing_child_placeholder {
-            log::info!(
-                "[orchestration-unified-debug] enter_agent_view existing child placeholder \
-                 conversation_id={conversation_id:?} exchange_count={exchange_count} \
-                 emitted_is_new={is_new}"
-            );
         }
         ctx.emit(AgentViewControllerEvent::EnteredAgentView {
             conversation_id,

@@ -130,11 +130,6 @@ impl PaneGroup {
         if let Some(existing_pane_id) = self.child_agent_panes.get(&child_id).copied()
             && self.has_pane_id(existing_pane_id)
         {
-            log::info!(
-                "[orchestration-unified-debug] materialize idempotent-skip \
-                 child_conversation_id={child_id:?} origin={origin:?} \
-                 existing_pane_id={existing_pane_id:?}"
-            );
             return;
         }
 
@@ -147,22 +142,7 @@ impl PaneGroup {
         let materialization = task_for_decision
             .as_ref()
             .map(decide_child_pane_materialization);
-        log::info!(
-            "[orchestration-unified-debug] materialize entry \
-             child_conversation_id={child_id:?} origin={origin:?} task_id={task_id:?} \
-             task_found={} materialization={materialization:?}",
-            task_for_decision.is_some()
-        );
         if let Some(ref task) = task_for_decision {
-            log::info!(
-                "[orchestration-unified-debug] materialize task-detail \
-                 child_conversation_id={child_id:?} task_id={} state={:?} \
-                 live_session_state={:?} has_conversation_token={}",
-                task.task_id,
-                task.state,
-                task.active_live_session_state(),
-                task.conversation_id().is_some()
-            );
         }
 
         match origin {
@@ -204,16 +184,6 @@ impl PaneGroup {
             return;
         };
 
-        log::info!(
-            "[orchestration-unified-debug] materialize_owner match-arm \
-             child_conversation_id={child_id:?} arm={}",
-            match &materialization {
-                Some(crate::pane_group::child_agent::materialization::ChildPaneMaterialization::AttachLive { .. }) => "AttachLive",
-                Some(crate::pane_group::child_agent::materialization::ChildPaneMaterialization::LoadTranscript { .. }) => "LoadTranscript",
-                Some(crate::pane_group::child_agent::materialization::ChildPaneMaterialization::Pending) => "Pending",
-                None => "None(task-missing)",
-            }
-        );
         match materialization {
             Some(ChildPaneMaterialization::AttachLive { session_id }) => {
                 self.attach_child_session(
@@ -241,11 +211,6 @@ impl PaneGroup {
                 else {
                     return;
                 };
-                log::info!(
-                    "[orchestration-unified-debug] materialize_owner Pending: \
-                     child_conversation_id={child_id:?} pane_id={pane_id:?}; \
-                     registering pending hydration for re-drive on TasksUpdated"
-                );
                 self.pending_remote_child_hydrations
                     .insert(task_id, child_id);
                 self.ensure_pending_ambient_restoration_subscription(ctx);
@@ -355,14 +320,6 @@ impl PaneGroup {
         origin: ChildPaneOrigin,
         ctx: &mut ViewContext<Self>,
     ) {
-        log::info!(
-            "[orchestration-unified-debug] attach_child_session entry \
-             child_conversation_id={child_id:?} origin={origin:?} \
-             pane_in_map={}",
-            self.child_agent_panes
-                .get(&child_id)
-                .is_some_and(|p| self.has_pane_id(*p))
-        );
         match origin {
             ChildPaneOrigin::HostedConversation => {
                 self.attach_owner_child_session(child_id, session_id, ctx);
@@ -389,14 +346,14 @@ impl PaneGroup {
             .cloned()
         else {
             log::warn!(
-                "[orchestration-unified-debug] owner live replacement: no conversation \
+                "owner live replacement: no conversation \
                  child_conversation_id={child_id:?}"
             );
             return;
         };
         let Some(task_id) = child_conversation.task_id() else {
             log::warn!(
-                "[orchestration-unified-debug] owner live replacement: no task id \
+                "owner live replacement: no task id \
                  child_conversation_id={child_id:?}"
             );
             return;
@@ -409,22 +366,12 @@ impl PaneGroup {
             .filter(|pane_id| self.has_pane_id(*pane_id))
         {
             let anchor = self.panes.original_pane_for_replacement(prior_pane_id);
-            log::info!(
-                "[orchestration-unified-debug] owner live replacement discard-pending \
-                 child_conversation_id={child_id:?} prior_pane_id={prior_pane_id:?} \
-                 was_visible={}",
-                anchor.is_some()
-            );
             self.discard_child_agent_pane_for_conversation(child_id, ctx);
             anchor
         } else {
             None
         };
 
-        log::info!(
-            "[orchestration-unified-debug] owner live replacement create-start \
-             child_conversation_id={child_id:?} task_id={task_id}"
-        );
         let resources = TerminalViewResources {
             tips_completed: self.tips_completed.clone(),
             server_api: self.server_api.clone(),
@@ -485,10 +432,6 @@ impl PaneGroup {
         if let Some(anchor) = fallback_was_swapped_anchor {
             self.swap_active_pane_to_conversation(anchor, child_id, ctx);
         }
-        log::info!(
-            "[orchestration-unified-debug] owner live replacement complete \
-             child_conversation_id={child_id:?} new_pane_id={new_pane_id:?}"
-        );
     }
 
     /// Attaches the hidden child pane's ambient agent view model to the live
@@ -530,10 +473,6 @@ impl PaneGroup {
         server_token: ServerConversationToken,
         ctx: &mut ViewContext<Self>,
     ) {
-        log::info!(
-            "[orchestration-unified-debug] owner completed replacement fetch-start \
-             child_conversation_id={child_id:?} pane_id={pane_id:?} task_id={task_id}"
-        );
         let future = BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
             history.load_conversation_by_server_token(&server_token, ctx)
         });
@@ -544,16 +483,12 @@ impl PaneGroup {
                 .copied()
                 .is_some_and(|candidate| candidate == pane_id && group.has_pane_id(candidate));
             if !still_canonical {
-                log::info!(
-                    "[orchestration-unified-debug] owner completed replacement stale-pane \
-                     child_conversation_id={child_id:?} pane_id={pane_id:?}"
-                );
                 return;
             }
 
             let Some(CloudConversationData::Oz(cloud)) = conversation else {
                 log::warn!(
-                    "[orchestration-unified-debug] owner completed replacement missing Oz transcript \
+                    "owner completed replacement missing Oz transcript \
                      child_conversation_id={child_id:?}"
                 );
                 return;
@@ -575,21 +510,13 @@ impl PaneGroup {
                 Ok(merged) => merged,
                 Err(err) => {
                     log::warn!(
-                        "[orchestration-unified-debug] owner completed replacement merge-error \
+                        "owner completed replacement merge-error \
                          child_conversation_id={child_id:?} error={err:#}"
                     );
                     return;
                 }
             };
             let root_task = merged.get_root_task();
-            log::info!(
-                "[orchestration-unified-debug] owner completed merged identity \
-                 conversation_id={child_id:?} root_task_id={} root_has_server_data={} \
-                 has_server_conversation_token={}",
-                merged.get_root_task_id(),
-                root_task.is_some_and(|task| task.source().is_some()),
-                merged.server_conversation_token().is_some(),
-            );
 
             let blocks_cloud_followups =
                 task.as_ref().is_none_or(AmbientAgentTask::blocks_cloud_followups);
@@ -716,10 +643,6 @@ impl PaneGroup {
         server_token: ServerConversationToken,
         ctx: &mut ViewContext<Self>,
     ) {
-        log::info!(
-            "[orchestration-unified-debug] viewer transcript upgrade fetch-start \
-             child_conversation_id={child_id:?} pane_id={pane_id:?} task_id={task_id}"
-        );
         let history_handle = BlocklistAIHistoryModel::handle(ctx);
         let future = history_handle.update(ctx, |history_model, ctx| {
             history_model.load_conversation_by_server_token(&server_token, ctx)
@@ -731,20 +654,12 @@ impl PaneGroup {
                 .copied()
                 .is_some_and(|p| p == pane_id && group.has_pane_id(p));
             if !still_canonical {
-                log::info!(
-                    "[orchestration-unified-debug] viewer transcript upgrade stale-pane \
-                     child_conversation_id={child_id:?} pane_id={pane_id:?}"
-                );
                 return;
             }
             let active_conversation = group
                 .terminal_view_from_pane_id(pane_id, ctx)
                 .and_then(|view| view.as_ref(ctx).active_conversation_id(ctx));
             if active_conversation != Some(child_id) {
-                log::info!(
-                    "[orchestration-unified-debug] viewer transcript upgrade stale-conversation \
-                     child_conversation_id={child_id:?} active={active_conversation:?}"
-                );
                 return;
             }
             let task = AgentConversationsModel::as_ref(ctx).get_task_data(&task_id);
@@ -776,7 +691,7 @@ impl PaneGroup {
                         Ok(merged) => merged,
                         Err(err) => {
                             log::warn!(
-                                "[orchestration-unified-debug] viewer transcript upgrade merge-error \
+                                "viewer transcript upgrade merge-error \
                                  child_conversation_id={child_id:?} error={err:#}"
                             );
                             return;
@@ -785,14 +700,14 @@ impl PaneGroup {
                 }
                 Some(CloudConversationData::CLIAgent(_)) => {
                     log::warn!(
-                        "[orchestration-unified-debug] viewer transcript upgrade unsupported \
+                        "viewer transcript upgrade unsupported \
                          CLI transcript child_conversation_id={child_id:?}"
                     );
                     return;
                 }
                 None => {
                     log::warn!(
-                        "[orchestration-unified-debug] viewer transcript upgrade fetch-empty \
+                        "viewer transcript upgrade fetch-empty \
                          child_conversation_id={child_id:?}"
                     );
                     return;
@@ -813,10 +728,6 @@ impl PaneGroup {
 
             group.restore_child_passive_transcript(
                 pane_id, child_id, task_id, merged, ctx,
-            );
-            log::info!(
-                "[orchestration-unified-debug] viewer transcript upgrade complete \
-                 child_conversation_id={child_id:?} pane_id={pane_id:?}"
             );
         });
     }
@@ -1450,10 +1361,6 @@ impl PaneGroup {
                 };
                 match decide_child_pane_materialization(&task) {
                     ChildPaneMaterialization::AttachLive { session_id } => {
-                        log::info!(
-                            "[orchestration-unified-debug] process_pending re-drive AttachLive \
-                             child_id={child_id:?} task_id={task_id}"
-                        );
                         self.attach_child_session(
                             child_id,
                             session_id,
@@ -1468,10 +1375,6 @@ impl PaneGroup {
                             .copied()
                             .filter(|p| self.has_pane_id(*p));
                         if let Some(pane_id) = pane_id {
-                            log::info!(
-                                "[orchestration-unified-debug] process_pending re-drive \
-                                 LoadTranscript child_id={child_id:?} task_id={task_id}"
-                            );
                             self.hydrate_owner_child_transcript(
                                 pane_id,
                                 child_id,

@@ -149,13 +149,6 @@ impl PaneGroup {
                         None
                     };
                     if let Some(conversation) = durable_parent {
-                        log::info!(
-                            "[orchestration-unified-debug] ambient restore durable Observer \
-                             task_id={task_id} conversation_id={conversation_id:?} \
-                             exchange_count={} local_cursor={:?}: restoring existing conversation",
-                            conversation.exchange_count(),
-                            conversation.last_event_sequence(),
-                        );
                         self.replace_loading_pane_with_restored_ambient_cloud_mode_pane(
                             pane_id,
                             crate::ai::blocklist::history_model::CloudConversationData::Oz(
@@ -165,12 +158,6 @@ impl PaneGroup {
                             ctx,
                         );
                     } else {
-                        log::info!(
-                            "[orchestration-unified-debug] ambient restore local conversation \
-                             task_id={task_id} conversation_id={conversation_id:?} \
-                             unified_stack={unified_stack} durable_marker={durable_marker}: \
-                             preserving fresh-cloud fallback",
-                        );
                         self.replace_pane_with_new_cloud_conversation(pane_id, ctx);
                     }
                 }

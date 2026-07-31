@@ -127,10 +127,6 @@ impl EventLoop {
             load_mode,
             SharedSessionInitialLoadMode::AppendFollowupScrollback
         );
-        log::info!(
-            "[orchestration-unified-debug] shared_session EventLoop identity \
-             load_mode={load_mode:?} suppress_existing_replay={should_suppress_existing_agent_conversation_replay}"
-        );
         // Append mode means the local conversation already contains the prior
         // transcript. Arm both halves of the replay gate before this event
         // loop can dispatch its first ordered response event: some sessions
@@ -148,9 +144,6 @@ impl EventLoop {
                     });
                 });
             }
-            log::info!(
-                "[orchestration-unified-debug] shared_session replay gate armed at EventLoop creation"
-            );
         }
         let mut event_loop = Self {
             terminal_model,

@@ -2644,17 +2644,6 @@ impl AIConversation {
                     .task_store
                     .root_task()
                     .is_some_and(|root| root.source().is_some());
-                log::info!(
-                    "[orchestration-unified-debug] apply CreateTask identity \
-                     conversation_id={:?} response_stream_id={response_stream_id:?} \
-                     incoming_task_id={task_id} incoming_has_parent={} \
-                     current_root_id={current_root_id} \
-                     current_root_has_server_data={current_root_has_server_data} \
-                     is_viewing_shared_session={}",
-                    self.id,
-                    task.parent_id().is_some(),
-                    self.is_viewing_shared_session,
-                );
                 // Save an empty task to the transaction
                 self.checkpoint_task(&task_id);
 

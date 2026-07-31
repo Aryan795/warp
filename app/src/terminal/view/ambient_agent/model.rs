@@ -936,13 +936,6 @@ impl AmbientAgentViewModel {
         let previous_session_id = self
             .active_execution_session_id
             .or(self.last_ended_execution_session_id);
-        log::info!(
-            "[orchestration-unified-debug] submit_cloud_followup identity \
-             ambient_task_id={task_id} local_conversation_id={:?} \
-             has_previous_session_id={}",
-            self.conversation_id,
-            previous_session_id.is_some(),
-        );
         let ai_client = ServerApiProvider::as_ref(ctx).get_ai_client();
         let stream = submit_run_followup(
             prompt.clone(),

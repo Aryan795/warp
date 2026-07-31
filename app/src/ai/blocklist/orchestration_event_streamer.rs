@@ -572,11 +572,6 @@ impl OrchestrationEventStreamer {
             match classify_family_event(&event, self_run_id) {
                 FamilyEvent::ParentSelf(event) => parent_self_events.push(event),
                 FamilyEvent::ChildStarted { child_run_id } => {
-                    log::info!(
-                        "[orchestration-unified-debug] drain ChildStarted \
-                         parent_conversation_id={cursor_conversation_id:?} \
-                         child_run_id={child_run_id} mode={mode:?}"
-                    );
                     self.ensure_remote_child_placeholder(
                         cursor_conversation_id,
                         child_run_id.clone(),
@@ -597,11 +592,6 @@ impl OrchestrationEventStreamer {
                     child_run_id,
                     session_uuid,
                 } => {
-                    log::info!(
-                        "[orchestration-unified-debug] drain ChildSessionLinked \
-                         parent_conversation_id={cursor_conversation_id:?} \
-                         child_run_id={child_run_id} session_id={session_uuid} mode={mode:?}"
-                    );
                     tracker.observe_child(
                         &child_run_id,
                         ChildSignal::SessionLinked {
@@ -621,11 +611,6 @@ impl OrchestrationEventStreamer {
                     }
                 }
                 FamilyEvent::ChildLifecycle { child_run_id, kind } => {
-                    log::info!(
-                        "[orchestration-unified-debug] drain ChildLifecycle \
-                         parent_conversation_id={cursor_conversation_id:?} \
-                         child_run_id={child_run_id} kind={kind:?} mode={mode:?}"
-                    );
                     // Backstop: if this lifecycle arrives before (or instead of)
                     // `child_agent_started`, ensure a placeholder still exists.
                     self.ensure_remote_child_placeholder(
@@ -666,10 +651,6 @@ impl OrchestrationEventStreamer {
                             | api::LifecycleEventType::Cancelled
                     );
                     if is_terminal && let Ok(task_id) = child_run_id.parse::<AmbientAgentTaskId>() {
-                        log::info!(
-                            "[orchestration-unified-debug] drain ChildLifecycle terminal \
-                             child_run_id={child_run_id} kind={kind:?}: evict+refetch task"
-                        );
                         AgentConversationsModel::handle(ctx).update(ctx, |model, ctx| {
                             model.evict_and_refetch_task(&task_id, ctx);
                         });
@@ -724,14 +705,10 @@ impl OrchestrationEventStreamer {
         mode: FamilyDrainMode,
         ctx: &mut ModelContext<Self>,
     ) {
-        let existing_conversation_id =
-            BlocklistAIHistoryModel::as_ref(ctx).conversation_id_for_agent_id(&child_run_id);
-        if let Some(existing_conversation_id) = existing_conversation_id {
-            log::info!(
-                "[orchestration-unified-debug] ensure placeholder skip-existing \
-                 parent_conversation_id={parent_conversation_id:?} child_run_id={child_run_id} \
-                 child_conversation_id={existing_conversation_id:?}"
-            );
+        if BlocklistAIHistoryModel::as_ref(ctx)
+            .conversation_id_for_agent_id(&child_run_id)
+            .is_some()
+        {
             // Already represented locally; nothing to do.
             return;
         }
@@ -740,10 +717,6 @@ impl OrchestrationEventStreamer {
         // are the representation consumed by the viewer hierarchy.
         if mode == FamilyDrainMode::Primary && self.is_remote_run_view(parent_conversation_id, ctx)
         {
-            log::info!(
-                "[orchestration-unified-debug] ensure placeholder skip-remote-view \
-                 parent_conversation_id={parent_conversation_id:?} child_run_id={child_run_id}"
-            );
             return;
         }
         let Ok(task_id) = child_run_id.parse::<AmbientAgentTaskId>() else {
@@ -753,11 +726,6 @@ impl OrchestrationEventStreamer {
             );
             return;
         };
-        log::info!(
-            "[orchestration-unified-debug] ensure placeholder fetch-start \
-             parent_conversation_id={parent_conversation_id:?} child_run_id={child_run_id} \
-             task_id={task_id}"
-        );
         let ai_client = self.ai_client.clone();
         ctx.spawn(
             async move { ai_client.get_ambient_agent_task(&task_id).await },
@@ -791,32 +759,19 @@ impl OrchestrationEventStreamer {
             Ok(task) => task,
             Err(err) => {
                 log::warn!(
-                    "[orchestration-unified-debug] finish placeholder fetch-error \
+                    "finish placeholder fetch-error \
                      parent_conversation_id={parent_conversation_id:?} \
                      child_run_id={child_run_id} error={err:#}"
                 );
                 return;
             }
         };
-        log::info!(
-            "[orchestration-unified-debug] finish placeholder fetch-success \
-             parent_conversation_id={parent_conversation_id:?} child_run_id={child_run_id} \
-             task_id={} state={:?} session_id={:?} has_conversation_token={}",
-            task.task_id,
-            task.state,
-            task.session_id,
-            task.conversation_id().is_some(),
-        );
         // Re-check: a locally-started child may have stamped this run_id
         // while the fetch was in flight.
-        if let Some(existing_conversation_id) =
-            BlocklistAIHistoryModel::as_ref(ctx).conversation_id_for_agent_id(&child_run_id)
+        if BlocklistAIHistoryModel::as_ref(ctx)
+            .conversation_id_for_agent_id(&child_run_id)
+            .is_some()
         {
-            log::info!(
-                "[orchestration-unified-debug] finish placeholder skip-existing \
-                 parent_conversation_id={parent_conversation_id:?} child_run_id={child_run_id} \
-                 child_conversation_id={existing_conversation_id:?}"
-            );
             return;
         }
         let Some(terminal_surface_id) = BlocklistAIHistoryModel::as_ref(ctx)
@@ -850,12 +805,6 @@ impl OrchestrationEventStreamer {
                     ctx,
                 )
             });
-        log::info!(
-            "[orchestration-unified-debug] finish placeholder created \
-             parent_conversation_id={parent_conversation_id:?} child_run_id={child_run_id} \
-             child_conversation_id={child_conversation_id:?} \
-             terminal_surface_id={terminal_surface_id:?}"
-        );
         // Update the tracker's TrackedChild entry to record the real
         // conversation_id, replacing the orchestrator stand-in that was
         // inserted eagerly in apply_started. This ensures apply_lifecycle's
