@@ -5,8 +5,9 @@ use super::TuiClipped;
 use crate::elements::MouseStateHandle;
 use crate::elements::tui::test_support::{dispatch_presented_event, render_to_lines};
 use crate::elements::tui::{
-    TuiConstraint, TuiElement, TuiEvent, TuiFlex, TuiHoverable, TuiLayoutContext, TuiPaintContext,
-    TuiPaintSurface, TuiPoint, TuiRect, TuiScreenPoint, TuiScreenPosition, TuiSize, TuiText,
+    TuiBuffer, TuiBufferExt, TuiConstraint, TuiElement, TuiEvent, TuiFlex, TuiHoverable,
+    TuiLayoutContext, TuiPaintContext, TuiPaintSurface, TuiPoint, TuiRect, TuiScreenPoint,
+    TuiScreenPosition, TuiSize, TuiText,
 };
 use crate::event::ModifiersState;
 use crate::presenter::tui::TuiPresenter;
@@ -153,6 +154,71 @@ fn clipped_column_paints_only_the_rows_inside_the_viewport() {
         3,
         "a clipped column must paint one row per visible row, not the whole child"
     );
+}
+
+/// Renders `element` through a clipped surface and reports the painted rows
+/// alongside the scratch rows the generic widget fallback had to materialize.
+fn render_clipped(element: impl TuiElement + 'static, size: TuiSize) -> (Vec<String>, usize) {
+    App::test((), |app| async move {
+        app.read(|app_ctx| {
+            let mut element = element.finish();
+            let mut rendered_views = EntityIdMap::default();
+            let mut layout_ctx = TuiLayoutContext {
+                rendered_views: &mut rendered_views,
+            };
+            element.layout(TuiConstraint::loose(size), &mut layout_ctx, app_ctx);
+            let mut buffer = TuiBuffer::empty(TuiRect::new(0, 0, size.width, size.height));
+            let mut paint_ctx = TuiPaintContext::new(&mut rendered_views);
+            let scratch_rows = {
+                let mut surface = TuiPaintSurface::new(&mut buffer);
+                element.render(TuiScreenPosition::new(0, 0), &mut surface, &mut paint_ctx);
+                surface.widget_scratch_rows()
+            };
+            (buffer.to_lines(), scratch_rows)
+        })
+    })
+}
+
+/// A tall text block scrolled deep into the window paints its visible slice
+/// without materializing the rows above it, so paint cost tracks the viewport
+/// rather than the scroll offset. Handing the whole rect to the generic widget
+/// fallback would allocate and render every row from the block's first down to
+/// the last visible one.
+#[test]
+fn deeply_clipped_text_does_not_materialize_the_rows_above_the_window() {
+    let lines = (0..400)
+        .map(|index| format!("row{index:03}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let clipped =
+        TuiClipped::new(TuiText::new(lines).truncate().finish()).with_viewport_origin_y(380);
+
+    let (rows, scratch_rows) = render_clipped(clipped, TuiSize::new(6, 2));
+
+    assert_eq!(rows, vec!["row380", "row381"]);
+    assert_eq!(
+        scratch_rows, 0,
+        "a deeply clipped text block must not materialize the rows above its window"
+    );
+}
+
+/// The same holds for wrapped text, where the visible slice starts partway
+/// through a soft-wrapped logical line.
+#[test]
+fn deeply_clipped_wrapped_text_does_not_materialize_the_rows_above_the_window() {
+    // 200 logical lines that each wrap into two rows at width 4.
+    let lines = (0..200)
+        .map(|index| format!("ab{index:02}cd"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let clipped = TuiClipped::new(TuiText::new(lines).finish()).with_viewport_origin_y(301);
+
+    let (rows, scratch_rows) = render_clipped(clipped, TuiSize::new(4, 2));
+
+    // Row 301 is the tail of logical line 150 ("ab150cd" wraps to "ab15" then
+    // "0cd "), row 302 the head of line 151.
+    assert_eq!(rows, vec!["0cd ", "ab15"]);
+    assert_eq!(scratch_rows, 0);
 }
 
 /// A multi-row child straddling the top of the window keeps painting the rows

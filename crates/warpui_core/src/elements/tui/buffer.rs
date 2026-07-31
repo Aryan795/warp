@@ -11,7 +11,9 @@
 //! columns of wide graphemes so every glyph appears exactly once (mirroring how
 //! ratatui's own `Buffer` debug output collapses multi-width cells).
 
+use std::cell::Cell as StdCell;
 use std::ops::Range;
+use std::rc::Rc;
 
 use ratatui::buffer::CellWidth;
 pub use ratatui::buffer::{Buffer as TuiBuffer, Cell};
@@ -97,6 +99,10 @@ pub struct TuiPaintSurface<'a> {
     /// Screen-space clip applied on top of the buffer's own extent. `None`
     /// means the buffer's extent is the only bound.
     clip: Option<ScreenBounds>,
+    /// Rows of scratch buffer the generic [`render_widget`](Self::render_widget)
+    /// fallback has materialized, shared with every surface clipped from this
+    /// one. See [`widget_scratch_rows`](Self::widget_scratch_rows).
+    scratch_rows: Rc<StdCell<usize>>,
 }
 
 impl<'a> TuiPaintSurface<'a> {
@@ -111,6 +117,7 @@ impl<'a> TuiPaintSurface<'a> {
             ),
             buffer_origin,
             clip: None,
+            scratch_rows: Rc::default(),
         }
     }
 
@@ -121,6 +128,7 @@ impl<'a> TuiPaintSurface<'a> {
             buffer,
             screen_origin,
             clip: None,
+            scratch_rows: Rc::default(),
         }
     }
 
@@ -138,7 +146,19 @@ impl<'a> TuiPaintSurface<'a> {
             screen_origin: self.screen_origin,
             buffer_origin: self.buffer_origin,
             clip: Some(clip),
+            scratch_rows: self.scratch_rows.clone(),
         }
+    }
+
+    /// How many scratch rows the generic widget fallback has materialized
+    /// through this surface, or any surface clipped from it.
+    ///
+    /// That fallback is the one paint path whose cost is not bounded by the
+    /// visible window, so this is the signal that an element handed over more
+    /// rows than the surface can show. Elements that window their own content
+    /// keep it at zero.
+    pub fn widget_scratch_rows(&self) -> usize {
+        self.scratch_rows.get()
     }
 
     /// The half-open range of absolute screen rows this surface can paint.
@@ -156,6 +176,31 @@ impl<'a> TuiPaintSurface<'a> {
         top < rows.end && bottom > rows.start && top < bottom
     }
 
+    /// The half-open range of an element's **own** rows (row 0 being its first)
+    /// that this surface can paint, or `None` when it is clipped away entirely.
+    ///
+    /// An element whose content can be produced from an arbitrary starting row
+    /// uses this to render only its visible slice, instead of handing the whole
+    /// rect to [`render_widget`](Self::render_widget) and paying for every row
+    /// above the window (see [`TuiText`](super::TuiText)).
+    pub fn visible_element_rows(
+        &self,
+        origin: TuiScreenPosition,
+        size: TuiSize,
+    ) -> Option<Range<u16>> {
+        let visible = self
+            .paintable_bounds()
+            .intersection(ScreenBounds::of(origin, size));
+        if visible.is_empty() {
+            return None;
+        }
+        let start = u16::try_from(visible.top.saturating_sub(origin.y)).unwrap_or(u16::MAX);
+        let end = u16::try_from(visible.bottom.saturating_sub(origin.y))
+            .unwrap_or(u16::MAX)
+            .min(size.height);
+        (start < end).then_some(start..end)
+    }
+
     /// Renders a ratatui widget within absolute screen bounds.
     ///
     /// A widget that fits entirely inside the paintable bounds is rendered
@@ -164,6 +209,12 @@ impl<'a> TuiPaintSurface<'a> {
     /// visible one, and only the visible window is copied out — ratatui widgets
     /// clip their area to the target buffer without skipping leading rows, so
     /// they cannot be rendered directly at a negative offset.
+    ///
+    /// That fallback costs a row for every row above the window, so an element
+    /// able to produce its content from an arbitrary starting row should ask
+    /// [`visible_element_rows`](Self::visible_element_rows) and hand over only
+    /// its visible slice. [`TuiText`](super::TuiText) does; the fallback remains
+    /// for partial *horizontal* clipping and for widgets with no such seam.
     pub fn render_widget(
         &mut self,
         widget: impl Widget,
@@ -193,6 +244,8 @@ impl<'a> TuiPaintSurface<'a> {
         let scratch_height = u16::try_from(visible.bottom.saturating_sub(origin.y))
             .unwrap_or(u16::MAX)
             .min(size.height);
+        self.scratch_rows
+            .set(self.scratch_rows.get() + usize::from(scratch_height));
         let mut scratch = TuiBuffer::empty(TuiRect::new(0, 0, size.width, scratch_height));
         widget.render(scratch.area, &mut scratch);
         for y in visible.top..visible.bottom {

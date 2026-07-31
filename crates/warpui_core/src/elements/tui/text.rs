@@ -253,6 +253,15 @@ impl TuiText {
             paragraph
         }
     }
+
+    /// The paragraph positioned to start at rendered row `first_row`.
+    ///
+    /// `Paragraph`'s vertical scroll drops the leading rows before it paints,
+    /// so a text element deep inside a clipped viewport can paint its visible
+    /// slice without materializing the rows above it.
+    fn paragraph_from_row(&self, width: u16, first_row: u16) -> Paragraph<'_> {
+        self.paragraph(width).scroll((first_row, 0))
+    }
 }
 
 impl TuiElement for TuiText {
@@ -291,7 +300,20 @@ impl TuiElement for TuiText {
         if size.width == 0 || size.height == 0 {
             return;
         }
-        surface.render_widget(self.paragraph(size.width), origin, size);
+        // Paint only the rows the surface can actually show. A tall text block
+        // scrolled deep into a clipped viewport would otherwise hand its whole
+        // rect to `render_widget`, whose generic fallback has to materialize
+        // every row from the first down to the last visible one — making paint
+        // scale with the scroll offset instead of the viewport.
+        let Some(rows) = surface.visible_element_rows(origin, size) else {
+            return;
+        };
+        let visible_size = TuiSize::new(size.width, rows.end - rows.start);
+        surface.render_widget(
+            self.paragraph_from_row(size.width, rows.start),
+            origin.offset(0, i32::from(rows.start)),
+            visible_size,
+        );
     }
 
     fn size(&self) -> Option<TuiSize> {
