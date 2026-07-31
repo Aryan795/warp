@@ -6,24 +6,19 @@
 //! (`run_session_linked`), REST seeds/restore rows, and in-band children
 //! registered by the local `StartAgentExecutor`. Each parent family holds one
 //! tracker; the only behavioral difference between consumers is captured by
-//! [`OrchestrationEventConsumer`] (see TECH QUALITY-928 §7.2).
+//! [`OrchestrationEventConsumer`].
 //!
 //! The tracker owns its internal state machine and the classification of
 //! signals into placeholder / status / fetch / pane actions. Every child
 //! placeholder it materializes is the single unified `is_remote_child` flavor
-//! (TECH QUALITY-928 §7.4) regardless of Primary/Observer consumption.
-//! [`OrchestrationEventConsumer`] is a runtime property of family-event
-//! consumption and cursor responsibility only — not authenticated ownership,
-//! permissions, or pane capability, and never a persisted conversation flavor.
-//! Claim-time metadata fetches route through the shared
-//! `AgentConversationsModel` fetch authority (§7.6, item 1).
+//! regardless of Primary/Observer consumption. [`OrchestrationEventConsumer`]
+//! is a runtime property of family-event consumption and cursor responsibility
+//! only — not authenticated ownership, permissions, or pane capability, and
+//! never a persisted conversation flavor. Claim-time metadata fetches route
+//! through the shared `AgentConversationsModel` fetch authority.
 //!
-//! The remaining side effect — persisting the placeholder conversation and
-//! materializing the child pane through `BlocklistAIHistoryModel` — is tracked
-//! in the tracker's in-memory map here and wired to the history/pane path by
-//! M2 (unified pane path). The `ctx`-driven pill-bar broadcasts
-//! (`ChildSpawned` / `ChildStatusChanged`) are already emitted so downstream
-//! views can be developed against them.
+//! Pill-bar broadcasts (`ChildSpawned` / `ChildStatusChanged`) are emitted
+//! via the `ctx` so downstream views can consume them without polling.
 
 use std::collections::{HashMap, HashSet};
 
@@ -40,11 +35,9 @@ use super::orchestration_event_streamer::{
     conversation_status_from_lifecycle_event_type,
 };
 use crate::ai::agent::conversation::AIConversationId;
-// The real metadata-fetch dispatch routes through the shared
-// `AgentConversationsModel` fetch authority (TECH QUALITY-928 §7.6, item 1).
-// It is compiled out of unit-test builds so the tracker state machine can be
-// exercised without installing the model's singleton dependency graph; the
-// `#[cfg(test)]` dispatch-counter path stands in for it there.
+// Compiled out of unit-test builds so the tracker state machine can be
+// exercised without installing the full model singleton graph; the
+// `#[cfg(test)]` dispatch-counter path stands in instead.
 #[cfg(not(test))]
 use crate::ai::agent_conversations_model::AgentConversationsModel;
 use crate::ai::ambient_agents::{AmbientAgentTask, AmbientAgentTaskId, AmbientAgentTaskState};
@@ -101,14 +94,12 @@ pub struct TrackedChild {
     pub last_state: Option<AmbientAgentTaskState>,
     /// True once pane materialization has been requested for this child.
     pub pane_materialized: bool,
-    /// Intended persisted placeholder flavor for this child (TECH
-    /// QUALITY-928 §7.4). `true` for every tracker-materialized placeholder
-    /// — owner-side discoveries and viewer-created children alike write the
-    /// single unified `is_remote_child` marker, never `is_viewing_shared_session`
-    /// (which stays reserved for the parent viewer placeholder). `false` only
-    /// for in-band children, which already own a real local conversation and
-    /// are observed for status only. The M2 pane path consumes this when
-    /// persisting the placeholder conversation.
+    /// `true` for every tracker-materialized placeholder — owner-side
+    /// discoveries and viewer-created children alike use the single unified
+    /// `is_remote_child` marker, never `is_viewing_shared_session` (which is
+    /// reserved for the parent viewer placeholder). `false` only for in-band
+    /// children, which already own a real local conversation and are tracked
+    /// for status only.
     pub is_remote_child: bool,
 }
 
@@ -128,9 +119,8 @@ pub struct OrchestrationChildTracker {
     /// by the executor, so the tracker observes them for status only and
     /// never issues a discovery/claim metadata fetch on their behalf.
     in_band_children: HashSet<AmbientAgentTaskId>,
-    /// In-flight metadata fetches keyed by `run_id`. Unifies today's
-    /// `remote_child_placeholder_fetches` guard and OVM's dispatch guard so a
-    /// second discovery signal for a run already being fetched is a no-op.
+    /// In-flight metadata fetches keyed by `run_id`. A second discovery signal
+    /// for a run already being fetched is a no-op.
     metadata_fetches: HashSet<String>,
     /// Session ids delivered by `run_session_linked` before the child's
     /// placeholder exists; applied when the child is created.
@@ -157,11 +147,9 @@ impl OrchestrationChildTracker {
         }
     }
 
-    /// The single entry point for all child state changes. Implements the
-    /// four-step logic from TECH QUALITY-928 §7.2:
+    /// The single entry point for all child state changes:
     ///
-    /// 0. Drop tombstoned runs (and, in T2, runs owned by a non-placeholder
-    ///    local conversation).
+    /// 0. Drop tombstoned runs.
     /// 1. Create-or-update the placeholder (`is_remote_child = true`).
     /// 2. Write status through on `Lifecycle` signals (sole status writer).
     /// 3. Refetch metadata while `session_id` is missing or the pane is not
@@ -179,10 +167,6 @@ impl OrchestrationChildTracker {
         // or pane request — including across the metadata-fetch await and the
         // cancel-during-spawn race — so a locally killed run cannot be
         // resurrected mid-fetch.
-        //
-        // T2: also drop runs owned by a non-placeholder local conversation
-        // (local in-band children observed for status only), by consulting
-        // `BlocklistAIHistoryModel`.
         if killed_run_ids.contains(child_run_id) {
             self.forget_run(child_run_id);
             return;
@@ -253,10 +237,8 @@ impl OrchestrationChildTracker {
     ) {
         if self.children.contains_key(&task_id) {
             let status = conversation_status_from_lifecycle_event_type(kind);
-            // Write the new status through to the history model so the pill
-            // bar badge reflects the lifecycle transition immediately. Lookup
-            // is by run_id (the agent-id index populated by
-            // `assign_run_id_for_conversation` when the placeholder is created).
+            // Write status through immediately so the pill bar badge reflects
+            // the lifecycle transition without waiting for a redraw cycle.
             #[cfg(not(test))]
             {
                 let child_info = {
@@ -299,8 +281,7 @@ impl OrchestrationChildTracker {
     /// Registers an in-band child (created by this process) with its existing
     /// local conversation. Marks the run already-represented so later
     /// `Started`/`Lifecycle` signals are idempotent status updates rather than
-    /// placeholder creation, replacing the old implicit
-    /// `conversation_id_for_agent_id(...).is_none()` guard.
+    /// placeholder creation.
     fn register_in_band_child(
         &mut self,
         task_id: AmbientAgentTaskId,
@@ -366,15 +347,9 @@ impl OrchestrationChildTracker {
             return;
         }
 
-        // Materialize the unified child placeholder (TECH QUALITY-928 §7.4).
-        // The tracker records the intended `is_remote_child = true` state here
-        // in both owner and viewer mode; the M2 pane path performs the
-        // corresponding `BlocklistAIHistoryModel` write (a
-        // `start_new_child_conversation` stamped with `is_remote_child = true`,
-        // `parent_conversation_id`, and the child `run_id`), keyed off this
-        // entry. Until that lands, the tracked entry stands in against the
-        // mode's placeholder conversation id so the state machine is
-        // exercisable end to end. Fall back to any pending session link.
+        // Materialize the unified child placeholder. The tracker records
+        // `is_remote_child = true` in both owner and viewer mode. Fall back
+        // to any pending session link.
         let session_id = seed_session_id.or_else(|| self.pending_session_ids.remove(&task_id));
         let conversation_id = self.placeholder_conversation_id();
         self.insert_child(
@@ -442,7 +417,6 @@ impl OrchestrationChildTracker {
     }
 
     /// Step 4: request pane materialization once a `session_id` is known.
-    /// No-op stub in T1 — M2 implements the unified pane path.
     fn maybe_request_pane_materialization(
         &mut self,
         task_id: AmbientAgentTaskId,
@@ -457,8 +431,7 @@ impl OrchestrationChildTracker {
         }
     }
 
-    /// Marks the child's pane as materialized. T1 records intent only; M2
-    /// dispatches the actual live-attach / transcript materialization.
+    /// Marks the child's pane as materialized.
     fn request_pane_materialization(&mut self, task_id: AmbientAgentTaskId) {
         if let Some(child) = self.children.get_mut(&task_id) {
             child.pane_materialized = true;
@@ -483,14 +456,14 @@ impl OrchestrationChildTracker {
     }
 
     /// Starts (or dedupes) a metadata fetch for a run. Routes through
-    /// `AgentConversationsModel::get_or_async_fetch_task_data` — the one fetch
-    /// authority with in-flight dedup, failure cooldowns, and a shared cache
-    /// (TECH QUALITY-928 §7.6, item 1). A synchronous cache hit resolves the
-    /// placeholder inline via [`Self::apply_seeded`]; a cache miss spawns the
-    /// shared fetch and resolves on a later re-drive (a subsequent
-    /// `child_agent_started`/lifecycle signal finds the cache warm). The
-    /// tracker's own `metadata_fetches` guard suppresses redundant dispatches
-    /// while a fetch is outstanding.
+    /// `AgentConversationsModel::get_or_async_fetch_task_data` — the shared
+    /// fetch authority with in-flight dedup, failure cooldowns, and a cache.
+    /// A synchronous cache hit resolves the placeholder inline via
+    /// [`Self::apply_seeded`]; a cache miss spawns the shared fetch and
+    /// resolves on a later re-drive (a subsequent `child_agent_started` or
+    /// lifecycle signal finds the cache warm). The tracker's own
+    /// `metadata_fetches` guard suppresses redundant dispatches while a
+    /// fetch is outstanding.
     ///
     /// The `run_id` guard is inserted first so the cache-hit `apply_seeded`
     /// (which clears it) and the in-flight case are both handled correctly.

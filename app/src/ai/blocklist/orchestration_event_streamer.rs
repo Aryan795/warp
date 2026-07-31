@@ -45,18 +45,16 @@ const SSE_DRAIN_INTERVAL_MS: u64 = 500;
 /// Cap killed-run tombstones while keeping normal sessions well below the limit.
 const MAX_KILLED_RUN_IDS: usize = 1024;
 /// Max child runs fetched per cold-start `?ancestor_run_id=` REST seed in
-/// viewer mode. Matches the legacy `OrchestrationViewerModel` poller's value
-/// (the server caps at 100 anyway).
+/// viewer mode. The server caps at 100 regardless.
 const VIEWER_MODE_SEED_FETCH_LIMIT: i32 = 100;
 
 /// Wire `event_type` for a parent's own inbox message events.
 const EVENT_NEW_MESSAGE: &str = "new_message";
 /// Wire `event_type` emitted on a PARENT run when a child task is created
 /// (`AddTask` with `parent_run_id`); the child run id is carried in `ref_id`.
-/// Consumed only under `OrchestrationUnifiedStack`. See TECH QUALITY-928 §3.2.
 const EVENT_CHILD_AGENT_STARTED: &str = "child_agent_started";
 /// Wire `event_type` emitted on a CHILD run when its sandbox session links;
-/// the session UUID is carried in `ref_id`. See TECH QUALITY-928 §3.2 (S5).
+/// the session UUID is carried in `ref_id`.
 const EVENT_RUN_SESSION_LINKED: &str = "run_session_linked";
 
 /// Per-event item delivered from the SSE background task to the entity.
@@ -85,35 +83,19 @@ struct SseForwardingConsumer {
 }
 
 /// Per-event item delivered from the ancestor SSE background task to the
-/// entity. Mirrors [`SseStreamItem`] but does not currently carry a
-/// hydrated message: the only ancestor consumer today is viewer mode,
-/// which surfaces only lifecycle transitions and so skips message
-/// hydration. If/when the ancestor path picks up a non-viewer caller
-/// (e.g. a local orchestrator subscribing to its own `ancestor_run_id`
-/// stream in lieu of N per-run-ids streams for its children — see
-/// [`AncestorForwardingConsumer`]), this struct would gain a hydrated-
-/// message field analogous to [`SseStreamItem`].
+/// entity. Carries no hydrated message because the ancestor consumer only
+/// surfaces lifecycle transitions.
 struct AncestorSseStreamItem {
     event: AgentRunEvent,
 }
 
-/// Forwarding consumer used by the ancestor SSE driver. Mirrors
-/// [`SseForwardingConsumer`] but does no message hydration: the only
-/// current caller is the shared-session viewer's pill bar, which only
-/// surfaces lifecycle events.
-///
-/// Future direction: a local orchestrator could subscribe to its own
-/// `ancestor_run_id` stream (one SSE per parent family) instead of
-/// having each local child open its own per-run-ids stream. At that
-/// point this consumer would gain an opt-in hydrate flag analogous to
-/// [`SseForwardingConsumer::hydrate_new_messages`].
+/// Forwarding consumer used by the ancestor SSE driver. Skips message
+/// hydration because the ancestor stream surfaces lifecycle events only.
 struct AncestorForwardingConsumer {
     tx: mpsc::UnboundedSender<AncestorSseStreamItem>,
 }
 
-/// State for an ancestor SSE connection. Mirrors [`SseConnectionState`]
-/// but parameterised on [`AncestorSseStreamItem`] because the only
-/// current caller (viewer mode) does not hydrate messages.
+/// State for an ancestor SSE connection.
 struct AncestorSseConnectionState {
     event_receiver: mpsc::UnboundedReceiver<AncestorSseStreamItem>,
     generation: u64,
@@ -353,12 +335,10 @@ enum DesiredSseFilter {
     NoFilter,
 }
 
-/// Which family-event consumer role a drain is servicing. Captures the only
-/// two behavioral differences the fan-out dispatches on (TECH QUALITY-928
-/// §7.3): parent-self delivery (Primary only) and cursor authority (Primary
-/// pushes the server cursor, Observer persists locally only). This is the
-/// streamer's counterpart to [`OrchestrationEventConsumer`] and likewise says
-/// nothing about authenticated ownership or pane capability.
+/// Which family-event consumer role a drain is servicing: parent-self delivery
+/// (Primary only) and cursor authority (Primary pushes the server cursor,
+/// Observer persists locally only). Says nothing about authenticated ownership
+/// or pane capability.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum FamilyDrainMode {
     Primary,
@@ -367,8 +347,7 @@ enum FamilyDrainMode {
 
 /// Classification of a single event from a parent-family (`include_self`)
 /// SSE stream. Produced by [`classify_family_event`] and fanned out by
-/// [`OrchestrationEventStreamer::drain_family_events`]. See TECH QUALITY-928
-/// §3.5 / §7.3.
+/// [`OrchestrationEventStreamer::drain_family_events`].
 #[derive(Debug, PartialEq)]
 enum FamilyEvent {
     /// Inbox message or lifecycle event on the parent's own run. Delivered by
@@ -398,7 +377,7 @@ enum FamilyEvent {
 /// the parent's own run; session links and lifecycle events are recognised
 /// only on other (child) runs; the parent's own inbox/lifecycle events
 /// become [`FamilyEvent::ParentSelf`]; everything else is
-/// [`FamilyEvent::Opaque`]. See TECH QUALITY-928 §3.5.
+/// [`FamilyEvent::Opaque`].
 fn classify_family_event(event: &AgentRunEvent, self_run_id: &str) -> FamilyEvent {
     let is_self = event.run_id == self_run_id;
     match (is_self, event.event_type.as_str()) {
@@ -556,7 +535,7 @@ impl OrchestrationEventStreamer {
     /// Fans out one family (`include_self`) SSE batch: classifies each event
     /// and routes it to the tracker (discovery / session-link / lifecycle) or
     /// Primary parent-self delivery (`ParentSelf`), then advances the cursor
-    /// with consumer-appropriate authority. See TECH QUALITY-928 §3.5 / §7.3.
+    /// with consumer-appropriate authority.
     ///
     /// The tracker is passed by value and returned so callers can keep it in
     /// `self` state without a borrow conflict against `handle_event_batch`
@@ -655,8 +634,6 @@ impl OrchestrationEventStreamer {
 
         match mode {
             FamilyDrainMode::Primary => {
-                // Deliver the parent's own inbox + lifecycle through the
-                // existing sink (which also persists the Primary cursor).
                 if !parent_self_events.is_empty() || !messages.is_empty() {
                     self.handle_event_batch(
                         cursor_conversation_id,
