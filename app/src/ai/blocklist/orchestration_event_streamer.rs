@@ -539,9 +539,10 @@ impl OrchestrationEventStreamer {
     ///
     /// The tracker is passed by value and returned so callers can keep it in
     /// `self` state without a borrow conflict against `handle_event_batch`
-    /// and `killed_run_ids`. The tracker is the sole status writer and emits
-    /// `ChildStatusChanged` from `observe_child`, so the drain does not
-    /// re-broadcast lifecycle status here.
+    /// and `killed_run_ids`. The tracker is the sole status writer for child
+    /// status and emits `ChildStatusChanged`; child lifecycle events are also
+    /// forwarded to `handle_event_batch` in Primary mode so the parent's
+    /// `OrchestrationEventService` receives them for conversation injection.
     #[allow(clippy::too_many_arguments)]
     fn drain_family_events(
         &mut self,
@@ -561,6 +562,13 @@ impl OrchestrationEventStreamer {
             .unwrap_or(previous_cursor);
 
         let mut parent_self_events = Vec::new();
+        // Child lifecycle events are also forwarded to handle_event_batch in
+        // Primary mode: `convert_lifecycle_events` (inside handle_event_batch)
+        // filters by run_id != self_run_id, so it picks up child events and
+        // injects them into OrchestrationEventService for the parent
+        // conversation. Without this, the parent's BlocklistAIController
+        // never receives child lifecycle notifications.
+        let mut child_lifecycle_for_batch = Vec::new();
         for event in events {
             match classify_family_event(&event, self_run_id) {
                 FamilyEvent::ParentSelf(event) => parent_self_events.push(event),
@@ -621,6 +629,11 @@ impl OrchestrationEventStreamer {
                     log::debug!(
                         "[orch-drain] calling observe_child(Lifecycle) for child_run_id={child_run_id}"
                     );
+                    // Also collect for handle_event_batch so OrchestrationEventService
+                    // delivers the lifecycle event to the parent conversation.
+                    if mode == FamilyDrainMode::Primary {
+                        child_lifecycle_for_batch.push(event);
+                    }
                     tracker.observe_child(
                         &child_run_id,
                         ChildSignal::Lifecycle(kind),
@@ -634,12 +647,14 @@ impl OrchestrationEventStreamer {
 
         match mode {
             FamilyDrainMode::Primary => {
-                if !parent_self_events.is_empty() || !messages.is_empty() {
+                let mut events_for_batch = parent_self_events;
+                events_for_batch.extend(child_lifecycle_for_batch);
+                if !events_for_batch.is_empty() || !messages.is_empty() {
                     self.handle_event_batch(
                         cursor_conversation_id,
                         self_run_id,
                         previous_cursor,
-                        parent_self_events,
+                        events_for_batch,
                         messages,
                         ctx,
                     );
