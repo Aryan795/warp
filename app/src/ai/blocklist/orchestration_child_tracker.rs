@@ -235,7 +235,6 @@ impl OrchestrationChildTracker {
         ctx: &mut ModelContext<OrchestrationEventStreamer>,
     ) {
         let tracker_known = self.children.contains_key(&task_id);
-        let fetch_in_flight = self.metadata_fetches.contains(run_id);
         if tracker_known {
             let status = conversation_status_from_lifecycle_event_type(kind);
             // Write status through immediately so the pill bar badge reflects

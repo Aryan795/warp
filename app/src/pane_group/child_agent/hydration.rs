@@ -204,11 +204,12 @@ impl PaneGroup {
                 // generic cloud-agent composing zero state. Register so that
                 // process_pending_remote_child_hydrations re-drives when
                 // evict_and_refetch_task fires TasksUpdated with fresh data.
-                let Some(pane_id) =
-                    self.create_owner_loading_child_placeholder(child_conversation, ctx)
-                else {
+                if self
+                    .create_owner_loading_child_placeholder(child_conversation, ctx)
+                    .is_none()
+                {
                     return;
-                };
+                }
                 self.pending_remote_child_hydrations
                     .insert(task_id, child_id);
                 self.ensure_pending_ambient_restoration_subscription(ctx);
@@ -514,8 +515,6 @@ impl PaneGroup {
                     return;
                 }
             };
-            let root_task = merged.get_root_task();
-
             let blocks_cloud_followups =
                 task.as_ref().is_none_or(AmbientAgentTask::blocks_cloud_followups);
             match completed_child_presentation(access, blocks_cloud_followups) {

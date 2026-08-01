@@ -7029,11 +7029,6 @@ impl PaneGroup {
             return false;
         };
 
-        let has_ambient_model = terminal_view
-            .as_ref(ctx)
-            .ambient_agent_view_model()
-            .is_some();
-
         if let Some(ambient_agent_view_model) = terminal_view
             .as_ref(ctx)
             .ambient_agent_view_model()
