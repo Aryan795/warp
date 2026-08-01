@@ -58,9 +58,14 @@ pub struct OrchestrationViewerModel {
     /// Secondary index keyed by stringified `run_id`, used by the streamer
     /// broadcast event handler. Kept in sync with `children`.
     children_by_run_id: HashMap<String, AmbientAgentTaskId>,
-    /// Task metadata requests in flight. Discovery and lifecycle can race;
-    /// only one request may create/adopt the durable run-id mapping.
+    /// Task metadata requests in flight (flag-OFF only). Discovery and
+    /// lifecycle can race; only one request may create/adopt the durable
+    /// run-id mapping.
     metadata_fetches: HashSet<AmbientAgentTaskId>,
+    /// Task IDs discovered via `ChildSpawned` that are waiting for task data
+    /// to arrive in the `AgentConversationsModel` cache (flag-ON only).
+    /// Drained on `TasksUpdated` events.
+    pending_task_ids_for_discovery: HashSet<AmbientAgentTaskId>,
     /// Periodic timer fetching the claim-time `session_id` for
     /// not-yet-claimed children.
     pending_session_id_poll_handle: Option<SpawnedFutureHandle>,
@@ -105,6 +110,10 @@ impl OrchestrationViewerModel {
                 | AgentConversationsModelEvent::NewTasksReceived
                 | AgentConversationsModelEvent::TasksUpdated => {
                     me.register_viewer_mode_consumer_if_possible(ctx);
+                    // Flag-ON: drain children waiting for task data.
+                    if FeatureFlag::OrchestrationUnifiedStack.is_enabled() {
+                        me.drain_pending_task_discoveries(ctx);
+                    }
                 }
                 AgentConversationsModelEvent::ConversationUpdated { .. }
                 | AgentConversationsModelEvent::ConversationArtifactsUpdated { .. } => {}
@@ -118,6 +127,7 @@ impl OrchestrationViewerModel {
             children: HashMap::new(),
             children_by_run_id: HashMap::new(),
             metadata_fetches: HashSet::new(),
+            pending_task_ids_for_discovery: HashSet::new(),
             pending_session_id_poll_handle: None,
             #[cfg(test)]
             metadata_fetch_dispatch_count: 0,
@@ -285,12 +295,26 @@ impl OrchestrationViewerModel {
         ctx: &mut ModelContext<Self>,
     ) {
         if FeatureFlag::OrchestrationUnifiedStack.is_enabled() {
-            if !self.metadata_fetches.insert(task_id) {
-                return;
+            // Use the shared ACM fetch authority instead of a direct ai_client
+            // call. A cache hit registers the child immediately; a miss adds to
+            // pending_task_ids_for_discovery and resolves on the next
+            // TasksUpdated event.
+            let cached = AgentConversationsModel::handle(ctx).update(ctx, |model, ctx| {
+                model.get_or_async_fetch_task_data(&task_id, ctx)
+            });
+            if let Some(task) = cached {
+                self.register_child(task, ctx);
+            } else {
+                self.pending_task_ids_for_discovery.insert(task_id);
             }
-        } else {
-            self.metadata_fetches.insert(task_id);
+            #[cfg(test)]
+            {
+                self.metadata_fetch_dispatch_count += 1;
+            }
+            return;
         }
+        // Flag-OFF: direct fetch path.
+        self.metadata_fetches.insert(task_id);
         #[cfg(test)]
         {
             self.metadata_fetch_dispatch_count += 1;
@@ -315,6 +339,24 @@ impl OrchestrationViewerModel {
                 me.register_child(task, ctx);
             },
         );
+    }
+
+    /// Drains children in `pending_task_ids_for_discovery` whose task data
+    /// has arrived in the `AgentConversationsModel` cache and registers them.
+    fn drain_pending_task_discoveries(&mut self, ctx: &mut ModelContext<Self>) {
+        let ready: Vec<_> = self
+            .pending_task_ids_for_discovery
+            .iter()
+            .filter_map(|&task_id| {
+                AgentConversationsModel::as_ref(ctx)
+                    .get_task_data(&task_id)
+                    .map(|task| (task_id, task))
+            })
+            .collect();
+        for (task_id, task) in ready {
+            self.pending_task_ids_for_discovery.remove(&task_id);
+            self.register_child(task, ctx);
+        }
     }
 
     // ---- Shared child registration (used by both paths) -----------------

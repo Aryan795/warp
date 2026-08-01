@@ -100,9 +100,6 @@ impl PaneGroup {
             return;
         };
         let task_id = child_conversation.task_id().or(Some(task.task_id));
-        AgentConversationsModel::handle(ctx).update(ctx, |model, ctx| {
-            model.cache_task_data(task.clone(), ctx);
-        });
         let materialization = decide_child_pane_materialization(&task);
         self.materialize_viewer_child_pane(child_conversation, task_id, Some(materialization), ctx);
     }

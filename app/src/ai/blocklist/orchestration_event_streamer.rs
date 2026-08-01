@@ -792,45 +792,18 @@ impl OrchestrationEventStreamer {
             "[orch-drain] creating remote-child placeholder for \
              child_run_id={child_run_id} name={name:?} parent={parent_conversation_id:?}"
         );
-        let child_conversation_id =
-            BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
-                history.ensure_remote_child_conversation(
-                    terminal_surface_id,
-                    parent_conversation_id,
-                    child_run_id.clone(),
-                    task_id,
-                    name,
-                    fallback_title,
-                    harness,
-                    ctx,
-                )
-            });
-        // Update the tracker's TrackedChild entry to record the real
-        // conversation_id, replacing the orchestrator stand-in that was
-        // inserted eagerly in apply_started. This ensures apply_lifecycle's
-        // history lookup (conversation_id_for_agent_id) resolves correctly.
-        match mode {
-            FamilyDrainMode::Primary => {
-                if let Some(stream) = self.streams.get_mut(&parent_conversation_id)
-                    && let Some(tracker) = stream.tracker.as_mut()
-                {
-                    tracker.stamp_conversation_id_for_run(&child_run_id, child_conversation_id);
-                }
-            }
-            FamilyDrainMode::Observer => {
-                let parent_task_id = BlocklistAIHistoryModel::as_ref(ctx)
-                    .conversation(&parent_conversation_id)
-                    .and_then(|conversation| conversation.task_id());
-                if let Some(parent_task_id) = parent_task_id
-                    && let Some(tracker) = self
-                        .viewer_mode_orchestrators
-                        .get_mut(&parent_task_id)
-                        .and_then(|entry| entry.tracker.as_mut())
-                {
-                    tracker.stamp_conversation_id_for_run(&child_run_id, child_conversation_id);
-                }
-            }
-        }
+        BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+            history.ensure_remote_child_conversation(
+                terminal_surface_id,
+                parent_conversation_id,
+                child_run_id.clone(),
+                task_id,
+                name,
+                fallback_title,
+                harness,
+                ctx,
+            )
+        });
     }
 
     /// Flag-on owner drain: reads the conversation's family SSE buffer and
