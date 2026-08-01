@@ -267,6 +267,7 @@ pub use crate::user_config::{WarpConfig, WarpConfigUpdateEvent};
 pub use crate::util::image::{
     MAX_IMAGE_COUNT_FOR_QUERY, MAX_IMAGE_SIZE_BYTES, MIME_SNIFF_BYTES, ProcessImageResult,
     infer_mime_type, is_supported_image_mime_type, process_image_for_agent,
+    process_image_for_agent_async,
 };
 pub use crate::util::repo_detection::{RepoDetectionSessionType, detect_possible_git_repo};
 pub use crate::util::time_format::format_elapsed_seconds;

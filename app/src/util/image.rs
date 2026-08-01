@@ -116,6 +116,20 @@ pub enum ProcessImageResult {
     Error(ImageError),
 }
 
+/// Async version of [`process_image_for_agent`] that runs the CPU-heavy
+/// decode/resize on the shared blocking thread pool.
+///
+/// Decoding and resizing a large image can take hundreds of milliseconds
+/// (seconds on slower machines). Running it inline on an async executor
+/// worker stalls that worker; on runtimes configured with a single worker
+/// thread (unit tests and `integration_tests`/eval builds, see
+/// `Background::default()` in `warpui_core`), it freezes all timers and I/O
+/// — including the agent event stream — for the duration of the decode.
+/// Prefer this over [`process_image_for_agent`] in async contexts.
+pub async fn process_image_for_agent_async(image_data: Vec<u8>) -> ProcessImageResult {
+    blocking::unblock(move || process_image_for_agent(&image_data)).await
+}
+
 /// Processes an image for agent mode: resizes if needed and checks size limits.
 ///
 /// This applies the same processing that user-attached images go through.

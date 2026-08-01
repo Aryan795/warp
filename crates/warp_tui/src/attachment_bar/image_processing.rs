@@ -6,7 +6,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose;
 use warp::tui_export::{
     ImageContext, MAX_IMAGE_SIZE_BYTES, MIME_SNIFF_BYTES, ProcessImageResult, infer_mime_type,
-    is_supported_image_mime_type, process_image_for_agent,
+    is_supported_image_mime_type, process_image_for_agent, process_image_for_agent_async,
 };
 use warpui_core::clipboard::{ClipboardContent, ImageData};
 use warpui_core::clipboard_utils::CLIPBOARD_IMAGE_MIME_TYPES;
@@ -114,7 +114,9 @@ pub(super) async fn process_paths(paths: Vec<PathBuf>) -> Result<Vec<ImageContex
                 path.display()
             ));
         }
-        let data = match process_image_for_agent(&bytes) {
+        // Decode/resize on the blocking pool so a large image doesn't stall
+        // the async executor (see `process_image_for_agent_async`).
+        let data = match process_image_for_agent_async(bytes).await {
             ProcessImageResult::Success { data } => data,
             ProcessImageResult::TooLarge => {
                 return Err(format!("Image is too large: {}.", path.display()));

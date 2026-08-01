@@ -52,6 +52,20 @@ fn test_resize_image_small_image_unchanged() {
 }
 
 #[test]
+fn test_process_image_for_agent_async_matches_sync() {
+    let small_png = create_small_test_png();
+    let result = futures::executor::block_on(process_image_for_agent_async(small_png.clone()));
+
+    match result {
+        ProcessImageResult::Success { data } => {
+            // Small images are returned unchanged, matching the sync path.
+            assert_eq!(data, small_png);
+        }
+        other => panic!("Expected Success, got {:?}", other),
+    }
+}
+
+#[test]
 fn test_process_image_for_agent_invalid_data() {
     let invalid_data = vec![0u8; 100];
     let result = process_image_for_agent(&invalid_data);

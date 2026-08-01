@@ -105,7 +105,7 @@ use crate::terminal::shell::ShellType;
 use crate::terminal::{ShellLaunchData, TerminalModel};
 #[cfg(feature = "local_fs")]
 use crate::util::image::{
-    ProcessImageResult, is_supported_image_mime_type, process_image_for_agent,
+    ProcessImageResult, is_supported_image_mime_type, process_image_for_agent_async,
 };
 #[cfg(feature = "local_fs")]
 use crate::util::openable_file_type::is_binary_file;
@@ -1336,9 +1336,13 @@ async fn read_binary_file_context(
     };
 
     let mime_type = from_path(path).first_or_octet_stream().to_string();
-    let processed_content = if is_supported_image_mime_type(&mime_type) {
-        match process_image_for_agent(&content) {
-            ProcessImageResult::Success { data } => Some(data),
+    let final_content = if is_supported_image_mime_type(&mime_type) {
+        // Decode/resize on the blocking pool: doing it inline stalls the
+        // async executor for the duration of the decode. On the
+        // single-worker runtime used by eval/integration builds this
+        // freezes all timers and I/O (including the agent event stream).
+        match process_image_for_agent_async(content).await {
+            ProcessImageResult::Success { data } => data,
             ProcessImageResult::TooLarge => {
                 log::warn!("Image file too large after processing: {}", path.display());
                 return Ok(BinaryFileReadResult::ProcessingFailed {
@@ -1353,10 +1357,8 @@ async fn read_binary_file_context(
             }
         }
     } else {
-        None
+        content
     };
-
-    let final_content = processed_content.unwrap_or(content);
     if final_content.len() > max_bytes {
         return Ok(BinaryFileReadResult::TooLarge {
             size_bytes: final_content.len(),
