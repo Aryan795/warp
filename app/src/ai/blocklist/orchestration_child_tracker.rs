@@ -1,24 +1,29 @@
-//! Unified child-tracking state machine for orchestration.
+//! Guides child runs from first discovery through to pane materialization.
 //!
-//! `OrchestrationChildTracker` is the single entry point for every way a
-//! child run can become known — creation-time discovery
-//! (`child_agent_started`), lifecycle events, sandbox session links
-//! (`run_session_linked`), REST seeds/restore rows, and in-band children
-//! registered by the local `StartAgentExecutor`. Each parent family holds one
-//! tracker; the only behavioral difference between consumers is captured by
-//! [`OrchestrationEventConsumer`].
+//! When the parent's SSE stream fires a `child_agent_started` event, the
+//! tracker creates a local placeholder, fetches the child's task metadata,
+//! waits for the sandbox session to be linked, and then requests the pane
+//! group to open a live or transcript pane. Every signal a child can produce
+//! — `child_agent_started`, lifecycle events, `run_session_linked`,
+//! REST seed rows, and in-band registrations from `StartAgentExecutor` —
+//! enters through the single [`OrchestrationChildTracker::observe_child`]
+//! entry point.
 //!
-//! The tracker owns its internal state machine and the classification of
-//! signals into placeholder / status / fetch / pane actions. Every child
-//! placeholder it materializes is the single unified `is_remote_child` flavor
-//! regardless of Primary/Observer consumption. [`OrchestrationEventConsumer`]
-//! is a runtime property of family-event consumption and cursor responsibility
-//! only — not authenticated ownership, permissions, or pane capability, and
-//! never a persisted conversation flavor. Claim-time metadata fetches route
-//! through the shared `AgentConversationsModel` fetch authority.
+//! [`OrchestrationEventConsumer`] captures the one behavioral axis between
+//! orchestrator and shared-session observer: who pushes the server cursor
+//! and who receives the parent's own inbox events. It says nothing about
+//! authenticated ownership, permissions, or pane capability.
 //!
 //! Pill-bar broadcasts (`ChildSpawned` / `ChildStatusChanged`) are emitted
-//! via the `ctx` so downstream views can consume them without polling.
+//! via the `ctx` so downstream views can react without polling.
+//!
+//! # TODO: unify `is_remote_child` and `is_viewing_shared_session`
+//! Both flags mark conversations that are local placeholders for a remote run
+//! accessed via the shared-session protocol. The only semantic difference is
+//! which code path created the placeholder. A future cleanup should merge them
+//! into a single `is_remote_placeholder` flag and persist all placeholder
+//! conversations uniformly, making `is_durable_observer_parent` (M3)
+//! unnecessary.
 
 use std::collections::{HashMap, HashSet};
 
