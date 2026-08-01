@@ -3476,7 +3476,7 @@ impl AIConversation {
         &mut self,
         ctx: &mut ModelContext<BlocklistAIHistoryModel>,
     ) {
-        // Shared-session views remain ephemeral.
+        // We should not persist non-local conversations (e.g. shared sessions).
         if self.is_viewing_shared_session {
             return;
         }
