@@ -346,6 +346,7 @@ pub struct AIConversation {
     /// these conversations — the remote worker's own client handles status
     /// reporting.
     is_remote_child: bool,
+
     /// The last event sequence number observed from the v2 orchestration
     /// event log. Used on restore to resume event delivery without
     /// re-delivering already-processed events.
