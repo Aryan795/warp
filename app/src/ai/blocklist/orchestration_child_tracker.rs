@@ -39,34 +39,12 @@ use super::orchestration_event_streamer::{
     OrchestrationEventStreamer, OrchestrationEventStreamerEvent,
     conversation_status_from_lifecycle_event_type,
 };
-use crate::ai::agent::conversation::AIConversationId;
 // Compiled out of unit-test builds so the tracker state machine can be
 // exercised without installing the full model singleton graph; the
 // `#[cfg(test)]` dispatch-counter path stands in instead.
 #[cfg(not(test))]
 use crate::ai::agent_conversations_model::AgentConversationsModel;
 use crate::ai::ambient_agents::{AmbientAgentTask, AmbientAgentTaskId, AmbientAgentTaskState};
-
-/// Family-event consumption role for one parent family stream.
-///
-/// Describes how this process consumes the family's SSE events and who may
-/// push the server cursor. It is **not** authenticated ownership, permissions,
-/// or pane capability:
-/// - [`Self::Primary`] delivers parent-self events and persists local +
-///   authoritative server cursor.
-/// - [`Self::Observer`] drops parent-self events and persists local cursor only.
-pub enum OrchestrationEventConsumer {
-    /// Primary consumer: deliver parent-self events and persist local +
-    /// authoritative server cursor.
-    Primary {
-        orchestrator_conversation_id: AIConversationId,
-    },
-    /// Observer consumer: drop parent-self events; persist local cursor only
-    /// (never push the server cursor).
-    Observer {
-        placeholder_conversation_id: AIConversationId,
-    },
-}
 
 /// Every way a child run can become known funnels into
 /// [`OrchestrationChildTracker::observe_child`].
@@ -83,16 +61,12 @@ pub enum ChildSignal {
     /// task row dwarfs the other variants.
     Seeded(Box<AmbientAgentTask>),
     /// A child created by this process (`run_agents` / `start_agent`): the
-    /// executor registers the child it just made with its existing local
-    /// conversation, marking it already-represented.
-    Registered { conversation_id: AIConversationId },
+    /// executor registers the child it just made, marking it already-represented.
+    Registered,
 }
 
 /// Per-child orchestration state, keyed by [`AmbientAgentTaskId`].
 pub struct TrackedChild {
-    /// The unified placeholder (or, for in-band children, the real local
-    /// conversation) representing this child.
-    pub conversation_id: AIConversationId,
     /// `None` until execution is claimed and a session is linked.
     pub session_id: Option<SessionId>,
     /// Last observed task state, when known (seeded/refetched rows).
@@ -109,11 +83,9 @@ pub struct TrackedChild {
 }
 
 /// Owns discovery, placeholder bookkeeping, claim-time metadata refetch, and
-/// pane-materialization requests for one parent family under either
-/// [`OrchestrationEventConsumer`] role.
+/// pane-materialization requests for one parent family.
 pub struct OrchestrationChildTracker {
     parent_task_id: AmbientAgentTaskId,
-    mode: OrchestrationEventConsumer,
     /// Materialized children keyed by task id.
     children: HashMap<AmbientAgentTaskId, TrackedChild>,
     /// Secondary index from stringified `run_id` to task id, kept in sync
@@ -137,11 +109,10 @@ pub struct OrchestrationChildTracker {
 }
 
 impl OrchestrationChildTracker {
-    /// Builds an empty tracker for the given parent family and mode.
-    pub fn new(parent_task_id: AmbientAgentTaskId, mode: OrchestrationEventConsumer) -> Self {
+    /// Builds an empty tracker for the given parent family.
+    pub fn new(parent_task_id: AmbientAgentTaskId) -> Self {
         Self {
             parent_task_id,
-            mode,
             children: HashMap::new(),
             children_by_run_id: HashMap::new(),
             in_band_children: HashSet::new(),
@@ -187,8 +158,8 @@ impl OrchestrationChildTracker {
         };
 
         match signal {
-            ChildSignal::Registered { conversation_id } => {
-                self.register_in_band_child(task_id, child_run_id, conversation_id, ctx);
+            ChildSignal::Registered => {
+                self.register_in_band_child(task_id, child_run_id, ctx);
             }
             ChildSignal::SessionLinked { session_uuid } => {
                 self.apply_session_linked(task_id, &session_uuid);
@@ -291,15 +262,13 @@ impl OrchestrationChildTracker {
         &mut self,
         task_id: AmbientAgentTaskId,
         run_id: &str,
-        conversation_id: AIConversationId,
         ctx: &mut ModelContext<OrchestrationEventStreamer>,
     ) {
-        // An in-band child has a real conversation, so any speculative fetch
-        // for it is moot.
+        // An in-band child has a real conversation tracked via the history
+        // model's run-id index; any speculative fetch is moot.
         self.metadata_fetches.remove(run_id);
         self.in_band_children.insert(task_id);
-        if let Some(existing) = self.children.get_mut(&task_id) {
-            existing.conversation_id = conversation_id;
+        if self.children.contains_key(&task_id) {
             return;
         }
         let session_id = self.pending_session_ids.remove(&task_id);
@@ -307,7 +276,6 @@ impl OrchestrationChildTracker {
             task_id,
             run_id,
             TrackedChild {
-                conversation_id,
                 session_id,
                 last_state: None,
                 pane_materialized: false,
@@ -356,12 +324,10 @@ impl OrchestrationChildTracker {
         // `is_remote_child = true` in both owner and viewer mode. Fall back
         // to any pending session link.
         let session_id = seed_session_id.or_else(|| self.pending_session_ids.remove(&task_id));
-        let conversation_id = self.placeholder_conversation_id();
         self.insert_child(
             task_id,
             &run_id,
             TrackedChild {
-                conversation_id,
                 session_id,
                 last_state: Some(state),
                 pane_materialized: false,
@@ -548,19 +514,6 @@ impl OrchestrationChildTracker {
         self.metadata_fetches.contains(run_id)
     }
 
-    /// Resolves the placeholder conversation id to associate a tracked child
-    /// with before T2's per-child placeholder creation lands. Both modes reuse
-    /// the mode's conversation id as a stable stand-in.
-    fn placeholder_conversation_id(&self) -> AIConversationId {
-        match &self.mode {
-            OrchestrationEventConsumer::Primary {
-                orchestrator_conversation_id,
-            } => *orchestrator_conversation_id,
-            OrchestrationEventConsumer::Observer {
-                placeholder_conversation_id,
-            } => *placeholder_conversation_id,
-        }
-    }
 }
 
 #[cfg(test)]

@@ -15,7 +15,6 @@ use warp_multi_agent_api as api;
 use warpui::App;
 
 use super::*;
-use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::ambient_agents::{AmbientAgentTask, AmbientAgentTaskId, AmbientAgentTaskState};
 use crate::ai::blocklist::history_model::BlocklistAIHistoryModel;
 use crate::server::server_api::ServerApiProvider;
@@ -73,12 +72,7 @@ fn install_streamer(app: &mut App) -> warpui::ModelHandle<OrchestrationEventStre
 }
 
 fn observer_tracker() -> OrchestrationChildTracker {
-    OrchestrationChildTracker::new(
-        task_id(PARENT_RUN_ID),
-        OrchestrationEventConsumer::Observer {
-            placeholder_conversation_id: AIConversationId::new(),
-        },
-    )
+    OrchestrationChildTracker::new(task_id(PARENT_RUN_ID))
 }
 
 #[test]
@@ -149,11 +143,10 @@ fn registered_prevents_placeholder_creation() {
         streamer.update(&mut app, |_streamer, ctx| {
             let mut tracker = observer_tracker();
             let killed = HashSet::new();
-            let conversation_id = AIConversationId::new();
 
             tracker.observe_child(
                 CHILD_A_RUN_ID,
-                ChildSignal::Registered { conversation_id },
+                ChildSignal::Registered,
                 &killed,
                 ctx,
             );
@@ -162,13 +155,13 @@ fn registered_prevents_placeholder_creation() {
                 .children
                 .get(&task_id(CHILD_A_RUN_ID))
                 .expect("registered child is tracked immediately");
-            assert_eq!(
-                entry.conversation_id, conversation_id,
-                "the executor-supplied conversation id is stored on the entry"
-            );
             assert!(
                 !entry.is_remote_child,
-                "an in-band child owns a real local conversation, not an is_remote_child placeholder"
+                "an in-band child is not an is_remote_child placeholder"
+            );
+            assert!(
+                tracker.in_band_children.contains(&task_id(CHILD_A_RUN_ID)),
+                "registered child is marked in-band"
             );
             assert!(
                 tracker.metadata_fetches.is_empty(),

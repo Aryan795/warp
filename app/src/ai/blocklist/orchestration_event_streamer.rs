@@ -15,9 +15,7 @@ use warpui::{
 };
 
 use super::history_model::{BlocklistAIHistoryEvent, BlocklistAIHistoryModel};
-use super::orchestration_child_tracker::{
-    ChildSignal, OrchestrationChildTracker, OrchestrationEventConsumer,
-};
+use super::orchestration_child_tracker::{ChildSignal, OrchestrationChildTracker};
 use super::orchestration_events::{
     LifecycleEventDetailPayload, LifecycleEventDetailStage, OrchestrationEventService,
     PendingEvent, PendingEventDetail, build_lifecycle_event,
@@ -847,12 +845,7 @@ impl OrchestrationEventStreamer {
             .get_mut(&conversation_id)
             .and_then(|stream| stream.tracker.take())
             .unwrap_or_else(|| {
-                OrchestrationChildTracker::new(
-                    parent_task_id,
-                    OrchestrationEventConsumer::Primary {
-                        orchestrator_conversation_id: conversation_id,
-                    },
-                )
+                OrchestrationChildTracker::new(parent_task_id)
             });
         let tracker = self.drain_family_events(
             conversation_id,
@@ -915,12 +908,7 @@ impl OrchestrationEventStreamer {
             .get_mut(&parent_task_id)
             .and_then(|entry| entry.tracker.take())
             .unwrap_or_else(|| {
-                OrchestrationChildTracker::new(
-                    parent_task_id,
-                    OrchestrationEventConsumer::Observer {
-                        placeholder_conversation_id: primary_placeholder,
-                    },
-                )
+                OrchestrationChildTracker::new(parent_task_id)
             });
         let tracker = self.drain_family_events(
             primary_placeholder,
