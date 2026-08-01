@@ -165,6 +165,7 @@ impl OnboardingMainView {
             | AgentOnboardingEvent::UpgradeRequested
             | AgentOnboardingEvent::UpgradeCopyUrlRequested
             | AgentOnboardingEvent::UpgradePasteTokenFromClipboardRequested
+            | AgentOnboardingEvent::OfferSetUpLaterSelected { .. }
             | AgentOnboardingEvent::LoginFromWelcomeRequested
             | AgentOnboardingEvent::PrivacySettingsFromTerminalThemeSlideRequested
             | AgentOnboardingEvent::AppBecameActive => {
