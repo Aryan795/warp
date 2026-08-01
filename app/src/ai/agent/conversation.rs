@@ -2621,11 +2621,6 @@ impl AIConversation {
             }
             Action::CreateTask(CreateTask { task: Some(task) }) => {
                 let task_id = TaskId::new(task.id.clone());
-                let current_root_id = self.task_store.root_task_id().clone();
-                let current_root_has_server_data = self
-                    .task_store
-                    .root_task()
-                    .is_some_and(|root| root.source().is_some());
                 // Save an empty task to the transaction
                 self.checkpoint_task(&task_id);
 
