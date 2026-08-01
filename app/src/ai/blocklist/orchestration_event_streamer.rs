@@ -751,7 +751,7 @@ impl OrchestrationEventStreamer {
         &mut self,
         parent_conversation_id: AIConversationId,
         child_run_id: String,
-        mode: FamilyDrainMode,
+        _mode: FamilyDrainMode,
         result: anyhow::Result<crate::ai::ambient_agents::task::AmbientAgentTask>,
         ctx: &mut ModelContext<Self>,
     ) {

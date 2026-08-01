@@ -199,17 +199,13 @@ impl OrchestrationChildTracker {
         }
         // Insert a placeholder TrackedChild immediately so lifecycle and
         // session-linked signals that arrive before the async metadata fetch
-        // completes see tracker_known=true. The entry's conversation_id is
-        // the mode's stand-in; it will be updated by stamp_conversation_id_for_run
-        // once finish_remote_child_placeholder creates the real placeholder.
-        // Any session_id that arrived before this signal is also applied now.
+        // completes see tracker_known=true. Any session_id that arrived
+        // before this signal is also applied now.
         let session_id = self.pending_session_ids.remove(&task_id);
-        let conversation_id = self.placeholder_conversation_id();
         self.insert_child(
             task_id,
             run_id,
             TrackedChild {
-                conversation_id,
                 session_id,
                 last_state: None,
                 pane_materialized: false,
