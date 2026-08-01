@@ -568,12 +568,10 @@ impl BlocklistAIHistoryModel {
         conversation_id
     }
 
-    /// Returns the single durable conversation mapping for a remotely hosted
-    /// child, creating it from fetched task metadata when necessary.
-    ///
-    /// Both Primary and Observer discovery call this method, so racing
-    /// `ChildStarted`, lifecycle, and viewer metadata callbacks converge on
-    /// the same run-id index entry.
+    /// Returns the existing run-id mapping for a remote child, creating one
+    /// from the supplied task metadata if none exists yet. Idempotent: racing
+    /// `ChildStarted`, lifecycle, and viewer metadata callbacks all converge
+    /// on the same entry.
     #[allow(clippy::too_many_arguments)]
     pub fn ensure_remote_child_conversation(
         &mut self,

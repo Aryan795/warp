@@ -220,9 +220,10 @@ struct ConversationStreamState {
     /// Consecutive `get_ambient_agent_task` failure count for the
     /// post-restore retry loop; resets on success.
     restore_fetch_failures: usize,
-    /// Owner-mode child tracker for this orchestrator family. Created lazily
-    /// by the flag-on family drain (`OrchestrationUnifiedStack`); `None` on
-    /// the flag-off baseline, where the legacy `drain_sse_events` path runs.
+    /// Primary-mode child tracker for this orchestrator family. `None` until
+    /// the first flag-on family drain fires and the tracker is constructed;
+    /// on the flag-off baseline the legacy `drain_sse_events` path runs
+    /// without a tracker.
     tracker: Option<OrchestrationChildTracker>,
 }
 
@@ -263,10 +264,9 @@ struct OrchestratorStreamState {
     /// cursor, so a replay does not generate spurious `ChildSpawned` events
     /// for already-known children.
     seeded: bool,
-    /// Viewer-mode child tracker for this orchestrator family. Created lazily
-    /// by the flag-on family drain (`OrchestrationUnifiedStack`); `None` on
-    /// the flag-off baseline, where the legacy `drain_ancestor_events` path
-    /// runs.
+    /// Observer-mode child tracker for this orchestrator family. `None` until
+    /// the first flag-on viewer drain fires; on the flag-off baseline the
+    /// legacy `drain_ancestor_events` path runs without a tracker.
     tracker: Option<OrchestrationChildTracker>,
 }
 

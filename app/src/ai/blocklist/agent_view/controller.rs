@@ -857,8 +857,6 @@ impl AgentViewController {
         let is_new = exchange_count == 0
             && !(FeatureFlag::OrchestrationUnifiedStack.is_enabled()
                 && is_existing_child_placeholder);
-        if is_existing_child_placeholder {
-        }
         ctx.emit(AgentViewControllerEvent::EnteredAgentView {
             conversation_id,
             is_new,
