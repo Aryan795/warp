@@ -539,7 +539,6 @@ impl OrchestrationChildTracker {
     pub(crate) fn has_in_flight_fetch(&self, run_id: &str) -> bool {
         self.metadata_fetches.contains(run_id)
     }
-
 }
 
 #[cfg(test)]

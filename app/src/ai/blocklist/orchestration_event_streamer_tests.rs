@@ -123,12 +123,7 @@ fn observer_placeholder_completion_creates_one_named_history_mapping() {
         child_task.title = "Research observer mapping".to_string();
 
         streamer.update(&mut app, |streamer, ctx| {
-            let mut tracker = OrchestrationChildTracker::new(
-                parent_task_id,
-                OrchestrationEventConsumer::Observer {
-                    placeholder_conversation_id: parent_id,
-                },
-            );
+            let mut tracker = OrchestrationChildTracker::new(parent_task_id);
             tracker.observe_child(
                 &child_task_id.to_string(),
                 ChildSignal::Started,
@@ -2399,7 +2394,7 @@ fn restored_child_without_children_opens_self_run_id_stream() {
     });
 }
 
-// ---- wait_for_events parent registration (QUALITY-919) -------------------
+// ---- wait_for_events parent registration --------------------------------
 
 /// Builds a streamer wired to a mock `AIClient` whose `get_ambient_agent_task`
 /// must never be called. Used by the synchronous short-circuit tests to assert
@@ -2420,7 +2415,7 @@ fn streamer_with_no_fetch_expected(
 fn wait_registration_root_with_children_opens_ancestor_include_self_stream() {
     // The completion of the wait-time parent fetch installs server-recorded
     // children, advances the cursor, and opens the parent-family ancestor
-    // stream — exactly the not-parent -> parent transition QUALITY-919 adds.
+    // stream, completing the not-parent -> parent transition.
     App::test((), |mut app| async move {
         let history_model =
             app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
@@ -2616,7 +2611,7 @@ fn register_parent_on_wait_flag_off_is_noop() {
     });
 }
 
-// ---- classify_family_event (QUALITY-928 M1 T2) --------------------------
+// ---- classify_family_event ----------------------------------------------
 
 #[test]
 fn classify_child_agent_started_on_self_is_child_started() {
@@ -2692,7 +2687,7 @@ fn classify_unknown_type_is_opaque() {
     );
 }
 
-// ---- drain_family_events (QUALITY-928 M1 T2) ----------------------------
+// ---- drain_family_events ------------------------------------------------
 
 #[test]
 fn drain_family_events_primary_routes_mixed_batch_and_delivers_inbox() {
@@ -2753,12 +2748,7 @@ fn drain_family_events_primary_routes_mixed_batch_and_delivers_inbox() {
         }];
 
         streamer.update(&mut app, |me, ctx| {
-            let tracker = OrchestrationChildTracker::new(
-                parent_task_id,
-                OrchestrationEventConsumer::Primary {
-                    orchestrator_conversation_id: conversation_id,
-                },
-            );
+            let tracker = OrchestrationChildTracker::new(parent_task_id);
             let tracker = me.drain_family_events(
                 conversation_id,
                 &parent_run_id,
@@ -2805,11 +2795,9 @@ fn drain_family_events_primary_routes_mixed_batch_and_delivers_inbox() {
 #[test]
 fn drain_family_events_observer_advances_cursor_without_server_push() {
     // Observer routes child lifecycle to the tracker and persists the cursor
-    // locally, but must NEVER push the server cursor (only Primary may write
+    // locally, but must never push the server cursor (only Primary may write
     // it). The bare MockAIClient panics if update_event_sequence_on_server is
-    // called — that is the proof Observer never pushes server cursor.
-    // TaskOwnership is deliberately not an input to this API, so an
-    // authenticated owner observing via a shared link remains an Observer.
+    // called — that is the proof Observer never pushes the server cursor.
     App::test((), |mut app| async move {
         initialize_settings_for_tests(&mut app);
         let (sender, _receiver) = std::sync::mpsc::sync_channel::<ModelEvent>(4);
@@ -2845,12 +2833,7 @@ fn drain_family_events_observer_advances_cursor_without_server_push() {
         ];
 
         streamer.update(&mut app, |me, ctx| {
-            let tracker = OrchestrationChildTracker::new(
-                parent_task_id,
-                OrchestrationEventConsumer::Observer {
-                    placeholder_conversation_id: placeholder_id,
-                },
-            );
+            let tracker = OrchestrationChildTracker::new(parent_task_id);
             let tracker = me.drain_family_events(
                 placeholder_id,
                 &parent_run_id,

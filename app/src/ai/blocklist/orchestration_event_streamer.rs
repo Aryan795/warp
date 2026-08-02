@@ -852,9 +852,7 @@ impl OrchestrationEventStreamer {
             .streams
             .get_mut(&conversation_id)
             .and_then(|stream| stream.tracker.take())
-            .unwrap_or_else(|| {
-                OrchestrationChildTracker::new(parent_task_id)
-            });
+            .unwrap_or_else(|| OrchestrationChildTracker::new(parent_task_id));
         let tracker = self.drain_family_events(
             conversation_id,
             &self_run_id,
@@ -915,9 +913,7 @@ impl OrchestrationEventStreamer {
             .viewer_mode_orchestrators
             .get_mut(&parent_task_id)
             .and_then(|entry| entry.tracker.take())
-            .unwrap_or_else(|| {
-                OrchestrationChildTracker::new(parent_task_id)
-            });
+            .unwrap_or_else(|| OrchestrationChildTracker::new(parent_task_id));
         let tracker = self.drain_family_events(
             primary_placeholder,
             &self_run_id,
