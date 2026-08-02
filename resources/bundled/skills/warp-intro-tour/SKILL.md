@@ -164,11 +164,14 @@ Open the keybindings page and read the live bindings.
 ```sh
 {{warpctrl_binary_name}} surface keybindings open
 {{warpctrl_binary_name}} --output-format json keybinding list
-{{warpctrl_binary_name}} keybinding get "workspace:  Open new tab"
+{{warpctrl_binary_name}} keybinding get "pane_group:navigate_next"
 ```
 
-Pass `keybinding get` an action name exactly as it appears in `keybinding list`
-output; look it up there first rather than inventing one.
+`keybinding list` returns entries like `{"name": "pane_group:navigate_next",
+"description": "Activate Next Pane", "keystroke": "Ctrl Shift }"}`. Pass
+`keybinding get` a `name` exactly as it appears there — a good live beat is to
+look up the shortcut for something the user just watched happen, like moving
+between the panes from Stop 3.
 
 Warp Control **inspects** keybindings but does not rewrite them. To actually
 remap something, hand off to the bundled `change-keybinding` skill, which edits
@@ -196,15 +199,18 @@ it is on screen.
 {{warpctrl_binary_name}} appearance get
 ```
 
-Let the user browse the picker. If they name a theme, apply it and confirm:
+`theme list` shows what is installed on this machine. Let the user browse the
+picker or that list, and if they name a theme, apply it and confirm — always
+using a name `theme list` actually returned:
 
 ```sh
-{{warpctrl_binary_name}} theme set "Dracula"
+{{warpctrl_binary_name}} theme list
+{{warpctrl_binary_name}} theme set "Cyber Wave"
 {{warpctrl_binary_name}} theme get
 ```
 
-`theme list` shows what is installed, and `theme system-set true` follows the OS
-light/dark setting (with `theme light-set` / `theme dark-set` picking each side).
+`theme system-set true` follows the OS light/dark setting (with
+`theme light-set` / `theme dark-set` picking each side).
 `appearance font-size-increase`, `appearance zoom-increase`, and their `-reset`
 counterparts are an easy, instantly visible demo — always reset afterwards
 unless the user wants to keep the change.

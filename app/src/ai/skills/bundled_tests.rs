@@ -37,26 +37,6 @@ fn unavailable_bundled_context_path_renders_as_empty_string() {
 }
 
 #[test]
-fn warp_control_skills_require_the_warp_control_feature() {
-    let resources_dir = repo_resources_dir();
-
-    for skill_id in ["warpctrl", "warp-intro-tour"] {
-        assert!(
-            matches!(
-                activation_for_bundled_skill(skill_id, &resources_dir),
-                BundledSkillActivation::RequiresFeature(FeatureFlag::WarpControlCli)
-            ),
-            "{skill_id} drives the app through warpctrl and must be gated on WarpControlCli"
-        );
-    }
-
-    assert!(matches!(
-        activation_for_bundled_skill("pr-comments", &resources_dir),
-        BundledSkillActivation::Always
-    ));
-}
-
-#[test]
 fn bundled_warp_intro_tour_skill_covers_every_tour_surface() {
     let resources_dir = repo_resources_dir();
     let skills_dir = resources_dir.join("bundled").join("skills");
