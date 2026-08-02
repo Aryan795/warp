@@ -9,10 +9,10 @@
 //! enters through the single [`OrchestrationChildTracker::observe_child`]
 //! entry point.
 //!
-//! [`OrchestrationEventConsumer`] captures the one behavioral axis between
-//! orchestrator and shared-session observer: who pushes the server cursor
-//! and who receives the parent's own inbox events. It says nothing about
-//! authenticated ownership, permissions, or pane capability.
+//! [`FamilyDrainMode`] captures the one behavioral axis between orchestrator
+//! and shared-session observer: who pushes the server cursor and who receives
+//! the parent's own inbox events. It says nothing about authenticated
+//! ownership, permissions, or pane capability.
 //!
 //! Pill-bar broadcasts (`ChildSpawned` / `ChildStatusChanged`) are emitted
 //! via the `ctx` so downstream views can react without polling.
@@ -22,8 +22,7 @@
 //! accessed via the shared-session protocol. The only semantic difference is
 //! which code path created the placeholder. A future cleanup should merge them
 //! into a single `is_remote_placeholder` flag and persist all placeholder
-//! conversations uniformly, making `is_durable_observer_parent` (M3)
-//! unnecessary.
+//! conversations uniformly.
 
 use std::collections::{HashMap, HashSet};
 
