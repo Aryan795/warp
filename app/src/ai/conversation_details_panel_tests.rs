@@ -41,7 +41,6 @@ fn create_test_task(task_id: &str) -> AmbientAgentTask {
             display_name: Some("User 1".to_string()),
         }),
         executor: None,
-        scope: None,
         conversation_id: None,
         request_usage: None,
         agent_config_snapshot: None,

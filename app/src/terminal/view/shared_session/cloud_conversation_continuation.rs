@@ -7,14 +7,13 @@ use crate::ai::agent::conversation::{
 };
 use crate::ai::agent_conversations_model::AgentConversationsModel;
 use crate::ai::ambient_agents::{
-    AmbientAgentTask, AmbientAgentTaskId, AmbientConversationStatus, TaskOwnership,
+    AmbientAgentTask, AmbientAgentTaskId, AmbientConversationStatus,
     conversation_output_status_from_conversation,
 };
 use crate::ai::blocklist::BlocklistAIHistoryModel;
 use crate::auth::AuthStateProvider;
 use crate::cloud_object::{Owner, ServerGuestSubject};
 use crate::drive::sharing::SharingAccessLevel;
-use crate::features::FeatureFlag;
 use crate::terminal::TerminalModel;
 use crate::terminal::view::ambient_agent::AmbientAgentViewModel;
 use crate::workspaces::user_workspaces::UserWorkspaces;
@@ -361,21 +360,15 @@ pub(crate) fn completed_child_conversation_access(
 }
 
 fn task_ownership_access(task: &AmbientAgentTask, app: &AppContext) -> ConversationAccess {
-    if !FeatureFlag::OrchestrationUnifiedStack.is_enabled() {
-        let current_user_uid = AuthStateProvider::as_ref(app).get().user_id();
-        return if task
-            .creator
-            .as_ref()
-            .is_some_and(|creator| current_user_uid.is_some_and(|uid| creator.uid == uid.as_str()))
-        {
-            ConversationAccess::Edit
-        } else {
-            ConversationAccess::Unknown
-        };
-    }
-    match task.ownership_for_current_principal(app) {
-        TaskOwnership::Owned => ConversationAccess::Edit,
-        TaskOwnership::NotOwned | TaskOwnership::Unknown => ConversationAccess::Unknown,
+    let current_user_uid = AuthStateProvider::as_ref(app).get().user_id();
+    if task
+        .creator
+        .as_ref()
+        .is_some_and(|creator| current_user_uid.is_some_and(|uid| creator.uid == uid.as_str()))
+    {
+        ConversationAccess::Edit
+    } else {
+        ConversationAccess::Unknown
     }
 }
 

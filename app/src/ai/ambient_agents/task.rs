@@ -12,18 +12,14 @@ use url::Url;
 use warp_core::ui::theme::WarpTheme;
 use warp_errors::report_error;
 use warpui::color::ColorU;
-use warpui::{AppContext, SingletonEntity, View, ViewContext};
+use warpui::{SingletonEntity, View, ViewContext};
 
 use super::AmbientAgentTaskId;
 use crate::ai::artifacts::{Artifact, deserialize_artifacts};
-use crate::auth::AuthStateProvider;
-use crate::auth::user::PrincipalType;
-use crate::server::ids::ServerId;
 use crate::server::server_api::ServerApiProvider;
 use crate::ui_components::icons::Icon;
 use crate::view_components::DismissibleToast;
 use crate::workspace::ToastStack;
-use crate::workspaces::user_workspaces::UserWorkspaces;
 
 fn parse_session_id_from_link(session_link: &str) -> Option<SessionId> {
     Url::parse(session_link).ok().and_then(|url| {
@@ -169,9 +165,6 @@ pub struct AmbientAgentTask {
     pub creator: Option<TaskPrincipalInfo>,
     #[serde(default)]
     pub executor: Option<TaskPrincipalInfo>,
-    /// Authoritative server ownership scope. Older servers omit this field.
-    #[serde(default)]
-    pub scope: Option<TaskScope>,
     pub conversation_id: Option<String>,
     pub request_usage: Option<RequestUsage>,
     pub is_sandbox_running: bool,
@@ -249,43 +242,6 @@ pub fn normalize_orchestrator_agent_name(raw: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-/// Server task ownership scope (`TaskItem.scope`).
-#[derive(Clone, Serialize, Debug, PartialEq, Eq)]
-#[serde(tag = "type")]
-pub enum TaskScope {
-    User { uid: String },
-    Team { uid: String },
-    Unknown,
-}
-
-impl<'de> Deserialize<'de> for TaskScope {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct WireScope {
-            #[serde(rename = "type")]
-            scope_type: Option<String>,
-            uid: Option<String>,
-        }
-
-        let scope = WireScope::deserialize(deserializer)?;
-        Ok(match (scope.scope_type.as_deref(), scope.uid) {
-            (Some("User"), Some(uid)) if !uid.is_empty() => Self::User { uid },
-            (Some("Team"), Some(uid)) if !uid.is_empty() => Self::Team { uid },
-            _ => Self::Unknown,
-        })
-    }
-}
-
-/// Whether the authenticated principal owns a task.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TaskOwnership {
-    Owned,
-    NotOwned,
-    Unknown,
-}
 impl AmbientAgentTask {
     pub fn run_id(&self) -> AmbientAgentTaskId {
         self.task_id
@@ -399,77 +355,6 @@ impl AmbientAgentTask {
     /// Principal the run executed as, formatted for user-facing surfaces.
     pub fn executor_display_name(&self) -> Option<String> {
         self.executor.as_ref().and_then(|e| e.display_name.clone())
-    }
-
-    /// Resolves ownership from authoritative task scope. Creator equality is
-    /// only a compatibility fallback for task payloads from older servers.
-    pub fn ownership_for_current_principal(&self, app: &AppContext) -> TaskOwnership {
-        let current_user_uid = AuthStateProvider::as_ref(app)
-            .get()
-            .user_id()
-            .map(|uid| uid.as_string());
-        let current_principal_type =
-            AuthStateProvider::as_ref(app)
-                .get()
-                .principal_type()
-                .map(|principal_type| match principal_type {
-                    PrincipalType::User => "user",
-                    PrincipalType::ServiceAccount => "service_account",
-                });
-        self.resolve_ownership(
-            current_user_uid.as_deref(),
-            current_principal_type,
-            |team_uid| {
-                ServerId::try_from(team_uid).ok().is_some_and(|team_uid| {
-                    UserWorkspaces::as_ref(app)
-                        .team_from_uid_across_all_workspaces(team_uid)
-                        .is_some()
-                })
-            },
-        )
-    }
-
-    pub(crate) fn resolve_ownership(
-        &self,
-        current_user_uid: Option<&str>,
-        current_principal_type: Option<&str>,
-        is_current_team: impl FnOnce(&str) -> bool,
-    ) -> TaskOwnership {
-        let Some(current_user_uid) = current_user_uid else {
-            return TaskOwnership::Unknown;
-        };
-        let Some(current_principal_type) = current_principal_type else {
-            return TaskOwnership::Unknown;
-        };
-        match self.scope.as_ref() {
-            Some(TaskScope::User { uid }) => {
-                if uid == current_user_uid && current_principal_type == "user" {
-                    TaskOwnership::Owned
-                } else {
-                    TaskOwnership::NotOwned
-                }
-            }
-            Some(TaskScope::Team { uid }) => {
-                if is_current_team(uid) {
-                    TaskOwnership::Owned
-                } else {
-                    TaskOwnership::NotOwned
-                }
-            }
-            Some(TaskScope::Unknown) => TaskOwnership::Unknown,
-            None => {
-                if self.creator.as_ref().is_some_and(|creator| {
-                    creator.uid == current_user_uid
-                        && creator
-                            .creator_type
-                            .eq_ignore_ascii_case(current_principal_type)
-                }) {
-                    TaskOwnership::Owned
-                } else {
-                    TaskOwnership::Unknown
-                }
-            }
-        }
     }
 
     /// Returns true if the underlying session for the ambient agent is no longer running.

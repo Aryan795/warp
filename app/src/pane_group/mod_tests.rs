@@ -35,7 +35,7 @@ use crate::ai::agent::conversation::{
 };
 use crate::ai::agent_conversations_model::AgentConversationsModel;
 use crate::ai::ambient_agents::github_auth_notifier::GitHubAuthNotifier;
-use crate::ai::ambient_agents::task::{TaskPrincipalInfo, TaskScope};
+use crate::ai::ambient_agents::task::TaskPrincipalInfo;
 use crate::ai::ambient_agents::{
     AgentSource, AmbientAgentTask, AmbientAgentTaskId, AmbientAgentTaskState,
 };
@@ -302,7 +302,6 @@ fn ambient_agent_task_for_current_user(task_id: AmbientAgentTaskId) -> AmbientAg
         session_id: None,
         session_link: None,
         executor: None,
-        scope: None,
         creator: Some(TaskPrincipalInfo {
             creator_type: "USER".to_string(),
             uid: TEST_USER_UID.to_string(),
@@ -1206,9 +1205,6 @@ fn completed_shared_session_child_with_edit_access_uses_continuation_pane() {
                 creator_type: "USER".to_string(),
                 uid: "other-user".to_string(),
                 display_name: None,
-            });
-            task.scope = Some(TaskScope::User {
-                uid: "other-user".to_string(),
             });
             task.conversation_id = Some("test-server-token".to_string());
             AgentConversationsModel::handle(ctx).update(ctx, |model, _| {

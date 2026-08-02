@@ -32,7 +32,6 @@ fn task_with_run_time_and_credits() -> AmbientAgentTask {
             display_name: Some("User 1".to_string()),
         }),
         executor: None,
-        scope: None,
         conversation_id: None,
         request_usage: Some(RequestUsage {
             inference_cost: Some(INFERENCE_COST),

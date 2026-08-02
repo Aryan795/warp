@@ -189,20 +189,12 @@ impl TerminalView {
         AgentConversationsModel::as_ref(ctx)
             .get_task_data(&task_id)
             .is_some_and(|task| {
-                if !FeatureFlag::OrchestrationUnifiedStack.is_enabled() {
-                    let Some(current_user_uid) =
-                        self.auth_state.user_id().map(|uid| uid.as_string())
-                    else {
-                        return false;
-                    };
-                    return task
-                        .creator
-                        .is_some_and(|creator| creator.uid == current_user_uid);
-                }
-                matches!(
-                    task.ownership_for_current_principal(ctx),
-                    crate::ai::ambient_agents::TaskOwnership::Owned
-                )
+                let Some(current_user_uid) = self.auth_state.user_id().map(|uid| uid.as_string())
+                else {
+                    return false;
+                };
+                task.creator
+                    .is_some_and(|creator| creator.uid == current_user_uid)
             })
             .then_some(task_id)
     }

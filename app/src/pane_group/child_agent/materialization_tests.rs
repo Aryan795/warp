@@ -35,7 +35,6 @@ fn task(
         session_link: None,
         creator: None,
         executor: None,
-        scope: None,
         conversation_id: conversation_id.map(str::to_string),
         request_usage: None,
         is_sandbox_running,
