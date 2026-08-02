@@ -2491,7 +2491,7 @@ fn register_parent_on_wait_flag_off_is_noop() {
     });
 }
 
-// ---- classify_family_event (QUALITY-928 M1 T2) --------------------------
+// ---- classify_family_event ----------------------------------------------
 
 #[test]
 fn classify_child_agent_started_on_self_is_child_started() {
@@ -2567,13 +2567,13 @@ fn classify_unknown_type_is_opaque() {
     );
 }
 
-// ---- drain_family_events (QUALITY-928 M1 T2) ----------------------------
+// ---- drain_family_events ------------------------------------------------
 
 #[test]
 fn drain_family_events_primary_routes_mixed_batch_and_delivers_inbox() {
-    // A mixed family batch under Primary consumption routes discovery/lifecycle
-    // to the tracker, delivers parent-self through handle_event_batch, and
-    // advances the Primary cursor (local + server).
+    // A mixed family batch under Primary consumption routes discovery and
+    // lifecycle events to the tracker, delivers parent-self events through
+    // handle_event_batch, and advances the Primary cursor (local + server).
     App::test((), |mut app| async move {
         initialize_settings_for_tests(&mut app);
         let (sender, _receiver) = std::sync::mpsc::sync_channel::<ModelEvent>(4);
@@ -2628,12 +2628,7 @@ fn drain_family_events_primary_routes_mixed_batch_and_delivers_inbox() {
         }];
 
         streamer.update(&mut app, |me, ctx| {
-            let tracker = OrchestrationChildTracker::new(
-                parent_task_id,
-                OrchestrationEventConsumer::Primary {
-                    orchestrator_conversation_id: conversation_id,
-                },
-            );
+            let tracker = OrchestrationChildTracker::new(parent_task_id);
             let tracker = me.drain_family_events(
                 conversation_id,
                 &parent_run_id,
@@ -2680,9 +2675,9 @@ fn drain_family_events_primary_routes_mixed_batch_and_delivers_inbox() {
 #[test]
 fn drain_family_events_observer_advances_cursor_without_server_push() {
     // Observer routes child lifecycle to the tracker and persists the cursor
-    // locally, but must NEVER push the server cursor (only Primary may write
-    // it). The bare MockAIClient panics if update_event_sequence_on_server is
-    // called — that is the proof Observer never pushes server cursor.
+    // locally, but must never push the server cursor. The mock has no
+    // expectation for `update_event_sequence_on_server`, so it panics if the
+    // Observer path attempts the push.
     App::test((), |mut app| async move {
         initialize_settings_for_tests(&mut app);
         let (sender, _receiver) = std::sync::mpsc::sync_channel::<ModelEvent>(4);
@@ -2705,7 +2700,6 @@ fn drain_family_events_observer_advances_cursor_without_server_push() {
             model.restore_conversations(terminal_view_id, vec![placeholder], ctx);
         });
 
-        // No expect_update_event_sequence_on_server: any call panics the mock.
         let ai_client: Arc<dyn AIClient> = Arc::new(MockAIClient::new());
         let server_api = ServerApiProvider::new_for_test().get();
         let streamer = app.add_singleton_model(|ctx| {
@@ -2718,12 +2712,7 @@ fn drain_family_events_observer_advances_cursor_without_server_push() {
         ];
 
         streamer.update(&mut app, |me, ctx| {
-            let tracker = OrchestrationChildTracker::new(
-                parent_task_id,
-                OrchestrationEventConsumer::Observer {
-                    placeholder_conversation_id: placeholder_id,
-                },
-            );
+            let tracker = OrchestrationChildTracker::new(parent_task_id);
             let tracker = me.drain_family_events(
                 placeholder_id,
                 &parent_run_id,

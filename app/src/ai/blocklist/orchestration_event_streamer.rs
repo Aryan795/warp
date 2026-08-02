@@ -219,9 +219,8 @@ struct ConversationStreamState {
     /// Consecutive `get_ambient_agent_task` failure count for the
     /// post-restore retry loop; resets on success.
     restore_fetch_failures: usize,
-    /// Owner-mode child tracker for this orchestrator family. Created lazily
-    /// by the flag-on family drain (`OrchestrationUnifiedStack`); `None` on
-    /// the flag-off baseline, where the legacy `drain_sse_events` path runs.
+    /// Owner-side child tracker for this orchestrator family. `None` until
+    /// the family drain creates one on the first batch it handles.
     tracker: Option<OrchestrationChildTracker>,
 }
 
@@ -262,10 +261,8 @@ struct OrchestratorStreamState {
     /// cursor, so a replay does not generate spurious `ChildSpawned` events
     /// for already-known children.
     seeded: bool,
-    /// Viewer-mode child tracker for this orchestrator family. Created lazily
-    /// by the flag-on family drain (`OrchestrationUnifiedStack`); `None` on
-    /// the flag-off baseline, where the legacy `drain_ancestor_events` path
-    /// runs.
+    /// Viewer-mode child tracker for this orchestrator family. `None` until
+    /// the family drain creates one on the first batch it handles.
     tracker: Option<OrchestrationChildTracker>,
 }
 
@@ -496,11 +493,9 @@ impl OrchestrationEventStreamer {
 
     // ---- Unified family drain (OrchestrationUnifiedStack) --------------
 
-    /// Primary cursor authority for the family drain: persist the cursor to
-    /// SQLite and push it to the server. The Primary consumer is the
-    /// authoritative writer of its run's server cursor. Delegates to
-    /// [`Self::persist_event_cursor`], whose non-shared-session branch
-    /// performs exactly this.
+    /// Primary cursor authority for the family drain: persists the cursor to
+    /// SQLite and pushes it to the server, which only the Primary consumer of
+    /// a run may do.
     fn persist_cursor_local_and_server(
         &mut self,
         conversation_id: AIConversationId,
@@ -560,12 +555,9 @@ impl OrchestrationEventStreamer {
             .unwrap_or(previous_cursor);
 
         let mut parent_self_events = Vec::new();
-        // Child lifecycle events are also forwarded to handle_event_batch in
-        // Primary mode: `convert_lifecycle_events` (inside handle_event_batch)
-        // filters by run_id != self_run_id, so it picks up child events and
-        // injects them into OrchestrationEventService for the parent
-        // conversation. Without this, the parent's BlocklistAIController
-        // never receives child lifecycle notifications.
+        // Child lifecycle events are forwarded to `handle_event_batch` as well
+        // as to the tracker, so a Primary consumer's conversation receives
+        // them as orchestration events and not just as status updates.
         let mut child_lifecycle_for_batch = Vec::new();
         for event in events {
             match classify_family_event(&event, self_run_id) {
@@ -585,9 +577,6 @@ impl OrchestrationEventStreamer {
                             ctx,
                         );
                     }
-                    log::debug!(
-                        "[orch-drain] calling observe_child(Started) for child_run_id={child_run_id}"
-                    );
                     tracker.observe_child(
                         &child_run_id,
                         ChildSignal::Started,
@@ -624,11 +613,6 @@ impl OrchestrationEventStreamer {
                             ctx,
                         );
                     }
-                    log::debug!(
-                        "[orch-drain] calling observe_child(Lifecycle) for child_run_id={child_run_id}"
-                    );
-                    // Also collect for handle_event_batch so OrchestrationEventService
-                    // delivers the lifecycle event to the parent conversation.
                     if mode == FamilyDrainMode::Primary {
                         child_lifecycle_for_batch.push(event);
                     }
@@ -670,7 +654,7 @@ impl OrchestrationEventStreamer {
         tracker
     }
 
-    // ---- Remote-child placeholder creation (flag-on owner path) ----------
+    // ---- Remote-child placeholder creation (owner path) ------------------
 
     /// Creates a local `is_remote_child` placeholder for an out-of-band
     /// (cloud) child announced by a `child_agent_started` event on the owner's
@@ -725,11 +709,9 @@ impl OrchestrationEventStreamer {
     }
 
     /// Completion callback for [`Self::ensure_remote_child_placeholder`].
-    /// Creates the remote-child `AIConversation` from the fetched task
-    /// metadata, mirroring the shared-session viewer's `register_child`.
-    /// Marked `is_remote_child` so the streamer opens no redundant per-child
-    /// SSE — the child is cloud and its events already arrive on the parent's
-    /// ancestor stream.
+    /// Creates the child `AIConversation` from the fetched task metadata and
+    /// marks it `is_remote_child` so no redundant per-child SSE is opened —
+    /// the child's events already arrive on the parent's ancestor stream.
     fn finish_remote_child_placeholder(
         &mut self,
         parent_conversation_id: AIConversationId,
@@ -798,10 +780,10 @@ impl OrchestrationEventStreamer {
         });
     }
 
-    /// Flag-on owner drain: reads the conversation's family SSE buffer and
-    /// routes it through [`Self::drain_family_events`]. Falls back to the
-    /// legacy [`Self::drain_sse_events`] when no `self_run_id` is available
-    /// yet (nothing to key a tracker on), preserving delivery.
+    /// Owner-side family drain: reads the conversation's SSE buffer and routes
+    /// it through [`Self::drain_family_events`]. Falls back to
+    /// [`Self::drain_sse_events`] when there is no `self_run_id` yet, since
+    /// there is nothing to key a tracker on but events still need delivering.
     fn drain_owner_family_events(
         &mut self,
         conversation_id: AIConversationId,
@@ -844,9 +826,7 @@ impl OrchestrationEventStreamer {
             .streams
             .get_mut(&conversation_id)
             .and_then(|stream| stream.tracker.take())
-            .unwrap_or_else(|| {
-                OrchestrationChildTracker::new(parent_task_id)
-            });
+            .unwrap_or_else(|| OrchestrationChildTracker::new(parent_task_id));
         let tracker = self.drain_family_events(
             conversation_id,
             &self_run_id,
@@ -862,10 +842,10 @@ impl OrchestrationEventStreamer {
         }
     }
 
-    /// Flag-on viewer drain: reads the orchestrator's ancestor SSE buffer and
-    /// routes it through [`Self::drain_family_events`] in viewer mode, then
-    /// mirrors the advanced cursor onto every registered viewer placeholder
-    /// (local-only) and the in-memory entry cursor.
+    /// Viewer-side family drain: reads the orchestrator's ancestor SSE buffer
+    /// and routes it through [`Self::drain_family_events`] as an Observer,
+    /// then mirrors the advanced cursor onto the in-memory entry and every
+    /// registered viewer placeholder.
     fn drain_viewer_family_events(
         &mut self,
         parent_task_id: AmbientAgentTaskId,
@@ -907,9 +887,7 @@ impl OrchestrationEventStreamer {
             .viewer_mode_orchestrators
             .get_mut(&parent_task_id)
             .and_then(|entry| entry.tracker.take())
-            .unwrap_or_else(|| {
-                OrchestrationChildTracker::new(parent_task_id)
-            });
+            .unwrap_or_else(|| OrchestrationChildTracker::new(parent_task_id));
         let tracker = self.drain_family_events(
             primary_placeholder,
             &self_run_id,
@@ -931,8 +909,7 @@ impl OrchestrationEventStreamer {
     }
 
     /// Owner drain dispatcher: the unified family drain when
-    /// `OrchestrationUnifiedStack` is on, else the legacy per-conversation
-    /// drain (flag-off baseline is unchanged).
+    /// `OrchestrationUnifiedStack` is on, else the per-conversation drain.
     fn drain_owner_events(
         &mut self,
         conversation_id: AIConversationId,
@@ -946,8 +923,7 @@ impl OrchestrationEventStreamer {
     }
 
     /// Viewer drain dispatcher: the unified family drain when
-    /// `OrchestrationUnifiedStack` is on, else the legacy ancestor drain
-    /// (flag-off baseline is unchanged).
+    /// `OrchestrationUnifiedStack` is on, else the ancestor-only drain.
     fn drain_viewer_events(
         &mut self,
         parent_task_id: AmbientAgentTaskId,

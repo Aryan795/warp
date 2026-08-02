@@ -1,12 +1,10 @@
-//! Tests for [`OrchestrationChildTracker`]'s internal state machine.
+//! Unit tests for the [`OrchestrationChildTracker`] state machine.
 //!
-//! These exercise `observe_child` against a real
-//! `ModelContext<OrchestrationEventStreamer>` (so the pill-bar broadcasts
-//! have somewhere to go) but assert only on the tracker's own state — the
-//! persisted placeholder write, metadata-fetch dispatch, and pane
-//! materialization are exercised through the tracker's in-memory bookkeeping
-//! (including the unified `is_remote_child` intent), so no history / network
-//! plumbing is required.
+//! Every test drives `observe_child` against a real
+//! `ModelContext<OrchestrationEventStreamer>` so the pill-bar broadcasts have
+//! somewhere to go, then asserts on the tracker's own bookkeeping: the
+//! model-backed side effects (history writes, network fetches) are compiled
+//! out of test builds.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -21,16 +19,41 @@ use crate::server::server_api::ServerApiProvider;
 use crate::server::server_api::ai::{AIClient, MockAIClient};
 
 const PARENT_RUN_ID: &str = "11111111-1111-1111-1111-111111111111";
-const CHILD_A_RUN_ID: &str = "22222222-2222-2222-2222-222222222222";
-const SESSION_A: &str = "44444444-4444-4444-4444-444444444444";
+const CHILD_RUN_ID: &str = "22222222-2222-2222-2222-222222222222";
+const SESSION_UUID: &str = "44444444-4444-4444-4444-444444444444";
 
-fn task_id(s: &str) -> AmbientAgentTaskId {
-    s.parse().expect("hardcoded task id parses")
+fn task_id(run_id: &str) -> AmbientAgentTaskId {
+    run_id.parse().expect("hardcoded task id parses")
 }
 
-/// Builds a minimal child task row for `ChildSignal::Seeded`, parented under
-/// `PARENT_RUN_ID` so `apply_seeded` treats it as a real child rather than
-/// the parent's own row.
+/// No runs have been killed locally.
+fn no_kills() -> HashSet<String> {
+    HashSet::new()
+}
+
+/// Runs `body` against a fresh tracker for `PARENT_RUN_ID`, with the
+/// singletons `OrchestrationEventStreamer` depends on installed.
+fn with_tracker<F>(body: F)
+where
+    F: FnOnce(&mut OrchestrationChildTracker, &mut ModelContext<OrchestrationEventStreamer>)
+        + 'static,
+{
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
+        let ai_client: Arc<dyn AIClient> = Arc::new(MockAIClient::new());
+        let server_api = ServerApiProvider::new_for_test().get();
+        let streamer = app.add_singleton_model(|ctx| {
+            OrchestrationEventStreamer::new_with_clients_for_test(ai_client, server_api, ctx)
+        });
+        streamer.update(&mut app, |_streamer, ctx| {
+            let mut tracker = OrchestrationChildTracker::new(task_id(PARENT_RUN_ID));
+            body(&mut tracker, ctx);
+        });
+    });
+}
+
+/// A child task row as a REST seed delivers it, parented under
+/// `PARENT_RUN_ID` so it is not mistaken for the parent's own row.
 fn child_task(task_id: AmbientAgentTaskId) -> AmbientAgentTask {
     use chrono::Utc;
     AmbientAgentTask {
@@ -59,228 +82,201 @@ fn child_task(task_id: AmbientAgentTaskId) -> AmbientAgentTask {
     }
 }
 
-/// Installs the singletons `OrchestrationEventStreamer` depends on and
-/// returns the streamer handle. Mirrors the setup in
-/// `orchestration_event_streamer_tests.rs`.
-fn install_streamer(app: &mut App) -> warpui::ModelHandle<OrchestrationEventStreamer> {
-    app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
-    let ai_client: Arc<dyn AIClient> = Arc::new(MockAIClient::new());
-    let server_api = ServerApiProvider::new_for_test().get();
-    app.add_singleton_model(|ctx| {
-        OrchestrationEventStreamer::new_with_clients_for_test(ai_client, server_api, ctx)
-    })
-}
-
-fn observer_tracker() -> OrchestrationChildTracker {
-    OrchestrationChildTracker::new(task_id(PARENT_RUN_ID))
-}
-
 #[test]
-fn started_creates_pending_entry_and_is_idempotent() {
-    App::test((), |mut app| async move {
-        let streamer = install_streamer(&mut app);
-        streamer.update(&mut app, |_streamer, ctx| {
-            let mut tracker = observer_tracker();
-            let killed = HashSet::new();
+fn started_dispatches_metadata_fetch_before_creating_placeholder() {
+    with_tracker(|tracker, ctx| {
+        tracker.observe_child(CHILD_RUN_ID, ChildSignal::Started, &no_kills(), ctx);
 
-            tracker.observe_child(CHILD_A_RUN_ID, ChildSignal::Started, &killed, ctx);
-
-            // A pending entry is an in-flight metadata fetch; the placeholder
-            // itself is created once the fetch returns (T2).
-            assert!(
-                tracker.metadata_fetches.contains(CHILD_A_RUN_ID),
-                "first Started must record an in-flight fetch"
-            );
-            assert!(
-                tracker.children.is_empty(),
-                "no placeholder is created before the fetch completes"
-            );
-            assert_eq!(tracker.metadata_fetch_dispatch_count, 1);
-
-            // Second Started for the same run id is a no-op.
-            tracker.observe_child(CHILD_A_RUN_ID, ChildSignal::Started, &killed, ctx);
-            assert_eq!(
-                tracker.metadata_fetch_dispatch_count, 1,
-                "a repeat Started must not dispatch another fetch"
-            );
-        });
+        assert!(
+            tracker.has_in_flight_fetch(CHILD_RUN_ID),
+            "discovery must start a metadata fetch"
+        );
+        assert!(
+            tracker.children.is_empty(),
+            "the placeholder is created only once the fetch resolves"
+        );
     });
 }
 
 #[test]
-fn lifecycle_for_tombstoned_run_is_noop() {
-    App::test((), |mut app| async move {
-        let streamer = install_streamer(&mut app);
-        streamer.update(&mut app, |_streamer, ctx| {
-            let mut tracker = observer_tracker();
-            let mut killed = HashSet::new();
-            killed.insert(CHILD_A_RUN_ID.to_string());
+fn repeated_started_signals_dispatch_one_metadata_fetch() {
+    with_tracker(|tracker, ctx| {
+        tracker.observe_child(CHILD_RUN_ID, ChildSignal::Started, &no_kills(), ctx);
+        tracker.observe_child(CHILD_RUN_ID, ChildSignal::Started, &no_kills(), ctx);
 
-            tracker.observe_child(
-                CHILD_A_RUN_ID,
-                ChildSignal::Lifecycle(api::LifecycleEventType::InProgress),
-                &killed,
-                ctx,
-            );
-
-            assert!(
-                tracker.children.is_empty(),
-                "tombstoned run must not create a placeholder"
-            );
-            assert!(
-                tracker.metadata_fetches.is_empty(),
-                "tombstoned run must not dispatch a metadata fetch"
-            );
-            assert_eq!(tracker.metadata_fetch_dispatch_count, 0);
-        });
+        assert_eq!(
+            tracker.metadata_fetch_dispatch_count(),
+            1,
+            "a repeat discovery signal must not dispatch a second fetch"
+        );
     });
 }
 
 #[test]
-fn registered_prevents_placeholder_creation() {
-    App::test((), |mut app| async move {
-        let streamer = install_streamer(&mut app);
-        streamer.update(&mut app, |_streamer, ctx| {
-            let mut tracker = observer_tracker();
-            let killed = HashSet::new();
+fn signal_for_killed_run_has_no_effect() {
+    with_tracker(|tracker, ctx| {
+        let killed = HashSet::from([CHILD_RUN_ID.to_string()]);
 
-            tracker.observe_child(
-                CHILD_A_RUN_ID,
-                ChildSignal::Registered,
-                &killed,
-                ctx,
-            );
+        tracker.observe_child(
+            CHILD_RUN_ID,
+            ChildSignal::Lifecycle(api::LifecycleEventType::InProgress),
+            &killed,
+            ctx,
+        );
 
-            let entry = tracker
-                .children
-                .get(&task_id(CHILD_A_RUN_ID))
-                .expect("registered child is tracked immediately");
-            assert!(
-                !entry.is_remote_child,
-                "an in-band child is not an is_remote_child placeholder"
-            );
-            assert!(
-                tracker.in_band_children.contains(&task_id(CHILD_A_RUN_ID)),
-                "registered child is marked in-band"
-            );
-            assert!(
-                tracker.metadata_fetches.is_empty(),
-                "an in-band child needs no discovery fetch"
-            );
-            assert_eq!(tracker.metadata_fetch_dispatch_count, 0);
-
-            // A later Started for the same run id must be an idempotent no-op:
-            // no placeholder creation, no metadata fetch.
-            tracker.observe_child(CHILD_A_RUN_ID, ChildSignal::Started, &killed, ctx);
-            assert_eq!(
-                tracker.metadata_fetch_dispatch_count, 0,
-                "Started for an already-registered run must not fetch"
-            );
-            assert!(
-                tracker.children.contains_key(&task_id(CHILD_A_RUN_ID)),
-                "the registered entry survives a subsequent Started"
-            );
-        });
+        assert!(
+            tracker.children.is_empty(),
+            "a killed run must not be given a placeholder"
+        );
+        assert_eq!(
+            tracker.metadata_fetch_dispatch_count(),
+            0,
+            "a killed run must not be fetched"
+        );
     });
 }
 
 #[test]
-fn session_linked_fills_session_id_and_requests_pane_without_fetch() {
-    App::test((), |mut app| async move {
-        let streamer = install_streamer(&mut app);
-        streamer.update(&mut app, |_streamer, ctx| {
-            let mut tracker = observer_tracker();
-            let killed = HashSet::new();
+fn signal_for_killed_run_forgets_an_existing_child() {
+    with_tracker(|tracker, ctx| {
+        tracker.observe_child(CHILD_RUN_ID, ChildSignal::Registered, &no_kills(), ctx);
+        let killed = HashSet::from([CHILD_RUN_ID.to_string()]);
 
-            // Establish a tracked child first (no session id yet).
-            tracker.observe_child(
-                CHILD_A_RUN_ID,
-                ChildSignal::Registered {
-                    conversation_id: AIConversationId::new(),
-                },
-                &killed,
-                ctx,
-            );
+        tracker.observe_child(
+            CHILD_RUN_ID,
+            ChildSignal::Lifecycle(api::LifecycleEventType::Cancelled),
+            &killed,
+            ctx,
+        );
 
-            tracker.observe_child(
-                CHILD_A_RUN_ID,
-                ChildSignal::SessionLinked {
-                    session_uuid: SESSION_A.to_string(),
-                },
-                &killed,
-                ctx,
-            );
-
-            let entry = tracker
-                .children
-                .get(&task_id(CHILD_A_RUN_ID))
-                .expect("child is tracked");
-            assert_eq!(
-                entry.session_id,
-                Some(SESSION_A.parse().unwrap()),
-                "SessionLinked fills in the session id directly"
-            );
-            assert!(
-                entry.pane_materialized,
-                "SessionLinked requests pane materialization immediately"
-            );
-            assert_eq!(
-                tracker.metadata_fetch_dispatch_count, 0,
-                "SessionLinked must not trigger a metadata fetch"
-            );
-        });
+        assert!(
+            tracker.children.is_empty(),
+            "a killed run must be dropped from the tracker"
+        );
     });
 }
 
 #[test]
-fn two_started_signals_issue_one_metadata_fetch() {
-    App::test((), |mut app| async move {
-        let streamer = install_streamer(&mut app);
-        streamer.update(&mut app, |_streamer, ctx| {
-            let mut tracker = observer_tracker();
-            let killed = HashSet::new();
+fn registered_child_is_tracked_in_band_without_a_discovery_fetch() {
+    with_tracker(|tracker, ctx| {
+        tracker.observe_child(CHILD_RUN_ID, ChildSignal::Registered, &no_kills(), ctx);
 
-            tracker.observe_child(CHILD_A_RUN_ID, ChildSignal::Started, &killed, ctx);
-            tracker.observe_child(CHILD_A_RUN_ID, ChildSignal::Started, &killed, ctx);
-
-            assert_eq!(
-                tracker.metadata_fetch_dispatch_count, 1,
-                "two Started signals for the same run id must dedupe to one fetch"
-            );
-            assert!(tracker.metadata_fetches.contains(CHILD_A_RUN_ID));
-        });
+        let child = tracker
+            .children
+            .get(&task_id(CHILD_RUN_ID))
+            .expect("a registered child is tracked immediately");
+        assert!(
+            !child.is_remote_child,
+            "a child created in this process owns a real local conversation"
+        );
+        assert!(
+            tracker.in_band_children.contains(&task_id(CHILD_RUN_ID)),
+            "a registered child is marked in-band"
+        );
+        assert_eq!(
+            tracker.metadata_fetch_dispatch_count(),
+            0,
+            "an in-band child needs no discovery fetch"
+        );
     });
 }
 
 #[test]
-fn seeded_child_placeholder_is_remote_child_in_viewer_mode() {
-    // Validation criterion 4 (TECH QUALITY-928 §7.4): a child placeholder
-    // materialized by the tracker uses the single unified `is_remote_child`
-    // marker even in viewer mode. The tracker never sets
-    // `is_viewing_shared_session` on a child — that flavor stays reserved for
-    // the parent viewer placeholder — so a viewer-created child persists as an
-    // `is_remote_child` row and survives restart.
-    App::test((), |mut app| async move {
-        let streamer = install_streamer(&mut app);
-        streamer.update(&mut app, |_streamer, ctx| {
-            let mut tracker = observer_tracker();
-            let killed = HashSet::new();
+fn started_after_registered_keeps_the_child_and_skips_discovery() {
+    with_tracker(|tracker, ctx| {
+        tracker.observe_child(CHILD_RUN_ID, ChildSignal::Registered, &no_kills(), ctx);
 
-            tracker.observe_child(
-                CHILD_A_RUN_ID,
-                ChildSignal::Seeded(Box::new(child_task(task_id(CHILD_A_RUN_ID)))),
-                &killed,
-                ctx,
-            );
+        tracker.observe_child(CHILD_RUN_ID, ChildSignal::Started, &no_kills(), ctx);
 
-            let entry = tracker
-                .children
-                .get(&task_id(CHILD_A_RUN_ID))
-                .expect("seeded child placeholder is tracked immediately");
-            assert!(
-                entry.is_remote_child,
-                "viewer-created child placeholders use the unified is_remote_child marker"
-            );
-        });
+        assert!(
+            tracker.children.contains_key(&task_id(CHILD_RUN_ID)),
+            "the registered child survives a later discovery signal"
+        );
+        assert_eq!(
+            tracker.metadata_fetch_dispatch_count(),
+            0,
+            "an already-represented child must not be fetched"
+        );
+    });
+}
+
+#[test]
+fn session_linked_materializes_the_pane_without_a_metadata_fetch() {
+    with_tracker(|tracker, ctx| {
+        tracker.observe_child(CHILD_RUN_ID, ChildSignal::Registered, &no_kills(), ctx);
+
+        tracker.observe_child(
+            CHILD_RUN_ID,
+            ChildSignal::SessionLinked {
+                session_uuid: SESSION_UUID.to_string(),
+            },
+            &no_kills(),
+            ctx,
+        );
+
+        let child = tracker
+            .children
+            .get(&task_id(CHILD_RUN_ID))
+            .expect("child is tracked");
+        assert_eq!(
+            child.session_id,
+            Some(SESSION_UUID.parse().expect("hardcoded session id parses"))
+        );
+        assert!(
+            child.pane_materialized,
+            "a linked session is enough to open the pane"
+        );
+        assert_eq!(
+            tracker.metadata_fetch_dispatch_count(),
+            0,
+            "the session link carries everything the pane needs"
+        );
+    });
+}
+
+#[test]
+fn session_linked_before_the_child_exists_is_applied_on_creation() {
+    with_tracker(|tracker, ctx| {
+        tracker.observe_child(
+            CHILD_RUN_ID,
+            ChildSignal::SessionLinked {
+                session_uuid: SESSION_UUID.to_string(),
+            },
+            &no_kills(),
+            ctx,
+        );
+
+        tracker.observe_child(CHILD_RUN_ID, ChildSignal::Registered, &no_kills(), ctx);
+
+        let child = tracker
+            .children
+            .get(&task_id(CHILD_RUN_ID))
+            .expect("child is tracked");
+        assert_eq!(
+            child.session_id,
+            Some(SESSION_UUID.parse().expect("hardcoded session id parses")),
+            "an early session link is stashed and applied when the child appears"
+        );
+    });
+}
+
+#[test]
+fn seeded_child_is_marked_as_a_remote_child() {
+    with_tracker(|tracker, ctx| {
+        tracker.observe_child(
+            CHILD_RUN_ID,
+            ChildSignal::Seeded(Box::new(child_task(task_id(CHILD_RUN_ID)))),
+            &no_kills(),
+            ctx,
+        );
+
+        let child = tracker
+            .children
+            .get(&task_id(CHILD_RUN_ID))
+            .expect("a seeded child is tracked immediately");
+        assert!(
+            child.is_remote_child,
+            "a placeholder for a run hosted elsewhere is a remote child"
+        );
     });
 }
