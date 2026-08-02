@@ -145,11 +145,9 @@ impl TerminalManager {
         );
     }
 
-    /// Creates the universal live-session viewer for an orchestration child
-    /// pane under the unified stack. Combines ambient-agent controls
-    /// (`is_ambient_agent = true`) with the `FailedToJoin` recovery routing
-    /// that `orchestration_child_conversation_id` provides, so every child
-    /// pane — owner or collaborator — gets both. Callers are responsible for
+    /// Creates the live-session viewer for an orchestration child pane, with
+    /// both ambient-agent controls and the `FailedToJoin` recovery routing
+    /// that a known child conversation enables. Callers are responsible for
     /// wiring ambient session events after construction.
     #[allow(clippy::new_ret_no_self)]
     pub fn new_for_ambient_orchestration_child(

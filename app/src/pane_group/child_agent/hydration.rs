@@ -25,10 +25,9 @@ use crate::terminal::view::{
     completed_child_presentation,
 };
 
-// flag-OFF path (OrchestrationUnifiedStack disabled)
-
 /// How to hydrate a restored hidden remote-child pane given its
-/// [`AmbientAgentTask`]. See [`decide_remote_child_hydration_action`].
+/// [`AmbientAgentTask`]. Only used while `OrchestrationUnifiedStack` is
+/// disabled. See [`decide_remote_child_hydration_action`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::pane_group) enum RemoteChildHydrationAction {
     /// Attachable live session — join it in place.
@@ -88,7 +87,7 @@ impl PaneGroup {
         task: AmbientAgentTask,
         ctx: &mut ViewContext<Self>,
     ) {
-        // Idempotency guard (same as current — check child_agent_panes)
+        // Skip when this child already has a live tracked pane.
         if let Some(existing_pane_id) = self.child_agent_panes.get(&child_id).copied()
             && self.has_pane_id(existing_pane_id)
         {
@@ -106,19 +105,13 @@ impl PaneGroup {
         self.apply_child_pane_materialization(child_conversation, task, ctx);
     }
 
-    /// Single dispatch for every placeholder-child pane — the `is_remote_child`
-    /// (owner) and `is_viewing_shared_session` (viewer) branches of
-    /// [`Self::create_hidden_child_agent_pane`] both funnel here.
+    /// Materializes the pane for a placeholder child conversation from its
+    /// [`AmbientAgentTask`](crate::ai::ambient_agents::AmbientAgentTask),
+    /// leaving a loading pane in place while the task is still being fetched.
     ///
-    /// Fetches the child's [`AmbientAgentTask`](crate::ai::ambient_agents::AmbientAgentTask)
-    /// and dispatches via [`Self::apply_child_pane_materialization`], which
-    /// makes the same live / transcript / pending choice regardless of
-    /// whether the child was discovered as a hosted conversation or through a
-    /// shared session.
-    ///
-    /// Idempotent: skipped when the placeholder already has a live tracked
-    /// pane, so repeat calls from `restore_missing_child_agent_panes_for_parent`
-    /// don't create a duplicate pane and orphan the first.
+    /// Idempotent: repeat calls for a placeholder that already has a live
+    /// tracked pane are skipped rather than creating a duplicate pane and
+    /// orphaning the first.
     pub(in crate::pane_group) fn materialize_child_pane(
         &mut self,
         child_conversation: AIConversation,
@@ -126,7 +119,6 @@ impl PaneGroup {
     ) {
         let child_id = child_conversation.id();
 
-        // Idempotency guard — see fn doc.
         if let Some(existing_pane_id) = self.child_agent_panes.get(&child_id).copied()
             && self.has_pane_id(existing_pane_id)
         {
@@ -142,10 +134,9 @@ impl PaneGroup {
         });
 
         let Some(task) = task else {
-            // Pending: show the child loading presentation rather than the
-            // generic cloud-agent composing zero state. Register so that
-            // process_pending_child_hydrations re-drives when
-            // evict_and_refetch_task fires TasksUpdated with fresh data.
+            // Show the child loading presentation rather than the generic
+            // cloud-agent composing zero state, and register for a re-drive
+            // once the task fetch lands.
             if self
                 .create_child_loading_placeholder(
                     child_conversation,
@@ -164,14 +155,10 @@ impl PaneGroup {
         self.apply_child_pane_materialization(child_conversation, task, ctx);
     }
 
-    /// Inner dispatch shared by [`Self::materialize_child_pane`] and
-    /// [`Self::materialize_viewer_child_pane_from_task`] once a task snapshot
-    /// is available. `AttachLive` joins the live session, `LoadTranscript`
-    /// fetches and merges the cloud transcript, and `Pending` leaves a
-    /// loading placeholder in place until fresher task data arrives. Applies
-    /// identically regardless of whether the child was discovered as a
-    /// hosted conversation or through a shared session — both already run
-    /// the same ownership check via `completed_child_conversation_access`.
+    /// Applies the materialization decision for a child whose task snapshot is
+    /// available: `AttachLive` joins the live session, `LoadTranscript`
+    /// fetches and merges the cloud transcript, and `Pending` leaves a loading
+    /// placeholder in place until fresher task data arrives.
     fn apply_child_pane_materialization(
         &mut self,
         child_conversation: AIConversation,
@@ -182,7 +169,8 @@ impl PaneGroup {
             ChildPaneMaterialization::AttachLive { session_id } => {
                 let child_id = child_conversation.id();
                 if self.failed_viewer_child_sessions.get(&child_id) == Some(&session_id) {
-                    // Stale-session guard: same dead session, queue for retry
+                    // The session already failed to join; wait for a later
+                    // execution rather than retrying the same dead session.
                     if let Some(task_id) = child_conversation.task_id() {
                         self.pending_child_hydrations.insert(task_id, child_id);
                         self.ensure_pending_ambient_restoration_subscription(ctx);
@@ -244,13 +232,11 @@ impl PaneGroup {
         }
     }
 
-    /// Universal live-session attach for every child pane, regardless of
-    /// whether the child was discovered as a hosted conversation or through a
-    /// shared session. Constructs the pane with the live session from the
-    /// start, matching normal ambient restoration. A visible Pending loading
-    /// pane is discarded and the new pane is swapped into the same anchor
-    /// only after its session manager, ambient model, and conversation have
-    /// all been initialized.
+    /// Builds a child pane that joins `session_id` from the start. Any loading
+    /// pane already showing for this child is discarded and the replacement is
+    /// swapped into the same anchor only once its session manager, ambient
+    /// model, and conversation are initialized, so the user never sees a
+    /// half-built pane.
     fn attach_ambient_orchestration_child_session(
         &mut self,
         child_id: AIConversationId,
@@ -347,10 +333,8 @@ impl PaneGroup {
         }
     }
 
-    /// Attaches the hidden child pane's ambient agent view model to the live
-    /// ambient session for `task_id`. Wrapper around
-    /// `AmbientAgentViewModel::enter_viewing_existing_session` that also sets
-    /// the active conversation id.
+    /// Points the pane's ambient agent view model at the existing session for
+    /// `task_id` and at the child's conversation.
     fn apply_existing_ambient_task_to_pane(
         &mut self,
         pane_id: PaneId,
@@ -377,9 +361,8 @@ impl PaneGroup {
     }
 
     /// Loads a completed child conversation's cloud transcript and chooses
-    /// continuation or passive presentation from conversation access.
-    /// Applies to every child pane regardless of origin — both already run
-    /// the same ownership check via `completed_child_conversation_access`.
+    /// continuation or passive presentation based on the caller's access to
+    /// the conversation.
     fn hydrate_child_transcript(
         &mut self,
         pane_id: PaneId,
@@ -401,10 +384,8 @@ impl PaneGroup {
             if !still_canonical {
                 return;
             }
-            // Staleness guard: a race between this async fetch and pane
-            // supersession may have swapped the pane's active conversation
-            // out from under us. Harmless to apply unconditionally — the
-            // pane is already canonical in the common case.
+            // The pane may have been swapped to another conversation while
+            // the fetch was in flight; don't overwrite what it now shows.
             let active_conversation = group
                 .terminal_view_from_pane_id(pane_id, ctx)
                 .and_then(|view| view.as_ref(ctx).active_conversation_id(ctx));
@@ -613,11 +594,8 @@ impl PaneGroup {
             return None;
         }
 
-        // Restore the conversation and enter agent view so the pill bar renders
-        // (its gate requires `is_fullscreen()`). The output area stays a loading
-        // spinner because the loading view's
-        // `ConversationTranscriptViewerStatus::Loading` short-circuits the
-        // block list render in `TerminalView::render`.
+        // Entering agent view is what makes the pill bar render; the loading
+        // view keeps the output area a spinner until hydration completes.
         loading_view.update(ctx, |terminal_view, ctx| {
             terminal_view.restore_conversation_after_view_creation(
                 RestoredAIConversation::new(child_conversation),
@@ -732,17 +710,15 @@ impl PaneGroup {
     // flag-OFF path (OrchestrationUnifiedStack disabled)
     // =========================================================================
 
-    /// Task-backed restore path for the `is_remote_child` branch of
-    /// `create_hidden_child_agent_pane` when `OrchestrationUnifiedStack` is
-    /// disabled. Always creates the hidden ambient pane, registers it in
-    /// `child_agent_panes` keyed by the placeholder's local
-    /// `AIConversationId`, then dispatches via `attempt_remote_child_hydration`
-    /// (or queues a pending entry while task data is fetched).
+    /// Task-backed restore path for remote children while
+    /// `OrchestrationUnifiedStack` is disabled. Creates the hidden ambient
+    /// pane, registers it in `child_agent_panes` under the placeholder's local
+    /// `AIConversationId`, then hydrates it (or queues a pending entry while
+    /// task data is fetched).
     ///
-    /// Idempotent: skipped when the placeholder already has a live tracked
-    /// pane, so repeat calls from `restore_missing_child_agent_panes_for_parent`
-    /// — including while the initial async hydration is still in flight —
-    /// don't create a duplicate hidden pane and orphan the first one.
+    /// Idempotent: repeat calls for a placeholder that already has a live
+    /// tracked pane — including while the initial async hydration is still in
+    /// flight — are skipped rather than orphaning the first pane.
     pub(super) fn hydrate_task_backed_hidden_child_pane(
         &mut self,
         child_conversation: AIConversation,
@@ -994,10 +970,8 @@ impl PaneGroup {
     }
 
     /// Drains entries from `pending_remote_child_hydrations` for which task
-    /// data is now available, hydrating each hidden child pane in place.
-    /// Only populated when `OrchestrationUnifiedStack` is disabled — the
-    /// unified stack re-drives through `process_pending_child_hydrations`
-    /// and `pending_child_hydrations` instead.
+    /// data is now available, hydrating each hidden child pane in place. That
+    /// map is only populated while `OrchestrationUnifiedStack` is disabled.
     pub(in crate::pane_group) fn process_pending_remote_child_hydrations(
         &mut self,
         ctx: &mut ViewContext<Self>,

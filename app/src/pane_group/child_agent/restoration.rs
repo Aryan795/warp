@@ -178,10 +178,8 @@ impl PaneGroup {
         let flag_on = FeatureFlag::OrchestrationUnifiedStack.is_enabled();
 
         if flag_on {
-            // flag-ON (M2): unified placeholder dispatch — viewer and owner
-            // both route through `materialize_child_pane`, which fetches the
-            // task and routes on `decide_child_pane_materialization`. The
-            // local in-process child branch below stays separate.
+            // Viewer and owner children share one task-driven dispatch; only
+            // local in-process children fall through to the branch below.
             if child_conversation.is_viewing_shared_session()
                 || child_conversation.is_remote_child()
             {
@@ -189,7 +187,7 @@ impl PaneGroup {
                 return;
             }
         } else {
-            // flag-OFF: original dispatch preserved
+            // Viewer and owner children take separate dispatches.
             if child_conversation.is_viewing_shared_session() {
                 let _ = self.create_child_loading_placeholder(
                     child_conversation,

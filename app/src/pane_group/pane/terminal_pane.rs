@@ -1450,9 +1450,9 @@ fn handle_terminal_view_event(
                 // joinable `session_id`. Materializes a dedicated hidden
                 // shared-session viewer pane for the child so subsequent pill
                 // clicks land on a populated agent view rather than an empty
-                // cloud-mode shell. Under `OrchestrationUnifiedStack`,
-                // `OrchestrationViewerModel` emits `EnsureUnifiedViewerChildPane`
-                // instead, so this handler only serves the flag-OFF path.
+                // cloud-mode shell. Only reached while
+                // `OrchestrationUnifiedStack` is disabled; the unified stack
+                // emits `EnsureUnifiedViewerChildPane` instead.
                 group.ensure_shared_session_viewer_child_pane(*conversation_id, *session_id, ctx);
             }
             Event::OpenChildAgentInNewTab { conversation_id } => {

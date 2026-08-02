@@ -19,9 +19,7 @@ use warpui::{Entity, EntityId, ModelContext, SingletonEntity, WeakViewHandle};
 
 use crate::ai::agent::conversation::{AIConversationId, ConversationStatus};
 use crate::ai::agent_conversations_model::{AgentConversationsModel, AgentConversationsModelEvent};
-use crate::ai::ambient_agents::{
-    AmbientAgentTask, AmbientAgentTaskId, AmbientAgentTaskState,
-};
+use crate::ai::ambient_agents::{AmbientAgentTask, AmbientAgentTaskId, AmbientAgentTaskState};
 use crate::ai::blocklist::BlocklistAIHistoryModel;
 use crate::ai::blocklist::history_model::BlocklistAIHistoryEvent;
 use crate::ai::blocklist::orchestration_event_streamer::{
@@ -58,13 +56,13 @@ pub struct OrchestrationViewerModel {
     /// Secondary index keyed by stringified `run_id`, used by the streamer
     /// broadcast event handler. Kept in sync with `children`.
     children_by_run_id: HashMap<String, AmbientAgentTaskId>,
-    /// Task metadata requests in flight (flag-OFF only). Discovery and
-    /// lifecycle can race; only one request may create/adopt the durable
-    /// run-id mapping.
+    /// Task metadata requests in flight, tracked only while
+    /// `OrchestrationUnifiedStack` is disabled. Discovery and lifecycle can
+    /// race; only one request may create/adopt the durable run-id mapping.
     metadata_fetches: HashSet<AmbientAgentTaskId>,
-    /// Task IDs discovered via `ChildSpawned` that are waiting for task data
-    /// to arrive in the `AgentConversationsModel` cache (flag-ON only).
-    /// Drained on `TasksUpdated` events.
+    /// Children discovered from the streamer whose task data is not cached
+    /// yet. Drained on `TasksUpdated`. Only populated while
+    /// `OrchestrationUnifiedStack` is enabled.
     pending_task_ids_for_discovery: HashSet<AmbientAgentTaskId>,
     /// Periodic timer fetching the claim-time `session_id` for
     /// not-yet-claimed children.
@@ -110,7 +108,6 @@ impl OrchestrationViewerModel {
                 | AgentConversationsModelEvent::NewTasksReceived
                 | AgentConversationsModelEvent::TasksUpdated => {
                     me.register_viewer_mode_consumer_if_possible(ctx);
-                    // Flag-ON: drain children waiting for task data.
                     if FeatureFlag::OrchestrationUnifiedStack.is_enabled() {
                         me.drain_pending_task_discoveries(ctx);
                     }
@@ -295,10 +292,9 @@ impl OrchestrationViewerModel {
         ctx: &mut ModelContext<Self>,
     ) {
         if FeatureFlag::OrchestrationUnifiedStack.is_enabled() {
-            // Use the shared ACM fetch authority instead of a direct ai_client
-            // call. A cache hit registers the child immediately; a miss adds to
-            // pending_task_ids_for_discovery and resolves on the next
-            // TasksUpdated event.
+            // Route through the shared task cache so discovery reuses whatever
+            // fetch is already in flight. A hit registers the child now; a miss
+            // parks it until the cache reports fresh data.
             let cached = AgentConversationsModel::handle(ctx).update(ctx, |model, ctx| {
                 model.get_or_async_fetch_task_data(&task_id, ctx)
             });
@@ -313,7 +309,6 @@ impl OrchestrationViewerModel {
             }
             return;
         }
-        // Flag-OFF: direct fetch path.
         self.metadata_fetches.insert(task_id);
         #[cfg(test)]
         {
@@ -341,8 +336,7 @@ impl OrchestrationViewerModel {
         );
     }
 
-    /// Drains children in `pending_task_ids_for_discovery` whose task data
-    /// has arrived in the `AgentConversationsModel` cache and registers them.
+    /// Registers every parked child whose task data has since been cached.
     fn drain_pending_task_discoveries(&mut self, ctx: &mut ModelContext<Self>) {
         let ready: Vec<_> = self
             .pending_task_ids_for_discovery

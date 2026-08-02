@@ -3313,8 +3313,10 @@ impl PaneGroup {
         }
 
         self.process_pending_ambient_restorations(ctx);
-        self.process_pending_remote_child_hydrations(ctx); // flag-OFF path (no-op under flag-ON)
-        self.process_pending_child_hydrations(ctx); // flag-ON unified path
+        // Each of these no-ops unless its own `OrchestrationUnifiedStack`
+        // state is the active one.
+        self.process_pending_remote_child_hydrations(ctx);
+        self.process_pending_child_hydrations(ctx);
     }
 
     /// Initial layout for a [`PaneGroup`] with a single ambient agent pane.
@@ -6199,10 +6201,9 @@ impl PaneGroup {
         (terminal_view, terminal_manager)
     }
 
-    /// Universal live-session pane for orchestration children under the
-    /// unified stack. The resulting pane always has an ambient model wired
-    /// up upfront, so owner and collaborator child panes both get ambient
-    /// controls and `FailedToJoin` recovery.
+    /// Builds a live-session pane for an orchestration child with its ambient
+    /// model wired up, so the pane gets ambient controls and `FailedToJoin`
+    /// recovery whether the child is owned or observed.
     fn create_ambient_orchestration_child_pane(
         session_id: SessionId,
         conversation_id: AIConversationId,
@@ -6226,9 +6227,8 @@ impl PaneGroup {
         let terminal_manager =
             ctx.add_model(|_ctx| Box::new(terminal_init.manager) as Box<dyn TerminalManager>);
 
-        // `is_ambient_agent = true` means the ambient model already exists at
-        // construction time, unlike the lazy `SessionJoined` creation used by
-        // generic shared-session viewers.
+        // The ambient model exists as soon as the view is constructed, so its
+        // session events have to be wired here rather than on session join.
         if let Some(view_model) = terminal_view
             .as_ref(ctx)
             .ambient_agent_view_model()
