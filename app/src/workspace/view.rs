@@ -12171,6 +12171,9 @@ impl Workspace {
         });
     }
 
+    /// Only reachable from the code-review right panel, which is itself gated
+    /// behind `local_fs` (see `handle_right_panel_event`).
+    #[cfg(feature = "local_fs")]
     fn handle_code_review_user_scrolled(
         &mut self,
         scroll_index: usize,

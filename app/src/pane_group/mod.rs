@@ -4463,8 +4463,8 @@ impl PaneGroup {
             return;
         }
         let window_id = ctx.window_id();
-        crate::workspace::nav_stack::NavigationStack::handle(ctx).update(ctx, |stack, _| {
-            stack.retain(|entry| entry.window_id != window_id || entry.pane_id != pane_id);
+        crate::workspace::nav_stack::retain_entries(ctx, |entry| {
+            entry.window_id != window_id || entry.pane_id != pane_id
         });
 
         let summary = UnsavedStateSummary::for_pane(self, pane_id, ctx);
@@ -4984,14 +4984,9 @@ impl PaneGroup {
                 let window_id = ctx.window_id();
                 self.clean_up_pane(original_pane_id, ctx);
                 self.pane_contents.remove(&original_pane_id);
-                crate::workspace::nav_stack::NavigationStack::handle(ctx).update(
-                    ctx,
-                    |stack, _| {
-                        stack.retain(|entry| {
-                            entry.window_id != window_id || entry.pane_id != original_pane_id
-                        });
-                    },
-                );
+                crate::workspace::nav_stack::retain_entries(ctx, |entry| {
+                    entry.window_id != window_id || entry.pane_id != original_pane_id
+                });
             }
             self.restore_missing_child_agent_panes_for_terminal_pane_if_needed(
                 replacement_pane_id,
@@ -5508,8 +5503,8 @@ impl PaneGroup {
         // map doesn't accumulate stale ids.
         self.forget_transitively_shared_pane(pane_id);
         let window_id = ctx.window_id();
-        crate::workspace::nav_stack::NavigationStack::handle(ctx).update(ctx, |stack, _| {
-            stack.retain(|entry| entry.window_id != window_id || entry.pane_id != pane_id);
+        crate::workspace::nav_stack::retain_entries(ctx, |entry| {
+            entry.window_id != window_id || entry.pane_id != pane_id
         });
 
         ctx.notify();

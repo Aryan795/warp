@@ -1,7 +1,8 @@
 use warp_editor::render::model::viewport::ScrollPositionSnapshot;
 use warpui::units::Pixels;
-use warpui::{AppContext, EntityId, WindowId, navigation};
+use warpui::{AppContext, EntityId, SingletonEntity, WindowId, navigation};
 
+use crate::features::FeatureFlag;
 use crate::pane_group::PaneId;
 use crate::terminal::block_list_viewport::ScrollPosition;
 
@@ -104,6 +105,22 @@ impl navigation::NavigationEntry for NavigationEntry {
 }
 
 pub type NavigationStack = navigation::NavigationStack<NavigationEntry>;
+
+/// Keeps only the navigation entries for which `keep` returns `true`, used to
+/// drop history that points at a destination which no longer exists.
+///
+/// No-ops while `NavigationStack` is disabled: nothing is recorded with the
+/// feature off, and the stack model is only registered when the workspace
+/// initializes it, so callers on pane/tab/window teardown paths must not
+/// require it to be present.
+pub fn retain_entries(ctx: &mut AppContext, keep: impl Fn(&NavigationEntry) -> bool) {
+    if !FeatureFlag::NavigationStack.is_enabled() {
+        return;
+    }
+    NavigationStack::handle(ctx).update(ctx, |stack, _| {
+        stack.retain(keep);
+    });
+}
 
 pub fn init(app: &mut AppContext) {
     app.add_singleton_model(NavigationStack::new);

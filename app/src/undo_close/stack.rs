@@ -77,9 +77,7 @@ impl ClosedItem {
         match self {
             ClosedItem::Window(data) => {
                 let ClosedWindowData { window_id, .. } = *data;
-                workspace::nav_stack::NavigationStack::handle(ctx).update(ctx, |stack, _| {
-                    stack.retain(|entry| entry.window_id != window_id);
-                });
+                workspace::nav_stack::retain_entries(ctx, |entry| entry.window_id != window_id);
                 ActiveAgentViewsModel::handle(ctx).update(ctx, |model, ctx| {
                     model.remove_focused_state_for_window(window_id, ctx);
                 });
@@ -103,10 +101,8 @@ impl ClosedItem {
                 data,
                 ..
             } => {
-                workspace::nav_stack::NavigationStack::handle(ctx).update(ctx, |stack, _| {
-                    stack.retain(|entry| {
-                        entry.window_id != window_id || entry.tab_index != tab_index
-                    });
+                workspace::nav_stack::retain_entries(ctx, |entry| {
+                    entry.window_id != window_id || entry.tab_index != tab_index
                 });
                 // Mark conversations from all terminal panes in the tab
                 Self::mark_conversations_historical_for_pane_group(
@@ -117,10 +113,8 @@ impl ClosedItem {
                 Self::clean_up_pane_group(&data.pane_group, ctx);
             }
             ClosedItem::Pane { data } => {
-                workspace::nav_stack::NavigationStack::handle(ctx).update(ctx, |stack, _| {
-                    stack.retain(|entry| {
-                        entry.window_id != data.window_id || entry.pane_id != data.pane_id
-                    });
+                workspace::nav_stack::retain_entries(ctx, |entry| {
+                    entry.window_id != data.window_id || entry.pane_id != data.pane_id
                 });
                 ctx.emit(UndoCloseStackEvent::DiscardPane(data.pane_id));
             }
