@@ -57,7 +57,6 @@ use crate::ai::outline::RepoOutlines;
 use crate::ai::persisted_workspace::PersistedWorkspace;
 use crate::ai::restored_conversations::RestoredAgentConversations;
 use crate::ai::skills::SkillManager;
-use crate::app_state::AmbientAgentPaneSnapshot;
 use crate::auth::auth_manager::AuthManager;
 use crate::auth::user::TEST_USER_UID;
 use crate::changelog_model::ChangelogModel;
@@ -110,7 +109,6 @@ use crate::{
 fn initialize_app(app: &mut App) {
     initialize_app_with_history(app, Vec::new());
 }
-
 
 fn initialize_app_with_history(app: &mut App, conversations: Vec<AgentConversation>) {
     initialize_settings_for_tests(app);
@@ -951,8 +949,9 @@ fn test_restored_remote_hidden_child_pane_enters_existing_ambient_session() {
 
             // Inject an *attachable* task (InProgress + running sandbox +
             // parseable session id) so the unified dispatch resolves to
-            // `AttachLive` and routes through `attach_child_session` (owner
-            // arm), joining the live ambient session in place.
+            // `AttachLive` and routes through
+            // `attach_ambient_orchestration_child_session`, joining the live
+            // ambient session in place.
             AgentConversationsModel::handle(ctx).update(ctx, |model, _| {
                 model.insert_task_for_test(attachable_ambient_agent_task(task_id));
             });
@@ -1292,7 +1291,7 @@ fn failed_viewer_child_session_stays_unavailable_without_retrying_same_session()
             AgentConversationsModel::handle(ctx).update(ctx, |model, _| {
                 model.insert_task_for_test(running_task);
             });
-            panes.process_pending_viewer_child_hydrations(ctx);
+            panes.process_pending_child_hydrations(ctx);
 
             assert_eq!(panes.child_agent_panes[&child_id], pane_id);
             assert_eq!(
@@ -1300,7 +1299,7 @@ fn failed_viewer_child_session_stays_unavailable_without_retrying_same_session()
                 Some(&failed_session_id),
             );
             assert_eq!(
-                panes.pending_viewer_child_hydrations.get(&task_id),
+                panes.pending_child_hydrations.get(&task_id),
                 Some(&child_id),
             );
             let view = panes

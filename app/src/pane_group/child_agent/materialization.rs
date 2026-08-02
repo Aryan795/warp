@@ -3,20 +3,6 @@ use session_sharing_protocol::common::SessionId;
 use crate::ai::agent::api::ServerConversationToken;
 use crate::ai::ambient_agents::{AmbientAgentLiveSessionState, AmbientAgentTask};
 
-/// The context from which a child pane is being constructed.
-///
-/// Selects the pane *construction* strategy in
-/// [`PaneGroup::attach_child_session`]; the materialization *decision*
-/// ([`decide_child_pane_materialization`]) is origin-agnostic. Origin never
-/// grants live input or terminal continuation capability.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ChildPaneOrigin {
-    /// Child discovered from a conversation hosted by this process.
-    HostedConversation,
-    /// Child discovered while observing a shared session.
-    SharedSession,
-}
-
 /// How to materialize a child agent pane given its [`AmbientAgentTask`].
 /// See [`decide_child_pane_materialization`].
 #[derive(Debug, Clone, PartialEq, Eq)]

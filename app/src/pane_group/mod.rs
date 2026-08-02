@@ -950,10 +950,11 @@ pub struct PaneGroup {
     /// Only populated when `OrchestrationUnifiedStack` is disabled.
     pending_remote_child_hydrations: HashMap<AmbientAgentTaskId, AIConversationId>,
 
-    /// Unified-stack viewer children waiting for a task state that can be
-    /// materialized. Unlike owner restorations, these remain passive and
-    /// re-drive through the viewer construction path.
-    pending_viewer_child_hydrations: HashMap<AmbientAgentTaskId, AIConversationId>,
+    /// Unified-stack children waiting for a task state that can be
+    /// materialized. Unlike `pending_remote_child_hydrations`, these remain
+    /// passive and re-drive through the unified construction path. Only
+    /// populated when `OrchestrationUnifiedStack` is enabled.
+    pending_child_hydrations: HashMap<AmbientAgentTaskId, AIConversationId>,
 
     /// The most recent live session that failed to join for each viewer child.
     /// Re-drive does not retry the same session, but a later execution with a
@@ -3168,7 +3169,7 @@ impl PaneGroup {
             is_right_panel_maximized: false,
             pending_ambient_agent_conversation_restorations: HashMap::new(),
             pending_remote_child_hydrations: HashMap::new(),
-            pending_viewer_child_hydrations: HashMap::new(),
+            pending_child_hydrations: HashMap::new(),
             failed_viewer_child_sessions: HashMap::new(),
             pending_ambient_restoration_subscription_installed: false,
             child_agent_panes: HashMap::new(),
@@ -3282,9 +3283,9 @@ impl PaneGroup {
     }
 
     /// Installs the long-lived AgentConversationsModel subscription used by
-    /// both `pending_ambient_agent_conversation_restorations` and
-    /// `pending_remote_child_hydrations` if it has not been installed yet.
-    /// Idempotent across multiple callers.
+    /// `pending_ambient_agent_conversation_restorations`,
+    /// `pending_remote_child_hydrations`, and `pending_child_hydrations` if
+    /// it has not been installed yet. Idempotent across multiple callers.
     fn ensure_pending_ambient_restoration_subscription(&mut self, ctx: &mut ViewContext<Self>) {
         if self.pending_ambient_restoration_subscription_installed {
             return;
@@ -3312,8 +3313,8 @@ impl PaneGroup {
         }
 
         self.process_pending_ambient_restorations(ctx);
-        self.process_pending_remote_child_hydrations(ctx);
-        self.process_pending_viewer_child_hydrations(ctx);
+        self.process_pending_remote_child_hydrations(ctx); // flag-OFF path (no-op under flag-ON)
+        self.process_pending_child_hydrations(ctx); // flag-ON unified path
     }
 
     /// Initial layout for a [`PaneGroup`] with a single ambient agent pane.
@@ -4634,7 +4635,7 @@ impl PaneGroup {
         for (conv_id, child_pane_id) in children {
             self.child_agent_panes.remove(&conv_id);
             self.failed_viewer_child_sessions.remove(&conv_id);
-            self.pending_viewer_child_hydrations
+            self.pending_child_hydrations
                 .retain(|_, child_id| *child_id != conv_id);
             self.panes.remove_hidden_pane(child_pane_id);
             self.discard_pane(child_pane_id, ctx);
@@ -4649,7 +4650,7 @@ impl PaneGroup {
     ) -> bool {
         let tracked_child_pane = self.child_agent_panes.remove(&conversation_id);
         self.failed_viewer_child_sessions.remove(&conversation_id);
-        self.pending_viewer_child_hydrations
+        self.pending_child_hydrations
             .retain(|_, child_id| *child_id != conversation_id);
         let split_off_child_pane = self.child_agent_origin.as_ref().and_then(|origin| {
             (origin.conversation_id == conversation_id)
@@ -6198,7 +6199,11 @@ impl PaneGroup {
         (terminal_view, terminal_manager)
     }
 
-    fn create_orchestration_child_shared_session_viewer(
+    /// Universal live-session pane for orchestration children under the
+    /// unified stack. The resulting pane always has an ambient model wired
+    /// up upfront, so owner and collaborator child panes both get ambient
+    /// controls and `FailedToJoin` recovery.
+    fn create_ambient_orchestration_child_pane(
         session_id: SessionId,
         conversation_id: AIConversationId,
         resources: TerminalViewResources,
@@ -6208,17 +6213,34 @@ impl PaneGroup {
         ViewHandle<TerminalView>,
         ModelHandle<Box<dyn TerminalManager>>,
     ) {
-        let terminal_init = shared_session::viewer::TerminalManager::new_for_orchestration_child(
-            session_id,
-            conversation_id,
-            resources,
-            initial_size,
-            ctx.window_id(),
-            ctx,
-        );
+        let terminal_init =
+            shared_session::viewer::TerminalManager::new_for_ambient_orchestration_child(
+                session_id,
+                conversation_id,
+                resources,
+                initial_size,
+                ctx.window_id(),
+                ctx,
+            );
         let terminal_view = terminal_init.view;
         let terminal_manager =
             ctx.add_model(|_ctx| Box::new(terminal_init.manager) as Box<dyn TerminalManager>);
+
+        // `is_ambient_agent = true` means the ambient model already exists at
+        // construction time, unlike the lazy `SessionJoined` creation used by
+        // generic shared-session viewers.
+        if let Some(view_model) = terminal_view
+            .as_ref(ctx)
+            .ambient_agent_view_model()
+            .cloned()
+        {
+            crate::terminal::view::ambient_agent::wire_ambient_agent_session_events(
+                &terminal_manager,
+                &view_model,
+                ctx,
+            );
+        }
+
         (terminal_view, terminal_manager)
     }
 

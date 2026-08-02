@@ -6,7 +6,6 @@ use uuid::Uuid;
 use warp_errors::report_error;
 use warpui::{SingletonEntity, ViewContext};
 
-use super::materialization::ChildPaneOrigin;
 use super::{HiddenChildAgentTaskContext, apply_hidden_child_agent_task_context};
 use crate::ai::agent::conversation::{AIConversation, AIConversationId};
 use crate::ai::blocklist::BlocklistAIHistoryModel;
@@ -180,30 +179,23 @@ impl PaneGroup {
 
         if flag_on {
             // flag-ON (M2): unified placeholder dispatch — viewer and owner
-            // both route through `materialize_child_placeholder_pane`, which
-            // fetches the task and routes on `decide_child_pane_materialization`.
-            // The local in-process child branch below stays separate.
-            let parent_is_shared_observer = child_conversation
-                .parent_conversation_id()
-                .and_then(|parent_id| BlocklistAIHistoryModel::as_ref(ctx).conversation(&parent_id))
-                .is_some_and(|parent| parent.is_viewing_shared_session());
-            let pane_origin = if child_conversation.is_viewing_shared_session()
-                || (child_conversation.is_remote_child() && parent_is_shared_observer)
+            // both route through `materialize_child_pane`, which fetches the
+            // task and routes on `decide_child_pane_materialization`. The
+            // local in-process child branch below stays separate.
+            if child_conversation.is_viewing_shared_session()
+                || child_conversation.is_remote_child()
             {
-                Some(ChildPaneOrigin::SharedSession)
-            } else if child_conversation.is_remote_child() {
-                Some(ChildPaneOrigin::HostedConversation)
-            } else {
-                None
-            };
-            if let Some(origin) = pane_origin {
-                self.materialize_child_placeholder_pane(child_conversation, origin, ctx);
+                self.materialize_child_pane(child_conversation, ctx);
                 return;
             }
         } else {
             // flag-OFF: original dispatch preserved
             if child_conversation.is_viewing_shared_session() {
-                self.create_viewer_loading_child_placeholder(child_conversation, ctx);
+                let _ = self.create_child_loading_placeholder(
+                    child_conversation,
+                    AgentViewEntryOrigin::SharedSessionSelection,
+                    ctx,
+                );
                 return;
             }
             if child_conversation.is_remote_child() {

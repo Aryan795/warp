@@ -44,7 +44,6 @@ use crate::features::FeatureFlag;
 #[cfg(feature = "local_fs")]
 use crate::pane_group::CodeSource;
 use crate::pane_group::Event::OpenConversationHistory;
-use crate::pane_group::child_agent::materialization::ChildPaneOrigin;
 use crate::pane_group::child_agent::{
     ErrorChildAgentConversationRequest, create_error_child_agent_conversation,
 };
@@ -1451,23 +1450,10 @@ fn handle_terminal_view_event(
                 // joinable `session_id`. Materializes a dedicated hidden
                 // shared-session viewer pane for the child so subsequent pill
                 // clicks land on a populated agent view rather than an empty
-                // cloud-mode shell.
-                if FeatureFlag::OrchestrationUnifiedStack.is_enabled() {
-                    // flag-ON (M2): converged attach
-                    group.attach_child_session(
-                        *conversation_id,
-                        *session_id,
-                        ChildPaneOrigin::SharedSession,
-                        ctx,
-                    );
-                } else {
-                    // flag-OFF: original dedicated pane creation
-                    group.ensure_shared_session_viewer_child_pane(
-                        *conversation_id,
-                        *session_id,
-                        ctx,
-                    );
-                }
+                // cloud-mode shell. Under `OrchestrationUnifiedStack`,
+                // `OrchestrationViewerModel` emits `EnsureUnifiedViewerChildPane`
+                // instead, so this handler only serves the flag-OFF path.
+                group.ensure_shared_session_viewer_child_pane(*conversation_id, *session_id, ctx);
             }
             Event::OpenChildAgentInNewTab { conversation_id } => {
                 // Pane group can't add tabs; forward to the workspace.
