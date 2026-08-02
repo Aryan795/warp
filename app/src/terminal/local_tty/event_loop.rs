@@ -29,6 +29,14 @@ const READ_BUFFER_SIZE: usize = 0x4_0000;
 /// someone else an opportunity to lock it.
 const MAX_LOCKED_READ: usize = 0x1_0000;
 
+/// Maximum number of `pty_read` passes performed when draining the PTY after
+/// the child process has exited (see [`EventLoop::drain_pty_after_exit`]). Each
+/// pass processes up to [`MAX_LOCKED_READ`] bytes, so this bounds the post-exit
+/// drain at `DRAIN_MAX_READS * MAX_LOCKED_READ` bytes — far more than any
+/// realistic final output burst, while still guaranteeing the drain cannot be
+/// wedged indefinitely.
+const DRAIN_MAX_READS: usize = 512;
+
 pub const CHANNEL_TOKEN: mio::Token = mio::Token(0);
 pub const PTY_TOKEN: mio::Token = mio::Token(1);
 pub const SIGNALS_TOKEN: mio::Token = mio::Token(2);
@@ -320,6 +328,35 @@ where
         Ok(())
     }
 
+    /// Drain and process any output still buffered in the PTY after the child
+    /// process has exited.
+    ///
+    /// The child exiting and the final burst of its output becoming readable
+    /// are two independent events. If the event loop tears down the instant it
+    /// observes the exit, any output the child wrote just before exiting that is
+    /// still buffered in the PTY is never read or parsed, so the tail of the
+    /// output (e.g. the bottom rows of a large table) is silently dropped. This
+    /// is especially visible on macOS, where `SIGCHLD` delivery can win the race
+    /// against draining the PTY on a fast, large output burst.
+    ///
+    /// Reading until the PTY reports it can no longer be read (`WouldBlock` /
+    /// EOF) ensures the complete output is rendered before the terminal is
+    /// marked as exited. The PTY leader is non-blocking, so this cannot block;
+    /// `DRAIN_MAX_READS` additionally bounds the work as a safety net.
+    fn drain_pty_after_exit(&mut self, state: &mut State, buf: &mut [u8]) {
+        let mut can_read = true;
+        for _ in 0..DRAIN_MAX_READS {
+            if !can_read {
+                break;
+            }
+            // A read error here (e.g. `EIO` once the child's PTY slave is fully
+            // closed) simply means there is nothing left to drain, so stop.
+            if self.pty_read(state, buf, &mut can_read).is_err() {
+                break;
+            }
+        }
+    }
+
     pub fn spawn(mut self) -> JoinHandle<()> {
         #[cfg(test)]
         let feature_flag_overrides = warp_core::features::get_overrides();
@@ -397,6 +434,10 @@ where
                                         child_exited: exited,
                                     } => {
                                         if exited {
+                                            // Drain any output still buffered in
+                                            // the PTY before winding down, so a
+                                            // final burst isn't dropped.
+                                            self.drain_pty_after_exit(&mut state, &mut buf);
                                             self.terminal
                                                 .lock()
                                                 .exit(ExitReason::ShellProcessExited);
@@ -412,6 +453,12 @@ where
                                 if let Some(local_tty::ChildEvent::Exited) =
                                     self.pty.next_child_event()
                                 {
+                                    // Drain any output the child wrote just
+                                    // before exiting that is still buffered in
+                                    // the PTY, so the tail of a large/fast output
+                                    // burst (e.g. a table) isn't dropped. See
+                                    // `drain_pty_after_exit`.
+                                    self.drain_pty_after_exit(&mut state, &mut buf);
                                     self.terminal.lock().exit(ExitReason::ShellProcessExited);
                                     child_exited = true;
                                     self.event_listener.send_wakeup_event();
@@ -492,3 +539,7 @@ where
             .expect("thread spawn works")
     }
 }
+
+#[cfg(test)]
+#[path = "event_loop_tests.rs"]
+mod tests;
