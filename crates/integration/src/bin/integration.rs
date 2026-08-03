@@ -513,8 +513,13 @@ fn register_tests() -> HashMap<&'static str, BoxedBuilderFn> {
     register_test!(test_nav_stack_code_editor_scroll);
     register_test!(test_nav_stack_restores_closed_pane_when_available);
     register_test!(test_nav_stack_restores_closed_tab_when_available);
+    register_test!(test_nav_stack_restores_closed_middle_tab_when_available);
     register_test!(test_nav_stack_restores_closed_window_when_available);
     register_test!(test_nav_stack_prunes_expired_closed_tab_entries);
+    register_test!(test_nav_stack_feature_flag_gates_settings_and_palette);
+    register_test!(test_nav_stack_settings_and_palette_present_when_enabled);
+    register_test!(test_nav_stack_shortcut_does_not_interrupt_foreground_program);
+    register_test!(test_nav_stack_code_review_scroll_restored);
     // Video recording test (manual only)
     register_test!(test_video_recording);
 

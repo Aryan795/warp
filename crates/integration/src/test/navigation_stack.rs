@@ -3,26 +3,33 @@ use std::time::Duration;
 
 use warp::features::FeatureFlag;
 use warp::integration_testing::assertions::assert_binding_display_string;
+use warp::integration_testing::code_review::{
+    assert_code_review_loaded, scroll_code_review_to_line, user_scroll_code_review,
+};
 use warp::integration_testing::command_palette::{
-    TestStepsExt, open_command_palette_and_run_action,
+    TestStepsExt, close_command_palette, open_command_palette_and_run_action,
 };
 use warp::integration_testing::pane_group::{assert_focused_pane_index, close_pane_by_index};
 use warp::integration_testing::settings::toggle_setting;
 use warp::integration_testing::step::new_step_with_default_assertions;
 use warp::integration_testing::terminal::util::ExpectedExitStatus;
 use warp::integration_testing::terminal::{
+    assert_long_running_block_executing, assert_no_block_executing,
     execute_command_for_single_terminal_in_tab, validate_block_output_on_finished_block,
     wait_until_bootstrapped_pane, wait_until_bootstrapped_single_pane_for_tab,
 };
 use warp::integration_testing::view_getters::{
-    pane_group_view, single_terminal_view_for_tab, terminal_view, workspace_view,
+    command_palette_view, pane_group_view, single_terminal_view_for_tab, terminal_view,
+    workspace_view,
 };
 use warp::integration_testing::window::{
     add_and_save_window, assert_num_windows_open, close_window, save_active_window_id,
 };
 use warp::integration_testing::workspace::assert_tab_count;
 use warp::integration_testing::{self};
-use warp::settings_view::{FeaturesPageAction, SettingsAction};
+use warp::settings_view::{
+    FeaturesPageAction, SettingsAction, SettingsSection, SettingsView, navigation_buttons_widget_id,
+};
 use warp::terminal::block_list_viewport::ScrollPosition;
 use warp::terminal::view::TerminalAction;
 use warp::workspace::WorkspaceAction;
@@ -34,8 +41,8 @@ use warpui_core::keymap::PerPlatformKeystroke;
 use warpui_core::units::{Lines, Pixels};
 use warpui_core::windowing::WindowManager;
 use warpui_core::{
-    App, ReadModel, SingletonEntity, TypedActionView, UpdateView, WindowId, async_assert,
-    async_assert_eq,
+    App, ReadModel, SingletonEntity, TypedActionView, UpdateView, ViewHandle, WindowId,
+    async_assert, async_assert_eq,
 };
 
 use super::{Builder, TEST_ONLY_ASSETS, new_builder};
@@ -202,9 +209,34 @@ fn assert_saved_position_visible(position_id: &'static str, expected: bool) -> A
 }
 
 fn assert_show_navigation_buttons_setting(expected: bool) -> AssertionCallback {
-    Box::new(move |app: &mut App, _window_id: WindowId| {
+    Box::new(move |app, _window_id| {
         app.update(|ctx| {
             async_assert_eq!(*TabSettings::as_ref(ctx).show_navigation_buttons, expected)
+        })
+    })
+}
+
+/// Asserts whether a command-palette result whose label contains `action_label`
+/// is currently among the search results. Matches on the accessibility label,
+/// which embeds the binding's user-visible description.
+fn assert_command_palette_action_present(
+    action_label: &'static str,
+    expected: bool,
+) -> AssertionCallback {
+    Box::new(move |app: &mut App, window_id: WindowId| {
+        let palette = command_palette_view(app, window_id);
+        palette.read(app, |palette, ctx| {
+            let labels: Vec<String> = palette
+                .search_results(ctx)
+                .map(|result| result.accessibility_label())
+                .collect();
+            let present = labels.iter().any(|label| label.contains(action_label));
+            async_assert_eq!(
+                present,
+                expected,
+                "Expected command palette action {action_label:?} present={expected}, got \
+                 {present}. Results: {labels:?}"
+            )
         })
     })
 }
@@ -1573,6 +1605,223 @@ pub fn test_nav_stack_restores_closed_tab_when_available() -> Builder {
         )
 }
 
+/// Verifies that Back reopens a closed *middle* tab. Closing a middle tab
+/// shifts later tabs down into its index, so an index-only "is this tab still
+/// there" check finds a live-but-different tab and silently skips the restore.
+pub fn test_nav_stack_restores_closed_middle_tab_when_available() -> Builder {
+    FeatureFlag::NavigationStack.set_enabled(true);
+
+    new_builder()
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(0))
+        .with_step(
+            new_step_with_default_assertions("Open tab 1 (the tab that will be closed)")
+                .with_keystrokes(&[cmd_or_ctrl_shift("t")]),
+        )
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(1))
+        .with_step(execute_command_for_single_terminal_in_tab(
+            1,
+            "echo \"middle tab\"".to_string(),
+            ExpectedExitStatus::Success,
+            (),
+        ))
+        .with_step(
+            new_step_with_default_assertions("Open tab 2")
+                .with_keystrokes(&[cmd_or_ctrl_shift("t")]),
+        )
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(2))
+        .with_step(
+            new_step_with_default_assertions("Switch to tab 0")
+                .with_keystrokes(&["cmdorctrl-1"])
+                .add_assertion(|app, window_id| {
+                    let workspace = workspace_view(app, window_id);
+                    workspace.read(app, |view, _ctx| {
+                        async_assert_eq!(view.active_tab_index(), 0)
+                    })
+                })
+                .add_assertion(assert_can_go_back(true)),
+        )
+        // Close the middle tab. Tab 2 now occupies index 1, so index 1 is still
+        // a live tab even though the entry recorded for it is gone.
+        .with_step(
+            new_step_with_default_assertions("Close the middle tab")
+                .with_hover_over_saved_position("close_tab_button:1")
+                .with_click_on_saved_position("close_tab_button:1")
+                .add_assertion(assert_tab_count(2)),
+        )
+        .with_step(
+            new_step_with_default_assertions("Navigate back reopens the closed middle tab")
+                .with_per_platform_keystroke(NAVIGATE_BACK)
+                .add_assertion(assert_tab_count(3))
+                .add_assertion(|app, window_id| {
+                    let workspace = workspace_view(app, window_id);
+                    workspace.read(app, |view, _ctx| {
+                        async_assert_eq!(view.active_tab_index(), 1)
+                    })
+                })
+                .add_assertion(|app, window_id| {
+                    validate_block_output_on_finished_block("middle tab", 1, 0, window_id, app)
+                }),
+        )
+}
+
+/// With `NavigationStack` disabled, the Settings row for the tab-bar buttons is
+/// not rendered and none of the navigation actions are reachable from the
+/// command palette. Complements
+/// [`test_nav_stack_feature_flag_gates_bindings_and_buttons`], which only covers
+/// the keybindings and the tab-bar buttons.
+pub fn test_nav_stack_feature_flag_gates_settings_and_palette() -> Builder {
+    FeatureFlag::NavigationStack.set_enabled(false);
+    feature_flag_settings_and_palette_builder(false)
+}
+
+/// The positive control for
+/// [`test_nav_stack_feature_flag_gates_settings_and_palette`]: with the flag on,
+/// the same Settings row and palette actions are present. Without this, the
+/// gating test would also pass if the surfaces were simply never built.
+pub fn test_nav_stack_settings_and_palette_present_when_enabled() -> Builder {
+    FeatureFlag::NavigationStack.set_enabled(true);
+    feature_flag_settings_and_palette_builder(true)
+}
+
+fn feature_flag_settings_and_palette_builder(expected: bool) -> Builder {
+    let presence = if expected { "present" } else { "absent" };
+
+    new_builder()
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(0))
+        .with_step(
+            new_step_with_default_assertions("Open the settings tab")
+                .with_keystrokes(&["cmdorctrl-,"])
+                .add_assertion(assert_tab_count(2)),
+        )
+        .with_step(
+            new_step_with_default_assertions("Show the Features settings page").with_action(
+                |app, window_id, _| {
+                    let settings_views: Vec<ViewHandle<SettingsView>> = app
+                        .views_of_type(window_id)
+                        .expect("settings view should exist");
+                    let settings_view = settings_views
+                        .first()
+                        .expect("settings view should exist")
+                        .clone();
+                    app.update_view(&settings_view, |view, ctx| {
+                        view.set_and_refresh_current_page(SettingsSection::Features, ctx);
+                    });
+                },
+            ),
+        )
+        .with_step(
+            new_step_with_default_assertions(&format!(
+                "Navigation buttons settings row is {presence}"
+            ))
+            .add_assertion(assert_saved_position_visible(
+                navigation_buttons_widget_id(),
+                expected,
+            )),
+        )
+        .with_step(
+            new_step_with_default_assertions(&format!(
+                "Navigation actions are {presence} in the command palette"
+            ))
+            .with_keystrokes(&[cmd_or_ctrl_shift("p")])
+            .with_typed_characters(&["navigation"])
+            .add_assertion(assert_command_palette_action_present(
+                "Clear Navigation Stack",
+                expected,
+            ))
+            .add_assertion(assert_command_palette_action_present(
+                "Navigation Buttons in Tab Bar",
+                expected,
+            )),
+        )
+        .with_step(close_command_palette())
+        .with_step(
+            new_step_with_default_assertions(&format!("Go Back / Go Forward are {presence}"))
+                .with_keystrokes(&[cmd_or_ctrl_shift("p")])
+                .with_typed_characters(&["go "])
+                .add_assertion(assert_command_palette_action_present("Go Back", expected))
+                .add_assertion(assert_command_palette_action_present(
+                    "Go Forward",
+                    expected,
+                )),
+        )
+        .with_step(close_command_palette())
+}
+
+/// Verifies that the navigation shortcuts are not consumed by the navigation
+/// stack while a foreground program owns the focused pane, and that they resume
+/// working once the program exits.
+pub fn test_nav_stack_shortcut_does_not_interrupt_foreground_program() -> Builder {
+    FeatureFlag::NavigationStack.set_enabled(true);
+
+    new_builder()
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(0))
+        .with_step(
+            new_step_with_default_assertions("Open tab 1")
+                .with_keystrokes(&[cmd_or_ctrl_shift("t")]),
+        )
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(1))
+        .with_step(
+            new_step_with_default_assertions("History exists before the program starts")
+                .add_assertion(assert_can_go_back(true))
+                .add_assertion(assert_can_go_forward(false))
+                .add_assertion(assert_nav_stack_entry_count(1)),
+        )
+        // `cat` with no arguments blocks on stdin, so the pane stays in the
+        // long-running-command state that the navigation bindings exclude.
+        .with_step(
+            new_step_with_default_assertions("Start a foreground program")
+                .with_typed_characters(&["cat"])
+                .with_keystrokes(&["enter"])
+                .set_timeout(Duration::from_secs(10))
+                .add_assertion(assert_long_running_block_executing(true, 1, 0)),
+        )
+        .with_step(
+            new_step_with_default_assertions("Back shortcut does not navigate while cat runs")
+                .with_per_platform_keystroke(NAVIGATE_BACK)
+                .add_assertion(|app, window_id| {
+                    let workspace = workspace_view(app, window_id);
+                    workspace.read(app, |view, _ctx| {
+                        async_assert_eq!(
+                            view.active_tab_index(),
+                            1,
+                            "Go Back must not steal the key from the foreground program"
+                        )
+                    })
+                })
+                .add_assertion(assert_can_go_back(true))
+                .add_assertion(assert_can_go_forward(false))
+                .add_assertion(assert_nav_stack_entry_count(1)),
+        )
+        .with_step(
+            new_step_with_default_assertions("Forward shortcut does not navigate while cat runs")
+                .with_per_platform_keystroke(NAVIGATE_FORWARD)
+                .add_assertion(|app, window_id| {
+                    let workspace = workspace_view(app, window_id);
+                    workspace.read(app, |view, _ctx| {
+                        async_assert_eq!(view.active_tab_index(), 1)
+                    })
+                })
+                .add_assertion(assert_can_go_forward(false)),
+        )
+        .with_step(
+            new_step_with_default_assertions("Exit the foreground program")
+                .with_keystrokes(&["ctrl-c"])
+                .set_timeout(Duration::from_secs(20))
+                .add_assertion(assert_no_block_executing(1, 0)),
+        )
+        .with_step(
+            new_step_with_default_assertions("Back navigates again once the program exits")
+                .with_per_platform_keystroke(NAVIGATE_BACK)
+                .add_assertion(|app, window_id| {
+                    let workspace = workspace_view(app, window_id);
+                    workspace.read(app, |view, _ctx| {
+                        async_assert_eq!(view.active_tab_index(), 0)
+                    })
+                })
+                .add_assertion(assert_can_go_forward(true)),
+        )
+}
+
 /// Verifies that a nav-stack entry pointing at a recently closed window reopens
 /// that window when navigating back before undo-close cleanup expires.
 pub fn test_nav_stack_restores_closed_window_when_available() -> Builder {
@@ -1749,5 +1998,159 @@ pub fn test_nav_stack_multiple_back_forward() -> Builder {
                     })
                 })
                 .add_assertion(assert_can_go_forward(true)),
+        )
+}
+
+const CODE_REVIEW_FILE_NAME: &str = "nav_stack_review.txt";
+const CODE_REVIEW_TOTAL_LINES: usize = 400;
+const CODE_REVIEW_TARGET_LINE: usize = 70;
+
+fn code_review_base_line(line_number: usize) -> String {
+    format!("line {line_number:03}")
+}
+
+fn code_review_modified_line(line_number: usize) -> String {
+    format!("line {line_number:03} modified")
+}
+fn run_git(repo_dir: &std::path::Path, args: &[&str]) {
+    let status = command::blocking::Command::new("git")
+        .args(args)
+        .current_dir(repo_dir)
+        .status()
+        .expect("git command should run");
+    assert!(status.success(), "git {args:?} should succeed");
+}
+
+fn assert_right_panel_open(expected: bool) -> AssertionCallback {
+    Box::new(move |app: &mut App, window_id: WindowId| {
+        let pane_group = pane_group_view(app, window_id, 0);
+        pane_group.read(app, |pane_group, _ctx| {
+            async_assert_eq!(
+                pane_group.right_panel_open,
+                expected,
+                "Expected right panel open={expected}, got {}",
+                pane_group.right_panel_open
+            )
+        })
+    })
+}
+
+fn toggle_right_panel_step(
+    name: &str,
+    expected_open_after: bool,
+) -> warpui_core::integration::TestStep {
+    new_step_with_default_assertions(name)
+        .with_action(|app, window_id, _| {
+            let workspace = workspace_view(app, window_id);
+            app.update(|ctx| {
+                ctx.dispatch_typed_action_for_view(
+                    window_id,
+                    workspace.id(),
+                    &WorkspaceAction::ToggleRightPanel,
+                );
+            });
+        })
+        .add_assertion(assert_right_panel_open(expected_open_after))
+}
+
+/// Verifies that the code-review panel participates in navigation history:
+/// scrolling it records a debounced entry, and navigating back to that entry
+/// reopens the panel when it has since been closed.
+///
+/// The LSP-driven half of the code-review story is deliberately not covered
+/// here: the integration harness runs no language server, so `Go to Definition`
+/// from the review panel cannot be driven end to end.
+pub fn test_nav_stack_code_review_scroll_restored() -> Builder {
+    FeatureFlag::NavigationStack.set_enabled(true);
+    FeatureFlag::CodeReviewScrollPreservation.set_enabled(true);
+    FeatureFlag::IncrementalAutoReload.set_enabled(true);
+
+    new_builder()
+        .use_tmp_filesystem_for_test_root_directory()
+        .with_setup(|utils| {
+            let test_dir = utils.test_dir();
+            let repo_dir = test_dir.join("repo");
+            std::fs::create_dir_all(&repo_dir).expect("should create repo subdirectory");
+            let repo_dir_string = repo_dir
+                .to_str()
+                .expect("repo directory should be valid utf-8");
+            write_all_rc_files_for_test(&test_dir, format!("cd {repo_dir_string}"));
+
+            let committed: String = (1..=CODE_REVIEW_TOTAL_LINES)
+                .map(|n| format!("{}\n", code_review_base_line(n)))
+                .collect();
+            std::fs::write(repo_dir.join(CODE_REVIEW_FILE_NAME), committed)
+                .expect("should write committed contents");
+            run_git(&repo_dir, &["init", "-b", "main"]);
+            run_git(&repo_dir, &["config", "user.email", "test@example.com"]);
+            run_git(&repo_dir, &["config", "user.name", "Warp Integration Test"]);
+            run_git(&repo_dir, &["add", CODE_REVIEW_FILE_NAME]);
+            run_git(&repo_dir, &["commit", "-m", "Initial commit"]);
+
+            let modified: String = (1..=CODE_REVIEW_TOTAL_LINES)
+                .map(|n| {
+                    let text = if (10..=80).contains(&n) {
+                        code_review_modified_line(n)
+                    } else {
+                        code_review_base_line(n)
+                    };
+                    format!("{text}\n")
+                })
+                .collect();
+            std::fs::write(repo_dir.join(CODE_REVIEW_FILE_NAME), modified)
+                .expect("should write modified contents");
+        })
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(0))
+        .with_step(
+            new_step_with_default_assertions("Wait for the terminal to detect the git repository")
+                .set_timeout(Duration::from_secs(20))
+                .add_assertion(|app, window_id| {
+                    let terminal = single_terminal_view_for_tab(app, window_id, 0);
+                    terminal.read(app, |terminal, _ctx| {
+                        async_assert!(
+                            terminal.current_repo_path().is_some(),
+                            "expected the active terminal to detect a git repository"
+                        )
+                    })
+                }),
+        )
+        .with_step(toggle_right_panel_step("Open the code review panel", true))
+        .with_step(
+            new_step_with_default_assertions("Wait for the code review panel to load file diffs")
+                .set_timeout(Duration::from_secs(20))
+                .add_assertion(assert_code_review_loaded()),
+        )
+        // Park the review at a known position first. This is a programmatic
+        // scroll, so it must not record anything by itself.
+        .with_step(
+            scroll_code_review_to_line(CODE_REVIEW_FILE_NAME, CODE_REVIEW_TARGET_LINE)
+                .set_timeout(Duration::from_secs(20))
+                .set_post_step_pause(Duration::from_millis(500)),
+        )
+        .with_step(clear_nav_stack())
+        // A *user* scroll records a debounced entry anchored at the position
+        // the user is leaving.
+        .with_step(
+            user_scroll_code_review(1, 240.0)
+                // Outlast the scroll debounce so the anchor is committed to the stack.
+                .set_post_step_pause(Duration::from_millis(2000)),
+        )
+        .with_step(
+            new_step_with_default_assertions("Code review scroll recorded a navigation entry")
+                .set_timeout(Duration::from_secs(10))
+                .add_assertion(assert_can_go_back(true)),
+        )
+        // Close the panel so Back has to reopen it to honor the entry.
+        .with_step(toggle_right_panel_step(
+            "Close the code review panel",
+            false,
+        ))
+        .with_step(
+            new_step_with_default_assertions("Navigate back reopens the code review panel")
+                .with_per_platform_keystroke(NAVIGATE_BACK)
+                .set_post_step_pause(Duration::from_millis(500))
+                .set_timeout(Duration::from_secs(20))
+                .add_assertion(assert_right_panel_open(true))
+                .add_assertion(assert_code_review_loaded()),
         )
 }

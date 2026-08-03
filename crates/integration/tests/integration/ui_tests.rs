@@ -386,9 +386,14 @@ integration_tests! {
     test_nav_stack_code_editor_scroll,
     test_nav_stack_restores_closed_pane_when_available,
     test_nav_stack_restores_closed_tab_when_available,
+    test_nav_stack_restores_closed_middle_tab_when_available,
     #[ignore = "Known failing closed-window navigation restoration case in the aggregated UI suite"]
     test_nav_stack_restores_closed_window_when_available,
     test_nav_stack_prunes_expired_closed_tab_entries,
+    test_nav_stack_feature_flag_gates_settings_and_palette,
+    test_nav_stack_settings_and_palette_present_when_enabled,
+    test_nav_stack_shortcut_does_not_interrupt_foreground_program,
+    test_nav_stack_code_review_scroll_restored,
     // Video recording test — requires real display, run manually
     #[ignore = "Manual test: requires real display for frame capture"]
     test_video_recording,

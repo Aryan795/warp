@@ -12416,7 +12416,16 @@ impl Workspace {
         entry: nav_stack::NavigationEntry,
         ctx: &mut ViewContext<Self>,
     ) {
-        if entry.tab_index >= self.tab_count() {
+        // Reopen a closed tab whenever the recorded index no longer holds this
+        // entry's target. Checking only `tab_index >= tab_count()` misses the
+        // closed-middle-tab case: later tabs shift down into the freed index,
+        // so the index stays in range but now addresses a different tab that
+        // never contained `entry.pane_id`.
+        let indexed_tab_hosts_entry = self.tabs.get(entry.tab_index).is_some_and(|tab| {
+            Self::navigation_entry_can_restore_in_pane_group(&tab.pane_group, &entry, ctx)
+        });
+        let mut target_tab_index = entry.tab_index;
+        if !indexed_tab_hosts_entry {
             let window_id = ctx.window_id();
             let tab_data = UndoCloseStack::handle(ctx).update(ctx, |stack, _| {
                 stack.take_closed_tab(window_id, entry.tab_index)
@@ -12424,11 +12433,13 @@ impl Workspace {
             let Some(tab_data) = tab_data else {
                 return;
             };
-            self.restore_closed_tab(entry.tab_index, tab_data, ctx);
+            // Pin/group invariants can land the restored tab somewhere other
+            // than its original index, so activate where it actually landed.
+            target_tab_index = self.restore_closed_tab(entry.tab_index, tab_data, ctx);
         }
 
-        if entry.tab_index != self.active_tab_index {
-            self.activate_tab_internal(entry.tab_index, ctx);
+        if target_tab_index != self.active_tab_index {
+            self.activate_tab_internal(target_tab_index, ctx);
         }
 
         let pane_group = self.active_tab_pane_group().clone();
@@ -12924,12 +12935,15 @@ impl Workspace {
         });
     }
 
+    /// Reinserts a previously closed tab and activates it. Returns the index it
+    /// was actually inserted at, which can differ from `tab_index` because of
+    /// pin and group placement invariants.
     pub fn restore_closed_tab(
         &mut self,
         tab_index: usize,
         mut tab_data: TabData,
         ctx: &mut ViewContext<Self>,
-    ) {
+    ) -> usize {
         // When restoring a closed tab, we have to reattach its panes so that they know they're
         // user-accessible again.
         tab_data.pane_group.update(ctx, |pane_group, ctx| {
@@ -12964,6 +12978,8 @@ impl Workspace {
         self.activate_tab(insert_index, ctx);
 
         ctx.notify();
+
+        insert_index
     }
 
     /// Insertion index for a restored tab that is not part of an existing group.

@@ -7749,6 +7749,14 @@ impl SettingsWidget for GraphicsBackendWidget {
     }
 }
 
+/// Saved-position id of the `Show navigation buttons in tab bar` settings row.
+/// Exposed so integration tests can assert the row is rendered only while
+/// `FeatureFlag::NavigationStack` is enabled.
+#[cfg(feature = "integration_tests")]
+pub fn navigation_buttons_widget_id() -> &'static str {
+    NavigationButtonsWidget::static_widget_id()
+}
+
 #[derive(Default)]
 struct NavigationButtonsWidget {
     switch_state: SwitchStateHandle,

@@ -122,6 +122,8 @@ pub(crate) use ai_page::custom_model_routers_widget_id;
 pub use billing_and_usage_page::create_discount_badge;
 pub use code_page::CodeSettingsPageView;
 pub use features_page::FeaturesPageAction;
+#[cfg(feature = "integration_tests")]
+pub use features_page::navigation_buttons_widget_id;
 pub use main_page::handle_experiment_change;
 pub use privacy_page::PrivacyPageAction;
 pub use settings_page::{
