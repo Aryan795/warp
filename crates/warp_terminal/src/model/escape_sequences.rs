@@ -85,6 +85,25 @@ pub mod C0 {
     pub const DEL: u8 = 0x7f;
 }
 
+fn modified_special_keystroke_to_escape_sequence(
+    keystroke: &Keystroke,
+    mode_provider: &impl ModeProvider,
+) -> Option<Vec<u8>> {
+    if !mode_provider.is_term_mode_set(TermMode::KEYBOARD_PROTOCOL) {
+        return None;
+    }
+
+    let code = match keystroke.key.as_str() {
+        "insert" => "2",
+        "delete" => "3",
+        "pageup" => "5",
+        "pagedown" => "6",
+        _ => return None,
+    };
+    let modifier_param = modified_modifier_param(keystroke)?;
+    Some([C1::CSI, format!("{code};{modifier_param}~").as_bytes()].concat())
+}
+
 /// C1 set of control characters. These are set to their 2-byte equivalent representations (rather
 /// than the 8-bit single byte representation).
 ///
@@ -258,6 +277,7 @@ impl<T: ModeProvider> ToEscapeSequence<T> for KeystrokeWithDetails<'_> {
         fn_keystroke_to_escape_sequence(keystroke, mode_provider)
             .or_else(|| keystroke_to_c0_control_code(keystroke, mode_provider))
             .or_else(|| cursor_movement_keystroke_to_escape_sequence(keystroke, mode_provider))
+            .or_else(|| modified_special_keystroke_to_escape_sequence(keystroke, mode_provider))
             .or_else(|| meta_keystroke_to_escape_sequence(keystroke, mode_provider))
             .or_else(|| backspace_keystroke_to_escape_sequence(keystroke))
     }
@@ -394,87 +414,32 @@ pub fn alt_screen_scroll_to_pty_bytes<T: ModeProvider>(
     Some(sequence.repeat(lines_to_scroll.unsigned_abs() as usize))
 }
 
-pub trait ToModifierEscapeByte {
-    /// Returns the modifier escape byte represented by this T.
-    ///
-    /// The returned modifier byte is typically meant to be inserted into escape sequence
-    /// corresponding to the keystroke. See the implementation of this trait for
-    /// `Keystroke` for more details.
-    fn to_modifier_escape_byte(&self) -> Option<u8>;
+/// Returns the xterm/Kitty modifier parameter for a keystroke.
+///
+/// This parameter is used by both Kitty CSI u and legacy-form escape sequences
+/// for cursor, function, and editing keys:
+///
+/// `1 + shift + alt/meta * 2 + ctrl * 4 + cmd/super * 8`.
+fn modifier_param(keystroke: &Keystroke) -> u32 {
+    let mut modifiers = 1;
+    if keystroke.shift {
+        modifiers += 1;
+    }
+    if keystroke.alt || keystroke.meta {
+        modifiers += 2;
+    }
+    if keystroke.ctrl {
+        modifiers += 4;
+    }
+    if keystroke.cmd {
+        modifiers += 8;
+    }
+    modifiers
 }
 
-impl ToModifierEscapeByte for Keystroke {
-    // Mirrors the [xterm implementation](https://www.xfree86.org/current/ctlseqs.html#PC-Style%20Function%20Keys).
-    fn to_modifier_escape_byte(&self) -> Option<u8> {
-        match self {
-            Keystroke {
-                shift: true,
-                alt: false,
-                ctrl: false,
-                meta: _,
-                cmd: _,
-                key: _,
-            } => Some(b'2'),
-            Keystroke {
-                shift: false,
-                alt: true,
-                ctrl: false,
-                meta: _,
-                cmd: _,
-                key: _,
-            } => Some(b'3'),
-            Keystroke {
-                shift: true,
-                alt: true,
-                ctrl: false,
-                meta: _,
-                cmd: _,
-                key: _,
-            } => Some(b'4'),
-            Keystroke {
-                shift: false,
-                alt: false,
-                ctrl: true,
-                meta: _,
-                cmd: _,
-                key: _,
-            } => Some(b'5'),
-            Keystroke {
-                shift: true,
-                alt: false,
-                ctrl: true,
-                meta: _,
-                cmd: _,
-                key: _,
-            } => Some(b'6'),
-            Keystroke {
-                shift: false,
-                alt: true,
-                ctrl: true,
-                meta: _,
-                cmd: _,
-                key: _,
-            } => Some(b'7'),
-            Keystroke {
-                shift: true,
-                alt: true,
-                ctrl: true,
-                meta: _,
-                cmd: _,
-                key: _,
-            } => Some(b'8'),
-            // meta can be basically treated the same way as alt...
-            Keystroke {
-                meta: true,
-                ctrl: _,
-                alt: _,
-                shift: _,
-                cmd: _,
-                key: _,
-            } => Some(b'3'),
-            _ => None,
-        }
-    }
+fn modified_modifier_param(keystroke: &Keystroke) -> Option<u32> {
+    let modifiers = modifier_param(keystroke);
+    (modifiers > 1).then_some(modifiers)
 }
 
 /// Returns the appropriate escape sequence for the given fn key, which may or may not be modified
@@ -488,11 +453,11 @@ fn fn_keystroke_to_escape_sequence(
     match keystroke.key.as_str() {
         "f1" | "f2" | "f3" | "f4" | "f5" | "f6" | "f7" | "f8" | "f9" | "f10" | "f11" | "f12"
         | "f13" | "f14" | "f15" | "f16" | "f17" | "f18" | "f19" | "f20" => {
-            let modifier_byte = keystroke.to_modifier_escape_byte();
-            match modifier_byte {
-                Some(modifier_byte) => fn_keystroke_with_modifier_to_escape_sequence(
+            let modifier_param = modified_modifier_param(keystroke);
+            match modifier_param {
+                Some(modifier_param) => fn_keystroke_with_modifier_to_escape_sequence(
                     keystroke.key.as_str(),
-                    modifier_byte,
+                    modifier_param,
                 ),
                 None => fn_keystroke_without_modifier_to_escape_sequence(keystroke.key.as_str()),
             }
@@ -537,28 +502,31 @@ fn fn_keystroke_without_modifier_to_escape_sequence(key: &str) -> Option<Vec<u8>
 ///
 /// Mapping from key to sequence is adapted from the xterm spec
 /// [here](https://www.xfree86.org/current/ctlseqs.html).
-fn fn_keystroke_with_modifier_to_escape_sequence(key: &str, modifier_byte: u8) -> Option<Vec<u8>> {
+fn fn_keystroke_with_modifier_to_escape_sequence(
+    key: &str,
+    modifier_param: u32,
+) -> Option<Vec<u8>> {
     match key {
-        "f1" => Some([C1::CSI, format!("1;{}P", modifier_byte as char).as_bytes()].concat()),
-        "f2" => Some([C1::CSI, format!("1;{}Q", modifier_byte as char).as_bytes()].concat()),
-        "f3" => Some([C1::CSI, format!("1;{}R", modifier_byte as char).as_bytes()].concat()),
-        "f4" => Some([C1::CSI, format!("1;{}S", modifier_byte as char).as_bytes()].concat()),
-        "f5" => Some([C1::CSI, format!("15;{}~", modifier_byte as char).as_bytes()].concat()),
-        "f6" => Some([C1::CSI, format!("17;{}~", modifier_byte as char).as_bytes()].concat()),
-        "f7" => Some([C1::CSI, format!("18;{}~", modifier_byte as char).as_bytes()].concat()),
-        "f8" => Some([C1::CSI, format!("19;{}~", modifier_byte as char).as_bytes()].concat()),
-        "f9" => Some([C1::CSI, format!("20;{}~", modifier_byte as char).as_bytes()].concat()),
-        "f10" => Some([C1::CSI, format!("21;{}~", modifier_byte as char).as_bytes()].concat()),
-        "f11" => Some([C1::CSI, format!("23;{}~", modifier_byte as char).as_bytes()].concat()),
-        "f12" => Some([C1::CSI, format!("24;{}~", modifier_byte as char).as_bytes()].concat()),
-        "f13" => Some([C1::CSI, format!("25;{}~", modifier_byte as char).as_bytes()].concat()),
-        "f14" => Some([C1::CSI, format!("26;{}~", modifier_byte as char).as_bytes()].concat()),
-        "f15" => Some([C1::CSI, format!("28;{}~", modifier_byte as char).as_bytes()].concat()),
-        "f16" => Some([C1::CSI, format!("29;{}~", modifier_byte as char).as_bytes()].concat()),
-        "f17" => Some([C1::CSI, format!("31;{}~", modifier_byte as char).as_bytes()].concat()),
-        "f18" => Some([C1::CSI, format!("32;{}~", modifier_byte as char).as_bytes()].concat()),
-        "f19" => Some([C1::CSI, format!("33;{}~", modifier_byte as char).as_bytes()].concat()),
-        "f20" => Some([C1::CSI, format!("34;{}~", modifier_byte as char).as_bytes()].concat()),
+        "f1" => Some([C1::CSI, format!("1;{modifier_param}P").as_bytes()].concat()),
+        "f2" => Some([C1::CSI, format!("1;{modifier_param}Q").as_bytes()].concat()),
+        "f3" => Some([C1::CSI, format!("1;{modifier_param}R").as_bytes()].concat()),
+        "f4" => Some([C1::CSI, format!("1;{modifier_param}S").as_bytes()].concat()),
+        "f5" => Some([C1::CSI, format!("15;{modifier_param}~").as_bytes()].concat()),
+        "f6" => Some([C1::CSI, format!("17;{modifier_param}~").as_bytes()].concat()),
+        "f7" => Some([C1::CSI, format!("18;{modifier_param}~").as_bytes()].concat()),
+        "f8" => Some([C1::CSI, format!("19;{modifier_param}~").as_bytes()].concat()),
+        "f9" => Some([C1::CSI, format!("20;{modifier_param}~").as_bytes()].concat()),
+        "f10" => Some([C1::CSI, format!("21;{modifier_param}~").as_bytes()].concat()),
+        "f11" => Some([C1::CSI, format!("23;{modifier_param}~").as_bytes()].concat()),
+        "f12" => Some([C1::CSI, format!("24;{modifier_param}~").as_bytes()].concat()),
+        "f13" => Some([C1::CSI, format!("25;{modifier_param}~").as_bytes()].concat()),
+        "f14" => Some([C1::CSI, format!("26;{modifier_param}~").as_bytes()].concat()),
+        "f15" => Some([C1::CSI, format!("28;{modifier_param}~").as_bytes()].concat()),
+        "f16" => Some([C1::CSI, format!("29;{modifier_param}~").as_bytes()].concat()),
+        "f17" => Some([C1::CSI, format!("31;{modifier_param}~").as_bytes()].concat()),
+        "f18" => Some([C1::CSI, format!("32;{modifier_param}~").as_bytes()].concat()),
+        "f19" => Some([C1::CSI, format!("33;{modifier_param}~").as_bytes()].concat()),
+        "f20" => Some([C1::CSI, format!("34;{modifier_param}~").as_bytes()].concat()),
         _ => None,
     }
 }
@@ -627,13 +595,16 @@ fn cursor_movement_keystroke_to_escape_sequence(
     if !CURSOR_KEYSTROKE_TO_CONTROL_CODE.contains_key(key) {
         return None;
     }
-    let modifier_bytes = keystroke.to_modifier_escape_byte();
-    match modifier_bytes {
-        Some(modifier_bytes) => Some(
+    let modifier_param = modified_modifier_param(keystroke);
+    match modifier_param {
+        Some(modifier_param) => Some(
             [
                 C1::CSI,
-                b"1;",
-                &[modifier_bytes, CURSOR_KEYSTROKE_TO_CONTROL_CODE[key]],
+                format!(
+                    "1;{modifier_param}{}",
+                    CURSOR_KEYSTROKE_TO_CONTROL_CODE[key] as char
+                )
+                .as_bytes(),
             ]
             .concat(),
         ),

@@ -167,6 +167,7 @@ impl OnboardingMainView {
             | AgentOnboardingEvent::UpgradePasteTokenFromClipboardRequested
             | AgentOnboardingEvent::LoginFromWelcomeRequested
             | AgentOnboardingEvent::PrivacySettingsFromTerminalThemeSlideRequested
+            | AgentOnboardingEvent::OfferSetUpLaterSelected { .. }
             | AgentOnboardingEvent::AppBecameActive => {
                 // No-op in the standalone demo binary
             }

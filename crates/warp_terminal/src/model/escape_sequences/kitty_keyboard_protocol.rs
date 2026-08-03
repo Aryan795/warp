@@ -2,7 +2,7 @@ use warpui_core::keymap::Keystroke;
 use warpui_core::platform::OperatingSystem;
 use warpui_core::platform::keyboard::KeyCode;
 
-use super::{ModeProvider, TermMode};
+use super::{ModeProvider, TermMode, modifier_param};
 
 /// Checks whether the Kitty keyboard protocol requires CSI u encoding for this
 /// keystroke, and if so, returns the encoded sequence.
@@ -31,18 +31,7 @@ pub(super) fn maybe_convert_keystroke_to_csi_u(
     // (e.g., Option+a → å) via the IME rather than acting as a modifier.
     //
     // See: https://sw.kovidgoyal.net/kitty/keyboard-protocol/#disambiguate
-    let mut is_ambiguous = keystroke.key == "escape" || keystroke.ctrl || keystroke.meta;
-    if !OperatingSystem::get().is_mac() {
-        is_ambiguous = is_ambiguous || keystroke.alt;
-    }
-    // Shift alone is NOT ambiguous for printable keys — Shift changes the
-    // character itself (e.g., Shift+a → A). But for functional keys like
-    // Enter, Tab, and Backspace, legacy encoding drops Shift entirely
-    // (Shift+Enter sends the same bytes as Enter), making them ambiguous.
-    if keystroke.shift {
-        is_ambiguous =
-            is_ambiguous || matches!(keystroke.key.as_str(), "enter" | "tab" | "backspace");
-    }
+    let is_ambiguous = is_ambiguous_for_csi_u(keystroke, chars, OperatingSystem::get());
 
     // With flag 8 (REPORT_ALL_KEYS_AS_ESC): use CSI u for all keys.
     // With flag 1 (DISAMBIGUATE_ESC_CODES): use CSI u only when ambiguous.
@@ -54,6 +43,38 @@ pub(super) fn maybe_convert_keystroke_to_csi_u(
     }
 
     keystroke_to_csi_u(keystroke, key_without_modifiers, chars, mode_provider)
+}
+
+pub(super) fn is_ambiguous_for_csi_u(
+    keystroke: &Keystroke,
+    chars: Option<&str>,
+    operating_system: OperatingSystem,
+) -> bool {
+    let mut is_ambiguous =
+        keystroke.key == "escape" || keystroke.ctrl || keystroke.meta || keystroke.cmd;
+    if keystroke.alt && !mac_option_generated_text(keystroke, chars, operating_system) {
+        is_ambiguous = true;
+    }
+    // Shift alone is NOT ambiguous for printable keys — Shift changes the
+    // character itself (e.g., Shift+a → A). But for functional keys like
+    // Enter, Tab, and Backspace, legacy encoding drops Shift entirely
+    // (Shift+Enter sends the same bytes as Enter), making them ambiguous.
+    if keystroke.shift {
+        is_ambiguous =
+            is_ambiguous || matches!(keystroke.key.as_str(), "enter" | "tab" | "backspace");
+    }
+    is_ambiguous
+}
+
+fn mac_option_generated_text(
+    keystroke: &Keystroke,
+    chars: Option<&str>,
+    operating_system: OperatingSystem,
+) -> bool {
+    operating_system.is_mac()
+        && keystroke.alt
+        && !keystroke.meta
+        && chars.is_some_and(|chars| !chars.is_empty() && !chars.chars().any(|c| c.is_control()))
 }
 
 /// Encodes a keystroke to a CSI u escape sequence for the Kitty keyboard protocol.
@@ -188,19 +209,7 @@ fn keystroke_to_csi_u(
     // the terminal concept of Alt — `meta` is just the macOS user preference that
     // remaps Option to behave as a terminal Meta/Alt key. They cannot both be true
     // simultaneously in practice (Option is either raw or Meta, never both).
-    let mut modifiers = 1u32;
-    if keystroke.shift {
-        modifiers += 1;
-    }
-    if keystroke.alt || keystroke.meta {
-        modifiers += 2;
-    }
-    if keystroke.ctrl {
-        modifiers += 4;
-    }
-    if keystroke.cmd {
-        modifiers += 8;
-    }
+    let modifiers = modifier_param(keystroke);
 
     // Compute associated text if REPORT_ASSOCIATED_TEXT is active.
     // Per spec: "The associated text must not contain control codes (control codes are code

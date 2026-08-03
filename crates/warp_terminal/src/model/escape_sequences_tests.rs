@@ -280,6 +280,14 @@ fn test_cursor_movement_keystroke_with_modifier_to_escape_sequence() {
             Keystroke::parse("ctrl-alt-end").unwrap(),
             vec![C0::ESC, b'[', b'1', b';', b'7', b'F'],
         ),
+        (
+            Keystroke::parse("cmd-left").unwrap(),
+            vec![C0::ESC, b'[', b'1', b';', b'9', b'D'],
+        ),
+        (
+            Keystroke::parse("shift-cmd-right").unwrap(),
+            vec![C0::ESC, b'[', b'1', b';', b'1', b'0', b'C'],
+        ),
     ];
 
     let mut terminal_model_mock = TerminalModelMock::new();
@@ -480,6 +488,10 @@ fn test_fn_keystroke_with_modifier_to_escape_sequence() {
         (
             Keystroke::parse("ctrl-shift-f20").unwrap(),
             vec![C0::ESC, b'[', b'3', b'4', b';', b'6', b'~'],
+        ),
+        (
+            Keystroke::parse("cmd-f5").unwrap(),
+            vec![C0::ESC, b'[', b'1', b'5', b';', b'9', b'~'],
         ),
     ];
 
@@ -807,6 +819,54 @@ fn test_keyboard_enhancement_disambiguate_only() {
         .to_escape_sequence(&terminal_model_mock),
         Some(b"\x1b[97;5u".to_vec())
     );
+
+    // Cmd+Backspace needs CSI u so the Super modifier is preserved.
+    let cmd_backspace = Keystroke::parse("cmd-backspace").unwrap();
+    assert_eq!(
+        KeystrokeWithDetails {
+            keystroke: &cmd_backspace,
+            key_without_modifiers: None,
+            chars: None,
+        }
+        .to_escape_sequence(&terminal_model_mock),
+        Some(b"\x1b[127;9u".to_vec())
+    );
+
+    // Cmd+Left keeps the legacy cursor-key form, but with the Super modifier parameter.
+    let cmd_left = Keystroke::parse("cmd-left").unwrap();
+    assert_eq!(
+        KeystrokeWithDetails {
+            keystroke: &cmd_left,
+            key_without_modifiers: None,
+            chars: None,
+        }
+        .to_escape_sequence(&terminal_model_mock),
+        Some(b"\x1b[1;9D".to_vec())
+    );
+
+    // Cmd+Delete keeps the legacy editing-key form, but with the Super modifier parameter.
+    let cmd_delete = Keystroke::parse("cmd-delete").unwrap();
+    assert_eq!(
+        KeystrokeWithDetails {
+            keystroke: &cmd_delete,
+            key_without_modifiers: None,
+            chars: None,
+        }
+        .to_escape_sequence(&terminal_model_mock),
+        Some(b"\x1b[3;9~".to_vec())
+    );
+
+    // Option/Alt+Backspace needs CSI u so the Alt modifier is preserved.
+    let alt_backspace = Keystroke::parse("alt-backspace").unwrap();
+    assert_eq!(
+        KeystrokeWithDetails {
+            keystroke: &alt_backspace,
+            key_without_modifiers: None,
+            chars: None,
+        }
+        .to_escape_sequence(&terminal_model_mock),
+        Some(b"\x1b[127;3u".to_vec())
+    );
     // Plain Enter without modifiers - NOT ambiguous, should not use CSI u.
     let enter = Keystroke::parse("enter").unwrap();
     assert_eq!(
@@ -868,18 +928,53 @@ fn test_keyboard_enhancement_unshifted_keycode_for_shifted_printables() {
 
 #[test]
 fn test_keyboard_enhancement_mac_option_without_meta_mapping_is_not_disambiguated() {
+    // On macOS with Option-as-Meta disabled, printable Option-generated text
+    // should not force CSI u in disambiguate-only mode.
+    let alt_a = Keystroke::parse("alt-a").unwrap();
+    assert!(!kitty_keyboard_protocol::is_ambiguous_for_csi_u(
+        &alt_a,
+        Some("å"),
+        OperatingSystem::Mac
+    ));
+    assert!(!kitty_keyboard_protocol::is_ambiguous_for_csi_u(
+        &Keystroke::parse("alt- ").unwrap(),
+        Some("\u{a0}"),
+        OperatingSystem::Mac
+    ));
+}
+
+#[test]
+fn test_keyboard_enhancement_mac_option_editing_keys_are_disambiguated() {
+    assert!(kitty_keyboard_protocol::is_ambiguous_for_csi_u(
+        &Keystroke::parse("alt-backspace").unwrap(),
+        None,
+        OperatingSystem::Mac
+    ));
+    assert!(kitty_keyboard_protocol::is_ambiguous_for_csi_u(
+        &Keystroke::parse("alt-left").unwrap(),
+        None,
+        OperatingSystem::Mac
+    ));
+    assert!(kitty_keyboard_protocol::is_ambiguous_for_csi_u(
+        &Keystroke::parse("alt-delete").unwrap(),
+        None,
+        OperatingSystem::Mac
+    ));
+}
+
+#[test]
+fn test_keyboard_enhancement_mac_option_generated_text_falls_back_to_text() {
     if !OperatingSystem::get().is_mac() {
         return;
     }
 
     let terminal_model_mock = mock_with_disambiguate_only();
-    // On macOS with Option-as-Meta disabled, Alt should not force CSI u in disambiguate-only mode.
     let alt_a = Keystroke::parse("alt-a").unwrap();
     assert_eq!(
         KeystrokeWithDetails {
             keystroke: &alt_a,
             key_without_modifiers: None,
-            chars: None,
+            chars: Some("å"),
         }
         .to_escape_sequence(&terminal_model_mock),
         None
