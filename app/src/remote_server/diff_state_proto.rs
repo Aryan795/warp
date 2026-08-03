@@ -33,6 +33,20 @@ impl From<&proto::DiffMode> for DiffMode {
     }
 }
 
+/// Reads the orthogonal staged-only flag carried alongside the base mode.
+pub fn staged_only_from_proto(proto_mode: &proto::DiffMode) -> bool {
+    proto_mode.staged_only
+}
+
+/// Builds the wire `DiffMode` from the base mode plus the orthogonal
+/// staged-only flag. Prefer this over the `From` impl when the flag is known,
+/// so base and staged-ness stay together on the wire.
+pub fn diff_mode_to_proto(mode: &DiffMode, staged_only: bool) -> proto::DiffMode {
+    let mut proto_mode = proto::DiffMode::from(mode);
+    proto_mode.staged_only = staged_only;
+    proto_mode
+}
+
 impl From<&proto::PrInfo> for PrInfo {
     fn from(pr_info: &proto::PrInfo) -> Self {
         PrInfo {
@@ -391,6 +405,9 @@ impl From<&DiffMode> for proto::DiffMode {
         };
         proto::DiffMode {
             mode: Some(mode_oneof),
+            // Base-only conversion defaults to unstaged; callers that know the
+            // staged flag use `diff_mode_to_proto`.
+            staged_only: false,
         }
     }
 }
@@ -658,13 +675,14 @@ fn git_diff_with_base_content_to_proto(d: &GitDiffWithBaseContent) -> proto::Git
 pub fn build_diff_state_snapshot(
     repo_path: &str,
     mode: &DiffMode,
+    staged_only: bool,
     metadata: Option<&DiffMetadata>,
     state: &DiffState,
     diffs: Option<&GitDiffWithBaseContent>,
 ) -> proto::DiffStateSnapshot {
     proto::DiffStateSnapshot {
         repo_path: repo_path.to_string(),
-        mode: Some(mode.into()),
+        mode: Some(diff_mode_to_proto(mode, staged_only)),
         metadata: metadata.map(proto::DiffMetadata::from),
         state: Some(state.into()),
         diffs: diffs.map(git_diff_with_base_content_to_proto),
@@ -675,11 +693,12 @@ pub fn build_diff_state_snapshot(
 pub fn build_diff_state_metadata_update(
     repo_path: &str,
     mode: &DiffMode,
+    staged_only: bool,
     metadata: &DiffMetadata,
 ) -> proto::DiffStateMetadataUpdate {
     proto::DiffStateMetadataUpdate {
         repo_path: repo_path.to_string(),
-        mode: Some(mode.into()),
+        mode: Some(diff_mode_to_proto(mode, staged_only)),
         metadata: Some(metadata.into()),
     }
 }
@@ -688,13 +707,14 @@ pub fn build_diff_state_metadata_update(
 pub fn build_diff_state_file_delta(
     repo_path: &str,
     mode: &DiffMode,
+    staged_only: bool,
     repo_relative_path: &str,
     diff: Option<&FileDiffAndContent>,
     metadata: Option<&DiffMetadata>,
 ) -> proto::DiffStateFileDelta {
     proto::DiffStateFileDelta {
         repo_path: repo_path.to_string(),
-        mode: Some(mode.into()),
+        mode: Some(diff_mode_to_proto(mode, staged_only)),
         file_path: repo_relative_path.to_string(),
         diff: diff.map(file_diff_and_content_to_proto),
         metadata: metadata.map(proto::DiffMetadata::from),

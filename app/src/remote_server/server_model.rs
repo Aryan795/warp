@@ -2705,14 +2705,15 @@ impl ServerModel {
         };
 
         let mode: DiffMode = mode_proto.into();
+        let staged_only = diff_state_proto::staged_only_from_proto(mode_proto);
 
         log::info!(
-            "Handling GetDiffState repo={} mode={mode:?} (request_id={request_id})",
+            "Handling GetDiffState repo={} mode={mode:?} staged_only={staged_only} (request_id={request_id})",
             msg.repo_path,
         );
 
         let outcome = self.diff_states.update(ctx, |mgr, ctx| {
-            mgr.subscribe(std_path, mode, request_id, conn_id, ctx)
+            mgr.subscribe(std_path, mode, staged_only, request_id, conn_id, ctx)
         });
 
         match outcome {
@@ -2724,6 +2725,7 @@ impl ServerModel {
                 let snapshot = diff_state_proto::build_diff_state_snapshot(
                     key.repo_path.as_str(),
                     &key.mode,
+                    key.staged_only,
                     metadata.as_ref(),
                     &state,
                     None,
@@ -2761,12 +2763,14 @@ impl ServerModel {
         let key = DiffModelKey {
             repo_path: std_path,
             mode: mode_proto.into(),
+            staged_only: diff_state_proto::staged_only_from_proto(mode_proto),
         };
 
         log::info!(
-            "Handling UnsubscribeDiffState repo={} mode={:?} conn={conn_id}",
+            "Handling UnsubscribeDiffState repo={} mode={:?} staged_only={} conn={conn_id}",
             msg.repo_path,
-            key.mode
+            key.mode,
+            key.staged_only
         );
 
         self.diff_states
@@ -2780,6 +2784,7 @@ impl ServerModel {
             DiffStateUpdate::Snapshot {
                 repo_path,
                 mode,
+                staged_only,
                 state,
                 metadata,
                 diffs,
@@ -2788,6 +2793,7 @@ impl ServerModel {
                 let snapshot = diff_state_proto::build_diff_state_snapshot(
                     repo_path,
                     mode,
+                    *staged_only,
                     metadata.as_ref(),
                     state,
                     diffs.as_deref(),
@@ -2815,12 +2821,14 @@ impl ServerModel {
             DiffStateUpdate::MetadataUpdate {
                 repo_path,
                 mode,
+                staged_only,
                 metadata,
                 subscribers,
             } => {
                 let update = diff_state_proto::build_diff_state_metadata_update(
                     repo_path.as_str(),
                     mode,
+                    *staged_only,
                     metadata,
                 );
                 for conn_id in subscribers {
@@ -2834,6 +2842,7 @@ impl ServerModel {
             DiffStateUpdate::FileDelta {
                 repo_path,
                 mode,
+                staged_only,
                 path,
                 diff,
                 metadata,
@@ -2842,6 +2851,7 @@ impl ServerModel {
                 let delta = diff_state_proto::build_diff_state_file_delta(
                     repo_path.as_str(),
                     mode,
+                    *staged_only,
                     path,
                     diff.as_deref(),
                     metadata.as_ref(),
@@ -3078,6 +3088,7 @@ impl ServerModel {
         let key = DiffModelKey {
             repo_path: std_path,
             mode: mode_proto.into(),
+            staged_only: diff_state_proto::staged_only_from_proto(mode_proto),
         };
 
         let model = self

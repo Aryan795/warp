@@ -295,6 +295,7 @@ async fn untracked_directory_diff_is_empty_and_non_binary() {
         &GitFileStatus::Untracked,
         false,
         None,
+        false,
     )
     .await
     .expect("get_file_diff should succeed for an untracked directory");
@@ -350,4 +351,141 @@ async fn num_lines_in_file_if_non_binary_errors_for_directory() {
     // metadata computation.
     let result = LocalDiffStateModel::num_lines_in_file_if_non_binary(dir.path()).await;
     assert!(result.is_err());
+}
+
+// ── Staged-only orthogonal flag (APP-5113) ──────────────────────────
+
+/// Runs a git command in `repo`, asserting success.
+#[cfg(test)]
+fn run_git_in(repo: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .current_dir(repo)
+        .args(args)
+        .status()
+        .expect("git command should run");
+    assert!(status.success(), "git {args:?} failed");
+}
+
+/// Sorted repo-relative file paths in a loaded diff.
+#[cfg(test)]
+fn diff_paths(diff: &GitDiffWithBaseContent) -> Vec<String> {
+    let mut paths: Vec<String> = diff
+        .files
+        .iter()
+        .map(|f| f.file_diff.file_path.clone())
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// Initializes a git repo with a mixed working tree used by the staged-only
+/// tests: two staged files (a modification + a new file), one unstaged
+/// modification, and one untracked file. Returns the temp dir (kept alive by
+/// the caller) and its path.
+#[cfg(test)]
+fn init_mixed_repo() -> tempfile::TempDir {
+    let repo_dir = tempfile::tempdir().expect("create temp repo dir");
+    let repo = repo_dir.path();
+
+    run_git_in(repo, &["init", "-q"]);
+    run_git_in(repo, &["config", "user.email", "test@example.com"]);
+    run_git_in(repo, &["config", "user.name", "Test"]);
+    run_git_in(repo, &["config", "commit.gpgsign", "false"]);
+
+    // Initial commit with two tracked files.
+    std::fs::write(repo.join("tracked.txt"), "line1\nline2\n").expect("write tracked");
+    std::fs::write(repo.join("unstaged.txt"), "orig\n").expect("write unstaged");
+    run_git_in(repo, &["add", "-A"]);
+    run_git_in(repo, &["commit", "-q", "-m", "initial"]);
+
+    // Stage a modification to a tracked file and a brand-new file.
+    std::fs::write(repo.join("tracked.txt"), "line1\nline2\nstaged-add\n").expect("modify tracked");
+    run_git_in(repo, &["add", "tracked.txt"]);
+    std::fs::write(repo.join("staged_new.txt"), "brand new staged\n").expect("write staged_new");
+    run_git_in(repo, &["add", "staged_new.txt"]);
+
+    // Leave an unstaged modification and an untracked file — neither is staged.
+    std::fs::write(repo.join("unstaged.txt"), "orig\nunstaged change\n").expect("modify unstaged");
+    std::fs::write(repo.join("untracked.txt"), "untracked\n").expect("write untracked");
+
+    repo_dir
+}
+
+/// Staged-only ON with base = HEAD yields exactly the staged files (index vs
+/// HEAD), excluding the unstaged modification and the untracked file. The
+/// non-staged Head view still shows all four, proving staged is a strict subset.
+#[tokio::test]
+async fn staged_only_head_shows_only_staged_files() {
+    let repo_dir = init_mixed_repo();
+    let repo = repo_dir.path();
+
+    let staged = LocalDiffStateModel::diff_state_staged(repo, &DiffMode::Head, false)
+        .await
+        .expect("staged Head diff should load");
+    assert_eq!(
+        diff_paths(&staged),
+        vec!["staged_new.txt".to_string(), "tracked.txt".to_string()],
+        "staged+Head must contain only staged files"
+    );
+
+    let unstaged = LocalDiffStateModel::diff_state_against_head(repo)
+        .await
+        .expect("non-staged Head diff should load");
+    let paths = diff_paths(&unstaged);
+    assert!(paths.contains(&"tracked.txt".to_string()));
+    assert!(paths.contains(&"staged_new.txt".to_string()));
+    assert!(paths.contains(&"unstaged.txt".to_string()));
+    assert!(paths.contains(&"untracked.txt".to_string()));
+}
+
+/// Staged-only ON composes with a branch base: `git diff --cached <merge-base>`
+/// is the index vs the branch point. This is the test that proves the two axes
+/// (base + staged) are orthogonal. Committed-plus-staged tree content appears;
+/// the unstaged working-tree edit and the untracked file do not.
+#[tokio::test]
+async fn staged_only_composes_with_branch_base() {
+    let repo_dir = init_mixed_repo();
+    let repo = repo_dir.path();
+
+    // Create a feature branch off the initial commit so the merge-base is the
+    // initial commit, then compare the index against that branch.
+    run_git_in(repo, &["branch", "feature-base", "HEAD"]);
+
+    let staged = LocalDiffStateModel::diff_state_staged(
+        repo,
+        &DiffMode::OtherBranch("feature-base".to_string()),
+        false,
+    )
+    .await
+    .expect("staged branch diff should load");
+    // Index vs merge-base: the staged modification and the staged new file,
+    // never the unstaged edit or the untracked file.
+    assert_eq!(
+        diff_paths(&staged),
+        vec!["staged_new.txt".to_string(), "tracked.txt".to_string()],
+        "staged+branch must be index vs merge-base, excluding unstaged/untracked"
+    );
+}
+
+/// Staged-only OFF is unchanged: the branch base still shows the full working
+/// tree (staged + unstaged + untracked) against the merge-base.
+#[tokio::test]
+async fn staged_only_off_branch_base_is_unchanged() {
+    let repo_dir = init_mixed_repo();
+    let repo = repo_dir.path();
+
+    run_git_in(repo, &["branch", "feature-base", "HEAD"]);
+
+    let unstaged = LocalDiffStateModel::diff_state_against_specific_branch(
+        repo,
+        "feature-base".to_string(),
+        false,
+    )
+    .await
+    .expect("non-staged branch diff should load");
+    let paths = diff_paths(&unstaged);
+    assert!(paths.contains(&"tracked.txt".to_string()));
+    assert!(paths.contains(&"staged_new.txt".to_string()));
+    assert!(paths.contains(&"unstaged.txt".to_string()));
+    assert!(paths.contains(&"untracked.txt".to_string()));
 }

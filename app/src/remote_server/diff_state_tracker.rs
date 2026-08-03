@@ -23,11 +23,14 @@ use crate::code_review::diff_state::{
 
 // ── Key type ────────────────────────────────────────────────────────
 
-/// Composite key: each (repo, mode) gets its own `LocalDiffStateModel`.
+/// Composite key: each (repo, mode, staged_only) gets its own
+/// `LocalDiffStateModel`. `staged_only` is orthogonal to `mode` (the base), so
+/// staged and unstaged views of the same base are distinct subscriptions.
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
 pub(super) struct DiffModelKey {
     pub repo_path: StandardizedPath,
     pub mode: DiffMode,
+    pub staged_only: bool,
 }
 
 // ── Pending response tracker ────────────────────────────────────────
@@ -65,6 +68,7 @@ pub(super) enum DiffStateUpdate {
     Snapshot {
         repo_path: String,
         mode: DiffMode,
+        staged_only: bool,
         state: DiffState,
         metadata: Option<DiffMetadata>,
         diffs: Option<Arc<GitDiffWithBaseContent>>,
@@ -77,6 +81,7 @@ pub(super) enum DiffStateUpdate {
     MetadataUpdate {
         repo_path: StandardizedPath,
         mode: DiffMode,
+        staged_only: bool,
         metadata: DiffMetadata,
         subscribers: Vec<ConnectionId>,
     },
@@ -84,6 +89,7 @@ pub(super) enum DiffStateUpdate {
     FileDelta {
         repo_path: StandardizedPath,
         mode: DiffMode,
+        staged_only: bool,
         /// Repo-relative path for the changed file.
         path: String,
         diff: Option<Arc<FileDiffAndContent>>,
@@ -243,11 +249,16 @@ impl RemoteDiffStateManager {
         &mut self,
         repo_path: StandardizedPath,
         mode: DiffMode,
+        staged_only: bool,
         request_id: &RequestId,
         conn_id: ConnectionId,
         ctx: &mut ModelContext<Self>,
     ) -> SubscribeOutcome {
-        let key = DiffModelKey { repo_path, mode };
+        let key = DiffModelKey {
+            repo_path,
+            mode,
+            staged_only,
+        };
         self.subscribe_connection(key.clone(), conn_id);
 
         if let Some(model) = self.get_model(&key) {
@@ -278,10 +289,12 @@ impl RemoteDiffStateManager {
             // Model doesn't exist — create it and wire up event subscription.
             let repo_path_str = key.repo_path.to_string();
             let mode = key.mode.clone();
+            let staged_only = key.staged_only;
             let model = ctx.add_model(|ctx| {
                 let mut m =
                     LocalDiffStateModel::new(Some(repo_path_str), BackendOrigin::RemoteDaemon, ctx);
                 m.set_diff_mode(mode, false, false, ctx);
+                m.set_staged_only(staged_only, false, false, ctx);
                 m.set_code_review_metadata_refresh_enabled(true, ctx);
                 m
             });
@@ -329,6 +342,7 @@ impl RemoteDiffStateManager {
                 ctx.emit(DiffStateUpdate::Snapshot {
                     repo_path: key.repo_path.to_string(),
                     mode: key.mode.clone(),
+                    staged_only: key.staged_only,
                     state,
                     metadata,
                     diffs: diffs.clone(),
@@ -339,6 +353,7 @@ impl RemoteDiffStateManager {
                 ctx.emit(DiffStateUpdate::MetadataUpdate {
                     repo_path: key.repo_path.clone(),
                     mode: key.mode.clone(),
+                    staged_only: key.staged_only,
                     metadata: metadata.as_ref().clone(),
                     subscribers: self.subscribed_connections(key),
                 });
@@ -353,6 +368,7 @@ impl RemoteDiffStateManager {
                 ctx.emit(DiffStateUpdate::MetadataUpdate {
                     repo_path: key.repo_path.clone(),
                     mode: key.mode.clone(),
+                    staged_only: key.staged_only,
                     metadata: metadata.clone(),
                     subscribers: self.subscribed_connections(key),
                 });
@@ -364,6 +380,7 @@ impl RemoteDiffStateManager {
                 ctx.emit(DiffStateUpdate::FileDelta {
                     repo_path: key.repo_path.clone(),
                     mode: key.mode.clone(),
+                    staged_only: key.staged_only,
                     path: path.clone(),
                     diff: diff.clone(),
                     metadata,
@@ -405,6 +422,7 @@ impl RemoteDiffStateManager {
         ctx.emit(DiffStateUpdate::Snapshot {
             repo_path: key.repo_path.to_string(),
             mode: key.mode.clone(),
+            staged_only: key.staged_only,
             state,
             metadata,
             diffs: diffs_arc,
@@ -420,13 +438,19 @@ impl RemoteDiffStateManager {
         ctx: &mut ModelContext<Self>,
     ) {
         let diff_mode = key.mode.clone();
+        let staged_only = key.staged_only;
         let repo_path = std::path::PathBuf::from(key.repo_path.as_str());
         let resolve_id = request_id.clone();
         let abort_id = request_id.clone();
         let abort_key = key.clone();
         let handle = ctx.spawn_abortable(
             async move {
-                LocalDiffStateModel::load_diffs_with_content_for_mode(diff_mode, repo_path).await
+                LocalDiffStateModel::load_diffs_with_content_for_mode(
+                    diff_mode,
+                    staged_only,
+                    repo_path,
+                )
+                .await
             },
             move |me, diffs, ctx| {
                 me.in_progress.remove(&resolve_id);

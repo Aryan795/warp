@@ -155,6 +155,10 @@ use crate::workspace::{ToastStack, Workspace, WorkspaceAction};
 pub struct CodeReviewHeaderFields {
     pub is_in_split_pane: bool,
     pub diff_state_model: ModelHandle<DiffStateModel>,
+    /// Snapshot of the orthogonal staged-only flag, read once at render time so
+    /// the header's "Staged changes only" checkbox can reflect it without an
+    /// `AppContext` (the revamped header layout renders without one).
+    pub staged_only: bool,
     pub maximize_button: ViewHandle<ActionButton>,
     pub diff_selector: ViewHandle<DiffSelector>,
     pub header_menu: ViewHandle<Menu<CodeReviewAction>>,
@@ -335,6 +339,8 @@ pub enum CodeReviewAction {
     ConfirmDiscardFile,
     CancelDiscardFile,
     ToggleStashChanges,
+    /// Toggles the "Staged changes only" checkbox in the code review header.
+    ToggleStagedOnly,
     ToggleFileSelection(String),
     AddDiffSetAsContext(DiffSetScope),
     CopyFilePath(String),
@@ -1583,10 +1589,14 @@ impl CodeReviewView {
             return;
         }
 
+        let staged_only = self
+            .diff_state_model
+            .read(ctx, |model, ctx| model.staged_only(ctx));
         send_telemetry_from_ctx!(
             CodeReviewTelemetryEvent::BaseChanged {
                 is_local: self.repo_is_local(),
                 mode: mode.clone(),
+                staged_only,
             },
             ctx
         );
@@ -1594,6 +1604,38 @@ impl CodeReviewView {
         let preferred_session = self.preferred_review_session(ctx);
         self.diff_state_model.update(ctx, |model, ctx| {
             model.set_diff_mode(mode, false, true, preferred_session, ctx);
+        });
+        self.update_diff_selector_selection(ctx);
+        self.invalidate_all(None, None, ctx);
+    }
+
+    /// Toggles the orthogonal staged-only flag (the "Staged changes only"
+    /// checkbox). Composes with the current base: emits telemetry, updates the
+    /// diff state model, and reloads the diff the same way a base change does.
+    fn apply_staged_only(&mut self, staged_only: bool, ctx: &mut ViewContext<Self>) {
+        if self
+            .diff_state_model
+            .read(ctx, |model, ctx| model.staged_only(ctx))
+            == staged_only
+        {
+            return;
+        }
+
+        let mode = self
+            .diff_state_model
+            .read(ctx, |model, ctx| model.diff_mode(ctx));
+        send_telemetry_from_ctx!(
+            CodeReviewTelemetryEvent::BaseChanged {
+                is_local: self.repo_is_local(),
+                mode,
+                staged_only,
+            },
+            ctx
+        );
+
+        let preferred_session = self.preferred_review_session(ctx);
+        self.diff_state_model.update(ctx, |model, ctx| {
+            model.set_staged_only(staged_only, preferred_session, ctx);
         });
         self.update_diff_selector_selection(ctx);
         self.invalidate_all(None, None, ctx);
@@ -4192,6 +4234,7 @@ impl CodeReviewView {
             header_menu: self.header_menu.clone(),
             header_menu_open: self.header_menu_open,
             diff_state_model: self.diff_state_model.clone(),
+            staged_only: self.diff_state_model.as_ref(app).staged_only(app),
             header_dropdown_button: self.header_dropdown_button.clone(),
             has_header_menu_items,
             file_nav_button: if FeatureFlag::GitOperationsInCodeReview.is_enabled()
@@ -7248,6 +7291,12 @@ impl TypedActionView for CodeReviewView {
             }
             CodeReviewAction::SetDiffMode(mode) => {
                 self.apply_diff_mode(mode.clone(), ctx);
+            }
+            CodeReviewAction::ToggleStagedOnly => {
+                let current = self
+                    .diff_state_model
+                    .read(ctx, |model, ctx| model.staged_only(ctx));
+                self.apply_staged_only(!current, ctx);
             }
             CodeReviewAction::ToggleFileSidebar => {
                 if self.file_sidebar_expanded {

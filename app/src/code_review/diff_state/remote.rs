@@ -23,7 +23,9 @@ use super::{
     GitDiffWithBaseContent,
 };
 use crate::code_review::telemetry_event::CodeReviewTelemetryEvent;
-use crate::remote_server::diff_state_proto::{try_decode_file_delta, try_decode_snapshot};
+use crate::remote_server::diff_state_proto::{
+    diff_mode_to_proto, try_decode_file_delta, try_decode_snapshot,
+};
 use crate::remote_server::proto;
 use crate::util::git::{BranchEntry, Commit, FileChangeEntry, PrInfo};
 
@@ -46,6 +48,10 @@ enum InternalRemoteDiffState {
 pub struct RemoteDiffStateModel {
     remote_path: RemotePath,
     mode: DiffMode,
+    /// Orthogonal to `mode`: restrict the diff to staged changes only (index vs
+    /// base). Rides alongside `mode` in the subscription identity so staged and
+    /// unstaged views are distinct server-side subscriptions.
+    staged_only: bool,
     state: InternalRemoteDiffState,
     metadata: Option<DiffMetadata>,
     /// Start time for the latest caller-tracked full diff snapshot request.
@@ -76,6 +82,7 @@ impl RemoteDiffStateModel {
     pub fn new(
         remote_path: RemotePath,
         mode: DiffMode,
+        staged_only: bool,
         preferred_session: Option<SessionId>,
         ctx: &mut ModelContext<Self>,
     ) -> Self {
@@ -92,7 +99,7 @@ impl RemoteDiffStateModel {
             mgr.get_diff_state(
                 host_id,
                 repo_path,
-                proto::DiffMode::from(&mode_clone),
+                diff_mode_to_proto(&mode_clone, staged_only),
                 preferred_session,
                 ctx,
             );
@@ -101,6 +108,7 @@ impl RemoteDiffStateModel {
         Self {
             remote_path,
             mode,
+            staged_only,
             state: InternalRemoteDiffState::Loading,
             metadata: None,
             tracked_diff_load_start_time: None,
@@ -115,7 +123,9 @@ impl RemoteDiffStateModel {
         repo_path: &StandardizedPath,
         mode: &proto::DiffMode,
     ) -> bool {
-        let remote_mode = proto::DiffMode::from(&self.mode);
+        // The staged-only flag is part of the subscription identity, so compare
+        // the full wire mode (base + staged) rather than the base alone.
+        let remote_mode = diff_mode_to_proto(&self.mode, self.staged_only);
         self.remote_path.matches(host_id, repo_path) && mode == &remote_mode
     }
 
@@ -259,11 +269,12 @@ impl RemoteDiffStateModel {
         let host_id = self.remote_path.host_id.clone();
         let repo_path = self.remote_path.path.clone();
         let mode = self.mode.clone();
+        let staged_only = self.staged_only;
         RemoteServerManager::handle(ctx).update(ctx, |mgr, ctx| {
             mgr.get_diff_state(
                 host_id,
                 repo_path,
-                proto::DiffMode::from(&mode),
+                diff_mode_to_proto(&mode, staged_only),
                 preferred_session,
                 ctx,
             );
@@ -357,6 +368,7 @@ impl RemoteDiffStateModel {
         let host_id = self.remote_path.host_id.clone();
         let repo_path = self.remote_path.path.clone();
         let mode = self.mode.clone();
+        let staged_only = self.staged_only;
         // `preferred_session` is supplied per-call by the triggering view (the
         // session showing the review); `None` falls back to any connected
         // session for the host. Never cached on this shared model.
@@ -364,7 +376,7 @@ impl RemoteDiffStateModel {
             mgr.get_diff_state(
                 host_id,
                 repo_path,
-                proto::DiffMode::from(&mode),
+                diff_mode_to_proto(&mode, staged_only),
                 preferred_session,
                 ctx,
             );
@@ -528,7 +540,7 @@ impl RemoteDiffStateModel {
             .unsubscribe_diff_state(
                 self.remote_path.host_id.clone(),
                 &self.remote_path.path,
-                proto::DiffMode::from(&self.mode),
+                diff_mode_to_proto(&self.mode, self.staged_only),
             );
     }
 
@@ -546,6 +558,11 @@ impl RemoteDiffStateModel {
 
     pub fn diff_mode(&self) -> DiffMode {
         self.mode.clone()
+    }
+
+    /// Whether the diff is currently restricted to staged changes only.
+    pub fn staged_only(&self) -> bool {
+        self.staged_only
     }
 
     pub fn get_uncommitted_stats(&self) -> Option<DiffStats> {
@@ -817,6 +834,24 @@ impl RemoteDiffStateModel {
         self.resubscribe(track_load_duration, preferred_session, ctx);
     }
 
+    /// Toggles the orthogonal staged-only flag. Because the flag is part of the
+    /// subscription identity, this unsubscribes the old (base, staged) pair and
+    /// re-subscribes with the new one, mirroring [`Self::set_diff_mode`].
+    pub fn set_staged_only(
+        &mut self,
+        staged_only: bool,
+        track_load_duration: bool,
+        preferred_session: Option<SessionId>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if self.staged_only == staged_only {
+            return;
+        }
+        self.unsubscribe(ctx);
+        self.staged_only = staged_only;
+        self.resubscribe(track_load_duration, preferred_session, ctx);
+    }
+
     /// Fetches branches for the remote repository via the `GetBranches` RPC.
     /// The response is handled in `handle_manager_event` which emits
     /// `DiffStateModelEvent::BranchesReceived`.
@@ -840,6 +875,7 @@ impl RemoteDiffStateModel {
         let host_id = self.remote_path.host_id.clone();
         let repo_path = self.remote_path.path.clone();
         let mode = self.mode.clone();
+        let staged_only = self.staged_only;
         let proto_files = file_infos.iter().map(proto::FileStatusInfo::from).collect();
         RemoteServerManager::handle(ctx).update(ctx, |mgr, ctx| {
             mgr.discard_files(
@@ -848,7 +884,7 @@ impl RemoteDiffStateModel {
                 proto_files,
                 should_stash,
                 branch_name,
-                proto::DiffMode::from(&mode),
+                diff_mode_to_proto(&mode, staged_only),
                 ctx,
             );
         });

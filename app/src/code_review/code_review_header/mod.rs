@@ -39,6 +39,7 @@ struct StateHandles {
     branch_name_tooltip: MouseStateHandle,
     discard_all_button: MouseStateHandle,
     add_diff_set_context_button: MouseStateHandle,
+    staged_only_checkbox: MouseStateHandle,
 }
 
 pub struct CodeReviewHeader {
@@ -115,6 +116,10 @@ impl CodeReviewHeader {
             .with_main_axis_alignment(MainAxisAlignment::End)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_child(ChildView::new(&code_review_header_fields.diff_selector).finish());
+
+        right_section_wide.add_child(
+            self.render_staged_only_checkbox(code_review_header_fields.staged_only, appearance),
+        );
 
         let has_no_changes = state.to_diff_stats().has_no_changes();
 
@@ -197,6 +202,10 @@ impl CodeReviewHeader {
             .with_main_axis_size(MainAxisSize::Min)
             .with_cross_axis_alignment(CrossAxisAlignment::Center);
 
+        right_subsection_compact.add_child(
+            self.render_staged_only_checkbox(code_review_header_fields.staged_only, appearance),
+        );
+
         if FeatureFlag::DiscardPerFileAndAllChanges.is_enabled() {
             right_subsection_compact.add_child(self.create_discard_button(
                 state,
@@ -251,6 +260,56 @@ impl CodeReviewHeader {
             )
             .finish(),
         )
+        .finish()
+    }
+
+    /// Renders the "Staged changes only" checkbox. This is orthogonal to the
+    /// base selector (`DiffSelector`): it restricts whichever base is selected
+    /// to staged changes. `staged_only` is a render-time snapshot of the diff
+    /// state model's flag.
+    pub(super) fn render_staged_only_checkbox(
+        &self,
+        staged_only: bool,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
+        // Render the label as a separate sibling rather than via the checkbox's
+        // built-in `with_label`: the shared `Checkbox` applies its checked-state
+        // font color (the on-accent checkmark color) to the label too, which
+        // makes the text invisible on the header background when checked.
+        let label = appearance
+            .ui_builder()
+            .span("Staged changes only")
+            .with_style(UiComponentStyles {
+                font_size: Some(appearance.ui_font_size()),
+                font_color: Some(
+                    appearance
+                        .theme()
+                        .main_text_color(appearance.theme().background())
+                        .into(),
+                ),
+                ..Default::default()
+            })
+            .build()
+            .finish();
+
+        let checkbox = appearance
+            .ui_builder()
+            .checkbox(self.state_handles.staged_only_checkbox.clone(), Some(14.))
+            .check(staged_only)
+            .build()
+            .on_click(|ctx, _, _| {
+                ctx.dispatch_typed_action(CodeReviewAction::ToggleStagedOnly);
+            })
+            .finish();
+
+        Container::new(
+            Flex::row()
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_child(checkbox)
+                .with_child(Container::new(label).with_margin_left(4.).finish())
+                .finish(),
+        )
+        .with_margin_right(8.)
         .finish()
     }
 

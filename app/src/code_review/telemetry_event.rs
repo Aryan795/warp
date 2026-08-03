@@ -206,11 +206,15 @@ pub enum CodeReviewTelemetryEvent {
         is_local: Option<bool>,
         state_change: PaneStateChange,
     },
-    /// Emitted when the diff base is changed (e.g., from uncommitted to main branch).
+    /// Emitted when the diff base is changed (e.g., from uncommitted to main
+    /// branch) or the orthogonal staged-only flag is toggled.
     BaseChanged {
         is_local: Option<bool>,
-        /// The new diff mode.
+        /// The diff base mode.
         mode: DiffMode,
+        /// Whether the diff is restricted to staged changes only. Recorded as
+        /// its own field so base and staged-ness stay separable in analysis.
+        staged_only: bool,
     },
     /// Failure when we are calculating the diff metadata.
     LoadMetadataFailed {
@@ -381,9 +385,15 @@ impl TelemetryEvent for CodeReviewTelemetryEvent {
                 is_local,
                 state_change,
             } => Some(json!({ "is_local": is_local, "state_change": state_change })),
-            CodeReviewTelemetryEvent::BaseChanged { is_local, mode } => {
-                Some(json!({ "is_local": is_local, "mode": mode }))
-            }
+            CodeReviewTelemetryEvent::BaseChanged {
+                is_local,
+                mode,
+                staged_only,
+            } => Some(json!({
+                "is_local": is_local,
+                "mode": mode,
+                "staged_only": staged_only,
+            })),
             CodeReviewTelemetryEvent::LoadMetadataFailed {
                 backend_origin,
                 mode,

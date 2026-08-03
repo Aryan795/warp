@@ -11,6 +11,7 @@ fn test_key(repo: &str, mode: DiffMode) -> DiffModelKey {
     DiffModelKey {
         repo_path: StandardizedPath::try_new(repo).unwrap(),
         mode,
+        staged_only: false,
     }
 }
 

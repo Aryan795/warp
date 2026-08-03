@@ -27,6 +27,7 @@ impl RemoteDiffStateModel {
                     .expect("test repo path should be valid and absolute"),
             ),
             mode,
+            staged_only: false,
             state,
             metadata,
             tracked_diff_load_start_time: None,

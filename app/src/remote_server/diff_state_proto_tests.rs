@@ -94,6 +94,25 @@ fn diff_metadata_against_base_requires_stats() {
 }
 
 #[test]
+fn diff_mode_and_staged_flag_round_trip_through_proto() {
+    // The staged-only flag is orthogonal to the base and rides alongside it on
+    // the wire (APP-5113). Every (base, staged) combination must round-trip:
+    // the base survives Rust → proto → Rust, and the flag is readable via
+    // `staged_only_from_proto`.
+    for mode in [
+        DiffMode::Head,
+        DiffMode::MainBranch,
+        DiffMode::OtherBranch("feature/x".to_string()),
+    ] {
+        for staged_only in [false, true] {
+            let proto_mode = super::diff_mode_to_proto(&mode, staged_only);
+            assert_eq!(DiffMode::from(&proto_mode), mode);
+            assert_eq!(super::staged_only_from_proto(&proto_mode), staged_only);
+        }
+    }
+}
+
+#[test]
 fn pr_info_round_trips_through_proto() {
     let pr_info = PrInfo {
         number: 42,
@@ -152,6 +171,7 @@ fn build_diff_state_snapshot_preserves_repo_relative_file_paths() {
     let snapshot = super::build_diff_state_snapshot(
         "/repo",
         &DiffMode::Head,
+        false,
         None,
         &DiffState::Loaded,
         Some(&diffs),
@@ -171,8 +191,14 @@ fn build_diff_state_snapshot_preserves_repo_relative_file_paths() {
 
 #[test]
 fn build_diff_state_file_delta_preserves_repo_relative_file_path() {
-    let delta =
-        super::build_diff_state_file_delta("/repo", &DiffMode::Head, "src/main.rs", None, None);
+    let delta = super::build_diff_state_file_delta(
+        "/repo",
+        &DiffMode::Head,
+        false,
+        "src/main.rs",
+        None,
+        None,
+    );
 
     assert_eq!(delta.file_path, "src/main.rs");
 }

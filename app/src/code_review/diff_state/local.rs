@@ -200,6 +200,10 @@ pub struct LocalDiffStateModel {
     state: InternalDiffState,
     backend_origin: BackendOrigin,
     mode: DiffMode,
+    /// Orthogonal to `mode`: when true, the diff is restricted to staged
+    /// changes only (the index vs the current base), i.e. `git diff --cached
+    /// <base>`. Composes with every `DiffMode` base.
+    staged_only: bool,
     metadata: Option<DiffMetadata>,
     computing_diffs_abort_handle: Option<SpawnedFutureHandle>,
     computing_metadata_abort_handle: Option<SpawnedFutureHandle>,
@@ -283,6 +287,7 @@ impl LocalDiffStateModel {
             },
             subscriber_id: None,
             mode: DiffMode::default(),
+            staged_only: false,
             backend_origin,
             metadata: None,
             computing_diffs_abort_handle: None,
@@ -334,6 +339,7 @@ impl LocalDiffStateModel {
             state: InternalDiffState::default(),
             backend_origin,
             mode: DiffMode::default(),
+            staged_only: false,
             metadata: None,
             computing_diffs_abort_handle: None,
             computing_metadata_abort_handle: None,
@@ -360,6 +366,11 @@ impl LocalDiffStateModel {
 
     pub fn diff_mode(&self) -> DiffMode {
         self.mode.clone()
+    }
+
+    /// Whether the diff is currently restricted to staged changes only.
+    pub fn staged_only(&self) -> bool {
+        self.staged_only
     }
 
     pub fn get_uncommitted_stats(&self) -> Option<DiffStats> {
@@ -520,6 +531,22 @@ impl LocalDiffStateModel {
         }
     }
 
+    /// Sets the orthogonal staged-only flag and reloads if it changed. Staged
+    /// composes with the current `mode`, so this reloads the same way a base
+    /// change does.
+    pub fn set_staged_only(
+        &mut self,
+        staged_only: bool,
+        should_fetch_base: bool,
+        track_load_duration: bool,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if self.staged_only != staged_only {
+            self.staged_only = staged_only;
+            self.load_diffs_for_current_repo(should_fetch_base, track_load_duration, ctx);
+        }
+    }
+
     /// Like [`Self::set_diff_mode`], but also arranges for the next diff load
     /// to fetch the base branch from origin if it is not available locally.
     /// This is intended for the `insert_code_review_comments` flow where the
@@ -557,10 +584,17 @@ impl LocalDiffStateModel {
             .root_dir()
             .to_local_path_lossy();
         let mode = self.mode.clone();
+        let staged_only = self.staged_only;
         self.state = InternalDiffState::Loading;
         self.computing_diffs_abort_handle = Some(ctx.spawn(
             async move {
-                Self::load_diffs_for_repo(current_repository_path, mode, should_fetch_base).await
+                Self::load_diffs_for_repo(
+                    current_repository_path,
+                    mode,
+                    staged_only,
+                    should_fetch_base,
+                )
+                .await
             },
             Self::handle_updated_state_for_repo,
         ));
@@ -1140,6 +1174,7 @@ impl LocalDiffStateModel {
         }
 
         let mode = self.mode.clone();
+        let staged = self.staged_only;
         let merge_base = self.file_invalidation.merge_base.clone();
         let queue = self.file_invalidation.queue.clone();
         for file in files {
@@ -1148,6 +1183,7 @@ impl LocalDiffStateModel {
                 repo_path: repo_path.clone(),
                 mode: mode.clone(),
                 merge_base: merge_base.clone(),
+                staged,
             };
             queue.enqueue(task, None, "file-invalidation");
         }
@@ -1583,9 +1619,10 @@ impl LocalDiffStateModel {
     #[cfg(feature = "local_fs")]
     pub async fn load_diff_data_for_mode(
         mode: DiffMode,
+        staged_only: bool,
         repo_path: PathBuf,
     ) -> Option<GitDiffData> {
-        let diffs = Self::load_diffs_for_repo(repo_path, mode, false).await;
+        let diffs = Self::load_diffs_for_repo(repo_path, mode, staged_only, false).await;
         diffs.changes.ok().map(|diff| diff.into())
     }
 
@@ -1596,25 +1633,33 @@ impl LocalDiffStateModel {
     #[cfg(feature = "local_fs")]
     pub async fn load_diffs_with_content_for_mode(
         mode: DiffMode,
+        staged_only: bool,
         repo_path: PathBuf,
     ) -> Option<GitDiffWithBaseContent> {
-        let diffs = Self::load_diffs_for_repo(repo_path, mode, false).await;
+        let diffs = Self::load_diffs_for_repo(repo_path, mode, staged_only, false).await;
         diffs.changes.ok()
     }
 
     async fn load_diffs_for_repo(
         repo_path: PathBuf,
         mode: DiffMode,
+        staged_only: bool,
         should_fetch_base: bool,
     ) -> DiffsWithBaseContent {
-        let diffs = match mode {
-            DiffMode::Head => Self::diff_state_against_head(&repo_path).await,
-            DiffMode::MainBranch => {
-                Self::diff_state_against_base_branch(&repo_path, should_fetch_base).await
-            }
-            DiffMode::OtherBranch(branch) => {
-                Self::diff_state_against_specific_branch(&repo_path, branch, should_fetch_base)
-                    .await
+        let diffs = if staged_only {
+            // Staged is orthogonal to the base: for each base, restrict the diff
+            // to the index (`git diff --cached <base>`).
+            Self::diff_state_staged(&repo_path, &mode, should_fetch_base).await
+        } else {
+            match mode {
+                DiffMode::Head => Self::diff_state_against_head(&repo_path).await,
+                DiffMode::MainBranch => {
+                    Self::diff_state_against_base_branch(&repo_path, should_fetch_base).await
+                }
+                DiffMode::OtherBranch(branch) => {
+                    Self::diff_state_against_specific_branch(&repo_path, branch, should_fetch_base)
+                        .await
+                }
             }
         };
 
@@ -1795,13 +1840,171 @@ impl LocalDiffStateModel {
         for (file_path, status) in changed_files {
             let is_binary = binary_files.contains(&file_path);
             let mut file_diff =
-                Self::get_file_diff(repo_path, &file_path, &status, is_binary, None).await?;
+                Self::get_file_diff(repo_path, &file_path, &status, is_binary, None, false).await?;
             // Never read or ship base content for binary files: it can't be
             // inline-rendered and, after lossy UTF-8 decoding, can balloon ~3x.
             let content_at_head = if is_binary {
                 None
             } else {
                 Self::get_file_content_at_head(repo_path, &file_path, &status).await
+            };
+
+            file_diff.is_autogenerated =
+                is_file_autogenerated(&file_path, content_at_head.as_deref());
+
+            total_additions += file_diff.additions();
+            total_deletions += file_diff.deletions();
+
+            files.push(FileDiffAndContent {
+                file_diff,
+                content_at_head,
+            });
+        }
+
+        Ok(GitDiffWithBaseContent {
+            files_changed: files.len(),
+            files,
+            total_additions,
+            total_deletions,
+        })
+    }
+
+    /// Resolves the base commit for staged-only mode against the given base
+    /// `mode`. `Head` has no base (index vs HEAD → `None`); branch modes resolve
+    /// to the merge-base (optionally fetching it from origin).
+    async fn resolve_staged_base(
+        repo_path: &Path,
+        mode: &DiffMode,
+        should_fetch_base: bool,
+    ) -> Result<Option<String>> {
+        let branch = match mode {
+            DiffMode::Head => return Ok(None),
+            DiffMode::MainBranch => detect_main_branch(repo_path).await?,
+            DiffMode::OtherBranch(branch) => branch.clone(),
+        };
+        let merge_base = if should_fetch_base {
+            Self::get_or_fetch_merge_base(repo_path, &branch).await?
+        } else {
+            Self::get_merge_base(repo_path, &branch).await?
+        };
+        Ok(Some(merge_base))
+    }
+
+    /// Returns the staged file statuses (index vs `base`) via
+    /// `git diff --cached --name-status -z [base]`. Untracked files are excluded
+    /// because they are not staged.
+    async fn file_statuses_staged(
+        repo_path: &Path,
+        base: Option<&str>,
+    ) -> Result<Vec<(String, GitFileStatus)>> {
+        let mut args = vec!["diff", "--cached", "--name-status", "-z"];
+        if let Some(base) = base {
+            args.push(base);
+        }
+        log::debug!(
+            "[GIT OPERATION] local.rs file_statuses_staged git {}",
+            args.join(" ")
+        );
+        let diff_output = run_git_command(repo_path, &args).await?;
+        if diff_output.trim().is_empty() {
+            Ok(Vec::new())
+        } else {
+            Self::parse_git_diff_name_status(&diff_output)
+        }
+    }
+
+    /// Binary files among the staged changes via
+    /// `git diff --cached --numstat [base]` (binary files are reported as `-\t-`).
+    async fn get_binary_files_staged(
+        repo_path: &Path,
+        base: Option<&str>,
+    ) -> Result<std::collections::HashSet<String>> {
+        let mut args = vec!["diff", "--cached", "--numstat"];
+        if let Some(base) = base {
+            args.push(base);
+        }
+        log::debug!(
+            "[GIT OPERATION] local.rs get_binary_files_staged git {}",
+            args.join(" ")
+        );
+        let numstat_output = match run_git_command(repo_path, &args).await {
+            Ok(output) => output,
+            Err(_) => return Ok(std::collections::HashSet::new()),
+        };
+        let binary_files = numstat_output
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.split('\t');
+                let additions = parts.next()?;
+                let deletions = parts.next()?;
+                let filename = parts.next()?;
+                (additions == "-" && deletions == "-").then(|| filename.to_string())
+            })
+            .collect();
+        Ok(binary_files)
+    }
+
+    /// Content of a staged file at the diff base: HEAD when `base` is `None`
+    /// (index vs HEAD), or the given base commit for branch bases.
+    async fn staged_content_at_base(
+        repo_path: &Path,
+        file_path: &str,
+        status: &GitFileStatus,
+        base: Option<&str>,
+    ) -> Option<String> {
+        match base {
+            None => Self::get_file_content_at_head(repo_path, file_path, status).await,
+            Some(base) => match status {
+                GitFileStatus::New | GitFileStatus::Untracked => {
+                    repo_path.join(file_path).is_file().then(String::new)
+                }
+                GitFileStatus::Renamed { old_path } => {
+                    Self::get_file_content_at_commit(repo_path, old_path, base).await
+                }
+                _ => Self::get_file_content_at_commit(repo_path, file_path, base).await,
+            },
+        }
+    }
+
+    /// Diffs the index against the base (`git diff --cached <base>`) — staged
+    /// changes only. `base` is `None` for `Head` mode (index vs HEAD) or the
+    /// merge-base for branch modes, so the staged source composes with any base.
+    /// Untracked files are excluded because they are not staged.
+    async fn diff_state_staged(
+        repo_path: &Path,
+        mode: &DiffMode,
+        should_fetch_base: bool,
+    ) -> Result<GitDiffWithBaseContent> {
+        let base = match Self::resolve_staged_base(repo_path, mode, should_fetch_base).await {
+            Ok(base) => base,
+            Err(err) => {
+                log::warn!("Could not determine base for staged diff: {err:?}");
+                return Ok(GitDiffWithBaseContent {
+                    files_changed: 0,
+                    files: Vec::new(),
+                    total_additions: 0,
+                    total_deletions: 0,
+                });
+            }
+        };
+        let base_ref = base.as_deref();
+
+        let changed_files = Self::file_statuses_staged(repo_path, base_ref).await?;
+        let binary_files = Self::get_binary_files_staged(repo_path, base_ref).await?;
+
+        let mut files = Vec::new();
+        let mut total_additions = 0;
+        let mut total_deletions = 0;
+
+        for (file_path, status) in changed_files {
+            let is_binary = binary_files.contains(&file_path);
+            let mut file_diff =
+                Self::get_file_diff(repo_path, &file_path, &status, is_binary, base_ref, true)
+                    .await?;
+            let content_at_head = if is_binary {
+                None
+            } else {
+                Self::staged_content_at_base(repo_path, &file_path, &status, base_ref).await
             };
 
             file_diff.is_autogenerated =
@@ -1834,14 +2037,35 @@ impl LocalDiffStateModel {
         Self::diff_state_against_specific_branch(repo_path, main_branch, should_fetch_base).await
     }
 
-    /// Returns the per-file status by running a scoped `git status` (Head mode)
-    /// or `git diff --name-status` (base-branch mode) limited to a single path.
+    /// Returns the per-file status by running a scoped `git status` (Head mode),
+    /// `git diff --name-status` (base-branch mode), or `git diff --cached
+    /// --name-status` (staged mode), limited to a single path.
     async fn file_status_for_path(
         repo_path: &Path,
         relative: &str,
         mode: &DiffMode,
         merge_base: Option<&str>,
+        staged: bool,
     ) -> Result<Option<(String, GitFileStatus)>> {
+        if staged {
+            // Staged mode: `git diff --cached --name-status -z [base]` (index vs
+            // base) scoped to this path. Untracked files are not staged, so
+            // there is no untracked fallback.
+            let mut args = vec!["diff", "--cached", "--name-status", "-z"];
+            if let Some(base) = merge_base {
+                args.push(base);
+            }
+            args.push("--");
+            args.push(relative);
+            log::debug!(
+                "[GIT OPERATION] local.rs file_status_for_path git {} (staged)",
+                args.join(" ")
+            );
+            let diff_output = run_git_command(repo_path, &args).await?;
+            return Ok(Self::parse_git_diff_name_status(&diff_output)?
+                .into_iter()
+                .find(|(p, _)| *p == relative));
+        }
         match (mode, merge_base) {
             (DiffMode::Head, _) => {
                 log::debug!(
@@ -1921,6 +2145,33 @@ impl LocalDiffStateModel {
             .is_some_and(|line| line.starts_with("-\t-")))
     }
 
+    /// Like [`Self::is_file_binary`] but for staged mode: runs
+    /// `git diff --numstat --cached [base] -- <file>` (index vs base).
+    async fn is_file_binary_staged(
+        repo_path: &Path,
+        relative: &str,
+        base: Option<&str>,
+    ) -> Result<bool> {
+        let mut args = vec!["diff", "--numstat", "--cached"];
+        if let Some(base) = base {
+            args.push(base);
+        }
+        args.push("--");
+        args.push(relative);
+        log::debug!(
+            "[GIT OPERATION] local.rs is_file_binary_staged git {}",
+            args.join(" ")
+        );
+        let output = match run_git_command(repo_path, &args).await {
+            Ok(o) => o,
+            Err(_) => return Ok(false),
+        };
+        Ok(output
+            .lines()
+            .next()
+            .is_some_and(|line| line.starts_with("-\t-")))
+    }
+
     /// Retrieves the diff state for a single invalidated file using scoped
     /// per-file git commands instead of full-repo operations.
     ///
@@ -1931,6 +2182,7 @@ impl LocalDiffStateModel {
         file: &Path,
         mode: &DiffMode,
         merge_base: Option<&str>,
+        staged: bool,
     ) -> Result<(String, Option<Arc<FileDiffAndContent>>)> {
         let relative = file
             .strip_prefix(repo_path)
@@ -1940,11 +2192,22 @@ impl LocalDiffStateModel {
             .to_owned();
 
         let Some((file_path, status)) =
-            Self::file_status_for_path(repo_path, &relative, mode, merge_base).await?
+            Self::file_status_for_path(repo_path, &relative, mode, merge_base, staged).await?
         else {
             // File is no longer part of the diff.
             return Ok((relative, None));
         };
+
+        if staged {
+            // Staged mode: the base is `merge_base` (the branch merge-base) or
+            // `None` (index vs HEAD for `Head` mode).
+            let is_binary = Self::is_file_binary_staged(repo_path, &relative, merge_base).await?;
+            let diff = Self::file_diff_for_path(
+                is_binary, repo_path, &file_path, &status, merge_base, true,
+            )
+            .await?;
+            return Ok((relative, diff.map(Arc::new)));
+        }
 
         let commit = match mode {
             DiffMode::Head => "HEAD",
@@ -1953,7 +2216,8 @@ impl LocalDiffStateModel {
         let is_binary = Self::is_file_binary(repo_path, &relative, commit).await?;
 
         let diff =
-            Self::file_diff_for_path(is_binary, repo_path, &file_path, &status, merge_base).await?;
+            Self::file_diff_for_path(is_binary, repo_path, &file_path, &status, merge_base, false)
+                .await?;
         Ok((relative, diff.map(Arc::new)))
     }
 
@@ -1963,9 +2227,11 @@ impl LocalDiffStateModel {
         file_path: &str,
         status: &GitFileStatus,
         merge_base: Option<&str>,
+        staged: bool,
     ) -> Result<Option<FileDiffAndContent>> {
         let mut file_diff =
-            Self::get_file_diff(repo_path, file_path, status, is_binary, merge_base).await?;
+            Self::get_file_diff(repo_path, file_path, status, is_binary, merge_base, staged)
+                .await?;
 
         // Skip files that have no actual changes (empty hunks and not binary)
         // Also skip files with no additions or deletions (no real changes) except for renamed or new files.
@@ -2104,6 +2370,7 @@ impl LocalDiffStateModel {
                 &file_path,
                 &status,
                 Some(&merge_base),
+                false,
             )
             .await?;
 
@@ -2389,6 +2656,7 @@ impl LocalDiffStateModel {
         status: &GitFileStatus,
         is_binary: bool,
         commit: Option<&str>,
+        staged: bool,
     ) -> Result<FileDiff> {
         let mut hunks = Vec::new();
         let mut max_line_number = 0;
@@ -2426,7 +2694,32 @@ impl LocalDiffStateModel {
 
         // Get the actual diff content for text files only
         // Use the same diff arguments as Git Desktop or compare against specific commit
-        let diff_args = if let Some(commit) = commit {
+        let diff_args = if staged {
+            // Staged mode: diff the index against the base (`git diff --cached
+            // [base]`). `commit` carries the base ref (the merge-base for branch
+            // bases; absent means index vs HEAD).
+            let mut args = vec![
+                "diff",
+                "--no-ext-diff",
+                "--patch-with-raw",
+                "-z",
+                "--no-color",
+                "--cached",
+            ];
+            if let Some(commit) = commit {
+                args.push(commit);
+            }
+            args.push("--");
+            match status {
+                // For renamed files, compare the old path to the new path.
+                GitFileStatus::Renamed { old_path } => {
+                    args.push(old_path);
+                    args.push(file_path);
+                }
+                _ => args.push(file_path),
+            }
+            args
+        } else if let Some(commit) = commit {
             // When commit is specified, handle special cases that need different treatment
             match status {
                 GitFileStatus::Untracked => {
@@ -2977,6 +3270,7 @@ impl LocalDiffStateModel {
             subscriber_id: None,
             backend_origin: BackendOrigin::ClientLocal,
             mode: DiffMode::default(),
+            staged_only: false,
             metadata: None,
             computing_diffs_abort_handle: None,
             computing_metadata_abort_handle: None,

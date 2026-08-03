@@ -471,7 +471,13 @@ impl DiffStateModel {
         ctx: &mut ModelContext<Self>,
     ) -> Self {
         let remote = ctx.add_model(|ctx| {
-            RemoteDiffStateModel::new(remote_path, DiffMode::default(), preferred_session, ctx)
+            RemoteDiffStateModel::new(
+                remote_path,
+                DiffMode::default(),
+                false,
+                preferred_session,
+                ctx,
+            )
         });
         ctx.subscribe_to_model(&remote, |me, _, event, ctx| me.forward_event(event, ctx));
         Self::Remote(remote)
@@ -535,6 +541,15 @@ impl DiffStateModel {
         match self {
             Self::Local(m) => m.as_ref(ctx).diff_mode(),
             Self::Remote(m) => m.as_ref(ctx).diff_mode(),
+        }
+    }
+
+    /// Whether the diff is currently restricted to staged changes only. This is
+    /// orthogonal to [`Self::diff_mode`]: any base can be viewed staged-only.
+    pub(crate) fn staged_only(&self, ctx: &AppContext) -> bool {
+        match self {
+            Self::Local(m) => m.as_ref(ctx).staged_only(),
+            Self::Remote(m) => m.as_ref(ctx).staged_only(),
         }
     }
 
@@ -641,6 +656,29 @@ impl DiffStateModel {
             Self::Remote(model) => {
                 model.update(ctx, |model, ctx| {
                     model.set_diff_mode(mode, track_load_duration, preferred_session, ctx);
+                });
+            }
+        }
+    }
+
+    /// Toggles the orthogonal staged-only flag. Reloads the same way a base
+    /// change does. `preferred_session` is forwarded to the remote backend
+    /// (the local backend ignores it), mirroring [`Self::set_diff_mode`].
+    pub(crate) fn set_staged_only(
+        &self,
+        staged_only: bool,
+        preferred_session: Option<SessionId>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        match self {
+            Self::Local(local) => {
+                local.update(ctx, |local, ctx| {
+                    local.set_staged_only(staged_only, false, true, ctx);
+                });
+            }
+            Self::Remote(model) => {
+                model.update(ctx, |model, ctx| {
+                    model.set_staged_only(staged_only, true, preferred_session, ctx);
                 });
             }
         }

@@ -12,6 +12,8 @@ pub(crate) struct FileInvalidationTask {
     pub(crate) repo_path: PathBuf,
     pub(crate) mode: DiffMode,
     pub(crate) merge_base: Option<String>,
+    /// Whether the diff is restricted to staged changes only (index vs base).
+    pub(crate) staged: bool,
 }
 
 impl SyncQueueTaskTrait for FileInvalidationTask {
@@ -28,6 +30,7 @@ impl SyncQueueTaskTrait for FileInvalidationTask {
         let file = self.file.clone();
         let mode = self.mode.clone();
         let merge_base = self.merge_base.clone();
+        let staged = self.staged;
         Box::pin(async move {
             // File invalidation runs local git commands against a local repo path,
             // so using LocalDiffStateModel directly is correct — remote repos use a
@@ -37,6 +40,7 @@ impl SyncQueueTaskTrait for FileInvalidationTask {
                 &file,
                 &mode,
                 merge_base.as_deref(),
+                staged,
             )
             .await
             .map_err(DiffStateError::from)

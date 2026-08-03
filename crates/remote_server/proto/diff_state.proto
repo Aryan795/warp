@@ -11,13 +11,19 @@ package remote_server;
 // ── Diff state sub-messages ───────────────────────────────────────
 // Mirror the Rust domain types in code_review/diff_state.rs.
 
-// Mirrors DiffMode in Rust.
+// Mirrors the base axis DiffMode in Rust, plus the orthogonal staged-only
+// flag. The `oneof mode` selects the diff base (working tree vs HEAD / a
+// branch); `staged_only` selects the diff source (the index instead of the
+// working tree, i.e. `git diff --cached <base>`). The two compose freely, so
+// the flag rides alongside the base rather than being a fourth base variant.
 message DiffMode {
   oneof mode {
     DiffModeHead head = 1;
     DiffModeMainBranch main_branch = 2;
     DiffModeOtherBranch other_branch = 3;
   }
+  // When true, restrict the diff to staged changes only (index vs base).
+  bool staged_only = 4;
 }
 message DiffModeHead {}
 message DiffModeMainBranch {}
