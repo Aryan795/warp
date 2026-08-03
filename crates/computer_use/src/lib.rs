@@ -303,11 +303,14 @@ pub async fn post_process_recording(
         Ok(input.to_path_buf())
     }
 }
-/// Reads the duration encoded in a finalized recording's media timeline.
-pub async fn finalized_video_duration(input: &Path) -> Result<Duration, RecordingError> {
+/// Resolves the finalized recording that may be published: the file whose media
+/// timeline is playable, plus that duration. Repairs a mis-written container
+/// duration with a stream copy, and errors when no playable timeline can be
+/// established, so a zero-length video is never uploaded.
+pub async fn playable_recording(input: &Path) -> Result<(PathBuf, Duration), RecordingError> {
     #[cfg(any(macos, linux))]
     {
-        recording_metadata::video_duration(input).await
+        recording_metadata::playable_video(input).await
     }
     #[cfg(not(any(macos, linux)))]
     {

@@ -23,6 +23,7 @@ use x11rb::protocol::xproto;
 use x11rb::rust_connection::RustConnection;
 
 use super::x11::windows;
+use crate::recording_metadata::ffmpeg_error_tail;
 use crate::{
     RecordingCompletionStatus, RecordingConfig, RecordingError, RecordingHandle, RecordingOutput,
     Target,
@@ -381,7 +382,7 @@ async fn cut_to_segments(
 ) -> Result<PathBuf, RecordingError> {
     let output_path = input.with_extension("cut.mp4");
     let filter = build_cut_only_filtergraph(segments);
-    let status = Command::new("ffmpeg")
+    let output = Command::new("ffmpeg")
         .arg("-y")
         .arg("-i")
         .arg(input)
@@ -402,15 +403,19 @@ async fn cut_to_segments(
         .arg(&output_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .stderr(Stdio::piped())
+        .output()
         .await;
-    match status {
-        Ok(status) if status.success() => Ok(output_path),
-        Ok(status) => {
+    match output {
+        Ok(output) if output.status.success() => Ok(output_path),
+        Ok(output) => {
             let _ = std::fs::remove_file(&output_path);
+            let detail = ffmpeg_error_tail(&String::from_utf8_lossy(&output.stderr));
             Err(RecordingError::Finalize {
-                reason: format!("ffmpeg segment cut exited with status {status}"),
+                reason: format!(
+                    "ffmpeg segment cut exited with status {}{detail}",
+                    output.status
+                ),
             })
         }
         Err(e) => {
@@ -434,7 +439,7 @@ async fn burn_overlays_into_cut(
 ) -> Result<PathBuf, RecordingError> {
     let output_path = input.with_extension("overlay.mp4");
     let subtitles_filter = format!("subtitles=filename='{}'", ass_path.display());
-    let status = Command::new("ffmpeg")
+    let output = Command::new("ffmpeg")
         .arg("-y")
         .arg("-i")
         .arg(input)
@@ -447,15 +452,19 @@ async fn burn_overlays_into_cut(
         .arg(&output_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .stderr(Stdio::piped())
+        .output()
         .await;
-    match status {
-        Ok(status) if status.success() => Ok(output_path),
-        Ok(status) => {
+    match output {
+        Ok(output) if output.status.success() => Ok(output_path),
+        Ok(output) => {
             let _ = std::fs::remove_file(&output_path);
+            let detail = ffmpeg_error_tail(&String::from_utf8_lossy(&output.stderr));
             Err(RecordingError::Finalize {
-                reason: format!("ffmpeg overlay burn-in exited with status {status}"),
+                reason: format!(
+                    "ffmpeg overlay burn-in exited with status {}{detail}",
+                    output.status
+                ),
             })
         }
         Err(e) => {
@@ -477,9 +486,9 @@ async fn burn_overlays_into_cut(
 /// The two steps are independent: `cut_to_segments` knows nothing about
 /// overlays, and `burn_overlays_into_cut` knows nothing about segment
 /// boundaries. A recording whose committed actions yield no qualifying segment
-/// returns an error rather than producing a video; the caller falls back to
-/// uploading the untouched source for an unexpected processing failure after at
-/// least one committed action.
+/// has nothing to cut or annotate and returns the untouched source; every error
+/// is a real processing failure that the caller surfaces rather than publishing
+/// an unprocessed video.
 pub async fn post_process_recording(
     input: &Path,
     entries: &[crate::ActionLogEntry],
@@ -489,9 +498,7 @@ pub async fn post_process_recording(
 ) -> Result<PathBuf, RecordingError> {
     let segments = crate::overlay::build_keep_segments(entries, source_duration, frame_rate);
     if segments.is_empty() {
-        return Err(RecordingError::Finalize {
-            reason: "recording has no qualifying action segments to keep".to_string(),
-        });
+        return Ok(input.to_path_buf());
     }
 
     // Step 1: cut the source to retained segments only.
@@ -577,22 +584,6 @@ async fn wait_for_first_output(path: &Path, process: &mut Child) -> Result<(), S
             return Err("timed out waiting for capture to begin".to_string());
         }
         tokio::time::sleep(POLL_INTERVAL).await;
-    }
-}
-
-/// Returns a short, parenthesized tail of ffmpeg's stderr log for diagnostics.
-fn ffmpeg_error_tail(log: &str) -> String {
-    let lines: Vec<&str> = log
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .collect();
-    let start = lines.len().saturating_sub(3);
-    let tail = lines[start..].join(" ");
-    if tail.is_empty() {
-        String::new()
-    } else {
-        format!(" ({tail})")
     }
 }
 

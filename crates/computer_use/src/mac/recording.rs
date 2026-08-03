@@ -11,8 +11,8 @@
 //! bounded-capture (`-t` input option / `-fs`) and playback-speed (`-vf setpts`)
 //! handling are identical to Linux; see the
 //! code-split note in the REMOTE-2160 spec for why the
-//! `wait_for_first_output` / `ffmpeg_error_tail` / SIGINT-finalize logic is
-//! duplicated between the two recorder modules.
+//! `wait_for_first_output` / SIGINT-finalize logic is duplicated between the two
+//! recorder modules.
 
 use std::path::Path;
 use std::process::Stdio;
@@ -26,6 +26,7 @@ use nix::unistd::Pid;
 use tokio::process::{Child, Command};
 
 use super::util::main_display_dimensions;
+use crate::recording_metadata::ffmpeg_error_tail;
 use crate::{
     RecordingCompletionStatus, RecordingConfig, RecordingError, RecordingHandle, RecordingOutput,
 };
@@ -253,22 +254,6 @@ async fn wait_for_first_output(path: &Path, process: &mut Child) -> Result<(), S
             return Err("timed out waiting for capture to begin".to_string());
         }
         tokio::time::sleep(POLL_INTERVAL).await;
-    }
-}
-
-/// Returns a short, parenthesized tail of ffmpeg's stderr log for diagnostics.
-fn ffmpeg_error_tail(log: &str) -> String {
-    let lines: Vec<&str> = log
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .collect();
-    let start = lines.len().saturating_sub(3);
-    let tail = lines[start..].join(" ");
-    if tail.is_empty() {
-        String::new()
-    } else {
-        format!(" ({tail})")
     }
 }
 

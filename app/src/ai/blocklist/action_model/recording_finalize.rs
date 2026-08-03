@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ai::agent::action_result::{RecordingStopped, StopRecordingResult};
@@ -48,6 +48,17 @@ impl RecordingFinalization {
             }),
             RecordingFinalization::Ready(ready) => ready,
         }
+    }
+}
+
+/// Removes the capture and every intermediate file produced while finalizing it.
+/// Local recording files are ephemeral regardless of outcome; retrying a failed
+/// upload or retaining its file requires a separate persistence policy.
+fn remove_local_recording_files(local_path: &Path, intermediates: &[Option<PathBuf>]) {
+    let _ = std::fs::remove_file(local_path);
+    let _ = std::fs::remove_file(local_path.with_extension("log"));
+    for intermediate in intermediates.iter().flatten() {
+        let _ = std::fs::remove_file(intermediate);
     }
 }
 
@@ -142,11 +153,12 @@ async fn finalize_recording(
 
     // Apply the post-stop smart cut (keep real action windows at 1x, drop
     // blocked/thinking gaps) and burn the remapped overlay pills into the video
-    // before upload. Best-effort: on any failure the original 1x capture is
-    // uploaded unannotated (a no-cut video beats no video). The cut/overlay
-    // file, when produced, is a sibling of the mp4.
-    let mut upload_path = local_path.clone();
-    let mut overlay_path: Option<std::path::PathBuf> = None;
+    // before upload. The cut/overlay file, when produced, is a sibling of the
+    // mp4. A failure here means the finalized video is not the one the agent
+    // asked for, so it is reported instead of silently publishing the raw
+    // capture.
+    let mut processed_path = local_path.clone();
+    let mut overlay_path: Option<PathBuf> = None;
     match computer_use::post_process_recording(
         &local_path,
         &actions,
@@ -158,22 +170,34 @@ async fn finalize_recording(
     {
         Ok(path) if path != local_path => {
             overlay_path = Some(path.clone());
-            upload_path = path;
+            processed_path = path;
         }
         Ok(_) => {}
         Err(error) => {
-            log::warn!("Recording cut/overlay burn-in failed; uploading original: {error}");
+            remove_local_recording_files(&local_path, &[]);
+            return StopRecordingResult::Error(format!(
+                "Recording cut/overlay processing failed, so no video artifact was published: \
+                 {error}"
+            ));
         }
     }
-    let duration = match computer_use::finalized_video_duration(&upload_path).await {
-        Ok(duration) => duration,
+
+    // Only a duration the container itself reports makes a recording
+    // publishable: a capture can hold every frame yet declare a near-zero
+    // timeline, which plays back as an empty video. The wall-clock capture
+    // duration is deliberately not a fallback, since it would report that broken
+    // file as a normal one.
+    let (upload_path, duration) = match computer_use::playable_recording(&processed_path).await {
+        Ok(playable) => playable,
         Err(error) => {
-            log::warn!(
-                "Failed to inspect finalized recording duration; using capture duration: {error}"
-            );
-            output.duration
+            remove_local_recording_files(&local_path, &[overlay_path]);
+            return StopRecordingResult::Error(format!(
+                "Recording has no playable video timeline, so no video artifact was published; \
+                 retry the recording: {error}"
+            ));
         }
     };
+    let remux_path = (upload_path != processed_path).then(|| upload_path.clone());
 
     // Keep a handle on the finalized video path for thumbnail extraction before
     // it is moved into the upload request; the thumbnail reads this file with
@@ -209,13 +233,7 @@ async fn finalize_recording(
     {
         log::warn!("PR video thumbnail capture failed; video upload unaffected: {error}");
     }
-    // Local files are ephemeral regardless of upload outcome. Retrying failed
-    // uploads or retaining their files requires a separate persistence policy.
-    let _ = std::fs::remove_file(&local_path);
-    let _ = std::fs::remove_file(local_path.with_extension("log"));
-    if let Some(overlay_path) = overlay_path.as_ref() {
-        let _ = std::fs::remove_file(overlay_path);
-    }
+    remove_local_recording_files(&local_path, &[overlay_path, remux_path]);
 
     match upload_result {
         Ok(upload) => StopRecordingResult::Success(RecordingStopped {
