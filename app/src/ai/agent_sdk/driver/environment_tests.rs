@@ -3,15 +3,18 @@ use std::path::{Path, PathBuf};
 
 use cloud_object_models::CodeForge;
 use command::blocking::Command;
+use regex::Regex;
+use serial_test::serial;
 use tempfile::TempDir;
 use warp_core::command::ExitCode;
 
 use super::{
     MAX_SETUP_COMMAND_OUTPUT_BYTES, PrepareEnvironmentError, build_parallel_clone_command,
-    checkout_command_for, checkout_result, merge_repos_deduped, single_repo_name,
-    truncate_setup_command_output,
+    checkout_command_for, checkout_result, merge_repos_deduped,
+    redact_and_truncate_setup_command_output, single_repo_name, truncate_setup_command_output,
 };
 use crate::ai::cloud_environments::SourceRepo;
+use crate::terminal::model::secrets::set_user_and_enterprise_secret_regexes;
 use crate::terminal::shell::ShellType;
 
 #[test]
@@ -252,6 +255,40 @@ fn truncate_setup_command_output_keeps_short_output_and_trims_trailing_whitespac
     assert_eq!(
         truncate_setup_command_output("line 1\nline 2\n\n"),
         "line 1\nline 2"
+    );
+}
+
+// #[serial] because the secret regexes configured below are global state.
+#[test]
+#[serial]
+fn setup_command_output_is_secret_redacted() {
+    // block_output_plaintext does NOT mask secrets in the default (non-Asterisks)
+    // session mode used by cloud/agent setup, so the captured output must be
+    // redacted before it reaches logs / Sentry / the task status. Configure a
+    // secret pattern (a GitHub classic PAT), mirroring how these are populated
+    // from privacy settings in production.
+    set_user_and_enterprise_secret_regexes(
+        [&Regex::new(r"\bghp_[A-Za-z0-9_]{36}\b").expect("pattern should compile")],
+        std::iter::empty(),
+    );
+
+    let token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij";
+    let output = format!("Cloning into 'repo'...\nremote: using token {token}\nfatal: auth failed");
+
+    let redacted = redact_and_truncate_setup_command_output(&output);
+
+    assert!(
+        !redacted.contains(token),
+        "captured setup-command output must not contain the raw secret: {redacted}"
+    );
+    assert!(
+        redacted.contains(&"*".repeat(token.len())),
+        "the secret must be replaced with the redaction character: {redacted}"
+    );
+    // Non-secret context is preserved so the failure stays debuggable.
+    assert!(
+        redacted.contains("fatal: auth failed"),
+        "non-secret output should be preserved: {redacted}"
     );
 }
 

@@ -21,6 +21,7 @@ use super::AgentDriverError;
 #[cfg(feature = "local_fs")]
 use super::cache_setup;
 use super::terminal::TerminalDriver;
+use crate::ai::agent::redaction::redact_secrets;
 use crate::ai::agent_sdk::setup_observability::{SetupClientEventReporter, SetupStep};
 use crate::ai::cloud_environments::{CodeForge, SourceRepo};
 use crate::terminal::model::block::BlockId;
@@ -75,6 +76,25 @@ fn format_setup_command_failure(command: &str, output: &str) -> String {
     } else {
         format!("Failed to run setup command: {command}\nCommand output:\n{output}")
     }
+}
+
+/// Redact secrets from a failed setup command's captured output and bound it
+/// for attaching to [`PrepareEnvironmentError::SetupCommand`].
+///
+/// The captured output is **not** guaranteed to be secret-masked at the source:
+/// [`TerminalDriver::block_output_plaintext`] only visually obfuscates secrets
+/// when the session grid is in the `Asterisks` obfuscation mode, which is off by
+/// default for cloud / agent setup sessions. Since this text flows through
+/// [`PrepareEnvironmentError::SetupCommand`]'s message into the run log, Sentry
+/// (`report_error!`), and the FAILED task status (`report_driver_error`), redact
+/// it explicitly with the grid-independent regex redactor — the same pattern
+/// used for [`TerminalDriver`]'s stored `last_command`. Redaction runs on the
+/// **full** output before truncation so a secret straddling the truncation cut
+/// point cannot survive in the retained tail.
+fn redact_and_truncate_setup_command_output(output: &str) -> String {
+    let mut redacted = output.to_string();
+    redact_secrets(&mut redacted);
+    truncate_setup_command_output(&redacted)
 }
 
 /// Truncate a failed setup command's captured output so it stays bounded when
@@ -281,13 +301,15 @@ async fn prepare_environment_impl(
                     let (exit_code, block_id) =
                         execute_command_with_block(command, spawner).await?;
                     if exit_code != 0.into() {
-                        // Capture the failed command's block output (already
-                        // ANSI-stripped and secret-obfuscated) so the failure is
-                        // debuggable. Best-effort: an unavailable block just
-                        // yields empty output and the command-only message.
+                        // Capture the failed command's block output (ANSI-stripped)
+                        // so the failure is debuggable. It is secret-redacted and
+                        // truncated before being stored, since it reaches logs,
+                        // Sentry, and the task status. Best-effort: an unavailable
+                        // block just yields empty output and the command-only
+                        // message.
                         let output = fetch_block_output(block_id, spawner)
                             .await
-                            .map(|output| truncate_setup_command_output(&output))
+                            .map(|output| redact_and_truncate_setup_command_output(&output))
                             .unwrap_or_default();
                         return Err(PrepareEnvironmentError::SetupCommand {
                             command: command_for_error,
@@ -827,9 +849,15 @@ async fn execute_command_with_block(
 }
 
 /// Fetch the full visible plaintext output of a completed terminal block
-/// (ANSI-stripped, secrets obfuscated). Returns `None` when the block can't be
-/// found or the driver spawn fails, so callers treat missing output as
-/// best-effort rather than an error.
+/// (ANSI-stripped). Returns `None` when the block can't be found or the driver
+/// spawn fails, so callers treat missing output as best-effort rather than an
+/// error.
+///
+/// Note: secrets are **not** reliably masked here —
+/// [`TerminalDriver::block_output_plaintext`] only obfuscates them when the
+/// session grid is in `Asterisks` mode (off by default for cloud / agent
+/// sessions). Callers that persist this text must redact it themselves (see
+/// [`redact_and_truncate_setup_command_output`]).
 async fn fetch_block_output(
     block_id: BlockId,
     spawner: &ModelSpawner<TerminalDriver>,
