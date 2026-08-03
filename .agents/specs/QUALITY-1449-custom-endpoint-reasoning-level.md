@@ -10,9 +10,11 @@ owned by the companion `warp-proto-apis` and `warp-server` specs.
 
 **Working shared assumptions:** The cross-repo product contract supplied for this spec uses
 per-custom-model ownership, the explicit values `none`, `low`, `medium`, `high`, and `xhigh`, and
-an unset state that omits the wire field and preserves today's behavior. The client must keep
-the option registry and schema-compatibility table centralized so a value-set decision from the
-lead `warp-server` spec is a small edit rather than a UI/data-flow rewrite.
+an unset state that maps to protobuf `REASONING_LEVEL_UNSPECIFIED = 0` and preserves today's
+behavior. Proto3 omits that default-valued scalar from encoded bytes; explicit `none` is the
+distinct `REASONING_LEVEL_NONE = 1`. The client must keep the option registry and
+schema-compatibility table centralized so a value-set decision from the lead `warp-server` spec
+is a small edit rather than a UI/data-flow rewrite.
 
 **Key design choices:** Store a typed optional level on `CustomEndpointModel`; expose a
 `Reasoning` dropdown inside each model row group with `Provider default` as the unset choice;
@@ -29,8 +31,9 @@ model variant rather than configuration attached to one custom-model ID.
 2. Reasoning is per model, not per endpoint. Two models under one endpoint may be saved with
    different levels, and adding, removing, or reordering rows cannot transfer a level or stable
    `config_key` to another model.
-3. `Provider default` means absence, not `none`. Saving it stores no explicit level and sends no
-   reasoning-level field. `None` is an explicit user choice and must round-trip distinctly.
+3. `Provider default` means unspecified, not `none`. Saving it stores no explicit local level and
+   sets the generated protobuf scalar to `REASONING_LEVEL_UNSPECIFIED`; proto3 omits that zero
+   value from encoded bytes. `None` sets `REASONING_LEVEL_NONE` and must round-trip distinctly.
 4. A legacy secure-storage payload with no model reasoning field loads every endpoint, key,
    schema, model name, alias, and `config_key` unchanged, with `Provider default` shown for each
    model. An unknown future stored value must degrade to the unset behavior without causing the
@@ -60,9 +63,9 @@ model variant rather than configuration attached to one custom-model ID.
     scrolling-to-row, Add model, row removal, Save, Cancel, and the fixed action row continue to
     work with one or many model rows.
 12. When custom inference is enabled and the endpoint is otherwise eligible for request
-    serialization, every model is sent with its own optional level. Existing endpoint filtering,
-    BYO policy gates, schema serialization, API-key handling, and model selection by
-    `config_key` remain unchanged.
+    serialization, every model is sent with its configured enum or the unspecified zero value.
+    Existing endpoint filtering, BYO policy gates, schema serialization, API-key handling, and
+    model selection by `config_key` remain unchanged.
 13. The custom model picker continues to show one atomic custom model per `config_key`; this
     change does not create hosted-style reasoning variants or change the selected model ID.
 14. QUALITY-1210 may land first as a server-side safety mitigation. This dial is the durable
@@ -134,12 +137,13 @@ model variant rather than configuration attached to one custom-model ID.
      cached schema action. Keep the user's incompatible value selected, surface the reason, and
      include compatibility in `is_valid` so Save is blocked without data loss.
 
-3. **Serialize the optional wire field.**
+3. **Serialize the wire enum with an explicit unspecified sentinel.**
    - After the companion proto change is available, update the `warp_multi_agent_api` revision in
      `Cargo.toml` and `Cargo.lock`.
-   - In `custom_model_providers_for_request`, map `Some(level)` onto the generated optional
-     `CustomModel.reasoning_level` and map unset/unknown onto absence. Do not send a default enum
-     value for unset.
+   - In `custom_model_providers_for_request`, map `Some(level)` onto the matching generated
+     `ReasoningLevel` discriminant and map unset/unknown onto the generated unspecified variant
+     with numeric value `0`. Do not map unset to the generated `NONE` variant; the zero scalar
+     will be absent from proto3 encoded bytes.
    - Preserve the existing provider/model eligibility filters, endpoint schema mapping, API-key
      transport, and stable `config_key` mapping. No second request path is added:
      `Request::new` continues attaching the manager-produced registry.
@@ -155,14 +159,16 @@ model variant rather than configuration attached to one custom-model ID.
 
 ### Cross-repo contract
 
-- **Consumes from `warpdotdev/warp-proto-apis`:** a generated optional
-  `CustomModel.reasoning_level` plus enum values `none`, `low`, `medium`, `high`, and `xhigh`.
-  Field absence must remain distinguishable from explicit `none`. The Warp dependency pin moves
-  to the proto commit that supplies this contract.
+- **Consumes from `warpdotdev/warp-proto-apis`:** `CustomModel.reasoning_level = 3` and its
+  generated scalar `ReasoningLevel` contract:
+  `REASONING_LEVEL_UNSPECIFIED = 0`, `NONE = 1`, `LOW = 2`, `MEDIUM = 3`, `HIGH = 4`, and
+  `XHIGH = 5`, as specified in
+  [`warp-proto-apis` PR #352](https://github.com/warpdotdev/warp-proto-apis/pull/352).
+  The Warp dependency pin moves to the proto commit that supplies this contract.
 - **Provides to `warpdotdev/warp-server`:** for each client-configured custom model, the existing
-  `config_key` and slug plus either no reasoning field (unset/legacy) or exactly one explicit enum
-  value. The endpoint schema remains provider-level. The client never substitutes an implicit
-  default and never encodes request-time tool presence.
+  `config_key` and slug plus either `REASONING_LEVEL_UNSPECIFIED` (unset/legacy) or exactly one
+  explicit nonzero enum value. The endpoint schema remains provider-level. The client never
+  substitutes `NONE` for unset and never encodes request-time tool presence.
 - **Consumes from `warpdotdev/warp-server` product policy:** the approved shared value set and
   static schema-compatibility matrix. The server remains authoritative for Chat Completions tool
   conflicts, OpenAI parameter shape, Anthropic budget mapping, reasoning summaries/encrypted
@@ -197,8 +203,10 @@ model variant rather than configuration attached to one custom-model ID.
 ### Open questions resolved
 
 - Shared product questions are adopted from the foreman's alignment contract: per-model
-  ownership; `none|low|medium|high|xhigh`; unset means omit and preserve current behavior.
-- The UI label for unset is `Provider default`; it is not serialized as explicit `none`.
+  ownership; `none|low|medium|high|xhigh`; unset means protobuf `UNSPECIFIED` and preserves
+  current behavior because the zero-valued scalar is omitted from encoded bytes.
+- The UI label for unset is `Provider default`; local storage omits it and request construction
+  maps it to proto `REASONING_LEVEL_UNSPECIFIED`, never explicit `NONE`.
 - `xhigh` is treated as incompatible with Chat Completions under the working matrix and remains
   a single option-table edit if the lead server spec approves a different matrix.
 - The client warns but does not decide the dynamic tools-plus-reasoning outcome. The server spec
@@ -211,8 +219,9 @@ model variant rather than configuration attached to one custom-model ID.
 
 ### Risks and mitigations
 
-- A proto revision mismatch can make Warp fail to compile or accidentally collapse unset into an
-  enum default; sequence the proto commit first and assert absence and explicit `none` separately.
+- A proto revision mismatch can make Warp fail to compile or accidentally collapse unset into
+  explicit `NONE`; sequence the proto commit first and assert `UNSPECIFIED = 0` and `NONE = 1`
+  separately, including encoded-byte behavior for the zero scalar.
 - Positional row state can drift after add/remove operations; move values through named params,
   keep dropdown ownership inside `ModelRow`, and test multiple distinct rows through removal.
 - Extra row height/popups can regress modal scrolling or fixed actions; retain the existing scene
@@ -242,9 +251,10 @@ model variant rather than configuration attached to one custom-model ID.
    preserve existing keys on edit, preserve distinct reasoning values across at least two models,
    and do not transfer the second row's value after removing the first row.
 5. Extend `custom_model_providers_for_request` tests to assert all three wire states separately:
-   unset produces an absent optional field, explicit `none` produces the `none` enum, and another
-   explicit level produces its matching enum. Retain assertions for schema, slug, key, BYO/custom
-   inference policy gating, invalid endpoint/model filtering, and multiple providers.
+   unset produces `REASONING_LEVEL_UNSPECIFIED` (and no field bytes after protobuf encoding),
+   explicit `none` produces `REASONING_LEVEL_NONE`, and another explicit level produces its
+   matching nonzero enum. Retain assertions for schema, slug, key, BYO/custom inference policy
+   gating, invalid endpoint/model filtering, and multiple providers.
 6. Add a request-construction regression test proving `Request::new` places those per-model fields
    under `settings.custom_model_providers` without changing model IDs, endpoint schema, API-key
    gating, or unrelated settings.
