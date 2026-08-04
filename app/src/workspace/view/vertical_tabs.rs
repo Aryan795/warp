@@ -1130,6 +1130,28 @@ fn summary_search_text_fragments(
     fragments
 }
 
+/// Returns whether a tab's group header name matches the search query. A matched
+/// group admits all of its members, so searching a group's name surfaces every
+/// tab under it regardless of the tabs' own text.
+fn tab_group_name_matches_query(
+    group_id: Option<TabGroupId>,
+    tab_groups: &HashMap<TabGroupId, TabGroup>,
+    query_lower: &str,
+) -> bool {
+    group_id
+        .and_then(|group_id| tab_groups.get(&group_id))
+        .is_some_and(|group| {
+            search_fragments_contain_query(&[group.display_name().to_string()], query_lower)
+        })
+}
+
+/// Collapsed groups hide their member rows, which would keep search matches out of
+/// sight. An active query renders the group expanded without touching the stored
+/// collapsed state, so the group snaps back once the query is cleared.
+fn renders_group_collapsed(group_collapsed: bool, search_query: &str) -> bool {
+    group_collapsed && search_query.is_empty()
+}
+
 fn select_summary_pane_kind_icons(
     pane_kinds: impl IntoIterator<Item = (EntityId, SummaryPaneKind)>,
 ) -> Option<SummaryPaneKindIcons> {
@@ -1161,11 +1183,12 @@ impl VerticalTabsPanelState {
     }
 
     /// Returns the indices (in original order) of tab groups that have at least
-    /// one pane matching the current search query. Returns all indices when the
-    /// query is empty.
+    /// one pane matching the current search query, plus every member of a tab
+    /// group whose name matches. Returns all indices when the query is empty.
     pub(super) fn matching_tab_indices(
         &self,
         tabs: &[TabData],
+        tab_groups: &HashMap<TabGroupId, TabGroup>,
         active_tab_index: usize,
         app: &AppContext,
     ) -> Vec<usize> {
@@ -1183,6 +1206,9 @@ impl VerticalTabsPanelState {
         tabs.iter()
             .enumerate()
             .filter(|(tab_index, tab)| {
+                if tab_group_name_matches_query(tab.group_id, tab_groups, &query_lower) {
+                    return true;
+                }
                 let pane_group = tab.pane_group.as_ref(app);
                 let visible_pane_ids = pane_group.visible_pane_ids();
                 match resolved_mode {
@@ -1786,6 +1812,11 @@ fn render_groups(
             .iter()
             .enumerate()
             .filter_map(|(tab_index, tab)| {
+                // A group-name match admits every member row unfiltered, so the
+                // whole group surfaces even when member titles don't match.
+                if tab_group_name_matches_query(tab.group_id, &workspace.tab_groups, &query_lower) {
+                    return Some((tab_index, None));
+                }
                 let pane_group = tab.pane_group.as_ref(app);
                 let visible_pane_ids = pane_group.visible_pane_ids();
                 match resolved_mode {
@@ -2788,11 +2819,7 @@ fn render_grouped_tabs_header(
         if let Some(editor) = rename_editor.filter(|_| is_being_renamed) {
             render_inline_tab_rename_editor(editor, appearance, app)
         } else {
-            let title_text = group
-                .name
-                .clone()
-                .unwrap_or_else(|| "New Group".to_string());
-            Text::new_inline(title_text, font_family, 12.)
+            Text::new_inline(group.display_name().to_string(), font_family, 12.)
                 .with_clip(ClipConfig::ellipsis())
                 .with_color(main_text_color.into())
                 .finish()
@@ -2977,7 +3004,7 @@ fn render_grouped_tab_container(
     let any_member_active = members
         .iter()
         .any(|(tab_index, _)| *tab_index == workspace.active_tab_index);
-    let is_collapsed = group.collapsed;
+    let is_collapsed = renders_group_collapsed(group.collapsed, &state.search_query);
     let first_member_index = members.first().map(|(index, _)| *index).unwrap_or(0);
 
     let resolved_mode = resolve_vertical_tabs_mode(app);

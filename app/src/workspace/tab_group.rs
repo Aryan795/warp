@@ -5,6 +5,9 @@ use warpui::elements::DraggableState;
 
 use crate::tab::SelectedTabColor;
 
+/// Header label shown for a group the user hasn't named yet.
+pub const DEFAULT_TAB_GROUP_NAME: &str = "New Group";
+
 /// Stable identity for a tab group.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TabGroupId(pub Uuid);
@@ -35,6 +38,11 @@ pub struct TabGroup {
 }
 
 impl TabGroup {
+    /// The group's name as displayed in its header.
+    pub fn display_name(&self) -> &str {
+        self.name.as_deref().unwrap_or(DEFAULT_TAB_GROUP_NAME)
+    }
+
     /// Creates a new, untitled, expanded tab group with a fresh id.
     pub fn new() -> Self {
         Self {

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use pathfinder_geometry::rect::RectF;
@@ -13,11 +14,11 @@ use super::{
     code_detail_kind_label, compact_branch_subtitle_display, detail_sidecar_width_and_bounds,
     detail_target_for_hovered_row, non_terminal_search_text_fragments,
     pane_ids_for_display_granularity, pane_search_text_fragments, preferred_agent_tab_titles,
-    push_normalized_unique_summary_label, search_fragments_contain_query,
+    push_normalized_unique_summary_label, renders_group_collapsed, search_fragments_contain_query,
     select_summary_pane_kind_icons, should_keep_detail_sidecar_visible_for_mouse_position,
     should_show_tab_group_header, sort_summary_primary_labels_status_first, summary_overflow_count,
-    summary_search_text_fragments, terminal_kind_badge_label, terminal_primary_line_data,
-    terminal_pull_request_badge_label, terminal_search_text_fragments,
+    summary_search_text_fragments, tab_group_name_matches_query, terminal_kind_badge_label,
+    terminal_primary_line_data, terminal_pull_request_badge_label, terminal_search_text_fragments,
     terminal_title_fallback_font, uses_outer_group_container, visible_pane_ids_for_detail_target,
     vtab_diff_stats_text,
 };
@@ -27,6 +28,7 @@ use crate::pane_group::pane::IPaneType;
 use crate::pane_group::{PaneId, TerminalPaneId};
 use crate::safe_triangle::SafeTriangle;
 use crate::terminal::CLIAgent;
+use crate::workspace::tab_group::{DEFAULT_TAB_GROUP_NAME, TabGroup, TabGroupId};
 use crate::workspace::tab_settings::VerticalTabsDisplayGranularity;
 
 fn label(text: &str) -> VerticalTabsSummaryPrimaryLabel {
@@ -1206,4 +1208,85 @@ fn summary_search_fragments_include_hidden_overflow_values() {
     assert!(search_fragments_contain_query(&fragments, "#789"));
     assert!(search_fragments_contain_query(&fragments, "+2"));
     assert!(search_fragments_contain_query(&fragments, "-3"));
+}
+
+fn named_tab_group(name: Option<&str>) -> TabGroup {
+    TabGroup {
+        name: name.map(str::to_string),
+        ..TabGroup::new()
+    }
+}
+
+fn tab_groups_with(groups: [TabGroup; 2]) -> HashMap<TabGroupId, TabGroup> {
+    groups.into_iter().map(|group| (group.id, group)).collect()
+}
+
+#[test]
+fn tab_group_name_matches_query_admits_members_of_the_named_group_only() {
+    let backend = named_tab_group(Some("Backend"));
+    let frontend = named_tab_group(Some("Frontend"));
+    let backend_id = backend.id;
+    let frontend_id = frontend.id;
+    let tab_groups = tab_groups_with([backend, frontend]);
+
+    // Case-insensitive, substring match against the header name.
+    assert!(tab_group_name_matches_query(
+        Some(backend_id),
+        &tab_groups,
+        "backend"
+    ));
+    assert!(tab_group_name_matches_query(
+        Some(backend_id),
+        &tab_groups,
+        "back"
+    ));
+    // Other groups keep filtering on their own text.
+    assert!(!tab_group_name_matches_query(
+        Some(frontend_id),
+        &tab_groups,
+        "backend"
+    ));
+    // Ungrouped tabs are unaffected.
+    assert!(!tab_group_name_matches_query(None, &tab_groups, "backend"));
+}
+
+#[test]
+fn tab_group_name_matches_query_uses_the_untitled_fallback_shown_in_the_header() {
+    let untitled = named_tab_group(None);
+    let named = named_tab_group(Some("Backend"));
+    let untitled_id = untitled.id;
+    let named_id = named.id;
+    let tab_groups = tab_groups_with([untitled, named]);
+
+    assert!(tab_group_name_matches_query(
+        Some(untitled_id),
+        &tab_groups,
+        &DEFAULT_TAB_GROUP_NAME.to_lowercase()
+    ));
+    assert!(!tab_group_name_matches_query(
+        Some(named_id),
+        &tab_groups,
+        &DEFAULT_TAB_GROUP_NAME.to_lowercase()
+    ));
+}
+
+#[test]
+fn tab_group_name_matches_query_ignores_groups_that_no_longer_exist() {
+    let tab_groups = HashMap::new();
+
+    assert!(!tab_group_name_matches_query(
+        Some(TabGroupId::new()),
+        &tab_groups,
+        "backend"
+    ));
+}
+
+#[test]
+fn collapsed_groups_render_expanded_while_a_search_query_is_active() {
+    assert!(renders_group_collapsed(true, ""));
+    // The stored collapsed state is untouched; only the rendered state opens up so
+    // matches aren't hidden behind the header.
+    assert!(!renders_group_collapsed(true, "backend"));
+    assert!(!renders_group_collapsed(false, ""));
+    assert!(!renders_group_collapsed(false, "backend"));
 }

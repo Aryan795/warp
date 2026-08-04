@@ -7307,13 +7307,10 @@ impl Workspace {
         let Some(group) = self.tab_groups.get(&group_id) else {
             return;
         };
-        // Seed the editor with the existing name, or the "New Group" default
-        // label when the group is unnamed. `insert_selected_text` selects the
-        // seeded text so the user can type to replace it instantly.
-        let seed_text = group
-            .name
-            .clone()
-            .unwrap_or_else(|| "New Group".to_string());
+        // Seed the editor with the group's displayed name, which falls back to the
+        // untitled label. `insert_selected_text` selects the seeded text so the user
+        // can type to replace it instantly.
+        let seed_text = group.display_name().to_string();
 
         self.current_workspace_state
             .set_tab_group_being_renamed(group_id);
@@ -11933,6 +11930,7 @@ impl Workspace {
         } else {
             let matching = self.vertical_tabs_panel.matching_tab_indices(
                 &self.tabs,
+                &self.tab_groups,
                 self.active_tab_index,
                 ctx,
             );
@@ -11957,6 +11955,7 @@ impl Workspace {
         } else {
             let matching = self.vertical_tabs_panel.matching_tab_indices(
                 &self.tabs,
+                &self.tab_groups,
                 self.active_tab_index,
                 ctx,
             );
@@ -20030,10 +20029,7 @@ impl Workspace {
         let is_being_renamed = self
             .current_workspace_state
             .is_tab_group_being_renamed(group_id);
-        let title = group
-            .name
-            .clone()
-            .unwrap_or_else(|| "New Group".to_string());
+        let title = group.display_name().to_string();
         let show_header_pin = FeatureFlag::PinnedTabs.is_enabled() && group.pinned;
         let normal_right_pad = if is_collapsed { 8. } else { 9. };
 
