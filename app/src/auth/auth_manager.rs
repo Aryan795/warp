@@ -17,7 +17,7 @@ use warp_graphql::mutations::create_anonymous_user::{
 };
 use warp_server_auth::API_KEY_PREFIX;
 use warp_server_auth::user::persistence::PersistedUser;
-use warpui::r#async::Timer;
+use warpui::r#async::{SpawnedFutureHandle, Timer};
 use warpui::clipboard::ClipboardContent;
 use warpui::{Entity, ModelContext, SingletonEntity, UpdateModel};
 
@@ -139,6 +139,16 @@ pub struct AuthManager {
     auth_client: Arc<dyn AuthClient>,
     /// A generated state token that the web app must provide back to the client.
     pending_auth_state: Option<String>,
+    /// Identifies the device-authorization attempt currently owning auth state.
+    ///
+    /// A device exchange polls for up to ten minutes, so a logout or a retry can
+    /// easily start a second attempt while an earlier one is still running.
+    /// Results are tagged with the attempt that produced them and dropped when
+    /// they no longer match, so a superseded attempt can neither re-authenticate
+    /// the previous account nor fail the attempt that replaced it.
+    device_auth_generation: u64,
+    /// Futures owned by the current device-authorization attempt.
+    device_auth_tasks: Vec<SpawnedFutureHandle>,
 }
 
 impl AuthManager {
@@ -156,6 +166,8 @@ impl AuthManager {
             server_api,
             auth_client,
             pending_auth_state: None,
+            device_auth_generation: 0,
+            device_auth_tasks: Vec::new(),
         }
     }
 
@@ -173,6 +185,8 @@ impl AuthManager {
             server_api,
             auth_client,
             pending_auth_state: None,
+            device_auth_generation: 0,
+            device_auth_tasks: Vec::new(),
         }
     }
 
@@ -332,14 +346,15 @@ impl AuthManager {
     ///
     /// This is only used by the Warp CLI if running on a device that does not have the Warp app installed.
     #[cfg_attr(target_family = "wasm", allow(dead_code))]
-    pub fn authorize_device(&self, ctx: &mut ModelContext<Self>) {
+    pub fn authorize_device(&mut self, ctx: &mut ModelContext<Self>) {
+        let generation = self.begin_device_auth_attempt();
         // Clear any stale user state so old credentials don't interfere
         // with the fresh device auth flow.
         self.auth_state.set_credentials(None);
 
         let auth_client = self.auth_client.clone();
         // Request a device code the user can enter in their browser.
-        ctx.spawn(
+        let task = ctx.spawn(
             async move {
                 request_device_code_with_timeout(
                     || auth_client.request_device_code(),
@@ -348,16 +363,38 @@ impl AuthManager {
                 )
                 .await
             },
-            Self::on_device_code_received,
+            move |me, result, ctx| me.on_device_code_received(generation, result, ctx),
         );
+        self.device_auth_tasks.push(task);
+    }
+
+    /// Supersedes any in-flight device authorization and returns the id of the
+    /// attempt that now owns auth state.
+    fn begin_device_auth_attempt(&mut self) -> u64 {
+        for task in self.device_auth_tasks.drain(..) {
+            task.abort();
+        }
+        self.device_auth_generation = self.device_auth_generation.wrapping_add(1);
+        self.device_auth_generation
+    }
+
+    /// Whether results tagged with `generation` still belong to the live attempt.
+    fn is_current_device_auth_attempt(&self, generation: u64) -> bool {
+        generation == self.device_auth_generation
     }
 
     #[cfg_attr(target_family = "wasm", allow(dead_code))]
     fn on_device_code_received(
         &mut self,
+        generation: u64,
         result: Result<oauth2::StandardDeviceAuthorizationResponse, UserAuthenticationError>,
         ctx: &mut ModelContext<Self>,
     ) {
+        if !self.is_current_device_auth_attempt(generation) {
+            log::info!("Discarding device authorization code from a superseded login attempt");
+            return;
+        }
+
         match result {
             Ok(details) => {
                 // Emit the device authorization details so that they can be shown to the user.
@@ -370,7 +407,7 @@ impl AuthManager {
                 });
 
                 let auth_client = self.auth_client.clone();
-                ctx.spawn(
+                let task = ctx.spawn(
                     async move {
                         // Wait for the user to approve the device authorization request.
                         let token = auth_client
@@ -382,11 +419,35 @@ impl AuthManager {
                             .fetch_user(LoginToken::Firebase(token), false)
                             .await
                     },
-                    Self::on_user_fetched,
+                    move |me, result, ctx| me.on_device_auth_user_fetched(generation, result, ctx),
                 );
+                self.device_auth_tasks.push(task);
             }
             Err(err) => ctx.emit(AuthManagerEvent::AuthFailed(err)),
         }
+    }
+
+    /// Applies the outcome of a device exchange, but only while it still belongs
+    /// to the live attempt.
+    ///
+    /// Dropping a superseded success keeps a logged-out account from being
+    /// re-persisted to secure storage (which would survive into the next
+    /// process), and dropping a superseded failure keeps the previous account's
+    /// exchange from failing the login that replaced it.
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
+    fn on_device_auth_user_fetched(
+        &mut self,
+        generation: u64,
+        result: StdResult<FetchUserResult, UserAuthenticationError>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if !self.is_current_device_auth_attempt(generation) {
+            log::info!("Discarding device authorization result from a superseded login attempt");
+            return;
+        }
+
+        self.device_auth_tasks.clear();
+        self.on_user_fetched(result, ctx);
     }
 
     /// Callback for handling a successful fetch of a user from warp-server and Firebase.
@@ -641,6 +702,10 @@ impl AuthManager {
         // completed before this logout, so it can't be replayed against the next session
         // in the same process.
         self.pending_auth_state = None;
+        // A device exchange started before this logout must not be allowed to land
+        // afterwards: succeeding would re-persist the account we are logging out of,
+        // and failing would fail whichever login replaces it.
+        self.begin_device_auth_attempt();
         self.set_and_persist(None, None, ctx);
     }
 

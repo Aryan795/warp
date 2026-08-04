@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::anyhow;
+use warpui::r#async::Timer;
 use warpui::{App, SingletonEntity};
 
 use super::{AuthManager, AuthManagerEvent, request_device_code_with_timeout};
@@ -269,6 +270,95 @@ fn test_mismatched_state_with_different_user_uid_emits_invalid_state_parameter()
             saw_invalid_state.load(Ordering::Relaxed),
             "expected AuthFailed(InvalidStateParameter) when incoming user_uid differs from current user"
         );
+    });
+}
+
+/// Builds an auth client whose device-code request always fails, and installs it
+/// on the `AuthManager` along with a counter of the `AuthFailed` events observed.
+fn install_failing_device_code_client(app: &mut App) -> Arc<AtomicUsize> {
+    let mut auth_client = MockAuthClient::new();
+    auth_client.expect_request_device_code().returning(|| {
+        Err(UserAuthenticationError::Unexpected(anyhow!(
+            "device code request failed"
+        )))
+    });
+    AuthManager::handle(app).update(app, |auth_manager, _| {
+        auth_manager.auth_client = Arc::new(auth_client);
+    });
+
+    let auth_failures = Arc::new(AtomicUsize::new(0));
+    let auth_failures_for_subscription = auth_failures.clone();
+    app.update(|ctx| {
+        ctx.subscribe_to_model(&AuthManager::handle(ctx), move |_, event, _| {
+            if matches!(event, AuthManagerEvent::AuthFailed(_)) {
+                auth_failures_for_subscription.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+    });
+    auth_failures
+}
+
+/// Baseline for the two tests below: a device authorization that is never
+/// superseded still surfaces its failure.
+#[test]
+fn device_authorization_failure_is_surfaced() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let auth_failures = install_failing_device_code_client(&mut app);
+
+        AuthManager::handle(&app).update(&mut app, |auth_manager, ctx| {
+            auth_manager.authorize_device(ctx);
+        });
+        Timer::after(Duration::from_millis(100)).await;
+
+        assert_eq!(auth_failures.load(Ordering::Relaxed), 1);
+    });
+}
+
+/// A device exchange runs for minutes, so retrying login (or logging out again)
+/// leaves the previous attempt in flight. Its eventual failure must not be
+/// reported, otherwise it fails the attempt that replaced it — which is how a
+/// post-logout account switch ended up on an error page it could not leave.
+#[test]
+fn superseded_device_authorization_failure_is_discarded() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let auth_failures = install_failing_device_code_client(&mut app);
+
+        AuthManager::handle(&app).update(&mut app, |auth_manager, ctx| {
+            auth_manager.authorize_device(ctx);
+            auth_manager.authorize_device(ctx);
+        });
+        Timer::after(Duration::from_millis(100)).await;
+
+        assert_eq!(
+            auth_failures.load(Ordering::Relaxed),
+            1,
+            "only the live device authorization attempt may report a failure"
+        );
+    });
+}
+
+/// Logging out must take ownership of auth state away from the device
+/// authorization that was already running, so nothing from the previous session
+/// can land afterwards — neither re-persisting that account nor failing the
+/// login that follows the logout.
+#[test]
+fn log_out_discards_in_flight_device_authorization() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            warpui_extras::secure_storage::register_noop("warp_test", ctx);
+        });
+        let auth_failures = install_failing_device_code_client(&mut app);
+
+        AuthManager::handle(&app).update(&mut app, |auth_manager, ctx| {
+            auth_manager.authorize_device(ctx);
+            auth_manager.log_out(ctx);
+        });
+        Timer::after(Duration::from_millis(100)).await;
+
+        assert_eq!(auth_failures.load(Ordering::Relaxed), 0);
     });
 }
 

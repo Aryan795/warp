@@ -266,20 +266,21 @@ fn handle_auth_manager_event(event: &AuthManagerEvent, ctx: &mut AppContext) {
             let verification_url = tui_verification_url(url_to_open, user_code);
             let url_to_open =
                 TuiLoginModel::handle(ctx).update(ctx, |model, _| match model.browser_flow {
-                    TuiAuthBrowserFlow::DirectDeviceAuthorization => Some(verification_url.clone()),
+                    TuiAuthBrowserFlow::DirectDeviceAuthorization => verification_url.clone(),
                     TuiAuthBrowserFlow::LogoutThenDeviceAuthorizationPending => {
                         model.browser_flow =
                             TuiAuthBrowserFlow::LogoutThenDeviceAuthorizationOpened;
-                        Some(
-                            auth::web_logout_url_with_continue(&verification_url)
-                                .unwrap_or_else(auth::web_logout_url),
-                        )
+                        auth::web_logout_url_with_continue(&verification_url)
+                            .unwrap_or_else(auth::web_logout_url)
                     }
-                    TuiAuthBrowserFlow::LogoutThenDeviceAuthorizationOpened => None,
+                    // The browser already went through web logout for this session, so a
+                    // later code (a retry) opens the device URL directly. It must still be
+                    // surfaced: dropping it strands the user on a screen whose URL no longer
+                    // matches the live device code.
+                    TuiAuthBrowserFlow::LogoutThenDeviceAuthorizationOpened => {
+                        verification_url.clone()
+                    }
                 });
-            let Some(url_to_open) = url_to_open else {
-                return;
-            };
             set_login_phase(
                 ctx,
                 TuiLoginPhase::AwaitingLogin {
@@ -296,6 +297,13 @@ fn handle_auth_manager_event(event: &AuthManagerEvent, ctx: &mut AppContext) {
             activate_global_mcp_servers(ctx);
         }
         AuthManagerEvent::AuthFailed(err) => {
+            // Authentication is already complete, so this failure belongs to an earlier
+            // attempt that lost the race. Tearing down a working session for it is how a
+            // successful account switch turned into a stuck error page.
+            if matches!(TuiLoginModel::as_ref(ctx).phase(), TuiLoginPhase::LoggedIn) {
+                log::info!("Ignoring authentication failure received after login completed");
+                return;
+            }
             let event = TuiLoginModel::handle(ctx)
                 .update(ctx, |model, _| model.telemetry.authentication_failed(err));
             send_tui_onboarding_event(event, ctx);

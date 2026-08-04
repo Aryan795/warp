@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use warp_core::channel::ChannelState;
@@ -369,6 +369,93 @@ fn post_logout_device_code_failure_still_opens_web_logout() {
         });
     });
 }
+/// The device exchange armed by `/logout` for the previous account can fail long
+/// after the new account finished logging in. Applying that failure replaces a
+/// working session with the login error page, which is what made the account
+/// switch look broken.
+#[test]
+fn ignores_stale_auth_failure_after_account_switch_completes() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|_| TuiLoginModel {
+            phase: TuiLoginPhase::LoggedIn,
+            browser_flow: TuiAuthBrowserFlow::DirectDeviceAuthorization,
+            // The post-logout journey is still open: the previous account's device
+            // authorization was armed by `/logout` and never resolved.
+            telemetry: TuiOnboardingTelemetry::new(false),
+        });
+        app.update(MockTelemetryContextProvider::register);
+
+        app.update(|ctx| {
+            handle_auth_manager_event(
+                &AuthManagerEvent::AuthFailed(UserAuthenticationError::Unexpected(
+                    anyhow::anyhow!("expired_token"),
+                )),
+                ctx,
+            );
+        });
+
+        app.read(|ctx| {
+            assert!(matches!(
+                TuiLoginModel::as_ref(ctx).phase(),
+                TuiLoginPhase::LoggedIn
+            ));
+        });
+    });
+}
+
+/// Retrying from the post-logout error page mints a new device code. The browser
+/// has already been through web logout at that point, so the new URL is opened
+/// directly — but it must still be surfaced, or the user is stranded on a screen
+/// whose URL no longer matches the live code.
+#[test]
+fn post_logout_retry_surfaces_the_new_device_url() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|_| TuiLoginModel {
+            phase: TuiLoginPhase::Failed {
+                message: "Sign-in failed".to_owned(),
+            },
+            browser_flow: TuiAuthBrowserFlow::LogoutThenDeviceAuthorizationOpened,
+            telemetry: TuiOnboardingTelemetry::new(false),
+        });
+        app.update(MockTelemetryContextProvider::register);
+
+        let opened_url = Rc::new(RefCell::new(None));
+        let opened_url_for_callback = opened_url.clone();
+        app.update(|ctx| {
+            ctx.set_before_open_url(move |url, _| {
+                *opened_url_for_callback.borrow_mut() = Some(url.to_owned());
+                url.to_owned()
+            });
+            let verification_url = format!(
+                "{}/device",
+                ChannelState::server_root_url().trim_end_matches('/')
+            );
+            handle_auth_manager_event(
+                &AuthManagerEvent::ReceivedDeviceAuthorizationCode {
+                    verification_url,
+                    verification_url_complete: None,
+                    user_code: "ABCD-EFGH".to_owned(),
+                },
+                ctx,
+            );
+        });
+
+        let opened_url = opened_url
+            .borrow()
+            .clone()
+            .expect("the retried device authorization URL should be opened");
+        assert_eq!(url::Url::parse(&opened_url).unwrap().path(), "/device");
+        app.read(|ctx| {
+            assert!(matches!(
+                TuiLoginModel::as_ref(ctx).phase(),
+                TuiLoginPhase::AwaitingLogin {
+                    browser_url: Some(browser_url),
+                } if browser_url == &opened_url
+            ));
+        });
+    });
+}
+
 #[test]
 fn emits_logged_in_event_when_login_completes() {
     App::test((), |mut app| async move {
