@@ -36,10 +36,10 @@ pub enum GenericStringObjectFormat {
     JsonFactory,
     #[cynic(rename = "JsonRunner")]
     JsonRunner,
-    /// Fallback for GSO formats this client build does not recognize. Without
-    /// this, decoding a Drive sync response that contains an unknown format
-    /// fails for the entire response. This variant only arises when
-    /// deserializing; we never serialize it.
+    /// Fallback for GSO formats this client build does not recognize (for example
+    /// server-only formats such as `JsonRunner`). Without this, decoding a Drive
+    /// sync response that contains an unknown format fails for the entire response.
+    /// This variant only arises when deserializing; we never serialize it.
     #[cynic(fallback)]
     Unknown,
 }
