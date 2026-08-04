@@ -383,6 +383,12 @@ impl AuthManager {
         generation == self.device_auth_generation
     }
 
+    /// The id of the device-authorization attempt that currently owns auth state.
+    #[cfg(test)]
+    fn current_device_auth_attempt(&self) -> u64 {
+        self.device_auth_generation
+    }
+
     #[cfg_attr(target_family = "wasm", allow(dead_code))]
     fn on_device_code_received(
         &mut self,

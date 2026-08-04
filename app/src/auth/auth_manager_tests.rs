@@ -1,18 +1,25 @@
-use std::sync::Arc;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::anyhow;
+use warp_graphql::queries::get_user::{
+    FirebaseProfile, User as GqlUser, UserOutput as GqlUserOutput,
+};
+use warp_graphql::workspace::{AvailableLlms, FeatureModelChoice};
+use warp_server_auth::user::persistence::PersistedUser;
 use warpui::r#async::Timer;
 use warpui::{App, SingletonEntity};
+use warpui_extras::secure_storage;
 
 use super::{AuthManager, AuthManagerEvent, request_device_code_with_timeout};
 use crate::ServerApiProvider;
 use crate::auth::auth_view_modal::AuthRedirectPayload;
-use crate::auth::credentials::{Credentials, LoginToken, RefreshToken};
+use crate::auth::credentials::{Credentials, FirebaseToken, LoginToken, RefreshToken};
 use crate::auth::user::{FirebaseAuthTokens, TEST_USER_UID, User};
 use crate::auth::{AuthStateProvider, UserUid};
-use crate::server::server_api::auth::{MockAuthClient, UserAuthenticationError};
+use crate::server::server_api::auth::{FetchUserResult, MockAuthClient, UserAuthenticationError};
 
 fn initialize_app(app: &mut App) {
     app.add_singleton_model(|_ctx| ServerApiProvider::new_for_test());
@@ -357,6 +364,245 @@ fn log_out_discards_in_flight_device_authorization() {
             auth_manager.log_out(ctx);
         });
         Timer::after(Duration::from_millis(100)).await;
+
+        assert_eq!(auth_failures.load(Ordering::Relaxed), 0);
+    });
+}
+
+/// An in-memory [`secure_storage::SecureStorage`] that records what was written,
+/// so tests can assert what a cold start would find on disk.
+#[derive(Clone, Default)]
+struct RecordingSecureStorage {
+    entries: Arc<Mutex<HashMap<String, String>>>,
+}
+
+impl RecordingSecureStorage {
+    fn register(app: &mut App) -> Self {
+        let storage = Self::default();
+        let storage_for_singleton = storage.clone();
+        app.update(|ctx| {
+            ctx.add_singleton_model(|_| -> secure_storage::Model {
+                Box::new(storage_for_singleton)
+            });
+        });
+        storage
+    }
+
+    fn contains_key(&self, key: &str) -> bool {
+        self.entries.lock().unwrap().contains_key(key)
+    }
+}
+
+impl secure_storage::SecureStorage for RecordingSecureStorage {
+    fn write_value(&self, key: &str, value: &str) -> Result<(), secure_storage::Error> {
+        self.entries
+            .lock()
+            .unwrap()
+            .insert(key.to_owned(), value.to_owned());
+        Ok(())
+    }
+
+    fn read_value(&self, key: &str) -> Result<String, secure_storage::Error> {
+        self.entries
+            .lock()
+            .unwrap()
+            .get(key)
+            .cloned()
+            .ok_or(secure_storage::Error::NotFound)
+    }
+
+    fn remove_value(&self, key: &str) -> Result<(), secure_storage::Error> {
+        self.entries.lock().unwrap().remove(key);
+        Ok(())
+    }
+}
+
+/// Builds a device authorization response. Its fields are private, so it is
+/// deserialized the same way the real client receives it.
+fn device_authorization_response(device_code: &str) -> oauth2::StandardDeviceAuthorizationResponse {
+    serde_json::from_value(serde_json::json!({
+        "device_code": device_code,
+        "user_code": "ABCD-EFGH",
+        "verification_uri": "https://app.warp.dev/device",
+        "expires_in": 600,
+        "interval": 5,
+    }))
+    .expect("device authorization response should deserialize")
+}
+
+/// A successful user fetch for `uid`, carrying Firebase credentials so that
+/// applying it would write the user to secure storage.
+fn firebase_fetch_user_result(uid: &str) -> FetchUserResult {
+    let empty_llms = || AvailableLlms {
+        default_id: String::new(),
+        choices: Vec::new(),
+        preferred_codex_model_id: None,
+    };
+    FetchUserResult {
+        user_output: GqlUserOutput {
+            api_key_owner_type: None,
+            principal_type: None,
+            user: GqlUser {
+                anonymous_user_info: None,
+                experiments: None,
+                global_skills: Vec::new(),
+                is_onboarded: true,
+                is_on_work_domain: false,
+                profile: FirebaseProfile {
+                    display_name: None,
+                    email: Some(format!("{uid}@example.com")),
+                    needs_sso_link: false,
+                    photo_url: None,
+                    uid: uid.to_owned(),
+                },
+                llms: FeatureModelChoice {
+                    agent_mode: empty_llms(),
+                    planning: empty_llms(),
+                    coding: empty_llms(),
+                    cli_agent: empty_llms(),
+                    computer_use_agent: empty_llms(),
+                },
+            },
+        },
+        credentials: Credentials::Firebase(FirebaseAuthTokens {
+            id_token: "stale-id-token".to_owned(),
+            refresh_token: "stale-refresh-token".to_owned(),
+            expiration_time: chrono::Utc::now().fixed_offset() + chrono::Duration::days(365),
+        }),
+        from_refresh: false,
+    }
+}
+
+/// The device exchange for the account being logged out of can still be polling
+/// when `/logout` re-arms device authorization for the next account. Applying its
+/// late success would re-authenticate the previous account and write it back to
+/// secure storage after logout removed it, so a cold start would restore the
+/// account the user just left.
+#[test]
+fn superseded_device_exchange_success_is_not_persisted() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let storage = RecordingSecureStorage::register(&mut app);
+        let auth_state = app.read(|ctx| AuthStateProvider::as_ref(ctx).get().clone());
+
+        let mut auth_client = MockAuthClient::new();
+        auth_client
+            .expect_request_device_code()
+            .returning(|| Ok(device_authorization_response("device-code-b")));
+        // Keyed on the device code so the outcome does not depend on which
+        // attempt's exchange happens to run first.
+        auth_client
+            .expect_exchange_device_access_token()
+            .returning(|details, _| {
+                if details.device_code().secret() == "device-code-a" {
+                    Ok(FirebaseToken::Custom("account-a-token".to_owned()))
+                } else {
+                    Err(UserAuthenticationError::Unexpected(anyhow!(
+                        "account B never approved the request"
+                    )))
+                }
+            });
+        auth_client
+            .expect_fetch_user()
+            .returning(|_, _| Ok(firebase_fetch_user_result("account-a-uid")));
+        AuthManager::handle(&app).update(&mut app, |auth_manager, _| {
+            auth_manager.auth_client = Arc::new(auth_client);
+        });
+
+        let auth_completions = Arc::new(AtomicUsize::new(0));
+        let auth_completions_for_subscription = auth_completions.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_model(&AuthManager::handle(ctx), move |_, event, _| {
+                if matches!(event, AuthManagerEvent::AuthComplete) {
+                    auth_completions_for_subscription.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+        });
+
+        // Drive the whole hand-off synchronously so the ordering is deterministic:
+        // account A's exchange is already running when the logout lands.
+        AuthManager::handle(&app).update(&mut app, |auth_manager, ctx| {
+            auth_manager.authorize_device(ctx);
+            let account_a_attempt = auth_manager.current_device_auth_attempt();
+            auth_manager.on_device_code_received(
+                account_a_attempt,
+                Ok(device_authorization_response("device-code-a")),
+                ctx,
+            );
+            // `/logout`, then the device authorization it immediately re-arms.
+            auth_manager.log_out(ctx);
+            auth_manager.authorize_device(ctx);
+        });
+
+        Timer::after(Duration::from_millis(200)).await;
+
+        assert_eq!(
+            auth_completions.load(Ordering::Relaxed),
+            0,
+            "a superseded device exchange must not complete authentication"
+        );
+        assert!(
+            !storage.contains_key("User"),
+            "a superseded device exchange must not write a user to secure storage"
+        );
+        assert!(auth_state.user_id().is_none());
+        assert!(!auth_state.is_logged_in());
+        // The restart assertion: after logging out and a failed post-logout login,
+        // a cold start finds nothing to restore and lands signed out.
+        app.read(|ctx| {
+            assert!(
+                PersistedUser::from_secure_storage(ctx).is_err(),
+                "secure storage must hold no loadable user after logout"
+            );
+        });
+    });
+}
+
+/// The same superseded exchange must not report its failure either: doing so
+/// replaces whatever the user is doing now with the previous attempt's error.
+#[test]
+fn superseded_device_exchange_failure_is_discarded() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        RecordingSecureStorage::register(&mut app);
+
+        let mut auth_client = MockAuthClient::new();
+        auth_client
+            .expect_request_device_code()
+            .returning(|| Ok(device_authorization_response("device-code-a")));
+        auth_client
+            .expect_exchange_device_access_token()
+            .returning(|_, _| {
+                Err(UserAuthenticationError::Unexpected(anyhow!(
+                    "expired_token"
+                )))
+            });
+        AuthManager::handle(&app).update(&mut app, |auth_manager, _| {
+            auth_manager.auth_client = Arc::new(auth_client);
+        });
+
+        let auth_failures = Arc::new(AtomicUsize::new(0));
+        let auth_failures_for_subscription = auth_failures.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_model(&AuthManager::handle(ctx), move |_, event, _| {
+                if matches!(event, AuthManagerEvent::AuthFailed(_)) {
+                    auth_failures_for_subscription.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+        });
+
+        AuthManager::handle(&app).update(&mut app, |auth_manager, ctx| {
+            auth_manager.authorize_device(ctx);
+            let account_a_attempt = auth_manager.current_device_auth_attempt();
+            auth_manager.on_device_code_received(
+                account_a_attempt,
+                Ok(device_authorization_response("device-code-a")),
+                ctx,
+            );
+            auth_manager.log_out(ctx);
+        });
+
+        Timer::after(Duration::from_millis(200)).await;
 
         assert_eq!(auth_failures.load(Ordering::Relaxed), 0);
     });
