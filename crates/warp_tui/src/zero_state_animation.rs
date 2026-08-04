@@ -1,6 +1,6 @@
 //! Rotating object animation for the TUI zero state.
 //!
-//! The built-in Warp mark or a user-provided ASCII silhouette is sampled into a
+//! The built-in silhouette or a user-provided ASCII one is sampled into a
 //! shallow, ghosted wireframe, rotated around its vertical axis, and projected
 //! back onto terminal cells. A tiny z-buffer keeps the front-most sample for
 //! each cell, while directional ASCII edges and sparse stippling retain depth
@@ -34,7 +34,6 @@ const MIN_ANIMATION_ROWS: u16 = 7;
 const MAX_LOGO_ROWS: u16 = 17;
 const MIN_OBJECT_COLS: u16 = 5;
 const MIN_OBJECT_ROWS: u16 = 5;
-const BUILT_IN_LOGO_CELL_ASPECT_RATIO: f64 = 2.5;
 const SURFACE_SAMPLES: usize = 3;
 const DEPTH_SAMPLES: usize = 6;
 /// Slows the rotation at the readable front and back poses while preserving
@@ -75,36 +74,6 @@ const MAX_INTERACTIVE_REVOLUTIONS_PER_SECOND: f64 = 2.0;
 const MAX_INTERACTIVE_RADIANS_PER_SECOND: f64 =
     MAX_INTERACTIVE_REVOLUTIONS_PER_SECOND * std::f64::consts::TAU;
 const MOMENTUM_SETTLE_DURATION: Duration = Duration::from_secs(3);
-
-/// Approximate visible bounds of the bundled Warp logo SVG.
-const SVG_MIN_X: f64 = 35.0;
-const SVG_MAX_X: f64 = 216.155;
-const SVG_MIN_Y: f64 = 25.5701;
-const SVG_MAX_Y: f64 = 170.489;
-
-/// The upper-right and lower-left faces from `warp-logo-light.svg`.
-///
-/// Rounded corners are intentionally squared off: at terminal-cell resolution,
-/// preserving the diagonal cut and offset silhouette contributes much more to
-/// recognition than sub-cell corner curvature.
-const UPPER_FACE: &[(f64, f64)] = &[
-    (127.725, 25.5701),
-    (196.111, 25.5701),
-    (216.155, 46.2824),
-    (216.155, 126.695),
-    (196.111, 147.407),
-    (98.2486, 147.407),
-];
-const LOWER_FACE: &[(f64, f64)] = &[
-    (109.963, 48.652),
-    (54.8733, 48.652),
-    (35.0, 69.3643),
-    (35.0, 149.777),
-    (54.8733, 170.489),
-    (122.676, 170.489),
-    (125.395, 159.154),
-    (83.4561, 159.154),
-];
 
 #[derive(Clone, Copy)]
 pub(crate) struct WarpLogoStyles {
@@ -1454,28 +1423,6 @@ fn glyph_for_tangent(tangent_x: f64, tangent_y: f64) -> Option<LogoGlyph> {
 
 fn bool_as_scalar(value: bool) -> f64 {
     if value { 1.0 } else { 0.0 }
-}
-
-fn warp_logo_contains(x: f64, y: f64) -> bool {
-    let svg_x = SVG_MIN_X + (x + 1.0) * 0.5 * (SVG_MAX_X - SVG_MIN_X);
-    let svg_y = SVG_MIN_Y + (y + 1.0) * 0.5 * (SVG_MAX_Y - SVG_MIN_Y);
-    point_in_polygon(svg_x, svg_y, UPPER_FACE) || point_in_polygon(svg_x, svg_y, LOWER_FACE)
-}
-
-fn point_in_polygon(x: f64, y: f64, polygon: &[(f64, f64)]) -> bool {
-    let mut inside = false;
-    let mut previous = polygon.len() - 1;
-    for current in 0..polygon.len() {
-        let (current_x, current_y) = polygon[current];
-        let (previous_x, previous_y) = polygon[previous];
-        if ((current_y > y) != (previous_y > y))
-            && x < (previous_x - current_x) * (y - current_y) / (previous_y - current_y) + current_x
-        {
-            inside = !inside;
-        }
-        previous = current;
-    }
-    inside
 }
 
 #[cfg(test)]

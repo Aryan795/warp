@@ -30,17 +30,22 @@ use super::config::{
     ZeroStateAnimationLoadFailure, ZeroStateShape, resolve_ascii_art_path,
 };
 use super::{
-    ActivePress, BUILT_IN_LOGO_CELL_ASPECT_RATIO, FLICK_RELEASE_VELOCITY_GAIN, LogoCell, LogoGlyph,
-    LogoProjector, LogoSurface, MAX_INTERACTIVE_RADIANS_PER_SECOND, MIN_ANIMATION_COLS,
-    MIN_ANIMATION_ROWS, MOMENTUM_SETTLE_DURATION, REPAINT_INTERVAL, WarpLogoStyles,
-    ZeroStateAnimationElement, ZeroStateInteractionHandle, configured_idle_velocity,
-    face_linger_angle, fitted_logo_size, glyph_for_tangent, idle_angle, is_ghost_stipple_cell,
-    logo_frame_at, object_frame_at, object_frame_at_angle, object_frame_at_angle_with_background,
-    object_frame_at_with_background, rotation_angle, star_count_for_size, starfield_emitter_x,
-    warp_logo_contains,
+    ActivePress, FLICK_RELEASE_VELOCITY_GAIN, LogoCell, LogoGlyph, LogoProjector, LogoSurface,
+    MAX_INTERACTIVE_RADIANS_PER_SECOND, MIN_ANIMATION_COLS, MIN_ANIMATION_ROWS,
+    MOMENTUM_SETTLE_DURATION, REPAINT_INTERVAL, WarpLogoStyles, ZeroStateAnimationElement,
+    ZeroStateInteractionHandle, configured_idle_velocity, face_linger_angle, fitted_logo_size,
+    glyph_for_tangent, idle_angle, is_ghost_stipple_cell, logo_frame_at, object_frame_at,
+    object_frame_at_angle, object_frame_at_angle_with_background, object_frame_at_with_background,
+    rotation_angle, star_count_for_size, starfield_emitter_x,
 };
 
 const PANEL_SIZE: TuiSize = TuiSize::new(52, 20);
+/// The zero state renders the animation into a 32-column panel, so this is the
+/// size the shipped built-in art actually has to stay readable at.
+const ZERO_STATE_PANEL_SIZE: TuiSize = TuiSize::new(32, 20);
+/// Cell aspect ratio of the built-in art, restated as a literal because the
+/// tests that use it exercise the generic fitting math, not the art itself.
+const BUILT_IN_CELL_ASPECT_RATIO: f64 = 2.5;
 const DIAMOND_ART: &str = "   #\n  ###\n #####\n  ###\n   #\n";
 const ROCKET_ART: &str = "    #\n   ###\n  ####\n #####\n   ###\n  #  #\n";
 const WARP_W_ART: &str = "#       #\n#       #\n#   #   #\n#  # #  #\n ##   ##\n";
@@ -172,11 +177,23 @@ impl TuiView for AnimationTestView {
 }
 
 #[test]
-fn logo_mask_preserves_the_offset_warp_faces() {
-    assert!(warp_logo_contains(0.25, -0.65));
-    assert!(warp_logo_contains(-0.55, 0.45));
-    assert!(!warp_logo_contains(-0.85, -0.85));
-    assert!(!warp_logo_contains(0.0, 0.9));
+fn built_in_art_is_never_downsampled_in_the_zero_state_panel() {
+    let (width, height) = ZeroStateShape::built_in_size();
+
+    assert_eq!(
+        (width, height),
+        (28, 16),
+        "the built-in art must keep the bounding box its legibility was tuned for"
+    );
+    let (fitted_cols, fitted_rows) = fitted_logo_size(
+        ZERO_STATE_PANEL_SIZE,
+        ZeroStateShape::BuiltInWarp.cell_aspect_ratio(),
+    )
+    .expect("the zero-state panel is large enough to fit the object");
+    assert!(
+        usize::from(fitted_cols) >= width && usize::from(fitted_rows) >= height,
+        "downsampling the built-in art to {fitted_cols}x{fitted_rows} would smear its lettering"
+    );
 }
 
 #[test]
@@ -277,7 +294,7 @@ fn full_face_frame_is_recognizable_and_centered() {
             .filter(|(_, _, cell)| cell.surface != LogoSurface::Background)
             .all(|(_, y, _)| y > 0 && y < usize::from(PANEL_SIZE.height) - 1)
     );
-    assert!(lines.iter().any(|line| line.contains("------")));
+    assert!(lines.iter().any(|line| line.contains("----")));
     assert!(lines.iter().any(|line| line.contains('.')));
     assert!(lines.iter().all(|line| !line.contains(['█', '▓', '▒'])));
 }
@@ -344,7 +361,7 @@ fn adjacent_builtin_frames_have_bounded_occupancy_and_content_churn() {
         "adjacent built-in frames changed occupancy in {max_occupancy_changes} cells"
     );
     assert!(
-        max_content_changes <= 120,
+        max_content_changes <= 150,
         "adjacent built-in frames changed glyph or surface content in {max_content_changes} cells"
     );
 }
@@ -395,16 +412,16 @@ fn one_revolution_returns_to_the_initial_frame() {
 #[test]
 fn logo_scales_down_while_preserving_cell_aspect() {
     assert_eq!(
-        fitted_logo_size(TuiSize::new(100, 40), BUILT_IN_LOGO_CELL_ASPECT_RATIO),
+        fitted_logo_size(TuiSize::new(100, 40), BUILT_IN_CELL_ASPECT_RATIO),
         Some((43, 17))
     );
     assert_eq!(
-        fitted_logo_size(TuiSize::new(30, 12), BUILT_IN_LOGO_CELL_ASPECT_RATIO),
+        fitted_logo_size(TuiSize::new(30, 12), BUILT_IN_CELL_ASPECT_RATIO),
         Some((25, 10))
     );
     assert_eq!(fitted_logo_size(TuiSize::new(100, 40), 4.0), Some((68, 17)));
     assert_eq!(
-        fitted_logo_size(TuiSize::new(32, 28), BUILT_IN_LOGO_CELL_ASPECT_RATIO),
+        fitted_logo_size(TuiSize::new(32, 28), BUILT_IN_CELL_ASPECT_RATIO),
         Some((30, 12)),
         "the layout panel should keep the restored dev animation compact"
     );

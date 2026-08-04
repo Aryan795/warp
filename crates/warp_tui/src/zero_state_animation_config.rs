@@ -2,7 +2,7 @@ use std::fmt;
 use std::fs::File;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use warp::settings::{TuiZeroStateObject, TuiZeroStateSettings, TuiZeroStateSettingsChangedEvent};
@@ -11,10 +11,40 @@ use warp_core::settings::Setting;
 use warpui::SingletonEntity;
 use warpui_core::{AppContext, Entity};
 
-use super::{
-    BUILT_IN_LOGO_CELL_ASPECT_RATIO, MAX_ASCII_ART_BYTES, MAX_ASCII_ART_COLS, MAX_ASCII_ART_ROWS,
-    warp_logo_contains,
-};
+use super::{MAX_ASCII_ART_BYTES, MAX_ASCII_ART_COLS, MAX_ASCII_ART_ROWS};
+
+/// The shipped default silhouette, in the same ASCII-art form the
+/// user-configurable `ascii_file` object uses.
+///
+/// The proportions are load-bearing, not decorative. The zero state gives the
+/// animation a 32-column panel, which fits an object of at most 30x17 cells, and
+/// the projector samples each mask cell three times and rounds each sample to a
+/// terminal cell — so a stroke bleeds into its neighbour about two thirds of the
+/// time. Lettering therefore needs two blank cells between glyphs and between
+/// lines to stay separated, and the 28x16 bounding box has to stay small enough
+/// that the panel scales it up rather than down. Retuning the art means
+/// re-checking those constraints, not just eyeballing the source.
+const BUILT_IN_ART: &str = "\
+    ####   #   #  #####
+    #  #   #   #  #
+    ####   #   #  #  ##
+    ####   #####  #####
+
+
+ #####  ####   #####  #####
+ #      #  #   #      #
+ ####   ####   ####   ####
+ #      #  ##  #####  #####
+
+
+#  #  ####  #  #  ####  #  #
+##    #     #  #   ##   ## #
+# #   ###   #  #   ##   # ##
+#  #  ####   ##   ####  #  #
+";
+
+static BUILT_IN_ART_MASK: LazyLock<AsciiArtMask> =
+    LazyLock::new(|| AsciiArtMask::parse(BUILT_IN_ART).expect("built-in zero-state art is valid"));
 
 #[derive(Clone, Debug)]
 pub(super) enum ZeroStateShape {
@@ -25,16 +55,21 @@ pub(super) enum ZeroStateShape {
 impl ZeroStateShape {
     pub(super) fn contains(&self, x: f64, y: f64) -> bool {
         match self {
-            Self::BuiltInWarp => warp_logo_contains(x, y),
+            Self::BuiltInWarp => BUILT_IN_ART_MASK.contains(x, y),
             Self::Ascii(mask) => mask.contains(x, y),
         }
     }
 
     pub(super) fn cell_aspect_ratio(&self) -> f64 {
         match self {
-            Self::BuiltInWarp => BUILT_IN_LOGO_CELL_ASPECT_RATIO,
+            Self::BuiltInWarp => BUILT_IN_ART_MASK.cell_aspect_ratio(),
             Self::Ascii(mask) => mask.cell_aspect_ratio(),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn built_in_size() -> (usize, usize) {
+        BUILT_IN_ART_MASK.size()
     }
 }
 
