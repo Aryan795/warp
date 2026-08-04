@@ -361,7 +361,10 @@ impl HarnessAvailabilityModel {
                     }
                 }
                 Err(e) => {
-                    report_error!(e.context("Failed to fetch available harnesses"));
+                    // Best-effort background refresh: the selector keeps using the cached (or
+                    // default) harness list, and the failure is almost always an external
+                    // transport error (e.g. HTTP 408), so this is a log, not a Sentry report.
+                    log::warn!("Failed to fetch available harnesses: {e:#}");
                 }
             },
         );
