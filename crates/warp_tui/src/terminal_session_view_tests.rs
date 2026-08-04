@@ -25,14 +25,12 @@ use warp::tui_export::{
     SlashCommandDataSource as _, SlashCommandKind, TaskId, TranscriptScope, TuiMcpAction,
     TuiMcpServerId, TuiOnboardingMarker, TuiOnboardingMarkers, TuiUpArrowHistoryItemKind,
     UserTakeOverReason, WarpConfig, WarpConfigUpdateEvent, export_conversation_markdown,
-    forkable_tui_conversation_for_test, light_theme, register_tui_session_view_test_singletons,
-    slash_commands,
+    forkable_tui_conversation_for_test, register_tui_session_view_test_singletons, slash_commands,
 };
 use warp_core::channel::Channel;
 use warp_core::features::FeatureFlag;
 use warp_core::settings::Setting as _;
 use warp_editor::model::CoreEditorModel;
-use warp_terminal::model::ansi::NamedColor;
 use warpui::platform::WindowStyle;
 use warpui::{
     AddWindowOptions, EntityIdMap, ModelHandle, ReadModel, SingletonEntity, UpdateModel, ViewHandle,
@@ -50,7 +48,6 @@ use warpui_core::event::ModifiersState;
 use warpui_core::keymap::{Context, DescriptionContext, Keystroke, Trigger};
 use warpui_core::platform::keyboard::KeyCode;
 use warpui_core::presenter::tui::TuiPresenter;
-use warpui_core::runtime::ProbedRgb;
 use warpui_core::telemetry::{EventPayload, flush_events};
 use warpui_core::{App, AppContext, TuiView, TypedActionView, WindowInvalidation};
 
@@ -100,7 +97,6 @@ use crate::root_view::RootTuiView;
 use crate::session_registry::{TuiSessionId, TuiSessions};
 use crate::statusline_config_view::TuiStatuslineConfigEvent;
 use crate::telemetry::TuiConversationRestoreTelemetryTarget;
-use crate::terminal_background::TuiHostTerminalBackground;
 use crate::terminal_block::{block_content_rows, should_render_terminal_block};
 use crate::terminal_use::TuiInputTarget;
 use crate::test_fixtures::{
@@ -203,7 +199,7 @@ fn mcp_menu_footer_replaces_status_with_controls() {
 }
 
 #[test]
-fn out_of_credits_ctrl_o_binding_opens_pricing() {
+fn out_of_credits_ctrl_o_binding_opens_upgrade() {
     App::test((), |mut app| async move {
         app.update(crate::keybindings::init);
         app.read(|ctx| {
@@ -243,7 +239,7 @@ fn out_of_credits_ctrl_o_binding_opens_pricing() {
         });
         assert_eq!(
             opened_urls.borrow().as_slice(),
-            &["https://www.warp.dev/pricing".to_owned()]
+            &["https://app.warp.dev/upgrade?source=warp-agent-cli".to_owned()]
         );
     });
 }
@@ -1177,29 +1173,6 @@ fn theme_slash_command_accepts_direct_selection_and_rejects_invalid_values() {
     });
 }
 
-#[test]
-fn appearance_theme_change_refreshes_terminal_model_colors() {
-    App::test((), |mut app| async move {
-        let fixture = focus_test_fixture(&mut app);
-        let (view, _) = add_focus_test_session(&mut app, &fixture, true);
-        let previous_foreground = view.read(&app, |view, _| {
-            view.terminal_model.lock().colors()[NamedColor::Foreground.into_color_index()]
-        });
-        let light_theme = light_theme();
-        let expected_foreground = light_theme.foreground().into_solid();
-
-        Appearance::handle(&app).update(&mut app, |appearance, ctx| {
-            appearance.set_theme(light_theme, ctx);
-        });
-
-        view.read(&app, |view, _| {
-            let foreground =
-                view.terminal_model.lock().colors()[NamedColor::Foreground.into_color_index()];
-            assert_ne!(foreground, previous_foreground);
-            assert_eq!(foreground, expected_foreground);
-        });
-    });
-}
 #[test]
 fn zero_state_initial_load_failure_shows_an_error_footer_hint() {
     App::test((), |mut app| async move {
@@ -2431,14 +2404,6 @@ fn footer_model_label_is_a_bounded_click_target() {
 
 fn focus_test_fixture(app: &mut App) -> FocusTestFixture {
     register_tui_session_view_test_singletons(app);
-    app.update(|ctx| {
-        let selected_theme = TuiThemeSettings::as_ref(ctx).selected_theme();
-        TuiHostTerminalBackground::register_for_test(
-            Some(ProbedRgb { r: 0, g: 0, b: 0 }),
-            selected_theme,
-            ctx,
-        );
-    });
     add_test_semantic_selection(app);
     app.update(TuiAutoupdater::register);
     let (window_id, _) = app.update(|ctx| {
@@ -2993,6 +2958,49 @@ fn bootstrap_renders_starting_shell_above_input() {
             .map(|(index, _)| index)
             .expect("bootstrap input border should render below the status");
         assert!(status_index < input_index);
+    });
+}
+
+#[test]
+fn zero_state_position_stays_stable_across_shell_bootstrap() {
+    App::test((), |mut app| async move {
+        let fixture = focus_test_fixture(&mut app);
+        let (view, _) = add_focus_test_session(&mut app, &fixture, true);
+
+        let ready_lines = render_session(&mut app, &view, 80, 40);
+        assert!(
+            ready_lines
+                .iter()
+                .all(|line| line.trim() != "Starting shell..."),
+            "ready state must not render the bootstrap hint:\n{}",
+            ready_lines.join("\n")
+        );
+
+        view.update(&mut app, |view, _| {
+            view.terminal_model.lock().block_list_mut().reinit_shell();
+        });
+        let bootstrap_lines = render_session(&mut app, &view, 80, 40);
+        assert!(
+            bootstrap_lines
+                .iter()
+                .any(|line| line.trim() == "Starting shell..."),
+            "bootstrap state must render the starting-shell hint:\n{}",
+            bootstrap_lines.join("\n")
+        );
+
+        let title_row = |lines: &[String]| {
+            lines
+                .iter()
+                .position(|line| line.contains("Warp Agent CLI"))
+                .unwrap_or_else(|| panic!("zero-state title should render:\n{}", lines.join("\n")))
+        };
+        assert_eq!(
+            title_row(&bootstrap_lines),
+            title_row(&ready_lines),
+            "zero state must not shift when the bootstrap hint disappears\nbootstrap:\n{}\nready:\n{}",
+            bootstrap_lines.join("\n"),
+            ready_lines.join("\n")
+        );
     });
 }
 
@@ -4595,10 +4603,13 @@ fn footer_usage_entry_is_hidden_until_the_conversation_reports_usage() {
 
 /// A conversation with usage but an unknown historical cost (legacy restore)
 /// still renders the usage entry — `Cost unavailable` in cost mode, never
-/// `$0.00` — even when credits happen to be zero.
+/// `$0.00` — even when credits happen to be zero. Cost mode is only reachable
+/// while the credits⇄dollars toggle is enabled, so this exercises the
+/// `TuiCostTransparency`-on path.
 #[test]
 fn footer_usage_entry_shows_unknown_cost_even_with_zero_credits() {
     App::test((), |mut app| async move {
+        let _cost_transparency = FeatureFlag::TuiCostTransparency.override_enabled(true);
         app.update(|ctx| {
             ctx.add_singleton_model(|_| Appearance::mock());
             let builder = TuiUiBuilder::from_app(ctx);
@@ -6439,38 +6450,55 @@ fn killing_child_does_not_exit_tui_parent_session_remains_alive() {
 }
 
 #[test]
-fn status_email_fallback_chain_covers_username_and_signed_in_arms() {
+fn status_email_fallback_chain_requires_a_validated_identity() {
     // Arm 1: non-empty email wins regardless of username.
     assert_eq!(
         super::resolve_status_email(
             Some("user@example.com".to_owned()),
             Some("display_name".to_owned()),
+            Some("user-123".to_owned()),
             true,
         ),
         "user@example.com"
     );
     // Arm 2a: empty email falls back to a non-empty username.
     assert_eq!(
-        super::resolve_status_email(Some(String::new()), Some("display_name".to_owned()), true,),
+        super::resolve_status_email(
+            Some(String::new()),
+            Some("display_name".to_owned()),
+            Some("user-123".to_owned()),
+            true,
+        ),
         "display_name"
     );
     // Arm 2b: None email falls back to a non-empty username.
     assert_eq!(
-        super::resolve_status_email(None, Some("display_name".to_owned()), true),
+        super::resolve_status_email(
+            None,
+            Some("display_name".to_owned()),
+            Some("user-123".to_owned()),
+            true,
+        ),
         "display_name"
     );
-    // Arm 3: both email and username absent/empty but logged in → "Signed in".
+    // Arm 3: user ID is the final validated identity fallback.
     assert_eq!(
-        super::resolve_status_email(None, None, true),
-        super::STATUS_SIGNED_IN
+        super::resolve_status_email(None, None, Some("user-123".to_owned()), true),
+        "user-123"
     );
+    // Arm 4: a missing identity never degrades to bare "Signed in".
     assert_eq!(
-        super::resolve_status_email(Some(String::new()), Some(String::new()), true,),
-        super::STATUS_SIGNED_IN
+        super::resolve_status_email(Some(String::new()), Some(String::new()), None, true),
+        super::STATUS_NOT_SIGNED_IN
     );
-    // Arm 4: fully logged out → "Not signed in".
+    // Arm 5: an identity is ignored unless auth has been validated.
     assert_eq!(
-        super::resolve_status_email(None, None, false),
+        super::resolve_status_email(
+            Some("user@example.com".to_owned()),
+            Some("display_name".to_owned()),
+            Some("user-123".to_owned()),
+            false,
+        ),
         super::STATUS_NOT_SIGNED_IN
     );
 }

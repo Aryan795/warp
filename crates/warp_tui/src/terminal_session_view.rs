@@ -9,7 +9,6 @@ use std::time::Duration;
 use async_channel::Sender;
 use instant::Instant;
 use parking_lot::FairMutex;
-use warp::appearance::AppearanceEvent;
 use warp::editor::{CodeEditorModel, CodeEditorModelEvent};
 #[cfg(feature = "voice_input")]
 use warp::settings::TuiVoiceSettings;
@@ -39,12 +38,12 @@ use warp::tui_export::{
     ServerConversationToken, SessionSettings, Sessions, ShellCommandExecutorEvent, SizeInfo,
     SizeUpdate, SkillReference, SlashCommandDataSource as _, SlashCommandKind,
     SlashCommandSelectionBehavior, StartAgentExecutorEvent, StartAgentRequest, StaticCommand,
-    TelemetryEvent, TerminalColorList, TerminalColors, TerminalModel, TerminalSurface,
-    TerminalSurfaceInit, TranscriptScope, TuiMcpAction, TuiMcpManager, TuiMcpServerId,
-    TuiMcpVariableValue, TuiOnboardingMarker, TuiOnboardingMarkers, TuiOnboardingMarkersEvent,
-    TuiSlashCommandDataSource, TuiSlashCommandDataSourceArgs, TuiUpArrowHistoryItemKind,
-    TuiUserInfoManager, TuiUserInfoManagerEvent, TuiZeroStateDataSource, UserTakeOverReason,
-    WAKEUP_THROTTLE_PERIOD, WarpConfig, WarpConfigUpdateEvent, block_context_from_terminal_model,
+    TelemetryEvent, TerminalModel, TerminalSurface, TerminalSurfaceInit, TranscriptScope,
+    TuiMcpAction, TuiMcpManager, TuiMcpServerId, TuiMcpVariableValue, TuiOnboardingMarker,
+    TuiOnboardingMarkers, TuiOnboardingMarkersEvent, TuiSlashCommandDataSource,
+    TuiSlashCommandDataSourceArgs, TuiUpArrowHistoryItemKind, TuiUserInfoManager,
+    TuiUserInfoManagerEvent, TuiZeroStateDataSource, UserTakeOverReason, WAKEUP_THROTTLE_PERIOD,
+    WarpConfig, WarpConfigUpdateEvent, block_context_from_terminal_model,
     build_slash_command_mixer, detect_possible_git_repo, export_conversation_markdown, log_out_tui,
     maybe_build_ai_query_upsert_event, prepare_conversation_block_restoration,
     record_autodetection_toggle_from_slash_command, record_saved_prompt_accepted,
@@ -133,7 +132,7 @@ use crate::telemetry::{
     TuiConversationMenuTelemetryEvent, TuiConversationRestoreTelemetryEvent,
     TuiConversationRestoreTelemetryState, TuiConversationRestoreTelemetryTarget,
 };
-use crate::terminal_background::TuiHostTerminalBackground;
+use crate::terminal_background::probed_colors;
 use crate::terminal_content_element::TuiTerminalContentElement;
 use crate::terminal_use::{
     TerminalUseInterruptAction, TuiInputTarget, hide_agent_requested_command_from_top_level,
@@ -192,6 +191,9 @@ const RUNNING_COMMAND_DETACH_HINT: &str = "ctrl-c to return to command";
 /// Replaces the exit hint when viewing a child agent conversation.
 pub(crate) const CTRL_C_KILL_CHILD_HINT: &str = "ctrl-c again to kill child agent";
 const STARTING_SHELL_HINT: &str = "Starting shell...";
+/// The hint row plus its top padding. The zero state accounts for this temporary
+/// chrome so its centered position already matches the post-bootstrap layout.
+const STARTING_SHELL_CHROME_ROWS: u16 = 2;
 const SETTINGS_PARSE_FAILED_HINT: &str = "Settings failed to load: invalid syntax.";
 const SETTINGS_INVALID_VALUES_HINT: &str = "Settings failed to load: invalid values.";
 
@@ -207,7 +209,6 @@ const STATUS_UNAVAILABLE: &str = "\u{2014}"; // em dash
 const STATUS_UNTITLED_SESSION: &str = "Untitled";
 const STATUS_DEV_BUILD: &str = "dev build";
 const STATUS_NOT_SIGNED_IN: &str = "Not signed in";
-const STATUS_SIGNED_IN: &str = "Signed in";
 
 fn status_menu_is_open(mode: TuiInputSuggestionsMode) -> bool {
     matches!(
@@ -556,23 +557,22 @@ fn export_file_success_message(export: &ConversationFileExport) -> String {
 /// chain as `render_login_line`:
 /// 1. `email` when non-empty
 /// 2. `username` when non-empty (display name or email fallback from auth)
-/// 3. `STATUS_SIGNED_IN` when `is_logged_in` is true but no identifier
-/// 4. `STATUS_NOT_SIGNED_IN` when fully logged out
+/// 3. `user_id` when non-empty
+/// 4. `STATUS_NOT_SIGNED_IN` when no validated identity is available
 fn resolve_status_email(
     email: Option<String>,
     username: Option<String>,
+    user_id: Option<String>,
     is_logged_in: bool,
 ) -> String {
+    if !is_logged_in {
+        return STATUS_NOT_SIGNED_IN.to_owned();
+    }
     email
         .filter(|e| !e.is_empty())
         .or_else(|| username.filter(|u| !u.is_empty()))
-        .unwrap_or_else(|| {
-            if is_logged_in {
-                STATUS_SIGNED_IN.to_owned()
-            } else {
-                STATUS_NOT_SIGNED_IN.to_owned()
-            }
-        })
+        .or_else(|| user_id.filter(|id| !id.is_empty()))
+        .unwrap_or_else(|| STATUS_NOT_SIGNED_IN.to_owned())
 }
 
 fn format_status_conversation_id(conversation_id: Option<AIConversationId>) -> String {
@@ -1478,9 +1478,6 @@ impl TuiTerminalSessionView {
             .lock()
             .block_list_mut()
             .set_transcript_scope(TranscriptScope::Unfiltered);
-        ctx.subscribe_to_model(&Appearance::handle(ctx), |view, _, event, ctx| {
-            view.handle_appearance_event(event, ctx);
-        });
         ctx.subscribe_to_model(&WarpConfig::handle(ctx), |view, _, event, ctx| {
             if let WarpConfigUpdateEvent::SettingsErrors(error) = event {
                 view.show_settings_file_error(error, ctx);
@@ -2296,21 +2293,6 @@ impl TuiTerminalSessionView {
         publisher.as_ref(ctx).publish_session_start(ctx);
         self.cli_agent_osc_event_publisher = Some(publisher);
     }
-    fn handle_appearance_event(&mut self, event: &AppearanceEvent, ctx: &mut ViewContext<Self>) {
-        match event {
-            AppearanceEvent::ThemeChanged => {
-                let theme = Appearance::as_ref(ctx).theme().clone();
-                let colors = TerminalColorList::from(&TerminalColors::from(theme));
-                self.terminal_model.lock().update_colors(colors);
-                ctx.notify();
-            }
-            AppearanceEvent::UiFontFamilyChanged { .. }
-            | AppearanceEvent::MonospaceFontSizeChanged { .. }
-            | AppearanceEvent::MonospaceFontFamilyChanged { .. }
-            | AppearanceEvent::MonospaceFontWeightChanged { .. }
-            | AppearanceEvent::LineHeightRatioChanged { .. } => {}
-        }
-    }
 
     /// Starts the first request for a child conversation hosted by this
     /// background session.
@@ -2790,8 +2772,12 @@ impl TuiTerminalSessionView {
         let org = user_info
             .org
             .unwrap_or_else(|| STATUS_UNAVAILABLE.to_owned());
-        let email =
-            resolve_status_email(user_info.email, user_info.username, user_info.is_logged_in);
+        let email = resolve_status_email(
+            user_info.email,
+            user_info.username,
+            user_info.user_id,
+            user_info.is_logged_in,
+        );
         status_menu::TuiStatusInfo {
             version,
             session: session_name,
@@ -4882,10 +4868,11 @@ impl TuiTerminalSessionView {
             .update(ctx, |settings, ctx| settings.theme.set_value(theme, ctx));
         match result {
             Ok(()) => {
-                let resolved_theme = TuiHostTerminalBackground::handle(ctx)
-                    .update(ctx, |background, _| background.select_theme(theme));
                 Appearance::handle(ctx).update(ctx, |appearance, ctx| {
-                    appearance.set_theme(resolved_theme, ctx);
+                    appearance.set_theme(
+                        theme.resolve_for_background(probed_colors().background_luminance()),
+                        ctx,
+                    );
                 });
                 let hint = match theme {
                     TuiTheme::Auto => format!(
@@ -5143,6 +5130,8 @@ impl TuiTerminalSessionView {
         let builder = TuiUiBuilder::from_app(ctx);
         let orchestration_tabs_available = state.orchestration_available();
         let blocker_active = state.has_blocking_interaction();
+        let show_starting_shell_hint =
+            !blocker_active && matches!(input_target, TuiInputTarget::Disabled);
 
         if state.is_alt_screen() {
             self.zero_state_interaction.set_visible(false);
@@ -5222,10 +5211,20 @@ impl TuiTerminalSessionView {
         let mut content = TuiFlex::column();
         let transcript_is_empty = self.transcript.as_ref(ctx).is_empty();
         self.zero_state_interaction.set_visible(transcript_is_empty);
-        if transcript_is_empty && self.session_state.as_ref(ctx).show_first_zero_state() {
-            content = content.flex_child(self.zero_state_view.as_ref(ctx).render_first_run(ctx));
-        } else if transcript_is_empty {
-            content = content.flex_child(TuiChildView::new(&self.zero_state_view).finish());
+        if transcript_is_empty {
+            let zero_state = if self.session_state.as_ref(ctx).show_first_zero_state() {
+                self.zero_state_view.as_ref(ctx).render_first_run(ctx)
+            } else {
+                TuiChildView::new(&self.zero_state_view).finish()
+            };
+            let zero_state = if show_starting_shell_hint {
+                TuiContainer::new(zero_state)
+                    .with_padding_top(STARTING_SHELL_CHROME_ROWS)
+                    .finish()
+            } else {
+                zero_state
+            };
+            content = content.flex_child(zero_state);
         } else {
             content = content.flex_child(TuiChildView::new(&self.transcript).finish());
         }
@@ -5237,7 +5236,7 @@ impl TuiTerminalSessionView {
         // fresh each pass — no stored suppression flag — and the hidden
         // input model is never written to, so its draft/cursor/selection/
         // scroll survive untouched.
-        if !blocker_active && matches!(input_target, TuiInputTarget::Disabled) {
+        if show_starting_shell_hint {
             content = content.child(
                 TuiContainer::new(
                     TuiText::new(STARTING_SHELL_HINT)
