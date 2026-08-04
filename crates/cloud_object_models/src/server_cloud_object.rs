@@ -318,9 +318,13 @@ fn server_gso_to_cloud_object(
                 GenericServerObject::<GenericStringObjectId, GenericStringModel<ScheduledAmbientAgent, JsonSerializer>>::try_from_gql(gso)?,
             ))
         }
-        // Formats unknown to this client build (e.g. the server-only `JsonRunner`).
-        // Returning an error lets callers skip the object rather than failing.
-        warp_graphql::generic_string_object::GenericStringObjectFormat::Unknown => Err(anyhow::anyhow!(
+        // Server-only formats the desktop client has no model for, plus formats
+        // unknown to this client build. Returning an error lets callers skip the
+        // object rather than failing.
+        warp_graphql::generic_string_object::GenericStringObjectFormat::JsonCustomModelRouter
+        | warp_graphql::generic_string_object::GenericStringObjectFormat::JsonFactory
+        | warp_graphql::generic_string_object::GenericStringObjectFormat::JsonRunner
+        | warp_graphql::generic_string_object::GenericStringObjectFormat::Unknown => Err(anyhow::anyhow!(
             "unsupported generic string object format (unknown to this client build)"
         )),
     }

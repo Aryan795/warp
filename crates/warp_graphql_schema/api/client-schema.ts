@@ -22,6 +22,7 @@ const clientMutations = [
   'deleteManagedSecret',
   'updateManagedSecret',
   'deleteObject',
+  'deleteRunner',
   'deleteTeamInvite',
   'emptyTrash',
   'expireApiKey',
@@ -76,6 +77,7 @@ const clientMutations = [
   'updateWorkspaceSettings',
   'updateOnboardingSurveyStatus',
   'createSimpleIntegration',
+  'upsertRunner',
 ];
 
 const clientQueries = [
@@ -96,6 +98,7 @@ const clientQueries = [
   'apiKeys',
   'getOAuthConnectTxStatus',
   'getCloudEnvironments',
+  'getRunners',
   'simpleIntegrations',
   'getIntegrationsUsingEnvironment',
   'scheduledAgentHistory',
