@@ -20,6 +20,50 @@ fn make_workspace(policy: Option<UsageVisibilityPolicy>) -> Workspace {
     workspace
 }
 
+fn make_workspace_with_native_policy(
+    native_workspaces_enabled: Option<bool>,
+    team_count: usize,
+) -> Workspace {
+    let mut workspace = Workspace::from_local_cache(
+        ServerId::from_string_lossy(TEST_WORKSPACE_UID).into(),
+        "Test Workspace".to_string(),
+        None,
+    );
+    let team = Team::from_local_cache(
+        ServerId::from_string_lossy(TEST_WORKSPACE_UID),
+        "Test Team".to_string(),
+        None,
+        None,
+        None,
+    );
+    workspace.teams = vec![team; team_count];
+    workspace.billing_metadata.tier.native_workspaces_policy =
+        native_workspaces_enabled.map(|enabled| NativeWorkspacesPolicy { enabled });
+    workspace
+}
+
+#[test]
+fn native_workspaces_are_disabled_without_an_enabled_policy() {
+    for enabled in [None, Some(false)] {
+        let workspace = make_workspace_with_native_policy(enabled, 2);
+        assert!(!workspace.is_native_workspaces_enabled());
+    }
+}
+
+#[test]
+fn native_workspaces_are_disabled_with_fewer_than_two_teams() {
+    for team_count in [0, 1] {
+        let workspace = make_workspace_with_native_policy(Some(true), team_count);
+        assert!(!workspace.is_native_workspaces_enabled());
+    }
+}
+
+#[test]
+fn native_workspaces_are_enabled_with_an_enabled_policy_and_multiple_teams() {
+    let workspace = make_workspace_with_native_policy(Some(true), 2);
+    assert!(workspace.is_native_workspaces_enabled());
+}
+
 fn policy(
     granularity: UsageVisibilityGranularity,
     max_prior_cycles: MaxPriorCycles,
