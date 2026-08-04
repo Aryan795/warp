@@ -324,8 +324,17 @@ impl AIApiError {
     /// Whether the error is worth an automatic recovery attempt — a fresh request may
     /// succeed. Gates both retry (pre-actions) and resume (post-actions).
     pub fn is_recoverable(&self) -> bool {
-        // Don't recover from client errors, except timeouts and rate limits.
         fn is_recoverable_status(status: http::StatusCode) -> bool {
+            // A success-class status only reaches an error path because the response
+            // wasn't the shape the caller required — e.g. the SSE open rejects
+            // anything but 200, so a body-less 204 lands here. The server did not
+            // fail, so re-sending the same request can't change the outcome, and the
+            // outcome isn't an engineering-actionable server error either.
+            if status.is_success() {
+                return false;
+            }
+
+            // Don't recover from client errors, except timeouts and rate limits.
             !status.is_client_error()
                 || status == http::StatusCode::REQUEST_TIMEOUT
                 || status == http::StatusCode::TOO_MANY_REQUESTS
@@ -368,6 +377,10 @@ impl ErrorExt for AIApiError {
     }
 }
 register_error!(AIApiError);
+
+#[cfg(test)]
+#[path = "server_api_tests.rs"]
+mod tests;
 
 #[derive(thiserror::Error, Debug)]
 pub enum TranscribeError {
