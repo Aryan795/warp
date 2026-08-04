@@ -77,6 +77,7 @@ pub fn render_agent_mode_setup_banner(
         InlineBannerContent {
             title: SPEEDBUMP_HEADER.to_string(),
             buttons: vec![open_button],
+            copy_button: None,
             close_button: Some(close_button),
             header_icon: Some(InlineBannerIcon {
                 asset_path: "bundled/svg/info.svg",

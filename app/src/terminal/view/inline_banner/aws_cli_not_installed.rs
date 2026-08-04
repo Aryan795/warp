@@ -81,6 +81,7 @@ pub fn render_aws_cli_not_installed_banner(
             title: "AWS CLI Not Installed".to_string(),
             content: Some(vec![description_text]),
             buttons,
+            copy_button: None,
             close_button: Some(close_button),
             header_icon: Some(InlineBannerIcon {
                 asset_path: crate::ui_components::icons::Icon::AlertTriangle.into(),

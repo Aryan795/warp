@@ -78,6 +78,7 @@ pub fn render_aws_bedrock_login_banner(
             title: "Use AWS Bedrock?".to_string(),
             content: Some(vec![description_text]),
             buttons,
+            copy_button: None,
             close_button: Some(close_button),
             header_icon: Some(InlineBannerIcon {
                 asset_path: crate::ui_components::icons::Icon::Cloud.into(),

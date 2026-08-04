@@ -91,6 +91,7 @@ pub fn render_alias_expansion_banner(
             title: "Warp can auto-expand aliases.".into(),
             buttons,
             content: Some(content),
+            copy_button: None,
             close_button: Some(close_button),
             header_icon: Some(super::InlineBannerIcon {
                 asset_path: "bundled/svg/info.svg",

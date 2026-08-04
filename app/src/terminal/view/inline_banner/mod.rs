@@ -118,6 +118,16 @@ impl Default for InlineBannerTextButtonFont {
 /// The close button is special since it's a singleton.
 struct InlineBannerCloseButton(pub InlineBannerButtonState);
 
+/// An optional copy button that copies the banner's text to the clipboard. Rendered after the main
+/// buttons and before the close button. This gives error/notification banners a discoverable way
+/// to copy their message instead of forcing users to screenshot it.
+struct InlineBannerCopyButton {
+    pub button_state: InlineBannerButtonState,
+    /// ID to save the button location in the position cache. This is mostly useful for integration
+    /// tests.
+    pub position_id: Option<String>,
+}
+
 /// Icon to render within the banner.
 #[derive(Default)]
 struct InlineBannerIcon {
@@ -140,6 +150,8 @@ struct InlineBannerContent {
     pub content: Option<Vec<Text>>,
     /// Buttons to render after the title and content.
     pub buttons: Vec<InlineBannerTextButton>,
+    /// An optional copy button to render after the buttons and before the close button.
+    pub copy_button: Option<InlineBannerCopyButton>,
     /// An optional close button to render after the buttons.
     pub close_button: Option<InlineBannerCloseButton>,
     /// An optional icon to render _before_ the title (or any other content).
@@ -324,6 +336,48 @@ fn render_inline_block_list_banner(
                 .finish()
             }),
     );
+
+    // Add an optional copy button before the close button. Wired to the banner-provided action
+    // that writes the banner's text to the clipboard.
+    if let Some(InlineBannerCopyButton {
+        button_state:
+            InlineBannerButtonState {
+                mouse_state_handle,
+                on_click_event,
+            },
+        position_id,
+    }) = inline_banner_content.copy_button
+    {
+        let copy_button = icon_button(appearance, UiIcon::Copy, false, mouse_state_handle)
+            .with_style(UiComponentStyles {
+                padding: Some(Coords::uniform(INLINE_BANNER_BUTTON_PADDING)),
+                ..default_button_styles
+            })
+            .with_active_styles(UiComponentStyles {
+                padding: Some(Coords::uniform(INLINE_BANNER_BUTTON_PADDING)),
+                ..hovered_and_clicked_styles
+            })
+            .with_hovered_styles(UiComponentStyles {
+                padding: Some(Coords::uniform(INLINE_BANNER_BUTTON_PADDING)),
+                ..hovered_and_clicked_styles
+            })
+            .build()
+            .on_click(move |ctx, _, _| {
+                ctx.dispatch_typed_action(on_click_event.clone());
+            })
+            .finish();
+
+        let copy_button = match position_id {
+            Some(position_id) => SavePosition::new(copy_button, &position_id).finish(),
+            None => copy_button,
+        };
+
+        end_banner_flex.add_child(
+            Container::new(copy_button)
+                .with_margin_left(INLINE_BANNER_MARGIN_BETWEEN_BUTTONS)
+                .finish(),
+        );
+    }
 
     // Add an optional close button at the end of the banner
     if let Some(InlineBannerCloseButton(InlineBannerButtonState {

@@ -5,6 +5,7 @@ use markdown_parser::{
     FormattedText, FormattedTextFragment, FormattedTextInline, FormattedTextLine,
 };
 use pathfinder_geometry::vector::Vector2F;
+use warpui::clipboard::ClipboardContent;
 use warpui::elements::{
     ConstrainedBox, Container, CrossAxisAlignment, Flex, FormattedTextElement,
     HighlightedHyperlink, HyperlinkLens, HyperlinkUrl, MainAxisAlignment, MainAxisSize,
@@ -19,6 +20,7 @@ use warpui::{
 };
 
 use crate::appearance::Appearance;
+use crate::ui_components::buttons::icon_button;
 use crate::ui_components::icons::Icon;
 
 const CLOSE_BUTTON_DIAMETER: f32 = 20.;
@@ -66,6 +68,16 @@ impl<T: Action + Clone> BannerTextContent<T> {
             highlighted_link: Default::default(),
             phantom_data: PhantomData,
         }
+    }
+
+    /// Returns the banner's text with all formatting stripped, suitable for copying to the
+    /// clipboard. Fragment text is concatenated in order, so link labels and inline code read the
+    /// same as they appear on screen.
+    pub fn to_plain_text(&self) -> String {
+        self.text
+            .iter()
+            .map(|fragment| fragment.text.as_str())
+            .collect()
     }
 
     fn render(&self, appearance: &Appearance) -> Box<dyn Element> {
@@ -130,6 +142,11 @@ pub struct Banner<T: Action + Clone> {
     /// after the text content and before the close button.
     end_buttons: Vec<BannerTextButton>,
 
+    /// Optional copy button rendered before the close button. When present, clicking it copies the
+    /// banner's plain text to the clipboard. Enabled for error/diagnostic banners so users can
+    /// copy the message instead of screenshotting it.
+    copy_button_hover_state: Option<MouseStateHandle>,
+
     /// Optional close button (X) rendered at the very end of the banner.
     /// Clicking the close button temporarily dismisses the banner.
     close_button_hover_state: Option<MouseStateHandle>,
@@ -139,6 +156,8 @@ pub struct Banner<T: Action + Clone> {
 pub enum BannerAction<T: Action + Clone> {
     Dismiss(DismissalType),
     HyperlinkClick(HyperlinkUrl),
+    /// Copy the banner's plain text to the clipboard.
+    CopyText,
     Action(T),
 }
 
@@ -189,6 +208,7 @@ impl<T: Action + Clone> Banner<T> {
     ) -> Self {
         Self {
             text_content,
+            copy_button_hover_state: None,
             close_button_hover_state: if with_close_button {
                 Some(Default::default())
             } else {
@@ -197,6 +217,14 @@ impl<T: Action + Clone> Banner<T> {
             end_buttons,
             icon: None,
         }
+    }
+
+    /// Adds a copy button (rendered before the close button) that copies the banner's plain text to
+    /// the clipboard. Intended for error/diagnostic banners so users can copy the message instead
+    /// of screenshotting it. Leaves all other banner behavior unchanged.
+    pub fn with_copy_button(mut self) -> Self {
+        self.copy_button_hover_state = Some(Default::default());
+        self
     }
 
     /// Replaces the banner's content with new items.
@@ -228,6 +256,23 @@ impl<T: Action + Clone> Banner<T> {
         ConstrainedBox::new(icon.to_warpui_icon(appearance.theme().accent()).finish())
             .with_width(icon_size)
             .with_height(icon_size)
+            .finish()
+    }
+
+    fn render_copy_button(
+        &self,
+        appearance: &Appearance,
+        hover_state: &MouseStateHandle,
+    ) -> Box<dyn Element> {
+        icon_button(appearance, Icon::Copy, false, hover_state.clone())
+            .with_style(UiComponentStyles {
+                font_color: Some(appearance.theme().active_ui_text_color().into()),
+                ..Default::default()
+            })
+            .build()
+            .on_click(|ctx, _, _| {
+                ctx.dispatch_typed_action(BannerAction::<T>::CopyText);
+            })
             .finish()
     }
 
@@ -287,6 +332,11 @@ impl<T: Action + Clone> TypedActionView for Banner<T> {
                 ctx.notify();
                 ctx.open_url(&hyperlink.url);
             }
+            BannerAction::CopyText => {
+                ctx.clipboard().write(ClipboardContent::plain_text(
+                    self.text_content.to_plain_text(),
+                ));
+            }
             BannerAction::Action(action) => {
                 ctx.emit(BannerEvent::Action(action.clone()));
             }
@@ -328,6 +378,14 @@ impl<T: Action + Clone> View for Banner<T> {
             );
         }
 
+        if let Some(hover_state) = &self.copy_button_hover_state {
+            right_side_banner_actions.add_child(
+                Container::new(self.render_copy_button(appearance, hover_state))
+                    .with_margin_left(INNER_MARGIN)
+                    .finish(),
+            );
+        }
+
         if let Some(hover_state) = &self.close_button_hover_state {
             right_side_banner_actions.add_child(
                 Container::new(self.render_close_button(appearance, hover_state))
@@ -357,4 +415,28 @@ impl<T: Action + Clone> View for Banner<T> {
 
 fn font_size(appearance: &Appearance) -> f32 {
     appearance.ui_font_size()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, Clone)]
+    struct TestAction;
+
+    /// The copy button copies `to_plain_text()`, so it must concatenate every fragment's text (link
+    /// labels and inline code included) with all formatting stripped, matching what the user reads.
+    #[test]
+    fn plain_text_concatenates_all_fragments_stripping_formatting() {
+        let content = BannerTextContent::<TestAction>::formatted_text(vec![
+            FormattedTextFragment::plain_text("Seems like your completions are not working ("),
+            FormattedTextFragment::hyperlink("more info", "https://example.com"),
+            FormattedTextFragment::plain_text("). Enabling the SSH extension may resolve this."),
+        ]);
+
+        assert_eq!(
+            content.to_plain_text(),
+            "Seems like your completions are not working (more info). Enabling the SSH extension may resolve this."
+        );
+    }
 }

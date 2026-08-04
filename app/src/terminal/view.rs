@@ -3895,6 +3895,7 @@ impl TerminalView {
                 ),
                 FormattedTextFragment::plain_text(" may resolve this issue."),
             ]))
+            .with_copy_button()
         });
 
         ctx.subscribe_to_view(&control_master_error_banner, |me, _, event, ctx| {
@@ -3908,6 +3909,7 @@ impl TerminalView {
                 ),
                 FormattedTextFragment::hyperlink("More info", KNOWN_ISSUES_URL),
             ]))
+            .with_copy_button()
         });
 
         ctx.subscribe_to_view(&incompatible_configuration_banner, |me, _, event, ctx| {
@@ -3981,6 +3983,7 @@ impl TerminalView {
                 true,
             )
             .with_icon(icons::Icon::AlertTriangle)
+            .with_copy_button()
         });
         ctx.subscribe_to_view(&osc52_clipboard_blocked_banner, |me, _, event, ctx| {
             me.handle_osc52_clipboard_banner_event(event, ctx);
@@ -24987,6 +24990,20 @@ impl TerminalView {
         match action {
             Troubleshoot => {
                 ctx.open_url(NOTIFICATIONS_TROUBLESHOOT_URL);
+            }
+            Copy => {
+                // Copy the full error text so the user can paste it (e.g. into Slack) instead of
+                // having to screenshot the banner.
+                let error_text = self
+                    .inline_banners_state
+                    .notifications_error_banner
+                    .error
+                    .as_ref()
+                    .map(|e| e.notifications_error_banner_title())
+                    .unwrap_or("Error sending notification")
+                    .to_string();
+                ctx.clipboard()
+                    .write(ClipboardContent::plain_text(error_text));
             }
             Close => self.close_notification_error_banner(ctx),
             SetPermissions => {
