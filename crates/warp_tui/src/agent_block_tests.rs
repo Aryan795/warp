@@ -337,6 +337,7 @@ fn agent_block_renders_invalid_api_key_detail_without_usage_notice() {
                 vec![
                     "⚠ Provided API key is not valid",
                     "  Failed to authenticate with OpenAI when using GPT. Double-check that your API key is correct.",
+                    "  Run /api-keys to update your provider API keys.",
                 ]
             );
             assert!(
@@ -411,9 +412,21 @@ fn failure_lines(
     height: u16,
     ctx: &AppContext,
 ) -> Vec<String> {
+    forkable_failure_lines(presentation, false, hover_state, width, height, ctx)
+}
+
+/// Renders a failure presentation with an explicit fork availability.
+fn forkable_failure_lines(
+    presentation: &FailedOutputPresentation,
+    can_fork: bool,
+    hover_state: &MouseStateHandle,
+    width: u16,
+    height: u16,
+    ctx: &AppContext,
+) -> Vec<String> {
     TuiPresenter::new()
         .present_element(
-            render_failure_section(presentation, hover_state, ctx),
+            render_failure_section(presentation, can_fork, hover_state, ctx),
             TuiRect::new(0, 0, width, height),
             ctx,
         )
@@ -454,6 +467,7 @@ fn out_of_credits_failure_shows_the_server_message_and_opens_upgrade() {
             let frame = presenter.present_element(
                 render_failure_section(
                     &presentation,
+                    false,
                     &out_of_credits_hover_state,
                     ctx,
                 ),
@@ -505,6 +519,7 @@ fn out_of_credits_failure_shows_the_server_message_and_opens_upgrade() {
             let narrow_frame = presenter.present_element(
                 render_failure_section(
                     &presentation,
+                    false,
                     &out_of_credits_hover_state,
                     ctx,
                 ),
@@ -520,6 +535,7 @@ fn out_of_credits_failure_shows_the_server_message_and_opens_upgrade() {
             dispatch_click_on_text(
                 render_failure_section(
                     &presentation,
+                    false,
                     &out_of_credits_hover_state,
                     ctx,
                 ),
@@ -649,10 +665,115 @@ fn copied_out_of_credits_text_matches_the_rendered_body() {
         },
     };
     assert_eq!(
-        failure_text(&presentation),
+        failure_text(&presentation, false),
         "I'm sorry, I couldn't complete that request.\n  No AI credits remaining.\n  Ask a team \
          admin to upgrade the plan or add more credits.\n  Or run /api-keys to use your own \
          provider API key."
+    );
+}
+
+#[test]
+fn invalid_api_key_failure_points_at_the_api_keys_command() {
+    App::test((), |app| async move {
+        app.add_singleton_model(|_| Appearance::mock());
+        app.read(|ctx| {
+            let presentation = FailedOutputPresentation::InvalidApiKey {
+                title: "Provided API key is not valid",
+                detail: "Failed to authenticate with Anthropic.".to_owned(),
+            };
+            let lines = failure_lines(&presentation, &MouseStateHandle::default(), 100, 3, ctx);
+            assert_eq!(
+                lines,
+                vec![
+                    "⚠ Provided API key is not valid",
+                    "  Failed to authenticate with Anthropic.",
+                    "  Run /api-keys to update your provider API keys.",
+                ]
+            );
+        });
+    });
+}
+
+#[test]
+fn aws_bedrock_failure_names_the_configured_refresh_command() {
+    App::test((), |app| async move {
+        app.add_singleton_model(|_| Appearance::mock());
+        app.read(|ctx| {
+            let presentation = FailedOutputPresentation::AwsBedrockCredentialsExpiredOrInvalid {
+                fallback_message: "AWS credentials expired or missing for claude.".to_owned(),
+                login_command: Some("aws sso login --profile prod".to_owned()),
+            };
+            assert_eq!(
+                failure_lines(&presentation, &MouseStateHandle::default(), 100, 2, ctx),
+                vec![
+                    "⚠ AWS credentials expired or missing for claude.",
+                    "  Run `aws sso login --profile prod` to refresh credentials.",
+                ]
+            );
+        });
+    });
+}
+
+#[test]
+fn aws_bedrock_failure_without_a_configured_command_stays_message_only() {
+    App::test((), |app| async move {
+        app.add_singleton_model(|_| Appearance::mock());
+        app.read(|ctx| {
+            let presentation = FailedOutputPresentation::AwsBedrockCredentialsExpiredOrInvalid {
+                fallback_message: "AWS credentials expired or missing for claude.".to_owned(),
+                login_command: None,
+            };
+            assert_eq!(
+                failure_lines(&presentation, &MouseStateHandle::default(), 100, 1, ctx),
+                vec!["⚠ AWS credentials expired or missing for claude."]
+            );
+        });
+    });
+}
+
+#[test]
+fn forkable_failure_offers_the_fork_command() {
+    App::test((), |app| async move {
+        app.add_singleton_model(|_| Appearance::mock());
+        app.read(|ctx| {
+            let presentation = FailedOutputPresentation::Message("Internal Warp error.".to_owned());
+            let hover_state = MouseStateHandle::default();
+            assert_eq!(
+                forkable_failure_lines(&presentation, true, &hover_state, 100, 3, ctx),
+                vec![
+                    "⚠ Internal Warp error.",
+                    "",
+                    "  Run /fork to continue from the last successful step.",
+                ]
+            );
+            assert_eq!(
+                forkable_failure_lines(&presentation, false, &hover_state, 100, 1, ctx),
+                vec!["⚠ Internal Warp error."]
+            );
+        });
+    });
+}
+
+#[test]
+fn copied_failure_text_carries_the_same_recovery_lines_as_the_render() {
+    let invalid_api_key = FailedOutputPresentation::InvalidApiKey {
+        title: "Provided API key is not valid",
+        detail: "Failed to authenticate with Anthropic.".to_owned(),
+    };
+    assert_eq!(
+        failure_text(&invalid_api_key, false),
+        "Provided API key is not valid\nFailed to authenticate with Anthropic.\n  Run /api-keys \
+         to update your provider API keys."
+    );
+
+    let bedrock = FailedOutputPresentation::AwsBedrockCredentialsExpiredOrInvalid {
+        fallback_message: "AWS credentials expired or missing for claude.".to_owned(),
+        login_command: Some("aws login".to_owned()),
+    };
+    assert_eq!(
+        failure_text(&bedrock, true),
+        "AWS credentials expired or missing for claude.\n  Run `aws login` to refresh \
+         credentials.\n\n  Run /fork to continue from the last successful step."
     );
 }
 

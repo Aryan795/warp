@@ -3089,7 +3089,10 @@ pub fn render_failed_output(props: FailedOutputProps, app: &AppContext) -> Box<d
                 .render(app)
                 .finish();
         }
-        FailedOutputPresentation::AwsBedrockCredentialsExpiredOrInvalid { fallback_message } => {
+        FailedOutputPresentation::AwsBedrockCredentialsExpiredOrInvalid {
+            fallback_message,
+            ..
+        } => {
             // Use the rich stateful view if it exists, otherwise show a simple error message
             if let Some(view) = props.aws_bedrock_credentials_error_view {
                 return ChildView::new(view).finish();
