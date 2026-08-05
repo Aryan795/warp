@@ -827,6 +827,33 @@ pub fn test_completion_results_for_is_command_argument() {
     );
 }
 
+#[cfg(not(feature = "v2"))]
+#[test]
+pub fn test_yc_root_subcommand_completions() {
+    let registry = CommandRegistry::new_with_yc_for_test();
+    let ctx = FakeCompletionContext::new(registry);
+
+    assert_eq!(
+        complete_at_end_of_line("yc comp", &ctx),
+        vec!["components", "compute"]
+    );
+}
+
+#[cfg(not(feature = "v2"))]
+#[test]
+pub fn test_yc_completion_results_from_builtin_generator() {
+    let registry = CommandRegistry::new_with_yc_for_test();
+    let generator_ctx = MockGeneratorContext::new().with_expected_command(
+        "yc __completeNoDesc compute '' 2>/dev/null",
+        "instance\nimage\n:4\nCompletion ended with directive: ShellCompDirectiveNoFileComp\n",
+    );
+    let ctx = FakeCompletionContext::new(registry).with_generator_context(generator_ctx);
+
+    assert_eq!(
+        complete_at_end_of_line("yc compute ", &ctx),
+        vec!["instance", "image"]
+    );
+}
 #[test]
 pub fn test_variadic_args() {
     let registry = create_test_command_registry([test_signature()]);

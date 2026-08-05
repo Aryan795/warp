@@ -3,6 +3,7 @@ use std::sync::{Arc, OnceLock};
 use warp_core::channel::Channel;
 
 pub mod registry;
+mod yc;
 
 pub use registry::CommandRegistry;
 #[cfg(feature = "test-util")]
@@ -30,6 +31,9 @@ impl CommandRegistry {
     /// Returns a new [`CommandRegistry`] that looks up commands in the embedded
     /// set of command signatures.
     fn new_with_embedded_signatures() -> Self {
+        let mut dynamic_completion_data = warp_command_signatures::dynamic_command_signature_data();
+        let (command, data) = yc::dynamic_completion_data_entry();
+        dynamic_completion_data.insert(command, data);
         let registry = CommandRegistry::new(
             |command| {
                 let start = instant::Instant::now();
@@ -40,10 +44,11 @@ impl CommandRegistry {
                 );
                 signature
             },
-            warp_command_signatures::dynamic_command_signature_data(),
+            dynamic_completion_data,
         );
 
         Self::register_warp_signatures(&registry);
+        registry.register_signature(yc::signature());
 
         registry
     }
@@ -90,6 +95,15 @@ impl CommandRegistry {
             .into_iter()
             .for_each(|signature| registry.register_signature(signature));
         registry
+    }
+
+    #[cfg(feature = "test-util")]
+    pub fn new_with_yc_for_test() -> Self {
+        let (command, data) = yc::dynamic_completion_data_entry();
+        Self::new_for_test(
+            [yc::signature()],
+            std::collections::HashMap::from([(command, data)]),
+        )
     }
 }
 
