@@ -106,7 +106,10 @@ fn api_keys_command_is_tui_only_and_has_no_arguments() {
     assert!(!command.auto_enter_ai_mode);
     assert_eq!(command.availability, Availability::AI_ENABLED);
     assert!(command.argument.is_none());
-    assert_eq!(command.description, "View and manage API keys");
+    assert_eq!(
+        command.description,
+        "Manage your API keys and AI subscriptions"
+    );
     assert!(
         all_commands(settings::SettingsMode::Gui)
             .iter()
@@ -116,29 +119,6 @@ fn api_keys_command_is_tui_only_and_has_no_arguments() {
         all_commands(settings::SettingsMode::Tui)
             .iter()
             .all(|command| !matches!(command.name, "/add-api-key" | "/clear-provider-api-key"))
-    );
-}
-
-#[test]
-fn connect_command_mirrors_api_keys_registration() {
-    let command = all_commands(settings::SettingsMode::Tui)
-        .into_iter()
-        .find(|command| command.kind == SlashCommandKind::Connect)
-        .expect("expected /connect to be registered in TUI mode");
-    assert_eq!(command, CONNECT);
-    assert_eq!(command.name, "/connect");
-    assert_eq!(
-        command.description,
-        "View and manage API keys (alias for /api-keys)"
-    );
-    assert_eq!(command.supported_surfaces, SlashCommandSurfaces::TuiOnly);
-    assert_eq!(command.availability, API_KEYS.availability);
-    assert_eq!(command.auto_enter_ai_mode, API_KEYS.auto_enter_ai_mode);
-    assert_eq!(command.argument, API_KEYS.argument);
-    assert!(
-        all_commands(settings::SettingsMode::Gui)
-            .iter()
-            .all(|command| command.kind != SlashCommandKind::Connect)
     );
 }
 

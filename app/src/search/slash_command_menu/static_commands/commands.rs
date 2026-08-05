@@ -120,7 +120,7 @@ pub const NATURAL_LANGUAGE_DETECTION: StaticCommand = StaticCommand {
 
 pub const API_KEYS: StaticCommand = StaticCommand {
     name: "/api-keys",
-    description: "View and manage API keys",
+    description: "Manage your API keys and AI subscriptions",
     kind: SlashCommandKind::ApiKeys,
     supported_surfaces: SlashCommandSurfaces::TuiOnly,
     availability: Availability::AI_ENABLED,
@@ -130,7 +130,7 @@ pub const API_KEYS: StaticCommand = StaticCommand {
 
 pub const CONNECT: StaticCommand = StaticCommand {
     name: "/connect",
-    description: "View and manage API keys (alias for /api-keys)",
+    description: "Manage your API keys and AI subscriptions",
     kind: SlashCommandKind::Connect,
     supported_surfaces: SlashCommandSurfaces::TuiOnly,
     availability: Availability::AI_ENABLED,
