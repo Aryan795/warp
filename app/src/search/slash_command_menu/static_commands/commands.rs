@@ -127,6 +127,16 @@ pub const API_KEYS: StaticCommand = StaticCommand {
     auto_enter_ai_mode: false,
     argument: None,
 };
+
+pub const CONNECT: StaticCommand = StaticCommand {
+    name: "/connect",
+    description: "View and manage API keys (alias for /api-keys)",
+    kind: SlashCommandKind::Connect,
+    supported_surfaces: SlashCommandSurfaces::TuiOnly,
+    availability: Availability::AI_ENABLED,
+    auto_enter_ai_mode: false,
+    argument: None,
+};
 pub const THEME: StaticCommand = StaticCommand {
     name: "/theme",
     description: "Set color theme",
@@ -932,6 +942,7 @@ fn all_commands(settings_mode: settings::SettingsMode) -> Vec<StaticCommand> {
         INDEX,
         INIT,
         API_KEYS,
+        CONNECT,
         LOGOUT,
         MCP,
         OPEN_PROJECT_RULES,
