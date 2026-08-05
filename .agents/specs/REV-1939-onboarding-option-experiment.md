@@ -187,11 +187,11 @@ assignment join.
 
 *Proposed changes:*
 1. **Add and convert the client experiment arms.**
-   - Add `OnboardingChooseHowToStartCreditsControl` and
-     `OnboardingChooseHowToStartCreditsExperiment` to `ServerExperiment`.
+   - Add `OnboardingChooseHowToStartControl` and
+     `OnboardingChooseHowToStartThreeOptions` to `ServerExperiment`.
    - Map them to the sibling server contract’s GraphQL values
-     `ONBOARDING_CHOOSE_HOW_TO_START_CREDITS_CONTROL` and
-     `ONBOARDING_CHOOSE_HOW_TO_START_CREDITS_EXPERIMENT` in the Cynic enum,
+     `ONBOARDING_CHOOSE_HOW_TO_START_CONTROL` and
+     `ONBOARDING_CHOOSE_HOW_TO_START_THREE_OPTIONS` in the Cynic enum,
      checked-in schema snapshot, `TryFrom<Experiment>`, `Display`, and
      `from_string`.
    - Keep both `on_added_to` arms as no-ops because consumers query the
@@ -265,8 +265,8 @@ assignment join.
 - **Feature flag:** none. Direct assignment is required to distinguish all
   states and avoid sticky flag state.
 - **Cross-repo enum contract:** fixed to
-  `ONBOARDING_CHOOSE_HOW_TO_START_CREDITS_CONTROL` and
-  `ONBOARDING_CHOOSE_HOW_TO_START_CREDITS_EXPERIMENT`; the sibling server PR
+  `ONBOARDING_CHOOSE_HOW_TO_START_CONTROL` and
+  `ONBOARDING_CHOOSE_HOW_TO_START_THREE_OPTIONS`; the sibling server PR
   must expose these exact values before the client PR can compile against its
   refreshed schema.
 
