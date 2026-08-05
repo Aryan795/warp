@@ -21,6 +21,7 @@ use super::UserAuthenticationError;
 const FETCH_ACCESS_TOKEN_TIMEOUT: Duration = Duration::from_secs(5);
 const WARP_AGENT_CLI_CLIENT_ID: &str = "warp-agent-cli";
 const WARP_CLI_CLIENT_ID: &str = "warp-cli";
+const WARP_TUI_CLIENT_ID: &str = "warp-tui";
 
 /// Authentication and authenticated-transport conditions observed by shared client code.
 #[derive(Clone)]
@@ -208,7 +209,7 @@ impl AuthSession {
             .join("/api/v1/oauth/device/auth")
             .expect("Invalid device URL");
 
-        let client_id = if reported_client_id == Some(WARP_AGENT_CLI_CLIENT_ID) {
+        let client_id = if reported_client_id == Some(WARP_TUI_CLIENT_ID) {
             WARP_AGENT_CLI_CLIENT_ID
         } else {
             WARP_CLI_CLIENT_ID

@@ -24,7 +24,7 @@ impl ExecutionMode {
     pub fn client_id(&self) -> &'static str {
         match self {
             ExecutionMode::App => "warp-app",
-            ExecutionMode::Tui => "warp-agent-cli",
+            ExecutionMode::Tui => "warp-tui",
             ExecutionMode::Sdk => "warp-cli",
             ExecutionMode::RemoteServerDaemon => "warp-remote-server-daemon",
         }
