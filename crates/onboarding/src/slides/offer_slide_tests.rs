@@ -408,6 +408,10 @@ fn packs_only_render_as_selected_while_the_credit_option_is_chosen() {
             move |_| OfferSlide::new(onboarding_state)
         });
         onboarding_state.update(&mut app, |model, ctx| {
+            model.set_choose_how_to_start_experiment_arm(
+                ChooseHowToStartExperimentArm::Experiment,
+                ctx,
+            );
             model.show_post_auth_offer(OfferVariant::ChooseHowToStart, ctx);
             model.set_credit_pack_options(credit_packs(4), ctx);
         });
