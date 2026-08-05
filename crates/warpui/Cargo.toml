@@ -209,6 +209,12 @@ zbus.workspace = true
 virtual-fs.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
+# UI Automation backend for third-party dictation/automation text insertion.
+# `accesskit` provides the portable tree/action types (shared with the logic in
+# `warpui_core::accessibility`); `accesskit_windows` provides the COM/UIA
+# provider that answers `WM_GETOBJECT` on the winit `HWND`.
+accesskit = "0.24.1"
+accesskit_windows = "0.34.0"
 dwrote = { git = "https://github.com/warpdotdev/dwrote-rs", rev = "a71ce6c0136f7d0954a9a8b181b5b2d8ace5eb9c", default-features = false }
 winreg.workspace = true
 windows = { workspace = true, features = [

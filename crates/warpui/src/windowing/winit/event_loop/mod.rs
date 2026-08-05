@@ -615,6 +615,7 @@ impl EventLoop {
                     &self.window_class,
                     is_tiling_window_manager,
                     self.downrank_non_nvidia_vulkan_adapters,
+                    self.proxy.clone(),
                 ) {
                     Ok(winit_window_id) => {
                         let window_state = WindowState::new(window_id);
@@ -838,6 +839,14 @@ impl EventLoop {
                         modifiers: ModifiersState::default(),
                     },
                 );
+            }
+            #[cfg(windows)]
+            Event::UserEvent(CustomEvent::UpdateAccessibilityContents(content)) => {
+                self.update_active_window_accessibility(content);
+            }
+            #[cfg(windows)]
+            Event::UserEvent(CustomEvent::AccessibilityInsertText(text)) => {
+                self.insert_accessibility_text(text);
             }
             Event::WindowEvent {
                 window_id,
@@ -1410,6 +1419,39 @@ impl EventLoop {
             let window = downcast_window(window.as_ref());
             window.focus();
         });
+    }
+
+    /// Pushes the focused view's accessibility content to the active window's
+    /// UIA adapter so dictation/automation clients see the correct focused input.
+    #[cfg(windows)]
+    fn update_active_window_accessibility(
+        &mut self,
+        content: crate::accessibility::AccessibilityContent,
+    ) {
+        let Some(window) = self.ui_app.read(|ctx| {
+            ctx.windows()
+                .active_window()
+                .and_then(|window_id| ctx.windows().platform_window(window_id))
+        }) else {
+            return;
+        };
+        downcast_window(window.as_ref()).update_accessibility(content);
+    }
+
+    /// Delivers text requested by a UIA client into the active window through the
+    /// normal typed-characters path, so it behaves exactly like typing or paste.
+    #[cfg(windows)]
+    fn insert_accessibility_text(&mut self, text: String) {
+        let Some(window) = self.ui_app.read(|ctx| {
+            ctx.windows()
+                .active_window()
+                .and_then(|window_id| ctx.windows().platform_window(window_id))
+        }) else {
+            return;
+        };
+        self.callbacks
+            .for_window(window.as_ref())
+            .dispatch_event(TypedCharacters { chars: text });
     }
 
     #[allow(unused_variables)]

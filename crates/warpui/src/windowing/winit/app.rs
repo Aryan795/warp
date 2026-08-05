@@ -101,6 +101,14 @@ pub enum CustomEvent {
     MomentumScroll {
         window_id: winit::window::WindowId,
     },
+    /// The focused view's accessibility content changed; refresh the Windows UIA
+    /// tree so dictation/automation tools target the correct focused input.
+    #[cfg(windows)]
+    UpdateAccessibilityContents(crate::accessibility::AccessibilityContent),
+    /// A UIA client (e.g. a dictation tool) asked to insert text into the
+    /// focused input; delivered to the active window as typed characters.
+    #[cfg(windows)]
+    AccessibilityInsertText(String),
 }
 
 #[derive(Debug)]

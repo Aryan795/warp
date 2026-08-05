@@ -543,7 +543,20 @@ impl platform::Delegate for AppDelegate {
     }
 
     fn set_accessibility_contents(&self, content: accessibility::AccessibilityContent) {
-        // TODO(wasm): Implement this.
+        // On Windows, forward the focused view's content to the UIA adapter (via
+        // the event loop, which owns the active window) so dictation/automation
+        // tools can target the focused text input. No-op elsewhere: macOS uses
+        // native AppKit accessibility and Linux/wasm have no UIA provider.
+        #[cfg(windows)]
+        {
+            let _ = self
+                .event_loop_proxy
+                .send_event(CustomEvent::UpdateAccessibilityContents(content));
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = content;
+        }
     }
 
     fn register_global_shortcut(&self, shortcut: keymap::Keystroke) {

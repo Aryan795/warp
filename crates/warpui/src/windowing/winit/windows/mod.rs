@@ -1,3 +1,4 @@
+pub mod accessibility;
 pub mod clipboard;
 mod network;
 mod registry;

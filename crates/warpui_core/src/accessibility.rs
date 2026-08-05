@@ -45,6 +45,9 @@
 //!   keybinding to access it;
 //! - If there’s a video/GIF in the user docs, make sure that its content is also reflected in text.
 
+use accesskit::{
+    Action as A11yAction, ActionData, Node as A11yNode, NodeId, Role, Tree, TreeId, TreeUpdate,
+};
 use pathfinder_geometry::rect::RectF;
 use serde::{Deserialize, Serialize};
 
@@ -271,3 +274,115 @@ impl From<Option<AccessibilityContent>> for ActionAccessibilityContent {
         }
     }
 }
+
+// --- UI Automation input provider ---------------------------------------------
+//
+// WarpUI paints its own text input and hosts no native OS edit control, so on
+// Windows there is no UI Automation (UIA) element for dictation/automation tools
+// (Superwhisper, Narrator, etc.) to target when they insert text automatically.
+// The helpers below build the minimal accesskit tree — a window root plus a
+// single focused text-input node — that the Windows adapter in `crates/warpui`
+// registers against the window's `HWND`, and translate the resulting UIA
+// set-value/insert action back into the text to feed WarpUI's normal typed-text
+// path. This logic is platform-independent so it is unit-tested off Windows;
+// only the COM/`WM_GETOBJECT` wiring around it is Windows-specific.
+
+/// Accesskit node id of the tree root (the window) exposed to UIA clients.
+pub const A11Y_WINDOW_ID: NodeId = NodeId(0);
+
+/// Accesskit node id of the single focused text-input node. UIA clients target
+/// this node's value/text patterns to insert dictated text.
+pub const A11Y_FOCUSED_INPUT_ID: NodeId = NodeId(1);
+
+impl WarpA11yRole {
+    /// Whether a focused view with this role accepts programmatic text insertion
+    /// (dictation/automation). Only WarpUI's editable text surfaces do.
+    pub fn is_editable_text(self) -> bool {
+        matches!(
+            self,
+            WarpA11yRole::TextareaRole | WarpA11yRole::TextfieldRole
+        )
+    }
+
+    /// The accesskit role that best represents this WarpUI role to a UIA client.
+    fn to_accesskit_role(self) -> Role {
+        use WarpA11yRole::*;
+        match self {
+            TextareaRole => Role::MultilineTextInput,
+            TextfieldRole => Role::TextInput,
+            TextRole => Role::Label,
+            ButtonRole => Role::Button,
+            CheckboxRole => Role::CheckBox,
+            LinkRole => Role::Link,
+            ListRole => Role::List,
+            MenuItemRole => Role::MenuItem,
+            MenuRole => Role::Menu,
+            ImageRole => Role::Image,
+            ScrollareaRole => Role::ScrollView,
+            HelpRole | PopoverRole | WindowRole | UserAction => Role::GenericContainer,
+        }
+    }
+}
+
+/// Builds the accesskit tree exposed to UIA for the currently focused view.
+///
+/// The tree is deliberately shallow: a window root owning a single focused node
+/// that mirrors `content`. When the focused view is an editable text surface the
+/// node advertises `SetValue`/`ReplaceSelectedText` so a dictation/automation
+/// client can write into it; otherwise it is a plain, non-settable node.
+pub fn build_focused_input_tree(content: &AccessibilityContent) -> TreeUpdate {
+    let role = content.role;
+    let mut node = A11yNode::new(role.to_accesskit_role());
+    // WarpUI's `value` is the human label for the surface (e.g. "Command
+    // Input"), so expose it as the accessible name.
+    node.set_label(content.value.clone());
+    if let Some(help) = &content.help {
+        node.set_description(help.clone());
+    }
+    if role.is_editable_text() {
+        // Advertise programmatic text entry. The value starts empty; the client
+        // writes text via a set-value/insert action which is routed into
+        // WarpUI's normal typed-text path (see `text_to_insert_for_action`).
+        node.set_value("");
+        node.add_action(A11yAction::SetValue);
+        node.add_action(A11yAction::ReplaceSelectedText);
+    }
+
+    let mut root = A11yNode::new(Role::Window);
+    root.push_child(A11Y_FOCUSED_INPUT_ID);
+
+    TreeUpdate {
+        nodes: vec![(A11Y_WINDOW_ID, root), (A11Y_FOCUSED_INPUT_ID, node)],
+        tree: Some(Tree::new(A11Y_WINDOW_ID)),
+        tree_id: TreeId::ROOT,
+        focus: A11Y_FOCUSED_INPUT_ID,
+    }
+}
+
+/// Resolves a UIA action into the text to insert into WarpUI, or `None` when the
+/// action is not a text-insertion request or when no editable input is focused.
+///
+/// `has_focused_input` reflects whether a WarpUI editable text surface currently
+/// holds keyboard focus. When it is `false` the request is a no-op, matching how
+/// a native edit control ignores value writes while it lacks focus. `action` and
+/// `data` are the corresponding fields of an accesskit `ActionRequest`.
+pub fn text_to_insert_for_action(
+    action: A11yAction,
+    data: Option<&ActionData>,
+    has_focused_input: bool,
+) -> Option<String> {
+    if !has_focused_input {
+        return None;
+    }
+    match action {
+        A11yAction::SetValue | A11yAction::ReplaceSelectedText => match data {
+            Some(ActionData::Value(value)) => Some(value.to_string()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+#[path = "accessibility_tests.rs"]
+mod tests;

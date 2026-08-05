@@ -684,6 +684,10 @@ struct Inner {
     window: Arc<winit::window::Window>,
     #[cfg(windows)]
     is_cloaked: bool,
+    /// The window's UI Automation provider for third-party dictation/automation
+    /// text insertion. Owned here so it is uninstalled when the window closes.
+    #[cfg(windows)]
+    accessibility: Option<super::windows::accessibility::WindowsAccessibility>,
     #[cfg_attr(not(any(target_os = "linux", target_os = "freebsd")), allow(dead_code))]
     gpu_power_preference: GPUPowerPreference,
     backend_preference: Option<wgpu::Backend>,
@@ -742,6 +746,17 @@ impl Window {
         self.titlebar_height.get()
     }
 
+    /// Pushes the focused view's accessibility content to this window's UIA
+    /// provider so dictation/automation clients target the correct focused input.
+    #[cfg(windows)]
+    pub(super) fn update_accessibility(&self, content: crate::accessibility::AccessibilityContent) {
+        if let Some(inner) = self.inner.borrow().as_ref()
+            && let Some(accessibility) = inner.accessibility.as_ref()
+        {
+            accessibility.update(content);
+        }
+    }
+
     pub fn open_window(
         &self,
         window_target: &ActiveEventLoop,
@@ -749,13 +764,21 @@ impl Window {
         window_class: &Option<String>,
         tiling_window_manager: bool,
         downrank_non_nvidia_vulkan_adapters: bool,
+        event_loop_proxy: EventLoopProxy<CustomEvent>,
     ) -> Result<winit::window::WindowId> {
         let window = create_window(
             window_target,
             &window_options,
             window_class,
             tiling_window_manager,
+            event_loop_proxy,
         )?;
+
+        // The UIA provider (if any) was created inside `create_window` while the
+        // window was still hidden; take ownership of it so its lifetime is tied
+        // to this window's `Inner`.
+        #[cfg(windows)]
+        let accessibility = super::windows::accessibility::take_pending();
 
         let window = Arc::new(window);
 
@@ -783,6 +806,8 @@ impl Window {
             window,
             #[cfg(windows)]
             is_cloaked: true,
+            #[cfg(windows)]
+            accessibility,
             gpu_power_preference,
             backend_preference,
             rendering_resources: Some(RenderingResources {
@@ -1278,6 +1303,7 @@ fn create_window(
     _window_options: &WindowOptions,
     _window_class: &Option<String>,
     _tiling_window_manager: bool,
+    _event_loop_proxy: EventLoopProxy<CustomEvent>,
 ) -> Result<winit::window::Window> {
     use winit::platform::web::{WindowAttributesExtWebSys, WindowExtWebSys};
 
@@ -1307,11 +1333,13 @@ fn create_window(
 }
 
 #[cfg(not(target_family = "wasm"))]
+#[cfg_attr(not(windows), allow(unused_variables))]
 fn create_window(
     window_target: &ActiveEventLoop,
     window_options: &WindowOptions,
     _window_class: &Option<String>,
     tiling_window_manager: bool,
+    event_loop_proxy: EventLoopProxy<CustomEvent>,
 ) -> Result<winit::window::Window> {
     let decorations = !window_options.hide_title_bar;
 
@@ -1478,6 +1506,11 @@ fn create_window(
                     adjustment.abs()
                 );
             }
+
+            // Register the UI Automation provider while the window is still
+            // hidden (accesskit's subclassing adapter panics on a visible
+            // window). `open_window` moves it into the window's `Inner`.
+            super::windows::accessibility::stash_pending(window, event_loop_proxy);
 
             window.set_visible(true);
             window.set_ime_allowed(true);

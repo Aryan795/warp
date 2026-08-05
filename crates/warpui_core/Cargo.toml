@@ -24,6 +24,11 @@ test-util = []
 
 [dependencies]
 warp_errors.workspace = true
+# Cross-platform accessibility tree/action types. Only the Windows UIA backend
+# (`accesskit_windows`, added in `crates/warpui`) is platform-specific; the core
+# `accesskit` crate is portable and lets the provider's tree/action logic be
+# unit-tested on any host.
+accesskit = "0.24.1"
 anyhow = "1.0"
 async-broadcast.workspace = true
 async-channel.workspace = true
