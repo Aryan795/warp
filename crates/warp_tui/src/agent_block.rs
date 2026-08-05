@@ -18,8 +18,8 @@ use parking_lot::FairMutex;
 use warp::tui_export::{
     AIActionStatus, AIAgentAction, AIAgentActionId, AIAgentActionType, AIAgentExchangeId,
     AIAgentOutputMessageType, AIAgentText, AIAgentTextSection, AIAgentTodo, AIBlockModel,
-    AIBlockModelHelper, AIBlockOutputStatus, AIConversationId, BlockId, BlocklistAIActionEvent,
-    BlocklistAIActionModel, BlocklistAIHistoryModel, CancellationReason,
+    AIBlockModelHelper, AIBlockOutputStatus, AIConversationId, BillingDenialGuidance, BlockId,
+    BlocklistAIActionEvent, BlocklistAIActionModel, BlocklistAIHistoryModel, CancellationReason,
     FAILED_OUTPUT_USAGE_NOTICE_TEXT, FailedOutputPresentation, MessageId, ModelEvent,
     ModelEventDispatcher, ReceivedMessageDisplay, RenderableAIError, SummarizationType,
     TelemetryEvent, TerminalModel, TodoOperation, TodoStatus, TuiOnboardingMarker,
@@ -60,9 +60,8 @@ use crate::tui_markdown::{
 use crate::tui_plan_view::{TuiPlanView, TuiPlanViewEvent};
 use crate::tui_review_comments::render_review_comments_tool_call;
 pub(crate) const OUT_OF_CREDITS_URL: &str = "https://app.warp.dev/upgrade?source=warp-agent-cli";
-const OUT_OF_CREDITS_TITLE: &str = "I’m sorry, I couldn’t complete that request.";
-const OUT_OF_CREDITS_DETAIL: &str =
-    "In order to use Warp’s AI features, subscribe to a Warp plan or buy packs of credits.";
+const OUT_OF_CREDITS_BYO_API_KEY_DETAIL: &str =
+    "Or run /api-keys to use your own provider API key.";
 const OUT_OF_CREDITS_ACTION_LABEL: &str = "Get started with AI";
 const OUT_OF_CREDITS_ACTION_HINT: &str = "(ctrl+o)";
 const FIRST_CREDIT_GATE_TITLE: &str = "You need AI credits in order to use Warp’s agent.";
@@ -76,15 +75,28 @@ struct TuiCodeBlockKey {
     section_index: usize,
 }
 
+/// Whether a denial is the plain "no credits yet" onboarding case. Denials
+/// that carry role- or policy-specific guidance are excluded so the first-run
+/// gate can never replace a more specific state with its generic copy.
+fn is_generic_first_run_denial(presentation: &FailedOutputPresentation) -> bool {
+    matches!(
+        presentation,
+        FailedOutputPresentation::OutOfCredits {
+            show_subscribe_cta: true,
+            guidance: BillingDenialGuidance {
+                next_step: None,
+                ..
+            },
+            ..
+        }
+    )
+}
+
 fn should_consume_first_credit_gate(
     is_restored: bool,
     presentation: Option<&FailedOutputPresentation>,
 ) -> bool {
-    !is_restored
-        && matches!(
-            presentation,
-            Some(FailedOutputPresentation::OutOfCredits { .. })
-        )
+    !is_restored && presentation.is_some_and(is_generic_first_run_denial)
 }
 
 fn render_first_credit_gate(
@@ -259,53 +271,63 @@ fn render_failure_section(
             (detail.clone(), body_style),
         ])
         .finish(),
-        FailedOutputPresentation::OutOfCredits { .. } => {
+        FailedOutputPresentation::OutOfCredits {
+            message,
+            can_use_own_api_keys,
+            show_subscribe_cta,
+            guidance,
+        } => {
             let primary_style = builder.primary_text_style();
-            let link_style = primary_style.add_modifier(Modifier::UNDERLINED);
-            let action = TuiHoverable::new(
-                out_of_credits_hover_state.clone(),
-                TuiText::new(OUT_OF_CREDITS_ACTION_LABEL)
-                    .with_style(link_style)
-                    .finish(),
-            )
-            .on_click(|_, app| app.open_url(OUT_OF_CREDITS_URL))
-            .finish();
-            let actions = TuiFlex::row()
-                .child(TuiText::new("  ").with_style(primary_style).finish())
-                .child(action)
-                .child(TuiText::new(" ").with_style(primary_style).finish())
-                .child(
-                    TuiText::new(OUT_OF_CREDITS_ACTION_HINT)
-                        .with_style(builder.accent_text_style())
+            let body = out_of_credits_body(
+                message,
+                *can_use_own_api_keys,
+                *show_subscribe_cta,
+                guidance,
+            );
+            let mut column = TuiFlex::column().child(
+                TuiText::from_spans([
+                    (FAILURE_WARNING_PREFIX.to_owned(), error_style),
+                    (body.title, primary_style),
+                ])
+                .finish(),
+            );
+            for detail in body.details {
+                column.add_child(
+                    TuiContainer::new(TuiText::new(detail).with_style(primary_style).finish())
+                        .with_padding_left(2)
+                        .finish(),
+                );
+            }
+            if body.show_upgrade_action {
+                let action = TuiHoverable::new(
+                    out_of_credits_hover_state.clone(),
+                    TuiText::new(OUT_OF_CREDITS_ACTION_LABEL)
+                        .with_style(primary_style.add_modifier(Modifier::UNDERLINED))
                         .finish(),
                 )
+                .on_click(|_, app| app.open_url(OUT_OF_CREDITS_URL))
                 .finish();
-            TuiFlex::column()
-                .child(
-                    TuiText::from_spans([
-                        (FAILURE_WARNING_PREFIX.to_owned(), error_style),
-                        (OUT_OF_CREDITS_TITLE.to_owned(), primary_style),
-                    ])
-                    .finish(),
-                )
-                .child(
-                    TuiContainer::new(
-                        TuiText::new(OUT_OF_CREDITS_DETAIL)
-                            .with_style(primary_style)
-                            .finish(),
-                    )
-                    .with_padding_left(2)
-                    .finish(),
-                )
-                .child(TuiText::new(" ").finish())
-                .child(actions)
-                .child(TuiText::new(" ").finish())
-                .child(
+                column.add_child(TuiText::new(" ").finish());
+                column.add_child(
+                    TuiFlex::row()
+                        .child(TuiText::new("  ").with_style(primary_style).finish())
+                        .child(action)
+                        .child(TuiText::new(" ").with_style(primary_style).finish())
+                        .child(
+                            TuiText::new(OUT_OF_CREDITS_ACTION_HINT)
+                                .with_style(builder.accent_text_style())
+                                .finish(),
+                        )
+                        .finish(),
+                );
+                column.add_child(TuiText::new(" ").finish());
+                column.add_child(
                     TuiText::new(format!("  {OUT_OF_CREDITS_URL}"))
                         .with_style(primary_style)
                         .finish(),
-                )
-                .finish()
+                );
+            }
+            column.finish()
         }
         FailedOutputPresentation::ContextWindowExceeded { message } => TuiText::from_spans([
             ("× ".to_owned(), error_style),
@@ -321,6 +343,43 @@ fn render_usage_notice(app: &AppContext) -> Box<dyn TuiElement> {
         .finish()
 }
 
+/// The pieces of an out-of-credits failure body, shared by the rendered
+/// element and its plain-text form so the two cannot diverge.
+struct OutOfCreditsBody {
+    title: String,
+    /// Explanation lines shown indented under the title, in order.
+    details: Vec<String>,
+    /// Whether the upgrade action row and URL apply to this user.
+    show_upgrade_action: bool,
+}
+
+fn out_of_credits_body(
+    message: &str,
+    can_use_own_api_keys: bool,
+    show_subscribe_cta: bool,
+    guidance: &BillingDenialGuidance,
+) -> OutOfCreditsBody {
+    // The shared presentation prefixes the server's explanation with the
+    // apology line, separated by a blank line.
+    let (title, explanation) = message.split_once("\n\n").unwrap_or((message, ""));
+    let mut details: Vec<String> = explanation
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect();
+    details.extend(guidance.next_step.map(str::to_owned));
+    if can_use_own_api_keys {
+        details.push(OUT_OF_CREDITS_BYO_API_KEY_DETAIL.to_owned());
+    }
+
+    OutOfCreditsBody {
+        title: title.trim().to_owned(),
+        details,
+        show_upgrade_action: show_subscribe_cta,
+    }
+}
+
 fn failure_text(presentation: &FailedOutputPresentation) -> String {
     match presentation {
         FailedOutputPresentation::Message(message)
@@ -331,9 +390,30 @@ fn failure_text(presentation: &FailedOutputPresentation) -> String {
             fallback_message: message,
         }
         | FailedOutputPresentation::ContextWindowExceeded { message } => message.clone(),
-        FailedOutputPresentation::OutOfCredits { .. } => format!(
-            "{OUT_OF_CREDITS_TITLE}\n  {OUT_OF_CREDITS_DETAIL}\n\n  {OUT_OF_CREDITS_ACTION_LABEL} {OUT_OF_CREDITS_ACTION_HINT}\n\n  {OUT_OF_CREDITS_URL}"
-        ),
+        FailedOutputPresentation::OutOfCredits {
+            message,
+            can_use_own_api_keys,
+            show_subscribe_cta,
+            guidance,
+        } => {
+            let body = out_of_credits_body(
+                message,
+                *can_use_own_api_keys,
+                *show_subscribe_cta,
+                guidance,
+            );
+            let mut lines = vec![body.title];
+            lines.extend(body.details.iter().map(|detail| format!("  {detail}")));
+            if body.show_upgrade_action {
+                lines.push(String::new());
+                lines.push(format!(
+                    "  {OUT_OF_CREDITS_ACTION_LABEL} {OUT_OF_CREDITS_ACTION_HINT}"
+                ));
+                lines.push(String::new());
+                lines.push(format!("  {OUT_OF_CREDITS_URL}"));
+            }
+            lines.join("\n")
+        }
         FailedOutputPresentation::InvalidApiKey { title, detail } => {
             format!("{title}\n{detail}")
         }
@@ -1253,11 +1333,20 @@ impl TuiAIBlock {
         failed_output_presentation(error, app).map(|presentation| (error, presentation))
     }
 
+    /// Whether this block offers the upgrade shortcut, which opens the generic
+    /// upgrade page and so only applies to denials that show its call to
+    /// action.
     pub(super) fn has_out_of_credits_failure(&self, app: &AppContext) -> bool {
         let status = self.block_model.status(app);
         matches!(
             self.visible_failure(&status, app),
-            Some((_, FailedOutputPresentation::OutOfCredits { .. }))
+            Some((
+                _,
+                FailedOutputPresentation::OutOfCredits {
+                    show_subscribe_cta: true,
+                    ..
+                }
+            ))
         )
     }
 
@@ -1608,9 +1697,7 @@ impl TuiAIBlock {
         }
 
         if let Some((error, presentation)) = self.visible_failure(&status, app) {
-            if self.first_credit_gate
-                && matches!(presentation, FailedOutputPresentation::OutOfCredits { .. })
-            {
+            if self.first_credit_gate && is_generic_first_run_denial(&presentation) {
                 sections.push(TuiAIBlockSection::FirstCreditGate);
             } else {
                 sections.push(TuiAIBlockSection::Failure(presentation));

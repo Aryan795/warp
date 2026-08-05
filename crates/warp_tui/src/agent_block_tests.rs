@@ -15,11 +15,12 @@ use warp::tui_export::{
     AIAgentOutputMessageType, AIAgentText, AIAgentTextSection, AIAgentTodo, AIAgentTodoList,
     AIBlockModel, AIBlockOutputStatus, AIConversationId, AIRequestType, ActiveSession,
     AgentOutputImage, AgentOutputImageLayout, AgentOutputMermaidDiagram, AgentOutputTable,
-    Appearance, BlocklistAIActionModel, FailedOutputPresentation, GetRelevantFilesController,
-    LLMId, MessageId, ModelEventDispatcher, OutputStatusUpdateCallback, ReceivedMessageDisplay,
-    RenderableAIError, RequestCommandOutputResult, ServerOutputId, Sessions, Shared,
-    SummarizationType, TaskId, TerminalModel, TodoOperation, TodoStatus, TuiOnboardingMarker,
-    TuiOnboardingMarkers, UserQueryMode, register_tui_session_view_test_singletons,
+    Appearance, BillingDenialGuidance, BillingDenialKind, BlocklistAIActionModel,
+    FailedOutputPresentation, GetRelevantFilesController, LLMId, MessageId, ModelEventDispatcher,
+    OutputStatusUpdateCallback, ReceivedMessageDisplay, RenderableAIError,
+    RequestCommandOutputResult, ServerOutputId, Sessions, Shared, SummarizationType, TaskId,
+    TerminalModel, TodoOperation, TodoStatus, TuiOnboardingMarker, TuiOnboardingMarkers,
+    UserQueryMode, register_tui_session_view_test_singletons,
     should_show_failed_output_usage_notice,
 };
 use warp_core::ui::color::blend::Blend;
@@ -38,7 +39,7 @@ use warpui_core::{App, AppContext, EntityId, EntityIdMap, TuiView, ViewContext, 
 
 use super::{
     CollapsibleSectionStates, TuiAIBlock, TuiAIBlockAction, TuiAIBlockEvent, TuiAIBlockSection,
-    TuiCodeBlockKey, TuiRichTextSection, TuiToolCallView, render_failure_section,
+    TuiCodeBlockKey, TuiRichTextSection, TuiToolCallView, failure_text, render_failure_section,
     render_first_credit_gate, should_consume_first_credit_gate,
 };
 use crate::agent_block_sections::{
@@ -97,15 +98,57 @@ fn agent_block_renders_generic_failure_after_partial_output() {
     });
 }
 
+/// A denial presentation with no role-specific guidance, matching an unpaid
+/// individual whose included credits ran out.
+fn generic_out_of_credits(message: &str) -> FailedOutputPresentation {
+    FailedOutputPresentation::OutOfCredits {
+        message: message.to_owned(),
+        can_use_own_api_keys: false,
+        show_subscribe_cta: true,
+        guidance: BillingDenialGuidance {
+            kind: BillingDenialKind::RequestLimitReached,
+            is_admin: true,
+            next_step: None,
+        },
+    }
+}
+
 #[test]
 fn restored_out_of_credits_exchange_does_not_consume_first_credit_gate() {
-    let presentation = FailedOutputPresentation::OutOfCredits {
-        message: "out of credits".to_owned(),
-        can_use_own_api_keys: false,
-    };
+    let presentation = generic_out_of_credits("out of credits");
     assert!(should_consume_first_credit_gate(false, Some(&presentation)));
     assert!(!should_consume_first_credit_gate(true, Some(&presentation)));
     assert!(!should_consume_first_credit_gate(false, None));
+}
+
+#[test]
+fn first_credit_gate_yields_to_denials_that_carry_specific_guidance() {
+    let team_member_denial = FailedOutputPresentation::OutOfCredits {
+        message: "out of credits".to_owned(),
+        can_use_own_api_keys: false,
+        show_subscribe_cta: true,
+        guidance: BillingDenialGuidance {
+            kind: BillingDenialKind::OveragesToggleableButNotEnabled,
+            is_admin: false,
+            next_step: Some("Ask a team admin to enable premium overages or add more credits."),
+        },
+    };
+    assert!(!should_consume_first_credit_gate(
+        false,
+        Some(&team_member_denial)
+    ));
+
+    let paid_denial = FailedOutputPresentation::OutOfCredits {
+        message: "out of credits".to_owned(),
+        can_use_own_api_keys: false,
+        show_subscribe_cta: false,
+        guidance: BillingDenialGuidance {
+            kind: BillingDenialKind::RequestLimitReached,
+            is_admin: true,
+            next_step: None,
+        },
+    };
+    assert!(!should_consume_first_credit_gate(false, Some(&paid_denial)));
 }
 
 #[test]
@@ -360,8 +403,29 @@ fn agent_block_renders_context_window_failure() {
     });
 }
 
+/// Renders a failure presentation and returns its trimmed rows.
+fn failure_lines(
+    presentation: &FailedOutputPresentation,
+    hover_state: &MouseStateHandle,
+    width: u16,
+    height: u16,
+    ctx: &AppContext,
+) -> Vec<String> {
+    TuiPresenter::new()
+        .present_element(
+            render_failure_section(presentation, hover_state, ctx),
+            TuiRect::new(0, 0, width, height),
+            ctx,
+        )
+        .buffer
+        .to_lines()
+        .into_iter()
+        .map(|line| line.trim_end().to_owned())
+        .collect()
+}
+
 #[test]
-fn out_of_credits_failure_matches_tui_design_and_opens_upgrade() {
+fn out_of_credits_failure_shows_the_server_message_and_opens_upgrade() {
     App::test((), |mut app| async move {
         app.add_singleton_model(|_| Appearance::mock());
         let opened_urls = Rc::new(RefCell::new(Vec::new()));
@@ -378,6 +442,12 @@ fn out_of_credits_failure_matches_tui_design_and_opens_upgrade() {
                 message: "I'm sorry, I couldn't complete that request.\n\nIn order to use Warp's AI features, subscribe to a Warp plan, or bring your own inference."
                     .to_owned(),
                 can_use_own_api_keys: true,
+                show_subscribe_cta: true,
+                guidance: BillingDenialGuidance {
+                    kind: BillingDenialKind::RequestLimitReached,
+                    is_admin: true,
+                    next_step: None,
+                },
             };
             let out_of_credits_hover_state = MouseStateHandle::default();
             let mut presenter = TuiPresenter::new();
@@ -387,7 +457,7 @@ fn out_of_credits_failure_matches_tui_design_and_opens_upgrade() {
                     &out_of_credits_hover_state,
                     ctx,
                 ),
-                TuiRect::new(0, 0, 100, 6),
+                TuiRect::new(0, 0, 100, 7),
                 ctx,
             );
             assert_eq!(
@@ -398,8 +468,9 @@ fn out_of_credits_failure_matches_tui_design_and_opens_upgrade() {
                     .map(|line| line.trim_end().to_owned())
                     .collect::<Vec<_>>(),
                 vec![
-                    "⚠ I’m sorry, I couldn’t complete that request.",
-                    "  In order to use Warp’s AI features, subscribe to a Warp plan or buy packs of credits.",
+                    "⚠ I'm sorry, I couldn't complete that request.",
+                    "  In order to use Warp's AI features, subscribe to a Warp plan, or bring your own inference.",
+                    "  Or run /api-keys to use your own provider API key.",
                     "",
                     "  Get started with AI (ctrl+o)",
                     "",
@@ -417,17 +488,17 @@ fn out_of_credits_failure_matches_tui_design_and_opens_upgrade() {
             );
             assert_eq!(frame.buffer[(2, 0)].fg, primary_foreground);
             assert_eq!(frame.buffer[(2, 1)].fg, primary_foreground);
-            assert_eq!(frame.buffer[(2, 3)].fg, primary_foreground);
+            assert_eq!(frame.buffer[(2, 4)].fg, primary_foreground);
             assert_eq!(
-                frame.buffer[(22, 3)].fg,
+                frame.buffer[(22, 4)].fg,
                 builder
                     .accent_text_style()
                     .fg
                     .expect("accent foreground")
             );
-            assert_eq!(frame.buffer[(2, 5)].fg, primary_foreground);
+            assert_eq!(frame.buffer[(2, 6)].fg, primary_foreground);
             assert!(
-                frame.buffer[(2, 3)]
+                frame.buffer[(2, 4)]
                     .modifier
                     .contains(Modifier::UNDERLINED)
             );
@@ -437,7 +508,7 @@ fn out_of_credits_failure_matches_tui_design_and_opens_upgrade() {
                     &out_of_credits_hover_state,
                     ctx,
                 ),
-                TuiRect::new(0, 0, 64, 7),
+                TuiRect::new(0, 0, 64, 10),
                 ctx,
             );
             let narrow_lines = narrow_frame.buffer.to_lines();
@@ -454,15 +525,8 @@ fn out_of_credits_failure_matches_tui_design_and_opens_upgrade() {
                 ),
                 "Get started with AI",
                 100,
-                6,
+                7,
                 ctx,
-            );
-            assert!(
-                frame
-                    .buffer
-                    .to_lines()
-                    .iter()
-                    .all(|line| !line.contains("API keys"))
             );
         });
 
@@ -471,6 +535,125 @@ fn out_of_credits_failure_matches_tui_design_and_opens_upgrade() {
             &["https://app.warp.dev/upgrade?source=warp-agent-cli".to_owned()]
         );
     });
+}
+
+#[test]
+fn team_member_out_of_credits_failure_points_at_a_team_admin() {
+    App::test((), |app| async move {
+        app.add_singleton_model(|_| Appearance::mock());
+        app.read(|ctx| {
+            let presentation = FailedOutputPresentation::OutOfCredits {
+                message: "I'm sorry, I couldn't complete that request.\n\nNo AI credits remaining."
+                    .to_owned(),
+                can_use_own_api_keys: false,
+                show_subscribe_cta: true,
+                guidance: BillingDenialGuidance {
+                    kind: BillingDenialKind::OveragesToggleableButNotEnabled,
+                    is_admin: false,
+                    next_step: Some(
+                        "Ask a team admin to enable premium overages or add more credits.",
+                    ),
+                },
+            };
+            let lines = failure_lines(&presentation, &MouseStateHandle::default(), 100, 7, ctx);
+            assert_eq!(
+                lines,
+                vec![
+                    "⚠ I'm sorry, I couldn't complete that request.",
+                    "  No AI credits remaining.",
+                    "  Ask a team admin to enable premium overages or add more credits.",
+                    "",
+                    "  Get started with AI (ctrl+o)",
+                    "",
+                    "  https://app.warp.dev/upgrade?source=warp-agent-cli",
+                ]
+            );
+            assert!(
+                lines.iter().all(|line| !line.contains("/api-keys")),
+                "BYOK guidance should stay hidden when the workspace disallows it: {lines:?}"
+            );
+        });
+    });
+}
+
+#[test]
+fn paid_spend_limit_failure_shows_billing_guidance_without_an_upgrade_cta() {
+    App::test((), |app| async move {
+        app.add_singleton_model(|_| Appearance::mock());
+        app.read(|ctx| {
+            let presentation = FailedOutputPresentation::OutOfCredits {
+                message: "I'm sorry, I couldn't complete that request.\n\nYour team has reached its monthly spend limit."
+                    .to_owned(),
+                can_use_own_api_keys: false,
+                show_subscribe_cta: false,
+                guidance: BillingDenialGuidance {
+                    kind: BillingDenialKind::MonthlyOveragesSpendLimitReached,
+                    is_admin: true,
+                    next_step: Some(
+                        "Increase the monthly spend limit or add credits under Settings > Billing & Usage.",
+                    ),
+                },
+            };
+            let lines = failure_lines(&presentation, &MouseStateHandle::default(), 100, 3, ctx);
+            assert_eq!(
+                lines,
+                vec![
+                    "⚠ I'm sorry, I couldn't complete that request.",
+                    "  Your team has reached its monthly spend limit.",
+                    "  Increase the monthly spend limit or add credits under Settings > Billing & Usage.",
+                ]
+            );
+        });
+    });
+}
+
+#[test]
+fn delinquent_failure_surfaces_the_payment_issue_next_step() {
+    App::test((), |app| async move {
+        app.add_singleton_model(|_| Appearance::mock());
+        app.read(|ctx| {
+            let presentation = FailedOutputPresentation::OutOfCredits {
+                message: "I'm sorry, I couldn't complete that request.\n\nAI requests are unavailable due to a billing issue with your account."
+                    .to_owned(),
+                can_use_own_api_keys: false,
+                show_subscribe_cta: false,
+                guidance: BillingDenialGuidance {
+                    kind: BillingDenialKind::DelinquentDueToPaymentIssue,
+                    is_admin: false,
+                    next_step: Some("Contact a team admin to resolve the payment issue."),
+                },
+            };
+            assert_eq!(
+                failure_lines(&presentation, &MouseStateHandle::default(), 100, 3, ctx),
+                vec![
+                    "⚠ I'm sorry, I couldn't complete that request.",
+                    "  AI requests are unavailable due to a billing issue with your account.",
+                    "  Contact a team admin to resolve the payment issue.",
+                ]
+            );
+        });
+    });
+}
+
+#[test]
+fn copied_out_of_credits_text_matches_the_rendered_body() {
+    let presentation = FailedOutputPresentation::OutOfCredits {
+        message: "I'm sorry, I couldn't complete that request.\n\nNo AI credits remaining."
+            .to_owned(),
+        can_use_own_api_keys: true,
+        show_subscribe_cta: false,
+        guidance: BillingDenialGuidance {
+            kind: BillingDenialKind::RequestLimitReached,
+            is_admin: false,
+            next_step: Some("Ask a team admin to upgrade the plan or add more credits."),
+        },
+    };
+    assert_eq!(
+        failure_text(&presentation),
+        "I'm sorry, I couldn't complete that request.\n  No AI credits remaining.\n  Ask a team \
+         admin to upgrade the plan or add more credits.\n  Or run /api-keys to use your own \
+         provider API key."
+    );
 }
 
 #[test]

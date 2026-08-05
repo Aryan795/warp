@@ -56,6 +56,7 @@ pub use crate::ai::blocklist::agent_view::{
     AgentViewController, AgentViewDisplayMode, AgentViewEntryOrigin, EnterAgentViewError,
     EphemeralMessageModel,
 };
+pub use crate::ai::blocklist::billing_denial::{BillingDenialGuidance, BillingDenialKind};
 pub use crate::ai::blocklist::block::cli_controller::{
     CLISubagentController, CLISubagentEvent, CLISubagentTarget, LongRunningCommandControlState,
     UserTakeOverReason,
