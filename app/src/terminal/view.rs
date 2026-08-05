@@ -9384,25 +9384,28 @@ impl TerminalView {
     /// reports when the app requested them and arrow keys otherwise.
     fn alt_scroll(&mut self, lines_to_scroll: i32, point: Point, ctx: &mut ViewContext<Self>) {
         let report_mouse = !should_intercept_scroll(&self.model.lock(), ctx);
-        // Scrolling moves the alt-screen content out from under a highlighted
-        // link whichever way the wheel is delivered: arrow keys scroll the grid,
-        // and a mouse report lets the running app scroll its own viewport.
-        // Dropping the highlight also drops the decoration the renderer paints
-        // from it, which flagging it as invalidated does not; the next hover
-        // re-detects whatever the pointer now sits on.
-        if self.highlighted_link.take(&mut self.model.lock()).is_some() {
-            ctx.reset_cursor();
-            ctx.notify();
-        }
-
         let bytes = {
             let model = self.model.lock();
             alt_screen_scroll_to_pty_bytes(lines_to_scroll, point, report_mouse, model.deref())
         };
-        if let Some(bytes) = bytes {
-            self.write_user_bytes_to_pty(bytes, ctx);
-            ctx.notify();
+        // A wheel movement that produces nothing to send never reaches the alt
+        // screen, so its content — and any link highlighted on it — stays put.
+        let Some(bytes) = bytes else {
+            return;
+        };
+
+        // The scroll is on its way out, so the content the highlight is anchored
+        // to is about to move: arrow keys scroll the running app and a mouse
+        // report lets it scroll its own viewport. Dropping the highlight also
+        // drops the decoration the renderer paints from it, which flagging it as
+        // invalidated does not; the next hover re-detects whatever the pointer
+        // has ended up on.
+        if self.highlighted_link.take(&mut self.model.lock()).is_some() {
+            ctx.reset_cursor();
         }
+
+        self.write_user_bytes_to_pty(bytes, ctx);
+        ctx.notify();
     }
 
     pub fn input_size_at_last_frame(&self, app: &AppContext) -> Option<Vector2F> {

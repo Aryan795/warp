@@ -8493,24 +8493,19 @@ fn send_review_comments_to_warp_tui_writes_prompt_to_pty() {
     });
 }
 
-/// Sets up an alt-screen terminal that takes the wheel itself, hovers a link on
-/// it, and returns the view so a scroll can be dispatched against it.
-fn highlight_link_on_scroll_reporting_alt_screen(
-    view: &mut TerminalView,
-    ctx: &mut ViewContext<TerminalView>,
-) {
+/// Enters the alt screen, optionally letting the running app ask for the wheel
+/// as SGR mouse reports, and highlights a link on it.
+fn highlight_link_on_alt_screen(view: &mut TerminalView, request_mouse_reports: bool) {
     {
         let mut model = view.model.lock();
         model.set_mode(ansi::Mode::SwapScreen {
             save_cursor_and_clear_screen: true,
         });
-        model.set_mode(ansi::Mode::SgrMouse);
+        if request_mouse_reports {
+            model.set_mode(ansi::Mode::SgrMouse);
+        }
         assert!(model.is_alt_screen_active());
     }
-    assert!(
-        !should_intercept_scroll(&view.model.lock(), ctx),
-        "the app should take the wheel itself, so Warp forwards a mouse report"
-    );
 
     let link = crate::terminal::model::grid::grid_handler::Link {
         range: Point::new(1usize, 28usize)..=Point::new(1usize, 88usize),
@@ -8536,13 +8531,66 @@ fn alt_screen_scroll_drops_a_highlighted_link_when_the_app_handles_the_wheel() {
         let (_window_id, terminal) = add_window_with_id_and_terminal(&mut app, None);
 
         terminal.update(&mut app, |view, ctx| {
-            highlight_link_on_scroll_reporting_alt_screen(view, ctx);
+            highlight_link_on_alt_screen(view, true);
+            assert!(
+                !should_intercept_scroll(&view.model.lock(), ctx),
+                "the app should take the wheel itself, so Warp forwards a mouse report"
+            );
 
             view.alt_scroll(1, Point::zero(), ctx);
 
             assert!(
                 view.highlighted_link.is_none(),
                 "scrolling the alt screen must drop the link highlight anchored to it"
+            );
+        });
+    })
+}
+
+/// A wheel movement that sends nothing leaves the alt-screen content exactly
+/// where it was, so the highlight still describes what is on screen and has to
+/// survive — otherwise a link under the pointer goes unhighlighted until the
+/// pointer moves again.
+#[test]
+fn ignored_alt_screen_scroll_keeps_the_highlighted_link() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let (_window_id, terminal) = add_window_with_id_and_terminal(&mut app, None);
+
+        terminal.update(&mut app, |view, ctx| {
+            highlight_link_on_alt_screen(view, false);
+            assert!(
+                should_intercept_scroll(&view.model.lock(), ctx),
+                "without mouse reporting Warp translates the wheel to arrow keys"
+            );
+
+            view.alt_scroll(0, Point::zero(), ctx);
+
+            assert!(
+                view.highlighted_link.is_some(),
+                "a scroll that sends nothing must leave the link highlight alone"
+            );
+        });
+    })
+}
+
+/// The arrow-key fallback still moves the running app's content, so a scroll it
+/// does send drops the highlight just like a mouse report does.
+#[test]
+fn arrow_key_alt_screen_scroll_drops_the_highlighted_link() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let (_window_id, terminal) = add_window_with_id_and_terminal(&mut app, None);
+
+        terminal.update(&mut app, |view, ctx| {
+            highlight_link_on_alt_screen(view, false);
+            assert!(should_intercept_scroll(&view.model.lock(), ctx));
+
+            view.alt_scroll(1, Point::zero(), ctx);
+
+            assert!(
+                view.highlighted_link.is_none(),
+                "an arrow-key scroll that is sent must drop the link highlight"
             );
         });
     })
