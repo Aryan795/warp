@@ -78,9 +78,17 @@ fn rename_conversation_with_feedback<T: View>(
     }
 
     let history = BlocklistAIHistoryModel::handle(ctx);
-    let server_conversation_id = match history.update(ctx, |history, ctx| {
+    let begin_result = history.update(ctx, |history, ctx| {
         history.begin_conversation_rename(conversation_id, title.clone(), ctx)
-    }) {
+    });
+    if matches!(
+        begin_result,
+        Err(BeginConversationRenameError::RenameInProgress)
+    ) && queue_rename_behind_in_flight(conversation_id, title.clone(), feedback, ctx)
+    {
+        return;
+    }
+    let server_conversation_id = match begin_result {
         Ok(server_conversation_id) => server_conversation_id,
         Err(err) => {
             let message = match err {
@@ -105,30 +113,71 @@ fn rename_conversation_with_feedback<T: View>(
                 .rename_conversation(server_conversation_id, title)
                 .await
         },
-        move |_, result, ctx| match result {
-            Ok(response) => {
-                let title = response.title;
-                BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
-                    history.complete_conversation_rename(conversation_id, title.clone(), ctx);
-                });
-                show_toast(
-                    feedback,
-                    DismissibleToast::success(format!("Conversation renamed to {title}")),
-                    ctx,
-                );
-            }
-            Err(e) => {
-                BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
-                    history.fail_conversation_rename(conversation_id, ctx);
-                });
-                show_toast(
-                    feedback,
-                    DismissibleToast::error(format!("Failed to rename conversation: {e}")),
-                    ctx,
-                );
+        move |_, result, ctx| {
+            let history = BlocklistAIHistoryModel::handle(ctx);
+            match result {
+                Ok(response) => {
+                    let title = response.title;
+                    let queued_title = history.update(ctx, |history, ctx| {
+                        history.complete_conversation_rename(conversation_id, title.clone(), ctx)
+                    });
+                    let applied_title = queued_title.clone().unwrap_or(title);
+                    show_toast(
+                        feedback,
+                        DismissibleToast::success(format!(
+                            "Conversation renamed to {applied_title}"
+                        )),
+                        ctx,
+                    );
+                    resume_queued_rename(conversation_id, queued_title, ctx);
+                }
+                Err(e) => {
+                    let queued_title = history.update(ctx, |history, ctx| {
+                        history.fail_conversation_rename(conversation_id, ctx)
+                    });
+                    show_toast(
+                        feedback,
+                        DismissibleToast::error(format!("Failed to rename conversation: {e}")),
+                        ctx,
+                    );
+                    resume_queued_rename(conversation_id, queued_title, ctx);
+                }
             }
         },
     );
+}
+
+/// Holds `title` as the conversation's newest requested name while an earlier rename is
+/// still in flight, so a burst of renames settles on the last one instead of the first.
+///
+/// Only an indirect rename is coalesced. A direct rename already tells the user it collided
+/// with an in-flight one, so it keeps reporting that rather than silently deferring.
+/// Returns whether the title was queued.
+fn queue_rename_behind_in_flight<T: View>(
+    conversation_id: AIConversationId,
+    title: String,
+    feedback: RenameFeedback,
+    ctx: &mut ViewContext<T>,
+) -> bool {
+    if feedback != RenameFeedback::Quiet {
+        return false;
+    }
+    BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+        history.queue_conversation_rename(conversation_id, title, ctx)
+    })
+}
+
+/// Sends the title that was queued behind the rename that just settled. It is already
+/// applied locally, so this only brings the server in line with what the user sees.
+fn resume_queued_rename<T: View>(
+    conversation_id: AIConversationId,
+    queued_title: Option<String>,
+    ctx: &mut ViewContext<T>,
+) {
+    let Some(title) = queued_title else {
+        return;
+    };
+    rename_conversation_with_feedback(conversation_id, title, RenameFeedback::Quiet, ctx);
 }
 
 fn show_toast<T: View>(

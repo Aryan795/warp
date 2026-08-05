@@ -1406,6 +1406,42 @@ fn renaming_a_pane_renames_the_agent_conversation_it_hosts() {
 }
 
 #[test]
+fn renaming_a_pane_twice_in_quick_succession_lands_on_the_final_name() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+
+        pane_group.update(&mut app, |panes, ctx| {
+            let pane_id = get_newly_created_pane_id(panes, &[]);
+            let terminal_view_id = panes
+                .terminal_view_from_pane_id(pane_id, ctx)
+                .expect("pane should have a terminal view")
+                .id();
+            let conversation_id = restore_conversation_for_terminal_view(
+                terminal_view_id,
+                renamable_conversation("Original conversation title"),
+                ctx,
+            );
+            enter_agent_view_for_conversation(panes, pane_id, conversation_id, ctx);
+
+            // The second rename lands while the first one's request is still in flight.
+            panes.set_custom_pane_name(pane_id, "First name".to_string(), ctx);
+            panes.set_custom_pane_name(pane_id, "Second name".to_string(), ctx);
+
+            assert_eq!(
+                custom_pane_name(panes, pane_id, ctx).as_deref(),
+                Some("Second name"),
+            );
+            assert_eq!(
+                conversation_title(conversation_id, ctx).as_deref(),
+                Some("Second name"),
+                "the last pane name should win, not the one that started renaming first",
+            );
+        });
+    });
+}
+
+#[test]
 fn renaming_a_pane_without_an_open_agent_view_leaves_conversation_titles_alone() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
