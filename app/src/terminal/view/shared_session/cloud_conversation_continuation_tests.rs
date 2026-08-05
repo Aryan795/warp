@@ -15,7 +15,7 @@ use crate::ai::ambient_agents::task::{
     AgentConfigSnapshot, HarnessConfig, TaskPrincipalInfo, TaskStatusErrorCode, TaskStatusMessage,
 };
 use crate::ai::ambient_agents::{
-    AgentSource, AmbientAgentTask, AmbientAgentTaskId, AmbientAgentTaskState,
+    AgentSource, AmbientAgentTask, AmbientAgentTaskId, AmbientAgentTaskState, ExecutionLocation,
 };
 use crate::ai::blocklist::history_model::BlocklistAIHistoryModel;
 use crate::auth::user::TEST_USER_UID;
@@ -211,6 +211,7 @@ fn active_ambient_agent_task(task_id: AmbientAgentTaskId) -> AmbientAgentTask {
 trait AmbientAgentTaskTestExt {
     fn with_creator(self, creator_uid: &str) -> Self;
     fn with_harness(self, harness: Harness) -> Self;
+    fn with_execution_location(self, execution_location: ExecutionLocation) -> Self;
 }
 
 impl AmbientAgentTaskTestExt for AmbientAgentTask {
@@ -220,6 +221,11 @@ impl AmbientAgentTaskTestExt for AmbientAgentTask {
             uid: creator_uid.to_string(),
             display_name: None,
         });
+        self
+    }
+
+    fn with_execution_location(mut self, execution_location: ExecutionLocation) -> Self {
+        self.execution_location = Some(execution_location);
         self
     }
 
@@ -780,6 +786,7 @@ fn ambient_pane_model(task_id: AmbientAgentTaskId, status: SharedSessionStatus) 
 #[test]
 fn routing_is_local_for_non_cloud_pane() {
     App::test((), |mut app| async move {
+        app.add_singleton_model(|_| BlocklistAIHistoryModel::new_for_test());
         let model = TerminalModel::mock(None, None);
         app.update(|ctx| {
             assert_eq!(
@@ -877,6 +884,184 @@ fn routing_is_read_only_for_non_owner_disconnected_pane() {
             assert_eq!(
                 resolve_ai_query_routing(terminal_view_id, None, &model, ctx),
                 AIQueryRouting::UnconnectedReadOnly
+            );
+        });
+    });
+}
+
+#[test]
+fn routing_is_new_cloud_vm_for_pane_without_ambient_association() {
+    App::test((), |mut app| async move {
+        // A finished local-to-cloud handoff pane whose shared session ended: the pane no longer
+        // looks ambient, but its conversation still records the cloud task it belongs to.
+        let TestHandles {
+            terminal_view_id,
+            task_id,
+        } = setup_app(
+            &mut app,
+            AuthFixture::LoggedIn,
+            AIAgentHarness::Oz,
+            ConversationPermissionFixture::CurrentUserOwner,
+        );
+        let model = TerminalModel::mock(None, None);
+        app.update(|ctx| {
+            assert_eq!(
+                resolve_ai_query_routing(terminal_view_id, None, &model, ctx),
+                AIQueryRouting::NewCloudVm { task_id }
+            );
+        });
+    });
+}
+
+#[test]
+fn routing_is_read_only_for_non_owner_pane_without_ambient_association() {
+    App::test((), |mut app| async move {
+        let TestHandles {
+            terminal_view_id, ..
+        } = setup_app(
+            &mut app,
+            AuthFixture::LoggedIn,
+            AIAgentHarness::Oz,
+            ConversationPermissionFixture::OtherUserOwner,
+        );
+        let model = TerminalModel::mock(None, None);
+        app.update(|ctx| {
+            assert_eq!(
+                resolve_ai_query_routing(terminal_view_id, None, &model, ctx),
+                AIQueryRouting::UnconnectedReadOnly
+            );
+        });
+    });
+}
+
+#[test]
+fn routing_is_local_for_pane_whose_cloud_conversation_was_continued_locally() {
+    App::test((), |mut app| async move {
+        // `/continue-locally` and the Continue-locally CTA fork into a fresh conversation with no
+        // cloud association, so the pane it lands in keeps running locally.
+        let TestHandles {
+            terminal_view_id, ..
+        } = setup_app(
+            &mut app,
+            AuthFixture::LoggedIn,
+            AIAgentHarness::Oz,
+            ConversationPermissionFixture::CurrentUserOwner,
+        );
+        BlocklistAIHistoryModel::handle(&app).update(&mut app, |model, ctx| {
+            model.start_new_conversation(terminal_view_id, false, false, false, ctx);
+        });
+        let model = TerminalModel::mock(None, None);
+        app.update(|ctx| {
+            assert_eq!(
+                resolve_ai_query_routing(terminal_view_id, None, &model, ctx),
+                AIQueryRouting::Local
+            );
+        });
+    });
+}
+
+#[test]
+fn routing_is_local_for_local_orchestration_child_pane() {
+    App::test((), |mut app| async move {
+        // A `run_agents(local)` child executes on this machine even though the server tracks it as
+        // an ambient task, so its pane must keep routing locally.
+        let TestHandles {
+            terminal_view_id, ..
+        } = setup_app(
+            &mut app,
+            AuthFixture::LoggedIn,
+            AIAgentHarness::Oz,
+            ConversationPermissionFixture::CurrentUserOwner,
+        );
+        BlocklistAIHistoryModel::handle(&app).update(&mut app, |model, _| {
+            let conversation_id = model
+                .all_live_conversations_for_terminal_surface(terminal_view_id)
+                .next()
+                .map(|conversation| conversation.id())
+                .expect("conversation exists for terminal surface");
+            if let Some(conversation) = model.conversation_mut(&conversation_id) {
+                conversation.set_parent_agent_id("parent-run-id".to_string());
+            }
+        });
+        let model = TerminalModel::mock(None, None);
+        app.update(|ctx| {
+            assert_eq!(
+                resolve_ai_query_routing(terminal_view_id, None, &model, ctx),
+                AIQueryRouting::Local
+            );
+        });
+    });
+}
+
+/// Builds the pane state a finished local-to-cloud handoff leaves behind: a forked conversation
+/// rebound to the cloud run's conversation token, with no metadata snapshot for that token yet.
+fn setup_handoff_pane_without_conversation_metadata(
+    app: &mut App,
+    execution_location: ExecutionLocation,
+) -> TestHandles {
+    let _agent_management_guard = FeatureFlag::AgentManagementView.override_enabled(false);
+    app.add_singleton_model(|_| AuthStateProvider::new_for_test());
+    app.add_singleton_model(UserWorkspaces::default_mock);
+    app.add_singleton_model(|_| BlocklistAIHistoryModel::new_for_test());
+    app.add_singleton_model(AgentConversationsModel::new);
+
+    let terminal_view_id = EntityId::new();
+    let task_id = ambient_task_id(1);
+    AgentConversationsModel::handle(app).update(app, |model, _| {
+        model.insert_task_for_test(
+            ambient_agent_task(
+                task_id,
+                CONVERSATION_TOKEN,
+                AmbientAgentTaskState::Succeeded,
+            )
+            .with_creator(TEST_USER_UID)
+            .with_execution_location(execution_location),
+        );
+    });
+    BlocklistAIHistoryModel::handle(app).update(app, |model, ctx| {
+        let conversation_id =
+            model.start_new_conversation(terminal_view_id, false, false, false, ctx);
+        model.set_server_conversation_token_for_conversation(
+            conversation_id,
+            CONVERSATION_TOKEN.to_string(),
+        );
+        model.set_viewing_shared_session_for_conversation(conversation_id, true);
+    });
+
+    TestHandles {
+        terminal_view_id,
+        task_id,
+    }
+}
+
+#[test]
+fn routing_is_new_cloud_vm_for_handoff_pane_without_conversation_metadata() {
+    App::test((), |mut app| async move {
+        let TestHandles {
+            terminal_view_id,
+            task_id,
+        } = setup_handoff_pane_without_conversation_metadata(&mut app, ExecutionLocation::Remote);
+        let model = TerminalModel::mock(None, None);
+        app.update(|ctx| {
+            assert_eq!(
+                resolve_ai_query_routing(terminal_view_id, None, &model, ctx),
+                AIQueryRouting::NewCloudVm { task_id }
+            );
+        });
+    });
+}
+
+#[test]
+fn routing_is_local_for_pane_whose_run_executed_locally() {
+    App::test((), |mut app| async move {
+        let TestHandles {
+            terminal_view_id, ..
+        } = setup_handoff_pane_without_conversation_metadata(&mut app, ExecutionLocation::Local);
+        let model = TerminalModel::mock(None, None);
+        app.update(|ctx| {
+            assert_eq!(
+                resolve_ai_query_routing(terminal_view_id, None, &model, ctx),
+                AIQueryRouting::Local
             );
         });
     });
