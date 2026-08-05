@@ -8492,3 +8492,58 @@ fn send_review_comments_to_warp_tui_writes_prompt_to_pty() {
         );
     });
 }
+
+/// Sets up an alt-screen terminal that takes the wheel itself, hovers a link on
+/// it, and returns the view so a scroll can be dispatched against it.
+fn highlight_link_on_scroll_reporting_alt_screen(
+    view: &mut TerminalView,
+    ctx: &mut ViewContext<TerminalView>,
+) {
+    {
+        let mut model = view.model.lock();
+        model.set_mode(ansi::Mode::SwapScreen {
+            save_cursor_and_clear_screen: true,
+        });
+        model.set_mode(ansi::Mode::SgrMouse);
+        assert!(model.is_alt_screen_active());
+    }
+    assert!(
+        !should_intercept_scroll(&view.model.lock(), ctx),
+        "the app should take the wheel itself, so Warp forwards a mouse report"
+    );
+
+    let link = crate::terminal::model::grid::grid_handler::Link {
+        range: Point::new(1usize, 28usize)..=Point::new(1usize, 88usize),
+        is_empty: false,
+    };
+    view.highlighted_link.set(
+        GridHighlightedLink::Url(WithinModel::AltScreen(link)),
+        &mut view.model.lock(),
+    );
+    assert!(view.highlighted_link.is_some());
+}
+
+/// A highlighted link is anchored to alt-screen grid coordinates and the
+/// renderer paints its color and underline straight from it, so it has to go
+/// when a scroll moves the content it described. The wheel reaches an app that
+/// asked for mouse reports as a report rather than as arrow keys, and that path
+/// used to keep the highlight — leaving a link underline stranded over whatever
+/// the app scrolled into its place.
+#[test]
+fn alt_screen_scroll_drops_a_highlighted_link_when_the_app_handles_the_wheel() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let (_window_id, terminal) = add_window_with_id_and_terminal(&mut app, None);
+
+        terminal.update(&mut app, |view, ctx| {
+            highlight_link_on_scroll_reporting_alt_screen(view, ctx);
+
+            view.alt_scroll(1, Point::zero(), ctx);
+
+            assert!(
+                view.highlighted_link.is_none(),
+                "scrolling the alt screen must drop the link highlight anchored to it"
+            );
+        });
+    })
+}
