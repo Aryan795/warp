@@ -59,12 +59,15 @@ impl OfferVariant {
         }
     }
 
-    pub(crate) fn primary_label(self) -> &'static str {
+    /// `shows_credit_packs` is the same condition that decides whether the
+    /// buy-credits card renders (see [`OfferSlide::shows_credit_packs`]).
+    pub(crate) fn primary_label(self, shows_credit_packs: bool) -> &'static str {
         match self {
             OfferVariant::HeadStart => "Unlock the full AI experience",
             // Two of the three options are ways to use Warp with AI, so this
             // card is named for what actually distinguishes it: the plan.
-            OfferVariant::ChooseHowToStart => "Subscribe to a Warp plan",
+            OfferVariant::ChooseHowToStart if shows_credit_packs => "Subscribe to a Warp plan",
+            OfferVariant::ChooseHowToStart => "Use Warp with AI",
         }
     }
 
@@ -230,17 +233,26 @@ impl OfferSlide {
     }
 
     /// The credit packs to render, capped at [`MAX_CREDIT_PACKS`]. Empty when
-    /// the offer doesn't include the option or pricing hasn't arrived yet, in
-    /// which case the buy-credits card is not shown at all.
+    /// the offer doesn't include the option, the user is not in the experiment
+    /// arm that offers packs, or pricing hasn't arrived yet — in any of which
+    /// cases the buy-credits card is not shown at all.
+    ///
+    /// The pack list itself stays loaded in the model regardless of arm, so a
+    /// hidden pack list never gets confused with unavailable pricing.
     fn credit_packs<'a>(
         &self,
         variant: OfferVariant,
         app: &'a AppContext,
     ) -> &'a [CreditPackOption] {
-        if !variant.supports_credit_packs() {
+        let state = self.onboarding_state.as_ref(app);
+        if !variant.supports_credit_packs()
+            || !state
+                .choose_how_to_start_experiment_arm()
+                .shows_credit_packs()
+        {
             return &[];
         }
-        let packs = self.onboarding_state.as_ref(app).credit_pack_options();
+        let packs = state.credit_pack_options();
         &packs[..packs.len().min(MAX_CREDIT_PACKS)]
     }
 
@@ -372,7 +384,7 @@ impl OfferSlide {
         let shows_credit_packs = self.shows_credit_packs(variant, app);
         let primary = Self::render_option_card(
             appearance,
-            variant.primary_label(),
+            variant.primary_label(shows_credit_packs),
             variant.primary_description(shows_credit_packs),
             selected_choice == OfferChoice::Primary,
             Some("Recommended"),
@@ -763,11 +775,17 @@ impl OfferSlide {
     }
 
     fn send_action(&self, variant: OfferVariant, action: &str, ctx: &mut ViewContext<Self>) {
+        let experiment_arm = self
+            .onboarding_state
+            .as_ref(ctx)
+            .offer_experiment_arm()
+            .map(str::to_string);
         send_telemetry_from_ctx!(
             OnboardingEvent::OnboardingAction {
                 slide_name: variant.slide_name().to_string(),
                 action: action.to_string(),
                 account_class: Some(variant.account_class().to_string()),
+                experiment_arm,
             },
             ctx
         );

@@ -6,8 +6,8 @@ use ai::LLMId;
 use anyhow::Result;
 use onboarding::slides::OnboardingModelInfo;
 use onboarding::{
-    AgentOnboardingEvent, AgentOnboardingView, CreditPackOption, MockTelemetryContextProvider,
-    OfferVariant, SelectedSettings,
+    AgentOnboardingEvent, AgentOnboardingView, ChooseHowToStartExperimentArm, CreditPackOption,
+    MockTelemetryContextProvider, OfferVariant, SelectedSettings,
 };
 use pathfinder_color::ColorU;
 use rust_embed::RustEmbed;
@@ -54,6 +54,26 @@ fn demo_offer_variant() -> Option<OfferVariant> {
         other => {
             log::warn!("unknown {DEMO_OFFER_ENV} value: {other}");
             None
+        }
+    }
+}
+
+/// Env var standing in for the server's "Choose how to start" arm assignment,
+/// which the demo cannot fetch. Accepts `control`, `experiment`, or
+/// `unassigned`.
+const DEMO_EXPERIMENT_ARM_ENV: &str = "ONBOARDING_DEMO_EXPERIMENT_ARM";
+
+fn demo_experiment_arm() -> ChooseHowToStartExperimentArm {
+    let Ok(value) = std::env::var(DEMO_EXPERIMENT_ARM_ENV) else {
+        return ChooseHowToStartExperimentArm::default();
+    };
+    match value.as_str() {
+        "control" => ChooseHowToStartExperimentArm::Control,
+        "experiment" => ChooseHowToStartExperimentArm::Experiment,
+        "unassigned" => ChooseHowToStartExperimentArm::Unassigned,
+        other => {
+            log::warn!("unknown {DEMO_EXPERIMENT_ARM_ENV} value: {other}");
+            ChooseHowToStartExperimentArm::default()
         }
     }
 }
@@ -170,6 +190,7 @@ impl OnboardingMainView {
             view.start_onboarding(ctx);
             if let Some(variant) = demo_offer_variant() {
                 view.set_credit_pack_options(demo_credit_packs(), ctx);
+                view.set_choose_how_to_start_experiment_arm(demo_experiment_arm(), ctx);
                 view.show_post_auth_offer(variant, ctx);
             }
         });

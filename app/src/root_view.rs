@@ -76,6 +76,7 @@ use crate::pane_group::{NewTerminalOptions, PanesLayout};
 use crate::persistence::ModelEvent;
 use crate::pricing::{PricingInfoModel, PricingInfoModelEvent};
 use crate::server::cloud_objects::update_manager::UpdateManager;
+use crate::server::experiments::ServerExperiments;
 use crate::server::ids::{ServerId, SyncId};
 use crate::server::server_api::auth::UserAuthenticationError;
 use crate::server::server_api::{ServerApi, ServerApiProvider, ServerTime};
@@ -2425,7 +2426,13 @@ impl RootView {
             FtueAccountClass::FreeIcp | FtueAccountClass::FreeStandard => {
                 let variant = offer_variant_for_account_class(account_class)
                     .expect("free account classes have an offer");
+                // Read the assignment here rather than at view construction so
+                // an arm that arrived after startup still applies, then leave it
+                // frozen for this exposure.
+                let experiment_arm =
+                    ServerExperiments::as_ref(ctx).choose_how_to_start_experiment_arm();
                 context.onboarding_view.update(ctx, |view, ctx| {
+                    view.set_choose_how_to_start_experiment_arm(experiment_arm, ctx);
                     view.show_post_auth_offer(variant, ctx);
                 });
                 self.auth_onboarding_state = AuthOnboardingState::PostAuthOnboarding {
@@ -2471,6 +2478,7 @@ impl RootView {
                     }
                     .to_string(),
                     account_class: account_class.as_str().to_string(),
+                    experiment_arm: self.choose_how_to_start_experiment_arm(ctx),
                 },
                 ctx
             );
@@ -2480,11 +2488,34 @@ impl RootView {
         }
     }
 
+    /// The `experiment_arm` for the offer currently exposed, or `None` for
+    /// every other onboarding path, which the experiment does not cover.
+    fn choose_how_to_start_experiment_arm(&self, ctx: &AppContext) -> Option<String> {
+        let AuthOnboardingState::PostAuthOnboarding {
+            onboarding_view,
+            account_class: FtueAccountClass::FreeStandard,
+            ..
+        } = &self.auth_onboarding_state
+        else {
+            return None;
+        };
+        Some(
+            onboarding_view
+                .as_ref(ctx)
+                .choose_how_to_start_experiment_arm(ctx)
+                .telemetry_value()
+                .to_string(),
+        )
+    }
+
     fn complete_account_first(
         &mut self,
         completion: AccountFirstCompletion,
         ctx: &mut ViewContext<Self>,
     ) {
+        // Read before the state moves to `Terminal`, which drops the offer's
+        // assignment.
+        let experiment_arm = self.choose_how_to_start_experiment_arm(ctx);
         let target = match &self.auth_onboarding_state {
             AuthOnboardingState::LoginSlide {
                 login_slide_view,
@@ -2526,6 +2557,7 @@ impl RootView {
         send_telemetry_from_ctx!(
             OnboardingEvent::OnboardingCompleted {
                 completion_type: completion.completion_type().to_string(),
+                experiment_arm,
             },
             ctx
         );
@@ -2798,6 +2830,7 @@ impl RootView {
                             }
                             .to_string(),
                             account_class: account_class.as_str().to_string(),
+                            experiment_arm: self.choose_how_to_start_experiment_arm(ctx),
                         },
                         ctx
                     );

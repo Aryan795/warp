@@ -1,9 +1,10 @@
 use ai::LLMId;
 use onboarding::{
-    AgentOnboardingView, OfferVariant, OnboardingAuthState, OnboardingIntention, SelectedSettings,
-    UICustomizationSettings,
+    AgentOnboardingView, ChooseHowToStartExperimentArm, OfferVariant, OnboardingAuthState,
+    OnboardingIntention, SelectedSettings, UICustomizationSettings,
 };
 use warp_core::features::FeatureFlag;
+use warp_core::telemetry::testing::MockTelemetryContextProvider;
 use warp_core::user_preferences::GetUserPreferences as _;
 use warpui::elements::Empty;
 use warpui::platform::WindowStyle;
@@ -17,17 +18,18 @@ use super::{
     has_completed_local_onboarding, offer_variant_for_account_class,
     refresh_pending_onboarding_choices, requires_post_onboarding_login,
 };
-use crate::GlobalResourceHandles;
 use crate::appearance::Appearance;
 use crate::auth::AuthStateProvider;
 use crate::auth::auth_manager::AuthManager;
 use crate::auth::login_slide::{LoginSlideSource, LoginSlideView};
+use crate::server::experiments::{ServerExperiment, ServerExperiments};
 use crate::server::server_api::ServerApiProvider;
 use crate::settings_view::keybindings::KeybindingChangedNotifier;
 use crate::test_util::settings::initialize_settings_for_tests;
 use crate::themes::onboarding_theme_picker_themes;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::workspaces::workspace::FtueAccountClass;
+use crate::{GlobalResourceHandles, GlobalResourceHandlesProvider};
 
 fn initialize_app(app: &mut App) {
     app.update(crate::settings::init_and_register_user_preferences);
@@ -434,5 +436,105 @@ fn test_show_needs_sso_link_view_blocks_pre_terminal_onboarding_states() {
             marker,
             "PostAuthOnboarding",
         );
+    });
+}
+
+struct OnboardingHarnessView {
+    onboarding_view: ViewHandle<AgentOnboardingView>,
+}
+
+impl Entity for OnboardingHarnessView {
+    type Event = ();
+}
+
+impl View for OnboardingHarnessView {
+    fn ui_name() -> &'static str {
+        "OnboardingHarnessView"
+    }
+
+    fn render(&self, _app: &AppContext) -> Box<dyn Element> {
+        Empty::new().finish()
+    }
+}
+
+impl TypedActionView for OnboardingHarnessView {
+    type Action = ();
+}
+
+/// REV-1939: the onboarding view is constructed at app start, long before the
+/// server reports an assignment, so `resolve_account_first_post_auth` reads the
+/// arm immediately before showing the offer — and then leaves that exposure on
+/// the arm it was shown with, even if a later refresh disagrees.
+#[test]
+fn the_offer_snapshots_the_latest_arm_and_then_freezes_it() {
+    // The offer slide only exists in the account-first flow.
+    let _account_first = FeatureFlag::AccountFirstOnboarding.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_settings_for_tests(&mut app);
+        app.update(MockTelemetryContextProvider::register);
+        app.add_singleton_model(|_| Appearance::mock());
+        app.add_singleton_model(|_| KeybindingChangedNotifier::new());
+        let global_resources = GlobalResourceHandles::mock(&mut app);
+        app.add_singleton_model(|_| GlobalResourceHandlesProvider::new(global_resources));
+        let experiments =
+            app.add_singleton_model(|ctx| ServerExperiments::new_from_cache(vec![], ctx));
+
+        // The view predates any assignment, exactly as it does in the app.
+        let (_, harness) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
+            let onboarding_view = ctx.add_typed_action_view(|ctx| {
+                AgentOnboardingView::new(
+                    onboarding_theme_picker_themes(),
+                    false,
+                    Vec::new(),
+                    LLMId::from("auto"),
+                    false,
+                    false,
+                    OnboardingAuthState::FreeUser,
+                    ctx,
+                )
+            });
+            OnboardingHarnessView { onboarding_view }
+        });
+        let onboarding_view = app.read(|ctx| harness.as_ref(ctx).onboarding_view.clone());
+
+        experiments.update(&mut app, |experiments, ctx| {
+            experiments.apply_latest_state(
+                vec![ServerExperiment::OnboardingChooseHowToStartThreeOptions],
+                ctx,
+            );
+        });
+
+        // Mirrors the offer-entry sequence in `resolve_account_first_post_auth`.
+        let arm =
+            app.read(|ctx| ServerExperiments::as_ref(ctx).choose_how_to_start_experiment_arm());
+        onboarding_view.update(&mut app, |view, ctx| {
+            view.set_choose_how_to_start_experiment_arm(arm, ctx);
+            view.show_post_auth_offer(OfferVariant::ChooseHowToStart, ctx);
+        });
+        app.read(|ctx| {
+            assert_eq!(
+                onboarding_view
+                    .as_ref(ctx)
+                    .choose_how_to_start_experiment_arm(ctx),
+                ChooseHowToStartExperimentArm::Experiment
+            );
+        });
+
+        // A later refresh must not move the arm underneath a live exposure.
+        experiments.update(&mut app, |experiments, ctx| {
+            experiments.apply_latest_state(
+                vec![ServerExperiment::OnboardingChooseHowToStartControl],
+                ctx,
+            );
+        });
+        app.read(|ctx| {
+            assert_eq!(
+                onboarding_view
+                    .as_ref(ctx)
+                    .choose_how_to_start_experiment_arm(ctx),
+                ChooseHowToStartExperimentArm::Experiment
+            );
+        });
     });
 }

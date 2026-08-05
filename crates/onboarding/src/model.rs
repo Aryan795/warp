@@ -163,6 +163,36 @@ impl std::fmt::Display for AiAccessChoice {
     }
 }
 
+/// The server-assigned arm of the "Choose how to start" option-count
+/// experiment.
+///
+/// `Unassigned` is the safe default: the offer renders its historical
+/// two-option layout unless the user is explicitly in the experiment arm.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ChooseHowToStartExperimentArm {
+    #[default]
+    Unassigned,
+    Control,
+    Experiment,
+}
+
+impl ChooseHowToStartExperimentArm {
+    /// The stable identifier reported as `experiment_arm` in onboarding
+    /// telemetry.
+    pub fn telemetry_value(self) -> &'static str {
+        match self {
+            ChooseHowToStartExperimentArm::Unassigned => "unassigned",
+            ChooseHowToStartExperimentArm::Control => "control",
+            ChooseHowToStartExperimentArm::Experiment => "experiment",
+        }
+    }
+
+    /// Whether this arm may render the one-time credit-pack option.
+    pub fn shows_credit_packs(self) -> bool {
+        matches!(self, ChooseHowToStartExperimentArm::Experiment)
+    }
+}
+
 /// A one-time add-on credit pack offered on the "Choose how to start" slide.
 ///
 /// Display-only data: the app crate builds these from the server's pricing
@@ -296,6 +326,13 @@ pub(crate) struct OnboardingStateModel {
     selected_credit_pack_index: usize,
     /// Progress of a credit purchase started from the offer slide.
     credit_purchase_state: CreditPurchaseState,
+    /// The denomination of the purchase currently in flight, so the completion
+    /// event reports what was actually bought rather than whatever is selected
+    /// by the time the credits land.
+    in_flight_purchase_credits: Option<i32>,
+    /// The server-assigned arm for the "Choose how to start" offer, snapshotted
+    /// by the app immediately before the offer is shown.
+    choose_how_to_start_experiment_arm: ChooseHowToStartExperimentArm,
 }
 
 impl OnboardingStateModel {
@@ -324,11 +361,36 @@ impl OnboardingStateModel {
             credit_pack_options: Vec::new(),
             selected_credit_pack_index: 0,
             credit_purchase_state: CreditPurchaseState::default(),
+            in_flight_purchase_credits: None,
+            choose_how_to_start_experiment_arm: ChooseHowToStartExperimentArm::default(),
         }
     }
 
     pub(crate) fn auth_state(&self) -> OnboardingAuthState {
         self.auth_state
+    }
+
+    pub(crate) fn choose_how_to_start_experiment_arm(&self) -> ChooseHowToStartExperimentArm {
+        self.choose_how_to_start_experiment_arm
+    }
+
+    pub(crate) fn set_choose_how_to_start_experiment_arm(
+        &mut self,
+        arm: ChooseHowToStartExperimentArm,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if self.choose_how_to_start_experiment_arm == arm {
+            return;
+        }
+        self.choose_how_to_start_experiment_arm = arm;
+        ctx.notify();
+    }
+
+    /// The `experiment_arm` to report on this offer's telemetry, or `None` for
+    /// offers and slides the experiment does not cover.
+    pub(crate) fn offer_experiment_arm(&self) -> Option<&'static str> {
+        matches!(self.offer_variant, Some(OfferVariant::ChooseHowToStart))
+            .then(|| self.choose_how_to_start_experiment_arm.telemetry_value())
     }
 
     pub(crate) fn offer_variant(&self) -> Option<OfferVariant> {
@@ -547,10 +609,41 @@ impl OnboardingStateModel {
             return;
         };
         self.credit_purchase_state = CreditPurchaseState::Purchasing;
+        self.in_flight_purchase_credits = Some(pack.credits);
+        if let Some(event) = self.credit_purchase_event(pack.credits, true) {
+            send_telemetry_from_ctx!(event, ctx);
+        }
         ctx.emit(OnboardingStateEvent::CreditPurchaseRequested {
             credits: pack.credits,
         });
         ctx.notify();
+    }
+
+    /// The purchase funnel event for the offer currently on screen, or `None`
+    /// for an offer the credit-pack option never appears on.
+    fn credit_purchase_event(&self, credits: i32, started: bool) -> Option<OnboardingEvent> {
+        let variant = self.offer_variant?;
+        if !variant.supports_credit_packs() {
+            return None;
+        }
+        let source_slide = variant.slide_name().to_string();
+        let account_class = variant.account_class().to_string();
+        let experiment_arm = self.offer_experiment_arm().map(str::to_string);
+        Some(if started {
+            OnboardingEvent::OnboardingCreditPurchaseStarted {
+                source_slide,
+                account_class,
+                credits,
+                experiment_arm,
+            }
+        } else {
+            OnboardingEvent::OnboardingCreditPurchaseCompleted {
+                source_slide,
+                account_class,
+                credits,
+                experiment_arm,
+            }
+        })
     }
 
     /// The purchase needs browser checkout (no saved payment method).
@@ -585,6 +678,11 @@ impl OnboardingStateModel {
             return;
         }
         self.credit_purchase_state = CreditPurchaseState::Idle;
+        if let Some(credits) = self.in_flight_purchase_credits.take()
+            && let Some(event) = self.credit_purchase_event(credits, false)
+        {
+            send_telemetry_from_ctx!(event, ctx);
+        }
         ctx.emit(OnboardingStateEvent::CreditPurchaseCompleted);
         ctx.notify();
     }
@@ -596,6 +694,7 @@ impl OnboardingStateModel {
             return;
         }
         self.credit_purchase_state = CreditPurchaseState::Failed;
+        self.in_flight_purchase_credits = None;
         ctx.notify();
     }
 
@@ -1225,91 +1324,38 @@ impl OnboardingStateModel {
         self.step = step;
 
         let account_first = warp_core::features::FeatureFlag::AccountFirstOnboarding.is_enabled();
-        match step {
+        let slide_name = match step {
             OnboardingStep::Intro => {
-                send_telemetry_from_ctx!(
-                    OnboardingEvent::SlideViewed {
-                        slide_name: if account_first { "welcome" } else { "intro" }.to_string(),
-                    },
-                    ctx
-                );
+                if account_first {
+                    "welcome"
+                } else {
+                    "intro"
+                }
             }
-            OnboardingStep::PostAuthOffer => {
-                let variant = self
-                    .offer_variant
-                    .expect("offer variant is selected before entering the post-auth offer");
-                send_telemetry_from_ctx!(
-                    OnboardingEvent::SlideViewed {
-                        slide_name: variant.slide_name().to_string(),
-                    },
-                    ctx
-                );
-            }
-            OnboardingStep::ThemePicker => {
-                send_telemetry_from_ctx!(
-                    OnboardingEvent::SlideViewed {
-                        slide_name: "theme_picker".to_string(),
-                    },
-                    ctx
-                );
-            }
-            OnboardingStep::Intention => {
-                send_telemetry_from_ctx!(
-                    OnboardingEvent::SlideViewed {
-                        slide_name: "intention".to_string(),
-                    },
-                    ctx
-                );
-            }
-            OnboardingStep::AiSetup => {
-                send_telemetry_from_ctx!(
-                    OnboardingEvent::SlideViewed {
-                        slide_name: "ai_setup".to_string(),
-                    },
-                    ctx
-                );
-            }
-            OnboardingStep::AiAccess => {
-                send_telemetry_from_ctx!(
-                    OnboardingEvent::SlideViewed {
-                        slide_name: "ai_access".to_string(),
-                    },
-                    ctx
-                );
-            }
-            OnboardingStep::Customize => {
-                send_telemetry_from_ctx!(
-                    OnboardingEvent::SlideViewed {
-                        slide_name: "customize".to_string(),
-                    },
-                    ctx
-                );
-            }
-            OnboardingStep::Agent => {
-                send_telemetry_from_ctx!(
-                    OnboardingEvent::SlideViewed {
-                        slide_name: "agent".to_string(),
-                    },
-                    ctx
-                );
-            }
-            OnboardingStep::ThirdParty => {
-                send_telemetry_from_ctx!(
-                    OnboardingEvent::SlideViewed {
-                        slide_name: "third_party".to_string(),
-                    },
-                    ctx
-                );
-            }
-            OnboardingStep::Project => {
-                send_telemetry_from_ctx!(
-                    OnboardingEvent::SlideViewed {
-                        slide_name: "project".to_string(),
-                    },
-                    ctx
-                );
-            }
-        }
+            OnboardingStep::PostAuthOffer => self
+                .offer_variant
+                .expect("offer variant is selected before entering the post-auth offer")
+                .slide_name(),
+            OnboardingStep::ThemePicker => "theme_picker",
+            OnboardingStep::Intention => "intention",
+            OnboardingStep::AiSetup => "ai_setup",
+            OnboardingStep::AiAccess => "ai_access",
+            OnboardingStep::Customize => "customize",
+            OnboardingStep::Agent => "agent",
+            OnboardingStep::ThirdParty => "third_party",
+            OnboardingStep::Project => "project",
+        };
+        let experiment_arm = matches!(step, OnboardingStep::PostAuthOffer)
+            .then(|| self.offer_experiment_arm())
+            .flatten()
+            .map(str::to_string);
+        send_telemetry_from_ctx!(
+            OnboardingEvent::SlideViewed {
+                slide_name: slide_name.to_string(),
+                experiment_arm,
+            },
+            ctx
+        );
 
         ctx.emit(OnboardingStateEvent::SelectedSlideChanged);
         ctx.notify();
@@ -1405,6 +1451,7 @@ impl OnboardingStateModel {
                 slide_name: slide_name.to_string(),
                 action: action.to_string(),
                 account_class: None,
+                experiment_arm: self.offer_experiment_arm().map(str::to_string),
             },
             ctx
         );

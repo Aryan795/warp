@@ -34,6 +34,8 @@ pub enum Experiment {
     MultiArmReverseAiTrialFiveHundredRequests,
     MultiArmReverseAiTrialOneThousandFiveHundredRequests,
     MultiArmReverseAiTrialOneThousandRequests,
+    OnboardingChooseHowToStartControl,
+    OnboardingChooseHowToStartThreeOptions,
     OverlimitAgentModeControl,
     OverlimitAgentModeGradualRolloutExperiment,
     PromptSuggestionsViaMaaControl,
@@ -74,3 +76,7 @@ pub enum Experiment {
     #[cynic(fallback)]
     Other(String),
 }
+
+#[cfg(test)]
+#[path = "experiment_tests.rs"]
+mod tests;

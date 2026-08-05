@@ -12,8 +12,14 @@ use super::{
     MAX_CREDIT_PACKS, OfferChoice, OfferSlide, OfferSlideAction, OfferVariant, OnboardingSlide as _,
 };
 use crate::model::{
-    CreditPackOption, CreditPurchaseState, OnboardingAuthState, OnboardingStateModel,
+    ChooseHowToStartExperimentArm, CreditPackOption, CreditPurchaseState, OnboardingAuthState,
+    OnboardingStateModel,
 };
+
+/// The pre-#14605 copy the control arm restores, asserted byte-for-byte so a
+/// later copy edit can't silently change what the control measures.
+const CONTROL_PRIMARY_LABEL: &str = "Use Warp with AI";
+const CONTROL_PRIMARY_DESCRIPTION: &str = "Warp Agent works locally or in the cloud with frontier and OSS models. Proactively fix terminal errors, implement changes, and ship verified code.";
 
 /// A do-nothing view used only to observe the events an [`OfferSlide`] emits.
 struct EventObserver {
@@ -81,7 +87,11 @@ fn head_start_copy_and_telemetry_names_match_spec() {
         variant.subtitle(),
         Some("Your account includes AI usage to help you get started.")
     );
-    assert_eq!(variant.primary_label(), "Unlock the full AI experience");
+    assert_eq!(
+        variant.primary_label(false),
+        "Unlock the full AI experience"
+    );
+    assert_eq!(variant.primary_label(true), "Unlock the full AI experience");
     assert_eq!(
         variant.primary_description(false),
         "Get more monthly usage, expanded cloud agent access, and collaboration features."
@@ -110,7 +120,8 @@ fn choose_how_to_start_copy_and_telemetry_names_match_spec() {
 
     assert_eq!(variant.title(), "Choose how to start");
     assert_eq!(variant.subtitle(), None);
-    assert_eq!(variant.primary_label(), "Subscribe to a Warp plan");
+    assert_eq!(variant.primary_label(true), "Subscribe to a Warp plan");
+    assert_eq!(variant.primary_label(false), CONTROL_PRIMARY_LABEL);
     assert_eq!(
         variant.primary_description(true),
         "Warp Agent works locally or in the cloud with frontier and OSS models. Get monthly credits at the best value, and save 20% on add-on credits with any Build plan."
@@ -149,10 +160,7 @@ fn subscribe_copy_frames_add_on_credits_as_a_saving() {
 fn subscribe_copy_drops_the_add_on_line_when_no_packs_are_shown() {
     let without_packs = OfferVariant::ChooseHowToStart.primary_description(false);
 
-    assert_eq!(
-        without_packs,
-        "Warp Agent works locally or in the cloud with frontier and OSS models. Proactively fix terminal errors, implement changes, and ship verified code."
-    );
+    assert_eq!(without_packs, CONTROL_PRIMARY_DESCRIPTION);
     assert!(!without_packs.contains("add-on credits"));
 
     // The head-start offer never shows packs and is unaffected either way.
@@ -182,6 +190,10 @@ fn buy_credits_is_hidden_until_packs_are_available_and_on_the_head_start_offer()
 
         // Pricing hasn't arrived yet, so there is nothing to buy.
         onboarding_state.update(&mut app, |model, ctx| {
+            model.set_choose_how_to_start_experiment_arm(
+                ChooseHowToStartExperimentArm::Experiment,
+                ctx,
+            );
             model.show_post_auth_offer(OfferVariant::ChooseHowToStart, ctx);
         });
         app.read(|ctx| {
@@ -218,6 +230,10 @@ fn buy_credits_is_hidden_until_packs_are_available_and_on_the_head_start_offer()
             move |_| OfferSlide::new(head_start_state)
         });
         head_start_state.update(&mut app, |model, ctx| {
+            model.set_choose_how_to_start_experiment_arm(
+                ChooseHowToStartExperimentArm::Experiment,
+                ctx,
+            );
             model.show_post_auth_offer(OfferVariant::HeadStart, ctx);
             model.set_credit_pack_options(credit_packs(4), ctx);
         });
@@ -243,6 +259,10 @@ fn arrow_keys_move_through_all_three_options() {
             move |_| OfferSlide::new(onboarding_state)
         });
         onboarding_state.update(&mut app, |model, ctx| {
+            model.set_choose_how_to_start_experiment_arm(
+                ChooseHowToStartExperimentArm::Experiment,
+                ctx,
+            );
             model.show_post_auth_offer(OfferVariant::ChooseHowToStart, ctx);
             model.set_credit_pack_options(credit_packs(4), ctx);
         });
@@ -281,6 +301,10 @@ fn get_warping_buys_credits_when_the_credit_option_is_selected() {
             move |_| OfferSlide::new(onboarding_state)
         });
         onboarding_state.update(&mut app, |model, ctx| {
+            model.set_choose_how_to_start_experiment_arm(
+                ChooseHowToStartExperimentArm::Experiment,
+                ctx,
+            );
             model.show_post_auth_offer(OfferVariant::ChooseHowToStart, ctx);
             model.set_credit_pack_options(credit_packs(4), ctx);
         });
@@ -337,6 +361,10 @@ fn set_up_later_still_works_while_checkout_is_pending() {
             move |_| OfferSlide::new(onboarding_state)
         });
         onboarding_state.update(&mut app, |model, ctx| {
+            model.set_choose_how_to_start_experiment_arm(
+                ChooseHowToStartExperimentArm::Experiment,
+                ctx,
+            );
             model.show_post_auth_offer(OfferVariant::ChooseHowToStart, ctx);
             model.set_credit_pack_options(credit_packs(4), ctx);
             model.request_credit_purchase(ctx);
@@ -378,6 +406,10 @@ fn more_packs_than_the_render_cap_are_truncated() {
             move |_| OfferSlide::new(onboarding_state)
         });
         onboarding_state.update(&mut app, |model, ctx| {
+            model.set_choose_how_to_start_experiment_arm(
+                ChooseHowToStartExperimentArm::Experiment,
+                ctx,
+            );
             model.show_post_auth_offer(OfferVariant::ChooseHowToStart, ctx);
             model.set_credit_pack_options(credit_packs(MAX_CREDIT_PACKS + 3), ctx);
         });
@@ -391,6 +423,199 @@ fn more_packs_than_the_render_cap_are_truncated() {
                 MAX_CREDIT_PACKS
             );
             drop(slide.render(ctx));
+        });
+    });
+}
+
+/// REV-1939: the control and unassigned arms restore the historical two-option
+/// screen even when purchasable packs are loaded, so pack availability alone
+/// can never leak the third option into the control measurement.
+#[test]
+fn control_and_unassigned_arms_render_the_historical_two_options() {
+    for arm in [
+        ChooseHowToStartExperimentArm::Control,
+        ChooseHowToStartExperimentArm::Unassigned,
+    ] {
+        App::test((), move |mut app| async move {
+            app.add_singleton_model(|_| Appearance::mock());
+            app.update(MockTelemetryContextProvider::register);
+            let onboarding_state = add_onboarding_state(&mut app);
+            let (_, slide) = app.add_window(WindowStyle::NotStealFocus, {
+                let onboarding_state = onboarding_state.clone();
+                move |_| OfferSlide::new(onboarding_state)
+            });
+            onboarding_state.update(&mut app, |model, ctx| {
+                model.set_choose_how_to_start_experiment_arm(arm, ctx);
+                model.show_post_auth_offer(OfferVariant::ChooseHowToStart, ctx);
+                model.set_credit_pack_options(credit_packs(4), ctx);
+            });
+
+            app.read(|ctx| {
+                let slide = slide.as_ref(ctx);
+                assert_eq!(
+                    slide.choices(OfferVariant::ChooseHowToStart, ctx),
+                    vec![OfferChoice::Primary, OfferChoice::SetUpLater],
+                    "{arm:?} must not offer credit packs"
+                );
+                assert!(
+                    slide
+                        .credit_packs(OfferVariant::ChooseHowToStart, ctx)
+                        .is_empty()
+                );
+                assert!(!slide.shows_credit_packs(OfferVariant::ChooseHowToStart, ctx));
+                drop(slide.render(ctx));
+            });
+
+            // The packs stay loaded in the model: hiding them is an arm
+            // decision, not a pricing outcome.
+            onboarding_state.read(&app, |model, _| {
+                assert_eq!(model.credit_pack_options().len(), 4);
+            });
+
+            let shows_packs = app.read(|ctx| {
+                slide
+                    .as_ref(ctx)
+                    .shows_credit_packs(OfferVariant::ChooseHowToStart, ctx)
+            });
+            assert_eq!(
+                OfferVariant::ChooseHowToStart.primary_label(shows_packs),
+                CONTROL_PRIMARY_LABEL
+            );
+            assert_eq!(
+                OfferVariant::ChooseHowToStart.primary_description(shows_packs),
+                CONTROL_PRIMARY_DESCRIPTION
+            );
+
+            // Arrow keys move straight between the two rendered options.
+            slide.update(&mut app, |slide, ctx| slide.on_down(ctx));
+            assert_eq!(
+                slide.read(&app, |slide, _| slide.selected_choice),
+                OfferChoice::SetUpLater
+            );
+            slide.update(&mut app, |slide, ctx| slide.on_up(ctx));
+            assert_eq!(
+                slide.read(&app, |slide, _| slide.selected_choice),
+                OfferChoice::Primary
+            );
+        });
+    }
+}
+
+/// REV-1939: an experiment-arm user with no purchasable packs gets the same
+/// safe two-option fallback, so unavailable pricing never renders a broken
+/// three-option screen.
+#[test]
+fn the_experiment_arm_falls_back_to_two_options_without_packs() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|_| Appearance::mock());
+        app.update(MockTelemetryContextProvider::register);
+        let onboarding_state = add_onboarding_state(&mut app);
+        let (_, slide) = app.add_window(WindowStyle::NotStealFocus, {
+            let onboarding_state = onboarding_state.clone();
+            move |_| OfferSlide::new(onboarding_state)
+        });
+        onboarding_state.update(&mut app, |model, ctx| {
+            model.set_choose_how_to_start_experiment_arm(
+                ChooseHowToStartExperimentArm::Experiment,
+                ctx,
+            );
+            model.show_post_auth_offer(OfferVariant::ChooseHowToStart, ctx);
+        });
+
+        app.read(|ctx| {
+            let slide = slide.as_ref(ctx);
+            assert_eq!(
+                slide.choices(OfferVariant::ChooseHowToStart, ctx),
+                vec![OfferChoice::Primary, OfferChoice::SetUpLater]
+            );
+            drop(slide.render(ctx));
+        });
+
+        // The user stays assigned to the experiment even while its UI falls
+        // back, so the arm is never relabelled as control.
+        onboarding_state.read(&app, |model, _| {
+            assert_eq!(model.offer_experiment_arm(), Some("experiment"));
+        });
+    });
+}
+
+/// REV-1939: if the arm changes after the buy-credits option was selected, the
+/// selection falls back to the primary rather than pointing at a hidden card.
+#[test]
+fn losing_the_experiment_arm_falls_back_to_the_primary_selection() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|_| Appearance::mock());
+        app.update(MockTelemetryContextProvider::register);
+        let onboarding_state = add_onboarding_state(&mut app);
+        let (_, slide) = app.add_window(WindowStyle::NotStealFocus, {
+            let onboarding_state = onboarding_state.clone();
+            move |_| OfferSlide::new(onboarding_state)
+        });
+        onboarding_state.update(&mut app, |model, ctx| {
+            model.set_choose_how_to_start_experiment_arm(
+                ChooseHowToStartExperimentArm::Experiment,
+                ctx,
+            );
+            model.show_post_auth_offer(OfferVariant::ChooseHowToStart, ctx);
+            model.set_credit_pack_options(credit_packs(4), ctx);
+        });
+        slide.update(&mut app, |slide, ctx| {
+            slide.handle_action(&OfferSlideAction::SelectBuyCredits, ctx)
+        });
+
+        onboarding_state.update(&mut app, |model, ctx| {
+            model.set_choose_how_to_start_experiment_arm(
+                ChooseHowToStartExperimentArm::Control,
+                ctx,
+            );
+        });
+
+        app.read(|ctx| {
+            assert_eq!(
+                slide
+                    .as_ref(ctx)
+                    .effective_choice(OfferVariant::ChooseHowToStart, ctx),
+                OfferChoice::Primary
+            );
+        });
+    });
+}
+
+/// REV-1939: the purchase funnel reports the denomination that was actually
+/// bought, and an abandoned checkout never reports a completion.
+#[test]
+fn credit_purchase_completion_is_only_reported_for_an_accepted_purchase() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|_| Appearance::mock());
+        app.update(MockTelemetryContextProvider::register);
+        let onboarding_state = add_onboarding_state(&mut app);
+        onboarding_state.update(&mut app, |model, ctx| {
+            model.set_choose_how_to_start_experiment_arm(
+                ChooseHowToStartExperimentArm::Experiment,
+                ctx,
+            );
+            model.show_post_auth_offer(OfferVariant::ChooseHowToStart, ctx);
+            model.set_credit_pack_options(credit_packs(4), ctx);
+            model.request_credit_purchase(ctx);
+            model.on_credit_checkout_opened(ctx);
+        });
+
+        // The server has not granted credits yet, so nothing completes.
+        onboarding_state.update(&mut app, |model, ctx| {
+            model.on_credit_availability_observed(false, ctx);
+        });
+        onboarding_state.read(&app, |model, _| {
+            assert_eq!(
+                model.credit_purchase_state(),
+                CreditPurchaseState::AwaitingCheckout
+            );
+        });
+
+        onboarding_state.update(&mut app, |model, ctx| {
+            model.on_credit_availability_observed(true, ctx);
+        });
+        onboarding_state.read(&app, |model, _| {
+            assert_eq!(model.credit_purchase_state(), CreditPurchaseState::Idle);
         });
     });
 }

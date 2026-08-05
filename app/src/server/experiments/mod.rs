@@ -46,6 +46,8 @@ pub enum ServerExperiment {
     OzMultiHarnessExperiment,
     MacosRunnersControl,
     MacosRunnersExperiment,
+    OnboardingChooseHowToStartControl,
+    OnboardingChooseHowToStartThreeOptions,
     /// A test-only experiment.
     /// Does not correspond to a real server-side experiment.
     #[cfg(test)]
@@ -133,6 +135,11 @@ impl ServerExperiment {
             }
             Self::MacosRunnersControl | Self::MacosRunnersExperiment => {
                 // Runner availability is gated directly by the experiment arm.
+            }
+            Self::OnboardingChooseHowToStartControl
+            | Self::OnboardingChooseHowToStartThreeOptions => {
+                // The onboarding offer reads the assigned arm directly, which a
+                // feature flag could not distinguish from being unassigned.
             }
             #[cfg(test)]
             Self::TestExperiment => {

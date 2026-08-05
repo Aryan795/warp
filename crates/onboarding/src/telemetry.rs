@@ -21,6 +21,18 @@ fn with_flow_version(mut payload: Value) -> Value {
     payload
 }
 
+/// Adds `experiment_arm` only when the event belongs to an experiment-assigned
+/// offer, so unrelated onboarding events keep their exact existing payloads
+/// instead of gaining a null key.
+fn with_experiment_arm(mut payload: Value, experiment_arm: &Option<String>) -> Value {
+    if let Some(experiment_arm) = experiment_arm
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.insert("experiment_arm".to_string(), json!(experiment_arm));
+    }
+    payload
+}
+
 /// Telemetry events for the onboarding flow.
 #[derive(Clone, Debug, Serialize, Deserialize, EnumDiscriminants)]
 #[strum_discriminants(derive(EnumIter))]
@@ -31,12 +43,11 @@ pub enum OnboardingEvent {
     /// A specific slide was viewed.
     SlideViewed {
         slide_name: String,
+        /// The "Choose how to start" experiment arm, for the offer slide only.
+        experiment_arm: Option<String>,
     },
     /// A setting was changed during onboarding.
-    SettingChanged {
-        setting: String,
-        value: String,
-    },
+    SettingChanged { setting: String, value: String },
     /// The onboarding slides were completed.
     OnboardingSlidesCompleted {
         intention: String,
@@ -54,15 +65,11 @@ pub enum OnboardingEvent {
     /// The user selected a folder.
     FolderSelected,
     /// A callout was displayed.
-    CalloutDisplayed {
-        callout: String,
-    },
+    CalloutDisplayed { callout: String },
     /// The user clicked next on a callout.
     CalloutNext,
     /// The user completed the callout flow.
-    CalloutCompleted {
-        completion_type: String,
-    },
+    CalloutCompleted { completion_type: String },
     /// The user navigated to the next slide.
     SlideNavigatedNext,
     /// The user navigated to the previous slide.
@@ -82,6 +89,7 @@ pub enum OnboardingEvent {
         slide_name: String,
         action: String,
         account_class: Option<String>,
+        experiment_arm: Option<String>,
     },
     OnboardingAuthCompleted {
         account_class: String,
@@ -92,13 +100,31 @@ pub enum OnboardingEvent {
     OnboardingUpgradeStarted {
         source_slide: String,
         account_class: String,
+        experiment_arm: Option<String>,
     },
     OnboardingUpgradeCompleted {
         source_slide: String,
         account_class: String,
+        experiment_arm: Option<String>,
+    },
+    /// A one-time credit-pack purchase was started from an offer slide.
+    OnboardingCreditPurchaseStarted {
+        source_slide: String,
+        account_class: String,
+        credits: i32,
+        experiment_arm: Option<String>,
+    },
+    /// The purchased credits landed on the account. Abandoned or rejected
+    /// checkout never reaches this event.
+    OnboardingCreditPurchaseCompleted {
+        source_slide: String,
+        account_class: String,
+        credits: i32,
+        experiment_arm: Option<String>,
     },
     OnboardingCompleted {
         completion_type: String,
+        experiment_arm: Option<String>,
     },
 }
 
@@ -126,6 +152,12 @@ impl TelemetryEvent for OnboardingEvent {
             OnboardingEvent::OnboardingAuthCompleted { .. } => "onboarding_auth_completed",
             OnboardingEvent::OnboardingUpgradeStarted { .. } => "onboarding_upgrade_started",
             OnboardingEvent::OnboardingUpgradeCompleted { .. } => "onboarding_upgrade_completed",
+            OnboardingEvent::OnboardingCreditPurchaseStarted { .. } => {
+                "onboarding_credit_purchase_started"
+            }
+            OnboardingEvent::OnboardingCreditPurchaseCompleted { .. } => {
+                "onboarding_credit_purchase_completed"
+            }
             OnboardingEvent::OnboardingCompleted { .. } => "onboarding_completed",
         }
     }
@@ -138,9 +170,15 @@ impl TelemetryEvent for OnboardingEvent {
                     "entrypoint": "native_app",
                 })
             }),
-            OnboardingEvent::SlideViewed { slide_name } => Some(with_flow_version(json!({
-                "slide_name": slide_name,
-            }))),
+            OnboardingEvent::SlideViewed {
+                slide_name,
+                experiment_arm,
+            } => Some(with_experiment_arm(
+                with_flow_version(json!({
+                    "slide_name": slide_name,
+                })),
+                experiment_arm,
+            )),
             OnboardingEvent::SettingChanged { setting, value } => Some(with_flow_version(json!({
                 "setting": setting,
                 "value": value,
@@ -179,6 +217,7 @@ impl TelemetryEvent for OnboardingEvent {
                 slide_name,
                 action,
                 account_class,
+                experiment_arm,
             } => {
                 let mut payload = json!({
                     "flow_version": ACCOUNT_FIRST_FLOW_VERSION,
@@ -190,7 +229,7 @@ impl TelemetryEvent for OnboardingEvent {
                 {
                     object.insert("account_class".to_string(), json!(account_class));
                 }
-                Some(payload)
+                Some(with_experiment_arm(payload, experiment_arm))
             }
             OnboardingEvent::OnboardingAuthCompleted {
                 account_class,
@@ -207,23 +246,57 @@ impl TelemetryEvent for OnboardingEvent {
             OnboardingEvent::OnboardingUpgradeStarted {
                 source_slide,
                 account_class,
-            } => Some(json!({
-                "flow_version": ACCOUNT_FIRST_FLOW_VERSION,
-                "source_slide": source_slide,
-                "account_class": account_class,
-            })),
+                experiment_arm,
+            } => Some(with_experiment_arm(
+                json!({
+                    "flow_version": ACCOUNT_FIRST_FLOW_VERSION,
+                    "source_slide": source_slide,
+                    "account_class": account_class,
+                }),
+                experiment_arm,
+            )),
             OnboardingEvent::OnboardingUpgradeCompleted {
                 source_slide,
                 account_class,
-            } => Some(json!({
-                "flow_version": ACCOUNT_FIRST_FLOW_VERSION,
-                "source_slide": source_slide,
-                "account_class": account_class,
-            })),
-            OnboardingEvent::OnboardingCompleted { completion_type } => Some(json!({
-                "flow_version": ACCOUNT_FIRST_FLOW_VERSION,
-                "completion_type": completion_type,
-            })),
+                experiment_arm,
+            } => Some(with_experiment_arm(
+                json!({
+                    "flow_version": ACCOUNT_FIRST_FLOW_VERSION,
+                    "source_slide": source_slide,
+                    "account_class": account_class,
+                }),
+                experiment_arm,
+            )),
+            OnboardingEvent::OnboardingCreditPurchaseStarted {
+                source_slide,
+                account_class,
+                credits,
+                experiment_arm,
+            }
+            | OnboardingEvent::OnboardingCreditPurchaseCompleted {
+                source_slide,
+                account_class,
+                credits,
+                experiment_arm,
+            } => Some(with_experiment_arm(
+                json!({
+                    "flow_version": ACCOUNT_FIRST_FLOW_VERSION,
+                    "source_slide": source_slide,
+                    "account_class": account_class,
+                    "credits": credits,
+                }),
+                experiment_arm,
+            )),
+            OnboardingEvent::OnboardingCompleted {
+                completion_type,
+                experiment_arm,
+            } => Some(with_experiment_arm(
+                json!({
+                    "flow_version": ACCOUNT_FIRST_FLOW_VERSION,
+                    "completion_type": completion_type,
+                }),
+                experiment_arm,
+            )),
         }
     }
 
@@ -267,6 +340,12 @@ impl TelemetryEvent for OnboardingEvent {
             }
             OnboardingEvent::OnboardingUpgradeCompleted { .. } => {
                 "User completed an upgrade from account-first onboarding"
+            }
+            OnboardingEvent::OnboardingCreditPurchaseStarted { .. } => {
+                "User started a credit-pack purchase from account-first onboarding"
+            }
+            OnboardingEvent::OnboardingCreditPurchaseCompleted { .. } => {
+                "User completed a credit-pack purchase from account-first onboarding"
             }
             OnboardingEvent::OnboardingCompleted { .. } => {
                 "User completed account-first onboarding"
@@ -321,6 +400,12 @@ impl TelemetryEventDesc for OnboardingEventDiscriminant {
             OnboardingEventDiscriminant::OnboardingUpgradeCompleted => {
                 "onboarding_upgrade_completed"
             }
+            OnboardingEventDiscriminant::OnboardingCreditPurchaseStarted => {
+                "onboarding_credit_purchase_started"
+            }
+            OnboardingEventDiscriminant::OnboardingCreditPurchaseCompleted => {
+                "onboarding_credit_purchase_completed"
+            }
             OnboardingEventDiscriminant::OnboardingCompleted => "onboarding_completed",
         }
     }
@@ -373,6 +458,12 @@ impl TelemetryEventDesc for OnboardingEventDiscriminant {
             }
             OnboardingEventDiscriminant::OnboardingUpgradeCompleted => {
                 "User completed an upgrade from account-first onboarding"
+            }
+            OnboardingEventDiscriminant::OnboardingCreditPurchaseStarted => {
+                "User started a credit-pack purchase from account-first onboarding"
+            }
+            OnboardingEventDiscriminant::OnboardingCreditPurchaseCompleted => {
+                "User completed a credit-pack purchase from account-first onboarding"
             }
             OnboardingEventDiscriminant::OnboardingCompleted => {
                 "User completed account-first onboarding"
