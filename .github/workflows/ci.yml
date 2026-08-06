@@ -262,6 +262,7 @@ jobs:
         uses: ./.github/actions/compile_macos_tests
         with:
           workspace_test_args: ${{ env.WORKSPACE_TEST_ARGS }}
+          source_sha: ${{ github.event.pull_request.head.sha || github.sha }}
           extra_test_args: ${{ matrix.extra_test_args }}
           runner_profile: ${{ join(matrix.runner, ',') }}
           cache_provider: ${{ steps.prepare_environment.outputs.rust_cache_provider }}

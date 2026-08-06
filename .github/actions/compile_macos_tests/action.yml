@@ -4,6 +4,9 @@ inputs:
   workspace_test_args:
     required: true
     description: Workspace and lockfile arguments forwarded to cargo nextest.
+  source_sha:
+    required: true
+    description: Source branch or workflow SHA whose content is being compiled.
   extra_test_args:
     description: Additional test-selection arguments forwarded to cargo nextest.
   runner_profile:
@@ -75,6 +78,7 @@ runs:
           printf 'repository=%s\n' "$GITHUB_REPOSITORY"
           printf 'workflow_sha=%s\n' "$GITHUB_SHA"
           printf 'checked_out_sha=%s\n' "$(git rev-parse HEAD)"
+          printf 'source_sha=%s\n' '${{ inputs.source_sha }}'
           printf 'run_id=%s\n' "$GITHUB_RUN_ID"
           printf 'run_attempt=%s\n' "$GITHUB_RUN_ATTEMPT"
           printf 'cargo_version=%s\n' "$(cargo --version)"
@@ -126,7 +130,8 @@ runs:
         reason_counts="$MACOS_COMPILE_DIAGNOSTICS_DIR/fingerprint-reason-counts.txt"
         sed $'s/\033\\[[0-9;]*[mK]//g' "$MACOS_COMPILE_DIAGNOSTICS_DIR/cargo-stderr.log" > "$clean_stderr"
         grep 'cargo::core::compiler::fingerprint' "$clean_stderr" > "$fingerprint_log" || true
-        sed -n 's/^.*cargo::core::compiler::fingerprint: *err: /- /p' "$fingerprint_log" | sort | uniq -c | sort -nr > "$reason_counts"
+        python3 "${{ github.action_path }}/filter_fingerprint_logs.py" --summarize-reasons \
+          < "$fingerprint_log" > "$reason_counts"
 
         pre_cargo_cache_kib="$(sed -n 's/^pre_cargo_cache_kib=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
         pre_cargo_registry_kib="$(sed -n 's/^pre_cargo_registry_kib=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
@@ -139,6 +144,8 @@ runs:
         post_cargo_cache_kib="$((post_cargo_registry_kib + post_cargo_git_kib + post_cargo_global_cache_kib))"
         post_target_kib="$(size_kib "$MACOS_COMPILE_TARGET_DIR")"
         compiled_units="$(grep -c '^[[:space:]]*Compiling ' "$clean_stderr" || true)"
+        downloading_records="$(grep -c '^[[:space:]]*Downloading ' "$clean_stderr" || true)"
+        downloaded_records="$(grep -c '^[[:space:]]*Downloaded ' "$clean_stderr" || true)"
         dirty_units="$(grep -c 'fingerprint error for ' "$fingerprint_log" || true)"
         stale_inputs="$(grep -c 'cargo::core::compiler::fingerprint: stale:' "$fingerprint_log" || true)"
         elapsed_seconds="$(awk '$1 == "real" { print $2; exit }' "$MACOS_COMPILE_DIAGNOSTICS_DIR/resource-usage.txt")"
@@ -151,6 +158,8 @@ runs:
           printf 'post_cargo_global_cache_kib=%s\n' "$post_cargo_global_cache_kib"
           printf 'post_target_kib=%s\n' "$post_target_kib"
           printf 'compiled_units=%s\n' "$compiled_units"
+          printf 'downloading_records=%s\n' "$downloading_records"
+          printf 'downloaded_records=%s\n' "$downloaded_records"
           printf 'dirty_units=%s\n' "$dirty_units"
           printf 'stale_inputs=%s\n' "$stale_inputs"
           printf 'elapsed_seconds=%s\n' "${elapsed_seconds:-unknown}"
@@ -172,6 +181,7 @@ runs:
         cache_hit="$(sed -n 's/^cache_hit=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
         compile_status="$(sed -n 's/^compile_status=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
         checked_out_sha="$(sed -n 's/^checked_out_sha=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
+        source_sha="$(sed -n 's/^source_sha=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
 
         summary="$MACOS_COMPILE_DIAGNOSTICS_DIR/summary.md"
         {
@@ -180,6 +190,7 @@ runs:
           echo "| Metric | Value |"
           echo "| --- | --- |"
           echo "| Checked-out SHA | \`$checked_out_sha\` |"
+          echo "| Source/head SHA | \`$source_sha\` |"
           echo "| Runner | \`$RUNNER_NAME\` / \`${{ inputs.runner_profile }}\` / \`$RUNNER_ARCH\` |"
           echo "| Rust cache | \`${{ inputs.cache_provider }}\` / \`${{ inputs.cache_identity }}\` / hit \`$cache_hit\` |"
           echo "| Cargo cache working set | $(kib_to_gib "$pre_cargo_cache_kib") → $(kib_to_gib "$post_cargo_cache_kib") |"
@@ -189,6 +200,7 @@ runs:
           echo "| Target working set | $(kib_to_gib "$pre_target_kib") → $(kib_to_gib "$post_target_kib") |"
           echo "| Compile result | exit \`${compile_status:-unknown}\` in \`${elapsed_seconds:-unknown}s\` |"
           echo "| Peak resident set | $(bytes_to_gib "${max_rss_bytes:-unknown}") |"
+          echo "| Cargo dependency fetch | $downloading_records downloading lines; $downloaded_records downloaded records |"
           echo "| Cargo rebuild signals | $compiled_units compiling lines; $dirty_units dirty fingerprints; $stale_inputs stale inputs |"
           echo
           echo "Top fingerprint reasons:"
