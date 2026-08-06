@@ -1,4 +1,13 @@
 on:
+  # Remove this pull_request trigger and its job guard after the workflow lands
+  # on the default branch, where workflow_dispatch becomes available.
+  pull_request:
+    branches:
+      - master
+    types:
+      - opened
+      - reopened
+      - synchronize
   workflow_dispatch:
 
 name: macOS Compile Cache Experiment
@@ -12,7 +21,12 @@ env:
 jobs:
   compile:
     name: Compile tests (${{ matrix.cache_mode }} Rust cache)
-    if: github.repository_owner == 'warpdotdev'
+    if: >-
+      github.repository_owner == 'warpdotdev' &&
+      (github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          github.event.pull_request.head.ref == 'factory/macos-ci-observability'))
     timeout-minutes: 40
     runs-on: namespace-profile-mac-ci
     permissions:
