@@ -5,6 +5,7 @@
 mod app;
 mod delegate;
 mod event_loop;
+mod shutdown_watchdog;
 mod windowing;
 
 pub use app::App;

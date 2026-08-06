@@ -1,5 +1,7 @@
 use libtest_mimic::{Arguments, Trial};
 
+// A process may only ever mark one thread as the headless main thread, so exactly one headless app
+// can run here. macOS spends that budget on the run-loop test, which has no counterpart elsewhere.
 fn main() {
     let mut args = Arguments::from_args();
     // This test must run on the process main thread to service the macOS run loop.
@@ -11,9 +13,44 @@ fn main() {
     })];
 
     #[cfg(not(target_os = "macos"))]
-    let tests = Vec::<Trial>::new();
+    let tests = vec![Trial::test("terminates_without_external_kill", || {
+        shutdown::terminates_without_external_kill().map_err(|error| format!("{error:#}").into())
+    })];
 
     libtest_mimic::run(&args, tests).exit();
+}
+
+#[cfg(not(target_os = "macos"))]
+mod shutdown {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use anyhow::anyhow;
+    use warpui::platform::TerminationMode;
+    use warpui::platform::app::{AppBuilder, AppCallbacks};
+
+    /// An `oz` command that has finished its work must bring the process down by itself: the
+    /// headless run returns once termination is requested, and teardown runs on the way out.
+    pub(super) fn terminates_without_external_kill() -> anyhow::Result<()> {
+        let tore_down = Arc::new(AtomicBool::new(false));
+        let callbacks = AppCallbacks {
+            on_will_terminate: Some(Box::new({
+                let tore_down = tore_down.clone();
+                move |_ctx| tore_down.store(true, Ordering::SeqCst)
+            })),
+            ..Default::default()
+        };
+
+        AppBuilder::new_headless(callbacks, Box::new(()), None)
+            .run(|ctx| ctx.terminate_app(TerminationMode::ForceTerminate, None))?;
+
+        if !tore_down.load(Ordering::SeqCst) {
+            return Err(anyhow!(
+                "headless shutdown returned without running app teardown"
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "macos")]

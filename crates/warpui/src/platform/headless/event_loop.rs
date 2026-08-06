@@ -2,20 +2,41 @@ use std::mem::ManuallyDrop;
 use std::ops::ControlFlow;
 #[cfg(target_os = "macos")]
 use std::sync::Arc;
+#[cfg(not(target_family = "wasm"))]
+use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(target_os = "macos")]
 use std::sync::mpsc::TryRecvError;
 use std::sync::mpsc::{self, Receiver, SendError};
+#[cfg(not(target_family = "wasm"))]
+use std::time::Duration;
 
 #[cfg(target_os = "macos")]
 use objc2_core_foundation::{
     CFRetained, CFRunLoop, CFRunLoopSource, CFRunLoopSourceContext, kCFRunLoopDefaultMode,
 };
 
+use super::shutdown_watchdog::{SHUTDOWN_TIMEOUT, ShutdownWatchdog};
 use crate::platform::app::{
     AppCallbackDispatcher, ApproveTerminateResult, TerminationRequestSource, TerminationResult,
 };
 use crate::platform::{self, TerminationMode};
 use crate::{AppContext, WindowId};
+
+/// Exit status for a process killed by SIGINT (128 + SIGINT).
+#[cfg(not(target_family = "wasm"))]
+const SIGINT_EXIT_CODE: i32 = 130;
+
+/// How long the event loop has to honor an interrupt before the process leaves anyway.
+///
+/// The request travels through the event queue, so it goes unread while the main thread is
+/// blocked. Interrupting means the user wants their prompt back, so waiting past this point
+/// serves nobody.
+#[cfg(not(target_family = "wasm"))]
+const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Exit status reported when the app terminated with an error and the watchdog had to force the
+/// exit before `main` could return it.
+const TERMINATION_FAILURE_EXIT_CODE: i32 = 1;
 
 /// Application events handled on the headless platform's main thread.
 pub(super) enum AppEvent {
@@ -183,9 +204,20 @@ pub(super) fn run(
     // from the channel, making Ctrl+C ineffective during shutdown.
     drop(receiver);
 
+    // Reaching this point means termination was requested, so the app's work is finished and its
+    // result is final; everything below is teardown. Bound that teardown, because a step which
+    // blocks forever would otherwise strand a completed CLI invocation at the user's prompt.
+    let termination_result = ui_app.termination_result().unwrap_or(Ok(()));
+    let exit_code = if termination_result.is_ok() {
+        0
+    } else {
+        TERMINATION_FAILURE_EXIT_CODE
+    };
+    let _watchdog = ShutdownWatchdog::arm(SHUTDOWN_TIMEOUT, exit_code);
+
     callbacks.app_will_terminate();
 
-    ui_app.termination_result().unwrap_or(Ok(()))
+    termination_result
 }
 
 fn process_event(
@@ -226,14 +258,47 @@ fn process_event(
     ControlFlow::Continue(())
 }
 
+/// How a delivered interrupt should be handled.
+#[cfg(not(target_family = "wasm"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InterruptAction {
+    /// Ask the event loop to terminate the app.
+    RequestTermination,
+    /// Leave the process immediately, without waiting on the event loop.
+    ForceExit,
+}
+
+/// Decides what to do with an interrupt, given how many preceded it.
+///
+/// A repeat interrupt means the user is still waiting at their prompt, so the graceful request
+/// either went unread — the event loop cannot service it while the main thread is blocked — or is
+/// taking longer than the user is willing to wait.
+#[cfg(not(target_family = "wasm"))]
+fn interrupt_action(preceding_interrupts: usize) -> InterruptAction {
+    if preceding_interrupts == 0 {
+        InterruptAction::RequestTermination
+    } else {
+        InterruptAction::ForceExit
+    }
+}
+
 /// Set up a signal handler for Ctrl-C (SIGINT) to gracefully terminate the app.
 ///
 /// When Ctrl-C is received, this will send a Terminate event to the event loop,
 /// allowing the app to shut down gracefully via the existing termination logic.
 #[cfg(not(target_family = "wasm"))]
 fn setup_signal_handler(sender: EventSender) {
+    let preceding_interrupts = AtomicUsize::new(0);
     let result = ctrlc::set_handler(move || {
+        if interrupt_action(preceding_interrupts.fetch_add(1, Ordering::SeqCst))
+            == InterruptAction::ForceExit
+        {
+            log::info!("Received a repeat Ctrl-C signal in headless mode, exiting immediately");
+            std::process::exit(SIGINT_EXIT_CODE);
+        }
+
         log::info!("Received Ctrl-C signal in headless mode, terminating application");
+        ShutdownWatchdog::arm_permanently(INTERRUPT_TIMEOUT, SIGINT_EXIT_CODE);
         // Send a ForceTerminate event to ensure the app exits cleanly.
         // We use ForceTerminate rather than Cancellable to ensure the app exits
         // even if there are unsaved changes or other conditions that might prevent shutdown.
@@ -243,7 +308,7 @@ fn setup_signal_handler(sender: EventSender) {
         {
             log::warn!("Failed to send termination event - event loop may have already stopped");
             // If the event cannot be sent, force an exit.
-            std::process::exit(130); // 128 + SIGINT (2) = 130
+            std::process::exit(SIGINT_EXIT_CODE);
         }
     });
 
@@ -256,3 +321,7 @@ fn setup_signal_handler(sender: EventSender) {
 fn setup_signal_handler(_sender: EventSender) {
     // Signal handling is unavailable on WASM.
 }
+
+#[cfg(all(test, not(target_family = "wasm")))]
+#[path = "event_loop_tests.rs"]
+mod tests;
