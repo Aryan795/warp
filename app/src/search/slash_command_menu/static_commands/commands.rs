@@ -130,7 +130,7 @@ pub const API_KEYS: StaticCommand = StaticCommand {
 
 pub const CONNECT: StaticCommand = StaticCommand {
     name: "/connect",
-    description: "Manage your API keys and AI subscriptions",
+    description: "Manage your API keys and AI subscriptions (alias for /api-keys)",
     kind: SlashCommandKind::Connect,
     supported_surfaces: SlashCommandSurfaces::TuiOnly,
     availability: Availability::AI_ENABLED,
