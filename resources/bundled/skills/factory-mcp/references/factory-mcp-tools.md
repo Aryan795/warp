@@ -102,8 +102,10 @@ Inputs:
 New intake vs. hand-back:
 - **New intake** — provide `factory_uid` + `title` (+ `note`, and `ticket_ref` /
   `ticket_url` when the work has a ticket).
-- **Hand-back** — provide `factory_task_uid` (+ `note`, `branch` / `pr_url`).
-  `factory_uid` is ignored, and `initial_snapshot_token` is not supported.
+- **Hand-back** — provide `factory_task_uid` (+ `note`, `branch` / `pr_url`, and
+  optionally `source_conversation_id` / `artifact_uids` to transfer artifacts to
+  the existing task). `factory_uid` is ignored, and `initial_snapshot_token` is
+  not supported.
 
 ## complete_task
 

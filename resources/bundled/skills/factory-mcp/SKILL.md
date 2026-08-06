@@ -64,7 +64,7 @@ Before calling `send_task`:
 
 1. **Push your branch.** The cloud run cannot see your uncommitted local state or
    an unpushed branch. Commit your work and push the branch, then pass its name
-   as `branch`. (For genuinely uncommitted WIP on *new* intake, a
+   as `branch`. (For genuinely uncommitted WIP on *new* intake, an
    `initial_snapshot_token` can carry a WIP snapshot — but a pushed branch is the
    reliable default and the only option for hand-backs.)
 2. **Write a decision-complete `note`.** This is the task description. Include:
@@ -74,15 +74,18 @@ Before calling `send_task`:
    avoid. Assume the foreman has none of your local context.
 3. **Pass the refs you have.** `branch` (pushed) and `pr_url` if a PR already
    exists, so the factory continues on your work instead of re-deriving it.
-4. **Transfer supporting artifacts.** If your current conversation holds plan
-   files or screenshots the factory should use, pass `source_conversation_id`
-   (and optionally a subset via `artifact_uids`) so they travel with the task.
-5. **Identify the ticket and title (new intake).** `title` is required for new
+4. **Identify the ticket and title (new intake).** `title` is required for new
    work. Pass `ticket_ref` in `<source>:<id>` form (e.g. `linear:APP-1234`) and
    `ticket_url` when the work already has a ticket; omit `ticket_ref` to mint an
    adhoc ref.
-6. **Suggest a stage.** Set `stage_hint` to where the factory should pick up
+5. **Suggest a stage.** Set `stage_hint` to where the factory should pick up
    (e.g. implementation when the plan is settled). The foreman may override it.
+
+To carry supporting artifacts (plan files, screenshots) that live in your current
+conversation, transfer them when handing an **existing** task back (see Workflow
+4) — `source_conversation_id` / `artifact_uids` target an existing task, not new
+intake. For uncommitted local state on new intake, use the WIP
+`initial_snapshot_token` instead (step 1).
 
 Example (new work):
 
@@ -167,6 +170,11 @@ Use this to make local changes to a factory task and return it to the factory.
    conversation and one factory task record — do not start a new task for the
    same work. Include a `note` describing what changed and what you want next,
    plus `branch` and/or `pr_url`, and a `stage_hint` if relevant.
+4. **Transfer supporting artifacts (optional).** Because a hand-back targets an
+   existing task, you can bring along plan files or screenshots from your current
+   conversation: pass `source_conversation_id` (and optionally a subset via
+   `artifact_uids`) so they travel with the task. This artifact transfer is
+   scoped to existing tasks, so it is not available on new intake.
 
 ```text
 send_task(
