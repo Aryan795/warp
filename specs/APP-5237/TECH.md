@@ -43,8 +43,13 @@ Use a structured identity instead of overloading a display string:
 ```rust
 pub struct PluginInstanceId {
     pub scope: PluginScopeId,
-    pub provider: PluginProvider,
+    pub source: PluginSourceId,
     pub manifest_name: String,
+}
+
+pub struct PluginSourceId {
+    pub kind: PluginSourceKind,
+    pub stable_identity: String,
 }
 
 pub struct PluginComponentId {
@@ -54,7 +59,7 @@ pub struct PluginComponentId {
 }
 ```
 
-`PluginProvider` is `Agents` or `Warp`. `PluginScopeId` distinguishes user, repository, factory, agent, and automation instances. UI/model adapters render `<plugin>:<component>`.
+`PluginSourceKind` is `AgentsDirectory`, `WarpDirectory`, or `FactoryRepository` in v1. `stable_identity` identifies the user root, repository, or Factory source without depending on a mutable version. Keep source identity opaque at component boundaries so a later remote source kind does not change component identity. `PluginScopeId` distinguishes user, repository, factory, agent, and automation instances. UI/model adapters render `<plugin>:<component>`.
 
 Do not treat plugins as one more row in `SKILL_PROVIDER_DEFINITIONS`. That list describes flat skill roots, while a plugin requires manifest-first loading and package-level shadowing.
 ### 2. Client discovery and watching
@@ -79,6 +84,8 @@ For each search root:
 5. Parse standard components independently.
 6. Publish one generation-tagged update so stale asynchronous parses cannot replace newer state.
 
+Package-level parse, unsupported-component, and shadowing diagnostics emit structured log events with stable diagnostic codes, source path, and scope. Invalid or ambiguous explicit skill invocation returns the matching codes and candidate identities. Component-level skill and MCP status continues through existing Skills and MCP models.
+
 Precedence is a tuple:
 
 ```text
@@ -96,7 +103,7 @@ Update:
 - Slash-command and explicit `--skill` resolution to accept `<plugin>:<skill>`.
 - `SkillReference` with a plugin component variant, or an equivalent stable structured reference. Do not encode identity only in a mutable path.
 - Ambiguity errors to include flat and plugin candidates.
-- GUI and TUI skill lists to show plugin and source chips.
+- GUI and TUI skill lists to show the qualified plugin skill name and existing source detail.
 
 Unqualified resolution first gathers every active candidate. It returns a match only when exactly one candidate has that local name. Existing repository qualification remains available for flat skills and can disambiguate cross-repository plugin sources before plugin qualification.
 ### 4. MCP integration
@@ -110,7 +117,7 @@ pub struct PluginMcpLaunchContext {
     pub plugin_root: PathBuf,
     pub plugin_data: PathBuf,
     pub discovery_scope: FileBasedMCPServerScope,
-    pub provider: PluginProvider,
+    pub source: PluginSourceId,
 }
 ```
 
@@ -120,9 +127,9 @@ Preserve `FileBasedMCPManager::auto_start_decision` by mapping:
 - User Warp plugin source to `GlobalWarp`.
 - User Agents plugin source to `GlobalThirdParty`.
 - Every repository plugin source to `ProjectScoped`.
-- Factory runtime source to an explicit runtime-start policy described in section 8.
+- Factory runtime source to an explicit runtime-start policy described in section 7.
 
-The spawner must:
+Plugin `mcp.json` stdio servers are the only processes that the plugin loader launches on a package's behalf. The spawner must:
 1. Create the dedicated plugin data directory.
 2. Expand exact `${PLUGIN_ROOT}` and `${PLUGIN_DATA}` occurrences once in `args`, `env` values, and `cwd`.
 3. Resolve and contain `command` and `cwd`.
@@ -145,23 +152,19 @@ pub trait PluginDataLocator {
 }
 ```
 
-Local data lives under the active frontend's `warp_core::paths::data_dir()/plugins/data/<instance-key>`. `instance-key` is a filesystem-safe hash of frontend identity, stable source identity, provider, scope, and manifest name. It excludes manifest version and component content. GUI and TUI therefore discover the same packages but do not share writable plugin state or running processes.
+Local data lives under the active frontend's `warp_core::paths::data_dir()/plugins/data/<instance-key>`. `instance-key` is a filesystem-safe hash of frontend identity, stable source identity, scope, and manifest name. It excludes manifest version and component content. GUI and TUI therefore discover the same packages but do not share writable plugin state or running processes.
+
+Skill-bundled scripts do not use `PluginDataLocator`. The skill content can direct the model to run one through the ordinary shell-command action. `BlocklistAIPermissions::can_autoexecute_command` applies the active execution profile, allowlist, denylist, risk classification, and user approval behavior. The plugin loader does not spawn the script and does not inject `PLUGIN_ROOT` or `PLUGIN_DATA`.
 
 Factory workers pass an absolute `WARP_PLUGIN_DATA_ROOT`. The client appends a stable key containing Factory UID, scope kind/name, and plugin name.
 
 - Warp-hosted workers mount this root from environment-persistent storage.
 - Self-hosted Docker workers bind it to a configured durable host path.
 - Self-hosted direct workers use a configured worker-local durable path and inherit that backend's existing process-isolation boundary.
-- Dispatch fails before starting a Factory stdio plugin when the worker cannot provide a writable persistent root. An ephemeral fallback would violate Agent Plugins conformance.
+- Dispatch fails before starting a Factory plugin MCP stdio server when the worker cannot provide a writable persistent root. An ephemeral fallback would violate Agent Plugins conformance.
 
 Concurrent processes can share one plugin instance data directory. Warp guarantees directory persistence, not application-level locking.
-### 6. Plugin inventory UI
-Add a read-only plugin inventory page under desktop AI settings. It consumes a `PluginManagerSnapshot` and links skills and MCP components to their existing control surfaces.
-
-Add a TUI `/plugins` screen over the same snapshot types. The TUI's MCP start/stop actions remain in `TuiMcpManager`.
-
-Neither surface owns enablement state in v1. This avoids introducing behavior different from existing skills and MCP.
-### 7. Factory source model and validation
+### 6. Factory source model and validation
 Extend `logic/factoryfile` source classification with:
 - Factory `plugins/<child>/plugin.json`.
 - Agent `agents/<name>/plugins/<child>/plugin.json`.
@@ -194,7 +197,7 @@ The tree parser validates plugin packages against vendored 1.0.0 schemas and sem
 Plugin package content is not copied into database rows. Canonical records provide validation, semantic hashing, diagnostics, and deterministic applicable paths. Runtime reads the checked-out package and revalidates it.
 
 Factory semantic hashing includes manifest, standard component configuration, skills, and package-contained files reachable by those components. A plugin-only change therefore creates a new desired source state even when projected database fields do not change.
-### 8. Factory runtime scoping
+### 7. Factory runtime scoping
 Add a runtime `FactoryFileScope` snapshot with:
 - Factory UID and checked-out Factory root.
 - Bound agent name.
@@ -222,7 +225,7 @@ Before passing either argument:
 - Verify the path remains inside the checked-out Factory root.
 - Verify the runtime checkout corresponds to the applied Factory source revision.
 - Require a client capability that advertises Agent Plugins 1.0.0 and Factory MCP 1.0 support.
-### 9. Warp Factory MCP schema
+### 8. Warp Factory MCP schema
 Publish and vendor an immutable closed schema at:
 
 ```text
@@ -276,7 +279,7 @@ The client is authoritative for ordinary entries:
 5. Resolve relative paths against the containing entity directory.
 
 The client must not accept this schema in a plugin root. The plugin MCP parser reports an unsupported Agent Plugins schema and disables only plugin MCP. Conversely, factoryfile rejects the Agent Plugins schema at an entity-level Factory MCP path.
-### 10. Legacy Factory MCP migration
+### 9. Legacy Factory MCP migration
 Keep legacy `mcpServers` parsing in `v1alpha1.go` during the transition. Convert both old and new managed entries into the existing canonical `MCPServerEntry` before resolution.
 
 Merge by entity and server name:
@@ -288,10 +291,9 @@ Rendering preserves the source representation. It does not rewrite a user's YAML
 Root Factory `mcp.json` migrates top-level `factory.yaml` MCP, while agent and automation `mcp.json` files migrate their matching frontmatter. Keep `agentDefaults.mcpServers` as a legacy-only source in v1. There is no new default-only Factory MCP file. Migration tooling or documentation expands those defaults into each intended agent file before the legacy field is removed.
 
 Add a source diagnostic and telemetry counter for legacy declarations. Do not set a removal release in this change.
-### 11. Feature and capability rollout
+### 10. Feature and capability rollout
 Use separate gates:
 - Client Agent Plugins parser/discovery.
-- Client Plugins UI.
 - Factory plugin source parsing.
 - Factory MCP source parsing.
 - Factory runtime argument emission.
@@ -313,7 +315,7 @@ Options considered:
 ### Reuse existing execution semantics
 Options considered:
 - Add package-wide enablement and content-fingerprint approval. Safer for changed stdio packages, but inconsistent with equivalent existing skill and MCP sources.
-- Reuse current source semantics. Selected by product direction. The implementation adds inventory and source visibility, not a new trust system.
+- Reuse current source semantics. Selected by product direction. The implementation preserves source provenance in existing component details and logs, not a new trust system.
 ### Structured identity instead of string rewriting
 Options considered:
 - Rewrite source skill and MCP tool names. Rejected because it mutates portable metadata and MCP wire names.
@@ -328,11 +330,13 @@ Options considered:
 - A source revision can change between Factory validation and runtime.
   - Store the applied source revision and verify the checkout before emitting runtime paths.
 - Global Warp-home plugins inherit automatic MCP start.
-  - Show source and resolved launch details in inventory and MCP settings. Address stricter trust only through a unified file-based MCP design.
+  - Show source and resolved launch details in existing MCP details and logs. Address stricter trust only through a unified file-based MCP design.
+- A skill can instruct the agent to run package-supplied code.
+  - Keep this on the ordinary shell-command path. Do not add a plugin bypass around execution-profile permissions, risk classification, allowlists, denylists, or approval.
 - Plugin paths can escape through symlinks or platform-specific path behavior.
   - Centralize filesystem-resolved containment and test Unix symlinks plus Windows junction/reparse behavior.
 - Factory plugin data can become ephemeral on a worker backend.
-  - Make a writable persistent root a dispatch precondition for stdio plugin servers.
+  - Make a writable persistent root a dispatch precondition for plugin MCP stdio servers.
 - Qualified skill names can conflict with existing parser syntax.
   - Add parser fixtures for colon-qualified plugin skills and preserve repository-qualified flat skill behavior.
 - Two `mcp.json` formats can be confused.
@@ -388,23 +392,23 @@ gofmt -l logic/factoryfile logic/ai/ambient_agents
 ```
 
 ### User-visible proof
-- Record a desktop video that adds a repository plugin, shows its skill and MCP inventory, invokes the qualified skill, explicitly starts the project MCP server, and uses one tool.
-- Record a TUI video of the equivalent `/plugins`, skill invocation, and MCP start flow.
+- Record a desktop video that adds a repository plugin, shows its qualified skill in the existing skill list, invokes it, shows the qualified MCP server in existing MCP settings, explicitly starts the project server, and uses one tool.
+- Record a TUI video that shows the qualified skill and MCP server in the existing component surfaces, invokes the skill, starts the server, and uses one tool.
 - Record a Factory run artifact that identifies the active factory/agent/automation plugin scopes and successfully calls both an ordinary plugin MCP tool and a managed Factory MCP tool.
 ## Parallelization
-Implementation can use three workstreams after the shared identities and JSON contracts are agreed:
-- Client core: Rust schemas, parser, watcher, SkillManager, MCP manager, and data locator on a Warp worktree.
-- Client surfaces: desktop Plugins settings and TUI `/plugins` against the client-core snapshot API on a second Warp worktree.
+Implementation can use two workstreams after the shared identities and JSON contracts are agreed:
+- Client: Rust schemas, parser, watcher, SkillManager, MCP manager, data locator, and minimal existing-surface adapters on a Warp worktree.
 - Factory: Go source parsing, Factory MCP schema, projection, runtime scope, and worker contract on a warp-server worktree.
 
-Client core lands before client surfaces. Factory development can proceed in parallel against committed fixture/schema contracts, but end-to-end Factory rollout waits for the client capability. Use one PR per repository; keep the PRODUCT and TECH specs aligned in this Warp PR.
+Factory development can proceed in parallel against committed fixture/schema contracts, but end-to-end Factory rollout waits for the client capability. Use one PR per repository; keep the PRODUCT and TECH specs aligned in this Warp PR.
 ## Assumptions
 - The Factory source revision can be recorded and compared with the worker checkout before launch.
-- Each supported worker backend can expose a durable writable plugin-data root. If this is false for a backend, that backend cannot claim stdio plugin conformance until storage exists.
+- Each supported worker backend can expose a durable writable plugin-data root. If this is false for a backend, that backend cannot claim plugin MCP stdio conformance until storage exists.
 - Existing Factory source registration and apply permissions remain the product trust boundary for repository code.
 - The implementation can publish the proposed immutable Warp Factory MCP schema URL before enabling authoring.
 ## Out of scope
 - Claude Code conversion or provider implementation.
+- A dedicated GUI or TUI plugin inventory and plugin-level management controls.
 - Plugin distribution and installation.
 - New secret-reference fields in either plugin or Factory ordinary MCP entries.
 - A generalized permissions or subprocess-sandbox redesign.
