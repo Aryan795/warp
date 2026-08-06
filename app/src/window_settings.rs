@@ -111,6 +111,24 @@ impl ZoomLevel {
             .filter(|value| (Self::MIN..=Self::MAX).contains(value))
     }
 
+    /// Returns the next preset above or below `current`.
+    pub fn next_preset(current: u16, increase: bool) -> u16 {
+        if increase {
+            Self::VALUES
+                .iter()
+                .copied()
+                .find(|preset| *preset > current)
+                .unwrap_or(current)
+        } else {
+            Self::VALUES
+                .iter()
+                .rev()
+                .copied()
+                .find(|preset| *preset < current)
+                .unwrap_or(current)
+        }
+    }
+
     /// Returns the current [`ZoomLevel`] as a percentage (so that it be can be used as a zoom factor).
     pub fn as_zoom_factor(&self) -> f32 {
         self.inner as f32 / 100.0

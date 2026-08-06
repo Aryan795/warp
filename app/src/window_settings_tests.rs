@@ -34,3 +34,17 @@ fn parse_zoom_level_percentage() {
         );
     }
 }
+
+#[test]
+fn steps_to_neighboring_presets_from_custom_zoom() {
+    assert_eq!(ZoomLevel::next_preset(137, true), 150);
+    assert_eq!(ZoomLevel::next_preset(137, false), 125);
+}
+
+#[test]
+fn preserves_preset_zoom_stepping_and_bounds() {
+    assert_eq!(ZoomLevel::next_preset(100, true), 110);
+    assert_eq!(ZoomLevel::next_preset(100, false), 90);
+    assert_eq!(ZoomLevel::next_preset(350, true), 350);
+    assert_eq!(ZoomLevel::next_preset(50, false), 50);
+}
