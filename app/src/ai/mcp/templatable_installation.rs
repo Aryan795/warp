@@ -178,7 +178,7 @@ impl TemplatableMCPServerInstallation {
     /// whose variable values are exactly the server's `env` and `headers` entries. Unlike the
     /// on-disk path, which expands the whole document, `command`, `args` and `url` are left
     /// untouched: only `env` and `headers` carry canonicalized secret references.
-    pub fn expand_env_var_placeholders(&mut self) -> Result<(), EnvVarExpansionError> {
+    pub(crate) fn expand_env_var_placeholders(&mut self) -> Result<(), EnvVarExpansionError> {
         let server = self.templatable_mcp_server.name.clone();
 
         // Sorted so a config with several unresolvable placeholders always names the same key,

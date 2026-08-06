@@ -442,10 +442,34 @@ fn managed_command_config_missing_secret_leaves_placeholder() {
 
 // ── Inline (`--mcp`) MCP JSON env var expansion tests ───────────────────────
 
+/// Sets an environment variable for the duration of a test and removes it on drop, so a
+/// failing assertion cannot leak it into the rest of the process.
+struct ScopedEnvVar(&'static str);
+
+impl ScopedEnvVar {
+    fn set(name: &'static str, value: &str) -> Self {
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var(name, value) };
+        Self(name)
+    }
+
+    fn unset(name: &'static str) -> Self {
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(name) };
+        Self(name)
+    }
+}
+
+impl Drop for ScopedEnvVar {
+    fn drop(&mut self) {
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(self.0) };
+    }
+}
+
 #[test]
 fn user_mcp_json_expands_env_placeholder_in_env_value() {
-    // TODO: Audit that the environment access only happens in single-threaded code.
-    unsafe { std::env::set_var("WARP_MCP_TEST_ENV_TOKEN", "env-secret") };
+    let _token = ScopedEnvVar::set("WARP_MCP_TEST_ENV_TOKEN", "env-secret");
 
     let installations = AgentDriver::installations_from_user_mcp_json(
         r#"{"GitHub MCP":{"command":"npx","env":{"API_TOKEN":"${WARP_MCP_TEST_ENV_TOKEN}"}}}"#,
@@ -459,15 +483,11 @@ fn user_mcp_json_expands_env_placeholder_in_env_value() {
         }
         other => panic!("expected CLI server, got {other:?}"),
     }
-
-    // TODO: Audit that the environment access only happens in single-threaded code.
-    unsafe { std::env::remove_var("WARP_MCP_TEST_ENV_TOKEN") };
 }
 
 #[test]
 fn user_mcp_json_expands_env_placeholder_in_header_value() {
-    // TODO: Audit that the environment access only happens in single-threaded code.
-    unsafe { std::env::set_var("WARP_MCP_TEST_HEADER_TOKEN", "header-secret") };
+    let _token = ScopedEnvVar::set("WARP_MCP_TEST_HEADER_TOKEN", "header-secret");
 
     let installations = AgentDriver::installations_from_user_mcp_json(
         r#"{"sentry":{"url":"https://mcp.sentry.dev/mcp","headers":{"Authorization":"Bearer ${WARP_MCP_TEST_HEADER_TOKEN}"}}}"#,
@@ -484,9 +504,6 @@ fn user_mcp_json_expands_env_placeholder_in_header_value() {
         }
         other => panic!("expected SSE server, got {other:?}"),
     }
-
-    // TODO: Audit that the environment access only happens in single-threaded code.
-    unsafe { std::env::remove_var("WARP_MCP_TEST_HEADER_TOKEN") };
 }
 
 #[test]
@@ -510,8 +527,7 @@ fn user_mcp_json_leaves_placeholders_outside_env_and_headers_untouched() {
     // Unlike the on-disk config path, which expands the whole document, only `env` and
     // `headers` carry canonicalized secret references — so a `${...}` in `command`/`args`
     // must reach the MCP process verbatim rather than be resolved or rejected.
-    // TODO: Audit that the environment access only happens in single-threaded code.
-    unsafe { std::env::remove_var("WARP_MCP_TEST_ARG_TOKEN") };
+    let _token = ScopedEnvVar::unset("WARP_MCP_TEST_ARG_TOKEN");
 
     let installations = AgentDriver::installations_from_user_mcp_json(
         r#"{"GitHub MCP":{"command":"npx","args":["--token=${WARP_MCP_TEST_ARG_TOKEN}"]}}"#,
@@ -532,8 +548,7 @@ fn user_mcp_json_leaves_placeholders_outside_env_and_headers_untouched() {
 
 #[test]
 fn user_mcp_json_missing_env_var_fails_with_server_and_key() {
-    // TODO: Audit that the environment access only happens in single-threaded code.
-    unsafe { std::env::remove_var("WARP_MCP_TEST_UNSET_TOKEN") };
+    let _token = ScopedEnvVar::unset("WARP_MCP_TEST_UNSET_TOKEN");
 
     let err = AgentDriver::installations_from_user_mcp_json(
         r#"{"GitHub MCP":{"command":"npx","env":{"API_TOKEN":"${WARP_MCP_TEST_UNSET_TOKEN}"}}}"#,
@@ -552,10 +567,8 @@ fn user_mcp_json_missing_env_var_fails_with_server_and_key() {
 
 #[test]
 fn user_mcp_json_missing_env_var_reports_the_first_key_in_sort_order() {
-    // TODO: Audit that the environment access only happens in single-threaded code.
-    unsafe { std::env::remove_var("WARP_MCP_TEST_UNSET_A") };
-    // TODO: Audit that the environment access only happens in single-threaded code.
-    unsafe { std::env::remove_var("WARP_MCP_TEST_UNSET_B") };
+    let _token_a = ScopedEnvVar::unset("WARP_MCP_TEST_UNSET_A");
+    let _token_b = ScopedEnvVar::unset("WARP_MCP_TEST_UNSET_B");
 
     let err = AgentDriver::installations_from_user_mcp_json(
         r#"{"GitHub MCP":{"command":"npx","env":{"ZZZ_TOKEN":"${WARP_MCP_TEST_UNSET_B}","AAA_TOKEN":"${WARP_MCP_TEST_UNSET_A}"}}}"#,

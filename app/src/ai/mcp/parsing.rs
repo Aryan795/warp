@@ -31,7 +31,7 @@ pub fn substitute_env_vars(json_content: &str) -> Result<String, MissingEnvVarEr
             let var_name = var_match.as_str();
             match std::env::var(var_name) {
                 Ok(value) if !value.is_empty() => {
-                    let placeholder = format!("${{{}}}", var_name);
+                    let placeholder = format!("${{{var_name}}}");
                     result = result.replace(&placeholder, &value);
                 }
                 _ => {
