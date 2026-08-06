@@ -63,10 +63,8 @@ starts from what you hand it, so a thin hand-off means the cloud run starts cold
 Before calling `send_task`:
 
 1. **Push your branch.** The cloud run cannot see your uncommitted local state or
-   an unpushed branch. Commit your work and push the branch, then pass its name
-   as `branch`. (For genuinely uncommitted WIP on *new* intake, an
-   `initial_snapshot_token` can carry a WIP snapshot — but a pushed branch is the
-   reliable default and the only option for hand-backs.)
+   an unpushed branch, so commit your work and push the branch, then pass its
+   name as `branch`. Uncommitted work is no exception — commit and push it first.
 2. **Write a decision-complete `note`.** This is the task description. Include:
    the goal / desired outcome, what you have already done and why (approach and
    key decisions), the current state (files touched, what works, what is
@@ -84,8 +82,7 @@ Before calling `send_task`:
 To carry supporting artifacts (plan files, screenshots) that live in your current
 conversation, transfer them when handing an **existing** task back (see Workflow
 4) — `source_conversation_id` / `artifact_uids` target an existing task, not new
-intake. For uncommitted local state on new intake, use the WIP
-`initial_snapshot_token` instead (step 1).
+intake.
 
 Example (new work):
 
