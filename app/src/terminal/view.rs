@@ -10721,7 +10721,8 @@ impl TerminalView {
         }
 
         // Check if AWS Bedrock is available in the workspace
-        if !UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_enabled(Some(ctx.window_id()), ctx)
+        if !UserWorkspaces::as_ref(ctx)
+            .is_aws_bedrock_credentials_enabled(Some(ctx.window_id()), ctx)
         {
             return;
         }

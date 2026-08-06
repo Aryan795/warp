@@ -810,15 +810,18 @@ impl AISettingsPageView {
         let is_any_ai_enabled = AISettings::as_ref(ctx).is_any_ai_enabled(ctx);
 
         let workspace = UserWorkspaces::handle(ctx);
-        let ai_autonomy_settings = workspace.as_ref(ctx).ai_autonomy_settings(Some(ctx.window_id()));
+        let ai_autonomy_settings = workspace
+            .as_ref(ctx)
+            .ai_autonomy_settings(Some(ctx.window_id()));
         ctx.subscribe_to_model(&workspace, |me, workspace, event, ctx| {
             if let UserWorkspacesEvent::TeamsChanged = event {
                 me.refresh_all_execution_profile_ui(ctx);
                 me.reset_execution_profile_mouse_state_handles(ctx);
 
                 let is_any_ai_enabled = AISettings::as_ref(ctx).is_any_ai_enabled(ctx);
-                let ai_autonomy_settings =
-                    workspace.as_ref(ctx).ai_autonomy_settings(Some(ctx.window_id()));
+                let ai_autonomy_settings = workspace
+                    .as_ref(ctx)
+                    .ai_autonomy_settings(Some(ctx.window_id()));
 
                 Self::update_editor_interaction_state(
                     me.command_denylist_editor.as_ref(ctx).editor().clone(),
@@ -9611,7 +9614,8 @@ impl AwsBedrockWidget {
         let aws_auth_refresh_command = ai_settings.aws_bedrock_auth_refresh_command.value().clone();
         let aws_auth_refresh_profile = ai_settings.aws_bedrock_profile.value().clone();
         let is_usage_enabled = is_any_ai_enabled
-            && UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_enabled(Some(ctx.window_id()), ctx);
+            && UserWorkspaces::as_ref(ctx)
+                .is_aws_bedrock_credentials_enabled(Some(ctx.window_id()), ctx);
 
         let aws_auth_refresh_command_editor = ctx.add_typed_action_view(move |ctx| {
             let appearance = Appearance::as_ref(ctx);
@@ -9812,8 +9816,7 @@ impl AwsBedrockWidget {
         let is_toggleable =
             is_section_enabled && user_workspaces.is_aws_bedrock_credentials_toggleable(None);
         // TODO(team-scoped-settings): thread a real window_id through once available here.
-        let are_credentials_enabled =
-            user_workspaces.is_aws_bedrock_credentials_enabled(None, app);
+        let are_credentials_enabled = user_workspaces.is_aws_bedrock_credentials_enabled(None, app);
         let is_usage_enabled = is_section_enabled && are_credentials_enabled;
         let toggle_description = if is_admin_enforced {
             "Warp loads and sends local AWS CLI credentials for Bedrock-supported models. This setting is managed by your organization.".to_string()
@@ -10128,8 +10131,8 @@ impl GeminiEnterpriseWidget {
             crate::workspaces::workspace::HostEnablementSetting::Enforce
         );
         // TODO(team-scoped-settings): thread a real window_id through once available here.
-        let is_toggleable = is_section_enabled
-            && user_workspaces.is_gemini_enterprise_credentials_toggleable(None);
+        let is_toggleable =
+            is_section_enabled && user_workspaces.is_gemini_enterprise_credentials_toggleable(None);
         // TODO(team-scoped-settings): thread a real window_id through once available here.
         let are_credentials_enabled =
             user_workspaces.is_gemini_enterprise_credentials_enabled(None, app);

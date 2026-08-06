@@ -193,8 +193,18 @@ fn workspace_defaults_marks_scalar_settings_as_workspace_enforced() {
     let team_settings = TeamSettings::from_workspace_defaults(&ws);
 
     assert!(team_settings.secret_redaction.enabled.value);
-    assert!(team_settings.secret_redaction.enabled.is_enforced_by_workspace);
-    assert!(!team_settings.ai_permissions.allow_ai_in_remote_sessions.value);
+    assert!(
+        team_settings
+            .secret_redaction
+            .enabled
+            .is_enforced_by_workspace
+    );
+    assert!(
+        !team_settings
+            .ai_permissions
+            .allow_ai_in_remote_sessions
+            .value
+    );
     assert!(
         team_settings
             .ai_permissions
@@ -230,12 +240,18 @@ fn workspace_defaults_attributes_list_entries_to_the_workspace_layer() {
 
     let regexes = &team_settings.secret_redaction.regexes;
     assert_eq!(regexes.values, ws.secret_redaction_settings.regexes);
-    assert_eq!(regexes.workspace_entries, ws.secret_redaction_settings.regexes);
+    assert_eq!(
+        regexes.workspace_entries,
+        ws.secret_redaction_settings.regexes
+    );
     assert!(regexes.team_entries.is_empty());
 
     let allowlist = &team_settings.ai_autonomy.read_files_allowlist;
     assert_eq!(allowlist.values, vec!["/tmp/allowed".to_string()]);
-    assert_eq!(allowlist.workspace_entries, vec!["/tmp/allowed".to_string()]);
+    assert_eq!(
+        allowlist.workspace_entries,
+        vec!["/tmp/allowed".to_string()]
+    );
     assert!(allowlist.team_entries.is_empty());
 
     let denylist = &team_settings.ai_autonomy.execute_commands_denylist;
@@ -253,7 +269,12 @@ fn workspace_defaults_has_no_enforced_value_for_create_plans() {
     let team_settings = TeamSettings::from_workspace_defaults(&ws);
 
     assert_eq!(team_settings.ai_autonomy.create_plans.value, None);
-    assert!(!team_settings.ai_autonomy.create_plans.is_enforced_by_workspace);
+    assert!(
+        !team_settings
+            .ai_autonomy
+            .create_plans
+            .is_enforced_by_workspace
+    );
 }
 
 #[test]

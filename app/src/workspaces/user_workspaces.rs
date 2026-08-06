@@ -893,7 +893,9 @@ impl UserWorkspaces {
         window_id: Option<WindowId>,
     ) -> Option<SandboxedAgentSettings> {
         let settings = SandboxedAgentSettings::from(
-            &self.effective_team_settings_for_window(window_id)?.sandboxed_agent,
+            &self
+                .effective_team_settings_for_window(window_id)?
+                .sandboxed_agent,
         );
         Some(settings)
     }
@@ -1823,7 +1825,11 @@ impl UserWorkspaces {
     /// Returns the codebase context settings, taking into account the organization,
     /// global AI settings, and codebase-specific settings.
     /// Prefer this function to determine whether to show indexing-related functionality.
-    pub fn is_codebase_context_enabled(&self, window_id: Option<WindowId>, app: &AppContext) -> bool {
+    pub fn is_codebase_context_enabled(
+        &self,
+        window_id: Option<WindowId>,
+        app: &AppContext,
+    ) -> bool {
         // If the organization has an explicit setting, respect it and make user toggle irrelevant.
         // - Enable: forced ON by org, regardless of user preference.
         // - Disable: forced OFF by org.
@@ -1850,7 +1856,10 @@ impl UserWorkspaces {
     ///
     /// Use this to decide whether the user's attribution toggle should be locked
     /// (`Enable`/`Disable`) or editable (`RespectUserSetting`).
-    pub fn get_agent_attribution_setting(&self, window_id: Option<WindowId>) -> AdminEnablementSetting {
+    pub fn get_agent_attribution_setting(
+        &self,
+        window_id: Option<WindowId>,
+    ) -> AdminEnablementSetting {
         self.effective_team_settings_for_window(window_id)
             .map(|settings| settings.enable_warp_attribution.clone())
             .unwrap_or_default()
@@ -1859,7 +1868,10 @@ impl UserWorkspaces {
     /// Returns only the organization-specific codebase context enablement setting.
     /// Do not use this function to determine whether codebase context is generally enabled --
     /// use `is_codebase_context_enabled` instead.
-    pub fn team_allows_codebase_context(&self, window_id: Option<WindowId>) -> AdminEnablementSetting {
+    pub fn team_allows_codebase_context(
+        &self,
+        window_id: Option<WindowId>,
+    ) -> AdminEnablementSetting {
         self.effective_team_settings_for_window(window_id)
             .map(|settings| settings.codebase_context.value.clone())
             .unwrap_or_default()
