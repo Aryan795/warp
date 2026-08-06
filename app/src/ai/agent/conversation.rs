@@ -3581,7 +3581,25 @@ impl AIConversation {
         if self.is_viewing_shared_session {
             return;
         }
+        self.write_conversation_state(ctx);
+    }
 
+    /// Persists this conversation even though it is displaying a remote shared session.
+    ///
+    /// [`Self::write_updated_conversation_state`] skips a shared-session viewer because a session
+    /// somebody else is running is not this client's to store. A conversation a local-to-cloud
+    /// handoff moved is the exception: it is this client's own conversation, already on disk before
+    /// the handoff marked its pane a viewer of the cloud run. Its cloud binding has to reach disk
+    /// at that moment, because the pane produces no further local writes once the run owns the
+    /// conversation.
+    pub(crate) fn write_cloud_handoff_conversation_state(
+        &mut self,
+        ctx: &mut ModelContext<BlocklistAIHistoryModel>,
+    ) {
+        self.write_conversation_state(ctx);
+    }
+
+    fn write_conversation_state(&mut self, ctx: &mut ModelContext<BlocklistAIHistoryModel>) {
         // Check if session restoration is enabled before writing any state.
         if !*GeneralSettings::as_ref(ctx).restore_session
             || !AppExecutionMode::as_ref(ctx).can_save_session()

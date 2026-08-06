@@ -924,10 +924,10 @@ impl BlocklistAIHistoryModel {
     /// created, so the token resolves here even though no metadata snapshot for it exists yet.
     ///
     /// The binding is written to disk immediately rather than waiting for the conversation's next
-    /// save, because the run moves off this machine right after the handoff and the pane may never
-    /// produce another local write. Conversations being viewed as a shared session persist nothing
-    /// at all ([`AIConversation::write_updated_conversation_state`]); for those the cloud
-    /// association is recovered from synced conversation metadata instead.
+    /// save: the run owns the conversation from here on, so the pane produces no further local
+    /// writes. It goes through [`AIConversation::write_cloud_handoff_conversation_state`] because
+    /// materialization has already marked the moved conversation a shared-session viewer of the
+    /// cloud run, and the ordinary save path refuses to persist those.
     pub fn record_cloud_handoff_task(
         &mut self,
         server_token: &ServerConversationToken,
@@ -945,7 +945,7 @@ impl BlocklistAIHistoryModel {
             return;
         };
         conversation.set_cloud_handoff_task_id(task_id);
-        self.persist_conversation_state(conversation_id, ctx);
+        conversation.write_cloud_handoff_conversation_state(ctx);
     }
 
     /// Sets server metadata for a conversation and emits the ConversationMetadataUpdated event.

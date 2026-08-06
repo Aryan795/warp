@@ -32,6 +32,7 @@ use crate::server::server_api::team::MockTeamClient;
 use crate::server::server_api::workspace::MockWorkspaceClient;
 use crate::terminal::TerminalModel;
 use crate::terminal::shared_session::{SharedSessionSource, SharedSessionStatus};
+use crate::test_util::settings::initialize_history_persistence_for_tests;
 use crate::workspaces::team::Team;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::workspaces::workspace::Workspace;
@@ -1008,6 +1009,9 @@ fn setup_handoff_pane_without_conversation_metadata(
     record_binding: bool,
 ) -> TestHandles {
     let _agent_management_guard = FeatureFlag::AgentManagementView.override_enabled(false);
+    // Recording the binding persists the conversation, which reads the settings and
+    // execution-mode singletons.
+    initialize_history_persistence_for_tests(app);
     app.add_singleton_model(|_| AuthStateProvider::new_for_test());
     app.add_singleton_model(UserWorkspaces::default_mock);
     app.add_singleton_model(|_| BlocklistAIHistoryModel::new_for_test());

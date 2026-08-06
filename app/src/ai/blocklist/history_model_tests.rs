@@ -2322,6 +2322,56 @@ fn test_start_new_child_conversation_persists_child_metadata_for_restore() {
     });
 }
 
+/// A local-to-cloud handoff marks the moved conversation a shared-session viewer of the cloud run
+/// before it records the run against it, and the ordinary save path refuses to persist a viewer.
+/// The binding still has to reach disk, or a follow-up after a client restart has nothing naming
+/// the cloud run and falls back to the local agent.
+#[test]
+fn test_record_cloud_handoff_task_persists_binding_for_shared_session_viewer() {
+    App::test((), |mut app| async move {
+        initialize_settings_for_tests(&mut app);
+
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let mut global_resource_handles = GlobalResourceHandles::mock(&mut app);
+        global_resource_handles.model_event_sender = Some(sender);
+        app.add_singleton_model(|_| GlobalResourceHandlesProvider::new(global_resource_handles));
+
+        let history_model = app.add_singleton_model(|_| BlocklistAIHistoryModel::new_for_test());
+        let terminal_view_id = EntityId::new();
+        let server_token = ServerConversationToken::new("moved-conversation-token".to_string());
+        let task_id: AmbientAgentTaskId = "550e8400-e29b-41d4-a716-446655440000"
+            .parse()
+            .expect("task id should parse");
+
+        let conversation_id = history_model.update(&mut app, |history_model, ctx| {
+            let conversation_id =
+                history_model.start_new_conversation(terminal_view_id, false, false, false, ctx);
+            history_model.set_server_conversation_token_for_conversation(
+                conversation_id,
+                server_token.as_str().to_string(),
+            );
+            history_model.set_viewing_shared_session_for_conversation(conversation_id, true);
+            conversation_id
+        });
+
+        history_model.update(&mut app, |history_model, ctx| {
+            history_model.record_cloud_handoff_task(&server_token, task_id, ctx);
+        });
+
+        let persisted_conversation = persisted_agent_conversation_from_update_event(
+            receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("recording the handoff's run should persist conversation state"),
+        );
+        let restored =
+            convert_persisted_conversation_to_ai_conversation_with_metadata(persisted_conversation)
+                .expect("persisted moved conversation should be restorable");
+
+        assert_eq!(restored.id(), conversation_id);
+        assert_eq!(restored.cloud_handoff_task_id(), Some(task_id));
+    });
+}
+
 #[test]
 fn test_mark_conversation_as_remote_child_persists_updated_conversation_state() {
     App::test((), |mut app| async move {
