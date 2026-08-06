@@ -7560,6 +7560,91 @@ fn ctrl_c_does_not_accept_prompt_suggestion_banner() {
     })
 }
 
+/// Guards the denominator of the prompt-suggestion acceptance rate.
+///
+/// Acceptance rate is accepts over exposures, and the accept event is emitted from a
+/// different callsite than this one. Dropping only the exposure event therefore skews the
+/// metric instead of zeroing it, which is not obvious from either callsite alone.
+#[test]
+fn dynamic_prompt_suggestion_banner_reports_exposure_telemetry() {
+    const SUGGESTION_ID: &str = "prompt-suggestion-shown-telemetry";
+    const REQUEST_DURATION_MS: u64 = 42;
+
+    fn exposure_events() -> Vec<serde_json::Value> {
+        warpui::telemetry::flush_events()
+            .into_iter()
+            .filter_map(|event| match event.payload {
+                warpui::telemetry::EventPayload::NamedEvent { name, value, .. }
+                    if name == "Agent Mode Query Suggestions Banner Shown" =>
+                {
+                    value
+                }
+                _ => None,
+            })
+            // Other tests share the process-wide telemetry queue, so only trust the event
+            // carrying the id this test generated.
+            .filter(|value| value["id"] == serde_json::json!(SUGGESTION_ID))
+            .collect()
+    }
+
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+
+        let block_id = terminal.update(&mut app, |view, _ctx| {
+            let mut model = view.model.lock();
+            model.simulate_block("ls", "output");
+            let last_completed_block_index = BlockIndex(model.block_list().blocks().len() - 2);
+            model
+                .block_list()
+                .block_at(last_completed_block_index)
+                .unwrap()
+                .id()
+                .clone()
+        });
+
+        terminal.update(&mut app, |view, ctx| {
+            view.on_legacy_prompt_suggestion_generated(
+                AgentModePromptSuggestion::Success(PromptSuggestion {
+                    id: SUGGESTION_ID.to_owned(),
+                    label: Some("Do something".to_owned()),
+                    prompt: "Do something".to_owned(),
+                    coding_query_context: None,
+                    // A static suggestion reports a different event, so leave this unset to
+                    // exercise the dynamic path.
+                    static_prompt_suggestion_name: None,
+                    should_start_new_conversation: false,
+                }),
+                block_id.clone(),
+                "ls".to_owned(),
+                REQUEST_DURATION_MS,
+                ctx,
+            );
+        });
+
+        // Telemetry is recorded on the background executor, so the event lands some time
+        // after the call that produced it.
+        let mut events = Vec::new();
+        for _ in 0..100 {
+            events.extend(exposure_events());
+            if !events.is_empty() {
+                break;
+            }
+            Timer::after(Duration::from_millis(10)).await;
+        }
+
+        let event = events
+            .first()
+            .expect("showing a dynamic prompt suggestion banner should report an exposure");
+        assert_eq!(event["block_id"], serde_json::json!(block_id.to_string()));
+        assert_eq!(
+            event["request_duration_ms"],
+            serde_json::json!(REQUEST_DURATION_MS)
+        );
+        assert_eq!(event["server_request_token"], serde_json::Value::Null);
+    })
+}
+
 /// Regression test for GH703: a Linear deeplink prompt must never be auto-submitted
 /// to the LLM. Because `LinearDeepLink` returns `AutoTriggerBehavior::Never`, the
 /// prompt must land in the input buffer as a draft and the "press enter again to
