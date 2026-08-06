@@ -2343,11 +2343,7 @@ impl Input {
         let effective_host = std::env::var("WARP_CLOUD_MODE_DEFAULT_HOST")
             .ok()
             .filter(|s| !s.is_empty())
-            .or_else(|| {
-                UserWorkspaces::as_ref(ctx)
-                    .default_host_slug()
-                    .map(String::from)
-            });
+            .or_else(|| UserWorkspaces::as_ref(ctx).default_host_slug(Some(ctx.window_id())));
         if let Some(slug) = &effective_host {
             view.update(ctx, |selector, ctx| {
                 selector.set_default_host(slug.clone(), ctx);
@@ -2391,11 +2387,7 @@ impl Input {
             let effective_host = std::env::var("WARP_CLOUD_MODE_DEFAULT_HOST")
                 .ok()
                 .filter(|s| !s.is_empty())
-                .or_else(|| {
-                    UserWorkspaces::as_ref(ctx)
-                        .default_host_slug()
-                        .map(String::from)
-                });
+                .or_else(|| UserWorkspaces::as_ref(ctx).default_host_slug(Some(ctx.window_id())));
             if let Some(slug) = &effective_host {
                 view_for_ws.update(ctx, |selector, ctx| {
                     selector.set_default_host(slug.clone(), ctx);
