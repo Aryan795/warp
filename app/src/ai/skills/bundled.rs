@@ -462,6 +462,7 @@ fn display_optional_path(path: Option<PathBuf>) -> String {
 /// - `{{tui_settings_file_path}}` - Path to the TUI settings TOML file
 /// - `{{gui_mcp_config_file_path}}` - Path to the GUI global MCP config
 /// - `{{tui_mcp_config_file_path}}` - Path to the TUI global MCP config
+/// - `{{factory_config_file_path}}` - Path to the shared factory default config (GUI/TUI-shared)
 pub(crate) fn build_bundled_skill_context(
     resources_dir: &Path,
     skill_dir: &Path,
@@ -522,6 +523,10 @@ pub(crate) fn build_bundled_skill_context(
             warp_core::paths::tui_mcp_config_file_path()
                 .display()
                 .to_string(),
+        ),
+        (
+            "factory_config_file_path".to_owned(),
+            display_optional_path(warp_core::paths::factory_config_file_path()),
         ),
         (
             "settings_schema_path".to_owned(),

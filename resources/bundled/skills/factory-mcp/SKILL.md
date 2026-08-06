@@ -46,11 +46,102 @@ tool schema when the two differ.
 - `complete_task` — mark a task complete (terminal `COMPLETE` stage).
 - `get_conversation` — read the raw foreman transcript for a task.
 
-Always start by resolving the factory:
+Always start by resolving the factory. When the user has set a **default
+factory**, use it and skip the discovery round-trip; otherwise fall back to
+`list_factories`:
 
 ```text
-list_factories  ->  pick the factory  ->  use its uid as factory_uid
+default set & valid?  ->  yes: use its default_factory_uid as factory_uid (skip list_factories)
+                      ->  no:  list_factories  ->  pick the factory  ->  use its uid as factory_uid
 ```
+
+See [The default factory](#the-default-factory) below for exactly when to honor
+the default, how to handle a missing/broken/stale default, and how to set or
+clear it.
+
+## The default factory
+
+A user who almost always uses one factory can save it as a **default**, so a
+workflow that needs a factory skips the `list_factories` pick. The default lives
+in a small JSON file on disk that Warp, the Warp TUI, and third-party harnesses
+all share:
+
+- **Path:** `{{factory_config_file_path}}` (channel-aware; the same file across
+  the native app and the TUI).
+- **Shape (v1):**
+  ```json
+  {
+    "default_factory_uid": "fac_abc123",
+    "default_factory_name": "Acme Backend Factory"
+  }
+  ```
+  - `default_factory_uid` is **authoritative** — use it directly as `factory_uid`.
+  - `default_factory_name` is **advisory only** — a label so you can say "using
+    your default factory X". It may be stale after a rename, so **never** use it
+    to look up or match a factory.
+  - **Any other keys you don't recognize must be left untouched** (see writing).
+
+### Reading the default (before `list_factories`)
+
+When a workflow needs a `factory_uid`, before calling `list_factories`, read
+`{{factory_config_file_path}}` with your own file tools and branch:
+
+1. **The request already names a specific factory.** Use that factory. The
+   explicit choice always wins over any stored default; do not read or apply the
+   default at all.
+2. **This is a management / discovery workflow** — listing all factories, or
+   setting / switching / clearing the default (see below). Always call
+   `list_factories` and operate on the real result; never short-circuit on the
+   stored default.
+3. **File absent.** There is no default. Fall back to `list_factories → pick →
+   use uid` exactly as before, silently — no new message, no error.
+4. **File present and valid** (parses as JSON with a non-empty string
+   `default_factory_uid`). Use `default_factory_uid` directly as `factory_uid`
+   and **skip `list_factories`**. Briefly tell the user you're using their
+   default factory (use `default_factory_name` for the label when present).
+5. **File present but unreadable/malformed** (not valid JSON, or
+   `default_factory_uid` missing, empty, or not a string). Warn the user once
+   that the default-factory config is unreadable, then fall back to
+   `list_factories`. **Do not overwrite or delete the file** — the user may have
+   hand-edited it with a typo, and destroying their file is worse than ignoring it.
+6. **Stale default** — `default_factory_uid` is valid but no longer resolves to a
+   factory visible to the current account (confirmed by a `list_factories` that
+   does not contain that uid). Tell the user **once** that their saved default is
+   no longer available, fall back to `list_factories` for this workflow, and
+   offer to update the default to a current factory or clear it. Do not silently
+   re-run discovery every time.
+
+### Writing the default (confirm-first — never silent)
+
+Only ever write `{{factory_config_file_path}}` when the user asks for it:
+
+- **Explicit set / remember.** The user asks to set, remember, or change their
+  default factory (e.g. "make Acme my default factory").
+- **Post-pick prompt (optional).** After the user picks a factory via
+  `list_factories`, you may ask once whether to remember it as their default. Only
+  write on an affirmative answer.
+- **Never auto-pin.** Do not save a default just because the user used a factory
+  once. A default is written only with explicit consent.
+
+When you do write, **read-modify-write** so unknown keys survive:
+
+1. Read the current file if it exists and parse it (treat unreadable content as
+   an empty object rather than clobbering it — but if it was hand-edited and
+   unreadable, confirm with the user before replacing it).
+2. Set `default_factory_uid` (and `default_factory_name` when you know the name)
+   on the parsed object, **preserving every other key already present** — a newer
+   Warp or harness may store additional preferences here that you must not drop.
+3. Create the `factory/` directory if it is missing and write the JSON back
+   (write to a temp file then rename to avoid a torn file). Setting the same
+   value again is a successful no-op.
+
+**Clearing** the default removes `default_factory_uid` (and
+`default_factory_name`) from the object — again preserving any other keys — after
+which behavior reverts to "no default set". Setting then clearing round-trips
+cleanly.
+
+The native app and the TUI both read and write this same file with identical
+semantics — the TUI is not read-only.
 
 ## Workflow 1 — Start work locally, then send it to the factory
 
@@ -113,7 +204,9 @@ not surfaced as structured task fields.
 Use this to locate a task from a Slack thread, a Linear ticket, or a plain
 description.
 
-1. `list_factories` → choose the factory → take its `uid`.
+1. `list_factories` → choose the factory → take its `uid`. This is a discovery
+   flow, so always use the real `list_factories` result; do not short-circuit on
+   a stored default (see [The default factory](#the-default-factory)).
 2. `list_tasks(factory_uid = ...)`. Narrow the set:
    - `created_by_me = true` for the caller's own tasks (never guess an email).
      This requires a **user-issued** API key; an agent/automation key has no user
@@ -220,7 +313,10 @@ complete raw transcript when the window is not enough.
 ## Tips
 
 - **Resolve the factory first.** Every task-level tool needs a `factory_uid` (or
-  a `factory_task_uid` that came from `list_tasks`); start with `list_factories`.
+  a `factory_task_uid` that came from `list_tasks`). Honor the user's default
+  factory when one is set and valid (skipping `list_factories`); otherwise start
+  with `list_factories`. Management/discovery flows and an explicitly named
+  factory always bypass the default (see [The default factory](#the-default-factory)).
 - **`send_task` is the only write path.** New work needs `factory_uid` + `title`;
   a hand-back needs `factory_task_uid`. Never open a second task for the same
   unit of work — hand it back to the same `factory_task_uid`.
