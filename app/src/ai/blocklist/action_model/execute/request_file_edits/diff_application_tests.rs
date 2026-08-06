@@ -755,6 +755,43 @@ fn test_create_edit_with_identical_content_becomes_an_update() {
 }
 
 #[test]
+fn test_create_edit_with_identical_content_but_no_trailing_newline_errors() {
+    App::test((), |app| async move {
+        let mut temp_file = NamedTempFile::new().expect("Failed to create temporary file");
+        let file_path = temp_file.path().to_string_lossy().to_string();
+        // No trailing newline: the diff appliers append one to non-empty update insertions, so
+        // coercing this into an update would rewrite the file rather than being a true no-op.
+        let content = "First line\nSecond line";
+        write!(&mut temp_file, "{content}").unwrap();
+
+        let create_edit = FileEdit::Create {
+            file: Some(file_path.clone()),
+            content: Some(content.to_string()),
+        };
+
+        let result = apply_edits(
+            vec![create_edit],
+            &SessionContext::new_for_test(),
+            &AIIdentifiers::default(),
+            app.background_executor(),
+            Arc::new(AuthState::new_for_test()),
+            false,
+            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+        )
+        .await;
+
+        let errors =
+            result.expect_err("Expected an error because coercion would not be byte-preserving");
+        match &errors[..] {
+            [DiffApplicationError::AlreadyExists { file, .. }] => {
+                assert_eq!(*file, file_path);
+            }
+            other => panic!("Expected a single AlreadyExists error, got {other:?}"),
+        }
+    });
+}
+
+#[test]
 fn test_format_match_error() {
     let err = DiffApplicationError::UnmatchedDiffs {
         file: "file.txt".to_string(),

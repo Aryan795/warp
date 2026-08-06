@@ -63,8 +63,6 @@ const MAX_EXISTING_CONTENT_EXCERPT_BYTES: usize = 16 * 1024;
 /// the content it needs to emit an edit on its next turn.
 pub(crate) struct ExistingFileContent {
     line_count: usize,
-    /// Line-numbered excerpt (`"{n}|{line}"`), matching the format search blocks are expected to
-    /// use. Empty when even the first line exceeds the byte budget.
     excerpt: String,
     excerpt_line_count: usize,
 }
@@ -592,7 +590,8 @@ async fn apply_create_file<F, Fut>(
         // cannot lose anything: the file is empty, or it already holds exactly what was requested.
         // Any other overlap falls through to an error rather than blindly clobbering the file.
         FileReadResult::Found(existing_content)
-            if existing_content.is_empty() || existing_content == content =>
+            if existing_content.is_empty()
+                || (existing_content == content && content.ends_with('\n')) =>
         {
             result
                 .diffs
