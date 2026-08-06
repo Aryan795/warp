@@ -9,7 +9,7 @@
 //! the legacy implementation, the internal structure and logic in this module may begin to
 //! (appropriately) diverge.
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use itertools::Itertools;
 use smol_str::SmolStr;
@@ -19,6 +19,7 @@ use crate::completer::context::call_js_function;
 use crate::completer::engine::path::{
     sorted_cd_directories, sorted_directories_relative_to, sorted_paths_relative_to,
 };
+use crate::completer::engine::worktree::{is_worktree_completion_context, worktree_suggestions};
 use crate::completer::{
     CommandExitStatus, CompleterOptions, CompletionContext, CompletionsFallbackStrategy,
     GeneratorContext, LocationType, MatchStrategy, MatchedSuggestion, Suggestion, SuggestionType,
@@ -107,7 +108,53 @@ pub async fn complete(
         }
     }
 
+    append_worktree_suggestions(
+        &mut suggestions,
+        parsed_argument,
+        tokens_without_last_editing,
+        options,
+        ctx,
+    )
+    .await;
+
     suggestions
+}
+
+/// Augments argument suggestions with worktree-name suggestions when the command
+/// being completed references a worktree (see `is_worktree_completion_context`).
+/// Worktree suggestions supplement, and never replace, filesystem completion;
+/// any whose display already appears are skipped to avoid duplicates.
+async fn append_worktree_suggestions(
+    suggestions: &mut Vec<MatchedSuggestion>,
+    parsed_argument: &ParsedToken,
+    tokens_without_last_editing: &[&str],
+    options: &CompleterOptions,
+    ctx: &dyn CompletionContext,
+) {
+    if !is_worktree_completion_context(tokens_without_last_editing) {
+        return;
+    }
+    let Some(path_completion_context) = ctx.path_completion_context() else {
+        return;
+    };
+    let worktrees = path_completion_context.worktrees().await;
+    if worktrees.is_empty() {
+        return;
+    }
+    let existing_displays: HashSet<SmolStr> = suggestions
+        .iter()
+        .map(|suggestion| suggestion.suggestion.display.clone())
+        .collect();
+    suggestions.extend(
+        worktree_suggestions(
+            parsed_argument,
+            options.match_strategy,
+            &worktrees,
+            path_completion_context.shell_family(),
+        )
+        .into_iter()
+        .filter(|suggestion| !existing_displays.contains(&suggestion.suggestion.display)),
+    );
 }
 
 /// Generate suggestions for the case where there was a parse error. Given there

@@ -942,6 +942,11 @@ pub enum FeatureFlag {
     /// between credits and dollars. When disabled (prod/stable), the footer
     /// falls back to a static, non-interactive credits total.
     TuiCostTransparency,
+
+    /// Surfaces the current repository's git worktrees as command-input
+    /// completion suggestions in worktree-relevant contexts (`cd`, `git
+    /// worktree` subcommands).
+    WorktreeCompletions,
 }
 
 static FLAG_STATES: [AtomicBool; cardinality::<FeatureFlag>()] =
@@ -1017,6 +1022,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::WellKnownMcpIds,
     FeatureFlag::FactoryMcp,
     FeatureFlag::TuiCostTransparency,
+    FeatureFlag::WorktreeCompletions,
 ];
 
 /// Features enabled for feature preview build users (e.g.: Friends of Warp).

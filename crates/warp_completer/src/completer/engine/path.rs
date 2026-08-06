@@ -12,6 +12,7 @@ use warp_command_signatures::{IconType, PathSuggestionType};
 use warp_util::path::{HOME_DIR_ENV_VAR_PREFIX, ShellFamily};
 
 use crate::completer::context::{PathCompletionContext, PathSeparators};
+use crate::completer::engine::worktree::Worktree;
 use crate::completer::matchers::MatchStrategy;
 use crate::completer::suggest::{MatchedSuggestion, Priority, Suggestion, SuggestionType};
 use crate::parsers::ParsedToken;
@@ -254,6 +255,10 @@ impl<'a> PathCompletionContext for CdpathOverrideContext<'a> {
 
     fn path_separators(&self) -> PathSeparators {
         self.inner.path_separators()
+    }
+
+    async fn worktrees(&self) -> Arc<Vec<Worktree>> {
+        self.inner.worktrees().await
     }
 }
 

@@ -6,7 +6,9 @@ use itertools::Itertools;
 use typed_path::TypedPathBuf;
 #[cfg(windows)]
 use typed_path::{UnixComponent, WindowsComponent, WindowsPrefix};
-use warp_completer::completer::{CompletionContext, EngineDirEntry, PathCompletionContext};
+use warp_completer::completer::{
+    CompletionContext, EngineDirEntry, PathCompletionContext, Worktree,
+};
 use warp_completer::signatures::CommandRegistry;
 use warpui::App;
 
@@ -181,6 +183,49 @@ pub fn test_session_context_lists_directory_entries_locally() {
             },
         );
     });
+}
+
+#[test]
+fn parse_worktree_list_extracts_paths_and_branch_names() {
+    let output = "worktree /Users/me/project\n\
+HEAD abcdef\n\
+branch refs/heads/main\n\
+\n\
+worktree /Users/me/worktrees/canyon\n\
+HEAD 123456\n\
+branch refs/heads/feature/canyon\n\
+\n\
+worktree /Users/me/worktrees/detached\n\
+HEAD 789abc\n\
+detached\n";
+
+    let worktrees = crate::completer::parse_worktree_list(output);
+
+    assert_eq!(
+        worktrees,
+        vec![
+            Worktree {
+                name: "main".to_owned(),
+                path: "/Users/me/project".to_owned(),
+            },
+            Worktree {
+                // The branch's basename is used, so `refs/heads/feature/canyon`
+                // becomes `canyon`.
+                name: "canyon".to_owned(),
+                path: "/Users/me/worktrees/canyon".to_owned(),
+            },
+            Worktree {
+                // Detached worktrees have no branch, so the path basename is used.
+                name: "detached".to_owned(),
+                path: "/Users/me/worktrees/detached".to_owned(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn parse_worktree_list_handles_empty_output() {
+    assert!(crate::completer::parse_worktree_list("").is_empty());
 }
 
 /// Given a Windows-encoded path, such as `C:\User\my_username`,

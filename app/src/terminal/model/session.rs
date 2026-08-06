@@ -9,6 +9,7 @@ use std::fmt::{Debug, Display, Formatter};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use async_channel::Sender;
@@ -24,7 +25,7 @@ use smol_str::SmolStr;
 use typed_path::{TypedPath, TypedPathBuf, WindowsPath};
 use version_compare::Version;
 use warp_completer::completer::{
-    CommandExitStatus, CommandOutput, PathSeparators, TopLevelCommandCaseSensitivity,
+    CommandExitStatus, CommandOutput, PathSeparators, TopLevelCommandCaseSensitivity, Worktree,
 };
 use warp_errors::{ErrorExt, register_error};
 use warp_util::path::{
@@ -954,7 +955,24 @@ pub struct Session {
     /// when `RemoteServerManager` reports a connected session (to fill in the
     /// `host_id`). Interior mutability allows updating through `Arc<Session>`.
     session_type: Mutex<SessionType>,
+    /// Cached `git worktree list` results keyed by the working directory they
+    /// were computed from. Listing worktrees spawns a subprocess, so results
+    /// are cached with a short TTL to keep completions from running it on
+    /// every keystroke.
+    worktrees_cache: Mutex<HashMap<String, CachedWorktrees>>,
 }
+
+/// A cached `git worktree list` result together with when it was fetched.
+#[derive(Debug, Clone)]
+struct CachedWorktrees {
+    fetched_at: Instant,
+    worktrees: Arc<Vec<Worktree>>,
+}
+
+/// How long a cached `git worktree list` result stays fresh before it is
+/// recomputed. Short enough to pick up newly added/removed worktrees quickly,
+/// long enough to avoid spawning git on every keystroke.
+const WORKTREE_CACHE_TTL: Duration = Duration::from_secs(5);
 
 impl Session {
     pub fn new(session_info: SessionInfo, command_executor: Arc<dyn CommandExecutor>) -> Self {
@@ -980,6 +998,7 @@ impl Session {
             load_all_builtins_future: Default::default(),
             command_case_sensitivity,
             session_type: Mutex::new(session_type),
+            worktrees_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1658,6 +1677,67 @@ impl Session {
         }
     }
 
+    /// Returns the git worktrees for the repository containing
+    /// `current_working_directory`, for use as command-input completions.
+    ///
+    /// Results are cached per working directory with a short TTL
+    /// ([`WORKTREE_CACHE_TTL`]) so `git worktree list` is not spawned on every
+    /// keystroke. Returns an empty list when the directory is not in a git
+    /// repository or git is unavailable.
+    pub async fn worktrees(&self, current_working_directory: &TypedPathBuf) -> Arc<Vec<Worktree>> {
+        let Some(working_dir) = current_working_directory.to_str() else {
+            return Arc::new(Vec::new());
+        };
+
+        if let Some(cached) = self.worktrees_cache.lock().get(working_dir)
+            && cached.fetched_at.elapsed() < WORKTREE_CACHE_TTL
+        {
+            return cached.worktrees.clone();
+        }
+
+        let worktrees = Arc::new(self.load_worktrees(working_dir).await);
+        self.worktrees_cache.lock().insert(
+            working_dir.to_owned(),
+            CachedWorktrees {
+                fetched_at: Instant::now(),
+                worktrees: worktrees.clone(),
+            },
+        );
+        worktrees
+    }
+
+    async fn load_worktrees(&self, working_dir: &str) -> Vec<Worktree> {
+        let env_vars = self
+            .info
+            .path
+            .as_deref()
+            .map(|path| HashMap::from_iter([("PATH".to_string(), path.to_string())]));
+
+        let output = self
+            .execute_command(
+                "git --no-optional-locks worktree list --porcelain",
+                Some(working_dir),
+                env_vars,
+                ExecuteCommandOptions::default(),
+            )
+            .await;
+
+        match output {
+            Ok(command_output) if command_output.status == CommandExitStatus::Success => {
+                match command_output.to_string() {
+                    Ok(output_string) => crate::completer::parse_worktree_list(&output_string),
+                    Err(_) => {
+                        log::warn!("the output for `git worktree list` was unparseable");
+                        Vec::new()
+                    }
+                }
+            }
+            // Not a git repo, git missing, or the command failed: no worktree
+            // suggestions, but never an error to the user.
+            _ => Vec::new(),
+        }
+    }
+
     pub fn command_case_sensitivity(&self) -> TopLevelCommandCaseSensitivity {
         self.command_case_sensitivity
     }
@@ -1889,6 +1969,7 @@ pub mod testing {
                 load_all_function_names_future: Default::default(),
                 additional_builtin_names: Default::default(),
                 load_all_builtins_future: Default::default(),
+                worktrees_cache: Mutex::new(HashMap::new()),
             }
         }
 
@@ -1908,6 +1989,7 @@ pub mod testing {
                 load_all_function_names_future: Default::default(),
                 additional_builtin_names: Default::default(),
                 load_all_builtins_future: Default::default(),
+                worktrees_cache: Mutex::new(HashMap::new()),
             }
         }
 

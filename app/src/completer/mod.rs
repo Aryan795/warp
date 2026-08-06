@@ -14,6 +14,7 @@ use typed_path::{TypedPath, TypedPathBuf};
 use warp_completer::completer::{
     CommandExitStatus, CommandOutput, CompletionContext, EngineDirEntry, EngineFileType,
     GeneratorContext, PathCompletionContext, PathSeparators, TopLevelCommandCaseSensitivity,
+    Worktree,
 };
 use warp_completer::signatures::CommandRegistry;
 use warp_core::features::FeatureFlag;
@@ -226,6 +227,15 @@ impl PathCompletionContext for SessionContext {
 
     fn path_separators(&self) -> PathSeparators {
         self.session.path_separators()
+    }
+
+    async fn worktrees(&self) -> Arc<Vec<Worktree>> {
+        if !FeatureFlag::WorktreeCompletions.is_enabled() {
+            return Arc::new(Vec::new());
+        }
+        self.session
+            .worktrees(&self.current_working_directory)
+            .await
     }
 }
 
@@ -467,6 +477,52 @@ impl CompletionContext for EmptyCompletionContext {
     fn generator_context(&self) -> Option<&dyn GeneratorContext> {
         None
     }
+}
+
+/// Parses the porcelain output of `git worktree list --porcelain` into [`Worktree`]s.
+///
+/// Each record begins with a `worktree <path>` line and may carry a
+/// `branch <ref>` line. The worktree's display name is the branch's basename
+/// when checked out, falling back to the working directory's basename.
+pub(crate) fn parse_worktree_list(output: &str) -> Vec<Worktree> {
+    let mut worktrees = Vec::new();
+    let mut path: Option<String> = None;
+    let mut branch: Option<String> = None;
+
+    for line in output.lines() {
+        if let Some(next_path) = line.strip_prefix("worktree ") {
+            if let Some(path) = path.take() {
+                worktrees.push(build_worktree(path, branch.take()));
+            }
+            path = Some(next_path.to_string());
+            branch = None;
+        } else if let Some(next_branch) = line.strip_prefix("branch ") {
+            branch = Some(next_branch.to_string());
+        }
+    }
+    if let Some(path) = path.take() {
+        worktrees.push(build_worktree(path, branch.take()));
+    }
+    worktrees
+}
+
+fn build_worktree(path: String, branch: Option<String>) -> Worktree {
+    let name = branch
+        .and_then(|branch| worktree_basename(&branch))
+        .or_else(|| worktree_basename(&path))
+        .unwrap_or_else(|| path.clone());
+    Worktree { name, path }
+}
+
+/// Returns the last path/ref segment of `value` (splitting on both `/` and `\`),
+/// or `None` when there is no non-empty segment.
+fn worktree_basename(value: &str) -> Option<String> {
+    value
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_string)
 }
 
 /// List files and directories in a directory; used for completions on a remote machine.

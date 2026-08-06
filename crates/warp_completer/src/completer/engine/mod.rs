@@ -3,12 +3,14 @@ mod command;
 mod flag;
 pub(crate) mod path;
 mod variable;
+pub(crate) mod worktree;
 
 pub use argument::complete as argument_suggestions;
 pub use command::complete as command_suggestions;
 pub use flag::complete as flag_suggestions;
 pub use path::{EngineDirEntry, EngineFileType};
 pub use variable::suggestions as variable_suggestions;
+pub use worktree::Worktree;
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "v2")] {

@@ -16,7 +16,7 @@ pub use context::{
 #[cfg(feature = "v2")]
 pub use context::{JsExecutionContext, JsExecutionError};
 pub use describe::{Description, TopLevelCommandCaseSensitivity, describe, describe_given_token};
-pub use engine::{EngineDirEntry, EngineFileType, LocationType};
+pub use engine::{EngineDirEntry, EngineFileType, LocationType, Worktree};
 pub use matchers::{Match, MatchStrategy, MatchType};
 pub use suggest::{
     CompleterOptions, CompletionsFallbackStrategy, ExplicitTabCompletion, MatchedSuggestion,

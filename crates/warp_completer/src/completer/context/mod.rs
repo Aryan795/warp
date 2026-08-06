@@ -16,7 +16,7 @@ use warp_core::command::ExitCode;
 use warp_util::path::{EscapeChar, ShellFamily};
 use warpui_core::platform::OperatingSystem;
 
-use super::engine::EngineDirEntry;
+use super::engine::{EngineDirEntry, Worktree};
 use crate::completer::TopLevelCommandCaseSensitivity;
 use crate::signatures::CommandRegistry;
 
@@ -176,6 +176,13 @@ pub trait PathCompletionContext: Send + Sync {
     fn pwd(&self) -> TypedPath<'_>;
 
     fn path_separators(&self) -> PathSeparators;
+
+    /// The git worktrees known for the current repository, used to surface
+    /// worktree-name completions. Defaults to none for contexts that do not
+    /// track worktrees.
+    async fn worktrees(&self) -> Arc<Vec<Worktree>> {
+        Arc::new(Vec::new())
+    }
 }
 
 #[async_trait]
