@@ -123,10 +123,8 @@ impl ChannelState {
         url.host_str() == Some("staging.warp.dev")
     }
 
-    /// Returns whether the resolved server root URL points at a local host that
-    /// should skip IAP (see [`host_is_local`]). The resolved server URL is the
-    /// sole authority for disabling IAP: there is no env var or flag, so IAP can
-    /// never be disabled against a non-local server such as staging.
+    /// Whether the resolved server root URL points at a local host, in which case
+    /// IAP is skipped (see [`host_is_local`]).
     pub fn server_root_url_is_local() -> bool {
         host_is_local(&Self::server_root_url())
     }
@@ -429,22 +427,12 @@ fn derive_http_origin_from_ws_url(ws_url: &str) -> Option<String> {
     Some(origin)
 }
 
-/// Hosts treated as local, non-IAP servers. When the resolved server root URL
-/// points at one of these, IAP is auto-disabled. IPv6 loopback appears as
-/// `[::1]` from [`Url::host_str`], so both forms are listed.
-const LOCAL_HOSTS: &[&str] = &[
-    "localhost",
-    "127.0.0.1",
-    "::1",
-    "[::1]",
-    "host.docker.internal",
-];
+/// Hosts treated as local (non-IAP) servers. `Url::host_str` yields IPv6
+/// loopback as `[::1]` (pinned by a test in `state_tests.rs`).
+const LOCAL_HOSTS: &[&str] = &["localhost", "127.0.0.1", "[::1]", "host.docker.internal"];
 
-/// Returns whether `server_root_url` points at a local host from [`LOCAL_HOSTS`].
-///
-/// Matching is exact on the parsed host, so a host that merely contains a local
-/// substring (e.g. `localhost.evil.example.com`) is not local. An unparseable
-/// URL is treated as non-local so the IAP decision fails safe toward enabled.
+/// Whether `server_root_url`'s host is in [`LOCAL_HOSTS`]. Matching is exact, and
+/// an unparseable URL is non-local, so the IAP decision fails safe toward enabled.
 fn host_is_local(server_root_url: &str) -> bool {
     Url::parse(server_root_url)
         .ok()

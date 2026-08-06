@@ -1,3 +1,5 @@
+use url::Url;
+
 use super::{derive_http_origin_from_ws_url, host_is_local};
 
 #[test]
@@ -19,30 +21,35 @@ fn unparseable_input_returns_none() {
 }
 
 #[test]
+fn ipv6_loopback_host_str_is_bracketed() {
+    // Pins the form `Url::host_str` yields for IPv6 loopback; `LOCAL_HOSTS` matches it.
+    assert_eq!(
+        Url::parse("http://[::1]:8080").unwrap().host_str(),
+        Some("[::1]")
+    );
+}
+
+#[test]
 fn local_server_urls_are_local() {
-    // The `oz-local` case plus the other allowlisted loopback / docker hosts.
-    // A local server URL disables IAP (invariants #1 and #2).
+    // Every allowlisted host, including port/scheme variations, disables IAP.
     assert!(host_is_local("http://localhost:8080"));
     assert!(host_is_local("http://127.0.0.1:8080"));
     assert!(host_is_local("http://[::1]:8080"));
     assert!(host_is_local("http://host.docker.internal:8080"));
-    // Port and scheme variations of a local host still classify as local.
     assert!(host_is_local("http://localhost"));
     assert!(host_is_local("https://localhost:443"));
 }
 
 #[test]
 fn non_local_server_urls_keep_iap() {
-    // The security-critical negative case: staging and production hosts are not
-    // local, so IAP stays enforced against them (invariant #3).
+    // Security-critical: staging and production keep IAP enforced.
     assert!(!host_is_local("https://staging.warp.dev"));
     assert!(!host_is_local("https://app.warp.dev"));
 }
 
 #[test]
 fn unrecognized_and_substring_hosts_keep_iap() {
-    // Unparseable input fails safe toward IAP-enabled, and matching is exact on
-    // host so a host that merely contains a local substring is not local.
+    // Unparseable input and substring-only hosts are not local (exact match).
     assert!(!host_is_local("not a url"));
     assert!(!host_is_local("https://localhost.evil.example.com"));
     assert!(!host_is_local("https://mylocalhost.dev"));

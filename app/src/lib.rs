@@ -1476,14 +1476,11 @@ pub(crate) fn initialize_app(
     // captured by the HTTP client hooks.
     ctx.add_singleton_model(|_ctx| NetworkLogModel::default());
 
-    // Create a shared IAP state for staging builds. The same `Arc<IapState>`
-    // is handed to both `ServerApi` (for sync reads on the request path) and
-    // `IapManager` (which owns refresh logic on the main thread).
-    //
-    // IAP is skipped when the resolved server root URL is local so a build that
-    // has an IAP config (e.g. Dev) can talk to a local `oz-local` server without
-    // attempting an IAP connection. The server URL is the sole authority, so IAP
-    // stays enforced for every non-local URL, including staging.
+    // Shared IAP state for staging builds, used by `ServerApi` (sync reads on the
+    // request path) and `IapManager` (refresh logic). Skipped when the resolved
+    // server root URL is local so a build with an IAP config (e.g. Dev) can reach
+    // a local `oz-local` server; IAP stays enforced for every non-local URL,
+    // including staging.
     #[cfg(not(target_family = "wasm"))]
     let iap_state = ChannelState::iap_config()
         .filter(|_| !ChannelState::server_root_url_is_local())
