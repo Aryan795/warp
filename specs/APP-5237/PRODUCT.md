@@ -186,7 +186,7 @@ Figma: none provided. The implementation will follow the existing Skills and MCP
 
 47. The client-side `.factory/skills` Droid provider is unrelated to a Factory product's root `skills/` directory. This proposal does not add `.factory/plugins` and does not change the Droid provider.
 
-48. Factory plugin packages must pass the same Agent Plugins validation at Factory sync and again in the runtime checkout. A sync failure prevents a new invalid Factory definition from being applied. A runtime mismatch disables the affected plugin or component and reports a run diagnostic.
+48. Factory plugin packages must pass the same Agent Plugins validation at Factory sync and again in the runtime checkout. An error-severity sync diagnostic prevents a new invalid Factory definition from being applied. A warning-severity diagnostic does not. A runtime mismatch disables the affected plugin or component and reports a run diagnostic.
 
 49. Factory plugin MCP stdio server processes execute in the selected worker environment. They never execute in the Warp control-plane process. A skill-directed script executes through the run's normal command action and permissions in the same worker environment. Warp-hosted workers and self-hosted workers provide durable plugin data storage for plugin MCP stdio servers.
 
@@ -227,11 +227,11 @@ Figma: none provided. The implementation will follow the existing Skills and MCP
    - Automation-level entries apply only to that automation run and overlay its bound agent's effective configuration.
    - A conflicting same-name entry with different configuration is a validation error. Identical entries deduplicate.
 
-60. A plugin author cannot add a managed server by placing a Factory-shaped `mcp.json` in a plugin root:
-   - The plugin loader sees the Factory `$schema` instead of the Agent Plugins `$schema`.
-   - It disables MCP for that plugin and reports an unsupported-schema diagnostic.
-   - Independently valid plugin skills continue to load.
-   - Factoryfile sync never interprets a file inside a plugin root as a Factory MCP file.
+60. A plugin author cannot add a managed server by placing a Factory-shaped `mcp.json` or a `managed` entry in a plugin root:
+   - In an interactive client, the plugin loader sees the unsupported schema or entry, disables MCP for that plugin, and reports a diagnostic. Independently valid plugin skills continue to load.
+   - In Factory source validation, the same shape is an error-severity diagnostic that blocks sync and the Factory PR check.
+   - Factoryfile sync never interprets the plugin-root file as a Factory MCP file and never projects its managed entry.
+   - Agent Plugins component isolation does not apply to this Factory sync error. A managed entry asserts a Warp-controlled privilege that a portable plugin cannot hold. Silently dropping it would hide the invalid privilege request from the Factory author.
 
 61. A Factory MCP file with the Agent Plugins `$schema` is invalid at an entity-level Factory MCP location. The error explains that Agent Plugins MCP belongs inside a plugin package.
 
@@ -248,7 +248,7 @@ Figma: none provided. The implementation will follow the existing Skills and MCP
    - Different `warpId` values fail Factory validation.
    - Ordinary stdio and HTTP entries can be declared only in the new Factory MCP file.
 
-66. Warp emits a non-blocking deprecation diagnostic for legacy `mcpServers` after the new format is available. Removing legacy support requires a separate migration decision based on usage telemetry.
+66. The Factory diagnostic channel distinguishes `error` from `warning`. `error` is the zero/default severity so existing diagnostics remain blocking. Factory sync and the Factory PR check fail only when at least one error diagnostic exists and surface warnings separately. Warp emits the legacy `mcpServers` deprecation as a warning after the new format is available. Removing legacy support requires a separate migration decision based on usage telemetry.
 
 ### Conformance target and phases
 

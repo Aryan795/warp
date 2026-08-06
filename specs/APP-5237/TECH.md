@@ -251,6 +251,15 @@ The tree parser validates plugin packages against vendored 1.0.0 schemas and sem
 Plugin package content is not copied into database rows. Canonical records provide validation, semantic hashing, diagnostics, and deterministic applicable paths. Runtime reads the checked-out package and revalidates it.
 
 Factory semantic hashing includes manifest, standard component configuration, skills, and package-contained files reachable by those components. A plugin-only change therefore creates a new desired source state even when projected database fields do not change.
+
+Extend `factoryfile.Diagnostic` with severity:
+- `error` is the zero value. Every existing constructor and diagnostic remains blocking without migration.
+- `warning` is explicit and non-blocking.
+- Factory sync and the Factory PR check fail only when the result contains at least one error diagnostic.
+- Both paths return warnings separately from blocking errors so authors see non-blocking migration guidance.
+- The legacy `mcpServers` deprecation uses warning severity.
+
+Factory source validation treats a Factory-schema plugin-root `mcp.json`, or any plugin-root MCP entry with `type: "managed"`, as a blocking error. This check occurs before ordinary Agent Plugins component-isolation handling. The file remains owned by the plugin location and is never parsed or projected as entity-level Factory MCP.
 ### 7. Factory runtime scoping
 Add a runtime `FactoryFileScope` snapshot with:
 - Factory UID and checked-out Factory root.
@@ -332,7 +341,9 @@ The client is authoritative for ordinary entries:
 4. Load stdio and Streamable HTTP entries through `FileBasedMCPManager` with Factory provenance.
 5. Resolve relative paths against the containing entity directory.
 
-The client must not accept this schema in a plugin root. The plugin MCP parser reports an unsupported Agent Plugins schema and disables only plugin MCP. Conversely, factoryfile rejects the Agent Plugins schema at an entity-level Factory MCP path.
+The interactive client must not accept the Factory schema or a managed entry in a plugin root. The plugin MCP parser reports the unsupported schema or entry and disables only plugin MCP. This preserves Agent Plugins component isolation for local interactive loading.
+
+Factory sync is intentionally stricter. A Factory schema or managed entry in plugin-root `mcp.json` emits a blocking error rather than an isolated component warning. The shape asserts a Warp-managed privilege that the package location cannot hold. Factoryfile never promotes or silently drops it. Conversely, factoryfile rejects the Agent Plugins schema at an entity-level Factory MCP path.
 ### 9. Legacy Factory MCP migration
 Keep legacy `mcpServers` parsing in `v1alpha1.go` during the transition. Convert both old and new managed entries into the existing canonical `MCPServerEntry` before resolution.
 
@@ -344,7 +355,7 @@ Merge by entity and server name:
 Rendering preserves the source representation. It does not rewrite a user's YAML/frontmatter into a new file during reconciliation.
 Root Factory `mcp.json` migrates top-level `factory.yaml` MCP, while agent and automation `mcp.json` files migrate their matching frontmatter. Keep `agentDefaults.mcpServers` as a legacy-only source in v1. There is no new default-only Factory MCP file. Migration tooling or documentation expands those defaults into each intended agent file before the legacy field is removed.
 
-Add a source diagnostic and telemetry counter for legacy declarations. Do not set a removal release in this change.
+Add a warning-severity source diagnostic and telemetry counter for legacy declarations. Do not set a removal release in this change.
 ### 10. Feature and capability rollout
 Use separate gates:
 - Client Agent Plugins parser/discovery.
@@ -366,6 +377,8 @@ Options considered:
 - Extend Agent Plugins `mcp.json` with `warpId`. Rejected because the standard schema is closed and an entry must match a standard transport.
 - Put managed references in a Warp extension directory inside each plugin. Rejected because managed MCP is Factory configuration, not a portable plugin component.
 - Define entity-level Factory `mcp.json`. Selected because location and `$schema` make ownership explicit while one Factory file can carry managed and ordinary servers.
+- Treat a managed entry in a Factory plugin as an isolated malformed MCP component during sync. Rejected because it would silently hide a privilege request and let an invalid Factory definition apply.
+- Reject a managed entry or Factory schema in a plugin root as a blocking sync error. Selected because managed MCP can be granted only from an entity-level Factory file. The interactive client still isolates the invalid plugin MCP component.
 ### Reuse existing execution semantics
 Options considered:
 - Add package-wide enablement and content-fingerprint approval. Safer for changed stdio packages, but inconsistent with equivalent existing skill and MCP sources.
@@ -427,7 +440,7 @@ Both Rust and Go validators run the applicable shared fixtures.
 - TUI plugin-manager tests assert that its frontend-specific false setting prevents interactive discovery.
 - MCP spawn tests assert exact `argv`, environment overlay order, authoritative variables, default `cwd`, persistent data path, and native tool-name routing.
 - Factory MCP client tests assert managed entries are ignored and ordinary entries load.
-- Cross-format tests assert Factory schema in a plugin root and Agent Plugins schema at a Factory entity path produce the specified isolated diagnostics.
+- Interactive-client cross-format tests assert a Factory schema or managed entry in a plugin root disables only that plugin's MCP component.
 
 Run at minimum:
 
@@ -443,6 +456,9 @@ cargo fmt --all -- --check
 
 ### Factory tests
 - Parser fixtures cover all three plugin scopes and all three Factory MCP locations.
+- Diagnostic tests assert error is the zero value, warnings do not fail sync or the Factory PR check, errors do fail both, and callers receive warnings separately.
+- Plugin-root MCP tests assert a Factory schema or `managed` entry is a blocking sync error and is never projected. The equivalent interactive-client fixture continues to disable only plugin MCP.
+- Entity-level Factory MCP tests assert an Agent Plugins schema at a Factory MCP path is a blocking source diagnostic.
 - Resolution tests cover automation > agent > factory plugin shadowing.
 - Managed MCP tests cover legacy/new deduplication, conflicts, scope, team validation, and projection.
 - Dispatch tests cover ordered exact paths, checkout containment, source revision, capability rejection, and persistent-data requirements.
