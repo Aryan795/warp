@@ -102,8 +102,14 @@ send_task(
 )
 ```
 
-The result includes a `run_url` that opens the receiving run in Oz — share it
-when you report back to a human.
+The result includes a `run_url` (share it when you report back to a human) and a
+minted `ticket_ref` (an `adhoc:<id>` ref when you omit `ticket_ref`). It does
+**not** return a `factory_task_uid`: new intake starts a foreman run and the
+authoritative task record appears a little later. To act on the task afterward
+(Workflows 3–4), discover its `factory_task_uid` with `list_tasks` once it shows
+up (see Workflow 2) — retry briefly if it isn't there yet. The context you pass
+(`note`, `branch`, `pr_url`) is delivered into the foreman's intake conversation,
+not surfaced as structured task fields.
 
 ## Workflow 2 — List and find factory work
 
@@ -113,6 +119,9 @@ description.
 1. `list_factories` → choose the factory → take its `uid`.
 2. `list_tasks(factory_uid = ...)`. Narrow the set:
    - `created_by_me = true` for the caller's own tasks (never guess an email).
+     This requires a **user-issued** API key; an agent/automation key has no user
+     identity and this errors, so use `created_by` (or just scan the list)
+     instead.
    - `created_by = "<teammate email>"` for someone else's.
    - Page through results with the returned cursor while `has_next_page` is true;
      one page holds however many whole tasks fit the response size limit.
@@ -138,8 +147,12 @@ Use this to check out a factory task's work on your machine and test it.
    absolute path of your local clone of the task's repo) so the result renders
    exact worktree/checkout commands, and optionally `branch` to select which
    PR's branch to work from (it defaults to the newest pull-request branch in the
-   task's outputs). The result adds an **active-run report** and the exact local
-   git `next_actions`.
+   task's outputs). The result adds an **active-run report** (`active_runs`) and
+   the exact local git `next_actions`. When the task has no branch in its outputs
+   yet, `next_actions` instead starts a fresh worktree from `origin/HEAD`. In a
+   multi-repo factory, make sure `workspace_dir` is a clone of the repo this task
+   targets — `get_task` returns the factory's `factory_repositories` and warns
+   when the target can't be inferred.
 3. Run those `next_actions` yourself — **the server never touches your disk.**
    They set up the worktree / check out the branch so you can build and test.
 
@@ -173,8 +186,10 @@ Use this to make local changes to a factory task and return it to the factory.
 4. **Transfer supporting artifacts (optional).** Because a hand-back targets an
    existing task, you can bring along plan files or screenshots from your current
    conversation: pass `source_conversation_id` (and optionally a subset via
-   `artifact_uids`) so they travel with the task. This artifact transfer is
-   scoped to existing tasks, so it is not available on new intake.
+   `artifact_uids`) so they travel with the task. Only *eligible* artifacts are
+   transferred (the result reports how many), and repeated sends are idempotent.
+   This artifact transfer is scoped to existing tasks, so it is not available on
+   new intake.
 
 ```text
 send_task(

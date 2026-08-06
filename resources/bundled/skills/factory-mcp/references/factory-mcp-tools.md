@@ -32,7 +32,9 @@ human. Use `get_task` for a task's full run history.
 Inputs:
 - `factory_uid` (required) — the factory to list tasks for (from `list_factories`).
 - `created_by_me` — set true to list only tasks started by the authenticated
-  caller. Never guess the caller's email.
+  caller. Never guess the caller's email. Requires a **user-issued** API key; an
+  agent/automation key has no user identity and this errors, so use `created_by`
+  (an email) or scan the list instead.
 - `created_by` — filter by the email of the user who started the task; use
   `created_by_me` for the caller's own tasks.
 - `cursor` — pagination cursor from a previous call; omit for the first page.
@@ -52,8 +54,12 @@ back to that origin (runs the factory dispatched itself have no trigger). Prefer
 these links over bare IDs when reporting a task to a human.
 
 Working locally: set `start_working = true` and the result additionally returns
-an active-run report and exact local git `next_actions`. **The server never
-touches the caller's disk** — you run the returned commands yourself.
+an active-run report (`active_runs`), the factory's `factory_repositories`, and
+exact local git `next_actions`. **The server never touches the caller's disk** —
+you run the returned commands yourself. When the task has no branch in its
+outputs yet, `next_actions` starts a fresh worktree from `origin/HEAD`; in a
+multi-repo factory it warns to point `workspace_dir` at the repo the task
+targets.
 
 Inputs:
 - `factory_task_uid` (required) — authoritative task UID from `list_tasks`.
@@ -76,6 +82,11 @@ conversation as a follow-up, so one unit of work keeps one conversation and one
 factory task record. With no `ticket_ref`, a synthetic adhoc ref is generated; a
 `title` is required only when the ticket is new to the factory. Push your branch
 before sending work back. The result's `run_url` opens the receiving run in Oz.
+New intake returns `run_url`, `state`, and a minted `ticket_ref` (an `adhoc:` ref
+when you omit one) but **not** a `factory_task_uid` — discover that with
+`list_tasks` once the task record appears. A hand-back returns `mode: handback`,
+resumes the existing foreman run, and reports how many eligible artifacts it
+transferred (idempotent).
 
 Inputs:
 - `note` (required) — what the factory should act on: the task description for
