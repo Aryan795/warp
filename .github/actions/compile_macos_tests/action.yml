@@ -20,6 +20,15 @@ inputs:
     description: Logical Rust cache identity reported by prepare_environment.
   cache_hit:
     description: Exact cache hit reported by prepare_environment, when available.
+  cache_scope:
+    default: shared
+    description: Which cache volume this run reuses ("shared" or "isolated").
+  cache_tag:
+    default: profile-default
+    description: Namespace cache tag backing this run's cache volume.
+  counted:
+    default: 'true'
+    description: Whether this run's measurements count toward the campaign.
   artifact_name:
     required: true
     description: Name for the uploaded diagnostic artifact.
@@ -74,6 +83,9 @@ runs:
           printf 'runner_profile=%s\n' '${{ inputs.runner_profile }}'
           printf 'cache_provider=%s\n' '${{ inputs.cache_provider }}'
           printf 'cache_identity=%s\n' '${{ inputs.cache_identity }}'
+          printf 'cache_scope=%s\n' '${{ inputs.cache_scope }}'
+          printf 'cache_tag=%s\n' '${{ inputs.cache_tag }}'
+          printf 'counted=%s\n' '${{ inputs.counted }}'
           printf 'cache_hit=%s\n' "$cache_hit"
           printf 'repository=%s\n' "$GITHUB_REPOSITORY"
           printf 'workflow_sha=%s\n' "$GITHUB_SHA"
@@ -179,6 +191,7 @@ runs:
         }
 
         cache_hit="$(sed -n 's/^cache_hit=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
+        counted="$(sed -n 's/^counted=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
         compile_status="$(sed -n 's/^compile_status=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
         checked_out_sha="$(sed -n 's/^checked_out_sha=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
         source_sha="$(sed -n 's/^source_sha=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
@@ -193,6 +206,12 @@ runs:
           echo "| Source/head SHA | \`$source_sha\` |"
           echo "| Runner | \`$RUNNER_NAME\` / \`${{ inputs.runner_profile }}\` / \`$RUNNER_ARCH\` |"
           echo "| Rust cache | \`${{ inputs.cache_provider }}\` / \`${{ inputs.cache_identity }}\` / hit \`$cache_hit\` |"
+          echo "| Cache volume | scope \`${{ inputs.cache_scope }}\` / tag \`${{ inputs.cache_tag }}\` |"
+          if [ "$counted" = "false" ]; then
+            echo "| Measurement | **uncounted warm-up — exclude from statistics** |"
+          else
+            echo "| Measurement | counted |"
+          fi
           echo "| Cargo cache working set | $(kib_to_gib "$pre_cargo_cache_kib") → $(kib_to_gib "$post_cargo_cache_kib") |"
           echo "| ↳ registry | $(kib_to_gib "$pre_cargo_registry_kib") → $(kib_to_gib "$post_cargo_registry_kib") |"
           echo "| ↳ git | $(kib_to_gib "$pre_cargo_git_kib") → $(kib_to_gib "$post_cargo_git_kib") |"
@@ -216,7 +235,12 @@ runs:
         } > "$summary"
 
         cat "$summary" >> "$GITHUB_STEP_SUMMARY"
-        echo "::notice title=macOS compile diagnostics::${elapsed_seconds:-unknown}s, $dirty_units dirty fingerprints, target $(kib_to_gib "$pre_target_kib") -> $(kib_to_gib "$post_target_kib")"
+        if [ "$counted" = "false" ]; then
+          measurement_note=' (uncounted warm-up)'
+        else
+          measurement_note=''
+        fi
+        echo "::notice title=macOS compile diagnostics::${{ inputs.cache_scope }} volume$measurement_note, ${elapsed_seconds:-unknown}s, $dirty_units dirty fingerprints, target $(kib_to_gib "$pre_target_kib") -> $(kib_to_gib "$post_target_kib")"
         rm "$clean_stderr"
 
     - name: Upload compile diagnostics

@@ -9,6 +9,22 @@ on:
       - reopened
       - synchronize
   workflow_dispatch:
+    inputs:
+      cache_scope:
+        description: >-
+          Which Rust cache volume the warm arm reuses. "shared" keeps the
+          profile's default cache; "isolated" forces a dedicated cache tag.
+        type: choice
+        default: shared
+        options:
+          - shared
+          - isolated
+      warmup:
+        description: >-
+          Mark this run as an uncounted warm-up that seeds the cache. Excluded
+          from measurement statistics.
+        type: boolean
+        default: false
 
 name: macOS Compile Cache Experiment
 
@@ -17,10 +33,20 @@ env:
   NEXTEST_PROFILE: ci
   WORKSPACE_TEST_ARGS: --workspace --locked --exclude command-signatures-v2
   RUSTFLAGS: -C debuginfo=line-tables-only --cfg=web_sys_unstable_apis
+  # Cache tag for the isolated arm. Namespace scopes a cache volume by tag, so a
+  # dedicated tag keeps this experiment's Cargo and target state off the shared
+  # profile volume that production macOS CI reuses.
+  #
+  # Volume *size* cannot be set from here. `nscloud-cache-size-*` is a
+  # runner-label-only companion, and Namespace refuses to schedule a job whose
+  # `runs-on` carries more than one `nscloud` label, so adding it next to a
+  # profile label would silently stop the job from ever being acquired. Sizing
+  # the tagged volume (target: 84 GB) is a Namespace dashboard change.
+  ISOLATED_CACHE_TAG: warp-macos-tests-only
 
 jobs:
   compile:
-    name: Compile tests (${{ matrix.cache_mode }} Rust cache)
+    name: Compile tests (${{ matrix.cache_mode }} Rust cache, ${{ inputs.cache_scope || 'shared' }} volume${{ inputs.warmup && ', warm-up' || '' }})
     if: >-
       github.repository_owner == 'warpdotdev' &&
       (github.event_name == 'workflow_dispatch' ||
@@ -28,7 +54,9 @@ jobs:
           github.event.pull_request.head.repo.full_name == github.repository &&
           github.event.pull_request.head.ref == 'kevinyang/macos-ci-observability'))
     timeout-minutes: 40
-    runs-on: namespace-profile-mac-ci
+    # The tag is spelled out here rather than reused from ISOLATED_CACHE_TAG
+    # because `runs-on` cannot read the `env` context. Keep the two in sync.
+    runs-on: ${{ inputs.cache_scope == 'isolated' && 'namespace-profile-mac-ci;overrides.cache-tag=warp-macos-tests-only' || 'namespace-profile-mac-ci' }}
     permissions:
       contents: read
     strategy:
@@ -67,10 +95,13 @@ jobs:
         with:
           workspace_test_args: ${{ env.WORKSPACE_TEST_ARGS }}
           source_sha: ${{ github.event.pull_request.head.sha || github.sha }}
-          runner_profile: namespace-profile-mac-ci
+          runner_profile: ${{ inputs.cache_scope == 'isolated' && format('namespace-profile-mac-ci;overrides.cache-tag={0}', env.ISOLATED_CACHE_TAG) || 'namespace-profile-mac-ci' }}
+          cache_scope: ${{ inputs.cache_scope || 'shared' }}
+          cache_tag: ${{ inputs.cache_scope == 'isolated' && env.ISOLATED_CACHE_TAG || 'profile-default' }}
+          counted: ${{ inputs.warmup && 'false' || 'true' }}
           cache_provider: ${{ steps.prepare_environment.outputs.rust_cache_provider }}
           cache_identity: ${{ steps.prepare_environment.outputs.rust_cache_identity }}
           cache_hit: ${{ steps.prepare_environment.outputs.rust_cache_hit }}
-          artifact_name: macos-compile-cache-${{ matrix.cache_mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          artifact_name: macos-compile-cache-${{ inputs.cache_scope || 'shared' }}-${{ matrix.cache_mode }}-${{ github.run_id }}-${{ github.run_attempt }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
