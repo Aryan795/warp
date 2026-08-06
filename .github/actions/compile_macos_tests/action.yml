@@ -48,12 +48,19 @@ runs:
             printf '0\n'
           fi
         }
+        pre_cargo_registry_kib="$(size_kib "$cargo_home/registry")"
+        pre_cargo_git_kib="$(size_kib "$cargo_home/git")"
+        pre_cargo_global_cache_kib="$(size_kib "$cargo_home/.global-cache")"
+        pre_cargo_cache_kib="$((pre_cargo_registry_kib + pre_cargo_git_kib + pre_cargo_global_cache_kib))"
 
         printf '%s\n' \
           "diagnostics_dir=$diagnostics_dir" \
           "cargo_home=$cargo_home" \
           "target_dir=$target_dir" \
-          "pre_cargo_home_kib=$(size_kib "$cargo_home")" \
+          "pre_cargo_cache_kib=$pre_cargo_cache_kib" \
+          "pre_cargo_registry_kib=$pre_cargo_registry_kib" \
+          "pre_cargo_git_kib=$pre_cargo_git_kib" \
+          "pre_cargo_global_cache_kib=$pre_cargo_global_cache_kib" \
           "pre_target_kib=$(size_kib "$target_dir")" \
           > "$diagnostics_dir/metrics.env"
 
@@ -121,9 +128,15 @@ runs:
         grep 'cargo::core::compiler::fingerprint' "$clean_stderr" > "$fingerprint_log" || true
         sed -n 's/^.*cargo::core::compiler::fingerprint: *err: /- /p' "$fingerprint_log" | sort | uniq -c | sort -nr > "$reason_counts"
 
-        pre_cargo_home_kib="$(sed -n 's/^pre_cargo_home_kib=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
+        pre_cargo_cache_kib="$(sed -n 's/^pre_cargo_cache_kib=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
+        pre_cargo_registry_kib="$(sed -n 's/^pre_cargo_registry_kib=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
+        pre_cargo_git_kib="$(sed -n 's/^pre_cargo_git_kib=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
+        pre_cargo_global_cache_kib="$(sed -n 's/^pre_cargo_global_cache_kib=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
         pre_target_kib="$(sed -n 's/^pre_target_kib=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
-        post_cargo_home_kib="$(size_kib "$MACOS_COMPILE_CARGO_HOME")"
+        post_cargo_registry_kib="$(size_kib "$MACOS_COMPILE_CARGO_HOME/registry")"
+        post_cargo_git_kib="$(size_kib "$MACOS_COMPILE_CARGO_HOME/git")"
+        post_cargo_global_cache_kib="$(size_kib "$MACOS_COMPILE_CARGO_HOME/.global-cache")"
+        post_cargo_cache_kib="$((post_cargo_registry_kib + post_cargo_git_kib + post_cargo_global_cache_kib))"
         post_target_kib="$(size_kib "$MACOS_COMPILE_TARGET_DIR")"
         compiled_units="$(grep -c '^[[:space:]]*Compiling ' "$clean_stderr" || true)"
         dirty_units="$(grep -c 'fingerprint error for ' "$fingerprint_log" || true)"
@@ -132,7 +145,10 @@ runs:
         max_rss_bytes="$(awk '/maximum resident set size/ { print $1; exit }' "$MACOS_COMPILE_DIAGNOSTICS_DIR/resource-usage.txt")"
 
         {
-          printf 'post_cargo_home_kib=%s\n' "$post_cargo_home_kib"
+          printf 'post_cargo_cache_kib=%s\n' "$post_cargo_cache_kib"
+          printf 'post_cargo_registry_kib=%s\n' "$post_cargo_registry_kib"
+          printf 'post_cargo_git_kib=%s\n' "$post_cargo_git_kib"
+          printf 'post_cargo_global_cache_kib=%s\n' "$post_cargo_global_cache_kib"
           printf 'post_target_kib=%s\n' "$post_target_kib"
           printf 'compiled_units=%s\n' "$compiled_units"
           printf 'dirty_units=%s\n' "$dirty_units"
@@ -166,7 +182,10 @@ runs:
           echo "| Checked-out SHA | \`$checked_out_sha\` |"
           echo "| Runner | \`$RUNNER_NAME\` / \`${{ inputs.runner_profile }}\` / \`$RUNNER_ARCH\` |"
           echo "| Rust cache | \`${{ inputs.cache_provider }}\` / \`${{ inputs.cache_identity }}\` / hit \`$cache_hit\` |"
-          echo "| Cargo home working set | $(kib_to_gib "$pre_cargo_home_kib") → $(kib_to_gib "$post_cargo_home_kib") |"
+          echo "| Cargo cache working set | $(kib_to_gib "$pre_cargo_cache_kib") → $(kib_to_gib "$post_cargo_cache_kib") |"
+          echo "| ↳ registry | $(kib_to_gib "$pre_cargo_registry_kib") → $(kib_to_gib "$post_cargo_registry_kib") |"
+          echo "| ↳ git | $(kib_to_gib "$pre_cargo_git_kib") → $(kib_to_gib "$post_cargo_git_kib") |"
+          echo "| ↳ .global-cache | $(kib_to_gib "$pre_cargo_global_cache_kib") → $(kib_to_gib "$post_cargo_global_cache_kib") |"
           echo "| Target working set | $(kib_to_gib "$pre_target_kib") → $(kib_to_gib "$post_target_kib") |"
           echo "| Compile result | exit \`${compile_status:-unknown}\` in \`${elapsed_seconds:-unknown}s\` |"
           echo "| Peak resident set | $(bytes_to_gib "${max_rss_bytes:-unknown}") |"
