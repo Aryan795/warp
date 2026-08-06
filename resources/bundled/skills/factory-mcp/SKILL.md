@@ -63,85 +63,73 @@ clear it.
 
 A user who almost always uses one factory can save it as a **default**, so a
 workflow that needs a factory skips the `list_factories` pick. The default lives
-in a small JSON file on disk that Warp, the Warp TUI, and third-party harnesses
-all share:
+in a small JSON file on disk (`{{factory_config_file_path}}` — channel-aware, the
+same file across the native app and the TUI). **Do not read or write that file
+directly.** Go through the `{{warp_cli_binary_name}} factory default` commands so
+reads, writes, malformed handling, and unknown-key preservation all behave
+identically everywhere:
 
-- **Path:** `{{factory_config_file_path}}` (channel-aware; the same file across
-  the native app and the TUI).
-- **Shape (v1):**
-  ```json
-  {
-    "default_factory_uid": "fac_abc123",
-    "default_factory_name": "Acme Backend Factory"
-  }
-  ```
-  - `default_factory_uid` is **authoritative** — use it directly as `factory_uid`.
-  - `default_factory_name` is **advisory only** — a label so you can say "using
-    your default factory X". It may be stale after a rename, so **never** use it
-    to look up or match a factory.
-  - **Any other keys you don't recognize must be left untouched** (see writing).
+- `{{warp_cli_binary_name}} factory default get` — prints the saved default as
+  JSON, or `{}` when none is set (or the file is unreadable).
+- `{{warp_cli_binary_name}} factory default set <uid> [--name <name>]` — saves a
+  default, preserving every other key already in the file.
+- `{{warp_cli_binary_name}} factory default clear` — removes the default,
+  preserving every other key.
+
+The JSON `get` prints has `default_factory_uid` (**authoritative** — use it
+directly as `factory_uid`) and an optional `default_factory_name` (**advisory
+only** — a label so you can say "using your default factory X"; it may be stale
+after a rename, so **never** use it to look up or match a factory).
 
 ### Reading the default (before `list_factories`)
 
-When a workflow needs a `factory_uid`, before calling `list_factories`, read
-`{{factory_config_file_path}}` with your own file tools and branch:
+When a workflow needs a `factory_uid`, before calling `list_factories`, branch:
 
 1. **The request already names a specific factory.** Use that factory. The
-   explicit choice always wins over any stored default; do not read or apply the
+   explicit choice always wins over any stored default; do not consult the
    default at all.
 2. **This is a management / discovery workflow** — listing all factories, or
    setting / switching / clearing the default (see below). Always call
    `list_factories` and operate on the real result; never short-circuit on the
    stored default.
-3. **File absent.** There is no default. Fall back to `list_factories → pick →
-   use uid` exactly as before, silently — no new message, no error.
-4. **File present and valid** (parses as JSON with a non-empty string
-   `default_factory_uid`). Use `default_factory_uid` directly as `factory_uid`
-   and **skip `list_factories`**. Briefly tell the user you're using their
-   default factory (use `default_factory_name` for the label when present).
-5. **File present but unreadable/malformed** (not valid JSON, or
-   `default_factory_uid` missing, empty, or not a string). Warn the user once
-   that the default-factory config is unreadable, then fall back to
-   `list_factories`. **Do not overwrite or delete the file** — the user may have
-   hand-edited it with a typo, and destroying their file is worse than ignoring it.
-6. **Stale default** — `default_factory_uid` is valid but no longer resolves to a
+3. Otherwise run `{{warp_cli_binary_name}} factory default get` and read its
+   JSON:
+   - **`{}` (no default set).** Fall back to `list_factories → pick → use uid`
+     exactly as before, silently — no new message, no error.
+   - **A non-empty `default_factory_uid`.** Use it directly as `factory_uid` and
+     **skip `list_factories`**. Briefly tell the user you're using their default
+     factory (use `default_factory_name` for the label when present).
+   - **A warning on stderr that the config is unreadable** (the command still
+     prints `{}`). Tell the user once that their default-factory config is
+     unreadable, then fall back to `list_factories`. The command never rewrites
+     or deletes the file, so a hand-edited file with a typo is preserved.
+4. **Stale default** — `get` returned a uid but it no longer resolves to a
    factory visible to the current account (confirmed by a `list_factories` that
    does not contain that uid). Tell the user **once** that their saved default is
    no longer available, fall back to `list_factories` for this workflow, and
-   offer to update the default to a current factory or clear it. Do not silently
-   re-run discovery every time.
+   offer to update the default (`... set <new_uid>`) or clear it
+   (`... clear`). Do not silently re-run discovery every time.
 
 ### Writing the default (confirm-first — never silent)
 
-Only ever write `{{factory_config_file_path}}` when the user asks for it:
+Only ever run `{{warp_cli_binary_name}} factory default set` / `clear` when the
+user asks for it:
 
 - **Explicit set / remember.** The user asks to set, remember, or change their
-  default factory (e.g. "make Acme my default factory").
+  default factory (e.g. "make Acme my default factory") → run
+  `{{warp_cli_binary_name}} factory default set <uid> --name "<name>"`.
 - **Post-pick prompt (optional).** After the user picks a factory via
-  `list_factories`, you may ask once whether to remember it as their default. Only
-  write on an affirmative answer.
+  `list_factories`, you may ask once whether to remember it as their default.
+  Only run `set` on an affirmative answer.
 - **Never auto-pin.** Do not save a default just because the user used a factory
   once. A default is written only with explicit consent.
+- **Clearing.** Run `{{warp_cli_binary_name}} factory default clear` to remove
+  the default; behavior then reverts to "no default set".
 
-When you do write, **read-modify-write** so unknown keys survive:
-
-1. Read the current file if it exists and parse it (treat unreadable content as
-   an empty object rather than clobbering it — but if it was hand-edited and
-   unreadable, confirm with the user before replacing it).
-2. Set `default_factory_uid` (and `default_factory_name` when you know the name)
-   on the parsed object, **preserving every other key already present** — a newer
-   Warp or harness may store additional preferences here that you must not drop.
-3. Create the `factory/` directory if it is missing and write the JSON back
-   (write to a temp file then rename to avoid a torn file). Setting the same
-   value again is a successful no-op.
-
-**Clearing** the default removes `default_factory_uid` (and
-`default_factory_name`) from the object — again preserving any other keys — after
-which behavior reverts to "no default set". Setting then clearing round-trips
-cleanly.
-
-The native app and the TUI both read and write this same file with identical
-semantics — the TUI is not read-only.
+The `set`/`clear` commands read-modify-write the file, so any keys you don't own
+are preserved, the write is atomic, re-setting the same value is a no-op, and a
+malformed file is refused rather than clobbered. The native app and the TUI use
+the same commands against the same file — the TUI is not read-only.
 
 ## Workflow 1 — Start work locally, then send it to the factory
 

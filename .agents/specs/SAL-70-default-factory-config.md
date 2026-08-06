@@ -67,6 +67,15 @@ Explicitly **not** in scope:
 
 ## Key design choices
 
+> **Update — Option A approved (requester: "Do A").** Decision 3 below originally
+> kept all file I/O in skill prose with only a Rust path helper. On review, the
+> requester approved reversing it so the read/write/resolve logic is real,
+> unit-tested Rust invoked in production, because the whole file contract was
+> otherwise unverifiable by a deterministic test. The current design ships a
+> `warp_core::factory_config` module plus a `oz factory default get|set|clear`
+> CLI subcommand that the skill (and, later, 3p harnesses) invoke. The six
+> behavior invariants below are unchanged and remain the normative contract.
+
 1. **One JSON file, minimal schema, forward-compatible.** `~/.warp*/factory/config.json`
    holding a single default today, with a **normative preserve-unknown-keys rule**
    so it can grow into a preferences directory later without a breaking change.
@@ -75,10 +84,17 @@ Explicitly **not** in scope:
    is load-bearing: only the home-based helper yields the *same* file for the GUI,
    the TUI, and an external 3p harness on every platform (see "Design
    alternatives → Path helper").
-3. **The agent does the file I/O, guided by skill prose.** Warp adds a path
-   helper + a handlebars template variable + skill edits; it does **not** add
-   server/app code that reads the default. This keeps the contract identical for
-   3p harnesses, which also just read/write the file with their own tools.
+3. **A canonical Rust implementation, invoked via a CLI (revised, Option A).**
+   Warp ships the read/resolve/write logic as a real `warp_core::factory_config`
+   module and exposes it through a `oz factory default get|set|clear` CLI
+   subcommand. The `factory-mcp` skill invokes that CLI instead of hand-rolling
+   file I/O, so native, TUI, and 3p harnesses (which already shell out to the
+   Oz CLI via `harness-support`) all go through one canonical, tested path. This
+   supersedes the original "agent does the I/O via skill prose; a Rust helper
+   would be dead code" decision: the module is live production code with a real
+   caller, which is what makes the file contract deterministically testable. 3p
+   harnesses that cannot invoke the CLI still honor the same file contract
+   directly.
 4. **Explicit request always wins; the default only fills the gap; management
    flows ignore it.**
 5. **Never pin a default silently** — writes are confirm-first only.
@@ -246,23 +262,33 @@ Ordered, each independently testable:
    `bundled.rs:449`. This gives the `factory-mcp` skill body the exact
    channel-aware path in both the GUI and TUI processes (which both run
    `read_bundled_skills`).
-3. **`factory-mcp` skill edits (`resources/bundled/skills/factory-mcp/SKILL.md`,
+3. **Canonical config module (`crates/warp_core/src/factory_config.rs`, Option A).**
+   A `FactoryConfig` serde struct with a `#[serde(flatten)]` extra-keys map
+   (preserve-unknown-keys), plus `resolve_at`/`set_default_at`/`clear_default_at`
+   (path-injectable, for tests) and `resolve_default`/`set_default`/`clear_default`
+   (over the real `factory_config_file_path()`). Reads return absent/parsed/
+   malformed; writes are atomic (temp-then-rename), create the `factory/` dir,
+   preserve unknown keys, and refuse to clobber a malformed file; resolution is
+   uid-authoritative with the name advisory only. Unit-tested against a real
+   filesystem (all six invariants).
+4. **CLI subcommand (`crates/warp_cli/src/factory.rs` + `app/src/ai/agent_sdk/factory.rs`).**
+   `oz factory default get|set|clear`, gated on `FeatureFlag::FactoryMcp`, is the
+   live caller of the module. `get` prints the resolved default as JSON (`{}` when
+   unset/malformed, with a stderr warning on malformed); `set`/`clear` write
+   confirm-first (the skill decides when to invoke them). This is the one
+   canonical path native, TUI, and 3p harnesses (via `harness-support`) share.
+5. **`factory-mcp` skill edits (`resources/bundled/skills/factory-mcp/SKILL.md`,
    on top of PR #14793).** Extend the factory-resolution guidance so the skill,
-   before `list_factories`:
-   - reads `{{factory_config_file_path}}`;
-   - if present and valid, uses `default_factory_uid` as `factory_uid` and skips
-     `list_factories` (invariant 1), unless the request names a factory
-     (invariant 3) or the workflow is a management/discovery flow (invariant 4);
-   - handles absent (invariant 2), malformed (invariant 6), and stale
-     (invariant 5) exactly per the behavior invariants;
-   - adds a "set / remember / clear the default factory" flow that writes the
-     file confirm-first (invariant 7), preserving unknown keys (invariant 9),
-     and an optional post-pick "remember this?" prompt.
-   The skill body is prose that instructs the agent to do the file I/O with its
-   own read/write tools; **no Rust JSON read/write helper is added** (there is no
-   in-app consumer — the app never resolves the default).
-4. **No feature-flag change** beyond the existing `FeatureFlag::FactoryMcp` gate
-   that already governs the skill and MCP server.
+   before `list_factories`, runs `oz factory default get` and honors the result
+   (invariant 1), unless the request names a factory (invariant 3) or the
+   workflow is a management/discovery flow (invariant 4); handles absent
+   (invariant 2), malformed (invariant 6), and stale (invariant 5) exactly per
+   the behavior invariants; and adds a confirm-first "set / remember / clear"
+   flow via `oz factory default set|clear` (invariants 7–9). The skill invokes
+   the CLI rather than hand-rolling file I/O. The `{{factory_config_file_path}}`
+   template variable is retained to document the on-disk location for 3p.
+6. **No feature-flag change** beyond the existing `FeatureFlag::FactoryMcp` gate
+   that already governs the skill, MCP server, and the new CLI subcommand.
 
 ### Design alternatives
 
@@ -291,13 +317,17 @@ Ordered, each independently testable:
 - **Format — JSON (chosen) vs TOML.** Warp local config elsewhere uses TOML, but
   JSON is the lowest-friction cross-consumer contract for the 3p plugin repos to
   read/write identically and matches the `.mcp.json` neighbor. **Chosen: JSON.**
-- **Who does the file I/O — agent via skill prose (chosen) vs a Rust
-  read/write/parse helper.** A Rust helper would have no caller: the app does not
-  resolve the default (that would edge toward the out-of-scope server-side
-  injection), and 3p harnesses cannot call Rust anyway. Keeping I/O in the
-  agent's tools keeps a single contract across all consumers. **Chosen: agent
-  I/O + Rust path helper only** (the path helper *is* unit-testable; a
-  read/write helper would be dead code).
+- **Who does the file I/O — agent via skill prose vs a Rust module behind a CLI
+  (revised to the latter, Option A).** The original choice kept I/O in skill
+  prose with only a Rust path helper, reasoning a read/write helper would be
+  dead code. That left the file contract (round-trip, preserve-unknown-keys,
+  malformed non-destruction, absent no-op) unverifiable by a deterministic test.
+  On review the requester approved **Option A**: ship a real `warp_core::factory_config`
+  module and a `oz factory default` CLI that the skill invokes, giving the module
+  a real production caller and one canonical path across native, TUI, and 3p
+  (which shell out to the Oz CLI via `harness-support`). **Chosen: Rust module +
+  CLI** (unit-tested; live). 3p harnesses that cannot invoke the CLI still honor
+  the same file contract directly.
 - **Write trigger — confirm-first, explicit-or-prompt (chosen) vs auto-pin first
   used factory.** Auto-pinning is explicitly ruled out by the requester
   ("do not get a default silently pinned behind their back"). **Chosen:
@@ -371,8 +401,10 @@ should decide this; this spec only defines the on-disk contract.
   GUI/TUI-shared and home-based on all platforms; this corrects the triage
   pointer. Implementer/reviewer should confirm this is acceptable (it changes the
   helper named in the ticket, not the user-facing `~/.warp/factory` outcome).
-- Whether a Rust read/write helper is needed → **no** (agent does I/O; only the
-  path helper is Rust). Confirm at implementation.
+- Whether a Rust read/write helper is needed → **yes, revised to Option A**
+  (requester: "Do A"). A real `warp_core::factory_config` module + a
+  `oz factory default` CLI now own read/write/resolve so the file contract is
+  deterministically testable; the module is live via the CLI caller.
 
 ## Validation & verification criteria (must ALL pass before merge)
 
@@ -391,12 +423,19 @@ Backend/config-path portion (deterministic, `warpdotdev/warp`):
    rendered via `display_optional_path`; a skill body containing
    `{{factory_config_file_path}}` renders to that path. This is the regression
    test for the new variable.
-3. **Skill-doc change is exempt from a test.** The edits to
+3. **Config-module file-contract tests** (`crates/warp_core/src/factory_config_tests.rs`,
+   real filesystem): round-trip (uid persisted verbatim), preserve-unknown-keys
+   across `set` and `clear`, malformed file surfaced and never overwritten/
+   deleted, absent file is a silent no-op (no file created), advisory name never
+   participates in resolution, and the real `factory_config_file_path()` location
+   round-trips under a temp `$HOME`. These cover invariants 5–9 deterministically
+   (the Option A caller made this possible).
+4. **Skill-doc change is exempt from a test.** The edits to
    `resources/bundled/skills/factory-mcp/SKILL.md` are `skill-doc-only` per
    `factory-verification` (a test would assert a sentence exists and break on
-   rewording). No test is added for the prose; the Rust helper (crit. 1) and
-   template variable (crit. 2) that the prose relies on carry the regression
-   coverage. Record this skip category in the PR body.
+   rewording). No test is added for the prose; the config module (crit. 3), path
+   helper (crit. 1), and template variable (crit. 2) it relies on carry the
+   regression coverage. Record this skip category in the PR body.
 4. **Repository checks gate (scope-proportional).** From the repo root, the
    documented checks pass over every touched package (`crates/warp_core`,
    `app`): `./script/format` (or `./script/presubmit`), `cargo clippy --workspace
