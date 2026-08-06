@@ -26,7 +26,7 @@ jobs:
       (github.event_name == 'workflow_dispatch' ||
         (github.event_name == 'pull_request' &&
           github.event.pull_request.head.repo.full_name == github.repository &&
-          github.event.pull_request.head.ref == 'factory/macos-ci-observability'))
+          github.event.pull_request.head.ref == 'kevinyang/macos-ci-observability'))
     timeout-minutes: 40
     runs-on: namespace-profile-mac-ci
     permissions:
