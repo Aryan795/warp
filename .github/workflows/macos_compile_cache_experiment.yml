@@ -12,8 +12,9 @@ on:
     inputs:
       cache_scope:
         description: >-
-          Which Rust cache volume the warm arm reuses. "shared" keeps the
-          profile's default cache; "isolated" forces a dedicated cache tag.
+          Which runner profile, and therefore which Rust cache volume, the warm
+          arm reuses. "shared" is the production 50 GB mac-ci profile;
+          "isolated" is the dedicated 84 GB tests-only profile.
         type: choice
         default: shared
         options:
@@ -33,16 +34,6 @@ env:
   NEXTEST_PROFILE: ci
   WORKSPACE_TEST_ARGS: --workspace --locked --exclude command-signatures-v2
   RUSTFLAGS: -C debuginfo=line-tables-only --cfg=web_sys_unstable_apis
-  # Cache tag for the isolated arm. Namespace scopes a cache volume by tag, so a
-  # dedicated tag keeps this experiment's Cargo and target state off the shared
-  # profile volume that production macOS CI reuses.
-  #
-  # Volume *size* cannot be set from here. `nscloud-cache-size-*` is a
-  # runner-label-only companion, and Namespace refuses to schedule a job whose
-  # `runs-on` carries more than one `nscloud` label, so adding it next to a
-  # profile label would silently stop the job from ever being acquired. Sizing
-  # the tagged volume (target: 84 GB) is a Namespace dashboard change.
-  ISOLATED_CACHE_TAG: warp-macos-tests-only
 
 jobs:
   compile:
@@ -54,9 +45,15 @@ jobs:
           github.event.pull_request.head.repo.full_name == github.repository &&
           github.event.pull_request.head.ref == 'kevinyang/macos-ci-observability'))
     timeout-minutes: 40
-    # The tag is spelled out here rather than reused from ISOLATED_CACHE_TAG
-    # because `runs-on` cannot read the `env` context. Keep the two in sync.
-    runs-on: ${{ inputs.cache_scope == 'isolated' && 'namespace-profile-mac-ci;overrides.cache-tag=warp-macos-tests-only' || 'namespace-profile-mac-ci' }}
+    # Two Namespace profiles with identical machine specs and different cache
+    # volumes: mac-ci is production's 50 GB volume, mac-ci-tests-84gb is the
+    # dedicated 84 GB one. Selecting a whole profile is what isolates the cache,
+    # so no cache-tag override is needed. Never add an `nscloud-cache-size-*`
+    # label beside a profile label: Namespace refuses to schedule a job carrying
+    # more than one `nscloud` label, and the job silently never gets acquired.
+    # `runs-on` cannot read `env`, so these names are repeated in the
+    # `runner_profile` input below and the two must stay in sync.
+    runs-on: ${{ inputs.cache_scope == 'isolated' && 'namespace-profile-mac-ci-tests-84gb' || 'namespace-profile-mac-ci' }}
     permissions:
       contents: read
     strategy:
@@ -95,9 +92,8 @@ jobs:
         with:
           workspace_test_args: ${{ env.WORKSPACE_TEST_ARGS }}
           source_sha: ${{ github.event.pull_request.head.sha || github.sha }}
-          runner_profile: ${{ inputs.cache_scope == 'isolated' && format('namespace-profile-mac-ci;overrides.cache-tag={0}', env.ISOLATED_CACHE_TAG) || 'namespace-profile-mac-ci' }}
+          runner_profile: ${{ inputs.cache_scope == 'isolated' && 'namespace-profile-mac-ci-tests-84gb' || 'namespace-profile-mac-ci' }}
           cache_scope: ${{ inputs.cache_scope || 'shared' }}
-          cache_tag: ${{ inputs.cache_scope == 'isolated' && env.ISOLATED_CACHE_TAG || 'profile-default' }}
           counted: ${{ inputs.warmup && 'false' || 'true' }}
           cache_provider: ${{ steps.prepare_environment.outputs.rust_cache_provider }}
           cache_identity: ${{ steps.prepare_environment.outputs.rust_cache_identity }}

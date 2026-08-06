@@ -23,9 +23,6 @@ inputs:
   cache_scope:
     default: shared
     description: Which cache volume this run reuses ("shared" or "isolated").
-  cache_tag:
-    default: profile-default
-    description: Namespace cache tag backing this run's cache volume.
   counted:
     default: 'true'
     description: Whether this run's measurements count toward the campaign.
@@ -84,7 +81,6 @@ runs:
           printf 'cache_provider=%s\n' '${{ inputs.cache_provider }}'
           printf 'cache_identity=%s\n' '${{ inputs.cache_identity }}'
           printf 'cache_scope=%s\n' '${{ inputs.cache_scope }}'
-          printf 'cache_tag=%s\n' '${{ inputs.cache_tag }}'
           printf 'counted=%s\n' '${{ inputs.counted }}'
           printf 'cache_hit=%s\n' "$cache_hit"
           printf 'repository=%s\n' "$GITHUB_REPOSITORY"
@@ -206,7 +202,7 @@ runs:
           echo "| Source/head SHA | \`$source_sha\` |"
           echo "| Runner | \`$RUNNER_NAME\` / \`${{ inputs.runner_profile }}\` / \`$RUNNER_ARCH\` |"
           echo "| Rust cache | \`${{ inputs.cache_provider }}\` / \`${{ inputs.cache_identity }}\` / hit \`$cache_hit\` |"
-          echo "| Cache volume | scope \`${{ inputs.cache_scope }}\` / tag \`${{ inputs.cache_tag }}\` |"
+          echo "| Cache volume | scope \`${{ inputs.cache_scope }}\` (profile \`${{ inputs.runner_profile }}\`) |"
           if [ "$counted" = "false" ]; then
             echo "| Measurement | **uncounted warm-up — exclude from statistics** |"
           else
