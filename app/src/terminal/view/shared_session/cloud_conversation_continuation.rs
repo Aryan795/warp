@@ -7,7 +7,7 @@ use crate::ai::agent::conversation::{
 };
 use crate::ai::agent_conversations_model::AgentConversationsModel;
 use crate::ai::ambient_agents::{
-    AmbientAgentTask, AmbientAgentTaskId, AmbientConversationStatus, ExecutionLocation,
+    AmbientAgentTask, AmbientAgentTaskId, AmbientConversationStatus,
     conversation_output_status_from_conversation,
 };
 use crate::ai::blocklist::BlocklistAIHistoryModel;
@@ -176,27 +176,35 @@ pub(crate) fn resolve_ai_query_routing(
         };
     }
 
-    // The pane's own ambient association is view state that does not survive the cloud run: once
-    // the shared session ends the pane can look like an ordinary local one while still holding a
-    // cloud conversation. Fall back to the conversation's own record of the task it belongs to so
-    // the follow-up is never handed to the local agent by default.
-    let ambient_agent_task_id =
-        pane_ambient_agent_task_id.or_else(|| cloud_task_id_for_pane(terminal_view_id, app));
-
-    // Ordinary local pane (not a cloud/ambient or transcript pane), or a sharer running locally
-    // (e.g. a local orchestration child, `/remote-control` of a local session): local behavior.
-    if !is_ambient && !is_transcript_viewer && ambient_agent_task_id.is_none() {
+    // A sharer runs on this machine by definition (e.g. a local orchestration child,
+    // `/remote-control` of a local session), so it stays local whatever its conversation says.
+    if status.is_active_sharer() {
         return AIQueryRouting::Local;
     }
-    if status.is_active_sharer() {
+
+    // The pane's own ambient association is view state that does not survive the cloud run: once
+    // the shared session ends the pane can look like an ordinary local one while still holding a
+    // cloud conversation. Ask the conversation itself where its continuation belongs.
+    let conversation_association = pane_cloud_association(terminal_view_id, app);
+    let ambient_agent_task_id =
+        pane_ambient_agent_task_id.or_else(|| conversation_association.task_id());
+
+    // Ordinary local pane: not a cloud/ambient or transcript pane, and holding no cloud
+    // conversation.
+    if !is_ambient && !is_transcript_viewer && !conversation_association.is_cloud() {
         return AIQueryRouting::Local;
     }
 
     // Disconnected / ended / transcript ambient pane: defer to the resolved continuation state.
     let Some(task_id) = ambient_agent_task_id else {
-        // No ambient task yet (fresh composing cloud pane, replay/loading, or a generic local
-        // transcript): defer to existing local handling.
-        return AIQueryRouting::Local;
+        return match conversation_association {
+            // The conversation belongs to a cloud run this client cannot name right now. Blocking
+            // is recoverable; running the prompt on the user's machine is not.
+            PaneCloudAssociation::UnresolvedCloud => AIQueryRouting::UnconnectedReadOnly,
+            // No ambient task yet (fresh composing cloud pane, replay/loading, or a generic local
+            // transcript): defer to existing local handling.
+            PaneCloudAssociation::Task(_) | PaneCloudAssociation::None => AIQueryRouting::Local,
+        };
     };
 
     match resolve_cloud_conversation_continuation_ui_state(terminal_view_id, task_id, app) {
@@ -229,52 +237,67 @@ pub(crate) fn resolve_ai_query_routing(
     }
 }
 
-/// The cloud task the pane's current conversation belongs to, read from the conversation itself
-/// rather than from pane view state.
+/// What a pane's current conversation says about where its continuation belongs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneCloudAssociation {
+    /// The conversation belongs to a cloud run, and that run is known.
+    Task(AmbientAgentTaskId),
+    /// The conversation is one this client is only viewing, but its run cannot be named. The
+    /// follow-up still must not run locally.
+    UnresolvedCloud,
+    /// Nothing ties this conversation to a cloud run.
+    None,
+}
+
+impl PaneCloudAssociation {
+    fn task_id(self) -> Option<AmbientAgentTaskId> {
+        match self {
+            Self::Task(task_id) => Some(task_id),
+            Self::UnresolvedCloud | Self::None => None,
+        }
+    }
+
+    fn is_cloud(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
+/// Where the pane's current conversation says its continuation belongs, read from the
+/// conversation itself rather than from pane view state.
 ///
-/// Only the pane's current conversation is consulted, so a conversation deliberately continued
+/// Only the pane's active conversation is consulted, so a conversation deliberately continued
 /// locally supersedes the cloud one it came from: `/continue-locally` and both Continue-locally
 /// CTAs fork into a fresh conversation that carries no cloud association. Child agent
 /// conversations are excluded because a `run_agents(local)` child is tracked as an ambient task
 /// while still executing on this machine.
-fn cloud_task_id_for_pane(
-    terminal_view_id: EntityId,
-    app: &AppContext,
-) -> Option<AmbientAgentTaskId> {
-    let history_model = BlocklistAIHistoryModel::as_ref(app);
-    let conversation = history_model
-        .active_conversation(terminal_view_id)
-        .or_else(|| {
-            history_model
-                .all_live_conversations_for_terminal_surface(terminal_view_id)
-                .last()
-        })?;
+fn pane_cloud_association(terminal_view_id: EntityId, app: &AppContext) -> PaneCloudAssociation {
+    let Some(conversation) =
+        BlocklistAIHistoryModel::as_ref(app).active_conversation(terminal_view_id)
+    else {
+        return PaneCloudAssociation::None;
+    };
     if conversation.is_child_agent_conversation() {
-        return None;
+        return PaneCloudAssociation::None;
     }
     // The server stamps `ambient_agent_task_id` on every conversation an ambient run owns, which
-    // is the same marker that keeps cloud runs out of local conversation navigation.
+    // is the same marker that keeps cloud runs out of local conversation navigation. A
+    // local-to-cloud handoff records its run before any metadata snapshot for the forked
+    // conversation exists, which covers the window the server marker cannot.
     if let Some(task_id) = conversation
         .server_metadata()
         .and_then(|metadata| metadata.ambient_agent_task_id)
+        .or_else(|| conversation.cloud_handoff_task_id())
     {
-        return Some(task_id);
+        return PaneCloudAssociation::Task(task_id);
     }
-    // A local-to-cloud handoff rebinds the pane's forked conversation to the cloud run's
-    // conversation token immediately, long before any metadata snapshot for that token exists, so
-    // also match the token against the user's runs. Only a run the server executed remotely
-    // qualifies; a locally-executed run is tracked the same way and must keep running locally.
-    if !conversation.is_viewing_shared_session() {
-        return None;
+    // A conversation this client is only viewing executes on whichever machine shared it, never
+    // this one, so an unnameable run must block rather than fall through to the local agent.
+    if conversation.is_viewing_shared_session()
+        && conversation.server_conversation_token().is_some()
+    {
+        return PaneCloudAssociation::UnresolvedCloud;
     }
-    let conversation_token = conversation.server_conversation_token()?;
-    AgentConversationsModel::as_ref(app)
-        .tasks_iter()
-        .find(|task| {
-            task.execution_location == Some(ExecutionLocation::Remote)
-                && task.conversation_id() == Some(conversation_token.as_str())
-        })
-        .map(|task| task.task_id)
+    PaneCloudAssociation::None
 }
 
 fn continuation_ui_state_for_harness_and_access(

@@ -38,6 +38,7 @@ use crate::ai::agent::{
     AIAgentTodoId, CancellationReason, FinishedAIAgentOutput, MessageId, RenderableAIError,
     RequestCost, Suggestions,
 };
+use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::artifacts::Artifact;
 use crate::ai::document::ai_document_model::AIDocumentModel;
 use crate::input_suggestions::HistoryOrder;
@@ -913,6 +914,30 @@ impl BlocklistAIHistoryModel {
                 terminal_surface_id,
             });
         }
+    }
+
+    /// Records the cloud run that a local-to-cloud handoff created for the conversation behind
+    /// `server_token`, so a follow-up in that pane keeps routing to the cloud once the handoff's
+    /// shared session ends and the pane's own ambient association is gone.
+    ///
+    /// The handoff rebinds the forked conversation to the cloud run's token before the run is
+    /// created, so the token resolves here even though no metadata snapshot for it exists yet.
+    pub fn record_cloud_handoff_task(
+        &mut self,
+        server_token: &ServerConversationToken,
+        task_id: AmbientAgentTaskId,
+    ) {
+        let Some(conversation_id) = self.find_conversation_id_by_server_token(server_token) else {
+            log::warn!(
+                "record_cloud_handoff_task: no conversation for the handoff's forked token; \
+                 a follow-up on that pane will fail closed rather than route to the cloud run"
+            );
+            return;
+        };
+        let Some(conversation) = self.conversations_by_id.get_mut(&conversation_id) else {
+            return;
+        };
+        conversation.set_cloud_handoff_task_id(task_id);
     }
 
     /// Sets server metadata for a conversation and emits the ConversationMetadataUpdated event.

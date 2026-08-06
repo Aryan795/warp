@@ -300,6 +300,15 @@ pub struct AIConversation {
     /// `run_id()` which calls `.to_string()` on this field.
     task_id: Option<AmbientAgentTaskId>,
 
+    /// The cloud run this conversation's continuation belongs to, recorded when a local-to-cloud
+    /// handoff creates that run.
+    ///
+    /// Distinct from [`Self::task_id`], which every local conversation also carries (parsed from
+    /// `StreamInit.run_id`) and so cannot say where a follow-up should execute. This field is
+    /// written only by the handoff, so its presence means the conversation was moved to the cloud
+    /// and must not silently continue on the local agent.
+    cloud_handoff_task_id: Option<AmbientAgentTaskId>,
+
     /// The server conversation ID of the source conversation if this conversation was forked.
     forked_from_server_conversation_token: Option<ServerConversationToken>,
 
@@ -423,6 +432,7 @@ impl AIConversation {
             conversation_usage_metadata: ConversationUsageMetadata::default(),
             server_conversation_token: None,
             task_id: None,
+            cloud_handoff_task_id: None,
             forked_from_server_conversation_token: None,
             server_metadata: None,
             transaction: None,
@@ -674,6 +684,7 @@ impl AIConversation {
             conversation_usage_metadata,
             server_conversation_token,
             task_id: run_id.as_deref().and_then(|id| id.parse().ok()),
+            cloud_handoff_task_id: None,
             forked_from_server_conversation_token,
             server_metadata: None,
             transaction: None,
@@ -1087,6 +1098,16 @@ impl AIConversation {
     /// Sets the task ID directly (used for child agents spawned via `SpawnAgentResponse`).
     pub fn set_task_id(&mut self, id: AmbientAgentTaskId) {
         self.task_id = Some(id);
+    }
+
+    /// Returns the cloud run a local-to-cloud handoff moved this conversation to, if any.
+    pub fn cloud_handoff_task_id(&self) -> Option<AmbientAgentTaskId> {
+        self.cloud_handoff_task_id
+    }
+
+    /// Records the cloud run a local-to-cloud handoff created for this conversation.
+    pub fn set_cloud_handoff_task_id(&mut self, id: AmbientAgentTaskId) {
+        self.cloud_handoff_task_id = Some(id);
     }
 
     /// Returns the server-side agent identifier for orchestration.
