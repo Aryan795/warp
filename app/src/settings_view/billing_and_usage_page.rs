@@ -1417,8 +1417,8 @@ impl BillingAndUsagePageView {
         has_admin_permissions: bool,
     ) -> Box<dyn Element> {
         let workspaces = UserWorkspaces::as_ref(app);
-        // TODO(team-scoped-settings): thread a real window_id through once available here.
-        let usage_settings = workspaces.usage_based_pricing_settings(None);
+        let usage_settings =
+            workspaces.usage_based_pricing_settings(self.self_handle.window_id(app));
 
         let spend_limit_text = if let Some(cents) = usage_settings.max_monthly_spend_cents {
             format!("${:.2}", cents as f64 / 100.0)
@@ -3337,8 +3337,8 @@ impl BillingAndUsagePageView {
         if let (Some(team), Some(billing_metadata)) = (team, billing_metadata)
             && billing_metadata.is_usage_based_pricing_toggleable()
         {
-            // TODO(team-scoped-settings): thread a real window_id through once available here.
-            let usage_based_pricing_settings = workspaces.usage_based_pricing_settings(None);
+            let usage_based_pricing_settings =
+                workspaces.usage_based_pricing_settings(self.self_handle.window_id(app));
 
             let enabled = self
                 .usage_based_pricing_toggle_override
