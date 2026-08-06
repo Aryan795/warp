@@ -1,9 +1,8 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use warpui::App;
-
 use warp_core::telemetry::testing::MockTelemetryContextProvider;
+use warpui::App;
 
 use super::*;
 use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
