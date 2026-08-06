@@ -15791,8 +15791,8 @@ impl Workspace {
             return;
         };
         let server_token = ServerConversationToken::new(forked_conversation_id.clone());
-        BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, _| {
-            history.record_cloud_handoff_task(&server_token, created.task_id);
+        BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+            history.record_cloud_handoff_task(&server_token, created.task_id, ctx);
         });
     }
 

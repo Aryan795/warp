@@ -3,7 +3,7 @@ use warpui::{AppContext, EntityId, ModelHandle, SingletonEntity};
 
 use crate::ai::agent::api::ServerConversationToken;
 use crate::ai::agent::conversation::{
-    AIAgentHarness, AIConversationId, ServerAIConversationMetadata,
+    AIAgentHarness, AIConversation, AIConversationId, ServerAIConversationMetadata,
 };
 use crate::ai::agent_conversations_model::AgentConversationsModel;
 use crate::ai::ambient_agents::{
@@ -271,9 +271,8 @@ impl PaneCloudAssociation {
 /// conversations are excluded because a `run_agents(local)` child is tracked as an ambient task
 /// while still executing on this machine.
 fn pane_cloud_association(terminal_view_id: EntityId, app: &AppContext) -> PaneCloudAssociation {
-    let Some(conversation) =
-        BlocklistAIHistoryModel::as_ref(app).active_conversation(terminal_view_id)
-    else {
+    let history_model = BlocklistAIHistoryModel::as_ref(app);
+    let Some(conversation) = history_model.active_conversation(terminal_view_id) else {
         return PaneCloudAssociation::None;
     };
     if conversation.is_child_agent_conversation() {
@@ -287,6 +286,7 @@ fn pane_cloud_association(terminal_view_id: EntityId, app: &AppContext) -> PaneC
         .server_metadata()
         .and_then(|metadata| metadata.ambient_agent_task_id)
         .or_else(|| conversation.cloud_handoff_task_id())
+        .or_else(|| synced_metadata_task_id(conversation, history_model))
     {
         return PaneCloudAssociation::Task(task_id);
     }
@@ -298,6 +298,24 @@ fn pane_cloud_association(terminal_view_id: EntityId, app: &AppContext) -> PaneC
         return PaneCloudAssociation::UnresolvedCloud;
     }
     PaneCloudAssociation::None
+}
+
+/// The ambient run named by the synced metadata snapshot for this conversation's server token.
+///
+/// A conversation restored from the local database carries no `server_metadata` of its own:
+/// `BlocklistAIHistoryModel::merge_cloud_conversation_metadata` pushes each snapshot onto the
+/// matching conversation only if that conversation is already in memory, and a conversation loaded
+/// afterwards never receives it. The snapshot is still held in the model's token-keyed metadata,
+/// so ask there before concluding the pane holds nothing cloud.
+fn synced_metadata_task_id(
+    conversation: &AIConversation,
+    history_model: &BlocklistAIHistoryModel,
+) -> Option<AmbientAgentTaskId> {
+    history_model
+        .get_server_conversation_metadata_by_server_token(
+            conversation.server_conversation_token()?,
+        )?
+        .ambient_agent_task_id
 }
 
 fn continuation_ui_state_for_harness_and_access(

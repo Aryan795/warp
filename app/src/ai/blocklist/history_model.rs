@@ -922,10 +922,17 @@ impl BlocklistAIHistoryModel {
     ///
     /// The handoff rebinds the forked conversation to the cloud run's token before the run is
     /// created, so the token resolves here even though no metadata snapshot for it exists yet.
+    ///
+    /// The binding is written to disk immediately rather than waiting for the conversation's next
+    /// save, because the run moves off this machine right after the handoff and the pane may never
+    /// produce another local write. Conversations being viewed as a shared session persist nothing
+    /// at all ([`AIConversation::write_updated_conversation_state`]); for those the cloud
+    /// association is recovered from synced conversation metadata instead.
     pub fn record_cloud_handoff_task(
         &mut self,
         server_token: &ServerConversationToken,
         task_id: AmbientAgentTaskId,
+        ctx: &mut ModelContext<Self>,
     ) {
         let Some(conversation_id) = self.find_conversation_id_by_server_token(server_token) else {
             log::warn!(
@@ -938,6 +945,7 @@ impl BlocklistAIHistoryModel {
             return;
         };
         conversation.set_cloud_handoff_task_id(task_id);
+        self.persist_conversation_state(conversation_id, ctx);
     }
 
     /// Sets server metadata for a conversation and emits the ConversationMetadataUpdated event.
@@ -1675,6 +1683,7 @@ impl BlocklistAIHistoryModel {
             autoexecute_override: Some(source_conversation.autoexecute_override().into()),
             last_event_sequence: None,
             pinned: false,
+            cloud_handoff_task_id: None,
         };
         let forked_conversation_id = AIConversationId::new();
         if let Err(e) = sqlite_sender.send(ModelEvent::UpdateMultiAgentConversation {
@@ -1853,6 +1862,7 @@ impl BlocklistAIHistoryModel {
             autoexecute_override: Some(conversation.autoexecute_override().into()),
             last_event_sequence: None,
             pinned: false,
+            cloud_handoff_task_id: None,
         };
 
         let forked_conversation_id = AIConversationId::new();
@@ -2903,6 +2913,7 @@ fn merged_remote_child_placeholder_conversation_data(
         reverted_action_ids: None,
         root_task_is_optimistic: None,
         autoexecute_override: None,
+        cloud_handoff_task_id: None,
     }
 }
 

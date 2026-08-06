@@ -576,6 +576,14 @@ impl AIConversation {
             (task_store, todo_lists, status)
         };
 
+        // Read out of the overlay before it is consumed below. Unlike `run_id`, this is written
+        // only by a local-to-cloud handoff, so its presence on a restored conversation means the
+        // continuation belongs in the cloud even though the pane looks like an ordinary local one.
+        let cloud_handoff_task_id = conversation_data
+            .as_ref()
+            .and_then(|data| data.cloud_handoff_task_id.as_deref())
+            .and_then(|id| id.parse().ok());
+
         let (
             server_conversation_token,
             forked_from_server_conversation_token,
@@ -684,7 +692,7 @@ impl AIConversation {
             conversation_usage_metadata,
             server_conversation_token,
             task_id: run_id.as_deref().and_then(|id| id.parse().ok()),
-            cloud_handoff_task_id: None,
+            cloud_handoff_task_id,
             forked_from_server_conversation_token,
             server_metadata: None,
             transaction: None,
@@ -3644,6 +3652,7 @@ impl AIConversation {
                 // (returns `None`) and `new_restored_synthesizing_on_empty`.
                 root_task_is_optimistic: None,
                 run_id: self.task_id.map(|id| id.to_string()),
+                cloud_handoff_task_id: self.cloud_handoff_task_id.map(|id| id.to_string()),
                 autoexecute_override: Some(self.autoexecute_override.into()),
                 last_event_sequence: self.last_event_sequence,
                 pinned: self.pinned,
