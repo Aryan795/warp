@@ -181,3 +181,108 @@ fn purchase_policy_standard_purchasing_wins_over_premium() {
     assert!(!billing_metadata.is_premium_addon_credits_purchase());
     assert_eq!(billing_metadata.addon_credits_price_premium_bps(), 0);
 }
+
+#[test]
+fn workspace_defaults_marks_scalar_settings_as_workspace_enforced() {
+    let mut ws = WorkspaceSettings::default();
+    ws.secret_redaction_settings.enabled = true;
+    ws.ai_permissions_settings.allow_ai_in_remote_sessions = false;
+    ws.link_sharing_settings.anyone_with_link_sharing_enabled = true;
+    ws.codebase_context_settings.setting = AdminEnablementSetting::Enable;
+
+    let team_settings = TeamSettings::from_workspace_defaults(&ws);
+
+    assert!(team_settings.secret_redaction.enabled.value);
+    assert!(team_settings.secret_redaction.enabled.is_enforced_by_workspace);
+    assert!(!team_settings.ai_permissions.allow_ai_in_remote_sessions.value);
+    assert!(
+        team_settings
+            .ai_permissions
+            .allow_ai_in_remote_sessions
+            .is_enforced_by_workspace
+    );
+    assert!(
+        team_settings
+            .link_sharing
+            .anyone_with_link_sharing_enabled
+            .value
+    );
+    assert_eq!(
+        team_settings.codebase_context.value,
+        AdminEnablementSetting::Enable
+    );
+    assert!(team_settings.codebase_context.is_enforced_by_workspace);
+}
+
+#[test]
+fn workspace_defaults_attributes_list_entries_to_the_workspace_layer() {
+    let mut ws = WorkspaceSettings::default();
+    ws.secret_redaction_settings.regexes = vec![EnterpriseSecretRegex {
+        pattern: "sk-[a-z0-9]+".to_string(),
+        name: Some("api key".to_string()),
+    }];
+    ws.ai_autonomy_settings.read_files_allowlist = Some(vec![PathBuf::from("/tmp/allowed")]);
+    ws.ai_autonomy_settings.execute_commands_denylist = Some(vec![
+        AgentModeCommandExecutionPredicate::new_regex("rm -rf.*").unwrap(),
+    ]);
+
+    let team_settings = TeamSettings::from_workspace_defaults(&ws);
+
+    let regexes = &team_settings.secret_redaction.regexes;
+    assert_eq!(regexes.values, ws.secret_redaction_settings.regexes);
+    assert_eq!(regexes.workspace_entries, ws.secret_redaction_settings.regexes);
+    assert!(regexes.team_entries.is_empty());
+
+    let allowlist = &team_settings.ai_autonomy.read_files_allowlist;
+    assert_eq!(allowlist.values, vec!["/tmp/allowed".to_string()]);
+    assert_eq!(allowlist.workspace_entries, vec!["/tmp/allowed".to_string()]);
+    assert!(allowlist.team_entries.is_empty());
+
+    let denylist = &team_settings.ai_autonomy.execute_commands_denylist;
+    assert_eq!(denylist.values, vec!["rm -rf.*".to_string()]);
+    assert!(denylist.team_entries.is_empty());
+}
+
+#[test]
+fn workspace_defaults_has_no_enforced_value_for_create_plans() {
+    // `WorkspaceSettings`/`AiAutonomySettings` has no `create_plans_setting` field
+    // (unlike the team-level `TeamAiAutonomySettings`), so the fallback can't claim
+    // the workspace enforces a value for it.
+    let ws = WorkspaceSettings::default();
+
+    let team_settings = TeamSettings::from_workspace_defaults(&ws);
+
+    assert_eq!(team_settings.ai_autonomy.create_plans.value, None);
+    assert!(!team_settings.ai_autonomy.create_plans.is_enforced_by_workspace);
+}
+
+#[test]
+fn workspace_defaults_treats_absent_sandboxed_agent_settings_as_empty() {
+    let mut ws = WorkspaceSettings::default();
+    ws.sandboxed_agent_settings = None;
+
+    let team_settings = TeamSettings::from_workspace_defaults(&ws);
+
+    assert!(
+        team_settings
+            .sandboxed_agent
+            .execute_commands_denylist
+            .values
+            .is_empty()
+    );
+}
+
+#[test]
+fn workspace_defaults_passes_through_unwrapped_fields_verbatim() {
+    let mut ws = WorkspaceSettings::default();
+    ws.default_host_slug = Some("my-host".to_string());
+    ws.enable_warp_attribution = AdminEnablementSetting::Disable;
+
+    let team_settings = TeamSettings::from_workspace_defaults(&ws);
+
+    assert_eq!(team_settings.default_host_slug.as_deref(), Some("my-host"));
+    assert_eq!(
+        team_settings.enable_warp_attribution,
+        AdminEnablementSetting::Disable
+    );
+}

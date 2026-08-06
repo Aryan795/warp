@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use chrono::Utc;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use warp_errors::report_error;
 use warp_graphql::billing::{AddonCreditAutoReloadStatus, ServiceAgreement, ServiceAgreementType};
 pub use warp_graphql::billing::{
     AiCreditsUsageAndCostSubjectType, AiCreditsUsageAndCostType, AiCreditsUsageBucket,
@@ -973,7 +974,7 @@ pub struct LinkSharingSettings {
     pub direct_link_sharing_enabled: bool,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct EnterpriseSecretRegex {
     pub pattern: String,
     #[serde(default)]
@@ -1126,6 +1127,195 @@ pub struct TeamSettings {
     #[serde(default)]
     pub default_host_slug: Option<String>,
     pub team_byo: Option<TeamByoSettings>,
+}
+
+/// Wraps a plain workspace-level value as a workspace-enforced [`EnforceableSetting`].
+/// Used only by [`TeamSettings::from_workspace_defaults`] to represent "no team is in the
+/// picture, so the workspace's value is what applies" — not a real per-team override.
+fn workspace_enforced<T>(value: T) -> EnforceableSetting<T> {
+    EnforceableSetting {
+        value,
+        is_enforced_by_workspace: true,
+    }
+}
+
+/// Wraps a plain workspace-level list as a [`SplitListSetting`] with every entry
+/// attributed to the workspace layer. See [`workspace_enforced`] for context.
+fn workspace_split_list<T: Clone>(values: Vec<T>) -> SplitListSetting<T> {
+    SplitListSetting {
+        workspace_entries: values.clone(),
+        team_entries: Vec::new(),
+        values,
+    }
+}
+
+impl TeamSettings {
+    /// Builds a [`TeamSettings`]-shaped value out of workspace-level settings, for use when
+    /// there is no real team to read settings from (e.g. the current window has no team bound,
+    /// or the user isn't part of any team). **This does not look up or construct any actual
+    /// team** — it exists purely so callers can read workspace-level values through the same
+    /// `TeamSettings` shape as real per-team settings, without a separate code path per case.
+    /// Every governable field is marked `is_enforced_by_workspace: true` (the workspace's value
+    /// is, by definition, what applies when no team overrides it), except `ai_autonomy.create_plans`,
+    /// for which [`WorkspaceSettings`] has no corresponding field at all (see follow-up note on
+    /// `AiAutonomySettings`).
+    pub fn from_workspace_defaults(ws: &WorkspaceSettings) -> TeamSettings {
+        let autonomy = &ws.ai_autonomy_settings;
+        TeamSettings {
+            ugc_collection: workspace_enforced(ws.ugc_collection_settings.setting.clone()),
+            cloud_conversation_storage: workspace_enforced(
+                ws.cloud_conversation_storage_settings.setting.clone(),
+            ),
+            codebase_context: workspace_enforced(ws.codebase_context_settings.setting.clone()),
+            ai_permissions: TeamAiPermissionsSettings {
+                allow_ai_in_remote_sessions: workspace_enforced(
+                    ws.ai_permissions_settings.allow_ai_in_remote_sessions,
+                ),
+                remote_session_regex_list: workspace_split_list(
+                    ws.ai_permissions_settings
+                        .remote_session_regex_list
+                        .iter()
+                        .map(|regex| regex.as_str().to_string())
+                        .collect(),
+                ),
+            },
+            secret_redaction: TeamSecretRedactionSettings {
+                enabled: workspace_enforced(ws.secret_redaction_settings.enabled),
+                regexes: workspace_split_list(ws.secret_redaction_settings.regexes.clone()),
+            },
+            ai_autonomy: TeamAiAutonomySettings {
+                apply_code_diffs: workspace_enforced(autonomy.apply_code_diffs_setting),
+                read_files: workspace_enforced(autonomy.read_files_setting),
+                // `WorkspaceSettings`/`AiAutonomySettings` has no `create_plans_setting` field
+                // (unlike the team-level `TeamAiAutonomySettings`), so there is no workspace value
+                // to enforce here. `None` has the same effect either way (agent decides).
+                create_plans: EnforceableSetting {
+                    value: None,
+                    is_enforced_by_workspace: false,
+                },
+                execute_commands: workspace_enforced(autonomy.execute_commands_setting),
+                write_to_pty: workspace_enforced(autonomy.write_to_pty_setting),
+                computer_use: workspace_enforced(autonomy.computer_use_setting),
+                read_files_allowlist: workspace_split_list(
+                    autonomy
+                        .read_files_allowlist
+                        .iter()
+                        .flatten()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .collect(),
+                ),
+                execute_commands_allowlist: workspace_split_list(
+                    autonomy
+                        .execute_commands_allowlist
+                        .iter()
+                        .flatten()
+                        .map(ToString::to_string)
+                        .collect(),
+                ),
+                execute_commands_denylist: workspace_split_list(
+                    autonomy
+                        .execute_commands_denylist
+                        .iter()
+                        .flatten()
+                        .map(ToString::to_string)
+                        .collect(),
+                ),
+            },
+            link_sharing: TeamLinkSharingSettings {
+                anyone_with_link_sharing_enabled: workspace_enforced(
+                    ws.link_sharing_settings.anyone_with_link_sharing_enabled,
+                ),
+                direct_link_sharing_enabled: workspace_enforced(
+                    ws.link_sharing_settings.direct_link_sharing_enabled,
+                ),
+            },
+            sandboxed_agent: TeamSandboxedAgentSettings {
+                execute_commands_denylist: workspace_split_list(
+                    ws.sandboxed_agent_settings
+                        .iter()
+                        .flat_map(|settings| settings.execute_commands_denylist.iter().flatten())
+                        .map(ToString::to_string)
+                        .collect(),
+                ),
+            },
+            llm_settings: ws.llm_settings.clone(),
+            telemetry_settings: ws.telemetry_settings.clone(),
+            usage_based_pricing_settings: ws.usage_based_pricing_settings.clone(),
+            addon_credits_settings: ws.addon_credits_settings.clone(),
+            enable_warp_attribution: ws.enable_warp_attribution.clone(),
+            default_host_slug: ws.default_host_slug.clone(),
+            team_byo: ws.team_byo.clone(),
+        }
+    }
+}
+
+/// Best-effort compiles a merged string list from a [`SplitListSetting`] into
+/// [`AgentModeCommandExecutionPredicate`]s, skipping and reporting any pattern that fails to
+/// compile as a regex. An empty result (including one where every entry failed to compile) is
+/// treated as "no effective entries" by callers that further map it to `None`.
+fn predicates_from_split_list(
+    list: &SplitListSetting<String>,
+) -> Vec<AgentModeCommandExecutionPredicate> {
+    list.values
+        .iter()
+        .filter_map(
+            |pattern| match AgentModeCommandExecutionPredicate::new_regex(pattern) {
+                Ok(predicate) => Some(predicate),
+                Err(e) => {
+                    report_error!(anyhow::Error::new(e).context(
+                        "Couldn't parse team-effective command pattern into AgentModeCommandExecutionPredicate"
+                    ));
+                    None
+                }
+            },
+        )
+        .collect()
+}
+
+/// Converts an effective list into the `Option<Vec<T>>` shape [`AiAutonomySettings`] and
+/// [`SandboxedAgentSettings`] use, where `None` means "no override, fall back to the execution
+/// profile's own list". [`SplitListSetting`] has no such distinction for an effective value
+/// (it's just a merged list, always present) -- an empty merged list is treated as `None` here.
+/// This loses the (server-supported but rare) case of a workspace/team explicitly overriding a
+/// list to be empty, which would collapse to the same "not overridden" behavior as never setting
+/// it at all; see the client's suggested follow-ups for revisiting this if that case matters.
+fn to_optional_override<T>(values: Vec<T>) -> Option<Vec<T>> {
+    (!values.is_empty()).then_some(values)
+}
+
+impl From<&TeamAiAutonomySettings> for AiAutonomySettings {
+    fn from(team: &TeamAiAutonomySettings) -> Self {
+        Self {
+            apply_code_diffs_setting: team.apply_code_diffs.value,
+            read_files_setting: team.read_files.value,
+            read_files_allowlist: to_optional_override(
+                team.read_files_allowlist
+                    .values
+                    .iter()
+                    .map(PathBuf::from)
+                    .collect(),
+            ),
+            execute_commands_setting: team.execute_commands.value,
+            execute_commands_allowlist: to_optional_override(predicates_from_split_list(
+                &team.execute_commands_allowlist,
+            )),
+            execute_commands_denylist: to_optional_override(predicates_from_split_list(
+                &team.execute_commands_denylist,
+            )),
+            write_to_pty_setting: team.write_to_pty.value,
+            computer_use_setting: team.computer_use.value,
+        }
+    }
+}
+
+impl From<&TeamSandboxedAgentSettings> for SandboxedAgentSettings {
+    fn from(team: &TeamSandboxedAgentSettings) -> Self {
+        Self {
+            execute_commands_denylist: to_optional_override(predicates_from_split_list(
+                &team.execute_commands_denylist,
+            )),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

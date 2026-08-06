@@ -53,8 +53,8 @@ use crate::workspaces::team_tester::TeamTesterStatus;
 use crate::workspaces::update_manager::TeamUpdateManager;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::workspaces::workspace::{
-    AdminEnablementSetting, CodebaseContextSettings, HostEnablementSetting, LlmHostSettings,
-    MultiAdminPolicy, PurchaseAddOnCreditsPolicy, Workspace,
+    AdminEnablementSetting, CodebaseContextSettings, EnforceableSetting, HostEnablementSetting,
+    LlmHostSettings, MultiAdminPolicy, PurchaseAddOnCreditsPolicy, Workspace,
 };
 
 #[derive(Default)]
@@ -1975,6 +1975,108 @@ fn test_workspace_policy_wins_over_user_level_policy() {
             assert_eq!(
                 policy.map_or(-1, |policy| policy.effective_premium_bps()),
                 0
+            );
+        });
+    })
+}
+
+#[test]
+fn effective_team_settings_uses_workspace_defaults_when_flag_disabled() {
+    let mut team = team_for_test();
+    team.settings.secret_redaction.enabled = EnforceableSetting {
+        value: true,
+        is_enforced_by_workspace: false,
+    };
+    let mut workspace = workspace_for_test(&team);
+    workspace.settings.secret_redaction_settings.enabled = false;
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        let window_id = WindowId::new();
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window_id, team.uid, ctx);
+        });
+
+        app.read(|ctx| {
+            let settings = UserWorkspaces::as_ref(ctx)
+                .effective_team_settings_for_window(Some(window_id))
+                .expect("a workspace is present");
+            assert!(
+                !settings.secret_redaction.enabled.value,
+                "flag disabled: should fall back to the workspace's value, not the team's"
+            );
+        });
+    })
+}
+
+#[test]
+fn effective_team_settings_uses_the_bound_teams_own_settings_when_flag_enabled() {
+    let _flag = FeatureFlag::TeamScopedSettings.override_enabled(true);
+    let mut team = team_for_test();
+    team.settings.secret_redaction.enabled = EnforceableSetting {
+        value: true,
+        is_enforced_by_workspace: false,
+    };
+    let mut workspace = workspace_for_test(&team);
+    workspace.settings.secret_redaction_settings.enabled = false;
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        let window_id = WindowId::new();
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window_id, team.uid, ctx);
+        });
+
+        app.read(|ctx| {
+            let settings = UserWorkspaces::as_ref(ctx)
+                .effective_team_settings_for_window(Some(window_id))
+                .expect("a workspace is present");
+            assert!(
+                settings.secret_redaction.enabled.value,
+                "flag enabled with a team bound to the window: should use the team's own settings"
+            );
+        });
+    })
+}
+
+#[test]
+fn effective_team_settings_falls_back_to_workspace_when_window_has_no_team() {
+    let _flag = FeatureFlag::TeamScopedSettings.override_enabled(true);
+    let team = team_for_test();
+    let mut workspace = workspace_for_test(&team);
+    workspace.settings.secret_redaction_settings.enabled = true;
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        app.read(|ctx| {
+            let settings = UserWorkspaces::as_ref(ctx)
+                .effective_team_settings_for_window(None)
+                .expect("a workspace is present");
+            assert!(settings.secret_redaction.enabled.value);
+            assert!(
+                settings.secret_redaction.enabled.is_enforced_by_workspace,
+                "workspace-derived fallback values should be marked workspace-enforced"
+            );
+        });
+    })
+}
+
+#[test]
+fn effective_team_settings_is_none_without_any_workspace() {
+    let _flag = FeatureFlag::TeamScopedSettings.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![]);
+
+        app.read(|ctx| {
+            assert!(
+                UserWorkspaces::as_ref(ctx)
+                    .effective_team_settings_for_window(None)
+                    .is_none(),
+                "individual/solo users have no workspace, so there is nothing to resolve"
             );
         });
     })
