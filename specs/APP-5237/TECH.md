@@ -14,8 +14,14 @@ The client has no plugin package abstraction today.
 - [`app/src/ai/mcp/file_mcp_watcher.rs:122`](https://github.com/warpdotdev/warp/blob/7a6044bd5377d708ab1d3767ece505a49d232aed/app/src/ai/mcp/file_mcp_watcher.rs#L122) watches provider-specific file-based MCP configuration.
 - [`app/src/ai/mcp/file_based_manager.rs:18`](https://github.com/warpdotdev/warp/blob/7a6044bd5377d708ab1d3767ece505a49d232aed/app/src/ai/mcp/file_based_manager.rs#L18) owns parsed file-based installations and scope.
 - [`app/src/ai/mcp/file_based_manager.rs:345`](https://github.com/warpdotdev/warp/blob/7a6044bd5377d708ab1d3767ece505a49d232aed/app/src/ai/mcp/file_based_manager.rs#L345) preserves current MCP auto-start behavior: global Warp always, enabled global third-party in GUI, and never project-scoped.
+- [`app/src/settings/ai.rs:1967`](https://github.com/warpdotdev/warp/blob/7a6044bd5377d708ab1d3767ece505a49d232aed/app/src/settings/ai.rs#L1967) is the settings declaration pattern for an Agent/MCP preference with a TOML path, platform surface, default, and cloud-sync policy.
+- [`app/src/settings_view/ai_page.rs:635`](https://github.com/warpdotdev/warp/blob/7a6044bd5377d708ab1d3767ece505a49d232aed/app/src/settings_view/ai_page.rs#L635) registers AI setting action pairs for the command palette.
+- [`app/src/settings_view/ai_page.rs:2855`](https://github.com/warpdotdev/warp/blob/7a6044bd5377d708ab1d3767ece505a49d232aed/app/src/settings_view/ai_page.rs#L2855) builds searchable Warp Agent settings widgets.
+- [`app/src/settings_view/mod.rs:793`](https://github.com/warpdotdev/warp/blob/7a6044bd5377d708ab1d3767ece505a49d232aed/app/src/settings_view/mod.rs#L793) creates state-aware enable/disable command-palette bindings from one setting action.
+- [`app/src/workspace/view.rs:23384`](https://github.com/warpdotdev/warp/blob/7a6044bd5377d708ab1d3767ece505a49d232aed/app/src/workspace/view.rs#L23384) publishes AI preference state into the keymap context used to select the correct command-palette label.
 - [`crates/warp_core/src/paths.rs:62`](https://github.com/warpdotdev/warp/blob/7a6044bd5377d708ab1d3767ece505a49d232aed/crates/warp_core/src/paths.rs#L62) owns Warp's channel-aware home config directory.
 - [`crates/warp_core/src/paths.rs:208`](https://github.com/warpdotdev/warp/blob/7a6044bd5377d708ab1d3767ece505a49d232aed/crates/warp_core/src/paths.rs#L208) intentionally separates TUI global MCP configuration from GUI configuration.
+- [`app/src/settings/mod.rs:600`](https://github.com/warpdotdev/warp/blob/7a6044bd5377d708ab1d3767ece505a49d232aed/app/src/settings/mod.rs#L600) intentionally gives GUI and TUI separate `settings.toml` files.
 
 Factories currently have direct flat skills and managed MCP references only.
 
@@ -93,6 +99,54 @@ Precedence is a tuple:
 ```
 
 Lower rank wins. Same-rank cross-repository collisions are ambiguous. Shadowing occurs after manifest validation and by manifest `name`, not child-directory name.
+
+Add one setting to `AISettings`:
+
+```rust
+plugin_discovery_enabled: AgentPluginDiscoveryEnabled {
+    type: bool,
+    default: true,
+    supported_platforms: SupportedPlatforms::ALL,
+    sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
+    surface: settings::SettingSurfaces::ALL,
+    private: false,
+    toml_path: "agents.plugins.discovery_enabled",
+    description: "Whether Warp discovers Agent Plugin packages.",
+}
+```
+
+The GUI surface follows the existing AI settings pattern:
+- Add `PluginDiscoveryWidget` to `AISettingsPageView::build_page(Some(AISubpage::WarpAgent), ...)` behind the static `FeatureFlag::AgentPlugins` gate.
+- Render one `Plugins` section with the `Agent Plugin discovery` switch and a short description that turning it off removes all plugin skills and MCP servers from the interactive client.
+- Keep the setting in its own `SettingsWidget`. Use exactly `agent plugin plugins discovery skills mcp disable stop` as `search_terms`.
+- Do not use `should_render` for the setting value. The widget must remain present while discovery is disabled. The build-time feature-flag check is static for the process.
+- Add `AISettingsPageAction::TogglePluginDiscovery`, persist through `toggle_and_save_value`, and notify observers.
+- Add `flags::PLUGIN_DISCOVERY_ENABLED` to `app/src/settings_view/mod.rs` and publish it from `Workspace::keymap_context`.
+- Register `ToggleSettingActionPair::new("Agent Plugin discovery", ...)` in `ai_page::init_actions_from_parent_view`, under `BindingGroup::WarpAi`, behind `FeatureFlag::AgentPlugins`. This yields the mutually exclusive `Enable Agent Plugin discovery` and `Disable Agent Plugin discovery` command-palette entries through the existing command binding data source.
+
+GUI and TUI use the same setting type and TOML key. They keep their existing frontend-specific `settings.toml` files; existing settings synchronization carries the value when enabled. V1 adds no TUI toggle surface.
+
+`PluginManager` observes `AgentPluginDiscoveryEnabled` in interactive execution. Model discovery policy explicitly distinguishes:
+
+```rust
+pub enum PluginDiscoveryPolicy {
+    InteractivePreference,
+    RequiredByFactory,
+}
+```
+
+On an enabled-to-disabled transition, `PluginManager` must first reject new registrations and component lookups, then:
+1. Stop `PluginWatcher` subscriptions and invalidate outstanding generation-tagged parse tasks.
+2. Publish an empty plugin-skill generation to `SkillManager`.
+3. Cancel in-flight plugin MCP tool calls with `agent_plugin_discovery_disabled`.
+4. Stop and unregister every plugin-provenance installation in `FileBasedMCPManager`.
+5. Preserve package files, structured diagnostics, and plugin data.
+
+Historical transcript content remains renderable. A shell command previously requested by a plugin skill is not plugin-provenance MCP work and is not terminated by this transition.
+
+On a disabled-to-enabled transition, create fresh watchers and perform a complete rescan. Do not revive stale snapshots. Recovered components then follow the normal provider/scope start policy.
+
+Factory dispatch selects `RequiredByFactory`. It does not consult a service account's or requester's personal `AgentPluginDiscoveryEnabled` preference. A future Factory-level kill switch requires an explicit Factory schema and policy design.
 ### 3. Skill integration
 Add a plugin ingestion API to `SkillManager`. It accepts parsed skills with explicit `PluginComponentId` and owning scope instead of deriving provider and parent from a flat path.
 
@@ -324,6 +378,11 @@ Options considered:
 Options considered:
 - Import ordinary Factory MCP into the managed MCP database. Rejected because local package paths are meaningful only inside a checkout and worker.
 - Let the client read applicable entity files from the checkout. Selected because it preserves path context and keeps the control plane from executing local commands.
+### Immediate global discovery switch
+Options considered:
+- Apply a disabled preference only after restart. Rejected because the requested control must act as a kill switch for already-loaded plugin MCP servers and skills.
+- Add user/repository/package-specific switches. Rejected from v1 because they require inventory and precedence UX that the initial sprint deliberately defers.
+- Add one interactive-client preference that immediately withdraws all plugin components. Selected because it is predictable, works from Settings and the command palette, and does not change Factory source semantics.
 ## Risks and mitigations
 - Rust and Go validators can drift.
   - Keep one cross-repository fixture corpus derived from the published schemas. Run it against both implementations in CI.
@@ -341,6 +400,8 @@ Options considered:
   - Add parser fixtures for colon-qualified plugin skills and preserve repository-qualified flat skill behavior.
 - Two `mcp.json` formats can be confused.
   - Require exact locations and exact schema identifiers. Emit targeted cross-format diagnostics.
+- A plugin skill can start an ordinary shell command before discovery is disabled.
+  - Withdraw the skill immediately, but leave that command under its existing shell-command lifecycle. Do not claim the discovery switch can identify unrelated process descendants.
 ## Testing and validation
 ### Agent Plugins conformance
 Create a committed conformance fixture suite that covers every item in Appendix A of Agent Plugins 1.0.0:
@@ -357,8 +418,13 @@ Both Rust and Go validators run the applicable shared fixtures.
 ### Client unit and integration tests
 - `PluginWatcher` tests all four local search roots, immediate-child scanning, hot reload, channel-aware Warp paths, same-name precedence, and cross-repository ambiguity.
 - `PluginManager` tests package-level shadowing and diagnostic preservation.
+- `PluginManager` tests enabled-to-disabled ordering, stale-generation invalidation, skill withdrawal, in-flight MCP cancellation, server stop/unregistration, persistent-data preservation, disabled lookup diagnostics, and a fresh rescan when re-enabled.
 - `SkillManager` and `resolve_skill_spec` test qualified invocation, unique unqualified alias, flat/plugin ambiguity, and cloud multi-repository scope.
 - `FileBasedMCPManager` tests provider/scope auto-start parity with existing file-based MCP.
+- `AISettings` tests the `agents.plugins.discovery_enabled` default, GUI/TUI surfaces, persistence, and sync policy.
+- `AISettingsPageView` filter tests assert that `plugin`, `skills`, `MCP`, `disable`, and `stop` each select the single `PluginDiscoveryWidget`, and that the widget remains visible when its value is false.
+- Command binding tests assert exactly one of `Enable Agent Plugin discovery` and `Disable Agent Plugin discovery` is available for the current context.
+- TUI plugin-manager tests assert that its frontend-specific false setting prevents interactive discovery.
 - MCP spawn tests assert exact `argv`, environment overlay order, authoritative variables, default `cwd`, persistent data path, and native tool-name routing.
 - Factory MCP client tests assert managed entries are ignored and ordinary entries load.
 - Cross-format tests assert Factory schema in a plugin root and Agent Plugins schema at a Factory entity path produce the specified isolated diagnostics.
@@ -370,6 +436,7 @@ cargo test -p ai plugins
 cargo test -p warp --lib ai::plugins
 cargo test -p warp --lib ai::skills
 cargo test -p warp --lib ai::mcp
+cargo nextest run -p warp settings_view
 cargo test -p warp_tui plugins
 cargo fmt --all -- --check
 ```
@@ -379,6 +446,7 @@ cargo fmt --all -- --check
 - Resolution tests cover automation > agent > factory plugin shadowing.
 - Managed MCP tests cover legacy/new deduplication, conflicts, scope, team validation, and projection.
 - Dispatch tests cover ordered exact paths, checkout containment, source revision, capability rejection, and persistent-data requirements.
+- Dispatch tests assert `RequiredByFactory` ignores any personal interactive discovery preference.
 - End-to-end tests run a factory skill, a plugin stdio MCP tool, an ordinary entity-level MCP tool, and a projected managed MCP from one Factory.
 - Run the same end-to-end case on a Warp-hosted sandbox and a self-hosted Docker worker. Add a direct-worker contract test for its durable data root.
 
@@ -392,12 +460,12 @@ gofmt -l logic/factoryfile logic/ai/ambient_agents
 ```
 
 ### User-visible proof
-- Record a desktop video that adds a repository plugin, shows its qualified skill in the existing skill list, invokes it, shows the qualified MCP server in existing MCP settings, explicitly starts the project server, and uses one tool.
+- Record a desktop video that adds a repository plugin, shows its qualified skill and MCP server in the existing component surfaces, explicitly starts and uses the project server, finds `Agent Plugin discovery` through Settings search, disables it from the command palette, and shows the skill withdrawal plus MCP server stop without restarting. Re-enable it and show a fresh rescan.
 - Record a TUI video that shows the qualified skill and MCP server in the existing component surfaces, invokes the skill, starts the server, and uses one tool.
 - Record a Factory run artifact that identifies the active factory/agent/automation plugin scopes and successfully calls both an ordinary plugin MCP tool and a managed Factory MCP tool.
 ## Parallelization
 Implementation can use two workstreams after the shared identities and JSON contracts are agreed:
-- Client: Rust schemas, parser, watcher, SkillManager, MCP manager, data locator, and minimal existing-surface adapters on a Warp worktree.
+- Client: Rust schemas, parser, watcher, SkillManager, MCP manager, data locator, discovery preference/actions, and minimal existing-surface adapters on a Warp worktree.
 - Factory: Go source parsing, Factory MCP schema, projection, runtime scope, and worker contract on a warp-server worktree.
 
 Factory development can proceed in parallel against committed fixture/schema contracts, but end-to-end Factory rollout waits for the client capability. Use one PR per repository; keep the PRODUCT and TECH specs aligned in this Warp PR.
@@ -408,7 +476,8 @@ Factory development can proceed in parallel against committed fixture/schema con
 - The implementation can publish the proposed immutable Warp Factory MCP schema URL before enabling authoring.
 ## Out of scope
 - Claude Code conversion or provider implementation.
-- A dedicated GUI or TUI plugin inventory and plugin-level management controls.
+- A dedicated GUI or TUI plugin inventory and plugin- or scope-level management controls beyond the single global discovery toggle.
+- A Factory-level discovery toggle.
 - Plugin distribution and installation.
 - New secret-reference fields in either plugin or Factory ordinary MCP entries.
 - A generalized permissions or subprocess-sandbox redesign.
