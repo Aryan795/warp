@@ -647,7 +647,8 @@ impl TypedActionView for CodeSettingsPageView {
         match action {
             CodeSettingsPageAction::ToggleCodebaseContext => {
                 // If the organization has an explicit setting (on or off), ignore user toggles.
-                let setting = UserWorkspaces::as_ref(ctx).team_allows_codebase_context();
+                let setting =
+                    UserWorkspaces::as_ref(ctx).team_allows_codebase_context(Some(ctx.window_id()));
                 match setting {
                     AdminEnablementSetting::Enable | AdminEnablementSetting::Disable => {
                         return;
@@ -1063,7 +1064,9 @@ impl SettingsWidget for CodePageWidget {
             appearance,
         ));
 
-        let codebase_context_enabled = UserWorkspaces::as_ref(app).is_codebase_context_enabled(app);
+        // TODO(team-scoped-settings): thread a real window_id through once available here.
+        let codebase_context_enabled =
+            UserWorkspaces::as_ref(app).is_codebase_context_enabled(None, app);
         if global_ai_enabled && codebase_context_enabled {
             content.add_children(self.render_autoindexing_rows(appearance, app));
         }
@@ -1101,8 +1104,9 @@ impl CodePageWidget {
         app: &AppContext,
     ) -> Vec<Box<dyn Element>> {
         let auto_indexing_enabled = *CodeSettings::as_ref(app).auto_indexing_enabled;
+        // TODO(team-scoped-settings): thread a real window_id through once available here.
         let codebase_indexing_enabled =
-            UserWorkspaces::as_ref(app).is_codebase_context_enabled(app);
+            UserWorkspaces::as_ref(app).is_codebase_context_enabled(None, app);
 
         let mut rows = vec![
             self.render_autoindex_row(
@@ -1258,7 +1262,8 @@ impl CodePageWidget {
     ) -> Box<dyn Element> {
         let ui_builder = appearance.ui_builder();
         let theme = appearance.theme();
-        let admin_setting = UserWorkspaces::as_ref(app).team_allows_codebase_context();
+        // TODO(team-scoped-settings): thread a real window_id through once available here.
+        let admin_setting = UserWorkspaces::as_ref(app).team_allows_codebase_context(None);
 
         let label = ui_builder
             .span(CODEBASE_INDEXING_LABEL)
@@ -1271,9 +1276,10 @@ impl CodePageWidget {
             .build()
             .finish();
 
+        // TODO(team-scoped-settings): thread a real window_id through once available here.
         let switch = ui_builder
             .switch(self.switch_state.clone())
-            .check(UserWorkspaces::as_ref(app).is_codebase_context_enabled(app));
+            .check(UserWorkspaces::as_ref(app).is_codebase_context_enabled(None, app));
 
         let disabled_tooltip_text = match admin_setting {
             AdminEnablementSetting::Enable => Some(INDEXING_WORKSPACE_ENABLED_ADMIN_TEXT),
@@ -2479,12 +2485,15 @@ impl SettingsWidget for CodebaseIndexingCategorizedWidget {
     ) -> Box<dyn Element> {
         let ui_builder = appearance.ui_builder();
         let global_ai_enabled = AISettings::as_ref(app).is_any_ai_enabled(app);
-        let codebase_context_enabled = UserWorkspaces::as_ref(app).is_codebase_context_enabled(app);
+        // TODO(team-scoped-settings): thread a real window_id through once available here.
+        let codebase_context_enabled =
+            UserWorkspaces::as_ref(app).is_codebase_context_enabled(None, app);
 
         let mut content = Flex::column();
 
         // Codebase indexing toggle using render_body_item for consistent styling
-        let admin_setting = UserWorkspaces::as_ref(app).team_allows_codebase_context();
+        // TODO(team-scoped-settings): thread a real window_id through once available here.
+        let admin_setting = UserWorkspaces::as_ref(app).team_allows_codebase_context(None);
         let switch = ui_builder
             .switch(self.inner.switch_state.clone())
             .check(codebase_context_enabled);
