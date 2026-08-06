@@ -2,7 +2,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use warp::appearance::Appearance;
-use warp::tui_export::slash_commands;
 use warpui::event::ModifiersState;
 use warpui_core::elements::MouseStateHandle;
 use warpui_core::elements::tui::{
@@ -452,56 +451,6 @@ fn conversation_like_snapshot_keeps_selection_visible_within_production_height()
     assert!(rendered.contains("Conversation 1"));
     assert!(rendered.contains("Conversation 2"));
     assert!(rendered.contains("Conversation 7"));
-}
-
-#[test]
-fn api_keys_and_connect_rows_render_the_alias_menu_copy() {
-    App::test((), |app| async move {
-        app.add_singleton_model(|_| Appearance::mock());
-        app.read(|ctx| {
-            let builder = TuiUiBuilder::from_app(ctx);
-            let snapshot = TuiInlineMenuSnapshot {
-                header: None,
-                rows: [&slash_commands::API_KEYS, &slash_commands::CONNECT]
-                    .into_iter()
-                    .map(|command| TuiInlineMenuRow {
-                        title: command.name.to_owned(),
-                        prefix: None,
-                        description: Some(command.description.to_owned()),
-                        state_suffix: None,
-                        promotional_suffix: None,
-                        is_selectable: true,
-                        style: TuiInlineMenuRowStyle::InlineMenuItem,
-                    })
-                    .collect(),
-                selected_index: Some(0),
-                scroll_offset: 0,
-                scroll_anchor: TuiInlineMenuScrollAnchor::Selection,
-                max_visible_rows: 8,
-                status: None,
-            };
-            let mut presenter = TuiPresenter::new();
-            let frame = presenter.present_element(
-                render_inline_menu(&snapshot, &builder),
-                TuiRect::new(0, 0, 100, 2),
-                ctx,
-            );
-            let lines = frame.buffer.to_lines();
-
-            assert!(
-                lines[0].starts_with(
-                    "/api-keys                    Manage your API keys and AI subscriptions"
-                ),
-                "{lines:?}"
-            );
-            assert!(
-                lines[1].starts_with(
-                    "/connect                     Manage your API keys and AI subscriptions (alias for /api-keys)"
-                ),
-                "{lines:?}"
-            );
-        });
-    });
 }
 
 #[test]

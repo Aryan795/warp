@@ -177,7 +177,6 @@ fn upgrade_command_is_always_available_only_in_tui_mode() {
             .all(|command| command.kind != SlashCommandKind::Upgrade)
     );
 }
-
 #[test]
 fn auto_approve_command_is_local_agent_action_without_arguments() {
     let tui_commands = all_commands(settings::SettingsMode::Tui);
