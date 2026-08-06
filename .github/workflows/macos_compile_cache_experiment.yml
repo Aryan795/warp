@@ -1,0 +1,61 @@
+on:
+  workflow_dispatch:
+
+name: macOS Compile Cache Experiment
+
+env:
+  CARGO_TERM_COLOR: always
+  NEXTEST_PROFILE: ci
+  WORKSPACE_TEST_ARGS: --workspace --locked --exclude command-signatures-v2
+  RUSTFLAGS: -C debuginfo=line-tables-only --cfg=web_sys_unstable_apis
+
+jobs:
+  compile:
+    name: Compile tests (${{ matrix.cache_mode }} Rust cache)
+    if: github.repository_owner == 'warpdotdev'
+    timeout-minutes: 40
+    runs-on: namespace-profile-mac-ci
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        cache_mode:
+          - warm
+          - scratch
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Use ephemeral Rust paths
+        if: ${{ matrix.cache_mode == 'scratch' }}
+        shell: bash
+        run: |
+          {
+            echo "CARGO_HOME=$RUNNER_TEMP/cargo-home"
+            echo "CARGO_TARGET_DIR=$RUNNER_TEMP/cargo-target"
+          } >> "$GITHUB_ENV"
+
+      - uses: ./.github/actions/prepare_environment
+        id: prepare_environment
+        with:
+          target_os: macos
+          is_self_hosted: false
+          install_test_deps: true
+          enable_rust_cache: ${{ matrix.cache_mode == 'warm' }}
+
+      - name: Install cargo nextest
+        uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419 # v2.82.7
+        with:
+          tool: nextest
+
+      - name: Compile tests
+        uses: ./.github/actions/compile_macos_tests
+        with:
+          workspace_test_args: ${{ env.WORKSPACE_TEST_ARGS }}
+          runner_profile: namespace-profile-mac-ci
+          cache_provider: ${{ steps.prepare_environment.outputs.rust_cache_provider }}
+          cache_identity: ${{ steps.prepare_environment.outputs.rust_cache_identity }}
+          cache_hit: ${{ steps.prepare_environment.outputs.rust_cache_hit }}
+          artifact_name: macos-compile-cache-${{ matrix.cache_mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
