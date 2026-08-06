@@ -11,6 +11,7 @@ use ai::diff_validation::{
     V4AHunk, fuzzy_match_diffs, fuzzy_match_v4a_diffs,
 };
 use itertools::Itertools;
+use similar::{DiffTag, TextDiff};
 use vec1::Vec1;
 use warpui::r#async::executor::Background;
 
@@ -48,6 +49,90 @@ impl From<std::io::Result<String>> for FileReadResult {
     }
 }
 
+/// Maximum number of lines of an existing file quoted back to the LLM when it tries to create a
+/// file that already exists. Enough to diff most files without a `read_files` round trip, while
+/// keeping the failed tool call from dominating the context window.
+const MAX_EXISTING_CONTENT_EXCERPT_LINES: usize = 200;
+
+/// Upper bound on the quoted excerpt's size, so a file with very long lines (e.g. minified
+/// sources) can't blow up the conversation regardless of its line count.
+const MAX_EXISTING_CONTENT_EXCERPT_BYTES: usize = 16 * 1024;
+
+/// A snapshot of the file already on disk at a path the LLM tried to create.
+///
+/// Carried on [`DiffApplicationError::AlreadyExists`] so the failure message can hand the model
+/// the content it needs to emit an edit on its next turn.
+pub(crate) struct ExistingFileContent {
+    line_count: usize,
+    excerpt: String,
+    excerpt_line_count: usize,
+}
+
+// File contents are user-generated content, so they must never reach a log line or Sentry
+// breadcrumb via the derived `Debug` on `DiffApplicationError`.
+impl std::fmt::Debug for ExistingFileContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExistingFileContent")
+            .field("line_count", &self.line_count)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ExistingFileContent {
+    fn new(content: &str) -> Self {
+        let mut excerpt = String::new();
+        let mut excerpt_line_count = 0;
+        for (index, line) in content
+            .lines()
+            .take(MAX_EXISTING_CONTENT_EXCERPT_LINES)
+            .enumerate()
+        {
+            let numbered = format!("{}|{line}\n", index + 1);
+            if excerpt.len().saturating_add(numbered.len()) > MAX_EXISTING_CONTENT_EXCERPT_BYTES {
+                break;
+            }
+            excerpt.push_str(&numbered);
+            excerpt_line_count += 1;
+        }
+
+        Self {
+            line_count: content.lines().count(),
+            excerpt,
+            excerpt_line_count,
+        }
+    }
+
+    fn to_conversation_message(&self, file: &str) -> String {
+        use std::fmt::Write;
+
+        let Self {
+            line_count,
+            excerpt,
+            excerpt_line_count,
+        } = self;
+        let mut message = format!(
+            "Could not create {file} because it already exists ({line_count} lines). Edit the \
+             existing file instead of creating it. To replace its contents entirely, include a \
+             delete of {file} and the create in the same tool call."
+        );
+
+        if excerpt.is_empty() {
+            return message;
+        }
+
+        if excerpt_line_count < line_count {
+            let _ = write!(
+                message,
+                " Its first {excerpt_line_count} lines are below; read the file for the rest.\n\
+                 {excerpt}"
+            );
+        } else {
+            let _ = write!(message, " Its current contents are:\n{excerpt}");
+        }
+        message
+    }
+}
+
 /// Errors that can occur while applying a diff.
 #[derive(Debug)]
 pub(crate) enum DiffApplicationError {
@@ -66,6 +151,11 @@ pub(crate) enum DiffApplicationError {
         // TODO(CODE-353): Display I/O errors to the user, since they may be able to fix them.
         #[expect(dead_code)]
         message: String,
+    },
+    /// A file that was supposed to be new already exists.
+    AlreadyExists {
+        file: String,
+        existing: ExistingFileContent,
     },
     /// The diff contained multiple attempts to create the same file.
     MultipleFileCreation {
@@ -109,6 +199,9 @@ impl DiffApplicationError {
             }
             DiffApplicationError::MissingFile { file } => {
                 format!("{file} does not exist. Is the path correct?")
+            }
+            DiffApplicationError::AlreadyExists { file, existing } => {
+                existing.to_conversation_message(file)
             }
             DiffApplicationError::ReadFailed { file, .. } => {
                 format!("Could not read {file}")
@@ -186,6 +279,7 @@ where
             }
             DiffApplicationError::MissingFile { .. }
             | DiffApplicationError::ReadFailed { .. }
+            | DiffApplicationError::AlreadyExists { .. }
             | DiffApplicationError::MultipleFileCreation { .. }
             | DiffApplicationError::MutatedDeletedFile { .. }
             | DiffApplicationError::MultipleFileRenames { .. }
@@ -476,6 +570,52 @@ fn full_replacement_diff(
     }
 }
 
+/// Minimum fraction of an existing file's lines that must survive into the content requested by
+/// a `create_file` for the request to be coerced into an update of that file. Below this bar the
+/// request is treated as a blind overwrite — evidence the model never read the file — and it
+/// fails with the file's contents instead of destroying them.
+const COERCED_CREATE_MIN_RETAINED_LINE_RATIO: f64 = 0.5;
+
+/// Computes the update deltas that turn `existing_content` into `content`.
+///
+/// Returns `None` when the rewrite would drop more than
+/// [`COERCED_CREATE_MIN_RETAINED_LINE_RATIO`] of the existing lines, or when the contents are
+/// line-identical and there is nothing to apply.
+fn coerced_update_deltas(existing_content: &str, content: &str) -> Option<Vec<DiffDelta>> {
+    let diff = TextDiff::from_lines(existing_content, content);
+
+    let retained_line_count: usize = diff
+        .ops()
+        .iter()
+        .filter(|op| matches!(op.tag(), DiffTag::Equal))
+        .map(|op| op.old_range().len())
+        .sum();
+    let existing_line_count = existing_content.lines().count();
+    if (retained_line_count as f64)
+        < existing_line_count as f64 * COERCED_CREATE_MIN_RETAINED_LINE_RATIO
+    {
+        return None;
+    }
+
+    let content_lines: Vec<&str> = content.split_inclusive('\n').collect();
+    let deltas: Vec<DiffDelta> = diff
+        .ops()
+        .iter()
+        .filter_map(|op| match op.tag() {
+            DiffTag::Equal => None,
+            DiffTag::Delete | DiffTag::Insert | DiffTag::Replace => {
+                let old_range = op.old_range();
+                Some(DiffDelta {
+                    replacement_line_range: old_range.start + 1..old_range.end + 1,
+                    insertion: content_lines[op.new_range()].concat(),
+                })
+            }
+        })
+        .collect();
+
+    (!deltas.is_empty()).then_some(deltas)
+}
+
 /// Converts a file-creation request into a diff.
 async fn apply_create_file<F, Fut>(
     file_path: String,
@@ -494,31 +634,41 @@ async fn apply_create_file<F, Fut>(
     );
 
     match read_file(absolute_path.clone()).await {
+        // Creating over an existing file is coerced into a full-content update when doing so
+        // cannot lose anything: the file is empty, or it already holds exactly what was requested.
+        FileReadResult::Found(existing_content)
+            if existing_content.is_empty()
+                || (existing_content == content && content.ends_with('\n')) =>
+        {
+            result
+                .diffs
+                .push(full_replacement_diff(file_path, existing_content, content));
+        }
         FileReadResult::Found(existing_content) => {
-            // The model asked to *create* a file that already exists. Rather than failing (which
-            // tempts it into destructive shell workarounds like `rm`), coerce the request into a
-            // full-content update routed through the normal reviewable-diff pipeline: the original
-            // content is preserved and the same write permission as any edit is required.
             safe_warn!(
                 safe: ("Agent Code tried to create a file that already exists"),
                 full: ("Agent Code tried to create a file that already exists: {absolute_path:?}")
             );
-
-            if existing_content == content {
-                // The file already holds exactly the requested content, so emitting an update
-                // would only churn it. Record a no-op instead, matching how identical edits are
-                // handled elsewhere.
-                result.errors.push(DiffApplicationError::UnmatchedDiffs {
-                    file: file_path,
-                    match_failures: DiffMatchFailures {
-                        noop_deltas: 1,
-                        ..Default::default()
-                    },
-                });
-            } else {
-                result
-                    .diffs
-                    .push(full_replacement_diff(file_path, existing_content, content));
+            // When the requested content retains enough of the existing file, the model has
+            // demonstrably seen that file, so the create is coerced into an update built from
+            // the computed hunks and routed through the normal reviewable-diff pipeline. Low
+            // overlap means a likely-blind overwrite: fail with the file's contents so the model
+            // can edit (or explicitly delete + create) on its next turn instead of clobbering it.
+            match coerced_update_deltas(&existing_content, &content) {
+                Some(deltas) => {
+                    result.diffs.push(AIRequestedCodeDiff {
+                        file_name: file_path,
+                        diff_type: DiffType::update(deltas, None),
+                        failures: None,
+                        original_content: existing_content,
+                    });
+                }
+                None => {
+                    result.errors.push(DiffApplicationError::AlreadyExists {
+                        file: file_path,
+                        existing: ExistingFileContent::new(&existing_content),
+                    });
+                }
             }
         }
         FileReadResult::NotFound => {

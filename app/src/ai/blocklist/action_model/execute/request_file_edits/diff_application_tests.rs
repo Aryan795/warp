@@ -587,15 +587,14 @@ fn test_delete_create_and_edit_same_path_still_fails() {
 }
 
 #[test]
-fn test_create_edit_for_existing_file_becomes_a_full_replacement() {
+fn test_create_edit_for_existing_file() {
     App::test((), |app| async move {
         // Create a temporary file that already exists
         let mut temp_file = NamedTempFile::new().expect("Failed to create temporary file");
         let file_path = temp_file.path().to_string_lossy().to_string();
         writeln!(&mut temp_file, "Existing content").unwrap();
 
-        // Creating over an existing file is coerced into a full-content update instead of failing,
-        // so the model never has a reason to reach for a destructive shell workaround.
+        // Try to create a file that already exists
         let create_edit = FileEdit::Create {
             file: Some(file_path.clone()),
             content: Some("New content".to_string()),
@@ -617,16 +616,75 @@ fn test_create_edit_for_existing_file_becomes_a_full_replacement() {
         )
         .await;
 
-        let diffs = result.expect("Expected the create to be coerced into a full replacement");
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(diffs[0].file_name, file_path);
-        assert_eq!(diffs[0].original_content, "Existing content\n");
-
-        let deltas = update_deltas(&diffs[0]);
-        assert_eq!(deltas.len(), 1);
-        assert_eq!(deltas[0].replacement_line_range, 1..2);
-        assert_eq!(deltas[0].insertion, "New content");
+        // Should fail because the file already exists
+        let errors = result.expect_err("Expected an error because file already exists");
+        match &errors[..] {
+            [DiffApplicationError::AlreadyExists { file, .. }] => {
+                assert_eq!(*file, file_path);
+            }
+            other => panic!("Expected a single AlreadyExists error, got {other:?}"),
+        }
     });
+}
+
+#[test]
+fn test_create_edit_for_existing_file_reports_its_contents() {
+    App::test((), |app| async move {
+        let mut temp_file = NamedTempFile::new().expect("Failed to create temporary file");
+        let file_path = temp_file.path().to_string_lossy().to_string();
+        writeln!(&mut temp_file, "First line\nSecond line").unwrap();
+
+        let create_edit = FileEdit::Create {
+            file: Some(file_path.clone()),
+            content: Some("New content".to_string()),
+        };
+
+        let result = apply_edits(
+            vec![create_edit],
+            &SessionContext::new_for_test(),
+            &AIIdentifiers::default(),
+            app.background_executor(),
+            Arc::new(AuthState::new_for_test()),
+            false,
+            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+        )
+        .await;
+
+        let errors = result.expect_err("Expected an error because file already exists");
+        assert_eq!(
+            DiffApplicationError::error_for_conversation(&errors),
+            format!(
+                "Could not create {file_path} because it already exists (2 lines). Edit the \
+                 existing file instead of creating it. To replace its contents entirely, \
+                 include a delete of {file_path} and the create in the same tool call. Its \
+                 current contents are:\n1|First line\n2|Second line\n"
+            )
+        );
+    });
+}
+
+#[test]
+fn test_create_edit_for_existing_file_truncates_long_contents() {
+    let existing: String = (1..=500).map(|n| format!("line {n}\n")).collect();
+    let err = DiffApplicationError::AlreadyExists {
+        file: "big.txt".to_string(),
+        existing: ExistingFileContent::new(&existing),
+    };
+
+    let message = err.to_conversation_message();
+    assert!(
+        message.starts_with(
+            "Could not create big.txt because it already exists (500 lines). Edit the existing \
+             file instead of creating it. To replace its contents entirely, include a delete of \
+             big.txt and the create in the same tool call. Its first 200 lines are below; read \
+             the file for the rest.\n1|line 1\n"
+        ),
+        "unexpected message: {message}"
+    );
+    assert!(
+        message.ends_with("200|line 200\n"),
+        "unexpected message end"
+    );
 }
 
 #[test]
@@ -664,7 +722,7 @@ fn test_create_edit_over_empty_file_becomes_an_update() {
 }
 
 #[test]
-fn test_create_edit_with_identical_content_is_a_noop() {
+fn test_create_edit_with_identical_content_becomes_an_update() {
     App::test((), |app| async move {
         let mut temp_file = NamedTempFile::new().expect("Failed to create temporary file");
         let file_path = temp_file.path().to_string_lossy().to_string();
@@ -687,30 +745,24 @@ fn test_create_edit_with_identical_content_is_a_noop() {
         )
         .await;
 
-        // The file already holds exactly the requested content, so there is nothing to write.
-        let errors = result.expect_err("Expected a no-op result for identical content");
-        match &errors[..] {
-            [
-                DiffApplicationError::UnmatchedDiffs {
-                    file,
-                    match_failures,
-                },
-            ] => {
-                assert_eq!(*file, file_path);
-                assert_eq!(match_failures.noop_deltas, 1);
-            }
-            other => panic!("Expected a single no-op UnmatchedDiffs error, got {other:?}"),
-        }
+        let diffs = result.expect("Expected the create to be coerced into a no-op update");
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].original_content, content);
+
+        let deltas = update_deltas(&diffs[0]);
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].replacement_line_range, 1..3);
+        assert_eq!(deltas[0].insertion, content);
     });
 }
 
 #[test]
-fn test_create_edit_with_identical_content_but_no_trailing_newline_is_a_noop() {
+fn test_create_edit_with_identical_content_but_no_trailing_newline_errors() {
     App::test((), |app| async move {
         let mut temp_file = NamedTempFile::new().expect("Failed to create temporary file");
         let file_path = temp_file.path().to_string_lossy().to_string();
-        // Identical content is a no-op regardless of a trailing newline, so the file is never
-        // rewritten (which would otherwise churn it by appending a newline).
+        // No trailing newline: the diff appliers append one to non-empty update insertions, so
+        // coercing this into an update would rewrite the file rather than being a true no-op.
         let content = "First line\nSecond line";
         write!(&mut temp_file, "{content}").unwrap();
 
@@ -730,18 +782,125 @@ fn test_create_edit_with_identical_content_but_no_trailing_newline_is_a_noop() {
         )
         .await;
 
-        let errors = result.expect_err("Expected a no-op result for identical content");
+        let errors =
+            result.expect_err("Expected an error because coercion would not be byte-preserving");
         match &errors[..] {
-            [
-                DiffApplicationError::UnmatchedDiffs {
-                    file,
-                    match_failures,
-                },
-            ] => {
+            [DiffApplicationError::AlreadyExists { file, .. }] => {
                 assert_eq!(*file, file_path);
-                assert_eq!(match_failures.noop_deltas, 1);
             }
-            other => panic!("Expected a single no-op UnmatchedDiffs error, got {other:?}"),
+            other => panic!("Expected a single AlreadyExists error, got {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn test_create_edit_with_high_overlap_becomes_a_hunk_update() {
+    App::test((), |app| async move {
+        let mut temp_file = NamedTempFile::new().expect("Failed to create temporary file");
+        let file_path = temp_file.path().to_string_lossy().to_string();
+        write!(
+            &mut temp_file,
+            "line one\nline two\nline three\nline four\n"
+        )
+        .unwrap();
+
+        let create_edit = FileEdit::Create {
+            file: Some(file_path.clone()),
+            content: Some("line one\nchanged two\nline three\nline four\nline five\n".to_string()),
+        };
+
+        let result = apply_edits(
+            vec![create_edit],
+            &SessionContext::new_for_test(),
+            &AIIdentifiers::default(),
+            app.background_executor(),
+            Arc::new(AuthState::new_for_test()),
+            false,
+            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+        )
+        .await;
+
+        let diffs = result.expect("Expected the create to be coerced into an update");
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].file_name, file_path);
+        assert_eq!(
+            diffs[0].original_content,
+            "line one\nline two\nline three\nline four\n"
+        );
+
+        let deltas = update_deltas(&diffs[0]);
+        assert_eq!(deltas.len(), 2);
+        assert_eq!(deltas[0].replacement_line_range, 2..3);
+        assert_eq!(deltas[0].insertion, "changed two\n");
+        assert_eq!(deltas[1].replacement_line_range, 5..5);
+        assert_eq!(deltas[1].insertion, "line five\n");
+    });
+}
+
+#[test]
+fn test_create_edit_appending_to_existing_file_becomes_an_update() {
+    App::test((), |app| async move {
+        let mut temp_file = NamedTempFile::new().expect("Failed to create temporary file");
+        let file_path = temp_file.path().to_string_lossy().to_string();
+        write!(&mut temp_file, "line one\nline two\n").unwrap();
+
+        let create_edit = FileEdit::Create {
+            file: Some(file_path.clone()),
+            content: Some("line one\nline two\nline three\n".to_string()),
+        };
+
+        let result = apply_edits(
+            vec![create_edit],
+            &SessionContext::new_for_test(),
+            &AIIdentifiers::default(),
+            app.background_executor(),
+            Arc::new(AuthState::new_for_test()),
+            false,
+            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+        )
+        .await;
+
+        let diffs = result.expect("Expected the create to be coerced into an update");
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].original_content, "line one\nline two\n");
+
+        let deltas = update_deltas(&diffs[0]);
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].replacement_line_range, 3..3);
+        assert_eq!(deltas[0].insertion, "line three\n");
+    });
+}
+
+#[test]
+fn test_create_edit_with_low_overlap_errors() {
+    App::test((), |app| async move {
+        let mut temp_file = NamedTempFile::new().expect("Failed to create temporary file");
+        let file_path = temp_file.path().to_string_lossy().to_string();
+        write!(&mut temp_file, "alpha\nbeta\ngamma\ndelta\n").unwrap();
+
+        let create_edit = FileEdit::Create {
+            file: Some(file_path.clone()),
+            content: Some("one\ntwo\ngamma\n".to_string()),
+        };
+
+        let result = apply_edits(
+            vec![create_edit],
+            &SessionContext::new_for_test(),
+            &AIIdentifiers::default(),
+            app.background_executor(),
+            Arc::new(AuthState::new_for_test()),
+            false,
+            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+        )
+        .await;
+
+        let errors =
+            result.expect_err("Expected an error because too little existing content survives");
+        match &errors[..] {
+            [DiffApplicationError::AlreadyExists { file, .. }] => {
+                assert_eq!(*file, file_path);
+            }
+            other => panic!("Expected a single AlreadyExists error, got {other:?}"),
         }
     });
 }
