@@ -7,7 +7,7 @@ use super::{
     CompleterOptions, CompletionsFallbackStrategy, SuggestionResults, SuggestionType, suggestions,
 };
 use crate::completer::context::CompletionContext;
-use crate::completer::engine::EngineDirEntry;
+use crate::completer::engine::{EngineDirEntry, Worktree};
 use crate::completer::matchers::MatchStrategy;
 use crate::completer::testing::{
     FakeCompletionContext, MockGeneratorContext, MockPathCompletionContext,
@@ -1372,6 +1372,55 @@ pub fn test_alias_completion() {
     assert_eq!(
         complete_at_end_of_line("ls ", &ctx),
         vec!["Cargo.toml", "src/", "target/"]
+    );
+}
+
+#[test]
+pub fn test_worktree_completion_for_cd() {
+    let registry = create_test_command_registry([cd_signature(), git_signature()]);
+
+    let pwd = TypedPathBuf::from(TEST_WORK_DIR);
+    let path_ctx = MockPathCompletionContext::new(pwd.clone())
+        .with_home_directory(TEST_WORK_DIR.to_owned())
+        .with_entries_in_pwd([EngineDirEntry::test_dir("src")])
+        .with_worktrees([
+            Worktree {
+                name: "canyon".to_owned(),
+                path: "/Users/me/worktrees/canyon".to_owned(),
+            },
+            Worktree {
+                name: "mesa".to_owned(),
+                path: "/Users/me/worktrees/mesa".to_owned(),
+            },
+        ]);
+
+    let ctx = FakeCompletionContext::new(registry)
+        .with_path_completion_context(path_ctx)
+        .with_top_level_commands(["cd", "git", "ls"]);
+
+    // Worktree names matching the typed prefix surface as `cd` completions.
+    let cd_suggestions = complete_at_end_of_line("cd ca", &ctx);
+    assert!(
+        cd_suggestions.contains(&"canyon".to_string()),
+        "expected worktree 'canyon' among {cd_suggestions:?}"
+    );
+    assert!(
+        !cd_suggestions.contains(&"mesa".to_string()),
+        "non-matching worktree 'mesa' should be filtered out of {cd_suggestions:?}"
+    );
+
+    // Worktree names are offered for `git worktree` subcommands too.
+    let git_worktree_suggestions = complete_at_end_of_line("git worktree remove ca", &ctx);
+    assert!(
+        git_worktree_suggestions.contains(&"canyon".to_string()),
+        "expected worktree 'canyon' among {git_worktree_suggestions:?}"
+    );
+
+    // Worktree names are NOT offered for unrelated commands.
+    let ls_suggestions = complete_at_end_of_line("ls ca", &ctx);
+    assert!(
+        !ls_suggestions.contains(&"canyon".to_string()),
+        "worktree 'canyon' should not appear for `ls` among {ls_suggestions:?}"
     );
 }
 

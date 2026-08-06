@@ -17,7 +17,7 @@ use warp_util::path::{EscapeChar, ShellFamily, TEST_SESSION_HOME_DIR};
 use super::{CommandExitStatus, MatchedSuggestion, PathSeparators};
 use crate::completer::{
     CommandOutput, CompletionContext, Description, EngineDirEntry, EngineFileType,
-    GeneratorContext, PathCompletionContext, Suggestion, TopLevelCommandCaseSensitivity,
+    GeneratorContext, PathCompletionContext, Suggestion, TopLevelCommandCaseSensitivity, Worktree,
 };
 use crate::signatures::CommandRegistry;
 use crate::signatures::testing::{
@@ -139,6 +139,7 @@ pub struct MockPathCompletionContext {
     cdpath: Option<String>,
     pwd: TypedPathBuf,
     directory_to_entries: HashMap<PathBuf, Vec<EngineDirEntry>>,
+    worktrees: Vec<Worktree>,
 }
 
 impl MockPathCompletionContext {
@@ -148,11 +149,17 @@ impl MockPathCompletionContext {
             cdpath: None,
             pwd,
             directory_to_entries: HashMap::new(),
+            worktrees: Vec::new(),
         }
     }
 
     pub fn with_home_directory(mut self, home_directory: String) -> Self {
         self.home_directory = Some(home_directory);
+        self
+    }
+
+    pub fn with_worktrees(mut self, worktrees: impl IntoIterator<Item = Worktree>) -> Self {
+        self.worktrees = worktrees.into_iter().collect();
         self
     }
 
@@ -245,6 +252,10 @@ impl PathCompletionContext for MockPathCompletionContext {
 
     fn path_separators(&self) -> PathSeparators {
         PathSeparators::for_unix()
+    }
+
+    async fn worktrees(&self) -> Arc<Vec<Worktree>> {
+        Arc::new(self.worktrees.clone())
     }
 }
 
