@@ -42,7 +42,8 @@ runs:
 
         size_kib() {
           if [ -e "$1" ]; then
-            du -sk "$1" | awk '{print $1}'
+            resolved_path="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1")"
+            du -sk "$resolved_path" | awk '{print $1}'
           else
             printf '0\n'
           fi
@@ -90,7 +91,8 @@ runs:
         set +e
         /usr/bin/time -lp -o "$MACOS_COMPILE_DIAGNOSTICS_DIR/resource-usage.txt" \
           cargo nextest run ${{ inputs.workspace_test_args }} ${{ inputs.extra_test_args }} --no-run \
-          2> >(tee "$MACOS_COMPILE_DIAGNOSTICS_DIR/cargo-stderr.log" >&2)
+          2> >(tee "$MACOS_COMPILE_DIAGNOSTICS_DIR/cargo-stderr.log" \
+            | python3 "${{ github.action_path }}/filter_fingerprint_logs.py" >&2)
         compile_status=$?
         set -e
 
@@ -105,7 +107,8 @@ runs:
 
         size_kib() {
           if [ -e "$1" ]; then
-            du -sk "$1" | awk '{print $1}'
+            resolved_path="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1")"
+            du -sk "$resolved_path" | awk '{print $1}'
           else
             printf '0\n'
           fi
@@ -178,12 +181,12 @@ runs:
             echo "No Cargo fingerprint dirtiness reasons were emitted."
           fi
           echo
-          echo "Full resource statistics, exact fingerprint messages, and raw metrics are in artifact \`${{ inputs.artifact_name }}\`."
+          echo "Complete Cargo stderr, resource statistics, exact fingerprint messages, and raw metrics are in artifact \`${{ inputs.artifact_name }}\`."
         } > "$summary"
 
         cat "$summary" >> "$GITHUB_STEP_SUMMARY"
         echo "::notice title=macOS compile diagnostics::${elapsed_seconds:-unknown}s, $dirty_units dirty fingerprints, target $(kib_to_gib "$pre_target_kib") -> $(kib_to_gib "$post_target_kib")"
-        rm "$clean_stderr" "$MACOS_COMPILE_DIAGNOSTICS_DIR/cargo-stderr.log"
+        rm "$clean_stderr"
 
     - name: Upload compile diagnostics
       if: ${{ always() && steps.capture.outcome == 'success' }}
