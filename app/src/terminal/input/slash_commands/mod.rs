@@ -1291,6 +1291,8 @@ impl Input {
             | SlashCommandKind::ResetStatusline
             | SlashCommandKind::ApiKeys
             | SlashCommandKind::Connect
+            | SlashCommandKind::Upgrade
+            | SlashCommandKind::ManageBilling
             | SlashCommandKind::ViewLogs
             | SlashCommandKind::Voice
             | SlashCommandKind::NaturalLanguageDetection

@@ -21,13 +21,14 @@ use warp::tui_export::{
     AIConversationAutoexecuteMode, AIConversationId, AgentViewEntryOrigin, BlockPadding,
     BlocklistAIHistoryEvent, BlocklistAIHistoryModel, ConversationStatus, ConversationUsageTotals,
     Harness, InputTypeAutoDetectionSource, LLMPreferences, LinkedWorkflowData,
-    LongRunningCommandControlState, PtyIntent, PtyIntentEvent, SizeInfo, SizeUpdate,
-    SlashCommandDataSource as _, SlashCommandKind, TaskId, TranscriptScope, TuiMcpAction,
-    TuiMcpServerId, TuiOnboardingMarker, TuiOnboardingMarkers, TuiUpArrowHistoryItemKind,
-    UserTakeOverReason, WarpConfig, WarpConfigUpdateEvent, export_conversation_markdown,
-    forkable_tui_conversation_for_test, register_tui_session_view_test_singletons, slash_commands,
+    LongRunningCommandControlState, ParsedSlashCommandInput, PtyIntent, PtyIntentEvent, Session,
+    SizeInfo, SizeUpdate, SlashCommandDataSource as _, SlashCommandKind, TaskId, TranscriptScope,
+    TuiMcpAction, TuiMcpServerId, TuiOnboardingMarker, TuiOnboardingMarkers,
+    TuiUpArrowHistoryItemKind, UserTakeOverReason, WarpConfig, WarpConfigUpdateEvent,
+    export_conversation_markdown, forkable_tui_conversation_for_test,
+    register_tui_session_view_test_singletons, set_tui_default_team_admin_for_test, slash_commands,
 };
-use warp_core::channel::Channel;
+use warp_core::channel::{Channel, ChannelState};
 use warp_core::features::FeatureFlag;
 use warp_core::settings::Setting as _;
 use warp_editor::model::CoreEditorModel;
@@ -78,6 +79,7 @@ use super::{
     SESSION_COMPOSER_SHORTCUTS_ACTIVE_FLAG, VOICE_INPUT_BINDING_NAME, VOICE_USAGE_HINT,
     voice_argument_is_empty, voice_command_argument,
 };
+use crate::agent_block::upgrade_url;
 use crate::autoupdate::TuiAutoupdater;
 use crate::inline_menu::MAX_INLINE_MENU_ROWS;
 use crate::input_mode_policy::{AI_LOCKED_CONFIG, AI_UNLOCKED_CONFIG};
@@ -216,6 +218,7 @@ fn out_of_credits_ctrl_o_binding_opens_upgrade() {
 
         let fixture = focus_test_fixture(&mut app);
         let (view, _) = add_focus_test_session(&mut app, &fixture, true);
+        let expected_upgrade_url = app.read(upgrade_url);
         app.read(|ctx| {
             let ctrl_o = Trigger::Keystrokes(vec![Keystroke::parse("ctrl-o").unwrap()]);
             let input_view_id = view.as_ref(ctx).input_view.id();
@@ -237,9 +240,118 @@ fn out_of_credits_ctrl_o_binding_opens_upgrade() {
         view.update(&mut app, |view, ctx| {
             view.handle_action(&TuiTerminalSessionAction::OpenOutOfCreditsUrl, ctx);
         });
+        assert_eq!(opened_urls.borrow().as_slice(), &[expected_upgrade_url]);
+    });
+}
+
+#[test]
+fn upgrade_slash_command_is_always_available_and_opens_the_upgrade_page() {
+    App::test((), |mut app| async move {
+        let fixture = focus_test_fixture(&mut app);
+        let (view, _) = add_focus_test_session(&mut app, &fixture, true);
+        let expected_upgrade_url = app.read(upgrade_url);
+        let opened_urls = Rc::new(RefCell::new(Vec::new()));
+        let opened_urls_for_callback = opened_urls.clone();
+        app.update(|ctx| {
+            ctx.set_before_open_url(move |url, _| {
+                opened_urls_for_callback.borrow_mut().push(url.to_owned());
+                url.to_owned()
+            });
+        });
+
+        view.update(&mut app, |view, ctx| {
+            view.input_view
+                .update(ctx, |input, ctx| input.set_text("/upgrade", ctx));
+            assert!(matches!(
+                view.slash_commands_source
+                    .as_ref(ctx)
+                    .parse_input("/upgrade", ctx),
+                ParsedSlashCommandInput::SlashCommand(_)
+            ));
+            view.execute_tui_slash_command(&slash_commands::UPGRADE, None, ctx);
+        });
+
+        assert_eq!(opened_urls.borrow().as_slice(), &[expected_upgrade_url]);
+        view.read(&app, |view, ctx| {
+            assert!(view.input_view.as_ref(ctx).is_empty(ctx));
+        });
+    });
+}
+#[test]
+fn manage_billing_slash_command_opens_the_default_team_billing_page_for_admins() {
+    App::test((), |mut app| async move {
+        let fixture = focus_test_fixture(&mut app);
+        let (view, _) = add_focus_test_session(&mut app, &fixture, true);
+        view.read(&app, |view, ctx| {
+            assert!(!matches!(
+                view.slash_commands_source
+                    .as_ref(ctx)
+                    .parse_input("/manage-billing", ctx),
+                ParsedSlashCommandInput::SlashCommand(_)
+            ));
+        });
+        app.update(set_tui_default_team_admin_for_test);
+        let opened_urls = Rc::new(RefCell::new(Vec::new()));
+        let opened_urls_for_callback = opened_urls.clone();
+        app.update(|ctx| {
+            ctx.set_before_open_url(move |url, _| {
+                opened_urls_for_callback.borrow_mut().push(url.to_owned());
+                url.to_owned()
+            });
+        });
+
+        view.update(&mut app, |view, ctx| {
+            assert!(matches!(
+                view.slash_commands_source
+                    .as_ref(ctx)
+                    .parse_input("/manage-billing", ctx),
+                ParsedSlashCommandInput::SlashCommand(_)
+            ));
+            view.execute_tui_slash_command(&slash_commands::MANAGE_BILLING, None, ctx);
+        });
+
         assert_eq!(
             opened_urls.borrow().as_slice(),
-            &["https://app.warp.dev/upgrade?source=warp-agent-cli".to_owned()]
+            &[format!(
+                "{}/admin/test_uid00000000000123/billing",
+                ChannelState::server_root_url().trim_end_matches('/')
+            )]
+        );
+    });
+}
+
+#[test]
+fn manage_billing_slash_command_rejects_users_without_an_admin_team() {
+    App::test((), |mut app| async move {
+        let fixture = focus_test_fixture(&mut app);
+        let (view, _) = add_focus_test_session(&mut app, &fixture, true);
+        let opened_urls = Rc::new(RefCell::new(Vec::new()));
+        let opened_urls_for_callback = opened_urls.clone();
+        app.update(|ctx| {
+            ctx.set_before_open_url(move |url, _| {
+                opened_urls_for_callback.borrow_mut().push(url.to_owned());
+                url.to_owned()
+            });
+        });
+
+        view.update(&mut app, |view, ctx| {
+            assert!(!matches!(
+                view.slash_commands_source
+                    .as_ref(ctx)
+                    .parse_input("/manage-billing", ctx),
+                ParsedSlashCommandInput::SlashCommand(_)
+            ));
+            view.execute_tui_slash_command(&slash_commands::MANAGE_BILLING, None, ctx);
+        });
+
+        assert!(opened_urls.borrow().is_empty());
+        assert_eq!(
+            view.read(&app, |view, _| {
+                view.transient_hint
+                    .current()
+                    .map(|(text, _)| text.to_owned())
+            }),
+            Some("Billing management is only available to team admins".to_owned())
         );
     });
 }
@@ -884,6 +996,27 @@ fn shell_mode_reserves_tab_even_when_attachments_render() {
     assert!(attachment_focus_available(false, true));
     assert!(!attachment_focus_available(true, true));
     assert!(!attachment_focus_available(false, false));
+}
+#[test]
+fn shell_completion_source_warmup_loads_path_executables() {
+    App::test((), |mut app| async move {
+        let fixture = focus_test_fixture(&mut app);
+        let (view, _) = add_focus_test_session(&mut app, &fixture, true);
+        let session = Arc::new(Session::test());
+
+        view.update(&mut app, |view, ctx| {
+            view.warm_shell_completion_sources(session.clone(), ctx);
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !session.has_loaded_external_commands() && Instant::now() < deadline {
+            Timer::after(Duration::from_millis(10)).await;
+        }
+
+        assert!(session.has_attempted_to_load_external_commands());
+        assert!(session.has_loaded_external_commands());
+        assert!(session.executable_names().any(|command| command == "git"));
+    });
 }
 
 #[test]
@@ -5028,6 +5161,7 @@ fn user_input_event_projects_to_raw_user_bytes() {
     };
     assert_eq!(&*bytes, b"hello\r");
 }
+
 #[test]
 fn running_command_attachment_bindings_are_context_scoped() {
     App::test((), |mut app| async move {
