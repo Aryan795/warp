@@ -8492,3 +8492,84 @@ fn send_review_comments_to_warp_tui_writes_prompt_to_pty() {
         );
     });
 }
+
+#[test]
+fn back_button_label_names_the_direct_parent_at_depth() {
+    App::test((), |mut app| async move {
+        crate::test_util::settings::initialize_history_persistence_for_tests(&mut app);
+        let terminal_view_id = EntityId::new();
+        let history_model = app.add_singleton_model(|_| BlocklistAIHistoryModel::new_for_test());
+        let (root_id, mid_id, grandchild_id) = history_model.update(&mut app, |history, ctx| {
+            let root_id =
+                history.start_new_conversation(terminal_view_id, false, false, false, ctx);
+            let mid_id = history.start_new_child_conversation(
+                terminal_view_id,
+                "api-refactor".to_string(),
+                root_id,
+                None,
+                ctx,
+            );
+            let grandchild_id = history.start_new_child_conversation(
+                terminal_view_id,
+                "grandchild".to_string(),
+                mid_id,
+                None,
+                ctx,
+            );
+            (root_id, mid_id, grandchild_id)
+        });
+
+        history_model.read(&app, |history, _| {
+            assert_eq!(agent_view_back_button_label(history, None), "for terminal");
+            assert_eq!(
+                agent_view_back_button_label(history, Some(root_id)),
+                "for terminal",
+            );
+            assert_eq!(
+                agent_view_back_button_label(history, Some(mid_id)),
+                "for Orchestrator",
+            );
+            assert_eq!(
+                agent_view_back_button_label(history, Some(grandchild_id)),
+                "for api-refactor",
+            );
+        });
+    });
+}
+
+#[test]
+fn back_button_label_truncates_long_parent_names() {
+    App::test((), |mut app| async move {
+        crate::test_util::settings::initialize_history_persistence_for_tests(&mut app);
+        let terminal_view_id = EntityId::new();
+        let history_model = app.add_singleton_model(|_| BlocklistAIHistoryModel::new_for_test());
+        let long_name = "a".repeat(BACK_BUTTON_PARENT_NAME_MAX_CHARS + 10);
+        let grandchild_id = history_model.update(&mut app, |history, ctx| {
+            let root_id =
+                history.start_new_conversation(terminal_view_id, false, false, false, ctx);
+            let mid_id = history.start_new_child_conversation(
+                terminal_view_id,
+                long_name.clone(),
+                root_id,
+                None,
+                ctx,
+            );
+            history.start_new_child_conversation(
+                terminal_view_id,
+                "grandchild".to_string(),
+                mid_id,
+                None,
+                ctx,
+            )
+        });
+
+        history_model.read(&app, |history, _| {
+            let label = agent_view_back_button_label(history, Some(grandchild_id));
+            let expected_name: String = long_name
+                .chars()
+                .take(BACK_BUTTON_PARENT_NAME_MAX_CHARS - 1)
+                .collect();
+            assert_eq!(label, format!("for {expected_name}\u{2026}"));
+        });
+    });
+}

@@ -626,6 +626,39 @@ fn should_not_autoexecute_without_approved_plan_or_always_allow_profile() {
 }
 
 #[test]
+fn should_autoexecute_for_child_conversation_without_plan_or_profile() {
+    // A child conversation lives in a hidden pane where a confirmation card
+    // would be invisible, so its run_agents must auto-execute even without an
+    // approved plan config or an always-allow profile.
+    App::test((), |mut app| async move {
+        let state = initialize_run_agents_test(&mut app, ExecutionMode::App);
+        let child_conversation_id =
+            BlocklistAIHistoryModel::handle(&app).update(&mut app, |history, ctx| {
+                history.start_new_child_conversation(
+                    EntityId::new(),
+                    "mid-tree".to_string(),
+                    state.conversation_id,
+                    None,
+                    ctx,
+                )
+            });
+        let action = remote_run_agents_action("oz");
+
+        let should_autoexecute = state.executor.update(&mut app, |executor, ctx| {
+            executor.should_autoexecute(
+                ExecuteActionInput {
+                    action: &action,
+                    conversation_id: child_conversation_id,
+                },
+                ctx,
+            )
+        });
+
+        assert!(should_autoexecute);
+    });
+}
+
+#[test]
 fn execute_denies_remote_non_warp_harness_without_default_auth_secret() {
     App::test((), |mut app| async move {
         let state = initialize_run_agents_test(&mut app, ExecutionMode::App);

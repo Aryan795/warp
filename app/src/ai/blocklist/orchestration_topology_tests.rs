@@ -514,6 +514,112 @@ fn adjacent_orchestration_child_navigation_wraps_within_child_list() {
 }
 
 #[test]
+fn adjacent_orchestration_child_navigation_cycles_whole_tree_from_grandchild() {
+    // Navigation must root at the TOP of the tree (not one parent hop), so
+    // cycling from a grandchild covers the root and every descendant.
+    App::test((), |mut app| async move {
+        initialize_history_persistence_for_tests(&mut app);
+        let terminal_view_id = EntityId::new();
+        let history_model = app.add_singleton_model(|_| BlocklistAIHistoryModel::new_for_test());
+
+        let root_id = history_model.update(&mut app, |history_model, ctx| {
+            history_model.start_new_conversation(terminal_view_id, false, false, false, ctx)
+        });
+        let mid_id = history_model.update(&mut app, |history_model, ctx| {
+            history_model.start_new_child_conversation(
+                terminal_view_id,
+                "mid".to_string(),
+                root_id,
+                None,
+                ctx,
+            )
+        });
+        let grandchild_id = history_model.update(&mut app, |history_model, ctx| {
+            history_model.start_new_child_conversation(
+                terminal_view_id,
+                "grandchild".to_string(),
+                mid_id,
+                None,
+                ctx,
+            )
+        });
+
+        history_model.read(&app, |history_model, _| {
+            // Spawn order is pre-order: [root, mid, grandchild].
+            assert_eq!(
+                adjacent_orchestration_child_conversation_id(
+                    history_model,
+                    grandchild_id,
+                    OrchestrationNavigationDirection::Next,
+                ),
+                Some(root_id),
+                "next from the last descendant wraps to the tree root",
+            );
+            assert_eq!(
+                adjacent_orchestration_child_conversation_id(
+                    history_model,
+                    grandchild_id,
+                    OrchestrationNavigationDirection::Previous,
+                ),
+                Some(mid_id),
+            );
+            assert_eq!(
+                adjacent_orchestration_child_conversation_id(
+                    history_model,
+                    mid_id,
+                    OrchestrationNavigationDirection::Previous,
+                ),
+                Some(root_id),
+            );
+        });
+    });
+}
+
+#[test]
+fn child_conversations_in_pill_order_returns_direct_children_only() {
+    App::test((), |mut app| async move {
+        initialize_history_persistence_for_tests(&mut app);
+        let terminal_view_id = EntityId::new();
+        let history_model = app.add_singleton_model(|_| BlocklistAIHistoryModel::new_for_test());
+
+        let root_id = history_model.update(&mut app, |history_model, ctx| {
+            history_model.start_new_conversation(terminal_view_id, false, false, false, ctx)
+        });
+        let mid_id = history_model.update(&mut app, |history_model, ctx| {
+            history_model.start_new_child_conversation(
+                terminal_view_id,
+                "mid".to_string(),
+                root_id,
+                None,
+                ctx,
+            )
+        });
+        history_model.update(&mut app, |history_model, ctx| {
+            history_model.start_new_child_conversation(
+                terminal_view_id,
+                "grandchild".to_string(),
+                mid_id,
+                None,
+                ctx,
+            )
+        });
+
+        history_model.read(&app, |history_model, _| {
+            let direct_children: Vec<AIConversationId> =
+                child_conversations_in_pill_order(history_model, root_id)
+                    .into_iter()
+                    .map(|descendant| descendant.conversation_id)
+                    .collect();
+            assert_eq!(
+                direct_children,
+                vec![mid_id],
+                "the drill-down ordering must exclude grandchildren",
+            );
+        });
+    });
+}
+
+#[test]
 fn adjacent_orchestration_child_navigation_noops_for_single_child() {
     App::test((), |mut app| async move {
         initialize_history_persistence_for_tests(&mut app);

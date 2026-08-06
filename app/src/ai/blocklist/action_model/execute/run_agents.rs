@@ -435,6 +435,18 @@ impl RunAgentsExecutor {
         if AppExecutionMode::as_ref(ctx).is_autonomous() {
             return true;
         }
+        // Child conversations live in hidden panes where a confirmation card
+        // would be invisible and hang the run. Always auto-execute; the
+        // interactive policy checks in `prepare_request_for_execution` still
+        // fail the call gracefully (Denied result) when launch is blocked.
+        // Children inherit the parent surface's execution profile via
+        // `inherit_child_agent_settings`, so run-wide permissions carry over.
+        if BlocklistAIHistoryModel::as_ref(ctx)
+            .conversation(&input.conversation_id)
+            .is_some_and(|c| c.is_child_agent_conversation())
+        {
+            return true;
+        }
         let mut resolved_request = request.clone();
         resolve_request_from_approved_config(&mut resolved_request, input.conversation_id, ctx);
         populate_default_auth_secret_for_execution(&mut resolved_request, ctx);

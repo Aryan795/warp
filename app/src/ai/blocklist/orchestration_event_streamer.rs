@@ -560,22 +560,17 @@ impl OrchestrationEventStreamer {
     /// [`Self::register_watched_run_id`]. Once the parent role is established
     /// it is permanent for the conversation's life, so subsequent waits
     /// short-circuit on the already-parent check below.
+    ///
+    /// Child conversations are eligible too: with multi-level orchestration a
+    /// mid-tree node is simultaneously a child and a parent, so a child
+    /// blocked on `wait_for_events` must still confirm whether it has
+    /// children of its own.
     pub fn register_parent_on_wait(
         &mut self,
         conversation_id: AIConversationId,
         ctx: &mut ModelContext<Self>,
     ) {
         if !FeatureFlag::WaitForEventsParentRegistration.is_enabled() {
-            return;
-        }
-        // One-level-tree invariant: a child can never also be a parent, so
-        // skip the server fetch. The child still receives its own inbox via
-        // the existing `is_eligible` -> `RunIds(self)` stream, so there is no
-        // regression.
-        let is_child = BlocklistAIHistoryModel::as_ref(ctx)
-            .conversation(&conversation_id)
-            .is_some_and(|c| c.is_child_agent_conversation());
-        if is_child {
             return;
         }
         // Passive views of a run hosted elsewhere (shared-session viewers,

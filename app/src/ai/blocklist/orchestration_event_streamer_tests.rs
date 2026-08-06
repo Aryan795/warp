@@ -2482,13 +2482,12 @@ fn register_parent_on_wait_flag_off_is_noop() {
 }
 
 #[test]
-fn register_parent_on_wait_child_short_circuits() {
-    // One-level-tree invariant: a child (is_child_agent_conversation) can
-    // never be a parent, so no server fetch is issued and no parent role is
-    // taken.
+fn wait_registration_mid_tree_child_with_children_registers_as_parent() {
+    // Multi-level orchestration: a mid-tree node is both a child and a
+    // parent. When its wait-time fetch reports children, it must take the
+    // parent role and open the parent-family ancestor stream just like a
+    // root orchestrator.
     App::test((), |mut app| async move {
-        let _flag_guard = FeatureFlag::WaitForEventsParentRegistration.override_enabled(true);
-
         let history_model =
             app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
         let own_run_id = "550e8400-e29b-41d4-a716-446655440524";
@@ -2507,15 +2506,44 @@ fn register_parent_on_wait_child_short_circuits() {
             );
         });
 
-        let poller = streamer_with_no_fetch_expected(&mut app);
-        poller.update(&mut app, |me, ctx| {
-            me.register_parent_on_wait(conversation_id, ctx);
+        let ai_client: Arc<dyn AIClient> = Arc::new(MockAIClient::new());
+        let server_api = ServerApiProvider::new_for_test().get();
+        let poller = app.add_singleton_model(|ctx| {
+            OrchestrationEventStreamer::new_with_clients_for_test(ai_client, server_api, ctx)
         });
+
+        let consumer_id = warpui::EntityId::new();
+        poller.update(&mut app, |me, _| {
+            let stream = me.streams.entry(conversation_id).or_default();
+            stream.watched_run_ids.insert(own_run_id.to_string());
+            stream.consumers.insert(consumer_id);
+        });
+
+        poller.update(&mut app, |me, ctx| {
+            me.finish_register_parent_on_wait(
+                conversation_id,
+                Ok(make_ambient_task_with_children(vec![
+                    "grandchild-run-1".to_string(),
+                ])),
+                ctx,
+            );
+        });
+
         poller.read(&app, |me, ctx| {
             assert!(
-                !me.is_parent_agent_conversation(conversation_id, ctx),
-                "a child must not take the parent role"
+                me.is_parent_agent_conversation(conversation_id, ctx),
+                "a mid-tree child with children must take the parent role"
             );
+            match connected_filter(me, conversation_id) {
+                Some(AgentEventFilter::AncestorRunId {
+                    ancestor_run_id,
+                    include_self,
+                }) => {
+                    assert_eq!(ancestor_run_id, own_run_id);
+                    assert!(include_self);
+                }
+                other => panic!("expected AncestorRunId include_self filter, got {other:?}"),
+            }
         });
     });
 }

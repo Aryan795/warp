@@ -220,6 +220,7 @@ use crate::ai::ambient_agents::{
     AmbientAgentTaskId, AmbientConversationStatus, conversation_output_status_from_conversation,
 };
 use crate::ai::blocklist::agent_view::agent_input_footer::toolbar_item::AgentToolbarItemKind;
+use crate::ai::blocklist::agent_view::orchestration_conversation_links::pane_group_id_containing_terminal_view;
 use crate::ai::blocklist::agent_view::{
     AgentViewController, AgentViewControllerEvent, AgentViewConversationSelection,
     AgentViewDisplayMode, AgentViewEntryBlockParams, AgentViewEntryOrigin,
@@ -4834,11 +4835,12 @@ impl TerminalView {
         callback(self, ctx);
     }
 
-    /// If the active conversation is a child agent, navigate to the parent
+    /// If the active conversation is a child agent, navigate to its DIRECT
+    /// parent (one level up, so repeated ESC walks up an orchestration tree)
     /// and return `true`; otherwise return `false` so the caller can run
     /// the normal exit-agent-view flow. Cross-tab and swap-target cases
     /// are handled by the workspace's focus path; falls back to emitting
-    /// a swap event when the parent has no canonical owner. Runs before
+    /// a swap event when the parent has no visible owner. Runs before
     /// any can-exit gating so long-running children can still navigate back.
     fn try_navigate_to_parent_conversation(&mut self, ctx: &mut ViewContext<Self>) -> bool {
         if !FeatureFlag::AgentView.is_enabled() {
@@ -4855,13 +4857,19 @@ impl TerminalView {
         let history = BlocklistAIHistoryModel::as_ref(ctx);
         let parent_id = history
             .conversation(&active_conv_id)
-            .and_then(|c| c.parent_conversation_id());
+            .and_then(|c| history.resolved_parent_conversation_id_for_conversation(c));
         let Some(parent_id) = parent_id else {
             return false;
         };
-        let parent_terminal_view_id = history.terminal_surface_id_for_conversation(&parent_id);
+        // Only focus the parent's terminal view when it is actually visible
+        // in some pane group. A mid-tree parent lives in a *hidden* child
+        // pane (off-tree), which the workspace focus path cannot reach —
+        // swap it into this pane instead, mirroring pill-bar navigation.
+        let visible_parent_view_id = history
+            .terminal_surface_id_for_conversation(&parent_id)
+            .filter(|view_id| pane_group_id_containing_terminal_view(*view_id, ctx).is_some());
 
-        if let Some(parent_terminal_view_id) = parent_terminal_view_id {
+        if let Some(parent_terminal_view_id) = visible_parent_view_id {
             // Defer so it runs after in-flight event handling completes.
             ctx.dispatch_typed_action_deferred(WorkspaceAction::FocusTerminalViewInWorkspace {
                 terminal_view_id: parent_terminal_view_id,
@@ -11319,19 +11327,21 @@ impl TerminalView {
         conversation_id.map(|conversation_id| (conversation_id, command))
     }
 
-    /// Updates the back button's state and label. For child agents the
-    /// label becomes "for Orchestrator" since ESC swaps to the parent
-    /// instead of exiting in place.
+    /// Updates the back button's state and label. For child agents ESC
+    /// navigates one level up instead of exiting in place, so the label
+    /// names the direct parent (see [`agent_view_back_button_label`]).
     pub(crate) fn update_agent_view_back_button_state(&mut self, ctx: &mut ViewContext<Self>) {
         let active_conv_id = self
             .agent_view_controller
             .as_ref(ctx)
             .agent_view_state()
             .active_conversation_id();
+        let history = BlocklistAIHistoryModel::as_ref(ctx);
         let is_child_agent = active_conv_id
-            .and_then(|id| BlocklistAIHistoryModel::as_ref(ctx).conversation(&id))
-            .and_then(|c| c.parent_conversation_id())
+            .and_then(|id| history.conversation(&id))
+            .and_then(|c| history.resolved_parent_conversation_id_for_conversation(c))
             .is_some();
+        let label = agent_view_back_button_label(history, active_conv_id);
 
         // Never disable for child agents: the swap-back path can't be blocked.
         let disabled_reason = if is_child_agent {
@@ -11342,11 +11352,6 @@ impl TerminalView {
                 .can_exit_agent_view()
                 .err()
                 .map(|e| e.to_string())
-        };
-        let label = if is_child_agent {
-            "for Orchestrator"
-        } else {
-            "for terminal"
         };
 
         self.agent_view_back_button.update(ctx, |button, ctx| {
@@ -28615,6 +28620,55 @@ fn is_rich_input_chip_in_cli_toolbar(app: &AppContext) -> bool {
         .iter()
         .chain(sel.right_items().iter())
         .any(|item| matches!(item, AgentToolbarItemKind::RichInput))
+}
+
+/// Longest parent-agent name shown verbatim in the back-button label before
+/// it is ellipsized, keeping the pane header compact.
+const BACK_BUTTON_PARENT_NAME_MAX_CHARS: usize = 24;
+
+/// Returns the agent-view back button label. ESC navigates one level up, so
+/// the label names the direct parent: children of the tree root keep the
+/// classic "for Orchestrator" wording, nested subagents name their parent
+/// agent (falling back to a generic label), and non-child conversations exit
+/// back to the terminal.
+fn agent_view_back_button_label(
+    history: &BlocklistAIHistoryModel,
+    active_conversation_id: Option<AIConversationId>,
+) -> Cow<'static, str> {
+    let parent_id = active_conversation_id
+        .and_then(|id| history.conversation(&id))
+        .and_then(|c| history.resolved_parent_conversation_id_for_conversation(c));
+    let Some(parent_id) = parent_id else {
+        return Cow::Borrowed("for terminal");
+    };
+    let parent = history.conversation(&parent_id);
+    // An unloaded parent can't be classified; keep the classic wording.
+    let parent_is_root = parent.is_none_or(|parent| {
+        history
+            .resolved_parent_conversation_id_for_conversation(parent)
+            .is_none()
+    });
+    if parent_is_root {
+        return Cow::Borrowed("for Orchestrator");
+    }
+    match parent
+        .and_then(|parent| parent.agent_name())
+        .filter(|name| !name.is_empty())
+    {
+        Some(name) => {
+            let name = if name.chars().count() > BACK_BUTTON_PARENT_NAME_MAX_CHARS {
+                let truncated: String = name
+                    .chars()
+                    .take(BACK_BUTTON_PARENT_NAME_MAX_CHARS - 1)
+                    .collect();
+                format!("{truncated}\u{2026}")
+            } else {
+                name.to_string()
+            };
+            Cow::Owned(format!("for {name}"))
+        }
+        None => Cow::Borrowed("for parent agent"),
+    }
 }
 
 #[cfg(test)]

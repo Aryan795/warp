@@ -315,3 +315,83 @@ fn navigation_action_for_orchestrator_pill_switches_in_place() {
         } if actual_id == conversation_id
     ));
 }
+
+/// Builds a 3-level tree (root → mid → grandchild) and returns the history
+/// handle plus the ids.
+fn build_three_level_tree(
+    app: &mut warpui::App,
+) -> (
+    ModelHandle<BlocklistAIHistoryModel>,
+    AIConversationId,
+    AIConversationId,
+    AIConversationId,
+) {
+    use warpui::EntityId;
+
+    use crate::test_util::settings::initialize_history_persistence_for_tests;
+
+    initialize_history_persistence_for_tests(app);
+    let terminal_view_id = EntityId::new();
+    let history_model = app.add_singleton_model(|_| BlocklistAIHistoryModel::new_for_test());
+    let root_id = history_model.update(app, |history, ctx| {
+        history.start_new_conversation(terminal_view_id, false, false, false, ctx)
+    });
+    let mid_id = history_model.update(app, |history, ctx| {
+        history.start_new_child_conversation(
+            terminal_view_id,
+            "mid".to_string(),
+            root_id,
+            None,
+            ctx,
+        )
+    });
+    let grandchild_id = history_model.update(app, |history, ctx| {
+        history.start_new_child_conversation(
+            terminal_view_id,
+            "grandchild".to_string(),
+            mid_id,
+            None,
+            ctx,
+        )
+    });
+    (history_model, root_id, mid_id, grandchild_id)
+}
+
+#[test]
+fn breadcrumb_ids_show_only_root_when_parent_is_root() {
+    use warpui::App;
+
+    App::test((), |mut app| async move {
+        let (history_model, root_id, mid_id, _grandchild_id) = build_three_level_tree(&mut app);
+        history_model.read(&app, |history, _| {
+            assert_eq!(breadcrumb_ids(history, mid_id), (Some(root_id), None));
+        });
+    });
+}
+
+#[test]
+fn breadcrumb_ids_show_root_and_parent_when_two_levels_deep() {
+    use warpui::App;
+
+    App::test((), |mut app| async move {
+        let (history_model, root_id, mid_id, grandchild_id) = build_three_level_tree(&mut app);
+        history_model.read(&app, |history, _| {
+            assert_eq!(
+                breadcrumb_ids(history, grandchild_id),
+                (Some(root_id), Some(mid_id)),
+            );
+        });
+    });
+}
+
+#[test]
+fn breadcrumb_ids_are_empty_at_the_root() {
+    use warpui::App;
+
+    App::test((), |mut app| async move {
+        let (history_model, root_id, _mid_id, _grandchild_id) = build_three_level_tree(&mut app);
+        history_model.read(&app, |history, _| {
+            assert_eq!(breadcrumb_ids(history, root_id), (None, None));
+        });
+    });
+}

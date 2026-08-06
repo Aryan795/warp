@@ -5,7 +5,6 @@
 //! orchestration pill bar so other surfaces (e.g. keyboard navigation and
 //! the agent-mode usage footer's credit rollup) can walk and order the same
 //! tree without duplicating the logic.
-#[cfg(feature = "tui")]
 use std::collections::HashSet;
 
 use crate::ai::agent::conversation::{AIConversation, AIConversationId, ConversationStatus};
@@ -106,7 +105,6 @@ pub fn resolve_orchestration_participant(
 ///
 /// Conversations without descendants are not orchestration roots. Malformed
 /// parent cycles and missing ancestors fail closed.
-#[cfg(feature = "tui")]
 pub fn orchestration_root_conversation_id(
     history: &BlocklistAIHistoryModel,
     conversation_id: AIConversationId,
@@ -225,7 +223,30 @@ pub fn descendant_conversations_in_pill_order(
     history: &BlocklistAIHistoryModel,
     parent_id: AIConversationId,
 ) -> Vec<OrderedOrchestrationDescendant> {
-    let mut descendants = descendant_conversation_ids_in_spawn_order(history, parent_id)
+    conversations_in_pill_order(
+        history,
+        descendant_conversation_ids_in_spawn_order(history, parent_id),
+    )
+}
+
+/// Returns only the DIRECT children of `parent_id` in the same canonical pill
+/// order as [`descendant_conversations_in_pill_order`]. Used by the
+/// drill-down pill bar, which renders one level of the tree at a time.
+pub fn child_conversations_in_pill_order(
+    history: &BlocklistAIHistoryModel,
+    parent_id: AIConversationId,
+) -> Vec<OrderedOrchestrationDescendant> {
+    conversations_in_pill_order(
+        history,
+        history.child_conversation_ids_of(&parent_id).to_vec(),
+    )
+}
+
+fn conversations_in_pill_order(
+    history: &BlocklistAIHistoryModel,
+    conversation_ids: Vec<AIConversationId>,
+) -> Vec<OrderedOrchestrationDescendant> {
+    let mut descendants = conversation_ids
         .into_iter()
         .enumerate()
         .filter_map(|(spawn_index, conversation_id)| {
@@ -276,9 +297,10 @@ pub fn adjacent_orchestration_child_conversation_id(
     active_conversation_id: AIConversationId,
     direction: OrchestrationNavigationDirection,
 ) -> Option<AIConversationId> {
-    let active_conversation = history.conversation(&active_conversation_id)?;
-    let orchestration_root_id = history
-        .resolved_parent_conversation_id_for_conversation(active_conversation)
+    history.conversation(&active_conversation_id)?;
+    // Root the cycle at the top of the tree (not one parent hop) so
+    // navigation covers the whole subtree at any orchestration depth.
+    let orchestration_root_id = orchestration_root_conversation_id(history, active_conversation_id)
         .unwrap_or(active_conversation_id);
     let descendants = descendant_conversations_in_pill_order(history, orchestration_root_id);
     if descendants.is_empty() {
