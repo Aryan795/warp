@@ -1,0 +1,247 @@
+# APP-5237: Agent Plugins 1.0.0 in Warp and Factories
+## Summary
+Warp will load Agent Plugins 1.0.0 packages that provide Agent Skills and MCP servers. The desktop app and TUI will use the same package format and discovery roots. File-managed Factories will support factory-, agent-, and automation-scoped plugins from their source repository.
+
+This proposal also moves Factory MCP declarations from YAML/frontmatter toward separate Warp-defined `mcp.json` files. A Factory `mcp.json` is not an Agent Plugins artifact. It can declare managed Warp MCP servers and ordinary MCP servers, while a plugin `mcp.json` remains strictly conformant to Agent Plugins 1.0.0.
+
+Agent Plugins 1.0.0 is the published specification at [agent-plugins.org](https://agent-plugins.org/specification). The similarly named open-plugins.com format is not in scope.
+## Goals
+- Support the complete Agent Plugins 1.0.0 portable core: root `plugin.json`, `skills/<name>/SKILL.md`, and root `mcp.json`.
+- Give the desktop app and TUI the same discovery, validation, scoping, naming, and failure behavior.
+- Preserve the current execution behavior of existing Warp skills and file-based MCP servers.
+- Add plugins to file-managed Factories without introducing a remote plugin installation protocol.
+- Let Factories declare managed and ordinary MCP servers in entity-level `mcp.json` files outside plugin packages.
+- Make scope and conflicts deterministic across user, repository, factory, agent, and automation sources.
+## Figma
+Figma: none provided. The implementation will follow the existing Skills and MCP settings patterns.
+## Behavior
+### Client discovery and scope
+1. Warp treats each immediate child directory of a plugin search root as one plugin candidate. Warp does not recursively search for nested plugin candidates.
+
+2. Warp scans these user search roots:
+   - `<home>/.agents/plugins/`.
+   - The current build's Warp home config directory plus `/plugins/`. Stable uses `<home>/.warp/plugins/`. Other channels and data profiles use their existing channel-aware Warp home config directory.
+
+3. Warp scans these repository search roots for the detected repository that contains the active working directory:
+   - `<repo-root>/.agents/plugins/`.
+   - `<repo-root>/.warp/plugins/`.
+
+4. Warp does not scan a bare `<repo-root>/plugins/` directory for client plugins.
+
+5. GUI and TUI scan the same plugin package roots. The separate TUI global MCP config file does not create a separate TUI plugin package root.
+
+6. A plugin is in project scope only while its repository is in scope under the existing skill rules:
+   - A local session uses the detected repository that contains the active working directory.
+   - A cloud session with multiple configured repositories can use plugins from all configured repositories.
+   - If equally ranked repositories provide the same plugin name, Warp reports an ambiguity instead of selecting by filesystem order.
+
+7. Same-name plugins shadow as a complete package. Warp does not combine the manifest from one package with skills or MCP from another package. Precedence from highest to lowest is:
+   1. Repository `.agents/plugins/`.
+   2. Repository `.warp/plugins/`.
+   3. User `.agents/plugins/`.
+   4. User Warp home config `plugins/`.
+
+8. The `.agents`-before-`.warp` order matches the existing skill-provider order. A shadowed plugin remains visible in plugin diagnostics with the source that won.
+
+9. Adding, changing, moving, or deleting a candidate causes Warp to update its plugin inventory without restarting. An invalid update does not execute new components.
+### Package validation and conformance
+10. Warp loads a plugin only when its filesystem-resolved root contains a regular root `plugin.json` whose `$schema` is the canonical Agent Plugins 1.0.0 manifest schema.
+
+11. Warp uses locally bundled schemas. Warp does not fetch a schema URL while loading a plugin.
+
+12. Warp applies the Agent Plugins 1.0.0 manifest rules exactly:
+   - Unknown top-level manifest fields are reported and ignored.
+   - An `extensions` value with the wrong type is reported and ignored.
+   - Other manifest schema violations reject the complete plugin.
+   - Unsupported extension namespaces are ignored without inspecting their contents.
+
+13. Warp resolves every package file before use. A path, symlink, junction, or equivalent filesystem reference that resolves outside the plugin root is rejected at the narrowest failure boundary required by the standard.
+
+14. A missing `skills/` directory or `mcp.json` file is not an error.
+
+15. A malformed skill disables only that skill. A malformed top-level MCP configuration disables MCP only for that plugin. A malformed or failed MCP server disables only that server when the standard defines a server-level failure boundary.
+
+16. Warp reports plugin, component, and connection diagnostics with the plugin name, source scope, source path, and actionable reason. Diagnostics never include secret values.
+### Skills and qualified names
+17. A valid plugin skill uses the fixed path `skills/<skill-directory>/SKILL.md`. Warp scans only immediate skill directories, as required by Agent Plugins 1.0.0.
+
+18. Plugin skills use the same Agent Skills parser, working-directory scope, automatic discovery, model context, and invocation permissions as existing repository and user skills. Discovering a skill does not add a new approval step.
+
+19. Warp gives each plugin skill the qualified component name `<plugin-name>:<skill-name>`. Example: the `deploy` skill in plugin `acme-tools` is `acme-tools:deploy`.
+
+20. The qualified skill name appears in:
+   - The skill catalog sent to the model.
+   - The GUI and TUI skill lists.
+   - Explicit user or model invocation, for example `/acme-tools:deploy`.
+   - Ambiguity and validation messages.
+   - Factory agent or automation prompt text that explicitly invokes the skill.
+
+21. An unqualified skill name remains usable when exactly one active skill has that name. If a flat skill and a plugin skill, or two plugin skills, share the name, Warp requires a qualified name and lists the candidates. A plugin never silently replaces a flat skill.
+
+22. The source `SKILL.md` frontmatter keeps its portable Agent Skills `name`. Warp's qualified name is runtime identity metadata; Warp does not rewrite the package on disk.
+### Plugin MCP servers
+23. A plugin can declare MCP servers only in root `mcp.json` with the canonical Agent Plugins 1.0.0 MCP schema. Warp does not read plugin MCP configuration from `plugin.json`, `.mcp.json`, or another path.
+
+24. Warp supports the Agent Plugins `stdio` and `streamable-http` transports in v1. Warp skips the optional legacy `sse` transport with an unsupported-transport diagnostic.
+
+25. Warp validates the closed schema for each MCP server and enforces the standard's URL, header, executable-token, working-directory, containment, environment, and placeholder rules.
+
+26. Warp expands only `${PLUGIN_ROOT}` and `${PLUGIN_DATA}`, and only in stdio `args`, `env` values, and `cwd`. Warp does not expand them in `command`, URL fields, headers, environment keys, or fixed component paths.
+
+27. Each plugin MCP server has the qualified component name `<plugin-name>:<server-name>`. A native MCP tool keeps the tool name returned by its server.
+
+28. The model and UI identify a tool as `<plugin-name>:<server-name>/<tool-name>`. Example: server `github` in plugin `acme-tools` can expose `acme-tools:github/create_issue`. The MCP wire call still sends native tool name `create_issue` to the server, and Warp routes it by the stable server identity.
+
+29. Qualified MCP server names appear in:
+   - The MCP settings page and TUI MCP screen.
+   - Tool metadata supplied to the model.
+   - Tool-call permission and execution details.
+   - Connection, authentication, and conflict diagnostics.
+
+30. Existing MCP execution semantics apply based on discovery scope and provider root:
+   - A repository plugin MCP server never starts only because Warp discovered it. It appears as a project-scoped file-based server and requires the existing explicit start action.
+   - A user `.agents/plugins` MCP server follows existing global third-party file-based MCP behavior. The GUI's existing file-based MCP setting controls automatic start. The TUI requires an explicit start.
+   - A user Warp-home plugin MCP server follows existing global Warp file-based MCP behavior. The TUI still defers startup until its existing post-login activation point.
+   - Stopping, retrying, authenticating, and viewing logs use the existing file-based MCP controls.
+
+31. Warp does not add plugin-level enablement, trust fingerprints, or reapproval prompts in v1. The Plugins surface is an inventory and diagnostics surface. Skill invocation and MCP start controls stay in their existing Skills and MCP surfaces.
+
+32. This proposal intentionally preserves today's trust behavior. Repository skills can influence agent behavior, and repository MCP commands become executable after the existing explicit MCP start action. The Plugins surface must show the resolved command, working directory, package source, and scope before a user starts a project-scoped stdio server.
+### Plugin data
+33. Each stdio plugin instance receives absolute `PLUGIN_ROOT` and `PLUGIN_DATA` environment variables.
+
+34. `PLUGIN_DATA` is outside the package root, writable by the subprocess, dedicated to one stable plugin instance, and preserved across plugin version or package-content updates.
+
+35. A local plugin instance is keyed by source kind, source identity, provider directory, and manifest name. Repository data remains separate from user data and from another repository with the same plugin name.
+36. GUI and TUI treat the same discovered package as separate runtime instances. They do not share running MCP processes or writable `PLUGIN_DATA`. This follows the existing frontend-specific MCP state boundary and prevents concurrent client versions from mutating the same plugin state.
+
+37. Warp creates `PLUGIN_DATA` immediately before the first stdio start. Removing a package does not immediately delete its data. A future uninstall workflow can offer deletion.
+### Plugin inventory surfaces
+38. Desktop Settings includes a Plugins page. The page groups discovered plugins by user or repository scope and shows:
+   - Manifest name, version, description, and source path.
+   - Whether the source is `.agents` or `.warp`.
+   - Skills and MCP servers with their qualified names.
+   - Active, shadowed, partially loaded, invalid, and unsupported states.
+   - Diagnostics and links to the existing Skills or MCP controls.
+
+39. The TUI provides `/plugins` with the same inventory and diagnostics. Starting or stopping a plugin MCP server continues through the existing TUI MCP flow.
+
+40. A plugin with only skills, only MCP, or no supported components still appears in the inventory when its manifest is valid.
+### Factories: plugin discovery and scope
+41. File-managed Factories discover plugin candidates from immediate children of:
+   - `<factory-root>/plugins/` for factory-scoped plugins.
+   - `<factory-root>/agents/<agent-name>/plugins/` for agent-scoped plugins.
+   - `<factory-root>/automations/<automation-name>/plugins/` for automation-scoped plugins.
+
+42. Factory plugin roots are in the Factory source repository. V1 does not fetch plugin packages from a URL, registry, marketplace, or another repository.
+
+43. A direct agent run loads agent-scoped plugins and factory-scoped plugins. An automation run loads automation-scoped plugins, plugins for the automation's bound agent, and factory-scoped plugins.
+
+44. Same-name Factory plugins shadow as complete packages in this order:
+   1. Automation scope.
+   2. Agent scope.
+   3. Factory scope.
+
+45. Two same-name plugins in the same Factory scope are a Factory validation error. The Factory does not select by child-directory name.
+
+46. Factory plugins use the same qualified skill and MCP names as local plugins. Examples:
+   - An agent prompt can explicitly invoke `/release-tools:deploy`.
+   - The model sees MCP server `release-tools:registry` and tool identity `release-tools:registry/publish`.
+   - Factory frontmatter does not list plugin components. Directory placement determines plugin scope.
+
+47. Existing Factory `skills/` and `agents/<name>/skills/` remain supported. They remain flat skills. A same-name flat and plugin skill requires qualified invocation; neither silently replaces the other.
+
+48. The client-side `.factory/skills` Droid provider is unrelated to a Factory product's root `skills/` directory. This proposal does not add `.factory/plugins` and does not change the Droid provider.
+
+49. Factory plugin packages must pass the same Agent Plugins validation at Factory sync and again in the runtime checkout. A sync failure prevents a new invalid Factory definition from being applied. A runtime mismatch disables the affected plugin or component and reports a run diagnostic.
+
+50. Factory plugin stdio subprocesses execute in the selected worker environment. They never execute in the Warp control-plane process. Warp-hosted workers and self-hosted workers provide durable plugin data storage for the environment.
+
+51. Factory source registration, repository access, branch controls, and the existing Factory apply flow remain the trust boundary. V1 adds no per-run plugin approval prompt.
+### Two distinct `mcp.json` artifacts
+52. A plugin `mcp.json` and a Factory `mcp.json` are different artifacts:
+   - Plugin `mcp.json` is inside a plugin root beside `plugin.json`. It uses the canonical Agent Plugins schema. It never accepts a managed Warp MCP entry.
+   - Factory `mcp.json` is outside every plugin root. It uses Warp's Factory MCP schema. It can contain managed and ordinary MCP entries.
+
+53. Factory MCP files use these fixed locations:
+   - `<factory-root>/mcp.json`.
+   - `<factory-root>/agents/<agent-name>/mcp.json`.
+   - `<factory-root>/automations/<automation-name>/mcp.json`.
+
+54. Location is the primary discriminator. The required `$schema` is the second discriminator. A Factory file targets `https://warp.dev/schemas/factory-mcp/1.0.0/schema.json`; a plugin file targets the Agent Plugins MCP schema.
+
+55. A Factory MCP entry uses one of these closed variants:
+   - `managed`: required `type: "managed"` and `warpId`.
+   - `stdio`: Agent Plugins-shaped `type`, `command`, optional `args`, optional `env`, and optional `cwd`.
+   - `streamable-http`: Agent Plugins-shaped `type`, `url`, and optional `headers`.
+
+56. Factory ordinary entries are deliberately similar to plugin entries, but they are not Agent Plugins components. Relative `command` and `cwd` paths resolve against the directory containing the Factory `mcp.json`. Factory files do not define or expand `${PLUGIN_ROOT}` or `${PLUGIN_DATA}`.
+
+57. Factory authors should use a plugin when a local MCP server needs packaged files, skills, or persistent plugin data. Entity-level Factory `mcp.json` is intended for managed MCP references, remote endpoints, bare executables, and simple entity-relative commands.
+
+58. Factoryfile sync reads every applicable Factory `mcp.json`:
+   - It validates the complete Warp schema.
+   - It projects `managed` entries onto the matching factory, agent, or automation level.
+   - It leaves ordinary entries in the repository for the runtime client.
+
+59. The runtime client reads applicable Factory `mcp.json` files and loads only ordinary entries. It recognizes and ignores valid `managed` entries because the server has already projected them into the run's managed MCP configuration.
+
+60. Factory MCP scope follows current Factory behavior:
+   - Factory-level managed entries are required additions for all agents and automations.
+   - Agent-level entries apply to that agent.
+   - Automation-level entries apply only to that automation run and overlay its bound agent's effective configuration.
+   - A conflicting same-name entry with different configuration is a validation error. Identical entries deduplicate.
+
+61. A plugin author cannot add a managed server by placing a Factory-shaped `mcp.json` in a plugin root:
+   - The plugin loader sees the Factory `$schema` instead of the Agent Plugins `$schema`.
+   - It disables MCP for that plugin and reports an unsupported-schema diagnostic.
+   - Independently valid plugin skills continue to load.
+   - Factoryfile sync never interprets a file inside a plugin root as a Factory MCP file.
+
+62. A Factory MCP file with the Agent Plugins `$schema` is invalid at an entity-level Factory MCP location. The error explains that Agent Plugins MCP belongs inside a plugin package.
+### Factory MCP migration
+63. Existing `mcpServers` fields in `factory.yaml`, agent frontmatter, automation frontmatter, and `agentDefaults` remain readable during migration.
+
+64. New Factory authoring uses entity-level `mcp.json`. The initial release does not automatically rewrite or delete authored YAML/frontmatter.
+
+65. Root Factory `mcp.json` replaces the top-level factory `mcpServers` use case. Agent and automation files replace their matching frontmatter use cases. `agentDefaults.mcpServers` remains legacy-only in v1 because no distinct entity-level file represents a default that can be replaced by every agent. An author who removes it must copy the intended entries into each applicable agent's `mcp.json`.
+
+66. When legacy YAML and a new Factory MCP file declare the same managed server name:
+   - The same `warpId` deduplicates.
+   - Different `warpId` values fail Factory validation.
+   - Ordinary stdio and HTTP entries can be declared only in the new Factory MCP file.
+
+67. Warp emits a non-blocking deprecation diagnostic for legacy `mcpServers` after the new format is available. Removing legacy support requires a separate migration decision based on usage telemetry.
+### Conformance target and phases
+68. The desktop app and TUI target Agent Plugins 1.0.0 client conformance for both standard component types, with stdio and Streamable HTTP support. Legacy SSE remains an optional unsupported transport.
+
+69. Factory runtime support claims the same conformance only for plugin packages. Warp's Factory `mcp.json` is explicitly outside that claim.
+
+70. Delivery is phased:
+   1. Shared client parser, discovery, diagnostics, qualified identity, skills, MCP, and plugin data.
+   2. Desktop and TUI inventory surfaces and existing MCP control integration.
+   3. Factory plugin discovery, sync validation, runtime scoping, durable data, and client-capability gating.
+   4. Factory `mcp.json`, managed-entry projection, ordinary-entry runtime loading, and legacy YAML migration diagnostics.
+
+71. Each phase remains behind capability or feature gates until its required end-to-end validation passes. Factory sync must not activate plugin runtime fields for a client version that cannot consume them.
+## Decisions
+- Use `.agents/plugins` and `.warp/plugins` rather than bare repository `plugins/` in the client. This mirrors established provider directories and prevents a generic repository folder from gaining execution semantics.
+- Use qualified component identity but preserve native MCP tool names. This removes component ambiguity without changing MCP wire contracts.
+- Preserve current skills and file-based MCP execution behavior. A stricter plugin-specific trust model would be safer for global stdio plugins, but it would create inconsistent semantics for equivalent existing configuration.
+- Keep plugin and Factory MCP files separate. Extending the closed Agent Plugins schema with `warpId` would break conformance.
+- Use in-repository Factory plugins only. Agent Plugins 1.0.0 defines no installation or distribution protocol.
+- Reserve `dev.warp.client` and `dev.warp.factory` extension namespaces, but require no Warp extension data in v1.
+## Risks
+- Existing global Warp MCP behavior can auto-start a stdio server from a user-controlled config location. Applying the same behavior to user Warp-home plugins increases the amount of executable configuration that can use that path. The inventory must make the source and command visible. A unified trust redesign for all file-based MCP is a follow-up, not a plugin-only exception.
+- A self-hosted direct worker backend executes plugin subprocesses with that backend's existing process isolation. Agent Plugins path containment is not a sandbox. Factory documentation must state this boundary.
+- Two similar `mcp.json` schemas can confuse authors. Fixed locations, distinct required `$schema` values, editor schemas, and targeted diagnostics mitigate the risk.
+## Out of scope
+- Plugin installation, updates, registries, marketplaces, remote fetch, signatures, provenance, or dependency resolution.
+- A new permission model, subprocess sandbox, or plugin-specific trust store.
+- Agent Plugins extensions beyond reserving Warp-owned namespaces.
+- Legacy SSE support for Agent Plugins MCP.
+- Automatic deletion, backup, or migration of plugin data.
+- Remote plugins outside the Factory source repository.
+- Claude Code plugin loading or conversion.
+
+Claude Code remains a future compatibility target. Default `skills/<name>/SKILL.md` content and most metadata align, but a Claude Code plugin is not directly conformant: its manifest and MCP paths, closed-schema behavior, required MCP `type`, and placeholders differ. The shared parser, discovery, identity, and runtime work in this proposal reduces future effort, but support will still require a converter or a separate provider. It is not a near-zero-cost alias.
