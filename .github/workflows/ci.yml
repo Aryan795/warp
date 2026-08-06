@@ -147,6 +147,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - uses: ./.github/actions/prepare_environment
+        id: prepare_environment
         with:
           target_os: ${{ matrix.os }}
           is_self_hosted: ${{ matrix.is_self_hosted }}
@@ -257,6 +258,24 @@ jobs:
           apt: vim
 
       - name: Compile tests
+        if: ${{ matrix.os == 'macos' }}
+        uses: ./.github/actions/compile_macos_tests
+        with:
+          workspace_test_args: ${{ env.WORKSPACE_TEST_ARGS }}
+          extra_test_args: ${{ matrix.extra_test_args }}
+          runner_profile: ${{ join(matrix.runner, ',') }}
+          cache_provider: ${{ steps.prepare_environment.outputs.rust_cache_provider }}
+          cache_identity: ${{ steps.prepare_environment.outputs.rust_cache_identity }}
+          cache_hit: ${{ steps.prepare_environment.outputs.rust_cache_hit }}
+          artifact_name: macos-compile-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+        env:
+          # Attach the GitHub auth token so that requests to the GitHub API
+          # don't get rate limited during compilation (e.g.: retrieving
+          # Sentry SDK binary releases).
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compile tests
+        if: ${{ matrix.os != 'macos' }}
         run: cargo nextest run ${{ env.WORKSPACE_TEST_ARGS }} ${{ matrix.extra_test_args }} --no-run
         env:
           # Attach the GitHub auth token so that requests to the GitHub API

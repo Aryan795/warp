@@ -17,6 +17,16 @@ inputs:
     description: If set, the cache key to use.  If unset, the cache key will be derived from the target OS.
   ssh_key:
     description: SSH private key used to clone the private warp-channel-config repository. Only consumed when running in warpdotdev/warp-internal.
+outputs:
+  rust_cache_provider:
+    description: Cache provider used for Rust build state, when one is configured.
+    value: ${{ startsWith(runner.name, 'nsc-runner') && 'namespace' || (inputs.is_self_hosted != 'true' && 'github-actions' || 'none') }}
+  rust_cache_identity:
+    description: Logical Rust cache identity available to this action.
+    value: ${{ startsWith(runner.name, 'nsc-runner') && 'rust' || (inputs.is_self_hosted != 'true' && (inputs.cache_key != '' && inputs.cache_key || inputs.target_os) || 'none') }}
+  rust_cache_hit:
+    description: Whether the configured Rust cache action reported an exact hit.
+    value: ${{ startsWith(runner.name, 'nsc-runner') && steps.namespace-cache.outputs.cache-hit || steps.rust-cache.outputs.cache-hit }}
 
 runs:
   using: composite
@@ -70,6 +80,7 @@ runs:
         git lfs ls-files --size
 
     - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      id: rust-cache
       if: ${{ inputs.is_self_hosted != 'true' && !startsWith(runner.name, 'nsc-runner') }}
       with:
         # Make sure x86_64-unknown-linux-gnu and wasm32-unknown-unknown builds
@@ -80,6 +91,7 @@ runs:
         save-if: ${{ github.ref == 'refs/heads/master' }}
 
     - name: Set up Namespace cache
+      id: namespace-cache
       if: ${{ startsWith(runner.name, 'nsc-runner') }}
       uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9 # v1.4.2
       with:

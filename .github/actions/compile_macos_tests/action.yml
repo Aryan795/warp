@@ -1,0 +1,200 @@
+name: Compile macOS tests with diagnostics
+description: Compile the macOS test graph and collect cache and Cargo rebuild diagnostics.
+inputs:
+  workspace_test_args:
+    required: true
+    description: Workspace and lockfile arguments forwarded to cargo nextest.
+  extra_test_args:
+    description: Additional test-selection arguments forwarded to cargo nextest.
+  runner_profile:
+    required: true
+    description: Requested GitHub Actions runner profile or labels.
+  cache_provider:
+    required: true
+    description: Rust cache provider reported by prepare_environment.
+  cache_identity:
+    required: true
+    description: Logical Rust cache identity reported by prepare_environment.
+  cache_hit:
+    description: Exact cache hit reported by prepare_environment, when available.
+  artifact_name:
+    required: true
+    description: Name for the uploaded diagnostic artifact.
+
+runs:
+  using: composite
+  steps:
+    - name: Capture pre-compile state
+      id: capture
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        diagnostics_dir="$RUNNER_TEMP/${{ inputs.artifact_name }}"
+        mkdir -p "$diagnostics_dir"
+
+        cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+        target_dir="${CARGO_TARGET_DIR:-$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')}"
+        cache_hit="${{ inputs.cache_hit }}"
+        if [ -z "$cache_hit" ]; then
+          cache_hit="unknown"
+        fi
+
+        size_kib() {
+          if [ -e "$1" ]; then
+            du -sk "$1" | awk '{print $1}'
+          else
+            printf '0\n'
+          fi
+        }
+
+        printf '%s\n' \
+          "diagnostics_dir=$diagnostics_dir" \
+          "cargo_home=$cargo_home" \
+          "target_dir=$target_dir" \
+          "pre_cargo_home_kib=$(size_kib "$cargo_home")" \
+          "pre_target_kib=$(size_kib "$target_dir")" \
+          > "$diagnostics_dir/metrics.env"
+
+        {
+          printf 'runner_name=%s\n' "$RUNNER_NAME"
+          printf 'runner_os=%s\n' "$RUNNER_OS"
+          printf 'runner_arch=%s\n' "$RUNNER_ARCH"
+          printf 'runner_profile=%s\n' '${{ inputs.runner_profile }}'
+          printf 'cache_provider=%s\n' '${{ inputs.cache_provider }}'
+          printf 'cache_identity=%s\n' '${{ inputs.cache_identity }}'
+          printf 'cache_hit=%s\n' "$cache_hit"
+          printf 'repository=%s\n' "$GITHUB_REPOSITORY"
+          printf 'workflow_sha=%s\n' "$GITHUB_SHA"
+          printf 'checked_out_sha=%s\n' "$(git rev-parse HEAD)"
+          printf 'run_id=%s\n' "$GITHUB_RUN_ID"
+          printf 'run_attempt=%s\n' "$GITHUB_RUN_ATTEMPT"
+          printf 'cargo_version=%s\n' "$(cargo --version)"
+          printf 'rustc_version=%s\n' "$(rustc --version)"
+        } >> "$diagnostics_dir/metrics.env"
+
+        {
+          printf 'MACOS_COMPILE_DIAGNOSTICS_DIR=%s\n' "$diagnostics_dir"
+          printf 'MACOS_COMPILE_CARGO_HOME=%s\n' "$cargo_home"
+          printf 'MACOS_COMPILE_TARGET_DIR=%s\n' "$target_dir"
+        } >> "$GITHUB_ENV"
+        printf 'diagnostics_dir=%s\n' "$diagnostics_dir" >> "$GITHUB_OUTPUT"
+
+    - name: Compile tests
+      id: compile
+      continue-on-error: true
+      shell: bash
+      env:
+        CARGO_LOG: cargo::core::compiler::fingerprint=info
+      run: |
+        set +e
+        /usr/bin/time -lp -o "$MACOS_COMPILE_DIAGNOSTICS_DIR/resource-usage.txt" \
+          cargo nextest run ${{ inputs.workspace_test_args }} ${{ inputs.extra_test_args }} --no-run \
+          2> >(tee "$MACOS_COMPILE_DIAGNOSTICS_DIR/cargo-stderr.log" >&2)
+        compile_status=$?
+        set -e
+
+        printf 'compile_status=%s\n' "$compile_status" >> "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env"
+        exit "$compile_status"
+
+    - name: Summarize compile diagnostics
+      if: ${{ always() }}
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        size_kib() {
+          if [ -e "$1" ]; then
+            du -sk "$1" | awk '{print $1}'
+          else
+            printf '0\n'
+          fi
+        }
+
+        clean_stderr="$MACOS_COMPILE_DIAGNOSTICS_DIR/cargo-stderr-clean.log"
+        fingerprint_log="$MACOS_COMPILE_DIAGNOSTICS_DIR/cargo-fingerprint.log"
+        reason_counts="$MACOS_COMPILE_DIAGNOSTICS_DIR/fingerprint-reason-counts.txt"
+        sed $'s/\033\\[[0-9;]*[mK]//g' "$MACOS_COMPILE_DIAGNOSTICS_DIR/cargo-stderr.log" > "$clean_stderr"
+        grep 'cargo::core::compiler::fingerprint' "$clean_stderr" > "$fingerprint_log" || true
+        sed -n 's/^.*cargo::core::compiler::fingerprint: *err: /- /p' "$fingerprint_log" | sort | uniq -c | sort -nr > "$reason_counts"
+
+        pre_cargo_home_kib="$(sed -n 's/^pre_cargo_home_kib=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
+        pre_target_kib="$(sed -n 's/^pre_target_kib=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
+        post_cargo_home_kib="$(size_kib "$MACOS_COMPILE_CARGO_HOME")"
+        post_target_kib="$(size_kib "$MACOS_COMPILE_TARGET_DIR")"
+        compiled_units="$(grep -c '^[[:space:]]*Compiling ' "$clean_stderr" || true)"
+        dirty_units="$(grep -c 'fingerprint error for ' "$fingerprint_log" || true)"
+        stale_inputs="$(grep -c 'cargo::core::compiler::fingerprint: stale:' "$fingerprint_log" || true)"
+        elapsed_seconds="$(awk '$1 == "real" { print $2; exit }' "$MACOS_COMPILE_DIAGNOSTICS_DIR/resource-usage.txt")"
+        max_rss_bytes="$(awk '/maximum resident set size/ { print $1; exit }' "$MACOS_COMPILE_DIAGNOSTICS_DIR/resource-usage.txt")"
+
+        {
+          printf 'post_cargo_home_kib=%s\n' "$post_cargo_home_kib"
+          printf 'post_target_kib=%s\n' "$post_target_kib"
+          printf 'compiled_units=%s\n' "$compiled_units"
+          printf 'dirty_units=%s\n' "$dirty_units"
+          printf 'stale_inputs=%s\n' "$stale_inputs"
+          printf 'elapsed_seconds=%s\n' "${elapsed_seconds:-unknown}"
+          printf 'max_rss_bytes=%s\n' "${max_rss_bytes:-unknown}"
+        } >> "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env"
+
+        kib_to_gib() {
+          awk -v kib="$1" 'BEGIN { printf "%.2f GiB", kib / 1048576 }'
+        }
+
+        bytes_to_gib() {
+          if [ "$1" = "unknown" ] || [ -z "$1" ]; then
+            printf 'unknown'
+          else
+            awk -v bytes="$1" 'BEGIN { printf "%.2f GiB", bytes / 1073741824 }'
+          fi
+        }
+
+        cache_hit="$(sed -n 's/^cache_hit=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
+        compile_status="$(sed -n 's/^compile_status=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
+        checked_out_sha="$(sed -n 's/^checked_out_sha=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
+
+        summary="$MACOS_COMPILE_DIAGNOSTICS_DIR/summary.md"
+        {
+          echo "### macOS compile diagnostics"
+          echo
+          echo "| Metric | Value |"
+          echo "| --- | --- |"
+          echo "| Checked-out SHA | \`$checked_out_sha\` |"
+          echo "| Runner | \`$RUNNER_NAME\` / \`${{ inputs.runner_profile }}\` / \`$RUNNER_ARCH\` |"
+          echo "| Rust cache | \`${{ inputs.cache_provider }}\` / \`${{ inputs.cache_identity }}\` / hit \`$cache_hit\` |"
+          echo "| Cargo home working set | $(kib_to_gib "$pre_cargo_home_kib") → $(kib_to_gib "$post_cargo_home_kib") |"
+          echo "| Target working set | $(kib_to_gib "$pre_target_kib") → $(kib_to_gib "$post_target_kib") |"
+          echo "| Compile result | exit \`${compile_status:-unknown}\` in \`${elapsed_seconds:-unknown}s\` |"
+          echo "| Peak resident set | $(bytes_to_gib "${max_rss_bytes:-unknown}") |"
+          echo "| Cargo rebuild signals | $compiled_units compiling lines; $dirty_units dirty fingerprints; $stale_inputs stale inputs |"
+          echo
+          echo "Top fingerprint reasons:"
+          if [ -s "$reason_counts" ]; then
+            echo '```text'
+            sed -n '1,10p' "$reason_counts"
+            echo '```'
+          else
+            echo "No Cargo fingerprint dirtiness reasons were emitted."
+          fi
+          echo
+          echo "Full resource statistics, exact fingerprint messages, and raw metrics are in artifact \`${{ inputs.artifact_name }}\`."
+        } > "$summary"
+
+        cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+        echo "::notice title=macOS compile diagnostics::${elapsed_seconds:-unknown}s, $dirty_units dirty fingerprints, target $(kib_to_gib "$pre_target_kib") -> $(kib_to_gib "$post_target_kib")"
+        rm "$clean_stderr" "$MACOS_COMPILE_DIAGNOSTICS_DIR/cargo-stderr.log"
+
+    - name: Upload compile diagnostics
+      if: ${{ always() && steps.capture.outcome == 'success' }}
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+      with:
+        name: ${{ inputs.artifact_name }}
+        path: ${{ steps.capture.outputs.diagnostics_dir }}
+        if-no-files-found: error
+        retention-days: 14
+
+    - name: Propagate compile failure
+      if: ${{ steps.compile.outcome != 'success' }}
+      shell: bash
+      run: exit 1
