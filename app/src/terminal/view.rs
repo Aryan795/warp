@@ -4186,7 +4186,8 @@ impl TerminalView {
 
         ctx.subscribe_to_model(&AISettings::handle(ctx), |me, _, ai_settings_event, ctx| {
             if let AISettingsChangedEvent::AwsBedrockCredentialsEnabled { .. } = ai_settings_event
-                && !UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_enabled(ctx)
+                && !UserWorkspaces::as_ref(ctx)
+                    .is_aws_bedrock_credentials_enabled(Some(ctx.window_id()), ctx)
             {
                 me.remove_aws_bedrock_login_banner(ctx);
             }
@@ -8299,7 +8300,7 @@ impl TerminalView {
         }
 
         let is_ai_allowed_in_remote_sessions =
-            UserWorkspaces::as_ref(ctx).is_ai_allowed_in_remote_sessions();
+            UserWorkspaces::as_ref(ctx).is_ai_allowed_in_remote_sessions(Some(ctx.window_id()));
 
         // Only update the FocusedTerminalInfo model if the user has disabled AI in remote sessions
         // because it's a potentially expensive operation.
@@ -10720,7 +10721,8 @@ impl TerminalView {
         }
 
         // Check if AWS Bedrock is available in the workspace
-        if !UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_enabled(ctx) {
+        if !UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_enabled(Some(ctx.window_id()), ctx)
+        {
             return;
         }
 
@@ -11180,12 +11182,14 @@ impl TerminalView {
             return false;
         };
 
-        if UserWorkspaces::as_ref(app).is_ai_allowed_in_remote_sessions() {
+        let window_id = self.view_handle.window_id(app);
+        if UserWorkspaces::as_ref(app).is_ai_allowed_in_remote_sessions(window_id) {
             // We don't check any regexes if the user is allowed to run AI in remote sessions.
             return false;
         }
 
-        let remote_session_regex_list = UserWorkspaces::as_ref(app).get_remote_session_regex_list();
+        let remote_session_regex_list =
+            UserWorkspaces::as_ref(app).get_remote_session_regex_list(window_id);
 
         // First check if the command matches any of the regexes in the list.
         if remote_session_regex_list
@@ -27226,8 +27230,8 @@ impl TypedActionView for TerminalView {
             }
             SummarizeConversation => self.summarize_conversation(ctx),
             IndexProjectSpeedbump => {
-                let codebase_context_enabled =
-                    UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(ctx);
+                let codebase_context_enabled = UserWorkspaces::as_ref(ctx)
+                    .is_codebase_context_enabled(Some(ctx.window_id()), ctx);
 
                 if FeatureFlag::FullSourceCodeEmbedding.is_enabled() && codebase_context_enabled {
                     #[cfg(feature = "local_fs")]
