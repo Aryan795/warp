@@ -59,10 +59,9 @@ impl ConversationObservedContents {
 }
 
 /// Singleton recording, per conversation, fingerprints of file contents that
-/// have been reported to the model: whole-file reads, contents it authored via
-/// accepted file edits, and full contents quoted back by a failed
-/// `create_file`. Diff application consults a snapshot of this to decide
-/// whether a create over an existing file is an informed overwrite.
+/// have been reported to the model: whole-file reads and contents it authored
+/// via accepted file edits. Diff application consults a snapshot of this to
+/// decide whether a create over an existing file is an informed overwrite.
 #[derive(Default)]
 pub struct ObservedFileContents {
     by_conversation: HashMap<AIConversationId, ConversationObservedContents>,

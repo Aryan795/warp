@@ -163,30 +163,6 @@ impl RequestFileEditsExecutor {
 
         // If diff application failed, early exit.
         if let Some(errors) = self.diff_application_failures.remove(id) {
-            // An `AlreadyExists` failure quotes the file back to the model; when the quote is
-            // complete, that content becomes observed, so an informed re-create can succeed on
-            // the next turn.
-            let quoted_contents: Vec<(String, ContentFingerprint)> = errors
-                .iter()
-                .filter_map(|error| match error {
-                    DiffApplicationError::AlreadyExists {
-                        absolute_path,
-                        existing,
-                        ..
-                    } => existing
-                        .complete_content_fingerprint()
-                        .map(|fingerprint| (absolute_path.clone(), fingerprint)),
-                    _ => None,
-                })
-                .collect();
-            if !quoted_contents.is_empty() {
-                let conversation_id = input.conversation_id;
-                ObservedFileContents::handle(ctx).update(ctx, |model, _| {
-                    for (path, fingerprint) in quoted_contents {
-                        model.record(conversation_id, path, fingerprint);
-                    }
-                });
-            }
             return ActionExecution::Sync(AIAgentActionResultType::RequestFileEdits(
                 RequestFileEditsResult::DiffApplicationFailed {
                     error: DiffApplicationError::error_for_conversation(&errors),

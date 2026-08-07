@@ -51,105 +51,6 @@ impl From<std::io::Result<String>> for FileReadResult {
     }
 }
 
-/// Maximum number of lines of an existing file quoted back to the LLM when it tries to create a
-/// file that already exists. Enough to diff most files without a `read_files` round trip, while
-/// keeping the failed tool call from dominating the context window.
-const MAX_EXISTING_CONTENT_EXCERPT_LINES: usize = 200;
-
-/// Upper bound on the quoted excerpt's size, so a file with very long lines (e.g. minified
-/// sources) can't blow up the conversation regardless of its line count.
-const MAX_EXISTING_CONTENT_EXCERPT_BYTES: usize = 16 * 1024;
-
-/// A snapshot of the file already on disk at a path the LLM tried to create.
-///
-/// Carried on [`DiffApplicationError::AlreadyExists`] so the failure message can hand the model
-/// the content it needs to emit an edit on its next turn.
-pub(crate) struct ExistingFileContent {
-    line_count: usize,
-    excerpt: String,
-    excerpt_line_count: usize,
-    fingerprint: ContentFingerprint,
-}
-
-// File contents are user-generated content, so they must never reach a log line or Sentry
-// breadcrumb via the derived `Debug` on `DiffApplicationError`.
-impl std::fmt::Debug for ExistingFileContent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ExistingFileContent")
-            .field("line_count", &self.line_count)
-            .finish_non_exhaustive()
-    }
-}
-
-impl ExistingFileContent {
-    fn new(content: &str) -> Self {
-        let mut excerpt = String::new();
-        let mut excerpt_line_count = 0;
-        for (index, line) in content
-            .lines()
-            .take(MAX_EXISTING_CONTENT_EXCERPT_LINES)
-            .enumerate()
-        {
-            let numbered = format!("{}|{line}\n", index + 1);
-            if excerpt.len().saturating_add(numbered.len()) > MAX_EXISTING_CONTENT_EXCERPT_BYTES {
-                break;
-            }
-            excerpt.push_str(&numbered);
-            excerpt_line_count += 1;
-        }
-
-        Self {
-            line_count: content.lines().count(),
-            excerpt,
-            excerpt_line_count,
-            fingerprint: ContentFingerprint::of(content),
-        }
-    }
-
-    /// The fingerprint of the file content, available only when the failure message quotes the
-    /// file back in full. Recording it marks the content as observed by the model, which is only
-    /// sound when the model actually received every line.
-    pub(super) fn complete_content_fingerprint(&self) -> Option<ContentFingerprint> {
-        (self.excerpt_line_count == self.line_count).then_some(self.fingerprint)
-    }
-
-    fn to_conversation_message(&self, file: &str) -> String {
-        use std::fmt::Write;
-
-        let Self {
-            line_count,
-            excerpt,
-            excerpt_line_count,
-            fingerprint: _,
-        } = self;
-        let mut message =
-            format!("{file} already exists ({line_count} lines); nothing was written.");
-
-        if excerpt.is_empty() {
-            let _ = write!(
-                message,
-                " Read the file, then edit it. Do not delete and recreate it."
-            );
-        } else if excerpt_line_count < line_count {
-            let _ = write!(
-                message,
-                " Lines 1-{excerpt_line_count} are:\n{excerpt}\
-                 You may edit within these lines directly, or read the rest of the file first. \
-                 Do not delete and recreate it."
-            );
-        } else {
-            let _ = write!(
-                message,
-                " Its current contents are:\n{excerpt}\
-                 Emit edits against these contents. To replace the file entirely, call \
-                 create_file again with the full replacement content; it will be applied as a \
-                 reviewable update of the existing file."
-            );
-        }
-        message
-    }
-}
-
 /// Errors that can occur while applying a diff.
 #[derive(Debug)]
 pub(crate) enum DiffApplicationError {
@@ -172,10 +73,7 @@ pub(crate) enum DiffApplicationError {
     /// A file that was supposed to be new already exists.
     AlreadyExists {
         file: String,
-        /// Host-native absolute path of the existing file, for recording the quoted content as
-        /// observed by the model.
-        absolute_path: String,
-        existing: ExistingFileContent,
+        line_count: usize,
     },
     /// The diff contained multiple attempts to create the same file.
     MultipleFileCreation {
@@ -220,8 +118,11 @@ impl DiffApplicationError {
             DiffApplicationError::MissingFile { file } => {
                 format!("{file} does not exist. Is the path correct?")
             }
-            DiffApplicationError::AlreadyExists { file, existing, .. } => {
-                existing.to_conversation_message(file)
+            DiffApplicationError::AlreadyExists { file, line_count } => {
+                format!(
+                    "{file} already exists ({line_count} lines); nothing was written. Read the \
+                     file first before editing it. Do not delete and recreate it."
+                )
             }
             DiffApplicationError::ReadFailed { file, .. } => {
                 format!("Could not read {file}")
@@ -644,11 +545,10 @@ async fn apply_create_file<F, Fut>(
                 .diffs
                 .push(full_replacement_diff(file_path, existing_content, content));
         }
-        // The conversation has observed the file's current content in full (a whole-file read,
-        // an earlier accepted edit, or a previous create attempt that quoted it back), so the
-        // overwrite is informed. Apply it as a full replacement routed through the normal
-        // reviewable-diff pipeline, and note the overwrite in the action result so it is never
-        // silent.
+        // The conversation has observed the file's current content in full (a whole-file read or
+        // an earlier accepted edit), so the overwrite is informed. Apply it as a full replacement
+        // routed through the normal reviewable-diff pipeline, and note the overwrite in the
+        // action result so it is never silent.
         FileReadResult::Found(existing_content)
             if observed.contains(&absolute_path, ContentFingerprint::of(&existing_content)) =>
         {
@@ -661,8 +561,8 @@ async fn apply_create_file<F, Fut>(
                 .push(full_replacement_diff(file_path, existing_content, content));
         }
         // Nothing in this conversation shows the model knows what the file currently holds, so
-        // this is a blind overwrite. Fail with the file's contents so the model can edit (or
-        // deliberately re-create) on its next turn instead of clobbering data it never saw.
+        // this is a blind overwrite. Fail so the model reads the file and edits it (or
+        // deliberately re-creates it) on its next turn instead of clobbering data it never saw.
         FileReadResult::Found(existing_content) => {
             safe_warn!(
                 safe: ("Agent Code tried to create a file that already exists"),
@@ -670,8 +570,7 @@ async fn apply_create_file<F, Fut>(
             );
             result.errors.push(DiffApplicationError::AlreadyExists {
                 file: file_path,
-                absolute_path,
-                existing: ExistingFileContent::new(&existing_content),
+                line_count: existing_content.lines().count(),
             });
         }
         FileReadResult::NotFound => {

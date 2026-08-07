@@ -642,7 +642,7 @@ fn test_create_edit_for_existing_file() {
 }
 
 #[test]
-fn test_create_edit_for_existing_file_reports_its_contents() {
+fn test_create_edit_for_existing_file_directs_model_to_read_first() {
     App::test((), |app| async move {
         let mut temp_file = NamedTempFile::new().expect("Failed to create temporary file");
         let file_path = temp_file.path().to_string_lossy().to_string();
@@ -669,52 +669,11 @@ fn test_create_edit_for_existing_file_reports_its_contents() {
         assert_eq!(
             DiffApplicationError::error_for_conversation(&errors),
             format!(
-                "{file_path} already exists (2 lines); nothing was written. Its current \
-                 contents are:\n1|First line\n2|Second line\nEmit edits against these contents. \
-                 To replace the file entirely, call create_file again with the full replacement \
-                 content; it will be applied as a reviewable update of the existing file."
+                "{file_path} already exists (2 lines); nothing was written. Read the file first \
+                 before editing it. Do not delete and recreate it."
             )
         );
     });
-}
-
-#[test]
-fn test_create_edit_for_existing_file_truncates_long_contents() {
-    let existing: String = (1..=500).map(|n| format!("line {n}\n")).collect();
-    let err = DiffApplicationError::AlreadyExists {
-        file: "big.txt".to_string(),
-        absolute_path: "/tmp/big.txt".to_string(),
-        existing: ExistingFileContent::new(&existing),
-    };
-
-    let message = err.to_conversation_message();
-    assert!(
-        message.starts_with(
-            "big.txt already exists (500 lines); nothing was written. Lines 1-200 \
-             are:\n1|line 1\n"
-        ),
-        "unexpected message: {message}"
-    );
-    assert!(
-        message.ends_with(
-            "200|line 200\nYou may edit within these lines directly, or read the rest of the \
-             file first. Do not delete and recreate it."
-        ),
-        "unexpected message end"
-    );
-}
-
-#[test]
-fn test_existing_file_content_fingerprint_only_when_complete() {
-    let complete = ExistingFileContent::new("a\nb\n");
-    assert_eq!(
-        complete.complete_content_fingerprint(),
-        Some(ContentFingerprint::of("a\nb\n"))
-    );
-
-    let long: String = (1..=500).map(|n| format!("line {n}\n")).collect();
-    let truncated = ExistingFileContent::new(&long);
-    assert_eq!(truncated.complete_content_fingerprint(), None);
 }
 
 #[test]
