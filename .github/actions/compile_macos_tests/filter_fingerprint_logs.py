@@ -77,14 +77,24 @@ def summarize_reasons(input_stream: TextIO, output: TextIO) -> None:
     for reason, count in sorted(counts.items(), key=lambda item: (-item[1], item[0])):
         output.write(f"{count:4} - {reason}\n")
 
+def count_signals(input_stream: TextIO, output: TextIO) -> None:
+    lines = list(input_stream)
+    missing = sum("fingerprint error for " in line for line in lines)
+    dirty = sum("fingerprint dirty for " in line for line in lines)
+    stale = sum(f"{FINGERPRINT_LOGGER} stale:" in line for line in lines)
+    output.write(f"{missing} {dirty} {stale}\n")
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--summarize-reasons", action="store_true")
+    parser.add_argument("--count-signals", action="store_true")
     args = parser.parse_args()
 
     if args.summarize_reasons:
         summarize_reasons(sys.stdin, sys.stdout)
+    elif args.count_signals:
+        count_signals(sys.stdin, sys.stdout)
     else:
         filter_live_logs(sys.stdin, sys.stdout)
 

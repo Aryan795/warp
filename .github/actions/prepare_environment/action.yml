@@ -18,18 +18,21 @@ inputs:
   enable_rust_cache:
     description: Whether to restore and save Rust build state.
     default: 'true'
+  enable_namespace_cache:
+    description: Whether Namespace runners should attach their configured cache volume.
+    default: 'true'
   ssh_key:
     description: SSH private key used to clone the private warp-channel-config repository. Only consumed when running in warpdotdev/warp-internal.
 outputs:
   rust_cache_provider:
     description: Cache provider used for Rust build state, when one is configured.
-    value: ${{ inputs.enable_rust_cache == 'true' && (startsWith(runner.name, 'nsc-runner') && 'namespace' || (inputs.is_self_hosted != 'true' && 'github-actions' || 'none')) || 'none' }}
+    value: ${{ inputs.enable_rust_cache == 'true' && (startsWith(runner.name, 'nsc-runner') && inputs.enable_namespace_cache == 'true' && 'namespace' || (!startsWith(runner.name, 'nsc-runner') && inputs.is_self_hosted != 'true' && 'github-actions' || 'none')) || 'none' }}
   rust_cache_identity:
     description: Logical Rust cache identity available to this action.
-    value: ${{ inputs.enable_rust_cache == 'true' && (startsWith(runner.name, 'nsc-runner') && 'rust' || (inputs.is_self_hosted != 'true' && (inputs.cache_key != '' && inputs.cache_key || inputs.target_os) || 'none')) || 'none' }}
+    value: ${{ inputs.enable_rust_cache == 'true' && (startsWith(runner.name, 'nsc-runner') && inputs.enable_namespace_cache == 'true' && 'rust' || (!startsWith(runner.name, 'nsc-runner') && inputs.is_self_hosted != 'true' && (inputs.cache_key != '' && inputs.cache_key || inputs.target_os) || 'none')) || 'none' }}
   rust_cache_hit:
     description: Whether the configured Rust cache action reported an exact hit.
-    value: ${{ inputs.enable_rust_cache == 'true' && (startsWith(runner.name, 'nsc-runner') && steps.namespace-cache.outputs.cache-hit || steps.rust-cache.outputs.cache-hit) || '' }}
+    value: ${{ inputs.enable_rust_cache == 'true' && (startsWith(runner.name, 'nsc-runner') && inputs.enable_namespace_cache == 'true' && steps.namespace-cache.outputs.cache-hit || steps.rust-cache.outputs.cache-hit) || '' }}
 
 runs:
   using: composite
@@ -95,7 +98,7 @@ runs:
 
     - name: Set up Namespace cache
       id: namespace-cache
-      if: ${{ startsWith(runner.name, 'nsc-runner') && (inputs.enable_rust_cache == 'true' || inputs.target_os == 'macos') }}
+      if: ${{ inputs.enable_namespace_cache == 'true' && startsWith(runner.name, 'nsc-runner') && (inputs.enable_rust_cache == 'true' || inputs.target_os == 'macos') }}
       uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9 # v1.4.2
       with:
         cache: |

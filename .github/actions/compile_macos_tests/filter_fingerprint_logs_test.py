@@ -1,7 +1,7 @@
 import io
 import unittest
 
-from filter_fingerprint_logs import filter_live_logs, summarize_reasons
+from filter_fingerprint_logs import count_signals, filter_live_logs, summarize_reasons
 
 
 class FilterLiveLogsTest(unittest.TestCase):
@@ -39,6 +39,22 @@ class SummarizeReasonsTest(unittest.TestCase):
         summarize_reasons(fingerprint_log, output)
 
         self.assertEqual(output.getvalue(), "   2 - failed to read Cargo fingerprint\n")
+
+class CountSignalsTest(unittest.TestCase):
+    def test_distinguishes_missing_dirty_and_stale_fingerprints(self) -> None:
+        fingerprint_log = io.StringIO(
+            """
+INFO cargo::core::compiler::fingerprint: fingerprint error for warp-core
+INFO cargo::core::compiler::fingerprint: fingerprint dirty for warp
+INFO cargo::core::compiler::fingerprint: fingerprint dirty for warp-ui
+INFO cargo::core::compiler::fingerprint: stale: changed dependency
+"""
+        )
+        output = io.StringIO()
+
+        count_signals(fingerprint_log, output)
+
+        self.assertEqual(output.getvalue(), "1 2 1\n")
 
 
 if __name__ == "__main__":
