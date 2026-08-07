@@ -167,14 +167,14 @@ fn the_factory_path_is_the_root_plus_scope_and_plugin_key() {
                 name: "release".to_owned(),
             },
             "acme-tools",
-            "/cache/factories/fac_01HZY/plugin-data/agent-release/acme-tools",
+            "/cache/factories/fac_01HZY/plugin-data/agent/release/acme-tools",
         ),
         (
             PluginScopeId::Automation {
                 name: "nightly".to_owned(),
             },
             "release.tools",
-            "/cache/factories/fac_01HZY/plugin-data/automation-nightly/release.tools",
+            "/cache/factories/fac_01HZY/plugin-data/automation/nightly/release.tools",
         ),
     ];
 
@@ -268,10 +268,10 @@ fn an_author_controlled_scope_name_cannot_escape_the_root() {
             "'{hostile}' escaped: {}",
             path.display()
         );
-        // Root, `durable`, `fac_01HZY`, the scope segment, and the plugin key: no more.
+        // Root, `durable`, `fac_01HZY`, `agent`, the sanitized name, and the plugin key.
         assert_eq!(
             path.components().count(),
-            5,
+            6,
             "'{hostile}' produced an unexpected depth: {}",
             path.display()
         );
@@ -321,4 +321,76 @@ fn the_sanitization_rule() {
     assert_eq!(filesystem_safe_segment(""), "e3b0c442");
     assert_eq!(filesystem_safe_segment("."), "cdb4ee2a");
     assert_eq!(filesystem_safe_segment(".."), "5ec1f7e7");
+}
+
+/// Drives the composition through the vendored cross-repo contract's own worked examples.
+///
+/// This is the consuming half of the assertion warp-server makes against the same file. If the
+/// canonical contract changes and this copy is re-vendored without the behavior following, this
+/// test fails rather than plugin data silently moving.
+#[test]
+fn the_vendored_contract_examples_compose_identically() {
+    const CONTRACT: &str = include_str!("contract/factory_plugin_runtime_contract.json");
+    let contract: serde_json::Value = serde_json::from_str(CONTRACT).unwrap();
+
+    // The variable names this client reads must be the ones the server declares it produces.
+    let declared: Vec<&str> = contract["environment_variables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["name"].as_str().unwrap())
+        .collect();
+    for required in [
+        PLUGIN_DATA_ROOT_ENV,
+        FACTORY_UID_ENV,
+        crate::plugins::PLUGIN_DIRS_ENV,
+        crate::plugins::FACTORY_MCP_FILES_ENV,
+    ] {
+        assert!(
+            declared.contains(&required),
+            "the contract no longer declares '{required}'; it declares {declared:?}"
+        );
+    }
+    assert_eq!(
+        contract["plugin_data_path"]["composed"].as_str().unwrap(),
+        "${WARP_PLUGIN_DATA_ROOT}/<scope>/<plugin-key>"
+    );
+
+    for example in contract["examples"].as_array().unwrap() {
+        let root = example["server_exports"].as_str().unwrap();
+        let scope = example["scope"].as_str().unwrap();
+        let plugin_key = example["plugin_key"].as_str().unwrap();
+        let expected = example["composed"].as_str().unwrap();
+
+        // Rebuild the scope the contract names, so the example drives the real composition
+        // rather than a restatement of it.
+        let scope = match scope.split_once('/') {
+            None => {
+                assert_eq!(scope, "factory", "unhandled contract scope '{scope}'");
+                PluginScopeId::Factory
+            }
+            Some(("agent", name)) => PluginScopeId::Agent {
+                name: name.to_owned(),
+            },
+            Some(("automation", name)) => PluginScopeId::Automation {
+                name: name.to_owned(),
+            },
+            Some(_) => panic!("unhandled contract scope '{scope}'"),
+        };
+
+        let locator =
+            FactoryPluginDataLocator::new(root, example["factory_uid"].as_str().map(str::to_owned));
+        let instance = instance(
+            scope,
+            PluginSourceKind::FactoryRepository,
+            "/checkout",
+            plugin_key,
+        );
+        assert_eq!(
+            locator.data_dir(&instance),
+            std::path::PathBuf::from(expected),
+            "contract example for scope '{}' did not compose as declared",
+            example["scope"]
+        );
+    }
 }

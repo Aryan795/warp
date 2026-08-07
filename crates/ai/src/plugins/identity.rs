@@ -101,20 +101,24 @@ impl PluginScopeId {
         }
     }
 
-    /// One filesystem-safe directory name for this scope.
+    /// The directory segments this scope contributes to a Factory's plugin data path.
     ///
-    /// Distinct from [`key_token`](Self::key_token), which is hashed and may contain separators.
-    /// This value becomes a real directory under a Factory's durable data root, and an agent or
-    /// automation name comes from a repository, so it is flattened into a single segment and
-    /// sanitized rather than nested.
-    pub fn path_segment(&self) -> String {
+    /// The shape matches the cross-repo contract's `scope` values — `factory`, `agent/<name>`,
+    /// `automation/<name>` — but each element is returned separately and individually sanitized.
+    /// Returning segments rather than a joined string is the point: an agent or automation name
+    /// comes from a repository, and a name like `../../etc` joined naively would climb out of the
+    /// durable root. A conformant name sanitizes to itself, so the contract's worked examples are
+    /// unaffected.
+    pub fn data_path_segments(&self) -> Vec<String> {
         match self {
-            PluginScopeId::User => "user".to_owned(),
-            PluginScopeId::Repository => "repository".to_owned(),
-            PluginScopeId::Factory => "factory".to_owned(),
-            PluginScopeId::Agent { name } => format!("agent-{}", filesystem_safe_segment(name)),
+            PluginScopeId::User => vec!["user".to_owned()],
+            PluginScopeId::Repository => vec!["repository".to_owned()],
+            PluginScopeId::Factory => vec!["factory".to_owned()],
+            PluginScopeId::Agent { name } => {
+                vec!["agent".to_owned(), filesystem_safe_segment(name)]
+            }
             PluginScopeId::Automation { name } => {
-                format!("automation-{}", filesystem_safe_segment(name))
+                vec!["automation".to_owned(), filesystem_safe_segment(name)]
             }
         }
     }

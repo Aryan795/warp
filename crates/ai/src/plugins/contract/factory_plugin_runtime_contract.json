@@ -1,0 +1,76 @@
+{
+  "contract": "factory-plugin-runtime",
+  "version": "1.0.0",
+  "canonical_source": "warpdotdev/warp-server: logic/ai/ambient_agents/workers/common/testdata/factory_plugin_runtime_contract.json",
+  "description": "Environment contract between the warp-server dispatch path and the Warp client for Agent Plugins in a file-managed Factory run. warp-server asserts the producing half against this file; the Warp client vendors a verbatim copy and asserts the consuming half, so a divergence appears as a diff between two committed files.",
+  "environment_variables": [
+    {
+      "name": "WARP_SKILL_DIRS",
+      "produced_by": "server",
+      "encoding": "comma-separated paths",
+      "order": "most specific first: agent, then factory",
+      "relative_to": "environment working directory",
+      "required": false
+    },
+    {
+      "name": "WARP_PLUGIN_DIRS",
+      "produced_by": "server",
+      "encoding": "comma-separated paths",
+      "order": "most specific first: automation, then bound agent, then factory",
+      "relative_to": "environment working directory",
+      "required": false,
+      "notes": "Each entry is a plugin collection directory. The client enumerates immediate child directories as packages; a package whose manifest name repeats in a later directory is shadowed by the earlier one."
+    },
+    {
+      "name": "WARP_FACTORY_MCP_FILES",
+      "produced_by": "server",
+      "encoding": "comma-separated paths",
+      "order": "most specific first: automation, then bound agent, then factory",
+      "relative_to": "environment working directory",
+      "required": false,
+      "notes": "The client loads ordinary entries and ignores managed entries, which Factory sync already projected."
+    },
+    {
+      "name": "WARP_FACTORY_UID",
+      "produced_by": "server",
+      "encoding": "opaque identifier",
+      "required": false,
+      "notes": "Identity and diagnostics only. It is never used to compose a path: the plugin data root already carries it."
+    },
+    {
+      "name": "WARP_PLUGIN_DATA_ROOT",
+      "produced_by": "server",
+      "encoding": "absolute path",
+      "required": false,
+      "notes": "Absence means the backend has no durable storage, and the client must not start a Factory plugin stdio MCP server."
+    }
+  ],
+  "plugin_data_path": {
+    "server_exports": "<durable-base>/plugin-data/<factory-uid>",
+    "client_appends": "<scope>/<plugin-key>",
+    "composed": "${WARP_PLUGIN_DATA_ROOT}/<scope>/<plugin-key>",
+    "scope_values": ["factory", "agent/<agent-name>", "automation/<automation-name>"],
+    "notes": [
+      "The Factory UID is baked into the exported root by the server so two Factories running as the same principal cannot share a data directory.",
+      "The client keeps its own local layout (plugins/data/<hash>) for non-Factory plugins; this contract governs Factory plugins only."
+    ]
+  },
+  "examples": [
+    {
+      "durable_base": "/cache/warp",
+      "factory_uid": "factory-uid-1",
+      "server_exports": "/cache/warp/plugin-data/factory-uid-1",
+      "scope": "agent/triage",
+      "plugin_key": "acme-tools",
+      "composed": "/cache/warp/plugin-data/factory-uid-1/agent/triage/acme-tools"
+    },
+    {
+      "durable_base": "/Volumes/warp-state",
+      "factory_uid": "factory-uid-2",
+      "server_exports": "/Volumes/warp-state/plugin-data/factory-uid-2",
+      "scope": "factory",
+      "plugin_key": "shared-tools",
+      "composed": "/Volumes/warp-state/plugin-data/factory-uid-2/factory/shared-tools"
+    }
+  ]
+}
