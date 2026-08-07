@@ -152,7 +152,7 @@ fn ensure_data_dir_creates_the_directory() {
 #[test]
 fn the_factory_path_is_the_root_plus_scope_and_plugin_key() {
     let locator = FactoryPluginDataLocator::new(
-        "/cache/factories/fac_01HZY/plugin-data",
+        "/cache/warp/plugin-data/fac_01HZY",
         Some("fac_01HZY".to_owned()),
     );
 
@@ -160,21 +160,21 @@ fn the_factory_path_is_the_root_plus_scope_and_plugin_key() {
         (
             PluginScopeId::Factory,
             "acme-tools",
-            "/cache/factories/fac_01HZY/plugin-data/factory/acme-tools",
+            "/cache/warp/plugin-data/fac_01HZY/factory/acme-tools",
         ),
         (
             PluginScopeId::Agent {
                 name: "release".to_owned(),
             },
             "acme-tools",
-            "/cache/factories/fac_01HZY/plugin-data/agent/release/acme-tools",
+            "/cache/warp/plugin-data/fac_01HZY/agent/release/acme-tools",
         ),
         (
             PluginScopeId::Automation {
                 name: "nightly".to_owned(),
             },
             "release.tools",
-            "/cache/factories/fac_01HZY/plugin-data/automation/nightly/release.tools",
+            "/cache/warp/plugin-data/fac_01HZY/automation/nightly/release.tools",
         ),
     ];
 
@@ -196,7 +196,10 @@ fn the_factory_path_is_the_root_plus_scope_and_plugin_key() {
 /// underneath the one the worker already created.
 #[test]
 fn the_factory_uid_never_enters_the_path() {
-    let locator = FactoryPluginDataLocator::new("/durable/fac_01HZY", Some("fac_01HZY".to_owned()));
+    let locator = FactoryPluginDataLocator::new(
+        "/durable/plugin-data/fac_01HZY",
+        Some("fac_01HZY".to_owned()),
+    );
     let instance = instance(
         PluginScopeId::Factory,
         PluginSourceKind::FactoryRepository,
@@ -207,7 +210,7 @@ fn the_factory_uid_never_enters_the_path() {
     assert_eq!(locator.factory_uid(), Some("fac_01HZY"));
     assert_eq!(
         locator.data_dir(&instance),
-        std::path::PathBuf::from("/durable/fac_01HZY/factory/acme-tools")
+        std::path::PathBuf::from("/durable/plugin-data/fac_01HZY/factory/acme-tools")
     );
     // Exactly one occurrence: the one the server put in the root.
     assert_eq!(
@@ -223,7 +226,7 @@ fn the_factory_uid_never_enters_the_path() {
 /// The Factory layout must not nest the local one, which is the defect this type exists to stop.
 #[test]
 fn the_factory_layout_is_not_the_local_layout() {
-    let factory = FactoryPluginDataLocator::new("/durable/fac_01HZY", None);
+    let factory = FactoryPluginDataLocator::new("/durable/plugin-data/fac_01HZY", None);
     let factory_instance = instance(
         PluginScopeId::Factory,
         PluginSourceKind::FactoryRepository,
@@ -251,7 +254,7 @@ fn the_factory_layout_is_not_the_local_layout() {
 /// An agent name comes from a repository, so it must not be able to climb out of the root.
 #[test]
 fn an_author_controlled_scope_name_cannot_escape_the_root() {
-    let locator = FactoryPluginDataLocator::new("/durable/fac_01HZY", None);
+    let locator = FactoryPluginDataLocator::new("/durable/plugin-data/fac_01HZY", None);
 
     for hostile in ["../../etc", "..", ".", "a/b", "a\\b", "", "Mixed Case"] {
         let instance = instance(
@@ -263,16 +266,22 @@ fn an_author_controlled_scope_name_cannot_escape_the_root() {
             "acme-tools",
         );
         let path = locator.data_dir(&instance);
-        assert!(
-            path.starts_with("/durable/fac_01HZY"),
-            "'{hostile}' escaped: {}",
+        let below_root = path
+            .strip_prefix("/durable/plugin-data/fac_01HZY")
+            .unwrap_or_else(|_| panic!("'{hostile}' escaped: {}", path.display()));
+        // Exactly `agent`, the sanitized name, and the plugin key below the root, and no
+        // component of it is a parent reference.
+        assert_eq!(
+            below_root.components().count(),
+            3,
+            "'{hostile}' produced an unexpected depth: {}",
             path.display()
         );
-        // Root, `durable`, `fac_01HZY`, `agent`, the sanitized name, and the plugin key.
-        assert_eq!(
-            path.components().count(),
-            6,
-            "'{hostile}' produced an unexpected depth: {}",
+        assert!(
+            !below_root
+                .components()
+                .any(|c| c.as_os_str() == std::ffi::OsStr::new("..")),
+            "'{hostile}' produced a parent reference: {}",
             path.display()
         );
     }
@@ -281,7 +290,7 @@ fn an_author_controlled_scope_name_cannot_escape_the_root() {
 /// Two hostile names that reduce to the same visible text must still get separate directories.
 #[test]
 fn distinct_names_that_sanitize_alike_do_not_collide() {
-    let locator = FactoryPluginDataLocator::new("/durable/fac_01HZY", None);
+    let locator = FactoryPluginDataLocator::new("/durable/plugin-data/fac_01HZY", None);
     let path_for = |name: &str| {
         locator.data_dir(&instance(
             PluginScopeId::Agent {
@@ -316,6 +325,12 @@ fn the_sanitization_rule() {
     // Transformed: reduced, then suffixed with the first four bytes of the SHA-256 of the input.
     assert_eq!(filesystem_safe_segment("a/b"), "a-b-c14cddc0");
     assert_eq!(filesystem_safe_segment("Mixed Case"), "mixed-case-0962903a");
+
+    // Periods survive step 1, so a traversal attempt keeps them and is distinguished only by
+    // the digest. This case was hand-written wrong once; it is executed here so it cannot be
+    // again.
+    assert_eq!(filesystem_safe_segment("../../etc"), "..-..-etc-74ccf3c5");
+    assert_eq!(filesystem_safe_segment("..-..-etc"), "..-..-etc");
 
     // Reserved or empty: the digest alone, since there is no safe text to keep.
     assert_eq!(filesystem_safe_segment(""), "e3b0c442");
