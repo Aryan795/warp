@@ -1,36 +1,36 @@
-# REMOTE-2591: Desktop web text-input bridge for the Warp prompt
+# REMOTE-2591: Desktop web text-input bridge for active text carets
 
 ## Summary
-Warp for Web must expose a focused editable browser element while its prompt is focused. This lets MacWhisper-class dictation tools, macOS Dictation, and browser text-input services attach to the prompt and insert text into the canvas-rendered editor.
+Warp for Web must expose a focused editable browser element while any editable Warp surface owns an active text caret. This lets MacWhisper-class dictation tools, macOS Dictation, and browser text-input services attach to the active surface and insert text into the canvas-rendered editor.
 
-The requester approved a narrow, prompt-only insertion bridge. The bridge is not a full DOM mirror of the prompt.
+The requester approved a narrow insertion capability and then chose a general surface rule: activate the bridge for any focused editable surface with an active text caret. The bridge is not a full DOM mirror of the surface.
 
 Figma: none provided. The bridge has no visible UI.
 
 ## Behavior
-1. The bridge is active only for the main editable prompt in Warp for Web on desktop browsers. The prompt includes shell input, agent input, and follow-up input when they use the same terminal prompt editor.
+1. On desktop browsers, the bridge is active when the focused Warp view reports an active editable text caret. The rule does not identify views by product name or require each field to opt in.
 
-2. When the Warp prompt gains focus, Warp focuses a real multiline browser text control in the same user interaction. The control stays focused for the full time that the Warp prompt owns focus.
+2. When an editable Warp surface gains focus and reports an active text caret, Warp focuses a real multiline browser text control in the same user interaction. The control stays focused for the full time that the surface owns the active text caret.
 
-3. When a tool such as MacWhisper activates while the prompt is focused:
+3. When a tool such as MacWhisper activates while an editable Warp surface is focused:
    - The tool detects a focused editable text control.
    - The tool can show its normal listening UI.
-   - Committed transcription is inserted into the Warp prompt.
+   - Committed transcription is inserted into the focused Warp surface.
    - One committed transcription produces one insertion.
 
-4. The bridge is transparent and does not add visible text, a native caret, scrolling, layout changes, or a new click target. Its browser-reported bounds follow the active Warp caret so tool UI and IME candidate UI can anchor near the caret.
+4. The bridge is transparent and does not add visible text, a native caret, scrolling, layout changes, or a new click target. Its browser-reported bounds follow the active Warp text caret so tool UI and IME candidate UI can anchor near the caret.
 
-5. The bridge reports the native semantics of a multiline text box. Its accessible name is “Warp prompt.” It is not hidden from the browser accessibility tree.
+5. The bridge reports the native semantics of a multiline text box. Its accessible name is “Warp text input.” It is not hidden from the browser accessibility tree.
 
-6. The Warp editor remains the source of truth for prompt text, caret position, and selection. The bridge keeps only its input sentinel and does not expose the existing prompt contents as its value.
+6. The focused Warp surface remains the source of truth for text, caret position, and selection. The bridge keeps only its input sentinel and does not expose existing contents as its value.
 
-7. Dictated or otherwise programmatically inserted text lands at the current Warp caret.
+7. Dictated or otherwise programmatically inserted text lands at the focused surface’s current Warp caret.
 
-8. If the Warp prompt has a selection, inserted text replaces that selection. Text before and after the selection remains unchanged. After insertion, the Warp caret collapses after the inserted text, following the editor’s existing insertion behavior.
+8. If the focused surface has a selection, inserted text replaces that selection. Text before and after the selection remains unchanged. After insertion, the Warp caret collapses after the inserted text, following that surface’s existing insertion behavior.
 
-9. If the prompt already contains text and has no selection, inserted text is added at the current caret. Existing text is not cleared or replaced.
+9. If the focused surface already contains text and has no selection, inserted text is added at the current caret. Existing text is not cleared or replaced.
 
-10. Repeated dictation commits append or replace text at the then-current Warp caret. Resetting the bridge sentinel between commits must not move the Warp caret.
+10. Repeated dictation commits append or replace text at the then-current Warp caret. Resetting the bridge sentinel between commits must not move the focused surface’s caret.
 
 11. Hardware keyboard input continues to behave as it does before this change:
     - Printable keys insert once.
@@ -43,29 +43,43 @@ Figma: none provided. The bridge has no visible UI.
 13. CJK and other IME input uses browser composition:
     - In-progress composition is shown through Warp’s existing marked-text UI.
     - Candidate selection does not commit intermediate text.
-    - Composition commit replaces the current Warp selection or inserts at the current caret.
+    - Composition commit replaces the focused surface’s current Warp selection or inserts at its current caret.
     - The final composition text is committed exactly once, even when the browser emits both `compositionend` and a trailing `input` event.
 
-14. If the prompt loses focus during composition, Warp clears unfinished marked text. Warp commits text only when the browser delivered a composition commit before the blur.
+14. If the text surface loses focus during composition, Warp clears unfinished marked text. Warp commits text only when the browser delivered a composition commit before the blur.
 
-15. Clicking within the prompt moves the Warp caret or changes the Warp selection using existing canvas hit testing. The bridge remains focused after the click.
+15. Clicking within an editable text surface moves its Warp caret or changes its Warp selection using existing canvas hit testing. The bridge remains focused after the click.
 
-16. When the user clicks another Warp surface, opens a Warp modal that takes focus, or otherwise moves Warp focus away from the prompt:
+16. When focus moves between editable Warp surfaces, the bridge stays focused and moves to the new active caret. Subsequent text goes only to the newly focused surface.
+
+17. When focus moves to a Warp surface that does not report an active editable text caret:
     - The bridge blurs.
-    - Dictation tools no longer target the prompt.
-    - The canvas or the newly focused Warp surface receives normal keyboard interaction.
+    - Dictation tools no longer target a Warp text surface.
+    - The canvas or newly focused surface receives normal keyboard interaction.
 
-17. Switching to another browser tab or application does not cause Warp to force focus back to the bridge. When the browser tab becomes active again, Warp restores the bridge only if the Warp prompt still owns focus.
+18. Switching to another browser tab or application does not cause Warp to force focus back to the bridge. When the browser tab becomes active again, Warp restores the bridge only if the focused Warp surface still reports an active editable text caret.
 
-18. A read-only, disabled, or viewer-only prompt does not activate the bridge.
+19. A read-only, disabled, viewer-only, or selectable-only surface does not activate the bridge, even if it renders a cursor or selection.
 
-19. Failure to create or focus the bridge does not disable the existing canvas keyboard path. Warp logs the failure without logging prompt or dictated text.
+20. Failure to create or focus the bridge does not disable the existing canvas keyboard path. Warp logs the failure without logging existing or inserted text.
 
-20. The existing mobile soft-keyboard behavior remains unchanged on iOS and Android. Mobile continues to use its current hidden-input path, sentinel behavior, soft-keyboard lifecycle, and viewport resize handling.
+21. The existing mobile soft-keyboard behavior remains unchanged on iOS and Android. Mobile continues to use its current hidden-input path, sentinel behavior, soft-keyboard lifecycle, and viewport resize handling.
+
+## Surface coverage
+The active-caret rule includes these canvas-rendered surface families when they are editable and focused:
+- Terminal, agent, and follow-up prompts, including queued-prompt editing and compact agent inputs.
+- Single-line and multiline text fields in search, settings, forms, dialogs, rename flows, workflow editors, environment configuration, sharing, and comments.
+- Editable code editors, including JSON/configuration editors and source editors that are available in Warp for Web.
+- Editable rich-text surfaces, including notebook bodies, notebook titles, and comment editors.
+- The raw terminal surface when it owns the active terminal caret. This matches the native IME contract and permits dictation into shells, REPLs, and terminal applications.
+
+The rule excludes these canvas-rendered surfaces:
+- Labels, rendered output, search results, menu items, and other surfaces that only display text.
+- Read-only, disabled, viewer-only, and selectable-only editor instances.
+- A rich-text surface while it hides its caret for a command selection or a nested link editor. The nested editor can activate the bridge when it owns focus.
 
 ## Out of scope
-- Full screen-reader reading, selection, or caret navigation is out of scope because the approved bridge does not mirror prompt contents.
-- Browser autofill and password-manager integration are out of scope because the prompt is not a credential or profile form and the bridge keeps autocomplete disabled.
-- Editable surfaces other than the main prompt are out of scope. Each surface needs an explicit product decision before it can opt in to a persistent DOM text-input bridge.
+- Full screen-reader reading, selection, or caret navigation is out of scope because the approved bridge does not mirror surface contents.
+- Browser autofill and password-manager integration are out of scope because the bridge is not a form or credential field and keeps autocomplete disabled.
 - Warp desktop is out of scope. The native macOS client already implements `NSTextInputClient` and exposes a native accessibility text-area role.
 - Mobile dictation changes are out of scope. This work must preserve the existing mobile path without changing its behavior.
