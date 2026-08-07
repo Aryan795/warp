@@ -395,3 +395,133 @@ fn breadcrumb_ids_are_empty_at_the_root() {
         });
     });
 }
+
+/// The pill bar's history subscription must treat
+/// `ConversationServerTokenAssigned` as a re-render trigger: a remote child's
+/// run-id linkage can land after `StartedNewConversation` (via
+/// `assign_run_id_for_conversation`), and pill contents keyed on run linkage
+/// would otherwise stay stale until an unrelated status event fired.
+#[test]
+fn conversation_server_token_assignment_rerenders_the_pill_bar() {
+    use std::sync::Arc;
+
+    use parking_lot::FairMutex;
+    use warpui::App;
+    use warpui::r#async::executor::Background;
+    use warpui::platform::WindowStyle;
+
+    use crate::ai::blocklist::agent_view::{AgentViewEntryOrigin, EphemeralMessageModel};
+    use crate::terminal::TerminalModel;
+    use crate::terminal::color::{self, Colors};
+    use crate::terminal::event_listener::ChannelEventListener;
+    use crate::terminal::model::test_utils::block_size;
+    use crate::test_util::settings::initialize_history_persistence_for_tests;
+
+    /// Hosts the pill bar without embedding it in the rendered element tree,
+    /// so the scene builds triggered by its notifications stay trivial.
+    struct PillBarHost {
+        pill_bar: ViewHandle<OrchestrationPillBar>,
+    }
+
+    impl Entity for PillBarHost {
+        type Event = ();
+    }
+
+    impl View for PillBarHost {
+        fn ui_name() -> &'static str {
+            "PillBarHost"
+        }
+
+        fn render(&self, _app: &AppContext) -> Box<dyn Element> {
+            Empty::new().finish()
+        }
+    }
+
+    impl TypedActionView for PillBarHost {
+        type Action = ();
+    }
+
+    App::test((), |mut app| async move {
+        initialize_history_persistence_for_tests(&mut app);
+        app.add_singleton_model(|_| Appearance::mock());
+        let history_model = app.add_singleton_model(|_| BlocklistAIHistoryModel::new_for_test());
+        app.add_singleton_model(|ctx| OrchestrationPillBarModel::new(HashSet::new(), ctx));
+
+        let terminal_view_id = EntityId::new();
+        let terminal_model = Arc::new(FairMutex::new(TerminalModel::new_for_test(
+            block_size(),
+            color::List::from(&Colors::default()),
+            ChannelEventListener::new_for_test(),
+            Arc::new(Background::default()),
+            false,
+            None,
+            false,
+            false,
+            None,
+        )));
+        let ephemeral_message_model = app.add_model(|_| EphemeralMessageModel::new());
+        let agent_view_controller = app.add_model(|_| {
+            AgentViewController::new(terminal_model, terminal_view_id, ephemeral_message_model)
+        });
+
+        let root_id = history_model.update(&mut app, |history, ctx| {
+            history.start_new_conversation(terminal_view_id, false, false, false, ctx)
+        });
+        let child_id = history_model.update(&mut app, |history, ctx| {
+            history.start_new_child_conversation(
+                terminal_view_id,
+                "child".to_string(),
+                root_id,
+                None,
+                ctx,
+            )
+        });
+
+        // Activate the agent view on the root BEFORE the pill bar exists so
+        // the entry events cannot populate its mouse-state cache; the only
+        // event the bar sees below is the token assignment.
+        agent_view_controller.update(&mut app, |controller, ctx| {
+            controller
+                .try_enter_agent_view(
+                    Some(root_id),
+                    AgentViewEntryOrigin::ConversationSelector,
+                    ctx,
+                )
+                .expect("agent view entry should succeed");
+        });
+
+        let (_window_id, host) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
+            let controller = agent_view_controller.clone();
+            let pill_bar =
+                ctx.add_typed_action_view(move |ctx| OrchestrationPillBar::new(controller, ctx));
+            PillBarHost { pill_bar }
+        });
+        let pill_bar = host.read(&app, |host, _| host.pill_bar.clone());
+
+        pill_bar.read(&app, |bar, _| {
+            assert!(
+                bar.mouse_states.borrow().is_empty(),
+                "no history event has reached the pill bar yet",
+            );
+        });
+
+        history_model.update(&mut app, |history, ctx| {
+            history.assign_run_id_for_conversation(
+                child_id,
+                "run-123".to_string(),
+                None,
+                terminal_view_id,
+                ctx,
+            );
+        });
+
+        pill_bar.read(&app, |bar, _| {
+            let mouse_states = bar.mouse_states.borrow();
+            assert!(
+                mouse_states.contains_key(&root_id) && mouse_states.contains_key(&child_id),
+                "ConversationServerTokenAssigned must re-render the pill bar, refreshing \
+                 mouse states for the visible pills",
+            );
+        });
+    });
+}

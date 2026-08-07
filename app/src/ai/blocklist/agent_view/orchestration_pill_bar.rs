@@ -379,7 +379,11 @@ impl OrchestrationPillBar {
             BlocklistAIHistoryEvent::UpdatedConversationStatus { .. }
             | BlocklistAIHistoryEvent::AppendedExchange { .. }
             | BlocklistAIHistoryEvent::SetActiveConversation { .. }
-            | BlocklistAIHistoryEvent::StartedNewConversation { .. } => {
+            | BlocklistAIHistoryEvent::StartedNewConversation { .. }
+            // A remote child's run-id linkage can land after
+            // StartedNewConversation; pill contents and badges keyed on run
+            // linkage must refresh when it does.
+            | BlocklistAIHistoryEvent::ConversationServerTokenAssigned { .. } => {
                 this.ensure_mouse_states(ctx);
                 ctx.notify();
             }
