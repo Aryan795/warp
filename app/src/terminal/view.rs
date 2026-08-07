@@ -5560,7 +5560,7 @@ impl TerminalView {
         ctx: &mut ViewContext<Self>,
     ) -> bool {
         let Some(pending) = self.pending_viewer_prompts.remove(request_id) else {
-            return false;
+            return self.finalize_late_acknowledged_row(request_id, ctx);
         };
         if let Some(timeout) = pending.timeout {
             timeout.abort();
@@ -5568,6 +5568,34 @@ impl TerminalView {
         // Dropping the claim finalizes the row's removal: the prompt is now the sharer's.
         self.input.update(ctx, |input, ctx| {
             input.unfreeze_agent_input(true, ctx);
+        });
+        true
+    }
+
+    /// Removes a queue row whose acknowledgement arrived after the client had already given up on
+    /// it, so a prompt the sharer did receive is not left queued to be sent a second time.
+    ///
+    /// Only an untouched row matches: editing it mints a new request ID, which is what stops a
+    /// stale acknowledgement from deleting the user's revised prompt.
+    fn finalize_late_acknowledged_row(
+        &mut self,
+        request_id: &AgentPromptRequestId,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        let queue_model = QueuedQueryModel::as_ref(ctx);
+        let Some((conversation_id, query_id)) = BlocklistAIHistoryModel::as_ref(ctx)
+            .all_live_conversations_for_terminal_surface(self.view_id)
+            .map(|conversation| conversation.id())
+            .find_map(|conversation_id| {
+                queue_model
+                    .row_for_request_id(conversation_id, request_id)
+                    .map(|row| (conversation_id, row.id()))
+            })
+        else {
+            return false;
+        };
+        QueuedQueryModel::handle(ctx).update(ctx, |model, ctx| {
+            model.remove_fired_row(conversation_id, query_id, ctx);
         });
         true
     }

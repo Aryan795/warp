@@ -71,7 +71,7 @@ const RECONNECT_RETRY_STRATEGY: RetryOption = RetryOption::exponential(
 .with_jitter(0.2);
 
 #[derive(Debug)]
-enum Stage {
+pub(super) enum Stage {
     BeforeJoined,
     JoinedSuccessfully,
     Reconnecting {
@@ -105,10 +105,21 @@ pub enum ServerMessageSendOutcome {
     Undeliverable,
 }
 
-impl ServerMessageSendOutcome {
-    pub fn is_undeliverable(self) -> bool {
-        matches!(self, ServerMessageSendOutcome::Undeliverable)
-    }
+/// Renders the diagnostic for a message the client refused to send.
+///
+/// Every field is a static label or an opaque identifier. Nothing derived from the message body
+/// reaches the line, because prompts, attachments, and input buffer bytes are all carried inside
+/// [`UpstreamMessage`].
+fn undeliverable_message_log_line(
+    kind: &'static str,
+    stage: &'static str,
+    session_id: SessionId,
+    reason: &'static str,
+) -> String {
+    format!(
+        "Viewer network dropped outbound message: kind={kind} stage={stage} \
+         session_id={session_id} reason={reason}"
+    )
 }
 
 /// A content-free label for an [`UpstreamMessage`]. Rendering the message itself would leak prompt
@@ -178,7 +189,7 @@ pub struct Network {
     initial_load_mode: SharedSessionInitialLoadMode,
     remote_update_guard: RemoteUpdateGuard,
 
-    stage: Stage,
+    pub(super) stage: Stage,
 
     /// Intermediate channel to queue up messages to send over
     /// over the websocket to the server.
@@ -186,7 +197,7 @@ pub struct Network {
     selection_throttled_tx: async_channel::Sender<Selection>,
 
     #[cfg(test)]
-    ws_proxy_rx: async_channel::Receiver<UpstreamMessage>,
+    pub(super) ws_proxy_rx: async_channel::Receiver<UpstreamMessage>,
 
     /// The participant ID we were assigned by the server.
     /// This is populated after successfully joining a session, and
@@ -893,10 +904,13 @@ impl Network {
         let kind = upstream_message_kind(&message);
         let Stage::JoinedSuccessfully = self.stage else {
             log::warn!(
-                "Viewer network dropped outbound message: kind={kind} stage={} session_id={} \
-                 reason=not_joined",
-                self.stage.kind(),
-                self.session_id,
+                "{}",
+                undeliverable_message_log_line(
+                    kind,
+                    self.stage.kind(),
+                    self.session_id,
+                    "not_joined"
+                )
             );
             return ServerMessageSendOutcome::Undeliverable;
         };
@@ -906,10 +920,8 @@ impl Network {
                 async_channel::TrySendError::Closed(_) => "proxy_channel_closed",
             };
             log::warn!(
-                "Viewer network dropped outbound message: kind={kind} stage={} session_id={} \
-                 reason={reason}",
-                self.stage.kind(),
-                self.session_id,
+                "{}",
+                undeliverable_message_log_line(kind, self.stage.kind(), self.session_id, reason)
             );
             return ServerMessageSendOutcome::Undeliverable;
         }

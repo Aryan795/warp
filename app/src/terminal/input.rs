@@ -4266,7 +4266,10 @@ impl Input {
     /// caller should handle the local case (submit locally for Enter, or emit the default
     /// unhandled-cmd-enter action for Cmd+Enter). Also returns `false` for an executor viewer
     /// running a local-action slash command such as `/fork`.
-    fn maybe_route_ai_query_to_remote_target(&mut self, ctx: &mut ViewContext<Self>) -> bool {
+    pub(crate) fn maybe_route_ai_query_to_remote_target(
+        &mut self,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
         // Nothing to route for an empty buffer; let the caller's normal (no-op) handling run.
         if self.editor.as_ref(ctx).buffer_text(ctx).trim().is_empty() {
             return false;
