@@ -9,6 +9,7 @@ use warpui::{
 };
 
 use crate::appearance::Appearance;
+use crate::cloud_object::CloudObject;
 use crate::cloud_object::model::persistence::CloudModel;
 use crate::search::command_palette::warp_drive;
 use crate::search::data_source::{DataSourceSearchError, Query, QueryResult};
@@ -22,6 +23,7 @@ use crate::terminal::input::inline_menu::{
 };
 use crate::terminal::input::message_bar::Message;
 use crate::workflows::CloudWorkflow;
+use crate::workspaces::user_workspaces::UserWorkspaces;
 
 #[derive(Clone, Debug)]
 pub struct AcceptPrompt {
@@ -38,6 +40,9 @@ impl InlineMenuAction for AcceptPrompt {
 
 pub struct PromptsMenuDataSource {
     warp_drive_data_source: ModelHandle<warp_drive::DataSource>,
+    /// The short-query paths below read the global [`CloudModel`] directly rather than going
+    /// through `warp_drive_data_source`, so they scope themselves to this window's spaces.
+    window_id: WindowId,
 }
 
 impl PromptsMenuDataSource {
@@ -50,7 +55,23 @@ impl PromptsMenuDataSource {
             ctx.add_model(|ctx| warp_drive::DataSource::new_fuzzy(window_id, ctx));
         Self {
             warp_drive_data_source,
+            window_id,
         }
+    }
+
+    /// The prompts visible in this data source's window: those in the window's team space, plus
+    /// the user's personal and shared-with-me prompts.
+    fn prompts_in_window<'a>(
+        &self,
+        app: &'a AppContext,
+    ) -> impl Iterator<Item = &'a CloudWorkflow> {
+        let spaces = UserWorkspaces::as_ref(app).spaces_for_window(self.window_id, app);
+        CloudModel::as_ref(app)
+            .get_all_active_workflows()
+            .filter(move |workflow| {
+                !workflow.model().data.is_command_workflow()
+                    && spaces.contains(&workflow.space(app))
+            })
     }
 }
 
@@ -65,10 +86,8 @@ impl SyncDataSource for PromptsMenuDataSource {
         let query_text = query.text.trim();
 
         if query_text.is_empty() {
-            let cloud_workflows = CloudModel::as_ref(app).get_all_active_workflows();
-
-            return Ok(cloud_workflows
-                .filter(|workflow| !workflow.model().data.is_command_workflow())
+            return Ok(self
+                .prompts_in_window(app)
                 .map(|workflow| QueryResult::from(PromptSearchItem::from_workflow(workflow)))
                 .collect());
         }
@@ -77,15 +96,14 @@ impl SyncDataSource for PromptsMenuDataSource {
         // search to avoid missing valid results while still filtering the list.
         if query_text.chars().count() == 1 {
             let query_char = query_text.chars().next().unwrap();
-            let cloud_workflows = CloudModel::as_ref(app).get_all_active_workflows();
 
-            return Ok(cloud_workflows
+            return Ok(self
+                .prompts_in_window(app)
                 .filter(|workflow| {
-                    !workflow.model().data.is_command_workflow()
-                        && workflow
-                            .model()
-                            .data
-                            .name_starts_with_char_ignore_case(query_char)
+                    workflow
+                        .model()
+                        .data
+                        .name_starts_with_char_ignore_case(query_char)
                 })
                 .map(|workflow| QueryResult::from(PromptSearchItem::from_workflow(workflow)))
                 .collect());
@@ -230,3 +248,7 @@ impl SearchItem for PromptSearchItem {
         format!("Prompt: {}", self.name)
     }
 }
+
+#[cfg(test)]
+#[path = "data_source_tests.rs"]
+mod tests;

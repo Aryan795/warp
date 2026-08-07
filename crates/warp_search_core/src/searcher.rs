@@ -48,6 +48,20 @@ const DEFAULT_MAX_RESULT_COUNT: usize = 20;
 /// Field name for the composite key that uniquely identifies documents
 const COMPOSITE_KEY_FIELD: &str = "_composite_key";
 
+/// How many scored matches a search should collect.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SearchResultLimit {
+    /// Collect at most [`DEFAULT_MAX_RESULT_COUNT`] top-scored matches.
+    #[default]
+    Default,
+    /// Collect every matching document, ranked by score.
+    ///
+    /// Required when the caller applies its own filtering to the results: a truncated candidate
+    /// set can consist entirely of matches the caller then discards, hiding valid matches that
+    /// scored just below the cut.
+    All,
+}
+
 #[derive(Debug, Clone, Copy, Display)]
 #[allow(unused)]
 pub enum FullTextSearchFieldTypes {
@@ -264,6 +278,7 @@ impl SearcherReaderWrapper {
         &self,
         search_term: &str,
         include_search_fields: bool,
+        result_limit: SearchResultLimit,
     ) -> anyhow::Result<Vec<FullTextSearchMatchUntyped>> {
         // Split the search term into words.
         let words: Vec<&str> = search_term.split_whitespace().collect();
@@ -328,13 +343,30 @@ impl SearcherReaderWrapper {
         // Create the boolean query from collected subqueries.
         let bool_query = BooleanQuery::new(subqueries);
 
+        let limit = match result_limit {
+            SearchResultLimit::Default => DEFAULT_MAX_RESULT_COUNT,
+            // `TopDocs` sizes its heap from the limit, so cap it at the number of indexed docs.
+            SearchResultLimit::All => searcher.num_docs().max(1) as usize,
+        };
+
         // Search for top documents.
         let top_docs = searcher
-            .search(
-                &bool_query,
-                &TopDocs::with_limit(DEFAULT_MAX_RESULT_COUNT).order_by_score(),
-            )
+            .search(&bool_query, &TopDocs::with_limit(limit).order_by_score())
             .with_context(|| "Failed to execute search")?;
+
+        // A snippet generator depends only on the searcher, the query and the field, so build one
+        // per field up front rather than once per matched document.
+        let snippet_generators = self
+            .weighted_search_fields
+            .iter()
+            .map(|(field_name, (field, _))| {
+                let generator = SnippetGenerator::create(&searcher, &bool_query, *field)
+                    .with_context(|| {
+                        format!("Failed to create snippet generator for field {field_name}")
+                    })?;
+                anyhow::Ok((field_name.clone(), (*field, generator)))
+            })
+            .collect::<anyhow::Result<HashMap<_, _>>>()?;
 
         let search_matches = top_docs
             .into_iter()
@@ -351,15 +383,13 @@ impl SearcherReaderWrapper {
                 }
 
                 // Generate highlight information.
-                for (field_name, (field, _)) in &self.weighted_search_fields {
+                for (field_name, (field, snippet_generator)) in &snippet_generators {
                     // Search fields should be strings.
                     let OwnedValue::Str(field_value) = retrieved_doc.get_first(*field)?.into()
                     else {
                         return None;
                     };
 
-                    let snippet_generator =
-                        SnippetGenerator::create(&searcher, &bool_query, *field).ok()?;
                     let snippet = snippet_generator.snippet_from_doc(&retrieved_doc);
 
                     // The snippet might not start from the beginning of the field value. The exclusion condition is set to always false
@@ -785,10 +815,18 @@ impl<C: SearchSchemaConfig> SimpleFullTextSearcher<C> {
         &self,
         search_term: &str,
     ) -> anyhow::Result<Vec<FullTextSearchMatch<C::SearchIdEntry, C::SearchHighlight>>> {
+        self.search_id_with_limit(search_term, SearchResultLimit::Default)
+    }
+
+    pub fn search_id_with_limit(
+        &self,
+        search_term: &str,
+        result_limit: SearchResultLimit,
+    ) -> anyhow::Result<Vec<FullTextSearchMatch<C::SearchIdEntry, C::SearchHighlight>>> {
         Ok(self
             .reader
             .read()
-            .search(search_term, false)?
+            .search(search_term, false, result_limit)?
             .into_iter()
             .filter_map(|search_match| {
                 let Some(values) = C::SearchIdEntry::from_match_result_values(search_match.values)
@@ -820,7 +858,7 @@ impl<C: SearchSchemaConfig> SimpleFullTextSearcher<C> {
         Ok(self
             .reader
             .read()
-            .search(search_term, true)?
+            .search(search_term, true, SearchResultLimit::Default)?
             .into_iter()
             .filter_map(|search_match| {
                 let Some(values) = C::SearchDocEntry::from_match_result_values(search_match.values)
@@ -1263,6 +1301,15 @@ impl<C: SearchSchemaConfig> AsyncSearcher<C> {
         search_term: &str,
     ) -> anyhow::Result<Vec<FullTextSearchMatch<C::SearchIdEntry, C::SearchHighlight>>> {
         self.searcher.search_id(search_term)
+    }
+
+    pub fn search_id_with_limit(
+        &self,
+        search_term: &str,
+        result_limit: SearchResultLimit,
+    ) -> anyhow::Result<Vec<FullTextSearchMatch<C::SearchIdEntry, C::SearchHighlight>>> {
+        self.searcher
+            .search_id_with_limit(search_term, result_limit)
     }
 
     pub fn search_full_doc(

@@ -594,7 +594,9 @@ mod full_text_searcher {
     use crate::search::command_palette::warp_drive::workflow_search_item::WorkflowSearchItem;
     use crate::search::env_var_collections::fuzzy_match::FuzzyMatchEnvVarCollectionResult;
     use crate::search::notebooks::fuzzy_match::FuzzyMatchNotebookResult;
-    use crate::search::searcher::{AsyncSearcher, DEFAULT_MEMORY_BUDGET, SCORE_CONVERSION_FACTOR};
+    use crate::search::searcher::{
+        AsyncSearcher, DEFAULT_MEMORY_BUDGET, SCORE_CONVERSION_FACTOR, SearchResultLimit,
+    };
     use crate::search::workflows::fuzzy_match::FuzzyMatchWorkflowResult;
     use crate::server::ids::ObjectUid;
     use crate::workflows::CloudWorkflow;
@@ -653,6 +655,13 @@ mod full_text_searcher {
         boost_factor: 1.3
     );
 
+    /// The index spans every Warp Drive object the client knows about, while the data source only
+    /// surfaces the ones in the window's spaces. A default-limited search would hand back the top
+    /// 20 matches globally, which another team can fill entirely — leaving nothing after that
+    /// filter even when the window's own drive holds a match. Collecting the full ranked match set
+    /// keeps the filter's input complete.
+    const WARP_DRIVE_SEARCH_LIMIT: SearchResultLimit = SearchResultLimit::All;
+
     pub(crate) struct FullTextWarpDriveSearcher {
         notebook_searcher: AsyncSearcher<NotebookConfig>,
         workflow_searcher: AsyncSearcher<WorkflowConfig>,
@@ -690,7 +699,7 @@ mod full_text_searcher {
 
             Ok(self
                 .notebook_searcher
-                .search_id(query)?
+                .search_id_with_limit(query, WARP_DRIVE_SEARCH_LIMIT)?
                 .into_iter()
                 .filter_map(|search_match| {
                     let notebook: Option<&CloudNotebook> = CloudModel::as_ref(app)
@@ -1032,7 +1041,7 @@ mod full_text_searcher {
 
             Ok(self
                 .workflow_searcher
-                .search_id(query)?
+                .search_id_with_limit(query, WARP_DRIVE_SEARCH_LIMIT)?
                 .into_iter()
                 .filter_map(|search_match| {
                     let cloud_workflow: Option<&CloudWorkflow> = CloudModel::as_ref(app)
@@ -1105,7 +1114,7 @@ mod full_text_searcher {
 
             Ok(self
                 .env_var_searcher
-                .search_id(query)?
+                .search_id_with_limit(query, WARP_DRIVE_SEARCH_LIMIT)?
                 .into_iter()
                 .filter_map(|search_match| {
                     let env_var_collection: Option<&CloudEnvVarCollection> =

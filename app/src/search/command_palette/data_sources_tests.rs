@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
 use cloud_object_client::MockObjectClient;
@@ -12,6 +13,7 @@ use crate::cloud_object::model::view::CloudViewModel;
 use crate::cloud_object::{
     Owner, Revision, ServerMetadata, ServerNotebook, ServerPermissions, ServerWorkflow,
 };
+use crate::features::FeatureFlag;
 use crate::network::NetworkStatus;
 use crate::notebooks::manager::NotebookManager;
 use crate::notebooks::{CloudNotebookModel, NotebookId};
@@ -57,9 +59,18 @@ fn mock_server_permissions(owner: Owner) -> ServerPermissions {
 }
 
 fn mock_server_workflow(id: WorkflowId, owner: Owner) -> ServerWorkflow {
+    mock_named_server_workflow(id, owner, format!("foo{id}"), format!("bar{id}"))
+}
+
+fn mock_named_server_workflow(
+    id: WorkflowId,
+    owner: Owner,
+    name: impl Into<String>,
+    command: impl Into<String>,
+) -> ServerWorkflow {
     ServerWorkflow::new(
         SyncId::ServerId(id.into()),
-        CloudWorkflowModel::new(Workflow::new(format!("foo{id}"), format!("bar{id}"))),
+        CloudWorkflowModel::new(Workflow::new(name, command)),
         mock_server_metadata(),
         mock_server_permissions(owner),
     )
@@ -414,6 +425,86 @@ fn test_drive_data_source_only_returns_objects_visible_in_the_window() {
             ];
             expected.sort();
             assert_eq!(labels, expected);
+        });
+    })
+}
+
+/// Enough out-of-window workflows to more than fill the full-text searcher's default result cap,
+/// so a capped search would collect nothing the window is allowed to see.
+const CROWDING_WORKFLOW_COUNT: i64 = 25;
+
+/// The full-text index spans every team, so a capped search can be filled entirely by another
+/// team's higher-scoring matches. The window's own match must still be found underneath them.
+#[test]
+fn test_full_text_drive_data_source_finds_in_window_objects_outranked_by_another_team() {
+    let _flag = FeatureFlag::UseTantivySearch.override_enabled(true);
+    let selected_team = team_for_test(123, "selected");
+    let other_team = team_for_test(456, "other");
+    let workspace = workspace_for_test(vec![selected_team.clone(), other_team.clone()]);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app, vec![workspace]);
+
+        let window_id = WindowId::new();
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window_id, selected_team.uid, ctx);
+        });
+
+        CloudModel::handle(&app).update(&mut app, |model, ctx| {
+            // The other team's workflows match "deploy" in both their name and their content, so
+            // they all outrank the in-window workflow, which only matches deep in its content.
+            for id in 1..=CROWDING_WORKFLOW_COUNT {
+                model.upsert_from_server_workflow(
+                    mock_named_server_workflow(
+                        id.into(),
+                        Owner::Team {
+                            team_uid: other_team.uid,
+                        },
+                        "deploy",
+                        "deploy deploy deploy",
+                    ),
+                    ctx,
+                );
+            }
+            model.upsert_from_server_workflow(
+                mock_named_server_workflow(
+                    (CROWDING_WORKFLOW_COUNT + 1).into(),
+                    Owner::Team {
+                        team_uid: selected_team.uid,
+                    },
+                    "release notes generator",
+                    "a long command that only mentions deploy once, near the very end of the text",
+                ),
+                ctx,
+            );
+        });
+
+        let mixer = app.add_model(|_| CommandPaletteMixer::new());
+        let data_source_handle = app.add_model(|ctx| warp_drive::DataSource::new(window_id, ctx));
+        // The full-text index is written on the background executor.
+        std::thread::sleep(Duration::from_millis(750));
+
+        mixer.update(&mut app, |mixer, ctx| {
+            mixer.add_sync_source(data_source_handle, [QueryFilter::Workflows]);
+
+            mixer.run_query(
+                Query {
+                    filters: HashSet::from([QueryFilter::Workflows]),
+                    text: "deploy".into(),
+                },
+                ctx,
+            );
+        });
+
+        app.read(|app| {
+            let labels = mixer
+                .as_ref(app)
+                .results()
+                .iter()
+                .map(|result| result.accessibility_label())
+                .collect::<Vec<_>>();
+
+            assert_eq!(labels, vec!["Workflow: release notes generator".to_owned()]);
         });
     })
 }
