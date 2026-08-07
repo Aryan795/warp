@@ -40,7 +40,7 @@ env:
   # itself. Flip these two values to switch arms while the workflow lives on a
   # branch; a real dispatch overrides them.
   DEFAULT_CACHE_SCOPE: isolated
-  DEFAULT_WARMUP: 'true'
+  DEFAULT_WARMUP: 'false'
 
 jobs:
   params:
