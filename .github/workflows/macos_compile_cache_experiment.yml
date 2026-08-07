@@ -39,7 +39,7 @@ env:
   # these every PR-triggered run would silently measure the shared arm and count
   # itself. Flip these two values to switch arms while the workflow lives on a
   # branch; a real dispatch overrides them.
-  DEFAULT_CACHE_SCOPE: isolated
+  DEFAULT_CACHE_SCOPE: shared
   DEFAULT_WARMUP: 'false'
 
 jobs:
