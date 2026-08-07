@@ -778,12 +778,7 @@ impl QueuedQueryModel {
     /// Puts a claimed row back where it came from after a dispatch attempt failed before the
     /// prompt was accepted.
     pub fn restore_claim(&mut self, claim: ClaimedQuery, ctx: &mut ModelContext<Self>) {
-        self.restore_fired_row(
-            claim.conversation_id,
-            claim.insert_index,
-            claim.query,
-            ctx,
-        );
+        self.restore_fired_row(claim.conversation_id, claim.insert_index, claim.query, ctx);
     }
 
     /// Re-files `query` at the head of `conversation_id`'s queue as a disconnected-viewer row.

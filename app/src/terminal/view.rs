@@ -258,13 +258,12 @@ use crate::ai::blocklist::{
     BlocklistAIContextModel, BlocklistAIController, BlocklistAIControllerEvent,
     BlocklistAIHistoryEvent, BlocklistAIHistoryModel, BlocklistAIInputEvent, BlocklistAIInputModel,
     ClientIdentifiers, ConversationSelection, ConversationStatusUpdate, DisconnectedViewerTarget,
-    InputConfig, InputType,
-    InputTypeAutoDetectionSource, LegacyPassiveSuggestionsEvent, LegacyPassiveSuggestionsModel,
-    MaaPassiveSuggestionsEvent, MaaPassiveSuggestionsModel, PRE_REWIND_PREFIX,
-    PassiveSuggestionsModels, PendingAttachment, PendingQueryState, QueuedQuery, QueuedQueryId,
-    QueuedQueryModel, QueuedQueryOrigin, RequestFileEditsFormatKind, ShellCommandExecutor,
-    ShellCommandExecutorEvent, SlashCommandRequest, StartAgentExecutor, StartAgentExecutorEvent,
-    StartAgentRequest, ai_brand_color, block_context_from_terminal_model,
+    InputConfig, InputType, InputTypeAutoDetectionSource, LegacyPassiveSuggestionsEvent,
+    LegacyPassiveSuggestionsModel, MaaPassiveSuggestionsEvent, MaaPassiveSuggestionsModel,
+    PRE_REWIND_PREFIX, PassiveSuggestionsModels, PendingAttachment, PendingQueryState, QueuedQuery,
+    QueuedQueryId, QueuedQueryModel, QueuedQueryOrigin, RequestFileEditsFormatKind,
+    ShellCommandExecutor, ShellCommandExecutorEvent, SlashCommandRequest, StartAgentExecutor,
+    StartAgentExecutorEvent, StartAgentRequest, ai_brand_color, block_context_from_terminal_model,
     get_ai_block_overflow_menu_element_position_id, get_attached_blocks_chip_element_position_id,
     is_lrc_auto_queue_active,
 };
@@ -462,6 +461,7 @@ use crate::terminal::shared_session::manager::Manager;
 use crate::terminal::shared_session::role_change_modal::{
     RoleChangeCloseSource, RoleChangeOpenSource,
 };
+use crate::terminal::shared_session::viewer::network::ServerMessageSendOutcome;
 use crate::terminal::shared_session::{
     SharedSessionActionSource, SharedSessionScrollbackType, SharedSessionSource,
     SharedSessionStatus,
@@ -504,7 +504,6 @@ use crate::terminal::{
     color, element_size_at_last_frame, height_in_range_approx, heights_approx_eq,
     heights_approx_gt, heights_approx_gte, prompt,
 };
-use crate::terminal::shared_session::viewer::network::ServerMessageSendOutcome;
 use crate::terminal::{
     TerminalModel,
     block_list_element::BlockHoverAction,
@@ -5624,13 +5623,10 @@ impl TerminalView {
             (Some(conversation_id), Some(session_id))
                 if FeatureFlag::QueueSlashCommand.is_enabled() =>
             {
-                let target =
-                    DisconnectedViewerTarget::new(session_id, server_conversation_token);
+                let target = DisconnectedViewerTarget::new(session_id, server_conversation_token);
                 let claim = dispatch.take_claim();
                 QueuedQueryModel::handle(ctx).update(ctx, |model, ctx| match claim {
-                    Some(claim) => {
-                        model.retarget_claim_to_disconnected_viewer(claim, target, ctx)
-                    }
+                    Some(claim) => model.retarget_claim_to_disconnected_viewer(claim, target, ctx),
                     None => {
                         model.append(
                             conversation_id,
@@ -5784,9 +5780,9 @@ impl TerminalView {
         if !self.disconnected_viewer_head_targets(conversation_id, ended_session_id, ctx) {
             return;
         }
-        let Some(claim) = QueuedQueryModel::handle(ctx)
-            .update(ctx, |model, ctx| model.claim_prompt_head(conversation_id, ctx))
-        else {
+        let Some(claim) = QueuedQueryModel::handle(ctx).update(ctx, |model, ctx| {
+            model.claim_prompt_head(conversation_id, ctx)
+        }) else {
             return;
         };
         let prompt = claim.query().text().to_owned();
@@ -5801,10 +5797,7 @@ impl TerminalView {
     }
 
     /// The conversation owning a queue whose head is a disconnected-viewer row, if any.
-    fn disconnected_viewer_head_conversation(
-        &self,
-        ctx: &AppContext,
-    ) -> Option<AIConversationId> {
+    fn disconnected_viewer_head_conversation(&self, ctx: &AppContext) -> Option<AIConversationId> {
         let queue_model = QueuedQueryModel::as_ref(ctx);
         BlocklistAIHistoryModel::as_ref(ctx)
             .all_live_conversations_for_terminal_surface(self.view_id)

@@ -14122,8 +14122,9 @@ impl Input {
             if let Some(task_id) = task_id
                 .filter(|_| Self::should_upload_cloud_followup_attachments(&pending_attachments))
             {
-                let claim = QueuedQueryModel::handle(ctx)
-                    .update(ctx, |model, ctx| model.claim_prompt_head(conversation_id, ctx));
+                let claim = QueuedQueryModel::handle(ctx).update(ctx, |model, ctx| {
+                    model.claim_prompt_head(conversation_id, ctx)
+                });
                 self.upload_files_then_submit_queued_cloud_followup(
                     task_id,
                     prompt,
@@ -14175,7 +14176,9 @@ impl Input {
             // Take the row out of the queue for the duration of this attempt so no concurrent
             // lifecycle trigger can dispatch it too; it goes back if the send fails.
             let claim = QueuedQueryModel::handle(ctx)
-                .update(ctx, |model, ctx| model.claim_prompt_head(conversation_id, ctx))
+                .update(ctx, |model, ctx| {
+                    model.claim_prompt_head(conversation_id, ctx)
+                })
                 .filter(|claim| claim.query().id() == query_id);
             let pending_attachments = claim
                 .as_ref()

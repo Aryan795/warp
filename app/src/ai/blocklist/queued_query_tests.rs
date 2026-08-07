@@ -5,9 +5,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use warpui::{App, SingletonEntity};
-
 use session_sharing_protocol::common::{AgentPromptRequestId, ServerConversationToken, SessionId};
+use warpui::{App, SingletonEntity};
 
 use super::{
     AutofireAction, DisconnectedViewerTarget, QueuedQuery, QueuedQueryEvent, QueuedQueryId,

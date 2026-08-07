@@ -18,7 +18,6 @@ use warpui::App;
 
 use super::*;
 use crate::ai::blocklist::agent_view::AgentViewEntryOrigin;
-use crate::terminal::shared_session::viewer::network::Stage;
 use crate::ai::blocklist::orchestration_event_streamer::OrchestrationEventStreamer;
 use crate::ai::blocklist::{QueuedQueryModel, QueuedQueryOrigin};
 // Bring the `TerminalManager` trait into scope (named under a different alias
@@ -26,6 +25,7 @@ use crate::ai::blocklist::{QueuedQueryModel, QueuedQueryOrigin};
 // `on_view_detached` is callable on the struct.
 use crate::terminal::TerminalManager as _;
 use crate::terminal::model::session::Sessions;
+use crate::terminal::shared_session::viewer::network::Stage;
 use crate::test_util::add_window_with_terminal;
 use crate::test_util::terminal::initialize_app_for_terminal_view;
 use crate::workspace::ToastStack;

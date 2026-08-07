@@ -153,12 +153,7 @@ fn send_agent_prompt_request_locally_queues_under_the_callers_request_id() {
         let request_id = AgentPromptRequestId::new();
 
         let outcome = network.update(&mut app, |network, _| {
-            network.send_agent_prompt_request(
-                request_id.clone(),
-                None,
-                "hello".to_owned(),
-                vec![],
-            )
+            network.send_agent_prompt_request(request_id.clone(), None, "hello".to_owned(), vec![])
         });
 
         assert_eq!(outcome, ServerMessageSendOutcome::LocallyQueued);
