@@ -7405,6 +7405,7 @@ impl Workspace {
         self.tabs[tab_index].group_id = Some(group_id);
         // Pin state is cleared when a new group with this tab is created.
         self.tabs[tab_index].pinned = false;
+        self.tabs[tab_index].mark_non_pristine();
 
         self.move_tab_to_index(tab_index, target, ctx);
 
@@ -7451,6 +7452,7 @@ impl Workspace {
 
         // Moving a tab to a group, clear its pinned state.
         self.tabs[tab_index].pinned = false;
+        self.tabs[tab_index].mark_non_pristine();
         self.expand_tab_group(group_id, ctx);
         self.move_tab_to_index(tab_index, target_index, ctx);
 
@@ -7485,6 +7487,7 @@ impl Workspace {
             .map(|t| self.clamp_to_unpinned_region(&self.tabs, t));
 
         self.tabs[tab_index].group_id = None;
+        self.tabs[tab_index].mark_non_pristine();
 
         if let Some(target) = target {
             self.move_tab_to_index(tab_index, target, ctx);
@@ -7510,6 +7513,7 @@ impl Workspace {
         for tab in &mut self.tabs {
             if tab.group_id == Some(group_id) {
                 tab.group_id = None;
+                tab.mark_non_pristine();
             }
         }
         self.tab_groups.remove(&group_id);
@@ -12096,8 +12100,12 @@ impl Workspace {
     /// semantics — or the same host-specific seed an empty workspace gets where no terminal
     /// session can be created. Returns the replacement's pane-group id, or `None` when creation
     /// failed and the original tab must stay attached.
+    ///
+    /// The identity is recovered by diffing the tab list rather than reading the active index,
+    /// so it stays correct even if a creation path stops activating the tab it inserts.
     fn seed_final_tab_replacement(&mut self, ctx: &mut ViewContext<Self>) -> Option<EntityId> {
-        let tab_count_before = self.tab_count();
+        let ids_before: HashSet<EntityId> =
+            self.tabs.iter().map(|tab| tab.pane_group.id()).collect();
         if ContextFlag::CreateNewSession.is_enabled() {
             self.add_new_session_tab_with_default_mode(
                 NewSessionSource::Tab,
@@ -12113,24 +12121,33 @@ impl Workspace {
             self.add_pristine_tab_from_existing_pane(home_pane, new_idx, group_id, ctx);
         }
 
-        if self.tab_count() <= tab_count_before {
-            return None;
-        }
-        self.tabs
-            .get(self.active_tab_index)
+        let new_ids: Vec<EntityId> = self
+            .tabs
+            .iter()
             .map(|tab| tab.pane_group.id())
+            .filter(|id| !ids_before.contains(id))
+            .collect();
+        debug_assert!(
+            new_ids.len() <= 1,
+            "Seeding a final-tab replacement created more than one tab"
+        );
+        new_ids.first().copied()
     }
 
+    /// Removes the tab at `index`, or applies the final-tab rule in its place when it is the
+    /// last one. Returns whether the close was carried out: `true` when the tab was removed or
+    /// the window was closed instead, `false` when the pristine final-tab rule turned the close
+    /// into a no-op or no replacement could be created.
     fn remove_tab(
         &mut self,
         mut index: usize,
         add_to_undo_stack: bool,
         detach_panes_for_close: bool,
         ctx: &mut ViewContext<Self>,
-    ) {
+    ) -> bool {
         let Some(pane_group) = self.tabs.get(index).map(|t| t.pane_group.clone()) else {
             debug_assert!(false, "Tried to remove a tab with an invalid index");
-            return;
+            return false;
         };
 
         // Clear a detail sidecar anchored to this tab before the tab disappears.
@@ -12142,9 +12159,9 @@ impl Workspace {
             match self.final_tab_outcome(index, ctx) {
                 FinalTabOutcome::CloseWindow => {
                     ctx.close_window();
-                    return;
+                    return true;
                 }
-                FinalTabOutcome::NoOp => return,
+                FinalTabOutcome::NoOp => return false,
                 FinalTabOutcome::Replace => {
                     let closing_pane_group_id = pane_group.id();
                     // Seed the replacement before detaching anything so the workspace never
@@ -12157,11 +12174,11 @@ impl Workspace {
                         .position(|tab| tab.pane_group.id() == closing_pane_group_id)
                     else {
                         debug_assert!(false, "Closing tab vanished while seeding its replacement");
-                        return;
+                        return false;
                     };
                     if replacement_pane_group_id.is_none() {
                         // Creation failed; leave the original tab attached and usable.
-                        return;
+                        return false;
                     }
                     index = new_index;
                 }
@@ -12237,6 +12254,7 @@ impl Workspace {
 
         ctx.dispatch_global_action("workspace:save_app", ());
         ctx.notify();
+        true
     }
 
     fn should_confirm_close_session(&self, ctx: &mut ViewContext<Self>) -> bool {
@@ -12254,7 +12272,8 @@ impl Workspace {
 
     /// Checks if the provided tab indices need to be confirmed before closing, unless skip_confirmation is true.
     /// If none of them need confirmation (or the confirm setting is turned off), we close all the provided tabs.
-    /// Returns true iff all of the tabs were closed.
+    /// Returns true iff all of the tabs were closed. A pending confirmation returns false, and so
+    /// does the pristine final-tab no-op, which leaves its tab in place.
     pub(crate) fn close_tabs(
         &mut self,
         tab_indices: impl Iterator<Item = usize>,
@@ -12350,10 +12369,11 @@ impl Workspace {
         self.cancel_tab_rename(ctx);
 
         // Remove the tabs in reverse order to avoid indexing OOB.
+        let mut all_closed = true;
         for i in tab_indices_vec.into_iter().sorted().rev() {
-            self.remove_tab(i, add_to_undo_stack, true, ctx);
+            all_closed &= self.remove_tab(i, add_to_undo_stack, true, ctx);
         }
-        true
+        all_closed
     }
 
     /// Opens a confirmation dialog if necessary, or closes immediately if not.
@@ -12947,11 +12967,11 @@ impl Workspace {
 
         let is_new_terminal = matches!(panes_layout, PanesLayout::SingleTerminal(_));
         let is_restoration = matches!(panes_layout, PanesLayout::Snapshot(_));
-        // A snapshot or launch-config template arrives with content the runtime never watched
-        // being created, so it can never be treated as untouched.
+        // A snapshot, a launch-config template, or a hydrated cloud run arrives with content the
+        // runtime never watched being created, so it can never be treated as untouched.
         let starts_pristine = !matches!(
             panes_layout,
-            PanesLayout::Snapshot(_) | PanesLayout::Template(_)
+            PanesLayout::Snapshot(_) | PanesLayout::Template(_) | PanesLayout::AmbientAgent
         );
         let new_pane_group = ctx.add_typed_action_view(|ctx| {
             let mut pane_group = PaneGroup::new_with_panes_layout(
@@ -12984,9 +13004,9 @@ impl Workspace {
             self.new_tab_index_and_group(ctx)
         };
         let new_tab = if starts_pristine {
-            TabData::new(new_pane_group)
+            TabData::new_pristine(new_pane_group)
         } else {
-            TabData::new_non_pristine(new_pane_group)
+            TabData::new(new_pane_group)
         };
         self.tabs.insert(insert_idx, new_tab);
         self.tab_mru_order
@@ -13084,9 +13104,9 @@ impl Workspace {
         });
 
         let new_tab = if starts_pristine {
-            TabData::new(new_pane_group)
+            TabData::new_pristine(new_pane_group)
         } else {
-            TabData::new_non_pristine(new_pane_group)
+            TabData::new(new_pane_group)
         };
         if self.tab_count() == 0 {
             self.tabs.push(new_tab);
@@ -28148,7 +28168,7 @@ impl Workspace {
         let index = self.clamp_past_group(index);
         // Moving a tab between windows is itself a user mutation, so the arriving tab is never
         // treated as untouched in its new home.
-        let mut tab_data = TabData::new_non_pristine(pane_group);
+        let mut tab_data = TabData::new(pane_group);
         tab_data.selected_color = color.map_or(SelectedTabColor::Unset, SelectedTabColor::Color);
         tab_data.draggable_state = draggable_state;
         self.tabs.insert(index, tab_data);

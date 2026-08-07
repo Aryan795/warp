@@ -5139,6 +5139,7 @@ fn test_final_tab_close_affordances_stay_available_in_a_close_window_disabled_ho
     let _close_window = ContextFlag::CloseWindow.override_enabled(false);
     App::test((), |mut app| async move {
         initialize_app(&mut app);
+        app.update(disable_quit_warning);
 
         let workspace = mock_workspace(&mut app);
         workspace.read(&app, |workspace, ctx| {
@@ -5158,6 +5159,357 @@ fn test_final_tab_close_affordances_stay_available_in_a_close_window_disabled_ho
                 )),
                 "\"Close tab\" must stay offered for a single tab in a CloseWindow-disabled host"
             );
+
+            let close_active_tab = ctx
+                .editable_bindings()
+                .find(|binding| binding.name == "workspace:close_active_tab")
+                .expect("the close-active-tab binding is registered");
+            assert!(
+                close_active_tab.in_context(&workspace.keymap_context(ctx)),
+                "Cmd/Ctrl+W must stay bound with a single tab in a CloseWindow-disabled host"
+            );
+        });
+
+        // The close button and middle-click both dispatch this one action, so exercising it
+        // covers the remaining two affordances end to end.
+        workspace.update(&mut app, |workspace, ctx| {
+            let original_tab_id = workspace.active_tab_pane_group().id();
+            workspace.handle_action(&WorkspaceAction::CloseTab(0), ctx);
+            assert_eq!(workspace.tab_count(), 1);
+            assert_eq!(
+                workspace.active_tab_pane_group().id(),
+                original_tab_id,
+                "The pristine final tab no-ops rather than being rejected by a gate"
+            );
+
+            mark_only_tab_non_pristine(workspace, ctx);
+            workspace.handle_action(&WorkspaceAction::CloseTab(0), ctx);
+            assert_eq!(workspace.tab_count(), 1);
+            assert_ne!(
+                workspace.active_tab_pane_group().id(),
+                original_tab_id,
+                "A non-pristine final tab is replaced through the same action"
+            );
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let replacement_id = workspace.active_tab_pane_group().id();
+            mark_only_tab_non_pristine(workspace, ctx);
+            workspace.handle_action(&WorkspaceAction::CloseActiveTab, ctx);
+            assert_eq!(workspace.tab_count(), 1);
+            assert_ne!(
+                workspace.active_tab_pane_group().id(),
+                replacement_id,
+                "`workspace:close_active_tab` reaches the same final-tab behavior"
+            );
+        });
+    });
+}
+
+/// The terminal view backing the workspace's active tab.
+fn active_terminal_view(workspace: &ViewHandle<Workspace>, app: &App) -> ViewHandle<TerminalView> {
+    workspace.read(app, |workspace, ctx| {
+        workspace
+            .active_tab_pane_group()
+            .as_ref(ctx)
+            .focused_session_view(ctx)
+            .expect("the active tab has a terminal session")
+    })
+}
+
+/// Edits the active tab's input buffer the way a keystroke does, so the assertion runs against
+/// the real `Input` -> `TerminalView` -> `PaneGroup` -> `Workspace` mutation chain rather than
+/// an injected event.
+fn type_into_active_tab(workspace: &ViewHandle<Workspace>, text: &str, app: &mut App) {
+    let terminal_view = active_terminal_view(workspace, app);
+    terminal_view.update(app, |view, ctx| {
+        let editor = view.input().as_ref(ctx).editor().clone();
+        editor.update(ctx, |editor, ctx| editor.user_insert(text, ctx));
+    });
+}
+
+/// Deletes `count` characters from the active tab's input buffer, again through the editor's
+/// own user-edit path.
+fn backspace_in_active_tab(workspace: &ViewHandle<Workspace>, count: usize, app: &mut App) {
+    let terminal_view = active_terminal_view(workspace, app);
+    terminal_view.update(app, |view, ctx| {
+        let editor = view.input().as_ref(ctx).editor().clone();
+        editor.update(ctx, |editor, ctx| {
+            for _ in 0..count {
+                editor.backspace(ctx);
+            }
+        });
+    });
+}
+
+fn active_tab_input_text(workspace: &ViewHandle<Workspace>, app: &App) -> String {
+    let terminal_view = active_terminal_view(workspace, app);
+    terminal_view.read(app, |view, ctx| view.input().as_ref(ctx).buffer_text(ctx))
+}
+
+#[test]
+fn test_typing_marks_the_tab_non_pristine_through_the_real_input_chain() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(disable_quit_warning);
+        app.update(keep_window_on_last_tab_close);
+
+        let workspace = mock_workspace(&mut app);
+        workspace.read(&app, |workspace, _| {
+            assert!(workspace.tabs[0].is_pristine());
+        });
+
+        type_into_active_tab(&workspace, "ls", &mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            assert!(
+                !workspace.tabs[0].is_pristine(),
+                "Typing must reach the workspace through the production event chain"
+            );
+            let original_tab_id = workspace.active_tab_pane_group().id();
+            workspace.handle_action(&WorkspaceAction::CloseTab(0), ctx);
+            assert_eq!(workspace.tab_count(), 1);
+            assert_ne!(workspace.active_tab_pane_group().id(), original_tab_id);
+        });
+    });
+}
+
+#[test]
+fn test_typing_then_deleting_back_to_empty_stays_non_pristine() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(disable_quit_warning);
+        app.update(keep_window_on_last_tab_close);
+
+        let workspace = mock_workspace(&mut app);
+        type_into_active_tab(&workspace, "ls", &mut app);
+        backspace_in_active_tab(&workspace, 2, &mut app);
+
+        assert_eq!(
+            active_tab_input_text(&workspace, &app),
+            "",
+            "The buffer must actually be back to empty for this to prove anything"
+        );
+
+        workspace.update(&mut app, |workspace, ctx| {
+            assert!(
+                !workspace.tabs[0].is_pristine(),
+                "Pristine state is a one-way marker, not a comparison against the initial buffer"
+            );
+            let original_tab_id = workspace.active_tab_pane_group().id();
+            workspace.handle_action(&WorkspaceAction::CloseTab(0), ctx);
+            assert_ne!(workspace.active_tab_pane_group().id(), original_tab_id);
+        });
+    });
+}
+
+#[test]
+fn test_navigational_interaction_preserves_pristine_state() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(disable_quit_warning);
+        app.update(keep_window_on_last_tab_close);
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            // A second tab so switching away and back is a real tab switch.
+            workspace.add_terminal_tab(false, ctx);
+            workspace.handle_action(&WorkspaceAction::ActivateTab(1), ctx);
+            workspace.handle_action(&WorkspaceAction::ActivateTab(0), ctx);
+            workspace.focus_active_tab(ctx);
+
+            workspace.handle_action(&WorkspaceAction::TabHoverWidthStart { width: 120. }, ctx);
+            workspace.handle_action(&WorkspaceAction::TabHoverWidthEnd, ctx);
+
+            let anchor = TabContextMenuAnchor::Pointer(vec2f(0., 0.));
+            workspace.handle_action(
+                &WorkspaceAction::ToggleTabRightClickMenu {
+                    tab_index: 0,
+                    anchor,
+                },
+                ctx,
+            );
+            workspace.handle_action(
+                &WorkspaceAction::ToggleTabRightClickMenu {
+                    tab_index: 0,
+                    anchor,
+                },
+                ctx,
+            );
+
+            // Pane navigation and focus bookkeeping are explicitly non-mutating.
+            workspace.active_tab_pane_group().update(ctx, |pg, ctx| {
+                pg.handle_action(&PaneGroupAction::NavigateNext, ctx);
+                pg.handle_action(&PaneGroupAction::HandleFocusChange, ctx);
+            });
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            assert!(
+                workspace.tabs.iter().all(TabData::is_pristine),
+                "Focus, tab switching, hover and menu open/dismiss must not touch pristine state"
+            );
+            workspace.close_tab(1, true, true, ctx);
+            let sole_tab_id = workspace.active_tab_pane_group().id();
+            workspace.handle_action(&WorkspaceAction::CloseTab(0), ctx);
+            assert_eq!(
+                workspace.active_tab_pane_group().id(),
+                sole_tab_id,
+                "The final-tab no-op is still in force after navigational interaction"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_pane_layout_mutation_marks_the_tab_non_pristine() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(disable_quit_warning);
+        app.update(keep_window_on_last_tab_close);
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.active_tab_pane_group().update(ctx, |pg, ctx| {
+                pg.handle_action(&PaneGroupAction::Add(Direction::Right), ctx);
+            });
+        });
+
+        workspace.read(&app, |workspace, _| {
+            assert!(!workspace.tabs[0].is_pristine());
+        });
+    });
+}
+
+#[test]
+fn test_tab_identity_mutations_mark_the_tab_non_pristine() {
+    let _pinned_tabs = FeatureFlag::PinnedTabs.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(disable_quit_warning);
+
+        let workspace = mock_workspace(&mut app);
+
+        // A separate tab per mutation category, because the marker is one-way.
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx);
+            workspace.add_terminal_tab(false, ctx);
+            assert_eq!(workspace.tab_count(), 3);
+            assert!(workspace.tabs.iter().all(TabData::is_pristine));
+
+            workspace.activate_tab(0, ctx);
+            workspace.set_active_tab_name("renamed", ctx);
+
+            workspace.set_tab_color(1, SelectedTabColor::Color(AnsiColorIdentifier::Blue), ctx);
+
+            workspace.handle_action(&WorkspaceAction::PinTab(2), ctx);
+
+            assert!(
+                workspace.tabs.iter().all(|tab| !tab.is_pristine()),
+                "Rename, color and pin each count as a user mutation of the tab"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_grouping_a_lone_tab_marks_it_non_pristine() {
+    let _grouped_tabs = FeatureFlag::GroupedTabs.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(disable_quit_warning);
+        app.update(keep_window_on_last_tab_close);
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let original_tab_id = workspace.active_tab_pane_group().id();
+            workspace.handle_action(&WorkspaceAction::NewTabGroupFromTab(0), ctx);
+            assert!(
+                !workspace.tabs[0].is_pristine(),
+                "Grouping the only tab must not leave Ctrl+W silently doing nothing"
+            );
+
+            workspace.handle_action(&WorkspaceAction::CloseTab(0), ctx);
+            assert_eq!(workspace.tab_count(), 1);
+            assert_ne!(workspace.active_tab_pane_group().id(), original_tab_id);
+        });
+    });
+}
+
+#[test]
+fn test_pinning_a_group_marks_every_member_non_pristine() {
+    let _grouped_tabs = FeatureFlag::GroupedTabs.override_enabled(true);
+    let _pinned_tabs = FeatureFlag::PinnedTabs.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(disable_quit_warning);
+
+        let workspace = mock_workspace(&mut app);
+
+        let member_id = workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::NewTabGroupFromTab(0), ctx);
+            let group_id = workspace.tabs[0]
+                .group_id
+                .expect("the first tab is now in a group");
+
+            // A tab created straight into the group is genuinely untouched, so the assertion
+            // below is about the group pin and nothing else.
+            workspace.handle_action(&WorkspaceAction::NewTabInGroup(group_id), ctx);
+            let member_id = workspace.active_tab_pane_group().id();
+            assert!(
+                workspace
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.pane_group.id() == member_id && tab.is_pristine()),
+                "A new tab seeded inside a group starts untouched"
+            );
+
+            workspace.handle_action(&WorkspaceAction::PinTabGroup(group_id), ctx);
+            member_id
+        });
+
+        workspace.read(&app, |workspace, _| {
+            assert!(
+                workspace
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.pane_group.id() == member_id && !tab.is_pristine()),
+                "A group pin changes every member's effective pin state and position"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_tabs_the_runtime_did_not_seed_start_non_pristine() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(disable_quit_warning);
+        app.update(keep_window_on_last_tab_close);
+
+        let workspace = mock_workspace(&mut app);
+
+        // A tab restored from a session snapshot never had its content watched being created.
+        let snapshot = workspace.update(&mut app, |workspace, ctx| {
+            workspace.snapshot(ctx.window_id(), false, ctx)
+        });
+        let restored = restored_workspace(&mut app, snapshot);
+        restored.read(&app, |workspace, _| {
+            assert!(
+                workspace.tabs.iter().all(|tab| !tab.is_pristine()),
+                "Restored tabs must keep their close affordances working"
+            );
+        });
+
+        // Neither did a tab hydrated from a shared-session link, which in a link-only host has
+        // no terminal input that could ever mark it.
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_tab_for_joining_shared_session(SharedSessionId::new(), false, ctx);
+            let joined = workspace.tabs.last().expect("the joined tab exists");
+            assert!(!joined.is_pristine());
         });
     });
 }

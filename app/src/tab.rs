@@ -202,6 +202,11 @@ const TAB_COLOR_ICON_PATH: &str = "bundled/svg/ellipse.svg";
 const TAB_NO_COLOR_ICON_PATH: &str = "bundled/svg/no_color_ellipse.svg";
 
 impl TabData {
+    /// A tab whose prior state the runtime cannot vouch for: restored from a snapshot, imported
+    /// from an existing pane, transferred from another window, or hydrated from a link. This is
+    /// the default so a creation path added later starts non-pristine — and therefore keeps its
+    /// close affordances working — until someone deliberately opts it into
+    /// [`TabData::new_pristine`].
     pub fn new(pane_group: ViewHandle<PaneGroup>) -> Self {
         Self {
             pane_group,
@@ -216,15 +221,15 @@ impl TabData {
             group_id: None,
             in_multi_selection: false,
             pinned: false,
-            pristine: true,
+            pristine: false,
         }
     }
 
-    /// A tab whose prior state the runtime cannot vouch for — restored from a snapshot,
-    /// imported from an existing pane, or transferred from another window.
-    pub fn new_non_pristine(pane_group: ViewHandle<PaneGroup>) -> Self {
+    /// A tab the runtime itself is seeding empty and has watched from creation, so it counts as
+    /// untouched until the user mutates it.
+    pub fn new_pristine(pane_group: ViewHandle<PaneGroup>) -> Self {
         Self {
-            pristine: false,
+            pristine: true,
             ..Self::new(pane_group)
         }
     }
