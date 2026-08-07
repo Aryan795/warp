@@ -12,6 +12,7 @@ mod data;
 mod diagnostics;
 mod discovery;
 mod factory_mcp;
+mod factory_runtime;
 mod identity;
 mod launch;
 mod manifest;
@@ -32,6 +33,7 @@ pub use factory_mcp::{
     FACTORY_MCP_SCHEMA_1_0_0, FactoryMcpEntry, FactoryMcpFile, FactoryMcpServer,
     parse_factory_mcp_file,
 };
+pub use factory_runtime::{FACTORY_MCP_FILES_ENV, FactoryPluginRuntime, PLUGIN_DIRS_ENV};
 pub use identity::{
     PluginComponentId, PluginComponentKind, PluginInstanceId, PluginScopeId, PluginSourceId,
     PluginSourceKind, split_qualified_name,

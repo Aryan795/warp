@@ -2282,6 +2282,10 @@ pub(crate) fn initialize_app(
     // SkillManager is used to cache SKILL.md files for all active terminal views and their working directories
     ctx.add_singleton_model(SkillManager::new);
 
+    // Owns discovered Agent Plugin packages. Registered after SkillManager and
+    // FileBasedMCPManager because plugin components are surfaced through them.
+    ctx.add_singleton_model(ai::plugins::PluginManager::new);
+
     // CloudViewModel subscribes to UpdateManager so that it can be notified when objects are
     // created on the server.
     ctx.add_singleton_model(CloudViewModel::new);
