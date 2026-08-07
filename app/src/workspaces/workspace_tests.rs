@@ -248,6 +248,7 @@ fn workspace_defaults_attributes_list_entries_to_the_workspace_layer() {
 
     let allowlist = &team_settings.ai_autonomy.read_files_allowlist;
     assert_eq!(allowlist.values, vec!["/tmp/allowed".to_string()]);
+    assert!(allowlist.is_configured);
     assert_eq!(
         allowlist.workspace_entries,
         vec!["/tmp/allowed".to_string()]
@@ -256,7 +257,45 @@ fn workspace_defaults_attributes_list_entries_to_the_workspace_layer() {
 
     let denylist = &team_settings.ai_autonomy.execute_commands_denylist;
     assert_eq!(denylist.values, vec!["rm -rf.*".to_string()]);
+    assert!(denylist.is_configured);
     assert!(denylist.team_entries.is_empty());
+}
+
+#[test]
+fn workspace_defaults_distinguishes_unconfigured_from_explicit_empty_override() {
+    // Regression coverage for the fallback path: `Option<Vec<T>>::is_some()` on
+    // the underlying `WorkspaceSettings` field must drive `is_configured`, not
+    // the resulting list's emptiness -- otherwise an admin's explicit empty
+    // override ("auto-allow nothing") would be indistinguishable from the
+    // field never having been configured at all.
+    let mut ws = WorkspaceSettings::default();
+    // Never configured: `None`.
+    ws.ai_autonomy_settings.read_files_allowlist = None;
+    // Explicitly configured to empty: `Some(vec![])`.
+    ws.ai_autonomy_settings.execute_commands_allowlist = Some(vec![]);
+
+    let team_settings = TeamSettings::from_workspace_defaults(&ws);
+
+    assert!(!team_settings.ai_autonomy.read_files_allowlist.is_configured);
+    assert!(
+        team_settings
+            .ai_autonomy
+            .execute_commands_allowlist
+            .is_configured
+    );
+    assert!(
+        team_settings
+            .ai_autonomy
+            .execute_commands_allowlist
+            .values
+            .is_empty()
+    );
+
+    // The distinction must survive all the way through to the shape the
+    // permission-checking code actually reads.
+    let autonomy = AiAutonomySettings::from(&team_settings.ai_autonomy);
+    assert_eq!(autonomy.read_files_allowlist, None);
+    assert_eq!(autonomy.execute_commands_allowlist, Some(vec![]));
 }
 
 #[test]
@@ -279,8 +318,9 @@ fn workspace_defaults_has_no_enforced_value_for_create_plans() {
 
 #[test]
 fn workspace_defaults_treats_absent_sandboxed_agent_settings_as_empty() {
-    let mut ws = WorkspaceSettings::default();
-    ws.sandboxed_agent_settings = None;
+    // `sandboxed_agent_settings` is already `None` via `Default`; this test
+    // documents that the fallback path handles that case explicitly.
+    let ws = WorkspaceSettings::default();
 
     let team_settings = TeamSettings::from_workspace_defaults(&ws);
 
@@ -295,9 +335,11 @@ fn workspace_defaults_treats_absent_sandboxed_agent_settings_as_empty() {
 
 #[test]
 fn workspace_defaults_passes_through_unwrapped_fields_verbatim() {
-    let mut ws = WorkspaceSettings::default();
-    ws.default_host_slug = Some("my-host".to_string());
-    ws.enable_warp_attribution = AdminEnablementSetting::Disable;
+    let ws = WorkspaceSettings {
+        default_host_slug: Some("my-host".to_string()),
+        enable_warp_attribution: AdminEnablementSetting::Disable,
+        ..Default::default()
+    };
 
     let team_settings = TeamSettings::from_workspace_defaults(&ws);
 

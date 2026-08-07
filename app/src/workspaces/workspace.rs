@@ -1050,9 +1050,16 @@ pub struct EnforceableSetting<T> {
 /// server's `StringListSettingInfo` / `SecretRedactionRegexListInfo`). `values`
 /// is the authoritative merged result; `workspace_entries` / `team_entries` are
 /// preserved so future admin UI can present the layers separately.
+///
+/// `is_configured` is true when *either* layer explicitly configured this list
+/// (even to empty), false when neither did. This is what distinguishes "the
+/// workspace/team locked this list to empty" from "nobody configured this list
+/// at all" -- both otherwise look identical as an empty `values`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SplitListSetting<T> {
     pub values: Vec<T>,
+    #[serde(default)]
+    pub is_configured: bool,
     #[serde(default)]
     pub workspace_entries: Vec<T>,
     #[serde(default)]
@@ -1141,8 +1148,18 @@ fn workspace_enforced<T>(value: T) -> EnforceableSetting<T> {
 
 /// Wraps a plain workspace-level list as a [`SplitListSetting`] with every entry
 /// attributed to the workspace layer. See [`workspace_enforced`] for context.
-fn workspace_split_list<T: Clone>(values: Vec<T>) -> SplitListSetting<T> {
+///
+/// `is_configured` must be computed by the caller from the *original* nullable
+/// source (e.g. `Option<Vec<T>>::is_some()`) where one is available -- `values`
+/// alone can't distinguish "explicitly configured to empty" from "never
+/// configured". Where no such nullable source exists on [`WorkspaceSettings`]
+/// (`ai_permissions_settings.remote_session_regex_list` and
+/// `secret_redaction_settings.regexes` are plain, always-non-null `Vec<T>`
+/// there), callers fall back to `!values.is_empty()`, which cannot represent an
+/// explicit empty override for those two fields specifically.
+fn workspace_split_list<T: Clone>(values: Vec<T>, is_configured: bool) -> SplitListSetting<T> {
     SplitListSetting {
+        is_configured,
         workspace_entries: values.clone(),
         team_entries: Vec::new(),
         values,
@@ -1171,17 +1188,27 @@ impl TeamSettings {
                 allow_ai_in_remote_sessions: workspace_enforced(
                     ws.ai_permissions_settings.allow_ai_in_remote_sessions,
                 ),
+                // No nullable source exists for this field on `WorkspaceSettings` (see
+                // `workspace_split_list` doc comment) -- best-effort non-empty heuristic.
                 remote_session_regex_list: workspace_split_list(
                     ws.ai_permissions_settings
                         .remote_session_regex_list
                         .iter()
                         .map(|regex| regex.as_str().to_string())
                         .collect(),
+                    !ws.ai_permissions_settings
+                        .remote_session_regex_list
+                        .is_empty(),
                 ),
             },
             secret_redaction: TeamSecretRedactionSettings {
                 enabled: workspace_enforced(ws.secret_redaction_settings.enabled),
-                regexes: workspace_split_list(ws.secret_redaction_settings.regexes.clone()),
+                // No nullable source exists for this field on `WorkspaceSettings` (see
+                // `workspace_split_list` doc comment) -- best-effort non-empty heuristic.
+                regexes: workspace_split_list(
+                    ws.secret_redaction_settings.regexes.clone(),
+                    !ws.secret_redaction_settings.regexes.is_empty(),
+                ),
             },
             ai_autonomy: TeamAiAutonomySettings {
                 apply_code_diffs: workspace_enforced(autonomy.apply_code_diffs_setting),
@@ -1203,6 +1230,7 @@ impl TeamSettings {
                         .flatten()
                         .map(|path| path.to_string_lossy().into_owned())
                         .collect(),
+                    autonomy.read_files_allowlist.is_some(),
                 ),
                 execute_commands_allowlist: workspace_split_list(
                     autonomy
@@ -1211,6 +1239,7 @@ impl TeamSettings {
                         .flatten()
                         .map(ToString::to_string)
                         .collect(),
+                    autonomy.execute_commands_allowlist.is_some(),
                 ),
                 execute_commands_denylist: workspace_split_list(
                     autonomy
@@ -1219,6 +1248,7 @@ impl TeamSettings {
                         .flatten()
                         .map(ToString::to_string)
                         .collect(),
+                    autonomy.execute_commands_denylist.is_some(),
                 ),
             },
             link_sharing: TeamLinkSharingSettings {
@@ -1236,6 +1266,9 @@ impl TeamSettings {
                         .flat_map(|settings| settings.execute_commands_denylist.iter().flatten())
                         .map(ToString::to_string)
                         .collect(),
+                    ws.sandboxed_agent_settings
+                        .as_ref()
+                        .is_some_and(|settings| settings.execute_commands_denylist.is_some()),
                 ),
             },
             llm_settings: ws.llm_settings.clone(),
@@ -1274,13 +1307,12 @@ fn predicates_from_split_list(
 
 /// Converts an effective list into the `Option<Vec<T>>` shape [`AiAutonomySettings`] and
 /// [`SandboxedAgentSettings`] use, where `None` means "no override, fall back to the execution
-/// profile's own list". [`SplitListSetting`] has no such distinction for an effective value
-/// (it's just a merged list, always present) -- an empty merged list is treated as `None` here.
-/// This loses the (server-supported but rare) case of a workspace/team explicitly overriding a
-/// list to be empty, which would collapse to the same "not overridden" behavior as never setting
-/// it at all; see the client's suggested follow-ups for revisiting this if that case matters.
-fn to_optional_override<T>(values: Vec<T>) -> Option<Vec<T>> {
-    (!values.is_empty()).then_some(values)
+/// profile's own list" and `Some` (even `Some(vec![])`) means the workspace/team explicitly
+/// configured this list and it should be enforced as-is. Driven directly by
+/// [`SplitListSetting::is_configured`] rather than the values' emptiness, so an explicit empty
+/// override is never confused with the list never having been configured at all.
+fn to_optional_override<T>(values: Vec<T>, is_configured: bool) -> Option<Vec<T>> {
+    is_configured.then_some(values)
 }
 
 impl From<&TeamAiAutonomySettings> for AiAutonomySettings {
@@ -1294,14 +1326,17 @@ impl From<&TeamAiAutonomySettings> for AiAutonomySettings {
                     .iter()
                     .map(PathBuf::from)
                     .collect(),
+                team.read_files_allowlist.is_configured,
             ),
             execute_commands_setting: team.execute_commands.value,
-            execute_commands_allowlist: to_optional_override(predicates_from_split_list(
-                &team.execute_commands_allowlist,
-            )),
-            execute_commands_denylist: to_optional_override(predicates_from_split_list(
-                &team.execute_commands_denylist,
-            )),
+            execute_commands_allowlist: to_optional_override(
+                predicates_from_split_list(&team.execute_commands_allowlist),
+                team.execute_commands_allowlist.is_configured,
+            ),
+            execute_commands_denylist: to_optional_override(
+                predicates_from_split_list(&team.execute_commands_denylist),
+                team.execute_commands_denylist.is_configured,
+            ),
             write_to_pty_setting: team.write_to_pty.value,
             computer_use_setting: team.computer_use.value,
         }
@@ -1311,9 +1346,10 @@ impl From<&TeamAiAutonomySettings> for AiAutonomySettings {
 impl From<&TeamSandboxedAgentSettings> for SandboxedAgentSettings {
     fn from(team: &TeamSandboxedAgentSettings) -> Self {
         Self {
-            execute_commands_denylist: to_optional_override(predicates_from_split_list(
-                &team.execute_commands_denylist,
-            )),
+            execute_commands_denylist: to_optional_override(
+                predicates_from_split_list(&team.execute_commands_denylist),
+                team.execute_commands_denylist.is_configured,
+            ),
         }
     }
 }

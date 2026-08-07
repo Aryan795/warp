@@ -3834,12 +3834,14 @@ type ComputerUseSettingInfo {
 
 type StringListSettingInfo {
   values: [String!]!
+  isConfigured: Boolean!
   workspaceEntries: [String!]!
   teamEntries: [String!]!
 }
 
 type SecretRedactionRegexListInfo {
   values: [SecretRedactionRegex!]!
+  isConfigured: Boolean!
   workspaceEntries: [SecretRedactionRegex!]!
   teamEntries: [SecretRedactionRegex!]!
 }
