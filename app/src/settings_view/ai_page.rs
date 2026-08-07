@@ -645,12 +645,18 @@ pub fn init_actions_from_parent_view<T: Action + Clone>(
             // Yields the mutually exclusive `Enable Agent Plugin discovery` and
             // `Disable Agent Plugin discovery` palette entries, backed by the same persisted
             // preference as the Settings switch.
+            //
+            // Gated on AI being on to match the widget and every neighbouring AI row. Two
+            // surfaces onto one preference must agree about whether it can be changed: gating
+            // only one of them makes the palette silently succeed while the switch looks inert.
+            // Discovery is already inert with AI off, since `is_plugin_discovery_enabled` ands
+            // the two together, so nothing is lost by dimming the control in that state.
             ToggleSettingActionPair::new(
                 "Agent Plugin discovery",
                 builder(SettingsAction::AI(
                     AISettingsPageAction::TogglePluginDiscovery,
                 )),
-                context,
+                &(context.clone() & id!(flags::IS_ANY_AI_ENABLED)),
                 flags::PLUGIN_DISCOVERY_ENABLED,
             )
             .with_group(bindings::BindingGroup::WarpAi)
