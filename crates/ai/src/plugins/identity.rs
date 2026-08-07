@@ -101,24 +101,21 @@ impl PluginScopeId {
         }
     }
 
-    /// The directory segments this scope contributes to a Factory's plugin data path.
+    /// The single directory segment this scope contributes to a Factory's plugin data path.
     ///
-    /// The shape matches the cross-repo contract's `scope` values — `factory`, `agent/<name>`,
-    /// `automation/<name>` — but each element is returned separately and individually sanitized.
-    /// Returning segments rather than a joined string is the point: an agent or automation name
-    /// comes from a repository, and a name like `../../etc` joined naively would climb out of the
-    /// durable root. A conformant name sanitizes to itself, so the contract's worked examples are
-    /// unaffected.
-    pub fn data_path_segments(&self) -> Vec<String> {
+    /// Flat, never nested, per the cross-repo contract's `scope_segment` mapping: an agent
+    /// contributes `agent-<name>` rather than `agent/<name>`, so the composed path always has
+    /// exactly two segments below the durable root. An agent or automation name comes from a
+    /// repository, so it is sanitized before it becomes part of a directory name; a conformant
+    /// name sanitizes to itself, which keeps real paths legible.
+    pub fn path_segment(&self) -> String {
         match self {
-            PluginScopeId::User => vec!["user".to_owned()],
-            PluginScopeId::Repository => vec!["repository".to_owned()],
-            PluginScopeId::Factory => vec!["factory".to_owned()],
-            PluginScopeId::Agent { name } => {
-                vec!["agent".to_owned(), filesystem_safe_segment(name)]
-            }
+            PluginScopeId::User => "user".to_owned(),
+            PluginScopeId::Repository => "repository".to_owned(),
+            PluginScopeId::Factory => "factory".to_owned(),
+            PluginScopeId::Agent { name } => format!("agent-{}", filesystem_safe_segment(name)),
             PluginScopeId::Automation { name } => {
-                vec!["automation".to_owned(), filesystem_safe_segment(name)]
+                format!("automation-{}", filesystem_safe_segment(name))
             }
         }
     }

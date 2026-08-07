@@ -167,14 +167,14 @@ fn the_factory_path_is_the_root_plus_scope_and_plugin_key() {
                 name: "release".to_owned(),
             },
             "acme-tools",
-            "/cache/warp/plugin-data/fac_01HZY/agent/release/acme-tools",
+            "/cache/warp/plugin-data/fac_01HZY/agent-release/acme-tools",
         ),
         (
             PluginScopeId::Automation {
                 name: "nightly".to_owned(),
             },
             "release.tools",
-            "/cache/warp/plugin-data/fac_01HZY/automation/nightly/release.tools",
+            "/cache/warp/plugin-data/fac_01HZY/automation-nightly/release.tools",
         ),
     ];
 
@@ -269,11 +269,11 @@ fn an_author_controlled_scope_name_cannot_escape_the_root() {
         let below_root = path
             .strip_prefix("/durable/plugin-data/fac_01HZY")
             .unwrap_or_else(|_| panic!("'{hostile}' escaped: {}", path.display()));
-        // Exactly `agent`, the sanitized name, and the plugin key below the root, and no
-        // component of it is a parent reference.
+        // Exactly the flat scope segment and the plugin key below the root, and no component
+        // of it is a parent reference.
         assert_eq!(
             below_root.components().count(),
-            3,
+            2,
             "'{hostile}' produced an unexpected depth: {}",
             path.display()
         );
@@ -340,9 +340,9 @@ fn the_sanitization_rule() {
 
 /// Drives the composition through the vendored cross-repo contract's own worked examples.
 ///
-/// This is the consuming half of the assertion warp-server makes against the same file. If the
-/// canonical contract changes and this copy is re-vendored without the behavior following, this
-/// test fails rather than plugin data silently moving.
+/// This is the consuming half of the assertion warp-server makes against the same file. The
+/// examples include a hostile agent name, so the sanitization is exercised here rather than only
+/// in this crate's own tests.
 #[test]
 fn the_vendored_contract_examples_compose_identically() {
     const CONTRACT: &str = include_str!("contract/factory_plugin_runtime_contract.json");
@@ -366,32 +366,41 @@ fn the_vendored_contract_examples_compose_identically() {
             "the contract no longer declares '{required}'; it declares {declared:?}"
         );
     }
+
+    let path_contract = &contract["plugin_data_path"];
     assert_eq!(
-        contract["plugin_data_path"]["composed"].as_str().unwrap(),
-        "${WARP_PLUGIN_DATA_ROOT}/<scope>/<plugin-key>"
+        path_contract["composed"].as_str().unwrap(),
+        "${WARP_PLUGIN_DATA_ROOT}/<scope-segment>/<plugin-key>"
     );
+    let segments_below_root = path_contract["segments_below_root"].as_u64().unwrap() as usize;
 
     for example in contract["examples"].as_array().unwrap() {
         let root = example["server_exports"].as_str().unwrap();
-        let scope = example["scope"].as_str().unwrap();
+        let scope_segment = example["scope"].as_str().unwrap();
         let plugin_key = example["plugin_key"].as_str().unwrap();
         let expected = example["composed"].as_str().unwrap();
 
-        // Rebuild the scope the contract names, so the example drives the real composition
-        // rather than a restatement of it.
-        let scope = match scope.split_once('/') {
-            None => {
-                assert_eq!(scope, "factory", "unhandled contract scope '{scope}'");
-                PluginScopeId::Factory
+        // Rebuild the scope the contract names. The segment is flat, and the portion after the
+        // prefix is already sanitized — sanitization is idempotent on a safe string — so this
+        // round-trips through the real `path_segment` rather than restating it.
+        let scope = if scope_segment == "factory" {
+            PluginScopeId::Factory
+        } else if let Some(name) = scope_segment.strip_prefix("agent-") {
+            PluginScopeId::Agent {
+                name: name.to_owned(),
             }
-            Some(("agent", name)) => PluginScopeId::Agent {
+        } else if let Some(name) = scope_segment.strip_prefix("automation-") {
+            PluginScopeId::Automation {
                 name: name.to_owned(),
-            },
-            Some(("automation", name)) => PluginScopeId::Automation {
-                name: name.to_owned(),
-            },
-            Some(_) => panic!("unhandled contract scope '{scope}'"),
+            }
+        } else {
+            panic!("unhandled contract scope segment '{scope_segment}'");
         };
+        assert_eq!(
+            scope.path_segment(),
+            scope_segment,
+            "the contract's scope segment did not round-trip through path_segment"
+        );
 
         let locator =
             FactoryPluginDataLocator::new(root, example["factory_uid"].as_str().map(str::to_owned));
@@ -401,11 +410,20 @@ fn the_vendored_contract_examples_compose_identically() {
             "/checkout",
             plugin_key,
         );
+        let composed = locator.data_dir(&instance);
         assert_eq!(
-            locator.data_dir(&instance),
+            composed,
             std::path::PathBuf::from(expected),
-            "contract example for scope '{}' did not compose as declared",
-            example["scope"]
+            "contract example for scope '{scope_segment}' did not compose as declared"
+        );
+        assert_eq!(
+            composed
+                .strip_prefix(root)
+                .expect("the composed path stays under the exported root")
+                .components()
+                .count(),
+            segments_below_root,
+            "contract example for scope '{scope_segment}' broke the segments-below-root invariant"
         );
     }
 }

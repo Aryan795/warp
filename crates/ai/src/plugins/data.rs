@@ -173,14 +173,11 @@ impl FactoryPluginDataLocator {
 
 impl PluginDataLocator for FactoryPluginDataLocator {
     fn data_dir(&self, instance: &PluginInstanceId) -> PathBuf {
-        let mut path = self.root.clone();
-        // Pushed one segment at a time, each already reduced to a safe name, so no author-supplied
-        // value can introduce a separator or a parent reference.
-        for segment in instance.scope.data_path_segments() {
-            path.push(segment);
-        }
-        path.push(Self::plugin_key(instance));
-        path
+        // Exactly two segments below the root, each already reduced to a safe name, so no
+        // author-supplied value can introduce a separator or a parent reference.
+        self.root
+            .join(instance.scope.path_segment())
+            .join(Self::plugin_key(instance))
     }
 }
 

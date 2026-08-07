@@ -1,17 +1,25 @@
-# Agent Plugins conformance corpus
+# Agent Plugins conformance corpus (vendored copy — **not** canonical)
 
-This directory is the **canonical** corpus of Agent Plugins 1.0.0 validation
-cases for Warp. Both validators run it:
+**Canonical source:** `warpdotdev/warp-server`, at
+`logic/factoryfile/testdata/agentplugins-conformance/`. The exact commit and the SHA-256 of every
+vendored file are recorded in `../PROVENANCE.json`.
 
-- Go — `logic/factoryfile` (Factory sync), driven by `TestAgentPluginsConformanceCorpus`.
-- Rust — the Warp client's plugin loader, which vendors a verbatim copy of this
-  directory with a provenance header pointing here.
+**Do not edit anything in this directory.** Change the corpus in warp-server first, then re-copy
+it here verbatim and regenerate `../PROVENANCE.json`. If the two copies differ, warp-server wins.
+`../README.md` has the one-command staleness check.
 
-The two implementations validate the same documents independently. Cross-repo
-build-time sharing is not available, so the mechanism against drift is a visible
-duplicate plus a committed expectations file on each side: a divergence shows up
-as a diff a reviewer can see, rather than as a package that sync accepts and the
-runtime then disables.
+This file is the single deliberate exception to "verbatim": upstream it opens by calling itself
+the canonical corpus, which is true there and false here, and an artifact whose whole purpose is
+preventing drift must not invite anyone to edit the wrong copy. Everything below is upstream's
+text. When you re-vendor, keep this framing and replace only what follows.
+
+## Why the copy exists
+
+Two independent validators have to agree on which Agent Plugins documents are acceptable: the Go
+validator in warp-server's `logic/factoryfile` (Factory sync), and this client's plugin loader,
+driven by `plugins/conformance_tests.rs`. If they drift, Factory sync admits a package that the
+runtime then disables. Cross-repo build-time sharing is not available, so the mechanism is a
+visible duplicate plus a committed expectations file on each side.
 
 ## Layout
 

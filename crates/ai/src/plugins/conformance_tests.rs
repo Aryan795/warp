@@ -164,3 +164,89 @@ fn every_fixture_is_declared_exactly_once() {
         "cases.json declares fixtures that do not exist: {missing:?}"
     );
 }
+
+/// Asserts every vendored file still hashes to what `PROVENANCE.json` recorded.
+///
+/// This is the half of the anti-drift mechanism that a local reader can enforce. It cannot know
+/// whether upstream has moved on — nothing in this repository can — but it does stop a vendored
+/// file being edited here, which is the failure mode that turns a shared contract into two
+/// private ones. `README.md` in the corpus is deliberately excluded and says so in its own text.
+#[test]
+fn contract_provenance_matches_the_vendored_files() {
+    #[derive(Deserialize)]
+    struct Provenance {
+        upstream_repo: String,
+        upstream_commit: String,
+        files: std::collections::BTreeMap<String, String>,
+    }
+
+    let contract_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/plugins/contract");
+    let provenance: Provenance = serde_json::from_str(
+        &std::fs::read_to_string(contract_dir.join("PROVENANCE.json")).unwrap(),
+    )
+    .expect("PROVENANCE.json parses");
+
+    assert_eq!(provenance.upstream_repo, "warpdotdev/warp-server");
+    assert_eq!(
+        provenance.upstream_commit.len(),
+        40,
+        "the upstream commit must be a full SHA so the copies can be checked against an exact tree"
+    );
+
+    let mut mismatched = Vec::new();
+    for (relative, expected) in &provenance.files {
+        let bytes = std::fs::read(contract_dir.join(relative))
+            .unwrap_or_else(|error| panic!("vendored file '{relative}' is missing: {error}"));
+        let actual = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&bytes));
+        if &actual != expected {
+            mismatched.push(format!("  {relative}: recorded {expected}, found {actual}"));
+        }
+    }
+    assert!(
+        mismatched.is_empty(),
+        "vendored files were edited locally instead of upstream:\n{}\nChange them in {} and \
+         re-vendor; see contract/README.md.",
+        mismatched.join("\n"),
+        provenance.upstream_repo
+    );
+
+    // Every vendored file on disk must be accounted for, or a new one could be added here
+    // without provenance and go unchecked.
+    let mut on_disk: BTreeSet<String> = BTreeSet::new();
+    for entry in walkdir(&contract_dir) {
+        let relative = entry
+            .strip_prefix(&contract_dir)
+            .expect("entry is under the contract directory")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let is_excluded = relative == "README.md"
+            || relative == "PROVENANCE.json"
+            || relative.ends_with("agentplugins-conformance/README.md");
+        if !is_excluded {
+            on_disk.insert(relative);
+        }
+    }
+    let recorded: BTreeSet<String> = provenance.files.keys().cloned().collect();
+    let unrecorded: Vec<&String> = on_disk.difference(&recorded).collect();
+    assert!(
+        unrecorded.is_empty(),
+        "vendored files with no entry in PROVENANCE.json: {unrecorded:?}"
+    );
+}
+
+/// Depth-first list of every file under `root`.
+fn walkdir(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("a readable directory") {
+            let path = entry.expect("a readable entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
