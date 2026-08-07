@@ -60,7 +60,7 @@ impl crate::Recorder for Recorder {
 
         let files = capture::new_capture_files()?;
         let command = new_ffmpeg_capture_command(&config, &plan);
-        capture::launch_capture(command, files, width, height, diagnose_start_failure).await
+        capture::launch_capture(command, files, width, height, Some(diagnose_start_failure)).await
     }
 
     async fn stop(&self, handle: RecordingHandle) -> Result<RecordingOutput, RecordingError> {

@@ -23,7 +23,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// The ephemeral files backing one capture: the MP4 the muxer writes and the log
 /// ffmpeg's stderr is redirected to.
 pub(crate) struct CaptureFiles {
-    pub(crate) path: PathBuf,
+    path: PathBuf,
     log_path: PathBuf,
     log_file: File,
 }
@@ -31,7 +31,8 @@ pub(crate) struct CaptureFiles {
 /// Explains, from the tail of ffmpeg's log, why capture never went live. The
 /// substrates fail for different reasons — a denied Screen Recording grant on
 /// macOS, an unreachable `$DISPLAY` on Linux — so the platform adapter owns the
-/// classification and returns `None` when it recognizes nothing.
+/// classification. It returns `None` for a failure it does not recognize, and a
+/// platform with nothing useful to add supplies no hook at all.
 pub(crate) type StartDiagnosis = fn(&str) -> Option<String>;
 
 /// Allocates the capture output path and its sibling log.
@@ -95,7 +96,7 @@ pub(crate) async fn launch_capture(
     files: CaptureFiles,
     width: u32,
     height: u32,
-    diagnose: StartDiagnosis,
+    diagnose: Option<StartDiagnosis>,
 ) -> Result<RecordingHandle, RecordingError> {
     let CaptureFiles {
         path,
@@ -119,7 +120,9 @@ pub(crate) async fn launch_capture(
         let _ = process.start_kill();
         let log = std::fs::read_to_string(&log_path).unwrap_or_default();
         let detail = ffmpeg_error_tail(&log);
-        let hint = diagnose(&log).map_or_else(String::new, |hint| format!(" {hint}"));
+        let hint = diagnose
+            .and_then(|diagnose| diagnose(&log))
+            .map_or_else(String::new, |hint| format!(" {hint}"));
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&log_path);
         return Err(RecordingError::Start {
@@ -261,9 +264,4 @@ fn ffmpeg_error_tail(log: &str) -> String {
     } else {
         format!(" ({tail})")
     }
-}
-
-/// No substrate-specific explanation for a failed start.
-pub(crate) fn no_start_diagnosis(_log: &str) -> Option<String> {
-    None
 }

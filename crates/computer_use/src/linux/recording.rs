@@ -70,7 +70,9 @@ async fn start_screen(config: RecordingConfig) -> Result<RecordingHandle, Record
 
     let files = capture::new_capture_files()?;
     let command = new_ffmpeg_capture_command(&config, &display, width, height, None);
-    capture::launch_capture(command, files, width, height, capture::no_start_diagnosis).await
+    // x11grab's own error text already names the display problem, so there is
+    // nothing platform-specific to add to a failed start.
+    capture::launch_capture(command, files, width, height, None).await
 }
 
 /// Starts a single-window recording via ffmpeg `x11grab -window_id`.
@@ -85,7 +87,7 @@ async fn start_window(
 
     let files = capture::new_capture_files()?;
     let command = new_ffmpeg_capture_command(&config, &display, width, height, Some(window));
-    capture::launch_capture(command, files, width, height, capture::no_start_diagnosis).await
+    capture::launch_capture(command, files, width, height, None).await
 }
 
 fn new_ffmpeg_capture_command(
