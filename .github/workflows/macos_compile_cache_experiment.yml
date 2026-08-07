@@ -34,16 +34,81 @@ env:
   NEXTEST_PROFILE: ci
   WORKSPACE_TEST_ARGS: --workspace --locked --exclude command-signatures-v2
   RUSTFLAGS: -C debuginfo=line-tables-only --cfg=web_sys_unstable_apis
+  # Branch-local arm selector, used only when this workflow is not triggered by
+  # workflow_dispatch. `inputs` is null on a pull_request event, so without
+  # these every PR-triggered run would silently measure the shared arm and count
+  # itself. Flip these two values to switch arms while the workflow lives on a
+  # branch; a real dispatch overrides them.
+  DEFAULT_CACHE_SCOPE: isolated
+  DEFAULT_WARMUP: 'true'
 
 jobs:
-  compile:
-    name: Compile tests (${{ matrix.cache_mode }} Rust cache, ${{ inputs.cache_scope || 'shared' }} volume${{ inputs.warmup && ', warm-up' || '' }})
+  params:
+    name: Resolve experiment arm
     if: >-
       github.repository_owner == 'warpdotdev' &&
       (github.event_name == 'workflow_dispatch' ||
         (github.event_name == 'pull_request' &&
           github.event.pull_request.head.repo.full_name == github.repository &&
           github.event.pull_request.head.ref == 'kevinyang/macos-ci-observability'))
+    timeout-minutes: 3
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      runner: ${{ steps.arm.outputs.runner }}
+      cache_scope: ${{ steps.arm.outputs.cache_scope }}
+      counted: ${{ steps.arm.outputs.counted }}
+    steps:
+      # `runs-on` cannot read the `env` context but it can read `needs`, so the
+      # arm is resolved here and consumed by the compile job as a job output.
+      - name: Resolve arm
+        id: arm
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_CACHE_SCOPE: ${{ inputs.cache_scope }}
+          INPUT_WARMUP: ${{ inputs.warmup }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            cache_scope="$INPUT_CACHE_SCOPE"
+            warmup="$INPUT_WARMUP"
+          else
+            cache_scope="$DEFAULT_CACHE_SCOPE"
+            warmup="$DEFAULT_WARMUP"
+          fi
+
+          case "$cache_scope" in
+            shared) runner='namespace-profile-mac-ci' ;;
+            isolated) runner='namespace-profile-mac-ci-tests-84gb' ;;
+            *)
+              echo "::error::Unknown cache_scope '$cache_scope' (expected shared or isolated)"
+              exit 1
+              ;;
+          esac
+
+          case "$warmup" in
+            true) counted=false ;;
+            false) counted=true ;;
+            *)
+              echo "::error::Unknown warmup '$warmup' (expected true or false)"
+              exit 1
+              ;;
+          esac
+
+          {
+            printf 'runner=%s\n' "$runner"
+            printf 'cache_scope=%s\n' "$cache_scope"
+            printf 'counted=%s\n' "$counted"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "::notice title=macOS cache experiment arm::scope=$cache_scope runner=$runner counted=$counted"
+
+  compile:
+    name: Compile tests (${{ matrix.cache_mode }} Rust cache, ${{ needs.params.outputs.cache_scope }} volume${{ needs.params.outputs.counted == 'false' && ', warm-up' || '' }})
+    needs: params
     timeout-minutes: 40
     # Two Namespace profiles with identical machine specs and different cache
     # volumes: mac-ci is production's 50 GB volume, mac-ci-tests-84gb is the
@@ -51,9 +116,7 @@ jobs:
     # so no cache-tag override is needed. Never add an `nscloud-cache-size-*`
     # label beside a profile label: Namespace refuses to schedule a job carrying
     # more than one `nscloud` label, and the job silently never gets acquired.
-    # `runs-on` cannot read `env`, so these names are repeated in the
-    # `runner_profile` input below and the two must stay in sync.
-    runs-on: ${{ inputs.cache_scope == 'isolated' && 'namespace-profile-mac-ci-tests-84gb' || 'namespace-profile-mac-ci' }}
+    runs-on: ${{ needs.params.outputs.runner }}
     permissions:
       contents: read
     strategy:
@@ -92,12 +155,12 @@ jobs:
         with:
           workspace_test_args: ${{ env.WORKSPACE_TEST_ARGS }}
           source_sha: ${{ github.event.pull_request.head.sha || github.sha }}
-          runner_profile: ${{ inputs.cache_scope == 'isolated' && 'namespace-profile-mac-ci-tests-84gb' || 'namespace-profile-mac-ci' }}
-          cache_scope: ${{ inputs.cache_scope || 'shared' }}
-          counted: ${{ inputs.warmup && 'false' || 'true' }}
+          runner_profile: ${{ needs.params.outputs.runner }}
+          cache_scope: ${{ needs.params.outputs.cache_scope }}
+          counted: ${{ needs.params.outputs.counted }}
           cache_provider: ${{ steps.prepare_environment.outputs.rust_cache_provider }}
           cache_identity: ${{ steps.prepare_environment.outputs.rust_cache_identity }}
           cache_hit: ${{ steps.prepare_environment.outputs.rust_cache_hit }}
-          artifact_name: macos-compile-cache-${{ inputs.cache_scope || 'shared' }}-${{ matrix.cache_mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          artifact_name: macos-compile-cache-${{ needs.params.outputs.cache_scope }}-${{ matrix.cache_mode }}-${{ github.run_id }}-${{ github.run_attempt }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
