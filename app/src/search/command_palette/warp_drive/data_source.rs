@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 
 use warp_errors::report_error;
-use warpui::{AppContext, Entity, ModelContext, ModelHandle, SingletonEntity};
+use warpui::{AppContext, Entity, ModelContext, ModelHandle, SingletonEntity, WindowId};
 
 use super::env_var_collection_search_item::EnvVarCollectionSearchItem;
 use super::notebook_search_item::NotebookSearchItem;
 use super::workflow_search_item::WorkflowSearchItem;
 use crate::cloud_object::model::persistence::{CloudModel, CloudModelEvent};
 use crate::cloud_object::{
-    CloudObject, CloudObjectLocation, GenericStringObjectFormat, JsonObjectType, ObjectType,
+    CloudObject, CloudObjectLocation, GenericStringObjectFormat, JsonObjectType, ObjectType, Space,
 };
 use crate::drive::folders::CloudFolder;
 use crate::env_vars::CloudEnvVarCollection;
@@ -23,38 +23,46 @@ use crate::search::workflows::fuzzy_match::FuzzyMatchWorkflowResult;
 use crate::server::ids::{ObjectUid, SyncId};
 use crate::settings::AISettings;
 use crate::workflows::CloudWorkflow;
+use crate::workspaces::user_workspaces::UserWorkspaces;
 
-/// Datasource that searches against all Warp Drive objects
+/// Datasource that searches against the Warp Drive objects that are visible in a window.
 pub struct DataSource {
     searcher: Box<dyn WarpDriveSearcher>,
+    /// The search index spans every Warp Drive object the client knows about, including objects
+    /// belonging to teams other than the one this window is switched to. Results are scoped back
+    /// down to this window's spaces so that search agrees with what the Warp Drive panel shows.
+    window_id: WindowId,
 }
 
 impl DataSource {
     #[cfg(not(target_family = "wasm"))]
-    pub fn new(ctx: &mut ModelContext<Self>) -> Self {
+    pub fn new(window_id: WindowId, ctx: &mut ModelContext<Self>) -> Self {
         if warp_core::features::FeatureFlag::UseTantivySearch.is_enabled() {
-            Self::new_full_text(ctx)
+            Self::new_full_text(window_id, ctx)
         } else {
-            Self::new_fuzzy(ctx)
+            Self::new_fuzzy(window_id, ctx)
         }
     }
 
     #[cfg(target_family = "wasm")]
-    pub fn new(ctx: &mut ModelContext<Self>) -> Self {
-        Self::new_fuzzy(ctx)
+    pub fn new(window_id: WindowId, ctx: &mut ModelContext<Self>) -> Self {
+        Self::new_fuzzy(window_id, ctx)
     }
 
-    pub fn new_fuzzy(ctx: &mut ModelContext<Self>) -> Self {
+    pub fn new_fuzzy(window_id: WindowId, ctx: &mut ModelContext<Self>) -> Self {
         ctx.subscribe_to_model(&CloudModel::handle(ctx), Self::handle_cloud_object_updated);
         let mut searcher = Box::new(FuzzyWarpDriveSearcher::default());
         searcher.refresh_search_index(ctx).unwrap_or_else(|err| {
             report_error!(err.context("Error refreshing search index"));
         });
-        DataSource { searcher }
+        DataSource {
+            searcher,
+            window_id,
+        }
     }
 
     #[cfg(not(target_family = "wasm"))]
-    fn new_full_text(ctx: &mut ModelContext<Self>) -> Self {
+    fn new_full_text(window_id: WindowId, ctx: &mut ModelContext<Self>) -> Self {
         ctx.subscribe_to_model(&CloudModel::handle(ctx), Self::handle_cloud_object_updated);
         let mut searcher = Box::new(full_text_searcher::FullTextWarpDriveSearcher::new(
             ctx.background_executor(),
@@ -62,7 +70,16 @@ impl DataSource {
         searcher.refresh_search_index(ctx).unwrap_or_else(|err| {
             report_error!(err.context("Error refreshing search index"));
         });
-        DataSource { searcher }
+        DataSource {
+            searcher,
+            window_id,
+        }
+    }
+
+    /// The spaces whose Warp Drive objects are visible in this data source's window: the window's
+    /// team, plus the user's personal and shared-with-me objects.
+    fn spaces_in_scope(&self, app: &AppContext) -> Vec<Space> {
+        UserWorkspaces::as_ref(app).spaces_for_window(self.window_id, app)
     }
 
     fn handle_cloud_object_updated(
@@ -140,12 +157,18 @@ impl DataSource {
         should_include_command_workflows: bool,
         app: &AppContext,
     ) -> anyhow::Result<Vec<WorkflowSearchItem>> {
-        self.searcher.search_workflow(
-            &query.text.to_lowercase(),
-            app,
-            should_include_agent_mode_prompts,
-            should_include_command_workflows,
-        )
+        let spaces = self.spaces_in_scope(app);
+        Ok(self
+            .searcher
+            .search_workflow(
+                &query.text.to_lowercase(),
+                app,
+                should_include_agent_mode_prompts,
+                should_include_command_workflows,
+            )?
+            .into_iter()
+            .filter(|item| spaces.contains(&item.cloud_workflow.space(app)))
+            .collect())
     }
 }
 
@@ -160,6 +183,7 @@ impl crate::search::mixer::SyncDataSource for DataSource {
         let mut filtered_cloud_objects = Vec::new();
 
         let should_include_all_drive_objects = Self::include_all_drive_objects_in_result(query);
+        let spaces = self.spaces_in_scope(app);
 
         if query.filters.contains(&QueryFilter::Notebooks) || should_include_all_drive_objects {
             filtered_cloud_objects.extend(
@@ -170,6 +194,7 @@ impl crate::search::mixer::SyncDataSource for DataSource {
                             as DataSourceRunErrorWrapper
                     })?
                     .into_iter()
+                    .filter(|item| spaces.contains(&item.cloud_notebook.space(app)))
                     .map(QueryResult::from),
             );
         }
@@ -183,6 +208,7 @@ impl crate::search::mixer::SyncDataSource for DataSource {
                             as DataSourceRunErrorWrapper
                     })?
                     .into_iter()
+                    .filter(|item| spaces.contains(&item.cloud_notebook.space(app)))
                     .map(QueryResult::from),
             );
         }
@@ -222,6 +248,7 @@ impl crate::search::mixer::SyncDataSource for DataSource {
                             as DataSourceRunErrorWrapper
                     })?
                     .into_iter()
+                    .filter(|item| spaces.contains(&item.cloud_env_var_collection.space(app)))
                     .map(QueryResult::from),
             );
         }
@@ -244,6 +271,10 @@ impl DataSource {
         app: &AppContext,
     ) -> Option<QueryResult<CommandPaletteItemAction>> {
         let object = CloudModel::as_ref(app).get_by_uid(&sync_id.uid())?;
+        if !self.spaces_in_scope(app).contains(&object.space(app)) {
+            return None;
+        }
+
         let workflow: Option<&CloudWorkflow> = object.into();
         if let Some(workflow) = workflow {
             return Some(QueryResult::from(WorkflowSearchItem {

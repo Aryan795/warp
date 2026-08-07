@@ -3,7 +3,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use cloud_object_client::MockObjectClient;
 use settings::manager::SettingsManager;
-use warpui::{App, SingletonEntity};
+use warpui::{App, SingletonEntity, WindowId};
 
 use super::*;
 use crate::auth::AuthStateProvider;
@@ -27,9 +27,11 @@ use crate::settings::AISettings;
 use crate::system::SystemStats;
 use crate::workflows::workflow::Workflow;
 use crate::workflows::{CloudWorkflowModel, WorkflowId};
+use crate::workspaces::team::Team;
 use crate::workspaces::team_tester::TeamTesterStatus;
 use crate::workspaces::user_profiles::UserProfiles;
 use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::workspace::Workspace;
 
 fn mock_server_metadata() -> ServerMetadata {
     ServerMetadata {
@@ -77,7 +79,44 @@ fn mock_server_notebook(id: NotebookId, owner: Owner) -> ServerNotebook {
     )
 }
 
-fn initialize_app(app: &mut App) {
+fn team_for_test(uid: i64, name: &str) -> Team {
+    Team {
+        uid: uid.into(),
+        name: name.to_owned(),
+        color: None,
+        invite_code: None,
+        members: vec![],
+        pending_email_invites: vec![],
+        invite_link_domain_restrictions: vec![],
+        billing_metadata: Default::default(),
+        stripe_customer_id: None,
+        settings: Default::default(),
+        is_eligible_for_discovery: false,
+        has_billing_history: false,
+    }
+}
+
+fn workspace_for_test(teams: Vec<Team>) -> Workspace {
+    Workspace {
+        uid: "workspace_uid123456789".to_string().into(),
+        name: "test".to_string(),
+        stripe_customer_id: None,
+        teams,
+        billing_metadata: Default::default(),
+        bonus_grants_purchased_this_month: Default::default(),
+        billing_cycle_usage: None,
+        has_billing_history: false,
+        settings: Default::default(),
+        invite_code: None,
+        invite_link_domain_restrictions: vec![],
+        pending_email_invites: vec![],
+        is_eligible_for_discovery: false,
+        members: vec![],
+        total_requests_used_since_last_refresh: 0,
+    }
+}
+
+fn initialize_app(app: &mut App, workspaces: Vec<Workspace>) {
     // Add the necessary singleton models to the App
     app.add_singleton_model(|_| NetworkStatus::new());
     app.add_singleton_model(|_| SystemStats::new());
@@ -87,7 +126,7 @@ fn initialize_app(app: &mut App) {
         UserWorkspaces::mock(
             mock_team_client.clone(),
             mock_workspace_client.clone(),
-            vec![],
+            workspaces,
             ctx,
         )
     });
@@ -108,7 +147,7 @@ fn initialize_app(app: &mut App) {
 #[test]
 fn test_drive_data_source_correctly_filters_drive_filter() {
     App::test((), |mut app| async move {
-        initialize_app(&mut app);
+        initialize_app(&mut app, vec![]);
         // Initialize CloudModel
         CloudModel::handle(&app).update(&mut app, |model, ctx| {
             model.upsert_from_server_notebook(
@@ -122,7 +161,8 @@ fn test_drive_data_source_correctly_filters_drive_filter() {
         });
 
         let mixer = app.add_model(|_| CommandPaletteMixer::new());
-        let data_source_handle = app.add_model(warp_drive::DataSource::new);
+        let data_source_handle =
+            app.add_model(|ctx| warp_drive::DataSource::new(WindowId::new(), ctx));
         mixer.update(&mut app, |mixer, ctx| {
             // Add the drive data source with the relevant filters
             mixer.add_sync_source(
@@ -156,7 +196,7 @@ fn test_drive_data_source_correctly_filters_drive_filter() {
 #[test]
 fn test_drive_data_source_correctly_filters_no_filter() {
     App::test((), |mut app| async move {
-        initialize_app(&mut app);
+        initialize_app(&mut app, vec![]);
         // Initialize CloudModel
         CloudModel::handle(&app).update(&mut app, |model, ctx| {
             model.upsert_from_server_notebook(
@@ -169,7 +209,8 @@ fn test_drive_data_source_correctly_filters_no_filter() {
             )
         });
         let mixer = app.add_model(|_| CommandPaletteMixer::new());
-        let data_source_handle = app.add_model(warp_drive::DataSource::new);
+        let data_source_handle =
+            app.add_model(|ctx| warp_drive::DataSource::new(WindowId::new(), ctx));
         mixer.update(&mut app, |mixer, ctx| {
             // Add the drive data source with the relevant filters
             mixer.add_sync_source(
@@ -203,7 +244,7 @@ fn test_drive_data_source_correctly_filters_no_filter() {
 #[test]
 fn test_drive_data_source_correctly_filters_workflow_filter() {
     App::test((), |mut app| async move {
-        initialize_app(&mut app);
+        initialize_app(&mut app, vec![]);
         // Initialize CloudModel
         CloudModel::handle(&app).update(&mut app, |model, ctx| {
             model.upsert_from_server_notebook(
@@ -216,7 +257,8 @@ fn test_drive_data_source_correctly_filters_workflow_filter() {
             )
         });
         let mixer = app.add_model(|_| CommandPaletteMixer::new());
-        let data_source_handle = app.add_model(warp_drive::DataSource::new);
+        let data_source_handle =
+            app.add_model(|ctx| warp_drive::DataSource::new(WindowId::new(), ctx));
         mixer.update(&mut app, |mixer, ctx| {
             // Add the drive data source with the relevant filters
             mixer.add_sync_source(
@@ -252,7 +294,7 @@ fn test_drive_data_source_correctly_filters_workflow_filter() {
 #[test]
 fn test_drive_data_source_correctly_filters_notebook_filter() {
     App::test((), |mut app| async move {
-        initialize_app(&mut app);
+        initialize_app(&mut app, vec![]);
         // Initialize CloudModel
         CloudModel::handle(&app).update(&mut app, |model, ctx| {
             model.upsert_from_server_notebook(
@@ -265,7 +307,8 @@ fn test_drive_data_source_correctly_filters_notebook_filter() {
             )
         });
         let mixer = app.add_model(|_| CommandPaletteMixer::new());
-        let data_source_handle = app.add_model(warp_drive::DataSource::new);
+        let data_source_handle =
+            app.add_model(|ctx| warp_drive::DataSource::new(WindowId::new(), ctx));
         mixer.update(&mut app, |mixer, ctx| {
             // Add the drive data source with the relevant filters
             mixer.add_sync_source(
@@ -294,6 +337,83 @@ fn test_drive_data_source_correctly_filters_notebook_filter() {
             assert_eq!(results.len(), 1);
 
             assert!(results[0].accessibility_label().starts_with("Notebook:"));
+        });
+    })
+}
+
+#[test]
+fn test_drive_data_source_only_returns_objects_visible_in_the_window() {
+    let selected_team = team_for_test(123, "selected");
+    let other_team = team_for_test(456, "other");
+    let workspace = workspace_for_test(vec![selected_team.clone(), other_team.clone()]);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app, vec![workspace]);
+
+        let selected_team_workflow_id: WorkflowId = 1.into();
+        let other_team_workflow_id: WorkflowId = 2.into();
+        let personal_workflow_id: WorkflowId = 3.into();
+        CloudModel::handle(&app).update(&mut app, |model, ctx| {
+            model.upsert_from_server_workflow(
+                mock_server_workflow(
+                    selected_team_workflow_id,
+                    Owner::Team {
+                        team_uid: selected_team.uid,
+                    },
+                ),
+                ctx,
+            );
+            model.upsert_from_server_workflow(
+                mock_server_workflow(
+                    other_team_workflow_id,
+                    Owner::Team {
+                        team_uid: other_team.uid,
+                    },
+                ),
+                ctx,
+            );
+            model.upsert_from_server_workflow(
+                mock_server_workflow(personal_workflow_id, Owner::mock_current_user()),
+                ctx,
+            );
+        });
+
+        let window_id = WindowId::new();
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window_id, selected_team.uid, ctx);
+        });
+
+        let mixer = app.add_model(|_| CommandPaletteMixer::new());
+        let data_source_handle = app.add_model(|ctx| warp_drive::DataSource::new(window_id, ctx));
+        mixer.update(&mut app, |mixer, ctx| {
+            mixer.add_sync_source(data_source_handle, [QueryFilter::Workflows]);
+
+            mixer.run_query(
+                Query {
+                    filters: HashSet::from([QueryFilter::Workflows]),
+                    text: "foo".into(),
+                },
+                ctx,
+            );
+        });
+
+        app.read(|app| {
+            let mut labels = mixer
+                .as_ref(app)
+                .results()
+                .iter()
+                .map(|result| result.accessibility_label())
+                .collect::<Vec<_>>();
+            labels.sort();
+
+            // The window is switched to `selected_team`, so only that team's workflow and the
+            // user's personal workflow are searchable; `other_team`'s workflow is not.
+            let mut expected = vec![
+                format!("Workflow: foo{selected_team_workflow_id}"),
+                format!("Workflow: foo{personal_workflow_id}"),
+            ];
+            expected.sort();
+            assert_eq!(labels, expected);
         });
     })
 }

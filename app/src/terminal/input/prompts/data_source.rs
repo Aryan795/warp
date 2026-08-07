@@ -4,7 +4,9 @@ use warp_core::ui::icons::Icon;
 use warpui::elements::{ConstrainedBox, Container, Highlight, Text};
 use warpui::fonts::{Properties, Weight};
 use warpui::text_layout::ClipConfig;
-use warpui::{AppContext, Element, Entity, ModelContext, ModelHandle, SingletonEntity as _};
+use warpui::{
+    AppContext, Element, Entity, ModelContext, ModelHandle, SingletonEntity as _, WindowId,
+};
 
 use crate::appearance::Appearance;
 use crate::cloud_object::model::persistence::CloudModel;
@@ -39,12 +41,13 @@ pub struct PromptsMenuDataSource {
 }
 
 impl PromptsMenuDataSource {
-    pub fn new(ctx: &mut ModelContext<Self>) -> Self {
+    pub fn new(window_id: WindowId, ctx: &mut ModelContext<Self>) -> Self {
         // Ideally this would be a full-text searching but full text searching is slow, and
         // currently its implementation is not well-setup for async use.
         //
         // TODO(zachbai): Revert to full-text search and make this an `AsyncDataSource`.
-        let warp_drive_data_source = ctx.add_model(warp_drive::DataSource::new_fuzzy);
+        let warp_drive_data_source =
+            ctx.add_model(|ctx| warp_drive::DataSource::new_fuzzy(window_id, ctx));
         Self {
             warp_drive_data_source,
         }
