@@ -13,7 +13,7 @@
 //! data and keep working.
 use std::path::{Path, PathBuf};
 
-use super::data::PLUGIN_DATA_ROOT_ENV;
+use super::data::{FACTORY_UID_ENV, FactoryPluginDataLocator, PLUGIN_DATA_ROOT_ENV};
 use super::diagnostics::{PluginDiagnostic, PluginDiagnosticCode};
 use super::mcp::{PluginMcpServer, PluginMcpTransport};
 
@@ -31,7 +31,11 @@ pub struct FactoryPluginRuntime {
     /// Factory MCP file paths, most specific first.
     pub factory_mcp_files: Vec<PathBuf>,
     /// The durable root for plugin data, when the worker backend can provide one.
+    ///
+    /// Already contains the Factory UID. The client appends only `<scope>/<plugin-key>`.
     pub plugin_data_root: Option<PathBuf>,
+    /// The Factory UID, for identity and diagnostics only. Never composed into a path.
+    pub factory_uid: Option<String>,
 }
 
 impl FactoryPluginRuntime {
@@ -48,7 +52,18 @@ impl FactoryPluginRuntime {
             plugin_data_root: read_env(PLUGIN_DATA_ROOT_ENV)
                 .map(PathBuf::from)
                 .filter(|path| path.is_absolute()),
+            factory_uid: read_env(FACTORY_UID_ENV),
         }
+    }
+
+    /// The locator for this run's plugin data, when the worker provided a durable root.
+    ///
+    /// `None` is the same condition as [`allows_stdio_plugin_servers`](Self::allows_stdio_plugin_servers)
+    /// being false: with nowhere durable to put `PLUGIN_DATA`, no plugin stdio server may start.
+    pub fn data_locator(&self) -> Option<FactoryPluginDataLocator> {
+        self.plugin_data_root
+            .as_ref()
+            .map(|root| FactoryPluginDataLocator::new(root, self.factory_uid.clone()))
     }
 
     /// Whether this run may start plugin stdio MCP servers at all.

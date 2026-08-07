@@ -5,8 +5,10 @@
 //! identity is deliberately opaque: adding a remote source kind later must not change the
 //! identity of a component that a conversation already referenced.
 use std::fmt;
+use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Separator between a plugin name and a component name in a qualified component name.
 pub const QUALIFIED_NAME_SEPARATOR: char = ':';
@@ -97,6 +99,66 @@ impl PluginScopeId {
             PluginScopeId::Agent { name } => format!("agent/{name}"),
             PluginScopeId::Automation { name } => format!("automation/{name}"),
         }
+    }
+
+    /// One filesystem-safe directory name for this scope.
+    ///
+    /// Distinct from [`key_token`](Self::key_token), which is hashed and may contain separators.
+    /// This value becomes a real directory under a Factory's durable data root, and an agent or
+    /// automation name comes from a repository, so it is flattened into a single segment and
+    /// sanitized rather than nested.
+    pub fn path_segment(&self) -> String {
+        match self {
+            PluginScopeId::User => "user".to_owned(),
+            PluginScopeId::Repository => "repository".to_owned(),
+            PluginScopeId::Factory => "factory".to_owned(),
+            PluginScopeId::Agent { name } => format!("agent-{}", filesystem_safe_segment(name)),
+            PluginScopeId::Automation { name } => {
+                format!("automation-{}", filesystem_safe_segment(name))
+            }
+        }
+    }
+}
+
+/// Reduces an arbitrary name to one safe path segment.
+///
+/// Anything outside `[a-z0-9._-]` becomes `-`. A name that had to be changed, or that reduces to
+/// a reserved or empty segment, gets a short digest suffix so two different names cannot collapse
+/// onto one directory. A conformant plugin name (Agent Plugins §5.5 already restricts the
+/// character set) passes through untouched, which keeps real paths readable.
+pub fn filesystem_safe_segment(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '-' | '_') {
+                c
+            } else if c.is_ascii_uppercase() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    let is_reserved = sanitized.is_empty() || sanitized == "." || sanitized == "..";
+    if sanitized == name && !is_reserved {
+        return sanitized;
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(name.as_bytes());
+    let digest = hasher.finalize();
+    let suffix = digest
+        .iter()
+        .take(4)
+        .fold(String::with_capacity(8), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        });
+    if is_reserved {
+        suffix
+    } else {
+        format!("{sanitized}-{suffix}")
     }
 }
 

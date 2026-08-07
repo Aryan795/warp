@@ -21,8 +21,8 @@ mod package;
 mod paths;
 
 pub use data::{
-    LocalPluginDataLocator, PLUGIN_DATA_ROOT_ENV, PluginDataLocator, PluginFrontend,
-    plugin_data_instance_key,
+    FACTORY_UID_ENV, FactoryPluginDataLocator, LocalPluginDataLocator, PLUGIN_DATA_ROOT_ENV,
+    PluginDataLocator, PluginFrontend, plugin_data_instance_key,
 };
 pub use diagnostics::{PluginDiagnostic, PluginDiagnosticCode, PluginDiagnosticSeverity};
 pub use discovery::{
@@ -36,7 +36,7 @@ pub use factory_mcp::{
 pub use factory_runtime::{FACTORY_MCP_FILES_ENV, FactoryPluginRuntime, PLUGIN_DIRS_ENV};
 pub use identity::{
     PluginComponentId, PluginComponentKind, PluginInstanceId, PluginScopeId, PluginSourceId,
-    PluginSourceKind, split_qualified_name,
+    PluginSourceKind, filesystem_safe_segment, split_qualified_name,
 };
 pub use launch::{
     PLUGIN_DATA_VAR, PLUGIN_ROOT_VAR, PluginPlaceholders, ResolvedCommand, StdioLaunchPlan,

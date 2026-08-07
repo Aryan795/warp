@@ -1,7 +1,9 @@
 use tempfile::tempdir;
 
 use super::*;
-use crate::plugins::identity::{PluginScopeId, PluginSourceId, PluginSourceKind};
+use crate::plugins::identity::{
+    PluginScopeId, PluginSourceId, PluginSourceKind, filesystem_safe_segment,
+};
 
 fn instance(
     scope: PluginScopeId,
@@ -133,4 +135,190 @@ fn ensure_data_dir_creates_the_directory() {
     let created = locator.ensure_data_dir(&instance).unwrap();
     assert!(created.is_dir());
     assert_eq!(created, locator.data_dir(&instance));
+}
+
+// ---------------------------------------------------------------------------
+// Factory persistent-data contract.
+//
+// The composed path shape and the segment sanitization below are a cross-repo
+// contract shared with warp-server. The worked examples are duplicated on the
+// Go side; a divergence shows up as these tests failing rather than as plugin
+// data quietly landing in the wrong place.
+// ---------------------------------------------------------------------------
+
+/// The exact shape the worker contract fixes: `<WARP_PLUGIN_DATA_ROOT>/<scope>/<plugin-key>`.
+///
+/// The root already carries the Factory UID, so nothing below it mentions one.
+#[test]
+fn the_factory_path_is_the_root_plus_scope_and_plugin_key() {
+    let locator = FactoryPluginDataLocator::new(
+        "/cache/factories/fac_01HZY/plugin-data",
+        Some("fac_01HZY".to_owned()),
+    );
+
+    let cases = [
+        (
+            PluginScopeId::Factory,
+            "acme-tools",
+            "/cache/factories/fac_01HZY/plugin-data/factory/acme-tools",
+        ),
+        (
+            PluginScopeId::Agent {
+                name: "release".to_owned(),
+            },
+            "acme-tools",
+            "/cache/factories/fac_01HZY/plugin-data/agent-release/acme-tools",
+        ),
+        (
+            PluginScopeId::Automation {
+                name: "nightly".to_owned(),
+            },
+            "release.tools",
+            "/cache/factories/fac_01HZY/plugin-data/automation-nightly/release.tools",
+        ),
+    ];
+
+    for (scope, name, expected) in cases {
+        let instance = instance(
+            scope,
+            PluginSourceKind::FactoryRepository,
+            "/checkout",
+            name,
+        );
+        assert_eq!(
+            locator.data_dir(&instance),
+            std::path::PathBuf::from(expected)
+        );
+    }
+}
+
+/// The UID is recorded but never composed. Appending it again would build a second layout
+/// underneath the one the worker already created.
+#[test]
+fn the_factory_uid_never_enters_the_path() {
+    let locator = FactoryPluginDataLocator::new("/durable/fac_01HZY", Some("fac_01HZY".to_owned()));
+    let instance = instance(
+        PluginScopeId::Factory,
+        PluginSourceKind::FactoryRepository,
+        "/checkout",
+        "acme-tools",
+    );
+
+    assert_eq!(locator.factory_uid(), Some("fac_01HZY"));
+    assert_eq!(
+        locator.data_dir(&instance),
+        std::path::PathBuf::from("/durable/fac_01HZY/factory/acme-tools")
+    );
+    // Exactly one occurrence: the one the server put in the root.
+    assert_eq!(
+        locator
+            .data_dir(&instance)
+            .to_string_lossy()
+            .matches("fac_01HZY")
+            .count(),
+        1
+    );
+}
+
+/// The Factory layout must not nest the local one, which is the defect this type exists to stop.
+#[test]
+fn the_factory_layout_is_not_the_local_layout() {
+    let factory = FactoryPluginDataLocator::new("/durable/fac_01HZY", None);
+    let factory_instance = instance(
+        PluginScopeId::Factory,
+        PluginSourceKind::FactoryRepository,
+        "/checkout",
+        "acme-tools",
+    );
+    let path = factory
+        .data_dir(&factory_instance)
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        !path.contains("plugins/data"),
+        "the local layout must not appear under a Factory root: {path}"
+    );
+
+    // Local plugins keep the hashed layout, unchanged.
+    let local = LocalPluginDataLocator::new("/data", PluginFrontend::Gui);
+    assert!(
+        local
+            .data_dir(&user_instance("acme-tools"))
+            .starts_with("/data/plugins/data")
+    );
+}
+
+/// An agent name comes from a repository, so it must not be able to climb out of the root.
+#[test]
+fn an_author_controlled_scope_name_cannot_escape_the_root() {
+    let locator = FactoryPluginDataLocator::new("/durable/fac_01HZY", None);
+
+    for hostile in ["../../etc", "..", ".", "a/b", "a\\b", "", "Mixed Case"] {
+        let instance = instance(
+            PluginScopeId::Agent {
+                name: hostile.to_owned(),
+            },
+            PluginSourceKind::FactoryRepository,
+            "/checkout",
+            "acme-tools",
+        );
+        let path = locator.data_dir(&instance);
+        assert!(
+            path.starts_with("/durable/fac_01HZY"),
+            "'{hostile}' escaped: {}",
+            path.display()
+        );
+        // Root, `durable`, `fac_01HZY`, the scope segment, and the plugin key: no more.
+        assert_eq!(
+            path.components().count(),
+            5,
+            "'{hostile}' produced an unexpected depth: {}",
+            path.display()
+        );
+    }
+}
+
+/// Two hostile names that reduce to the same visible text must still get separate directories.
+#[test]
+fn distinct_names_that_sanitize_alike_do_not_collide() {
+    let locator = FactoryPluginDataLocator::new("/durable/fac_01HZY", None);
+    let path_for = |name: &str| {
+        locator.data_dir(&instance(
+            PluginScopeId::Agent {
+                name: name.to_owned(),
+            },
+            PluginSourceKind::FactoryRepository,
+            "/checkout",
+            "acme-tools",
+        ))
+    };
+    assert_ne!(path_for("a/b"), path_for("a\\b"));
+    assert_ne!(path_for(".."), path_for("."));
+}
+
+/// The sanitization rule itself, stated as worked examples.
+///
+/// A conformant name passes through untouched so real paths stay legible; anything else is
+/// reduced and given a digest suffix that keeps it distinct.
+#[test]
+fn the_sanitization_rule() {
+    // Unchanged: already a safe segment.
+    for clean in [
+        "acme-tools",
+        "release.tools",
+        "a",
+        "lint3r",
+        "with_underscore",
+    ] {
+        assert_eq!(filesystem_safe_segment(clean), clean);
+    }
+
+    // Transformed: reduced, then suffixed with the first four bytes of the SHA-256 of the input.
+    assert_eq!(filesystem_safe_segment("a/b"), "a-b-c14cddc0");
+    assert_eq!(filesystem_safe_segment("Mixed Case"), "mixed-case-0962903a");
+
+    // Reserved or empty: the digest alone, since there is no safe text to keep.
+    assert_eq!(filesystem_safe_segment(""), "e3b0c442");
+    assert_eq!(filesystem_safe_segment("."), "cdb4ee2a");
+    assert_eq!(filesystem_safe_segment(".."), "5ec1f7e7");
 }

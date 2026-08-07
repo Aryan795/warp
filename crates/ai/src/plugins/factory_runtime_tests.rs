@@ -152,6 +152,7 @@ fn without_a_data_root_no_stdio_server_may_start() {
         plugin_collection_dirs: vec![PathBuf::from("/repo/plugins")],
         factory_mcp_files: Vec::new(),
         plugin_data_root: None,
+        factory_uid: None,
     };
     let servers = vec![stdio_server("validator")];
 
@@ -192,6 +193,7 @@ fn with_a_data_root_every_transport_is_startable() {
         plugin_collection_dirs: Vec::new(),
         factory_mcp_files: Vec::new(),
         plugin_data_root: Some(PathBuf::from("/durable")),
+        factory_uid: None,
     };
     let servers = vec![stdio_server("validator"), http_server("issues")];
 

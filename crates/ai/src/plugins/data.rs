@@ -10,13 +10,27 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use super::identity::PluginInstanceId;
+use super::identity::{PluginInstanceId, filesystem_safe_segment};
 
-/// Absolute directory a Factory worker provides for durable plugin data.
+/// Absolute durable root a Factory worker provides for plugin data, **with the Factory UID
+/// already included** by the server.
 ///
-/// A worker that cannot provide a writable persistent root must fail dispatch rather than fall
-/// back to ephemeral storage, which would break the persistence guarantee in §9.1.
+/// The client appends only `<scope>/<plugin-key>` below it. Composing the UID is deliberately not
+/// the client's job: the path shape previously lived as prose in two repositories and the two
+/// implementations disagreed, so there is now exactly one place it can be wrong, and it is the
+/// side that owns the storage.
+///
+/// A worker that cannot provide a writable persistent root omits this variable entirely, and the
+/// client then refuses to start that plugin's stdio servers rather than falling back to ephemeral
+/// storage, which would break the persistence guarantee in §9.1.
 pub const PLUGIN_DATA_ROOT_ENV: &str = "WARP_PLUGIN_DATA_ROOT";
+
+/// The Factory UID for the current run.
+///
+/// Identity and diagnostics only. It is deliberately **never** used for path composition: it is
+/// already baked into [`PLUGIN_DATA_ROOT_ENV`], and appending it again would produce a second,
+/// divergent layout.
+pub const FACTORY_UID_ENV: &str = "WARP_FACTORY_UID";
 
 /// Which front-end owns a plugin runtime instance.
 ///
@@ -88,10 +102,11 @@ pub struct LocalPluginDataLocator {
 }
 
 impl LocalPluginDataLocator {
-    /// Creates a locator rooted at `<base>/plugins/data`.
+    /// Creates a locator rooted at `<base>/plugins/data`, for **local plugins only**.
     ///
-    /// Interactive clients pass `warp_core::paths::data_dir()`; a Factory worker passes the
-    /// durable root it advertised through [`PLUGIN_DATA_ROOT_ENV`].
+    /// Interactive clients pass `warp_core::paths::data_dir()`. A Factory runtime must not use
+    /// this layout: see [`FactoryPluginDataLocator`], which composes the path the worker's
+    /// durable root expects instead of nesting this one underneath it.
     pub fn new(base: impl AsRef<Path>, frontend: PluginFrontend) -> Self {
         Self {
             base: base.as_ref().to_path_buf(),
@@ -109,6 +124,58 @@ impl PluginDataLocator for LocalPluginDataLocator {
     fn data_dir(&self, instance: &PluginInstanceId) -> PathBuf {
         self.root()
             .join(plugin_data_instance_key(self.frontend, instance))
+    }
+}
+
+/// Locates plugin data for a Factory run, under the worker's durable root.
+///
+/// The composed path is exactly `<WARP_PLUGIN_DATA_ROOT>/<scope>/<plugin-key>`. The root already
+/// carries the Factory UID, so runs under different Factories cannot collide even though nothing
+/// below the root mentions a UID.
+///
+/// This deliberately does not reuse the local `plugins/data/<hash>` layout. The two are different
+/// contracts — one is private to this client, the other is shared with the worker — and nesting
+/// the private one under the shared root is the defect this type exists to prevent.
+#[derive(Debug, Clone)]
+pub struct FactoryPluginDataLocator {
+    root: PathBuf,
+    factory_uid: Option<String>,
+}
+
+impl FactoryPluginDataLocator {
+    /// Creates a locator over the worker's durable root.
+    ///
+    /// `factory_uid` is recorded for diagnostics and never enters the path.
+    pub fn new(root: impl AsRef<Path>, factory_uid: Option<String>) -> Self {
+        Self {
+            root: root.as_ref().to_path_buf(),
+            factory_uid,
+        }
+    }
+
+    /// The Factory UID for the current run, when the worker supplied one.
+    pub fn factory_uid(&self) -> Option<&str> {
+        self.factory_uid.as_deref()
+    }
+
+    /// The durable root, exactly as the worker exported it.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The `<plugin-key>` segment for an instance.
+    ///
+    /// A conformant manifest name passes through unchanged, so real Factory paths stay legible.
+    pub fn plugin_key(instance: &PluginInstanceId) -> String {
+        filesystem_safe_segment(&instance.manifest_name)
+    }
+}
+
+impl PluginDataLocator for FactoryPluginDataLocator {
+    fn data_dir(&self, instance: &PluginInstanceId) -> PathBuf {
+        self.root
+            .join(instance.scope.path_segment())
+            .join(Self::plugin_key(instance))
     }
 }
 
