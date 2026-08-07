@@ -186,6 +186,7 @@ pub(crate) fn redact_inputs(inputs: &mut [AIAgentInput]) {
                                 diff,
                                 updated_files,
                                 deleted_files,
+                                notes,
                                 ..
                             } => {
                                 redact_secrets(diff);
@@ -198,6 +199,9 @@ pub(crate) fn redact_inputs(inputs: &mut [AIAgentInput]) {
                                 }
                                 for file_path in deleted_files {
                                     redact_secrets(file_path);
+                                }
+                                for note in notes {
+                                    redact_secrets(note);
                                 }
                             }
                             // Failure messages can quote existing file content (e.g. a
