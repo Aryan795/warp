@@ -311,6 +311,42 @@ fn kimi_models_are_matched_by_id_not_by_provider() {
 }
 
 #[test]
+fn custom_endpoint_models_never_get_the_kimi_logo() {
+    // A custom endpoint's model id is the user-chosen `config_key`, so it says
+    // nothing about the provider. Branding one would put Kimi's trademark on an
+    // arbitrary BYO endpoint.
+    let keys = ai::api_keys::ApiKeys {
+        custom_endpoints: vec![endpoint(
+            "My Endpoint",
+            "https://x.io",
+            "k",
+            vec![model("some-model", None, "kimi-anything")],
+        )],
+        ..Default::default()
+    };
+    let infos = build_custom_llm_infos(&keys);
+    let llm = infos.first().expect("one custom endpoint model");
+    assert_eq!(llm.id.as_str(), "kimi-anything");
+
+    assert_eq!(
+        model_leading_icon(
+            llm,
+            ModelIconFlags {
+                is_custom_endpoint: true,
+                ..Default::default()
+            }
+        ),
+        Icon::Agent
+    );
+    // Same id from the server catalogue is still branded, so the flag — not the
+    // id shape — is what excludes the custom-endpoint row.
+    assert_eq!(
+        model_leading_icon(llm, ModelIconFlags::default()),
+        Icon::KimiLogo
+    );
+}
+
+#[test]
 fn kimi_models_keep_the_existing_router_auto_and_host_precedence() {
     let llm = server_llm("kimi-k3-fireworks", None);
 
