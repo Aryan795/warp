@@ -19,8 +19,8 @@ env:
   RUSTFLAGS: -C debuginfo=line-tables-only --cfg=web_sys_unstable_apis
 
 jobs:
-  guard:
-    name: Validate experiment source
+  parameters:
+    name: Resolve experiment phase
     if: >-
       github.repository_owner == 'warpdotdev' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
@@ -29,20 +29,44 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      block: ${{ steps.resolve.outputs.block }}
+      phase: ${{ steps.resolve.outputs.phase }}
+      seed_attempt: ${{ steps.resolve.outputs.seed_attempt }}
     steps:
-      - name: Record immutable experiment input
+      - name: Resolve alternating seed and measure attempts
+        id: resolve
         env:
           MERGE_SHA: ${{ github.sha }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
           SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
+          set -euo pipefail
+          if (( RUN_ATTEMPT % 2 == 1 )); then
+            phase=seed
+            seed_attempt="$RUN_ATTEMPT"
+          else
+            phase=measure
+            seed_attempt="$((RUN_ATTEMPT - 1))"
+          fi
+          block="$(((RUN_ATTEMPT + 1) / 2))"
           {
+            printf 'block=%s\n' "$block"
+            printf 'phase=%s\n' "$phase"
+            printf 'seed_attempt=%s\n' "$seed_attempt"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "Block: $block"
+            echo "Phase: $phase"
+            echo "Seed attempt: $seed_attempt"
             echo "Merge SHA: $MERGE_SHA"
             echo "Source SHA: $SOURCE_SHA"
           } >> "$GITHUB_STEP_SUMMARY"
 
   seed:
-    name: Seed tests cache (${{ matrix.cache_scope }})
-    needs: guard
+    name: Seed block ${{ needs.parameters.outputs.block }} (${{ matrix.cache_scope }})
+    needs: parameters
+    if: needs.parameters.outputs.phase == 'seed'
     timeout-minutes: 40
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -87,9 +111,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  block_identity:
-    name: Validate matched treatment block
-    needs: seed
+  validate_seed:
+    name: Validate block ${{ needs.parameters.outputs.block }} seed
+    needs:
+      - parameters
+      - seed
+    if: needs.parameters.outputs.phase == 'seed' && needs.seed.result == 'success'
     timeout-minutes: 5
     runs-on: ubuntu-latest
     permissions:
@@ -108,7 +135,7 @@ jobs:
           name: macos-compile-cache-84gb-seed-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/seed-84gb
 
-      - name: Compare treatment inputs
+      - name: Compare treatment seed inputs
         shell: bash
         run: |
           set -euo pipefail
@@ -121,9 +148,47 @@ jobs:
             fi
           done
 
+  validate_measurement:
+    name: Load block ${{ needs.parameters.outputs.block }} seed
+    needs: parameters
+    if: needs.parameters.outputs.phase == 'measure'
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Download 50 GB seed diagnostics
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: macos-compile-cache-50gb-seed-${{ github.run_id }}-${{ needs.parameters.outputs.seed_attempt }}
+          path: ${{ runner.temp }}/seed-50gb
+
+      - name: Download 84 GB seed diagnostics
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: macos-compile-cache-84gb-seed-${{ github.run_id }}-${{ needs.parameters.outputs.seed_attempt }}
+          path: ${{ runner.temp }}/seed-84gb
+
+      - name: Validate prior-attempt seed artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          for key in checked_out_tree_sha environment_identity_sha; do
+            value_50gb="$(sed -n "s/^$key=//p" "$RUNNER_TEMP/seed-50gb/metrics.env")"
+            value_84gb="$(sed -n "s/^$key=//p" "$RUNNER_TEMP/seed-84gb/metrics.env")"
+            if [ -z "$value_50gb" ] || [ "$value_50gb" != "$value_84gb" ]; then
+              echo "::error::Prior-attempt seeds do not share $key"
+              exit 1
+            fi
+          done
+
   measure:
-    name: Measure tests cache (${{ matrix.cache_scope }})
-    needs: block_identity
+    name: Measure block ${{ needs.parameters.outputs.block }} (${{ matrix.cache_scope }})
+    needs:
+      - parameters
+      - validate_measurement
+    if: needs.parameters.outputs.phase == 'measure' && needs.validate_measurement.result == 'success'
     timeout-minutes: 40
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -145,7 +210,7 @@ jobs:
       - name: Download seed diagnostics
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: macos-compile-cache-${{ matrix.cache_scope }}-seed-${{ github.run_id }}-${{ github.run_attempt }}
+          name: macos-compile-cache-${{ matrix.cache_scope }}-seed-${{ github.run_id }}-${{ needs.parameters.outputs.seed_attempt }}
           path: ${{ runner.temp }}/seed-diagnostics
 
       - name: Read seed identity
@@ -195,8 +260,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   scratch:
-    name: Measure scratch control
-    needs: block_identity
+    name: Measure block ${{ needs.parameters.outputs.block }} scratch
+    needs:
+      - parameters
+      - validate_measurement
+    if: needs.parameters.outputs.phase == 'measure' && needs.validate_measurement.result == 'success'
     timeout-minutes: 40
     runs-on: namespace-profile-mac-ci-tests-scratch
     permissions:
@@ -210,7 +278,7 @@ jobs:
       - name: Download matched seed diagnostics
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: macos-compile-cache-50gb-seed-${{ github.run_id }}-${{ github.run_attempt }}
+          name: macos-compile-cache-50gb-seed-${{ github.run_id }}-${{ needs.parameters.outputs.seed_attempt }}
           path: ${{ runner.temp }}/seed-diagnostics
 
       - name: Read matched build identity
