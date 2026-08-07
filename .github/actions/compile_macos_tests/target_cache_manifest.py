@@ -5,6 +5,9 @@ import stat
 from pathlib import Path
 
 
+SEED_MARKER = ".warp-cache-seed.env"
+
+
 def build_manifest(target_dir: Path) -> tuple[str, int]:
     digest = hashlib.sha256()
     file_count = 0
@@ -21,7 +24,10 @@ def build_manifest(target_dir: Path) -> tuple[str, int]:
         )
         for path in sorted(entries):
             file_stat = path.lstat()
-            relative_path = path.relative_to(target_dir).as_posix().encode()
+            relative_path_text = path.relative_to(target_dir).as_posix()
+            if relative_path_text == SEED_MARKER:
+                continue
+            relative_path = relative_path_text.encode()
             file_kind = b"link" if stat.S_ISLNK(file_stat.st_mode) else b"file"
             metadata = (
                 file_kind

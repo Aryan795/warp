@@ -34,6 +34,9 @@ inputs:
     description: Fingerprint manifest expected from the seed job.
   expected_target_kib:
     description: Target working-set size expected from the seed job.
+  require_seed_marker:
+    default: 'false'
+    description: Require and validate seed identity persisted in the restored target cache.
   artifact_name:
     required: true
     description: Name for the uploaded diagnostic artifact.
@@ -49,6 +52,7 @@ runs:
         EXPECTED_ENVIRONMENT_SHA: ${{ inputs.expected_environment_sha }}
         EXPECTED_TARGET_MANIFEST_SHA: ${{ inputs.expected_target_manifest_sha }}
         EXPECTED_TARGET_KIB: ${{ inputs.expected_target_kib }}
+        REQUIRE_SEED_MARKER: ${{ inputs.require_seed_marker }}
       run: |
         set -euo pipefail
 
@@ -117,12 +121,27 @@ runs:
               '${{ inputs.extra_test_args }}'
           } | shasum -a 256 | awk '{print $1}'
         )"
+        seed_marker="$target_dir/.warp-cache-seed.env"
+        seed_marker_found=false
+        seed_run_id=
+        seed_run_attempt=
+        if [ "$REQUIRE_SEED_MARKER" = "true" ] && [ -f "$seed_marker" ]; then
+          seed_marker_found=true
+          EXPECTED_TREE_SHA="$(sed -n 's/^checked_out_tree_sha=//p' "$seed_marker")"
+          EXPECTED_ENVIRONMENT_SHA="$(sed -n 's/^environment_identity_sha=//p' "$seed_marker")"
+          EXPECTED_TARGET_MANIFEST_SHA="$(sed -n 's/^target_manifest_sha=//p' "$seed_marker")"
+          EXPECTED_TARGET_KIB="$(sed -n 's/^target_kib=//p' "$seed_marker")"
+          seed_run_id="$(sed -n 's/^seed_run_id=//p' "$seed_marker")"
+          seed_run_attempt="$(sed -n 's/^seed_run_attempt=//p' "$seed_marker")"
+        fi
         seed_identity_match=not_checked
-        if [ -n "$EXPECTED_TREE_SHA" ] ||
+        if [ "$REQUIRE_SEED_MARKER" = "true" ] ||
+           [ -n "$EXPECTED_TREE_SHA" ] ||
            [ -n "$EXPECTED_ENVIRONMENT_SHA" ] ||
            [ -n "$EXPECTED_TARGET_MANIFEST_SHA" ]; then
           seed_identity_match=true
-          if { [ -n "$EXPECTED_TREE_SHA" ] && [ "$checked_out_tree_sha" != "$EXPECTED_TREE_SHA" ]; } ||
+          if { [ "$REQUIRE_SEED_MARKER" = "true" ] && [ "$seed_marker_found" != "true" ]; } ||
+             { [ -n "$EXPECTED_TREE_SHA" ] && [ "$checked_out_tree_sha" != "$EXPECTED_TREE_SHA" ]; } ||
              { [ -n "$EXPECTED_ENVIRONMENT_SHA" ] && [ "$environment_identity_sha" != "$EXPECTED_ENVIRONMENT_SHA" ]; } ||
              { [ -n "$EXPECTED_TARGET_MANIFEST_SHA" ] && [ "$pre_target_manifest_sha" != "$EXPECTED_TARGET_MANIFEST_SHA" ]; }; then
             seed_identity_match=false
@@ -144,6 +163,9 @@ runs:
           "expected_environment_sha=$EXPECTED_ENVIRONMENT_SHA" \
           "expected_target_manifest_sha=$EXPECTED_TARGET_MANIFEST_SHA" \
           "expected_target_kib=$EXPECTED_TARGET_KIB" \
+          "seed_marker_found=$seed_marker_found" \
+          "seed_run_id=$seed_run_id" \
+          "seed_run_attempt=$seed_run_attempt" \
           "seed_identity_match=$seed_identity_match" \
           > "$diagnostics_dir/metrics.env"
 
@@ -294,6 +316,22 @@ runs:
         environment_identity_sha="$(sed -n 's/^environment_identity_sha=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
         source_sha="$(sed -n 's/^source_sha=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
         seed_identity_match="$(sed -n 's/^seed_identity_match=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
+        seed_marker_found="$(sed -n 's/^seed_marker_found=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
+        seed_run_id="$(sed -n 's/^seed_run_id=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
+        seed_run_attempt="$(sed -n 's/^seed_run_attempt=//p' "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env")"
+        seed_marker_written=false
+        if [ "$counted" = "false" ] && [ "$compile_status" = "0" ]; then
+          cat > "$MACOS_COMPILE_TARGET_DIR/.warp-cache-seed.env" <<EOF
+        checked_out_tree_sha=$checked_out_tree_sha
+        environment_identity_sha=$environment_identity_sha
+        target_manifest_sha=$post_target_manifest_sha
+        target_kib=$post_target_kib
+        seed_run_id=$GITHUB_RUN_ID
+        seed_run_attempt=$GITHUB_RUN_ATTEMPT
+        EOF
+          seed_marker_written=true
+        fi
+        printf 'seed_marker_written=%s\n' "$seed_marker_written" >> "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env"
 
         summary="$MACOS_COMPILE_DIAGNOSTICS_DIR/summary.md"
         {
@@ -314,6 +352,7 @@ runs:
             echo "| Measurement | counted |"
           fi
           echo "| Seed identity match | \`$seed_identity_match\` |"
+          echo "| Seed marker | found \`$seed_marker_found\`; source \`$seed_run_id/$seed_run_attempt\`; written \`$seed_marker_written\` |"
           echo "| Cargo cache working set | $(kib_to_gib "$pre_cargo_cache_kib") → $(kib_to_gib "$post_cargo_cache_kib") |"
           echo "| ↳ registry | $(kib_to_gib "$pre_cargo_registry_kib") → $(kib_to_gib "$post_cargo_registry_kib") |"
           echo "| ↳ git | $(kib_to_gib "$pre_cargo_git_kib") → $(kib_to_gib "$post_cargo_git_kib") |"
@@ -361,7 +400,7 @@ runs:
       run: exit 1
 
     - name: Reject mismatched experiment inputs
-      if: ${{ steps.compile.outcome == 'success' && (inputs.expected_tree_sha != '' || inputs.expected_environment_sha != '' || inputs.expected_target_manifest_sha != '') && steps.capture.outputs.seed_identity_match != 'true' }}
+      if: ${{ steps.compile.outcome == 'success' && (inputs.require_seed_marker == 'true' || inputs.expected_tree_sha != '' || inputs.expected_environment_sha != '' || inputs.expected_target_manifest_sha != '') && steps.capture.outputs.seed_identity_match != 'true' }}
       shell: bash
       run: |
         echo "::error::Checked-out tree, build environment, or restored target did not match the serialized seed"

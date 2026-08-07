@@ -54,5 +54,17 @@ class BuildManifestTest(unittest.TestCase):
 
             self.assertNotEqual(first_manifest, build_manifest(target_dir))
 
+    def test_ignores_seed_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target_dir = Path(directory)
+            marker = target_dir / ".warp-cache-seed.env"
+            marker.write_text("seed_attempt=1")
+            first_manifest = build_manifest(target_dir)
+
+            marker.write_text("seed_attempt=3")
+
+            self.assertEqual(first_manifest, build_manifest(target_dir))
+
+
 if __name__ == "__main__":
     unittest.main()

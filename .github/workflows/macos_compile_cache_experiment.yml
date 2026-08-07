@@ -111,6 +111,73 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  validate_block:
+    name: Validate block ${{ needs.parameters.outputs.block }} measurements
+    needs:
+      - parameters
+      - measure
+      - scratch
+    if: >-
+      needs.parameters.outputs.phase == 'measure' &&
+      needs.measure.result == 'success' &&
+      needs.scratch.result == 'success'
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Download 50 GB measurement
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: macos-compile-cache-50gb-measure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/measure-50gb
+
+      - name: Download 84 GB measurement
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: macos-compile-cache-84gb-measure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/measure-84gb
+
+      - name: Download scratch measurement
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: macos-compile-cache-scratch-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/measure-scratch
+
+      - name: Validate matched block
+        env:
+          EXPECTED_SEED_ATTEMPT: ${{ needs.parameters.outputs.seed_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for key in checked_out_tree_sha environment_identity_sha; do
+            expected="$(sed -n "s/^$key=//p" "$RUNNER_TEMP/measure-50gb/metrics.env")"
+            for scope in 84gb scratch; do
+              actual="$(sed -n "s/^$key=//p" "$RUNNER_TEMP/measure-$scope/metrics.env")"
+              if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
+                echo "::error::Measurement arms do not share $key"
+                exit 1
+              fi
+            done
+          done
+          for scope in 50gb 84gb; do
+            metrics="$RUNNER_TEMP/measure-$scope/metrics.env"
+            if [ "$(sed -n 's/^seed_identity_match=//p' "$metrics")" != "true" ] ||
+               [ "$(sed -n 's/^seed_marker_found=//p' "$metrics")" != "true" ] ||
+               [ "$(sed -n 's/^seed_run_id=//p' "$metrics")" != "$GITHUB_RUN_ID" ] ||
+               [ "$(sed -n 's/^seed_run_attempt=//p' "$metrics")" != "$EXPECTED_SEED_ATTEMPT" ]; then
+              echo "::error::$scope did not restore the expected seed generation"
+              exit 1
+            fi
+          done
+          scratch_metrics="$RUNNER_TEMP/measure-scratch/metrics.env"
+          if [ "$(sed -n 's/^cache_provider=//p' "$scratch_metrics")" != "none" ] ||
+             [ "$(sed -n 's/^pre_target_kib=//p' "$scratch_metrics")" != "0" ]; then
+            echo "::error::Scratch arm attached cache state"
+            exit 1
+          fi
+
   validate_seed:
     name: Validate block ${{ needs.parameters.outputs.block }} seed
     needs:
@@ -147,48 +214,19 @@ jobs:
               exit 1
             fi
           done
-
-  validate_measurement:
-    name: Load block ${{ needs.parameters.outputs.block }} seed
-    needs: parameters
-    if: needs.parameters.outputs.phase == 'measure'
-    timeout-minutes: 5
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-      contents: read
-    steps:
-      - name: Download 50 GB seed diagnostics
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: macos-compile-cache-50gb-seed-${{ github.run_id }}-${{ needs.parameters.outputs.seed_attempt }}
-          path: ${{ runner.temp }}/seed-50gb
-
-      - name: Download 84 GB seed diagnostics
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: macos-compile-cache-84gb-seed-${{ github.run_id }}-${{ needs.parameters.outputs.seed_attempt }}
-          path: ${{ runner.temp }}/seed-84gb
-
-      - name: Validate prior-attempt seed artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-          for key in checked_out_tree_sha environment_identity_sha; do
-            value_50gb="$(sed -n "s/^$key=//p" "$RUNNER_TEMP/seed-50gb/metrics.env")"
-            value_84gb="$(sed -n "s/^$key=//p" "$RUNNER_TEMP/seed-84gb/metrics.env")"
-            if [ -z "$value_50gb" ] || [ "$value_50gb" != "$value_84gb" ]; then
-              echo "::error::Prior-attempt seeds do not share $key"
+          for scope in 50gb 84gb; do
+            marker_written="$(sed -n 's/^seed_marker_written=//p' "$RUNNER_TEMP/seed-$scope/metrics.env")"
+            if [ "$marker_written" != "true" ]; then
+              echo "::error::$scope seed did not persist its cache marker"
               exit 1
             fi
           done
 
+
   measure:
     name: Measure block ${{ needs.parameters.outputs.block }} (${{ matrix.cache_scope }})
-    needs:
-      - parameters
-      - validate_measurement
-    if: needs.parameters.outputs.phase == 'measure' && needs.validate_measurement.result == 'success'
+    needs: parameters
+    if: needs.parameters.outputs.phase == 'measure'
     timeout-minutes: 40
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -207,26 +245,6 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
-      - name: Download seed diagnostics
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: macos-compile-cache-${{ matrix.cache_scope }}-seed-${{ github.run_id }}-${{ needs.parameters.outputs.seed_attempt }}
-          path: ${{ runner.temp }}/seed-diagnostics
-
-      - name: Read seed identity
-        id: seed_identity
-        shell: bash
-        run: |
-          set -euo pipefail
-          metrics="$RUNNER_TEMP/seed-diagnostics/metrics.env"
-          for key in checked_out_tree_sha environment_identity_sha post_target_manifest_sha post_target_kib; do
-            value="$(sed -n "s/^$key=//p" "$metrics")"
-            if [ -z "$value" ]; then
-              echo "::error::Seed diagnostics are missing $key"
-              exit 1
-            fi
-            printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT"
-          done
 
       - uses: ./.github/actions/prepare_environment
         id: prepare_environment
@@ -248,10 +266,7 @@ jobs:
           runner_profile: ${{ matrix.runner }}
           cache_scope: ${{ matrix.cache_scope }}
           counted: 'true'
-          expected_tree_sha: ${{ steps.seed_identity.outputs.checked_out_tree_sha }}
-          expected_environment_sha: ${{ steps.seed_identity.outputs.environment_identity_sha }}
-          expected_target_manifest_sha: ${{ steps.seed_identity.outputs.post_target_manifest_sha }}
-          expected_target_kib: ${{ steps.seed_identity.outputs.post_target_kib }}
+          require_seed_marker: 'true'
           cache_provider: ${{ steps.prepare_environment.outputs.rust_cache_provider }}
           cache_identity: ${{ steps.prepare_environment.outputs.rust_cache_identity }}
           cache_hit: ${{ steps.prepare_environment.outputs.rust_cache_hit }}
@@ -261,10 +276,8 @@ jobs:
 
   scratch:
     name: Measure block ${{ needs.parameters.outputs.block }} scratch
-    needs:
-      - parameters
-      - validate_measurement
-    if: needs.parameters.outputs.phase == 'measure' && needs.validate_measurement.result == 'success'
+    needs: parameters
+    if: needs.parameters.outputs.phase == 'measure'
     timeout-minutes: 40
     runs-on: namespace-profile-mac-ci-tests-scratch
     permissions:
@@ -275,26 +288,6 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
-      - name: Download matched seed diagnostics
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: macos-compile-cache-50gb-seed-${{ github.run_id }}-${{ needs.parameters.outputs.seed_attempt }}
-          path: ${{ runner.temp }}/seed-diagnostics
-
-      - name: Read matched build identity
-        id: seed_identity
-        shell: bash
-        run: |
-          set -euo pipefail
-          metrics="$RUNNER_TEMP/seed-diagnostics/metrics.env"
-          for key in checked_out_tree_sha environment_identity_sha; do
-            value="$(sed -n "s/^$key=//p" "$metrics")"
-            if [ -z "$value" ]; then
-              echo "::error::Seed diagnostics are missing $key"
-              exit 1
-            fi
-            printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT"
-          done
 
       - name: Use ephemeral Rust paths
         run: |
@@ -325,8 +318,6 @@ jobs:
           runner_profile: namespace-profile-mac-ci-tests-scratch
           cache_scope: scratch
           counted: 'true'
-          expected_tree_sha: ${{ steps.seed_identity.outputs.checked_out_tree_sha }}
-          expected_environment_sha: ${{ steps.seed_identity.outputs.environment_identity_sha }}
           cache_provider: ${{ steps.prepare_environment.outputs.rust_cache_provider }}
           cache_identity: ${{ steps.prepare_environment.outputs.rust_cache_identity }}
           cache_hit: ${{ steps.prepare_environment.outputs.rust_cache_hit }}
