@@ -2248,14 +2248,14 @@ fn test_workspace_policy_wins_over_user_level_policy() {
 }
 
 #[test]
-fn effective_team_settings_uses_workspace_defaults_when_flag_disabled() {
+fn team_scoped_settings_falls_back_to_workspace_when_flag_disabled() {
     let mut team = team_for_test();
-    team.settings.secret_redaction.enabled = EnforceableSetting {
-        value: true,
+    team.settings.ugc_collection = EnforceableSetting {
+        value: UgcCollectionEnablementSetting::Enable,
         is_enforced_by_workspace: false,
     };
     let mut workspace = workspace_for_test(&team);
-    workspace.settings.secret_redaction_settings.enabled = false;
+    workspace.settings.ugc_collection_settings.setting = UgcCollectionEnablementSetting::Disable;
 
     App::test((), |mut app| async move {
         initialize_window_team_test_app(&mut app, vec![workspace]);
@@ -2266,11 +2266,12 @@ fn effective_team_settings_uses_workspace_defaults_when_flag_disabled() {
         });
 
         app.read(|ctx| {
-            let settings = UserWorkspaces::as_ref(ctx)
-                .effective_team_settings_for_window(Some(window_id))
-                .expect("a workspace is present");
             assert!(
-                !settings.secret_redaction.enabled.value,
+                matches!(
+                    UserWorkspaces::as_ref(ctx)
+                        .get_ugc_collection_enablement_setting(Some(window_id)),
+                    UgcCollectionEnablementSetting::Disable
+                ),
                 "flag disabled: should fall back to the workspace's value, not the team's"
             );
         });
@@ -2278,15 +2279,15 @@ fn effective_team_settings_uses_workspace_defaults_when_flag_disabled() {
 }
 
 #[test]
-fn effective_team_settings_uses_the_bound_teams_own_settings_when_flag_enabled() {
+fn team_scoped_settings_uses_the_bound_teams_own_settings_when_flag_enabled() {
     let _flag = FeatureFlag::TeamScopedSettings.override_enabled(true);
     let mut team = team_for_test();
-    team.settings.secret_redaction.enabled = EnforceableSetting {
-        value: true,
+    team.settings.ugc_collection = EnforceableSetting {
+        value: UgcCollectionEnablementSetting::Enable,
         is_enforced_by_workspace: false,
     };
     let mut workspace = workspace_for_test(&team);
-    workspace.settings.secret_redaction_settings.enabled = false;
+    workspace.settings.ugc_collection_settings.setting = UgcCollectionEnablementSetting::Disable;
 
     App::test((), |mut app| async move {
         initialize_window_team_test_app(&mut app, vec![workspace]);
@@ -2297,11 +2298,12 @@ fn effective_team_settings_uses_the_bound_teams_own_settings_when_flag_enabled()
         });
 
         app.read(|ctx| {
-            let settings = UserWorkspaces::as_ref(ctx)
-                .effective_team_settings_for_window(Some(window_id))
-                .expect("a workspace is present");
             assert!(
-                settings.secret_redaction.enabled.value,
+                matches!(
+                    UserWorkspaces::as_ref(ctx)
+                        .get_ugc_collection_enablement_setting(Some(window_id)),
+                    UgcCollectionEnablementSetting::Enable
+                ),
                 "flag enabled with a team bound to the window: should use the team's own settings"
             );
         });
@@ -2309,30 +2311,29 @@ fn effective_team_settings_uses_the_bound_teams_own_settings_when_flag_enabled()
 }
 
 #[test]
-fn effective_team_settings_falls_back_to_workspace_when_window_has_no_team() {
+fn team_scoped_settings_falls_back_to_workspace_when_window_has_no_team() {
     let _flag = FeatureFlag::TeamScopedSettings.override_enabled(true);
     let team = team_for_test();
     let mut workspace = workspace_for_test(&team);
-    workspace.settings.secret_redaction_settings.enabled = true;
+    workspace.settings.ugc_collection_settings.setting = UgcCollectionEnablementSetting::Enable;
 
     App::test((), |mut app| async move {
         initialize_window_team_test_app(&mut app, vec![workspace]);
 
         app.read(|ctx| {
-            let settings = UserWorkspaces::as_ref(ctx)
-                .effective_team_settings_for_window(None)
-                .expect("a workspace is present");
-            assert!(settings.secret_redaction.enabled.value);
             assert!(
-                settings.secret_redaction.enabled.is_enforced_by_workspace,
-                "workspace-derived fallback values should be marked workspace-enforced"
+                matches!(
+                    UserWorkspaces::as_ref(ctx).get_ugc_collection_enablement_setting(None),
+                    UgcCollectionEnablementSetting::Enable
+                ),
+                "no team bound to the window: should fall back to the workspace's value"
             );
         });
     })
 }
 
 #[test]
-fn effective_team_settings_is_none_without_any_workspace() {
+fn team_scoped_settings_defaults_without_any_workspace() {
     let _flag = FeatureFlag::TeamScopedSettings.override_enabled(true);
 
     App::test((), |mut app| async move {
@@ -2340,10 +2341,11 @@ fn effective_team_settings_is_none_without_any_workspace() {
 
         app.read(|ctx| {
             assert!(
-                UserWorkspaces::as_ref(ctx)
-                    .effective_team_settings_for_window(None)
-                    .is_none(),
-                "individual/solo users have no workspace, so there is nothing to resolve"
+                matches!(
+                    UserWorkspaces::as_ref(ctx).get_ugc_collection_enablement_setting(None),
+                    UgcCollectionEnablementSetting::RespectUserSetting
+                ),
+                "individual/solo users have no workspace, so the accessor's own default applies"
             );
         });
     })

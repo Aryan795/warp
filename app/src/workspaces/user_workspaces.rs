@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -336,30 +335,20 @@ impl UserWorkspaces {
             .and_then(|window_id| self.team_for_window(window_id))
     }
 
-    /// Resolves the effective settings that should govern behavior for the given window:
-    /// * the window's bound team's real [`Team::settings`] when [`FeatureFlag::TeamScopedSettings`]
-    ///   is enabled and the window has a team bound (`window_id` given and known to
-    ///   [`Self::team_for_window`]);
-    /// * otherwise, the current workspace's settings represented in the same `TeamSettings`
-    ///   shape via [`TeamSettings::from_workspace_defaults`] -- this is **not** a real team,
-    ///   just the workspace's own values repackaged so callers have one shape to read
-    ///   regardless of which case applies.
-    ///
-    /// Returns `None` only when there is no current workspace at all (e.g. individual/solo
-    /// users); every caller already has its own documented fallback for that case, exactly as
-    /// it does today reading [`Self::current_workspace`] directly, so this preserves behavior
-    /// for users with no workspace and is not conditioned on `CustomerType`/enterprise status.
-    pub fn effective_team_settings_for_window(
-        &self,
-        window_id: Option<WindowId>,
-    ) -> Option<Cow<'_, TeamSettings>> {
-        if FeatureFlag::TeamScopedSettings.is_enabled()
-            && let Some(team) = window_id.and_then(|window_id| self.team_for_window(window_id))
-        {
-            return Some(Cow::Borrowed(&team.settings));
+    /// Returns the window's bound team's real [`Team::settings`], when
+    /// [`FeatureFlag::TeamScopedSettings`] is enabled and the window has a team bound
+    /// (`window_id` given and known to [`Self::team_for_window`]). Returns `None` in every
+    /// other case (no window, no bound team, or the flag disabled) -- callers fall back to
+    /// reading the current workspace's own settings fields directly in that case, exactly as
+    /// they did before per-team settings existed, so the common (currently: universal)
+    /// no-team case pays no allocation cost here.
+    pub fn team_settings_for_window(&self, window_id: Option<WindowId>) -> Option<&TeamSettings> {
+        if !FeatureFlag::TeamScopedSettings.is_enabled() {
+            return None;
         }
-        self.current_workspace()
-            .map(|workspace| Cow::Owned(TeamSettings::from_workspace_defaults(&workspace.settings)))
+        window_id
+            .and_then(|window_id| self.team_for_window(window_id))
+            .map(|team| &team.settings)
     }
 
     fn reconcile_window_team_assignments(&mut self) {
@@ -721,11 +710,14 @@ impl UserWorkspaces {
         let Some(workspace) = self.current_workspace() else {
             return true;
         };
-        !workspace.billing_metadata.is_managed_byok_byoe_enabled()
-            || self
-                .effective_team_settings_for_window(window_id)
-                .and_then(|settings| settings.team_byo.clone())
-                .is_some_and(|team_byo| team_byo.first_party_enabled && team_byo.allow_user_keys)
+        if !workspace.billing_metadata.is_managed_byok_byoe_enabled() {
+            return true;
+        }
+        let team_byo = match self.team_settings_for_window(window_id) {
+            Some(team_settings) => team_settings.team_byo.as_ref(),
+            None => workspace.settings.team_byo.as_ref(),
+        };
+        team_byo.is_some_and(|team_byo| team_byo.first_party_enabled && team_byo.allow_user_keys)
     }
     /// Whether custom inference endpoints are enabled for the current user.
     /// Anonymous or logged-out users are not allowed to use custom inference.
@@ -751,40 +743,53 @@ impl UserWorkspaces {
         let Some(workspace) = self.current_workspace() else {
             return true;
         };
-        !workspace.billing_metadata.is_managed_byok_byoe_enabled()
-            || self
-                .effective_team_settings_for_window(window_id)
-                .and_then(|settings| settings.team_byo.clone())
-                .is_some_and(|team_byo| team_byo.endpoints_enabled && team_byo.allow_user_endpoints)
+        if !workspace.billing_metadata.is_managed_byok_byoe_enabled() {
+            return true;
+        }
+        let team_byo = match self.team_settings_for_window(window_id) {
+            Some(team_settings) => team_settings.team_byo.as_ref(),
+            None => workspace.settings.team_byo.as_ref(),
+        };
+        team_byo.is_some_and(|team_byo| team_byo.endpoints_enabled && team_byo.allow_user_endpoints)
     }
 
     pub fn aws_bedrock_host_settings(
         &self,
         window_id: Option<WindowId>,
-    ) -> Option<super::workspace::LlmHostSettings> {
-        self.effective_team_settings_for_window(window_id)?
-            .llm_settings
-            .host_configs
-            .get(&LLMModelHost::AwsBedrock)
-            .cloned()
+    ) -> Option<&super::workspace::LlmHostSettings> {
+        match self.team_settings_for_window(window_id) {
+            Some(team_settings) => team_settings
+                .llm_settings
+                .host_configs
+                .get(&LLMModelHost::AwsBedrock),
+            None => self
+                .current_workspace()?
+                .settings
+                .llm_settings
+                .host_configs
+                .get(&LLMModelHost::AwsBedrock),
+        }
     }
 
     /// Did the admin enable AWS Bedrock for the given window's effective settings?
     pub fn is_aws_bedrock_available_from_workspace(&self, window_id: Option<WindowId>) -> bool {
-        self.effective_team_settings_for_window(window_id)
-            .is_some_and(|settings| {
-                settings.llm_settings.enabled
-                    && self
-                        .aws_bedrock_host_settings(window_id)
-                        .is_some_and(|host| host.enabled)
-            })
+        let llm_enabled = match self.team_settings_for_window(window_id) {
+            Some(team_settings) => team_settings.llm_settings.enabled,
+            None => self
+                .current_workspace()
+                .is_some_and(|workspace| workspace.settings.llm_settings.enabled),
+        };
+        llm_enabled
+            && self
+                .aws_bedrock_host_settings(window_id)
+                .is_some_and(|host| host.enabled)
     }
     pub fn aws_bedrock_host_enablement_setting(
         &self,
         window_id: Option<WindowId>,
     ) -> HostEnablementSetting {
         self.aws_bedrock_host_settings(window_id)
-            .map(|settings| settings.enablement_setting)
+            .map(|settings| settings.enablement_setting.clone())
             .unwrap_or_default()
     }
 
@@ -816,12 +821,19 @@ impl UserWorkspaces {
     pub fn gemini_enterprise_host_settings(
         &self,
         window_id: Option<WindowId>,
-    ) -> Option<super::workspace::LlmHostSettings> {
-        self.effective_team_settings_for_window(window_id)?
-            .llm_settings
-            .host_configs
-            .get(&LLMModelHost::GeminiEnterprise)
-            .cloned()
+    ) -> Option<&super::workspace::LlmHostSettings> {
+        match self.team_settings_for_window(window_id) {
+            Some(team_settings) => team_settings
+                .llm_settings
+                .host_configs
+                .get(&LLMModelHost::GeminiEnterprise),
+            None => self
+                .current_workspace()?
+                .settings
+                .llm_settings
+                .host_configs
+                .get(&LLMModelHost::GeminiEnterprise),
+        }
     }
 
     /// Did the admin enable Gemini Enterprise (GEAP) for the given window's effective settings?
@@ -829,13 +841,16 @@ impl UserWorkspaces {
         &self,
         window_id: Option<WindowId>,
     ) -> bool {
-        self.effective_team_settings_for_window(window_id)
-            .is_some_and(|settings| {
-                settings.llm_settings.enabled
-                    && self
-                        .gemini_enterprise_host_settings(window_id)
-                        .is_some_and(|host| host.enabled)
-            })
+        let llm_enabled = match self.team_settings_for_window(window_id) {
+            Some(team_settings) => team_settings.llm_settings.enabled,
+            None => self
+                .current_workspace()
+                .is_some_and(|workspace| workspace.settings.llm_settings.enabled),
+        };
+        llm_enabled
+            && self
+                .gemini_enterprise_host_settings(window_id)
+                .is_some_and(|host| host.enabled)
     }
 
     pub fn gemini_enterprise_host_enablement_setting(
@@ -843,7 +858,7 @@ impl UserWorkspaces {
         window_id: Option<WindowId>,
     ) -> HostEnablementSetting {
         self.gemini_enterprise_host_settings(window_id)
-            .map(|settings| settings.enablement_setting)
+            .map(|settings| settings.enablement_setting.clone())
             .unwrap_or_default()
     }
 
@@ -890,8 +905,11 @@ impl UserWorkspaces {
     /// otherwise the current workspace's. If a setting is `None`, nothing enforces a particular
     /// value for it (the execution profile's own value applies).
     pub fn ai_autonomy_settings(&self, window_id: Option<WindowId>) -> AiAutonomySettings {
-        self.effective_team_settings_for_window(window_id)
-            .map(|settings| AiAutonomySettings::from(&settings.ai_autonomy))
+        if let Some(team_settings) = self.team_settings_for_window(window_id) {
+            return AiAutonomySettings::from(&team_settings.ai_autonomy);
+        }
+        self.current_workspace()
+            .map(|workspace| workspace.settings.ai_autonomy_settings.clone())
             .unwrap_or_default()
     }
 
@@ -901,12 +919,11 @@ impl UserWorkspaces {
         &self,
         window_id: Option<WindowId>,
     ) -> Option<SandboxedAgentSettings> {
-        let settings = SandboxedAgentSettings::from(
-            &self
-                .effective_team_settings_for_window(window_id)?
-                .sandboxed_agent,
-        );
-        Some(settings)
+        if let Some(team_settings) = self.team_settings_for_window(window_id) {
+            return Some(SandboxedAgentSettings::from(&team_settings.sandboxed_agent));
+        }
+        self.current_workspace()
+            .and_then(|workspace| workspace.settings.sandboxed_agent_settings.clone())
     }
 
     /// Returns true iff AI autonomy features are allowed for this client, for the given window.
@@ -1731,8 +1748,11 @@ impl UserWorkspaces {
         &self,
         window_id: Option<WindowId>,
     ) -> UsageBasedPricingSettings {
-        self.effective_team_settings_for_window(window_id)
-            .map(|settings| settings.usage_based_pricing_settings.clone())
+        if let Some(team_settings) = self.team_settings_for_window(window_id) {
+            return team_settings.usage_based_pricing_settings.clone();
+        }
+        self.current_workspace()
+            .map(|workspace| workspace.settings.usage_based_pricing_settings.clone())
             .unwrap_or_default()
     }
 
@@ -1758,8 +1778,11 @@ impl UserWorkspaces {
         &self,
         window_id: Option<WindowId>,
     ) -> UgcCollectionEnablementSetting {
-        self.effective_team_settings_for_window(window_id)
-            .map(|settings| settings.ugc_collection.value.clone())
+        if let Some(team_settings) = self.team_settings_for_window(window_id) {
+            return team_settings.ugc_collection.value.clone();
+        }
+        self.current_workspace()
+            .map(|workspace| workspace.settings.ugc_collection_settings.setting.clone())
             .unwrap_or_default()
     }
 
@@ -1767,49 +1790,95 @@ impl UserWorkspaces {
         &self,
         window_id: Option<WindowId>,
     ) -> AdminEnablementSetting {
-        self.effective_team_settings_for_window(window_id)
-            .map(|settings| settings.cloud_conversation_storage.value.clone())
+        if let Some(team_settings) = self.team_settings_for_window(window_id) {
+            return team_settings.cloud_conversation_storage.value.clone();
+        }
+        self.current_workspace()
+            .map(|workspace| {
+                workspace
+                    .settings
+                    .cloud_conversation_storage_settings
+                    .setting
+                    .clone()
+            })
             .unwrap_or_default()
     }
 
     pub fn is_ai_allowed_in_remote_sessions(&self, window_id: Option<WindowId>) -> bool {
-        self.effective_team_settings_for_window(window_id)
-            .map(|settings| settings.ai_permissions.allow_ai_in_remote_sessions.value)
+        if let Some(team_settings) = self.team_settings_for_window(window_id) {
+            return team_settings
+                .ai_permissions
+                .allow_ai_in_remote_sessions
+                .value;
+        }
+        self.current_workspace()
+            .map(|workspace| {
+                workspace
+                    .settings
+                    .ai_permissions_settings
+                    .allow_ai_in_remote_sessions
+            })
             .unwrap_or(true)
     }
 
     pub fn get_remote_session_regex_list(&self, window_id: Option<WindowId>) -> Vec<Regex> {
-        self.effective_team_settings_for_window(window_id)
-            .map(|settings| {
-                settings
-                    .ai_permissions
+        if let Some(team_settings) = self.team_settings_for_window(window_id) {
+            return team_settings
+                .ai_permissions
+                .remote_session_regex_list
+                .values
+                .iter()
+                .filter_map(|pattern| match Regex::new(pattern) {
+                    Ok(regex) => Some(regex),
+                    Err(_) => {
+                        report_error!(
+                            "Invalid regex pattern for remote session detection",
+                            extra: { "pattern" => %pattern }
+                        );
+                        None
+                    }
+                })
+                .collect();
+        }
+        self.current_workspace()
+            .map(|workspace| {
+                workspace
+                    .settings
+                    .ai_permissions_settings
                     .remote_session_regex_list
-                    .values
-                    .iter()
-                    .filter_map(|pattern| match Regex::new(pattern) {
-                        Ok(regex) => Some(regex),
-                        Err(_) => {
-                            report_error!(
-                                "Invalid regex pattern for remote session detection",
-                                extra: { "pattern" => %pattern }
-                            );
-                            None
-                        }
-                    })
-                    .collect()
+                    .clone()
             })
             .unwrap_or_default()
     }
 
     pub fn is_anyone_with_link_sharing_enabled(&self, window_id: Option<WindowId>) -> bool {
-        self.effective_team_settings_for_window(window_id)
-            .map(|settings| settings.link_sharing.anyone_with_link_sharing_enabled.value)
+        if let Some(team_settings) = self.team_settings_for_window(window_id) {
+            return team_settings
+                .link_sharing
+                .anyone_with_link_sharing_enabled
+                .value;
+        }
+        self.current_workspace()
+            .map(|workspace| {
+                workspace
+                    .settings
+                    .link_sharing_settings
+                    .anyone_with_link_sharing_enabled
+            })
             .unwrap_or(true)
     }
 
     pub fn is_direct_link_sharing_enabled(&self, window_id: Option<WindowId>) -> bool {
-        self.effective_team_settings_for_window(window_id)
-            .map(|settings| settings.link_sharing.direct_link_sharing_enabled.value)
+        if let Some(team_settings) = self.team_settings_for_window(window_id) {
+            return team_settings.link_sharing.direct_link_sharing_enabled.value;
+        }
+        self.current_workspace()
+            .map(|workspace| {
+                workspace
+                    .settings
+                    .link_sharing_settings
+                    .direct_link_sharing_enabled
+            })
             .unwrap_or(true)
     }
 
@@ -1855,10 +1924,12 @@ impl UserWorkspaces {
         }
     }
 
-    pub fn default_host_slug(&self, window_id: Option<WindowId>) -> Option<String> {
-        self.effective_team_settings_for_window(window_id)?
-            .default_host_slug
-            .clone()
+    pub fn default_host_slug(&self, window_id: Option<WindowId>) -> Option<&str> {
+        if let Some(team_settings) = self.team_settings_for_window(window_id) {
+            return team_settings.default_host_slug.as_deref();
+        }
+        self.current_workspace()
+            .and_then(|workspace| workspace.settings.default_host_slug.as_deref())
     }
 
     /// Returns the team-level agent attribution setting.
@@ -1869,8 +1940,11 @@ impl UserWorkspaces {
         &self,
         window_id: Option<WindowId>,
     ) -> AdminEnablementSetting {
-        self.effective_team_settings_for_window(window_id)
-            .map(|settings| settings.enable_warp_attribution.clone())
+        if let Some(team_settings) = self.team_settings_for_window(window_id) {
+            return team_settings.enable_warp_attribution.clone();
+        }
+        self.current_workspace()
+            .map(|workspace| workspace.settings.enable_warp_attribution.clone())
             .unwrap_or_default()
     }
 
@@ -1881,8 +1955,11 @@ impl UserWorkspaces {
         &self,
         window_id: Option<WindowId>,
     ) -> AdminEnablementSetting {
-        self.effective_team_settings_for_window(window_id)
-            .map(|settings| settings.codebase_context.value.clone())
+        if let Some(team_settings) = self.team_settings_for_window(window_id) {
+            return team_settings.codebase_context.value.clone();
+        }
+        self.current_workspace()
+            .map(|workspace| workspace.settings.codebase_context_settings.setting.clone())
             .unwrap_or_default()
     }
 
