@@ -168,7 +168,7 @@ Figma: none provided. The implementation will follow the existing Skills and MCP
 
 41. Factory plugin roots are in the Factory source repository. V1 does not fetch plugin packages from a URL, registry, marketplace, or another repository.
 
-42. A direct agent run loads agent-scoped plugins and factory-scoped plugins. An automation run loads automation-scoped plugins, plugins for the automation's bound agent, and factory-scoped plugins.
+42. A direct agent run loads agent-scoped plugins and factory-scoped plugins. An automation run loads automation-scoped plugins, plugins for the automation's bound agent, and factory-scoped plugins. The Automation projector snapshots `factory_automation_name` into the run configuration so runtime resolution does not silently degrade an automation run to agent scope.
 
 43. Same-name Factory plugins shadow as complete packages in this order:
    1. Automation scope.
@@ -188,7 +188,11 @@ Figma: none provided. The implementation will follow the existing Skills and MCP
 
 48. Factory plugin packages must pass the same Agent Plugins validation at Factory sync and again in the runtime checkout. An error-severity sync diagnostic prevents a new invalid Factory definition from being applied. A warning-severity diagnostic does not. A runtime mismatch disables the affected plugin or component and reports a run diagnostic.
 
-49. Factory plugin MCP stdio server processes execute in the selected worker environment. They never execute in the Warp control-plane process. A skill-directed script executes through the run's normal command action and permissions in the same worker environment. Warp-hosted workers and self-hosted workers provide durable plugin data storage for plugin MCP stdio servers.
+49. Factory plugin MCP stdio server processes execute in the selected worker environment. They never execute in the Warp control-plane process. A skill-directed script executes through the run's normal command action and permissions in the same worker environment.
+   - The Namespace worker supplies a principal-scoped durable `WARP_PLUGIN_DATA_ROOT` at `/cache/warp/plugin-data`.
+   - Docker sandboxes are recreated per run and do not supply a durable root in v1.
+   - Self-hosted workers own their storage contract and do not receive a server-assumed root in v1.
+   - When `WARP_PLUGIN_DATA_ROOT` is absent, the client loads plugin skills and Streamable HTTP servers but refuses to start plugin stdio servers with a persistent-data diagnostic.
 
 50. Factory source registration, repository access, branch controls, and the existing Factory apply flow remain the trust boundary. V1 adds no per-run plugin approval prompt.
 
@@ -254,14 +258,14 @@ Figma: none provided. The implementation will follow the existing Skills and MCP
 
 67. The desktop app and TUI target Agent Plugins 1.0.0 client conformance for both standard component types, with stdio and Streamable HTTP support. Legacy SSE remains an optional unsupported transport.
 
-68. Factory runtime support claims the same conformance only for plugin packages. Warp's Factory `mcp.json` is explicitly outside that claim.
+68. Factory runtime support claims Agent Plugins MCP stdio conformance only on a backend that supplies a durable `WARP_PLUGIN_DATA_ROOT`. A backend without that root can still load plugin skills and Streamable HTTP servers, but it does not claim complete plugin MCP conformance. Warp's Factory `mcp.json` is explicitly outside every Agent Plugins conformance claim.
 
 69. Delivery is phased:
    1. Shared client parser, discovery, diagnostics, qualified identity, skills, MCP, plugin data, the global discovery kill switch, and adapters for existing Settings, command palette, Skills, and MCP surfaces.
-   2. Factory plugin discovery, sync validation, runtime scoping, durable data, and client-capability gating.
+   2. Factory plugin discovery, sync validation, runtime scoping, environment-variable propagation, and client-enforced plugin-data preconditions.
    3. Factory `mcp.json`, managed-entry projection, ordinary-entry runtime loading, and legacy YAML migration diagnostics.
 
-70. Each phase remains behind capability or feature gates until its required end-to-end validation passes. Factory sync must not activate plugin runtime fields for a client version that cannot consume them.
+70. Factory plugin and Factory MCP activation is gated by the server feature flag `factory_agent_plugins`. The flag is enabled in local and staging environments and disabled in production for the initial release. No server-to-client capability channel exists in v1, so apply cannot reject one incompatible worker/client independently. Production activation requires a compatible fleet deployment. Per-worker/client capability negotiation is a follow-up.
 
 ## Decisions
 - Use `.agents/plugins` and `.warp/plugins` rather than bare repository `plugins/` in the client. This mirrors established provider directories and prevents a generic repository folder from gaining execution semantics.
@@ -269,6 +273,8 @@ Figma: none provided. The implementation will follow the existing Skills and MCP
 - Preserve current skills and file-based MCP execution behavior. A stricter plugin-specific trust model would be safer for global stdio plugins, but it would create inconsistent semantics for equivalent existing configuration.
 - Provide one immediate interactive-client discovery kill switch. Per-source and per-plugin controls are deferred because the requested v1 control is global.
 - Keep plugin and Factory MCP files separate. Extending the closed Agent Plugins schema with `warpId` would break conformance.
+- Reuse the Factory environment-variable dispatch seam across worker types. This matches existing Factory skill propagation and avoids three separate CLI integrations.
+- Treat an absent Factory plugin data root as a client-side stdio precondition failure. The server cannot claim durable storage for every worker backend.
 - Use in-repository Factory plugins only. Agent Plugins 1.0.0 defines no installation or distribution protocol.
 - Reserve `dev.warp.client` and `dev.warp.factory` extension namespaces, but require no Warp extension data in v1.
 
@@ -276,7 +282,9 @@ Figma: none provided. The implementation will follow the existing Skills and MCP
 - Existing global Warp MCP behavior can auto-start a stdio server from a user-controlled config location. Applying the same behavior to user Warp-home plugins increases the amount of executable configuration that can use that path. Existing MCP connection details and structured logs must preserve plugin source and command provenance. A unified trust redesign for all file-based MCP is a follow-up, not a plugin-only exception.
 - A plugin skill can steer the model to run a bundled script. This uses existing command permissions, risk classification, allowlists, denylists, and approval behavior. It does not bypass command controls through the plugin or MCP lifecycle.
 - Disabling plugin discovery cannot identify and terminate an ordinary shell command that a skill started earlier. The toggle stops plugin MCP processes and prevents new plugin skill use; the user retains the existing shell-command controls for an already-running command.
-- A self-hosted direct worker backend executes plugin MCP stdio servers and skill-directed shell commands with that backend's existing process isolation. Agent Plugins path containment is not a sandbox. Factory documentation must state this boundary.
+- A self-hosted direct worker that supplies a durable plugin-data root executes plugin MCP stdio servers and skill-directed shell commands with that backend's existing process isolation. Agent Plugins path containment is not a sandbox. Factory documentation must state this boundary.
+- Docker and self-hosted workers do not yet have a Warp-owned durable plugin-data contract. Skills and Streamable HTTP remain available, but plugin stdio is unavailable until the worker supplies a durable root.
+- The `factory_agent_plugins` flag gates a deployment rather than an individual client capability. Production rollout must not enable the flag until every routed worker/client can consume the runtime environment contract.
 - Two similar `mcp.json` schemas can confuse authors. Fixed locations, distinct required `$schema` values, editor schemas, and targeted diagnostics mitigate the risk.
 
 ## Out of scope
@@ -287,6 +295,9 @@ Figma: none provided. The implementation will follow the existing Skills and MCP
 - Agent Plugins extensions beyond reserving Warp-owned namespaces.
 - Legacy SSE support for Agent Plugins MCP.
 - Automatic deletion, backup, or migration of plugin data.
+- Warp-owned durable plugin-data provisioning for Docker and self-hosted workers.
+- A server-to-worker/client capability negotiation channel for Agent Plugins.
+- Reconstructing plugin packages or Factory `mcp.json` during live-Factory-to-file rendering. These file-only resources have no live-Factory counterpart, so `RenderTree` omits them.
 - Remote plugins outside the Factory source repository.
 - Claude Code plugin loading or conversion.
 

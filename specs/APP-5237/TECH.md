@@ -3,6 +3,7 @@
 The [product spec](PRODUCT.md) defines client and Factory behavior. This technical design is pinned to:
 - Warp client commit [`7a6044bd`](https://github.com/warpdotdev/warp/tree/7a6044bd5377d708ab1d3767ece505a49d232aed).
 - Warp server commit [`d35b195a`](https://github.com/warpdotdev/warp-server/tree/d35b195a9bee8b512f860df1dcb77619ecf278d9).
+- Warp server implementation alignment commit [`c595afa6`](https://github.com/warpdotdev/warp-server/tree/c595afa64670fefbcb6fa782cde0b263ede0f0f4) from [warp-server PR #14030](https://github.com/warpdotdev/warp-server/pull/14030).
 - Published [Agent Plugins 1.0.0](https://github.com/agentplugins/agent-plugins-spec/blob/main/spec/1.0.0.md).
 
 The client has no plugin package abstraction today.
@@ -33,6 +34,12 @@ Factories currently have direct flat skills and managed MCP references only.
 - [`logic/factoryfile/projector/automation.go:35`](https://github.com/warpdotdev/warp-server/blob/d35b195a9bee8b512f860df1dcb77619ecf278d9/logic/factoryfile/projector/automation.go#L35) validates automation MCP overrides.
 - [`logic/ai/ambient_agents/workers/common/factory_skill_dirs.go:22`](https://github.com/warpdotdev/warp-server/blob/d35b195a9bee8b512f860df1dcb77619ecf278d9/logic/ai/ambient_agents/workers/common/factory_skill_dirs.go#L22) derives applicable Factory skills at dispatch and sends them through `WARP_SKILL_DIRS`.
 - [`logic/ai/ambient_agents/workers/common/task_utils.go:816`](https://github.com/warpdotdev/warp-server/blob/d35b195a9bee8b512f860df1dcb77619ecf278d9/logic/ai/ambient_agents/workers/common/task_utils.go#L816) sends effective managed MCP to the client through `--mcp`.
+
+The completed server implementation establishes these additional contracts:
+- [`logic/ai/ambient_agents/workers/common/factory_runtime_dirs.go:22`](https://github.com/warpdotdev/warp-server/blob/c595afa64670fefbcb6fa782cde0b263ede0f0f4/logic/ai/ambient_agents/workers/common/factory_runtime_dirs.go#L22) defines the shared Factory plugin/MCP environment-variable seam.
+- [`logic/ai/ambient_agents/sources/agent_config.go:112`](https://github.com/warpdotdev/warp-server/blob/c595afa64670fefbcb6fa782cde0b263ede0f0f4/logic/ai/ambient_agents/sources/agent_config.go#L112) stores `factory_automation_name` in run configuration.
+- [`logic/factoryfile/rendertree.go:3`](https://github.com/warpdotdev/warp-server/blob/c595afa64670fefbcb6fa782cde0b263ede0f0f4/logic/factoryfile/rendertree.go#L3) documents the file-only resources omitted by rendering.
+- [`config/features/features.go:373`](https://github.com/warpdotdev/warp-server/blob/c595afa64670fefbcb6fa782cde0b263ede0f0f4/config/features/features.go#L373) defines `factory_agent_plugins`.
 ## Proposed changes
 ### 1. Shared client package model
 Add `crates/ai/src/plugins/` with no UI or filesystem-watcher dependency:
@@ -210,12 +217,14 @@ Local data lives under the active frontend's `warp_core::paths::data_dir()/plugi
 
 Skill-bundled scripts do not use `PluginDataLocator`. The skill content can direct the model to run one through the ordinary shell-command action. `BlocklistAIPermissions::can_autoexecute_command` applies the active execution profile, allowlist, denylist, risk classification, and user approval behavior. The plugin loader does not spawn the script and does not inject `PLUGIN_ROOT` or `PLUGIN_DATA`.
 
-Factory workers pass an absolute `WARP_PLUGIN_DATA_ROOT`. The client appends a stable key containing Factory UID, scope kind/name, and plugin name.
+Factory workers can pass one absolute `WARP_PLUGIN_DATA_ROOT`. The client appends a stable key containing Factory UID, scope kind/name, and plugin name.
 
-- Warp-hosted workers mount this root from environment-persistent storage.
-- Self-hosted Docker workers bind it to a configured durable host path.
-- Self-hosted direct workers use a configured worker-local durable path and inherit that backend's existing process-isolation boundary.
-- Dispatch fails before starting a Factory plugin MCP stdio server when the worker cannot provide a writable persistent root. An ephemeral fallback would violate Agent Plugins conformance.
+- The Namespace worker supplies `/cache/warp/plugin-data` from principal-scoped persistent storage.
+- The Docker sandbox supplies no root because its filesystem is recreated for each run.
+- The server assumes no root for a self-hosted worker because that worker owns its storage contract.
+- Absence of `WARP_PLUGIN_DATA_ROOT` is the runtime capability signal. The client still loads plugin skills and Streamable HTTP servers, but it refuses to start a plugin stdio server and reports that persistent plugin data is unavailable.
+- The client, not dispatch, enforces writability immediately before stdio start. The server must not emit an ephemeral fallback.
+- Durable roots for Docker and self-hosted workers require follow-up changes in their worker or sandbox repositories.
 
 Concurrent processes can share one plugin instance data directory. Warp guarantees directory persistence, not application-level locking.
 ### 6. Factory source model and validation
@@ -248,9 +257,9 @@ type FactoryMCPFile struct {
 
 The tree parser validates plugin packages against vendored 1.0.0 schemas and semantic rules. Go and Rust conformance fixtures must be generated from the same committed fixture corpus so the implementations cannot drift.
 
-Plugin package content is not copied into database rows. Canonical records provide validation, semantic hashing, diagnostics, and deterministic applicable paths. Runtime reads the checked-out package and revalidates it.
+Plugin package content is not copied into projected live-Factory rows. `PluginResource.Digest` records the validated package digest for diagnostics and future use. Runtime reads the checked-out package and revalidates it.
 
-Factory semantic hashing includes manifest, standard component configuration, skills, and package-contained files reachable by those components. A plugin-only change therefore creates a new desired source state even when projected database fields do not change.
+Projected resource semantic hashes deliberately exclude plugin content. Factory sync records the applied source SHA even when the plan contains no projected resource operation, so a plugin-only change advances the applied revision without manufacturing live-resource update churn. Do not inject `PluginResource.Digest` into another resource's semantic hash.
 
 Extend `factoryfile.Diagnostic` with severity:
 - `error` is the zero value. Every existing constructor and diagnostic remains blocking without migration.
@@ -260,6 +269,8 @@ Extend `factoryfile.Diagnostic` with severity:
 - The legacy `mcpServers` deprecation uses warning severity.
 
 Factory source validation treats a Factory-schema plugin-root `mcp.json`, or any plugin-root MCP entry with `type: "managed"`, as a blocking error. This check occurs before ordinary Agent Plugins component-isolation handling. The file remains owned by the plugin location and is never parsed or projected as entity-level Factory MCP.
+
+`RenderTree` reconstructs only resources with a live-Factory counterpart. Plugin packages and entity-level Factory `mcp.json` are file-only resources, so live-to-file export omits them. The export is not a round trip for these sources; the original Factory repository remains authoritative.
 ### 7. Factory runtime scoping
 Add a runtime `FactoryFileScope` snapshot with:
 - Factory UID and checked-out Factory root.
@@ -268,26 +279,34 @@ Add a runtime `FactoryFileScope` snapshot with:
 - Ordered applicable plugin collection paths.
 - Ordered applicable Factory MCP file paths.
 
+The Automation projector writes `factory_automation_name` into the run configuration JSONB snapshot. This needs no database migration. Dispatch reads the snapshot to populate the optional automation name. Without this value, runtime resolution has no Automation identity and cannot include automation-scoped plugin or Factory MCP paths, so every Automation-created run must carry it.
+
 Factory plugin collection paths are:
 - Automation `plugins/`, when present.
 - Bound agent `plugins/`.
 - Factory `plugins/`.
 
-The worker converts each discovered package under those collection paths into a repeated exact `--plugin-dir <package-root>` client argument. More-specific packages with the same manifest name suppress lower scopes before launch.
+The client receives plugin collection directories, not individual package roots. It enumerates only immediate children of each collection. If a manifest name repeats in a later collection, the package from the earlier collection shadows it.
 
 Factory MCP paths are:
 - Automation `mcp.json`, when present.
 - Bound agent `mcp.json`.
 - Factory `mcp.json`.
 
-The worker passes them as repeated `--factory-mcp <file-path>` arguments. Use repeated arguments rather than a comma-separated environment variable so valid paths cannot be split.
+Extend the existing environment-variable dispatch seam used by Factory skills. All three worker implementations call the shared `FactoryRuntimeEnvForTask` helper. Do not add worker-specific plugin CLI arguments.
+
+- `WARP_PLUGIN_DIRS` is a comma-separated list of plugin collection directories, ordered automation > agent > factory.
+- `WARP_FACTORY_MCP_FILES` is a comma-separated list of entity-level Factory MCP files in the same order.
+- Each list item is relative to the environment working directory. The server prefixes the Factory-relative path with the cloned repository directory before encoding it.
+- A path containing a comma cannot be encoded. The server omits that path and emits a warning rather than creating a corrupted list item.
+- The client parses each `WARP_FACTORY_MCP_FILES` item, loads ordinary entries, and ignores valid managed entries.
+- `WARP_PLUGIN_DATA_ROOT` is separate from the two ordered lists. It is one optional absolute path. The client appends its Factory UID, scope, and plugin instance key.
 
 Factory runtime plugins are part of the applied Factory definition and start with the run. Plugin MCP servers are not project cards that require an interactive start inside a headless worker. This follows the existing behavior of MCP already attached to a Factory agent or automation. The Factory source/apply trust boundary is responsible for this difference from an interactive repository session.
 
-Before passing either argument:
+Before encoding a runtime path:
 - Verify the path remains inside the checked-out Factory root.
 - Verify the runtime checkout corresponds to the applied Factory source revision.
-- Require a client capability that advertises Agent Plugins 1.0.0 and Factory MCP 1.0 support.
 ### 8. Warp Factory MCP schema
 Publish and vendor an immutable closed schema at:
 
@@ -335,7 +354,7 @@ Factoryfile sync is authoritative for managed entries:
 5. Project them through the existing service-account and automation paths.
 
 The client is authoritative for ordinary entries:
-1. Parse only files passed through `--factory-mcp`.
+1. Parse only the ordered files in `WARP_FACTORY_MCP_FILES`.
 2. Require the Warp Factory schema identifier.
 3. Ignore valid `managed` entries without creating an installation.
 4. Load stdio and Streamable HTTP entries through `FileBasedMCPManager` with Factory provenance.
@@ -352,18 +371,19 @@ Merge by entity and server name:
 - Same name and different `warpId`: source validation error naming both files.
 - Ordinary entries exist only in the new Factory MCP source and are not projected as managed MCP.
 
-Rendering preserves the source representation. It does not rewrite a user's YAML/frontmatter into a new file during reconciliation.
+Sync and reconciliation preserve the authored source representation. They do not rewrite a user's YAML/frontmatter into a new file. Separate live-to-file `RenderTree` export is lossy for plugin packages and Factory MCP files as described in section 6.
 Root Factory `mcp.json` migrates top-level `factory.yaml` MCP, while agent and automation `mcp.json` files migrate their matching frontmatter. Keep `agentDefaults.mcpServers` as a legacy-only source in v1. There is no new default-only Factory MCP file. Migration tooling or documentation expands those defaults into each intended agent file before the legacy field is removed.
 
 Add a warning-severity source diagnostic and telemetry counter for legacy declarations. Do not set a removal release in this change.
-### 10. Feature and capability rollout
-Use separate gates:
-- Client Agent Plugins parser/discovery.
-- Factory plugin source parsing.
-- Factory MCP source parsing.
-- Factory runtime argument emission.
+### 10. Feature rollout and capability gap
+Use the client Agent Plugins feature gate for interactive parsing and discovery. Gate server-side Factory plugin parsing, Factory MCP handling, and runtime environment emission together with `factory_agent_plugins` (`FactoryAgentPluginsEnabled()`).
 
-Factory sync can validate new source before every worker can run it, but apply must reject a Factory that selects a worker/client without the required capabilities. Do not silently omit requested plugins or ordinary Factory MCP servers.
+- Local and staging configurations enable `factory_agent_plugins`.
+- Production configuration disables it for the initial release.
+- No server-side channel reports an individual worker or client Agent Plugins capability.
+- Factory apply therefore cannot reject one incompatible worker/client before dispatch.
+- Production rollout can enable the flag only after the routed fleet has a compatible client and environment-variable contract.
+- Per-worker/client capability advertisement and apply-time rejection remain a follow-up.
 
 Stable rollout order:
 1. Ship the capable client and worker contract.
@@ -391,6 +411,14 @@ Options considered:
 Options considered:
 - Import ordinary Factory MCP into the managed MCP database. Rejected because local package paths are meaningful only inside a checkout and worker.
 - Let the client read applicable entity files from the checkout. Selected because it preserves path context and keeps the control plane from executing local commands.
+### Shared Factory runtime environment
+Options considered:
+- Add repeated plugin and Factory MCP CLI arguments to each worker. Rejected because the three worker implementations already share the Factory environment-variable dispatch seam.
+- Extend the shared seam with `WARP_PLUGIN_DIRS`, `WARP_FACTORY_MCP_FILES`, and optional `WARP_PLUGIN_DATA_ROOT`. Selected because it centralizes scoping and preserves the current worker launch contract.
+### Applied revision instead of plugin-driven resource churn
+Options considered:
+- Include plugin digests in projected live-resource semantic hashes. Rejected because plugin content has no live-resource projection and would manufacture update operations.
+- Record `PluginResource.Digest` but advance plugin-only source changes through the sync row's applied SHA. Selected because runtime receives the new checkout revision even when the resource plan is otherwise a no-op.
 ### Immediate global discovery switch
 Options considered:
 - Apply a disabled preference only after restart. Rejected because the requested control must act as a kill switch for already-loaded plugin MCP servers and skills.
@@ -407,8 +435,14 @@ Options considered:
   - Keep this on the ordinary shell-command path. Do not add a plugin bypass around execution-profile permissions, risk classification, allowlists, denylists, or approval.
 - Plugin paths can escape through symlinks or platform-specific path behavior.
   - Centralize filesystem-resolved containment and test Unix symlinks plus Windows junction/reparse behavior.
-- Factory plugin data can become ephemeral on a worker backend.
-  - Make a writable persistent root a dispatch precondition for plugin MCP stdio servers.
+- A worker can lack durable Factory plugin data.
+  - Omit `WARP_PLUGIN_DATA_ROOT`. The client must reject plugin stdio start while continuing to load skills and Streamable HTTP servers.
+- Comma-separated runtime path variables cannot represent a comma in a path.
+  - Omit the unencodable item and emit a server warning. Keep generated Factory entity paths comma-free.
+- The server cannot detect an incompatible worker/client before apply.
+  - Keep production `factory_agent_plugins` disabled until the routed fleet is compatible. Add a capability channel before heterogeneous rollout.
+- An Automation run can lose automation-scoped resources if its origin is not preserved.
+  - Snapshot `factory_automation_name` during projection and test that dispatch consumes it.
 - Qualified skill names can conflict with existing parser syntax.
   - Add parser fixtures for colon-qualified plugin skills and preserve repository-qualified flat skill behavior.
 - Two `mcp.json` formats can be confused.
@@ -439,6 +473,8 @@ Both Rust and Go validators run the applicable shared fixtures.
 - Command binding tests assert exactly one of `Enable Agent Plugin discovery` and `Disable Agent Plugin discovery` is available for the current context.
 - TUI plugin-manager tests assert that its frontend-specific false setting prevents interactive discovery.
 - MCP spawn tests assert exact `argv`, environment overlay order, authoritative variables, default `cwd`, persistent data path, and native tool-name routing.
+- Factory runtime environment tests assert ordered parsing of `WARP_PLUGIN_DIRS`, immediate-child enumeration, first-collection shadowing, and ordered parsing of `WARP_FACTORY_MCP_FILES`.
+- Missing-data-root tests assert Factory plugin skills and Streamable HTTP load while plugin stdio start fails before spawn.
 - Factory MCP client tests assert managed entries are ignored and ordinary entries load.
 - Interactive-client cross-format tests assert a Factory schema or managed entry in a plugin root disables only that plugin's MCP component.
 
@@ -460,11 +496,16 @@ cargo fmt --all -- --check
 - Plugin-root MCP tests assert a Factory schema or `managed` entry is a blocking sync error and is never projected. The equivalent interactive-client fixture continues to disable only plugin MCP.
 - Entity-level Factory MCP tests assert an Agent Plugins schema at a Factory MCP path is a blocking source diagnostic.
 - Resolution tests cover automation > agent > factory plugin shadowing.
+- Automation projection tests assert `factory_automation_name` is stored in run config and selects automation-scoped runtime paths.
 - Managed MCP tests cover legacy/new deduplication, conflicts, scope, team validation, and projection.
-- Dispatch tests cover ordered exact paths, checkout containment, source revision, capability rejection, and persistent-data requirements.
+- Dispatch tests cover exact comma-separated environment values, most-specific-first ordering, clone-directory prefixing, checkout containment, comma-path warnings, and source revision.
+- Worker tests assert Namespace emits principal-scoped `/cache/warp/plugin-data`; Docker and server-side self-hosted dispatch omit `WARP_PLUGIN_DATA_ROOT`.
+- Feature tests assert `factory_agent_plugins` gates Factory source activation and runtime environment emission and has the configured local/staging/prod defaults.
+- Hash tests assert a plugin-only change leaves projected resource semantic hashes unchanged while sync advances the applied source SHA and retains `PluginResource.Digest`.
+- Render tests assert plugin packages and Factory `mcp.json` are omitted and the limitation remains documented on `RenderTree`.
 - Dispatch tests assert `RequiredByFactory` ignores any personal interactive discovery preference.
 - End-to-end tests run a factory skill, a plugin stdio MCP tool, an ordinary entity-level MCP tool, and a projected managed MCP from one Factory.
-- Run the same end-to-end case on a Warp-hosted sandbox and a self-hosted Docker worker. Add a direct-worker contract test for its durable data root.
+- Run the complete stdio case on the Namespace worker. On Docker and self-hosted workers without a supplied durable root, verify skills and Streamable HTTP work and plugin stdio fails with the persistent-data diagnostic.
 
 Run at minimum in `warp-server`:
 
@@ -478,16 +519,15 @@ gofmt -l logic/factoryfile logic/ai/ambient_agents
 ### User-visible proof
 - Record a desktop video that adds a repository plugin, shows its qualified skill and MCP server in the existing component surfaces, explicitly starts and uses the project server, finds `Agent Plugin discovery` through Settings search, disables it from the command palette, and shows the skill withdrawal plus MCP server stop without restarting. Re-enable it and show a fresh rescan.
 - Record a TUI video that shows the qualified skill and MCP server in the existing component surfaces, invokes the skill, starts the server, and uses one tool.
-- Record a Factory run artifact that identifies the active factory/agent/automation plugin scopes and successfully calls both an ordinary plugin MCP tool and a managed Factory MCP tool.
+- Record a Namespace Factory run artifact that identifies the active factory/agent/automation plugin scopes and successfully calls both an ordinary plugin MCP tool and a managed Factory MCP tool.
 ## Parallelization
 Implementation can use two workstreams after the shared identities and JSON contracts are agreed:
 - Client: Rust schemas, parser, watcher, SkillManager, MCP manager, data locator, discovery preference/actions, and minimal existing-surface adapters on a Warp worktree.
 - Factory: Go source parsing, Factory MCP schema, projection, runtime scope, and worker contract on a warp-server worktree.
 
-Factory development can proceed in parallel against committed fixture/schema contracts, but end-to-end Factory rollout waits for the client capability. Use one PR per repository; keep the PRODUCT and TECH specs aligned in this Warp PR.
+Factory development can proceed in parallel against committed fixture/schema contracts, but production Factory rollout waits for a compatible client deployment and explicit `factory_agent_plugins` enablement. Use one PR per repository; keep the PRODUCT and TECH specs aligned in this Warp PR.
 ## Assumptions
 - The Factory source revision can be recorded and compared with the worker checkout before launch.
-- Each supported worker backend can expose a durable writable plugin-data root. If this is false for a backend, that backend cannot claim plugin MCP stdio conformance until storage exists.
 - Existing Factory source registration and apply permissions remain the product trust boundary for repository code.
 - The implementation can publish the proposed immutable Warp Factory MCP schema URL before enabling authoring.
 ## Out of scope
@@ -495,6 +535,9 @@ Factory development can proceed in parallel against committed fixture/schema con
 - A dedicated GUI or TUI plugin inventory and plugin- or scope-level management controls beyond the single global discovery toggle.
 - A Factory-level discovery toggle.
 - Plugin distribution and installation.
+- Warp-owned durable plugin-data provisioning for Docker and self-hosted workers.
+- Server-side worker/client capability advertisement and apply-time compatibility checks.
+- Live-to-file reconstruction of plugin packages and Factory MCP files.
 - New secret-reference fields in either plugin or Factory ordinary MCP entries.
 - A generalized permissions or subprocess-sandbox redesign.
 - Automatic legacy YAML rewriting or removal.
