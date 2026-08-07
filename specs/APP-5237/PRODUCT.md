@@ -105,7 +105,7 @@ Figma: none provided. The implementation will follow the existing Skills and MCP
 
 24. Warp supports the Agent Plugins `stdio` and `streamable-http` transports in v1. Warp skips the optional legacy `sse` transport with an unsupported-transport diagnostic.
 
-25. Warp validates the closed schema for each MCP server and enforces the standard's URL, header, executable-token, working-directory, containment, environment, and placeholder rules.
+25. Warp validates the closed schema for each MCP server and enforces the standard's URL, header, executable-token, working-directory, containment, environment, and placeholder rules. A `cwd` that contains a literal `..` path segment is invalid when `mcp.json` is parsed, before any launch attempt. A name that only contains `..` as a substring remains valid.
 
 26. Warp expands only `${PLUGIN_ROOT}` and `${PLUGIN_DATA}`, and only in stdio `args`, `env` values, and `cwd`. Warp does not expand them in `command`, URL fields, headers, environment keys, or fixed component paths.
 
@@ -189,10 +189,13 @@ Figma: none provided. The implementation will follow the existing Skills and MCP
 48. Factory plugin packages must pass the same Agent Plugins validation at Factory sync and again in the runtime checkout. An error-severity sync diagnostic prevents a new invalid Factory definition from being applied. A warning-severity diagnostic does not. A runtime mismatch disables the affected plugin or component and reports a run diagnostic.
 
 49. Factory plugin MCP stdio server processes execute in the selected worker environment. They never execute in the Warp control-plane process. A skill-directed script executes through the run's normal command action and permissions in the same worker environment.
-   - The Namespace worker supplies a principal-scoped durable `WARP_PLUGIN_DATA_ROOT` at `/cache/warp/plugin-data`.
+   - The Namespace worker supplies a principal-scoped durable `WARP_PLUGIN_DATA_ROOT` at `/cache/warp/plugin-data/<factory-uid>`. The server validates the Factory UID as one safe path segment before joining it. An invalid UID causes the server to omit the root.
    - Docker sandboxes are recreated per run and do not supply a durable root in v1.
    - Self-hosted workers own their storage contract and do not receive a server-assumed root in v1.
    - When `WARP_PLUGIN_DATA_ROOT` is absent, the client loads plugin skills and Streamable HTTP servers but refuses to start plugin stdio servers with a persistent-data diagnostic.
+   - The server also supplies `WARP_FACTORY_UID` for Factory identity and diagnostics. The client never uses that variable to compose a path because the server has already included the UID in `WARP_PLUGIN_DATA_ROOT`.
+   - The client appends exactly two path segments: `<scope-segment>/<plugin-key>`. The scope segment is `factory`, `agent-<sanitized-agent-name>`, or `automation-<sanitized-automation-name>`. The plugin key is the sanitized manifest name.
+   - Sanitization keeps lowercase letters, digits, `.`, `_`, and `-`; lowercases uppercase ASCII; and replaces every other character with `-`. If the mapping changes a non-reserved input, Warp appends a stable eight-hex-character digest of the original input. An empty, `.`, or `..` result becomes the digest alone. This keeps distinct names from silently colliding and prevents reserved segments from escaping the root.
 
 50. Factory source registration, repository access, branch controls, and the existing Factory apply flow remain the trust boundary. V1 adds no per-run plugin approval prompt.
 
@@ -275,6 +278,7 @@ Figma: none provided. The implementation will follow the existing Skills and MCP
 - Keep plugin and Factory MCP files separate. Extending the closed Agent Plugins schema with `warpId` would break conformance.
 - Reuse the Factory environment-variable dispatch seam across worker types. This matches existing Factory skill propagation and avoids three separate CLI integrations.
 - Treat an absent Factory plugin data root as a client-side stdio precondition failure. The server cannot claim durable storage for every worker backend.
+- Compose the Factory UID into the durable root on the server, then let the client append one sanitized scope segment and one sanitized plugin key. This assigns each namespace part to the side that owns it and prevents Factories under one principal from sharing data.
 - Use in-repository Factory plugins only. Agent Plugins 1.0.0 defines no installation or distribution protocol.
 - Reserve `dev.warp.client` and `dev.warp.factory` extension namespaces, but require no Warp extension data in v1.
 
@@ -284,6 +288,7 @@ Figma: none provided. The implementation will follow the existing Skills and MCP
 - Disabling plugin discovery cannot identify and terminate an ordinary shell command that a skill started earlier. The toggle stops plugin MCP processes and prevents new plugin skill use; the user retains the existing shell-command controls for an already-running command.
 - A self-hosted direct worker that supplies a durable plugin-data root executes plugin MCP stdio servers and skill-directed shell commands with that backend's existing process isolation. Agent Plugins path containment is not a sandbox. Factory documentation must state this boundary.
 - Docker and self-hosted workers do not yet have a Warp-owned durable plugin-data contract. Skills and Streamable HTTP remain available, but plugin stdio is unavailable until the worker supplies a durable root.
+- The Factory plugin-data layout crosses two repositories. A stale vendored contract can remain internally consistent, so the client copy must record the canonical server commit and file hash and release validation must compare both copies.
 - The `factory_agent_plugins` flag gates a deployment rather than an individual client capability. Production rollout must not enable the flag until every routed worker/client can consume the runtime environment contract.
 - Two similar `mcp.json` schemas can confuse authors. Fixed locations, distinct required `$schema` values, editor schemas, and targeted diagnostics mitigate the risk.
 

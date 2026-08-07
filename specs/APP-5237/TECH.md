@@ -3,7 +3,7 @@
 The [product spec](PRODUCT.md) defines client and Factory behavior. This technical design is pinned to:
 - Warp client commit [`7a6044bd`](https://github.com/warpdotdev/warp/tree/7a6044bd5377d708ab1d3767ece505a49d232aed).
 - Warp server commit [`d35b195a`](https://github.com/warpdotdev/warp-server/tree/d35b195a9bee8b512f860df1dcb77619ecf278d9).
-- Warp server implementation alignment commit [`c595afa6`](https://github.com/warpdotdev/warp-server/tree/c595afa64670fefbcb6fa782cde0b263ede0f0f4) from [warp-server PR #14030](https://github.com/warpdotdev/warp-server/pull/14030).
+- Warp server runtime-contract commit [`d07f5070`](https://github.com/warpdotdev/warp-server/tree/d07f507034abf13886bb623013bcc61f717d9898) from [warp-server PR #14030](https://github.com/warpdotdev/warp-server/pull/14030).
 - Published [Agent Plugins 1.0.0](https://github.com/agentplugins/agent-plugins-spec/blob/main/spec/1.0.0.md).
 
 The client has no plugin package abstraction today.
@@ -36,10 +36,11 @@ Factories currently have direct flat skills and managed MCP references only.
 - [`logic/ai/ambient_agents/workers/common/task_utils.go:816`](https://github.com/warpdotdev/warp-server/blob/d35b195a9bee8b512f860df1dcb77619ecf278d9/logic/ai/ambient_agents/workers/common/task_utils.go#L816) sends effective managed MCP to the client through `--mcp`.
 
 The completed server implementation establishes these additional contracts:
-- [`logic/ai/ambient_agents/workers/common/factory_runtime_dirs.go:22`](https://github.com/warpdotdev/warp-server/blob/c595afa64670fefbcb6fa782cde0b263ede0f0f4/logic/ai/ambient_agents/workers/common/factory_runtime_dirs.go#L22) defines the shared Factory plugin/MCP environment-variable seam.
-- [`logic/ai/ambient_agents/sources/agent_config.go:112`](https://github.com/warpdotdev/warp-server/blob/c595afa64670fefbcb6fa782cde0b263ede0f0f4/logic/ai/ambient_agents/sources/agent_config.go#L112) stores `factory_automation_name` in run configuration.
-- [`logic/factoryfile/rendertree.go:3`](https://github.com/warpdotdev/warp-server/blob/c595afa64670fefbcb6fa782cde0b263ede0f0f4/logic/factoryfile/rendertree.go#L3) documents the file-only resources omitted by rendering.
-- [`config/features/features.go:373`](https://github.com/warpdotdev/warp-server/blob/c595afa64670fefbcb6fa782cde0b263ede0f0f4/config/features/features.go#L373) defines `factory_agent_plugins`.
+- [`logic/ai/ambient_agents/workers/common/factory_runtime_dirs.go (18-261) @ d07f507`](https://github.com/warpdotdev/warp-server/blob/d07f507034abf13886bb623013bcc61f717d9898/logic/ai/ambient_agents/workers/common/factory_runtime_dirs.go#L18-L261) defines the shared Factory plugin/MCP environment-variable seam, validates the Factory UID, and composes the Factory-specific plugin-data root.
+- [`logic/ai/ambient_agents/workers/common/testdata/factory_plugin_runtime_contract.json @ d07f507`](https://github.com/warpdotdev/warp-server/blob/d07f507034abf13886bb623013bcc61f717d9898/logic/ai/ambient_agents/workers/common/testdata/factory_plugin_runtime_contract.json) is the canonical executable contract for Factory runtime variables, plugin-data composition, segment sanitization, and worked examples.
+- [`logic/ai/ambient_agents/sources/agent_config.go:112 @ d07f507`](https://github.com/warpdotdev/warp-server/blob/d07f507034abf13886bb623013bcc61f717d9898/logic/ai/ambient_agents/sources/agent_config.go#L112) stores `factory_automation_name` in run configuration.
+- [`logic/factoryfile/rendertree.go:3 @ d07f507`](https://github.com/warpdotdev/warp-server/blob/d07f507034abf13886bb623013bcc61f717d9898/logic/factoryfile/rendertree.go#L3) documents the file-only resources omitted by rendering.
+- [`config/features/features.go:373 @ d07f507`](https://github.com/warpdotdev/warp-server/blob/d07f507034abf13886bb623013bcc61f717d9898/config/features/features.go#L373) defines `factory_agent_plugins`.
 ## Proposed changes
 ### 1. Shared client package model
 Add `crates/ai/src/plugins/` with no UI or filesystem-watcher dependency:
@@ -198,6 +199,8 @@ Plugin `mcp.json` stdio servers are the only processes that the plugin loader la
 5. Set authoritative `PLUGIN_ROOT` and `PLUGIN_DATA` last.
 6. Launch `command` as one executable token with a separate argument vector.
 
+The MCP parser rejects a `cwd` with a literal `..` segment in `validate_cwd_form`, before registration or launch. Check whole slash-delimited segments, not substrings, so `./a..b` remains valid. Filesystem resolution at launch still performs the final containment check after `${PLUGIN_ROOT}` or `${PLUGIN_DATA}` is known. Rust and Go must run this case through the shared conformance corpus.
+
 For HTTP:
 - Parse absolute URL semantics before mapping to the native transport.
 - Reject userinfo, fragments, non-HTTPS non-loopback origins, invalid duplicate headers, and redirect forwarding to another origin.
@@ -217,14 +220,44 @@ Local data lives under the active frontend's `warp_core::paths::data_dir()/plugi
 
 Skill-bundled scripts do not use `PluginDataLocator`. The skill content can direct the model to run one through the ordinary shell-command action. `BlocklistAIPermissions::can_autoexecute_command` applies the active execution profile, allowlist, denylist, risk classification, and user approval behavior. The plugin loader does not spawn the script and does not inject `PLUGIN_ROOT` or `PLUGIN_DATA`.
 
-Factory workers can pass one absolute `WARP_PLUGIN_DATA_ROOT`. The client appends a stable key containing Factory UID, scope kind/name, and plugin name.
-
-- The Namespace worker supplies `/cache/warp/plugin-data` from principal-scoped persistent storage.
+Factory runtime uses a cross-repository plugin-data contract:
+- The server composes `WARP_PLUGIN_DATA_ROOT` as `<durable-base>/plugin-data/<factory-uid>`. It validates the Factory UID as one non-empty path segment that is neither `.` nor `..` and contains no `/` or `\`. An invalid UID causes the server to omit the root.
+- The Namespace worker uses `/cache/warp` as its principal-scoped durable base and therefore exports `/cache/warp/plugin-data/<factory-uid>`.
 - The Docker sandbox supplies no root because its filesystem is recreated for each run.
 - The server assumes no root for a self-hosted worker because that worker owns its storage contract.
 - Absence of `WARP_PLUGIN_DATA_ROOT` is the runtime capability signal. The client still loads plugin skills and Streamable HTTP servers, but it refuses to start a plugin stdio server and reports that persistent plugin data is unavailable.
 - The client, not dispatch, enforces writability immediately before stdio start. The server must not emit an ephemeral fallback.
 - Durable roots for Docker and self-hosted workers require follow-up changes in their worker or sandbox repositories.
+- The server exports `WARP_FACTORY_UID` whenever the feature-gated file-managed Factory scope resolves. The client retains it for identity and diagnostics only. It must never pass the value to a path join because the server already included it in the root.
+
+The client appends exactly two segments below `WARP_PLUGIN_DATA_ROOT`:
+- Scope: `factory`, `agent-<sanitize(agent-name)>`, or `automation-<sanitize(automation-name)>`.
+- Plugin key: `sanitize(manifest-name)`.
+
+`sanitize(input)` is total and returns one safe path segment:
+1. Map each character. Keep `[a-z0-9._-]`, lowercase `A-Z`, and replace every other character with `-`.
+2. If the mapped value is byte-identical to the input and is not `""`, `"."`, or `".."`, return it unchanged.
+3. Otherwise compute SHA-256 over the original input bytes and encode the first four digest bytes as eight lowercase hexadecimal characters.
+4. If the mapped value is empty or reserved, return the digest alone. Otherwise return `<mapped>-<digest>`.
+
+Two porting traps require explicit fixtures:
+- Hash the original raw input, never the mapped value. Distinct inputs that map to the same visible segment must remain distinct.
+- `..` survives the character mapping unchanged. The explicit reserved-value check, not the changed-value check, must catch it.
+
+The composed path is `${WARP_PLUGIN_DATA_ROOT}/<scope-segment>/<plugin-key>`. Tests assert exactly two segments below the root. When `WARP_FACTORY_UID` is present, the client asserts that the UID occurs exactly once in the composed namespace, at the server-provided root boundary; it never appends the UID. Keeping Factory composition on the server prevents two Factories under one principal from colliding. It also assigns each part of the namespace to the side that owns the information. The earlier prose-only split let the two repositories implement incompatible layouts with no implementation capable of forming the specified namespace.
+
+[`logic/ai/ambient_agents/workers/common/testdata/factory_plugin_runtime_contract.json`](https://github.com/warpdotdev/warp-server/blob/d07f507034abf13886bb623013bcc61f717d9898/logic/ai/ambient_agents/workers/common/testdata/factory_plugin_runtime_contract.json) is canonical. At `d07f507`, its SHA-256 is `8134f4924a429cc89322c29c1c7697c854572191e41183b63f0bbc4fb95b1692`. The client vendors it byte-for-byte at `crates/ai/src/plugins/contract/factory_plugin_runtime_contract.json` and stores these fields in adjacent `factory_plugin_runtime_contract.provenance.json`:
+
+```json
+{
+  "upstream_repository": "warpdotdev/warp-server",
+  "upstream_path": "logic/ai/ambient_agents/workers/common/testdata/factory_plugin_runtime_contract.json",
+  "upstream_commit": "d07f507034abf13886bb623013bcc61f717d9898",
+  "sha256": "8134f4924a429cc89322c29c1c7697c854572191e41183b63f0bbc4fb95b1692"
+}
+```
+
+Every vendored copy must record equivalent provenance. A downstream test that compares code only with its own stale copy is insufficient. Cross-repository validation must compare the vendored bytes and recorded provenance with the canonical file at the server revision intended for deployment.
 
 Concurrent processes can share one plugin instance data directory. Warp guarantees directory persistence, not application-level locking.
 ### 6. Factory source model and validation
@@ -300,7 +333,8 @@ Extend the existing environment-variable dispatch seam used by Factory skills. A
 - Each list item is relative to the environment working directory. The server prefixes the Factory-relative path with the cloned repository directory before encoding it.
 - A path containing a comma cannot be encoded. The server omits that path and emits a warning rather than creating a corrupted list item.
 - The client parses each `WARP_FACTORY_MCP_FILES` item, loads ordinary entries, and ignores valid managed entries.
-- `WARP_PLUGIN_DATA_ROOT` is separate from the two ordered lists. It is one optional absolute path. The client appends its Factory UID, scope, and plugin instance key.
+- `WARP_FACTORY_UID` is the opaque Factory identity for diagnostics. The server emits it whenever the feature-gated file-managed Factory scope resolves. The client never uses it for path composition.
+- `WARP_PLUGIN_DATA_ROOT` is separate from the ordered lists and the identity variable. It is one optional absolute path already namespaced to the Factory as `<durable-base>/plugin-data/<factory-uid>`. The client appends only the two sanitized segments defined in section 5.
 
 Factory runtime plugins are part of the applied Factory definition and start with the run. Plugin MCP servers are not project cards that require an interactive start inside a headless worker. This follows the existing behavior of MCP already attached to a Factory agent or automation. The Factory source/apply trust boundary is responsible for this difference from an interactive repository session.
 
@@ -414,7 +448,13 @@ Options considered:
 ### Shared Factory runtime environment
 Options considered:
 - Add repeated plugin and Factory MCP CLI arguments to each worker. Rejected because the three worker implementations already share the Factory environment-variable dispatch seam.
-- Extend the shared seam with `WARP_PLUGIN_DIRS`, `WARP_FACTORY_MCP_FILES`, and optional `WARP_PLUGIN_DATA_ROOT`. Selected because it centralizes scoping and preserves the current worker launch contract.
+- Extend the shared seam with `WARP_PLUGIN_DIRS`, `WARP_FACTORY_MCP_FILES`, `WARP_FACTORY_UID`, and optional `WARP_PLUGIN_DATA_ROOT`. Selected because it centralizes scoping and preserves the current worker launch contract.
+### Server-owned Factory plugin-data namespace
+Options considered:
+- Give the client a durable base and require it to append Factory UID, scope, and plugin identity. Rejected after adversarial cross-repository review. The server and client independently interpreted the prose differently, neither implementation could form the intended namespace, and Factories under one principal could collide.
+- Have the server append the Factory UID and have the client append one scope segment plus one plugin key. Selected because the server owns Factory and storage identity while the client owns plugin scope and manifest identity. Each side now composes only the information it owns, and the client suffix is always exactly two safe segments.
+- Rely on each repository's tests against its own vendored fixture. Rejected because a stale fixture remains internally self-consistent and cannot detect upstream drift.
+- Vendor the canonical server fixture byte-for-byte and record its upstream commit SHA and file hash. Selected because reviewers and release validation can prove which contract a client implements and detect a stale copy.
 ### Applied revision instead of plugin-driven resource churn
 Options considered:
 - Include plugin digests in projected live-resource semantic hashes. Rejected because plugin content has no live-resource projection and would manufacture update operations.
@@ -427,6 +467,10 @@ Options considered:
 ## Risks and mitigations
 - Rust and Go validators can drift.
   - Keep one cross-repository fixture corpus derived from the published schemas. Run it against both implementations in CI.
+- A vendored Factory runtime contract can remain internally self-consistent after the canonical server fixture changes.
+  - Require byte-identical vendoring plus upstream repository, path, commit, and hash provenance. Compare the client copy with the canonical file from the intended server revision before rollout.
+- A Factory UID or author-controlled scope name can escape or collide in persistent storage.
+  - Validate the UID server-side before joining. Sanitize scope and plugin segments client-side with the canonical original-input hash rule and assert a two-segment suffix.
 - A source revision can change between Factory validation and runtime.
   - Store the applied source revision and verify the checkout before emitting runtime paths.
 - Global Warp-home plugins inherit automatic MCP start.
@@ -457,6 +501,7 @@ Create a committed conformance fixture suite that covers every item in Appendix 
 - Symlink/path escape failures at plugin, component, skill, command, and working-directory boundaries.
 - MCP top-level and per-server failure isolation.
 - Stdio executable-token, default working directory, environment overlay order, reserved variables, and single non-recursive expansion.
+- Parse-time rejection of a literal `..` `cwd` segment, while names that contain `..` only as a substring remain valid.
 - Streamable HTTP URL, redirect-origin, and header validation.
 - Unsupported SSE isolation.
 - Component start, connection, authentication, and handshake failure isolation.
@@ -474,6 +519,9 @@ Both Rust and Go validators run the applicable shared fixtures.
 - TUI plugin-manager tests assert that its frontend-specific false setting prevents interactive discovery.
 - MCP spawn tests assert exact `argv`, environment overlay order, authoritative variables, default `cwd`, persistent data path, and native tool-name routing.
 - Factory runtime environment tests assert ordered parsing of `WARP_PLUGIN_DIRS`, immediate-child enumeration, first-collection shadowing, and ordered parsing of `WARP_FACTORY_MCP_FILES`.
+- Factory plugin-data tests assert that `WARP_FACTORY_UID` is diagnostics-only, the UID is not appended below the root, and every path adds exactly `<scope-segment>/<plugin-key>`.
+- Sanitization tests consume every canonical worked example, including raw-input digesting, `..`, `.`, empty input, separator replacement, uppercase folding, and two distinct inputs that map to the same visible text.
+- Client test `vendored_factory_plugin_runtime_contract_matches_provenance` asserts that the vendored fixture bytes match the recorded SHA-256 and that all upstream provenance fields are present.
 - Missing-data-root tests assert Factory plugin skills and Streamable HTTP load while plugin stdio start fails before spawn.
 - Factory MCP client tests assert managed entries are ignored and ordinary entries load.
 - Interactive-client cross-format tests assert a Factory schema or managed entry in a plugin root disables only that plugin's MCP component.
@@ -498,8 +546,9 @@ cargo fmt --all -- --check
 - Resolution tests cover automation > agent > factory plugin shadowing.
 - Automation projection tests assert `factory_automation_name` is stored in run config and selects automation-scoped runtime paths.
 - Managed MCP tests cover legacy/new deduplication, conflicts, scope, team validation, and projection.
-- Dispatch tests cover exact comma-separated environment values, most-specific-first ordering, clone-directory prefixing, checkout containment, comma-path warnings, and source revision.
-- Worker tests assert Namespace emits principal-scoped `/cache/warp/plugin-data`; Docker and server-side self-hosted dispatch omit `WARP_PLUGIN_DATA_ROOT`.
+- Dispatch tests cover exact comma-separated environment values, `WARP_FACTORY_UID`, most-specific-first ordering, clone-directory prefixing, checkout containment, comma-path warnings, and source revision.
+- Worker tests assert Namespace emits principal-scoped `/cache/warp/plugin-data/<factory-uid>`, rejects an invalid UID path segment, and never supplies an unscoped root. Docker and server-side self-hosted dispatch omit `WARP_PLUGIN_DATA_ROOT`.
+- Cross-repository CI check `factory-plugin-runtime-contract` checks out the recorded upstream server commit, compares the canonical fixture with the client vendored copy byte-for-byte, and verifies the recorded SHA-256. A client test against only its own copy does not satisfy this criterion.
 - Feature tests assert `factory_agent_plugins` gates Factory source activation and runtime environment emission and has the configured local/staging/prod defaults.
 - Hash tests assert a plugin-only change leaves projected resource semantic hashes unchanged while sync advances the applied source SHA and retains `PluginResource.Digest`.
 - Render tests assert plugin packages and Factory `mcp.json` are omitted and the limitation remains documented on `RenderTree`.
