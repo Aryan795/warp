@@ -577,6 +577,7 @@ impl Workspace {
 
         self.tabs[tab_index].group_id = None;
         self.tabs[tab_index].pinned = true;
+        self.tabs[tab_index].mark_non_pristine();
         self.move_tab_to_index(tab_index, target, ctx);
 
         if let Some(prev) = previous_group_id {
@@ -605,6 +606,7 @@ impl Workspace {
         let target = self.pinned_boundary_index(&self.tabs);
 
         self.tabs[tab_index].pinned = false;
+        self.tabs[tab_index].mark_non_pristine();
         self.move_tab_to_index(tab_index, target, ctx);
 
         ctx.dispatch_global_action("workspace:save_app", ());

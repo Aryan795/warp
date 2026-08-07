@@ -2012,7 +2012,7 @@ fn test_reopen_closed_shared_tab() {
             assert_eq!(workspace.tab_count(), 2);
 
             // Restore the shared tab.
-            workspace.restore_closed_tab(1, TabData::new(shared_pane_group.to_owned()), ctx);
+            workspace.restore_closed_tab(1, TabData::new(shared_pane_group.to_owned()), None, ctx);
         });
         // Restored tab should no longer be shared.
         workspace.read(&app, |workspace, ctx| {
@@ -4841,6 +4841,377 @@ fn test_tools_panel_warp_drive_toggle_updates_available_views() {
                 workspace.left_panel_view.as_ref(ctx).active_view(),
                 ToolPanelView::WarpDrive,
                 "Warp Drive should be selectable again after re-enabling"
+            );
+        });
+    });
+}
+
+/// Turns off "Close window when all tabs are closed" so the final tab keeps its window.
+fn keep_window_on_last_tab_close(app: &mut AppContext) {
+    GeneralSettings::handle(app).update(app, |settings, ctx| {
+        settings
+            .close_window_on_last_tab_closed
+            .set_value(false, ctx)
+            .expect("Failed to disable close-window-on-last-tab-closed");
+    });
+}
+
+/// Marks the workspace's only tab as touched through the same event the terminal emits for
+/// user input, so the final-tab close takes the replacement branch.
+fn mark_only_tab_non_pristine(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace>) {
+    let pane_group = workspace.active_tab_pane_group().clone();
+    workspace.handle_file_tree_event(pane_group, &pane_group::Event::UserMutatedTab, ctx);
+}
+
+#[test]
+fn test_close_window_on_last_tab_closed_setting_round_trips() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        app.read(|ctx| {
+            assert!(
+                *GeneralSettings::as_ref(ctx).close_window_on_last_tab_closed,
+                "The setting defaults to on so today's close-the-window behavior is unchanged"
+            );
+        });
+
+        app.update(keep_window_on_last_tab_close);
+        app.read(|ctx| {
+            assert!(!*GeneralSettings::as_ref(ctx).close_window_on_last_tab_closed);
+        });
+
+        app.update(|ctx| {
+            GeneralSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(
+                    settings
+                        .close_window_on_last_tab_closed
+                        .set_value(true, ctx)
+                );
+            });
+        });
+        app.read(|ctx| {
+            assert!(*GeneralSettings::as_ref(ctx).close_window_on_last_tab_closed);
+        });
+    });
+}
+
+#[test]
+fn test_close_final_tab_closes_window_by_default() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(disable_quit_warning);
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            assert_eq!(workspace.tab_count(), 1);
+            let original_tab_id = workspace.active_tab_pane_group().id();
+            assert_eq!(
+                workspace.final_tab_outcome(0, ctx),
+                FinalTabOutcome::CloseWindow,
+                "A pristine final tab must not change the default close-the-window path"
+            );
+
+            workspace.handle_action(&WorkspaceAction::CloseTab(0), ctx);
+
+            assert_eq!(
+                workspace.tab_count(),
+                1,
+                "The window close owns the teardown; the tab list is left alone"
+            );
+            assert_eq!(
+                workspace.active_tab_pane_group().id(),
+                original_tab_id,
+                "No replacement tab is seeded on the default path"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_close_pristine_final_tab_is_a_silent_no_op_when_window_is_kept() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(disable_quit_warning);
+        app.update(keep_window_on_last_tab_close);
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let original_tab_id = workspace.active_tab_pane_group().id();
+            assert_eq!(workspace.final_tab_outcome(0, ctx), FinalTabOutcome::NoOp);
+
+            // Repeat the close so the no-op is proven to be allocation-free rather than
+            // merely idempotent on the first attempt.
+            for _ in 0..3 {
+                workspace.handle_action(&WorkspaceAction::CloseTab(0), ctx);
+                assert_eq!(workspace.tab_count(), 1);
+                assert_eq!(workspace.active_tab_pane_group().id(), original_tab_id);
+                assert!(workspace.tabs[0].is_pristine());
+            }
+
+            assert!(
+                !workspace
+                    .current_workspace_state
+                    .is_close_session_confirmation_dialog_open,
+                "The no-op is decided before any confirmation is offered"
+            );
+            assert!(
+                UndoCloseStack::as_ref(ctx).is_empty(),
+                "A no-op must not push an undo-close item"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_close_non_pristine_final_tab_replaces_it_when_window_is_kept() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(disable_quit_warning);
+        app.update(keep_window_on_last_tab_close);
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let original_tab_id = workspace.active_tab_pane_group().id();
+            mark_only_tab_non_pristine(workspace, ctx);
+            assert_eq!(
+                workspace.final_tab_outcome(0, ctx),
+                FinalTabOutcome::Replace
+            );
+
+            workspace.close_tab(0, true, true, ctx);
+
+            assert_eq!(
+                workspace.tab_count(),
+                1,
+                "The window keeps exactly one tab; it never reaches a zero-tab state"
+            );
+            assert_ne!(
+                workspace.active_tab_pane_group().id(),
+                original_tab_id,
+                "The remaining tab is a fresh one, not the closed session"
+            );
+            assert!(
+                workspace.tabs[0].is_pristine(),
+                "The replacement starts untouched, so closing it again is a no-op"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_final_tab_close_and_replace_reaches_the_same_outcome_from_a_multi_tab_close() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(disable_quit_warning);
+        app.update(keep_window_on_last_tab_close);
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx);
+            assert_eq!(workspace.tab_count(), 2);
+            let surviving_tab_id = workspace.get_pane_group_view(0).unwrap().id();
+            // Touch the tab that will end up last so the close takes the replace branch.
+            workspace.tabs[0].mark_non_pristine();
+
+            workspace.close_tabs(
+                [0, 1].into_iter(),
+                OpenDialogSource::CloseTab { tab_index: 0 },
+                true,
+                false,
+                ctx,
+            );
+
+            assert_eq!(workspace.tab_count(), 1);
+            assert_ne!(workspace.active_tab_pane_group().id(), surviving_tab_id);
+            assert_eq!(workspace.active_tab_index(), 0);
+        });
+    });
+}
+
+#[test]
+fn test_undo_close_swaps_out_a_still_pristine_replacement() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(disable_quit_warning);
+        app.update(keep_window_on_last_tab_close);
+
+        let workspace = mock_workspace(&mut app);
+        let original_tab_id = workspace.update(&mut app, |workspace, ctx| {
+            let original_tab_id = workspace.active_tab_pane_group().id();
+            mark_only_tab_non_pristine(workspace, ctx);
+            workspace.close_tab(0, true, true, ctx);
+            assert_ne!(workspace.active_tab_pane_group().id(), original_tab_id);
+            original_tab_id
+        });
+
+        app.update(|ctx| {
+            UndoCloseStack::handle(ctx).update(ctx, |stack, ctx| stack.undo_close(ctx));
+        });
+
+        workspace.read(&app, |workspace, _| {
+            assert_eq!(
+                workspace.tab_count(),
+                1,
+                "The untouched replacement is swapped out rather than left alongside"
+            );
+            assert_eq!(workspace.active_tab_pane_group().id(), original_tab_id);
+        });
+    });
+}
+
+#[test]
+fn test_undo_close_restores_alongside_a_touched_replacement() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(disable_quit_warning);
+        app.update(keep_window_on_last_tab_close);
+
+        let workspace = mock_workspace(&mut app);
+        let original_tab_id = workspace.update(&mut app, |workspace, ctx| {
+            let original_tab_id = workspace.active_tab_pane_group().id();
+            mark_only_tab_non_pristine(workspace, ctx);
+            workspace.close_tab(0, true, true, ctx);
+            // The user starts working in the replacement before undoing.
+            mark_only_tab_non_pristine(workspace, ctx);
+            original_tab_id
+        });
+
+        app.update(|ctx| {
+            UndoCloseStack::handle(ctx).update(ctx, |stack, ctx| stack.undo_close(ctx));
+        });
+
+        workspace.read(&app, |workspace, _| {
+            assert_eq!(
+                workspace.tab_count(),
+                2,
+                "Work done in the replacement must never be discarded by undo"
+            );
+            assert!(
+                workspace
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.pane_group.id() == original_tab_id)
+            );
+        });
+    });
+}
+
+#[test]
+fn test_close_window_disabled_host_keeps_window_at_either_setting_value() {
+    let _close_window = ContextFlag::CloseWindow.override_enabled(false);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(disable_quit_warning);
+
+        // The setting is left at its default (on); a host that cannot close its window must
+        // still use keep-window behavior.
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let original_tab_id = workspace.active_tab_pane_group().id();
+            assert_eq!(
+                workspace.final_tab_outcome(0, ctx),
+                FinalTabOutcome::NoOp,
+                "A host that cannot close its window never reaches the close-window outcome"
+            );
+            workspace.handle_action(&WorkspaceAction::CloseTab(0), ctx);
+            assert_eq!(workspace.tab_count(), 1);
+            assert_eq!(workspace.active_tab_pane_group().id(), original_tab_id);
+
+            mark_only_tab_non_pristine(workspace, ctx);
+            assert_eq!(
+                workspace.final_tab_outcome(0, ctx),
+                FinalTabOutcome::Replace
+            );
+            workspace.close_tab(0, true, true, ctx);
+            assert_eq!(workspace.tab_count(), 1);
+            assert_ne!(workspace.active_tab_pane_group().id(), original_tab_id);
+        });
+    });
+}
+
+#[test]
+fn test_final_tab_close_affordances_stay_available_in_a_close_window_disabled_host() {
+    let _close_window = ContextFlag::CloseWindow.override_enabled(false);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+        workspace.read(&app, |workspace, ctx| {
+            let menu_items = workspace.tabs[0].menu_items(
+                0,
+                workspace.tab_count(),
+                &workspace.tab_groups,
+                false,
+                false,
+                false,
+                ctx,
+            );
+            assert!(
+                menu_items.iter().any(|item| matches!(
+                    item,
+                    MenuItem::Item(fields) if fields.label() == "Close tab"
+                )),
+                "\"Close tab\" must stay offered for a single tab in a CloseWindow-disabled host"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_cross_window_handoff_leaves_a_fresh_tab_in_a_kept_source_window() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(disable_quit_warning);
+        app.update(keep_window_on_last_tab_close);
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let handed_off_tab_id = workspace.active_tab_pane_group().id();
+            workspace.handle_drop_result(
+                DropResult::CloseSourceWindow {
+                    transferred_tab_index: 0,
+                },
+                ctx,
+            );
+
+            assert_eq!(workspace.tab_count(), 1);
+            assert_ne!(
+                workspace.active_tab_pane_group().id(),
+                handed_off_tab_id,
+                "The source keeps a fresh tab rather than the transferred one"
+            );
+            assert!(workspace.tabs[0].is_pristine());
+        });
+    });
+}
+
+#[test]
+fn test_cross_window_handoff_closes_the_source_window_by_default() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(disable_quit_warning);
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let handed_off_tab_id = workspace.active_tab_pane_group().id();
+            workspace.handle_drop_result(
+                DropResult::CloseSourceWindow {
+                    transferred_tab_index: 0,
+                },
+                ctx,
+            );
+
+            assert_eq!(
+                workspace.active_tab_pane_group().id(),
+                handed_off_tab_id,
+                "The default path closes the source window instead of seeding a replacement"
             );
         });
     });
