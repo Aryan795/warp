@@ -286,6 +286,68 @@ fn models_without_a_host_fall_back_to_the_provider_icon() {
     );
 }
 
+#[test]
+fn kimi_models_are_matched_by_id_not_by_provider() {
+    // Kimi ships as `LLMProvider::Unknown`, so the id is the only signal.
+    for id in ["kimi", "kimi-k26-fireworks", "KIMI-K3-Fireworks"] {
+        let llm = server_llm(id, None);
+        assert_eq!(llm.provider, LLMProvider::Unknown);
+        assert_eq!(
+            model_leading_icon(&llm, ModelIconFlags::default()),
+            Icon::KimiLogo,
+            "{id} should resolve to the Kimi logo"
+        );
+    }
+
+    // Ids that merely start with or contain the letters must not match.
+    for id in ["kimimaro-7b", "gpt-kimi", "gpt-oss-120b"] {
+        let llm = server_llm(id, None);
+        assert_eq!(
+            model_leading_icon(&llm, ModelIconFlags::default()),
+            Icon::Agent,
+            "{id} should keep the agent fallback"
+        );
+    }
+}
+
+#[test]
+fn kimi_models_keep_the_existing_router_auto_and_host_precedence() {
+    let llm = server_llm("kimi-k3-fireworks", None);
+
+    for (flags, expected) in [
+        (
+            ModelIconFlags {
+                is_custom_router: true,
+                ..Default::default()
+            },
+            Icon::Dataflow,
+        ),
+        (
+            ModelIconFlags {
+                is_auto: true,
+                ..Default::default()
+            },
+            Icon::Agent,
+        ),
+        (
+            ModelIconFlags {
+                is_using_bedrock: true,
+                ..Default::default()
+            },
+            Icon::Aws,
+        ),
+        (
+            ModelIconFlags {
+                is_using_gemini_enterprise: true,
+                ..Default::default()
+            },
+            Icon::GeminiEnterpriseAgentPlatform,
+        ),
+    ] {
+        assert_eq!(model_leading_icon(&llm, flags), expected);
+    }
+}
+
 // -- build_custom_llm_infos / display label tests --
 
 fn endpoint(

@@ -173,6 +173,20 @@ pub struct ModelIconFlags {
     pub is_using_gemini_enterprise: bool,
 }
 
+/// Returns whether a model id belongs to Moonshot AI's Kimi family (e.g.
+/// `kimi-k3-fireworks`).
+///
+/// Kimi has no [`LLMProvider`] variant of its own — the server reports these
+/// models as [`LLMProvider::Unknown`] — so the id is the only signal available
+/// for picking the brand logo.
+fn is_kimi_model(id: &str) -> bool {
+    let id = id.trim();
+    id.eq_ignore_ascii_case("kimi")
+        || id
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("kimi-"))
+}
+
 /// The leading icon shown next to a model in the model picker and model menus.
 ///
 /// Auto models deliberately get the generic agent glyph rather than a host or
@@ -186,6 +200,8 @@ pub fn model_leading_icon(llm: &LLMInfo, flags: ModelIconFlags) -> Icon {
         Icon::Aws
     } else if flags.is_using_gemini_enterprise {
         Icon::GeminiEnterpriseAgentPlatform
+    } else if is_kimi_model(llm.id.as_str()) {
+        Icon::KimiLogo
     } else {
         llm.provider.icon().unwrap_or(Icon::Agent)
     }
