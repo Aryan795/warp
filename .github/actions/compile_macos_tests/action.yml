@@ -37,6 +37,9 @@ inputs:
   require_seed_marker:
     default: 'false'
     description: Require and validate seed identity persisted in the restored target cache.
+  discard_cache_after_measurement:
+    default: 'false'
+    description: Fail after successful diagnostics so Namespace discards the measurement cache fork.
   artifact_name:
     required: true
     description: Name for the uploaded diagnostic artifact.
@@ -384,6 +387,7 @@ runs:
         fi
         echo "::notice title=macOS compile diagnostics::${{ inputs.cache_scope }} volume$measurement_note, ${elapsed_seconds:-unknown}s, seed match $seed_identity_match, $dirty_units dirty fingerprints, target $(kib_to_gib "$pre_target_kib") -> $(kib_to_gib "$post_target_kib")"
         rm "$clean_stderr"
+        printf 'measurement_ready_for_discard=true\n' >> "$MACOS_COMPILE_DIAGNOSTICS_DIR/metrics.env"
 
     - name: Upload compile diagnostics
       if: ${{ always() && steps.capture.outcome == 'success' }}
@@ -404,4 +408,11 @@ runs:
       shell: bash
       run: |
         echo "::error::Checked-out tree, build environment, or restored target did not match the serialized seed"
+        exit 1
+
+    - name: Discard measurement cache fork
+      if: ${{ steps.compile.outcome == 'success' && steps.capture.outputs.seed_identity_match == 'true' && inputs.discard_cache_after_measurement == 'true' }}
+      shell: bash
+      run: |
+        echo "::notice::Intentionally failing after diagnostics so Namespace discards this measurement cache fork"
         exit 1

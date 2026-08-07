@@ -42,14 +42,14 @@ jobs:
           SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          if (( RUN_ATTEMPT % 2 == 1 )); then
+          seed_attempt=1
+          if [ "$RUN_ATTEMPT" = "1" ]; then
             phase=seed
-            seed_attempt="$RUN_ATTEMPT"
+            block=1
           else
             phase=measure
-            seed_attempt="$((RUN_ATTEMPT - 1))"
+            block="$((RUN_ATTEMPT - 1))"
           fi
-          block="$(((RUN_ATTEMPT + 1) / 2))"
           {
             printf 'block=%s\n' "$block"
             printf 'phase=%s\n' "$phase"
@@ -76,9 +76,9 @@ jobs:
       matrix:
         include:
           - cache_scope: 50gb
-            runner: namespace-profile-mac-ci-tests-50gb
+            runner: 'namespace-profile-mac-ci-tests-50gb;overrides.cache-tag=warp-macos-tests-final-50gb-v1'
           - cache_scope: 84gb
-            runner: namespace-profile-mac-ci-tests-84gb
+            runner: 'namespace-profile-mac-ci-tests-84gb;overrides.cache-tag=warp-macos-tests-final-84gb-v1'
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -118,8 +118,9 @@ jobs:
       - measure
       - scratch
     if: >-
+      always() &&
       needs.parameters.outputs.phase == 'measure' &&
-      needs.measure.result == 'success' &&
+      needs.measure.result == 'failure' &&
       needs.scratch.result == 'success'
     timeout-minutes: 5
     runs-on: ubuntu-latest
@@ -163,7 +164,9 @@ jobs:
           done
           for scope in 50gb 84gb; do
             metrics="$RUNNER_TEMP/measure-$scope/metrics.env"
-            if [ "$(sed -n 's/^seed_identity_match=//p' "$metrics")" != "true" ] ||
+            if [ "$(sed -n 's/^compile_status=//p' "$metrics")" != "0" ] ||
+               [ "$(sed -n 's/^measurement_ready_for_discard=//p' "$metrics")" != "true" ] ||
+               [ "$(sed -n 's/^seed_identity_match=//p' "$metrics")" != "true" ] ||
                [ "$(sed -n 's/^seed_marker_found=//p' "$metrics")" != "true" ] ||
                [ "$(sed -n 's/^seed_run_id=//p' "$metrics")" != "$GITHUB_RUN_ID" ] ||
                [ "$(sed -n 's/^seed_run_attempt=//p' "$metrics")" != "$EXPECTED_SEED_ATTEMPT" ]; then
@@ -237,9 +240,9 @@ jobs:
       matrix:
         include:
           - cache_scope: 50gb
-            runner: namespace-profile-mac-ci-tests-50gb
+            runner: 'namespace-profile-mac-ci-tests-50gb;overrides.cache-tag=warp-macos-tests-final-50gb-v1'
           - cache_scope: 84gb
-            runner: namespace-profile-mac-ci-tests-84gb
+            runner: 'namespace-profile-mac-ci-tests-84gb;overrides.cache-tag=warp-macos-tests-final-84gb-v1'
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -267,6 +270,7 @@ jobs:
           cache_scope: ${{ matrix.cache_scope }}
           counted: 'true'
           require_seed_marker: 'true'
+          discard_cache_after_measurement: 'true'
           cache_provider: ${{ steps.prepare_environment.outputs.rust_cache_provider }}
           cache_identity: ${{ steps.prepare_environment.outputs.rust_cache_identity }}
           cache_hit: ${{ steps.prepare_environment.outputs.rust_cache_hit }}
