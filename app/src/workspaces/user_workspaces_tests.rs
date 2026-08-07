@@ -12,7 +12,8 @@ use warp_graphql::queries::get_workspaces_metadata_for_user::{
     UserPurchasePolicyTier,
 };
 use warp_graphql::user::{
-    DiscoverableTeamData as GqlDiscoverableTeam, JoinableWorkspaceData as GqlJoinableWorkspaceData,
+    DiscoverableTeamData as GqlDiscoverableTeam,
+    DiscoverableWorkspaceData as GqlDiscoverableWorkspaceData,
 };
 use warp_graphql::workspace::{
     AddonCreditsSettings as GqlAddonCreditsSettings,
@@ -172,7 +173,7 @@ fn test_loading_all_spaces_after_switching_from_offline() {
         name: "test".to_string(),
         stripe_customer_id: None,
         teams: vec![team.clone()],
-        joinable_teams: vec![],
+        open_teams: vec![],
         billing_metadata: Default::default(),
         bonus_grants_purchased_this_month: Default::default(),
         billing_cycle_usage: None,
@@ -204,7 +205,7 @@ fn test_loading_all_spaces_after_switching_from_offline() {
                     metadata: WorkspacesMetadataResponse {
                         workspaces: vec![],
                         joinable_teams: vec![],
-                        joinable_workspaces: vec![],
+                        discoverable_workspaces: vec![],
                         experiments: None,
                         feature_model_choices: None,
                         ai_credit_availability: None,
@@ -224,7 +225,7 @@ fn test_loading_all_spaces_after_switching_from_offline() {
                     metadata: WorkspacesMetadataResponse {
                         workspaces: vec![workspace.clone()],
                         joinable_teams: vec![],
-                        joinable_workspaces: vec![],
+                        discoverable_workspaces: vec![],
                         experiments: None,
                         feature_model_choices: None,
                         ai_credit_availability: None,
@@ -364,7 +365,7 @@ fn test_aws_bedrock_credentials_respect_user_setting() {
             metadata: WorkspacesMetadataResponse {
                 workspaces: vec![workspace_for_poll.clone()],
                 joinable_teams: vec![],
-                joinable_workspaces: vec![],
+                discoverable_workspaces: vec![],
                 experiments: None,
                 feature_model_choices: None,
                 ai_credit_availability: None,
@@ -423,7 +424,7 @@ fn test_aws_bedrock_credentials_enforced_by_admin() {
             metadata: WorkspacesMetadataResponse {
                 workspaces: vec![workspace_for_poll.clone()],
                 joinable_teams: vec![],
-                joinable_workspaces: vec![],
+                discoverable_workspaces: vec![],
                 experiments: None,
                 feature_model_choices: None,
                 ai_credit_availability: None,
@@ -722,7 +723,7 @@ fn workspace_for_test(team: &Team) -> Workspace {
         name: "test".to_string(),
         stripe_customer_id: None,
         teams: vec![team.clone()],
-        joinable_teams: vec![],
+        open_teams: vec![],
         billing_metadata: team.billing_metadata.clone(),
         bonus_grants_purchased_this_month: Default::default(),
         billing_cycle_usage: None,
@@ -1144,7 +1145,7 @@ fn test_joining_team_moves_objects() {
         name: "test".to_string(),
         stripe_customer_id: None,
         teams: vec![team.clone()],
-        joinable_teams: vec![],
+        open_teams: vec![],
         billing_metadata: Default::default(),
         bonus_grants_purchased_this_month: Default::default(),
         billing_cycle_usage: None,
@@ -1384,7 +1385,7 @@ fn test_leaving_team_moves_objects() {
         name: "test".to_string(),
         stripe_customer_id: None,
         teams: vec![team.clone()],
-        joinable_teams: vec![],
+        open_teams: vec![],
         billing_metadata: Default::default(),
         bonus_grants_purchased_this_month: Default::default(),
         billing_cycle_usage: None,
@@ -1646,7 +1647,7 @@ fn gql_workspace(
         stripe_customer_id: None,
         members: vec![],
         teams: vec![],
-        joinable_teams: vec![],
+        open_teams: vec![],
         billing_metadata: GqlBillingMetadata {
             customer_type: GqlCustomerType::Free,
             delinquency_status: GqlDelinquencyStatus::NoDelinquency,
@@ -1760,17 +1761,17 @@ fn gql_user(
         workspaces,
         experiments: None,
         discoverable_teams: vec![],
-        joinable_workspaces: vec![],
+        discoverable_workspaces: vec![],
     }
 }
 
 #[test]
 fn test_native_discovery_metadata_preserves_workspace_scope_and_nullable_team_color() {
     let mut user = gql_user(None, vec![]);
-    user.joinable_workspaces = vec![GqlJoinableWorkspaceData {
+    user.discoverable_workspaces = vec![GqlDiscoverableWorkspaceData {
         workspace_uid: "workspace_native_12345".to_string().into(),
         name: "Acme".to_string(),
-        joinable_teams: vec![GqlDiscoverableTeam {
+        open_teams: vec![GqlDiscoverableTeam {
             team_uid: "team_open_123456789012".to_string().into(),
             num_members: 7,
             name: "Platform".to_string(),
@@ -1780,12 +1781,12 @@ fn test_native_discovery_metadata_preserves_workspace_scope_and_nullable_team_co
     }];
 
     let response: WorkspacesMetadataResponse = user.into();
-    assert_eq!(response.joinable_workspaces.len(), 1);
-    let workspace = &response.joinable_workspaces[0];
+    assert_eq!(response.discoverable_workspaces.len(), 1);
+    let workspace = &response.discoverable_workspaces[0];
     assert_eq!(workspace.name, "Acme");
     assert_eq!(String::from(workspace.uid), "workspace_native_12345");
-    assert_eq!(workspace.joinable_teams.len(), 1);
-    let team = &workspace.joinable_teams[0];
+    assert_eq!(workspace.open_teams.len(), 1);
+    let team = &workspace.open_teams[0];
     assert_eq!(team.name, "Platform");
     assert_eq!(team.num_members, 7);
     assert_eq!(team.color, None, "server team color is nullable");

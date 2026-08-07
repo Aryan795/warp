@@ -1,9 +1,8 @@
+use super::join_team_with_team_discovery::TeamDiscoveryEntrypoint;
 use crate::error::UserFacingError;
 use crate::request_context::RequestContext;
 use crate::response_context::ResponseContext;
 use crate::schema;
-
-use super::join_team_with_team_discovery::TeamDiscoveryEntrypoint;
 
 #[derive(cynic::QueryVariables, Debug)]
 pub struct JoinTeamInWorkspaceVariables {

@@ -38,10 +38,10 @@ impl From<ServerId> for WorkspaceUid {
 }
 
 #[derive(Clone, Debug)]
-pub struct JoinableWorkspace {
+pub struct DiscoverableWorkspace {
     pub uid: WorkspaceUid,
     pub name: String,
-    pub joinable_teams: Vec<DiscoverableTeam>,
+    pub open_teams: Vec<DiscoverableTeam>,
 }
 
 #[derive(Clone, Debug)]
@@ -50,7 +50,7 @@ pub struct Workspace {
     pub name: String,
     pub stripe_customer_id: Option<String>,
     pub teams: Vec<Team>,
-    pub joinable_teams: Vec<DiscoverableTeam>,
+    pub open_teams: Vec<DiscoverableTeam>,
     pub billing_metadata: BillingMetadata,
     pub bonus_grants_purchased_this_month: BonusGrantsPurchased,
     pub billing_cycle_usage: Option<BillingCycleUsageData>,
@@ -80,7 +80,7 @@ impl Workspace {
             name,
             stripe_customer_id: Default::default(),
             teams: teams.unwrap_or_default(),
-            joinable_teams: Default::default(),
+            open_teams: Default::default(),
             billing_metadata,
             bonus_grants_purchased_this_month: Default::default(),
             billing_cycle_usage: None,

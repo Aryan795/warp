@@ -1213,6 +1213,12 @@ type DiscoverableTeamData {
   teamUid: ID!
 }
 
+type DiscoverableWorkspaceData {
+  name: String!
+  openTeams: [DiscoverableTeamData!]!
+  workspaceUid: ID!
+}
+
 enum DisplaySetting {
   COMMAND
   COMMAND_AND_OUTPUT
@@ -2004,12 +2010,6 @@ type JoinWorkspaceFromDiscoveryOutput implements Response {
 }
 
 union JoinWorkspaceFromDiscoveryResult = JoinWorkspaceFromDiscoveryOutput | UserFacingError
-
-type JoinableWorkspaceData {
-  joinableTeams: [DiscoverableTeamData!]!
-  name: String!
-  workspaceUid: ID!
-}
 
 input LeaveObjectInput {
   objectUid: ID!
@@ -4420,6 +4420,7 @@ type User {
   """
   conversationUsage(days: Int, lastUpdatedEndTimestamp: Time, limit: Int): [ConversationUsage!]!
   discoverableTeams: [DiscoverableTeamData!]!
+  discoverableWorkspaces: [DiscoverableWorkspaceData!]!
 
   """
   We differentiate between `null` and `[]` here:
@@ -4440,7 +4441,6 @@ type User {
   globalSkills: [String!]!
   isOnWorkDomain: Boolean!
   isOnboarded: Boolean!
-  joinableWorkspaces: [JoinableWorkspaceData!]!
   llms: FeatureModelChoice!
   managedSecrets: ManagedSecretConfig
   onboardingSurveyStatus: OnboardingSurveyStatus
@@ -4638,10 +4638,10 @@ type Workspace {
   inviteCode: String
   inviteLinkDomainRestrictions: [InviteLinkDomainRestriction!]!
   isEligibleForDiscovery: Boolean!
-  joinableTeams: [DiscoverableTeamData!]!
   memberSpendLimits: [MemberSpendLimit!]
   members: [WorkspaceMember!]!
   name: String!
+  openTeams: [DiscoverableTeamData!]!
   pendingEmailInvites: [EmailInvite!]!
 
   """

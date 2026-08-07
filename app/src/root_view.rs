@@ -2490,14 +2490,14 @@ impl RootView {
             event,
             UserWorkspacesEvent::TeamsChanged
                 | UserWorkspacesEvent::CurrentWorkspaceChanged
-                | UserWorkspacesEvent::JoinableWorkspacesChanged
+                | UserWorkspacesEvent::DiscoverableWorkspacesChanged
         ) {
             return;
         }
 
         let workspaces = UserWorkspaces::as_ref(ctx);
         let should_open_team_discovery = workspaces.current_workspace().map_or_else(
-            || !workspaces.joinable_workspaces().is_empty(),
+            || !workspaces.discoverable_workspaces().is_empty(),
             |workspace| workspace.is_native_workspaces_enabled() && workspace.teams.is_empty(),
         );
         if !should_open_team_discovery {

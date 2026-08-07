@@ -78,7 +78,7 @@ use crate::workspaces::team::{DiscoverableTeam, MembershipRole, Team, TeamDelete
 use crate::workspaces::update_manager::{TeamUpdateManager, TeamUpdateManagerEvent};
 use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
 use crate::workspaces::workspace::{
-    BillingMetadata, CustomerType, DelinquencyStatus, JoinableWorkspace, WorkspaceSizePolicy,
+    BillingMetadata, CustomerType, DelinquencyStatus, DiscoverableWorkspace, WorkspaceSizePolicy,
     WorkspaceUid,
 };
 
@@ -304,13 +304,13 @@ enum TeamDiscoveryMode {
 
 fn team_discovery_mode(
     current_workspace_is_native: Option<bool>,
-    joinable_workspace_count: usize,
+    discoverable_workspace_count: usize,
 ) -> TeamDiscoveryMode {
     match current_workspace_is_native {
         Some(true) => TeamDiscoveryMode::CurrentNativeWorkspace,
         Some(false) => TeamDiscoveryMode::Legacy,
-        None if joinable_workspace_count == 1 => TeamDiscoveryMode::SoleSignupWorkspace,
-        None if joinable_workspace_count > 1 => TeamDiscoveryMode::SignupWorkspaceChooser,
+        None if discoverable_workspace_count == 1 => TeamDiscoveryMode::SoleSignupWorkspace,
+        None if discoverable_workspace_count > 1 => TeamDiscoveryMode::SignupWorkspaceChooser,
         None => TeamDiscoveryMode::Legacy,
     }
 }
@@ -957,15 +957,15 @@ impl TeamsPageView {
             team_uids.extend(workspace.teams.iter().map(|team| team.uid));
             team_uids.extend(
                 workspace
-                    .joinable_teams
+                    .open_teams
                     .iter()
                     .map(|team| ServerId::from_string_lossy(&team.team_uid)),
             );
         }
-        for workspace in workspaces.joinable_workspaces() {
+        for workspace in workspaces.discoverable_workspaces() {
             team_uids.extend(
                 workspace
-                    .joinable_teams
+                    .open_teams
                     .iter()
                     .map(|team| ServerId::from_string_lossy(&team.team_uid)),
             );
@@ -977,7 +977,7 @@ impl TeamsPageView {
         }
 
         let workspace_uids = workspaces
-            .joinable_workspaces()
+            .discoverable_workspaces()
             .iter()
             .map(|workspace| workspace.uid)
             .collect::<HashSet<_>>();
@@ -1058,7 +1058,7 @@ impl TeamsPageView {
                 // A workspace selection change always emits `TeamsChanged` too,
                 // which already refreshes this page.
             }
-            UserWorkspacesEvent::JoinableWorkspacesChanged => {
+            UserWorkspacesEvent::DiscoverableWorkspacesChanged => {
                 self.update_native_discovery_state(ctx);
             }
             UserWorkspacesEvent::ToggleInviteLinksSuccess => {
@@ -4365,13 +4365,14 @@ impl TeamsWidget {
         .finish()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_native_team_discovery(
         &self,
         view: &TeamsPageView,
         title: String,
         subtitle: String,
         joined_teams: &[Team],
-        joinable_teams: &[DiscoverableTeam],
+        open_teams: &[DiscoverableTeam],
         target: NativeTeamJoinTarget,
         appearance: &Appearance,
     ) -> Box<dyn Element> {
@@ -4383,7 +4384,7 @@ impl TeamsWidget {
                 .finish(),
         );
 
-        if joined_teams.is_empty() && joinable_teams.is_empty() {
+        if joined_teams.is_empty() && open_teams.is_empty() {
             page.add_child(
                 Container::new(self.render_sub_text(
                     "No teams available — ask a workspace admin.".to_string(),
@@ -4413,7 +4414,7 @@ impl TeamsWidget {
                 appearance,
             ));
         }
-        for team in joinable_teams {
+        for team in open_teams {
             page.add_child(self.render_native_team_card(
                 view,
                 NativeTeamCardData {
@@ -4433,7 +4434,7 @@ impl TeamsWidget {
     fn render_signup_workspace_chooser(
         &self,
         view: &TeamsPageView,
-        workspaces: &[JoinableWorkspace],
+        workspaces: &[DiscoverableWorkspace],
         appearance: &Appearance,
     ) -> Box<dyn Element> {
         let mut page = Flex::column();
@@ -4464,7 +4465,7 @@ impl TeamsWidget {
                 .get(&workspace_uid)
                 .cloned()
                 .unwrap_or_default();
-            let team_count = workspace.joinable_teams.len();
+            let team_count = workspace.open_teams.len();
             let team_count_label = if team_count == 1 {
                 "1 open team".to_string()
             } else {
@@ -4789,7 +4790,7 @@ impl SettingsWidget for TeamsWidget {
                 teams
                     .current_workspace()
                     .map(|workspace| workspace.is_native_workspaces_enabled()),
-                teams.joinable_workspaces().len(),
+                teams.discoverable_workspaces().len(),
             );
 
             match mode {
@@ -4802,7 +4803,7 @@ impl SettingsWidget for TeamsWidget {
                         "Discover teams".to_string(),
                         format!("Join an open team in {}.", workspace.name),
                         &workspace.teams,
-                        &workspace.joinable_teams,
+                        &workspace.open_teams,
                         NativeTeamJoinTarget::CurrentWorkspace,
                         appearance,
                     );
@@ -4833,11 +4834,11 @@ impl SettingsWidget for TeamsWidget {
                 }
                 TeamDiscoveryMode::SignupWorkspaceChooser => self.render_signup_workspace_chooser(
                     view,
-                    teams.joinable_workspaces(),
+                    teams.discoverable_workspaces(),
                     appearance,
                 ),
                 TeamDiscoveryMode::SoleSignupWorkspace => {
-                    let workspace = &teams.joinable_workspaces()[0];
+                    let workspace = &teams.discoverable_workspaces()[0];
                     Flex::column()
                         .with_child(render_sub_header(
                             appearance,
@@ -4850,7 +4851,7 @@ impl SettingsWidget for TeamsWidget {
                                 workspace.name.clone(),
                                 "Choose the team you work with.".to_string(),
                                 &[],
-                                &workspace.joinable_teams,
+                                &workspace.open_teams,
                                 NativeTeamJoinTarget::DiscoveredWorkspace(workspace.uid),
                                 appearance,
                             ))

@@ -18,8 +18,8 @@ pub struct DiscoverableTeamData {
 }
 
 #[derive(cynic::QueryFragment, Debug, Clone)]
-pub struct JoinableWorkspaceData {
+pub struct DiscoverableWorkspaceData {
     pub workspace_uid: cynic::Id,
     pub name: String,
-    pub joinable_teams: Vec<DiscoverableTeamData>,
+    pub open_teams: Vec<DiscoverableTeamData>,
 }
