@@ -1889,6 +1889,7 @@ fn gql_team_settings() -> GqlTeamSettings {
     fn str_list() -> GqlStringListSettingInfo {
         GqlStringListSettingInfo {
             values: vec![],
+            is_configured: false,
             workspace_entries: vec![],
             team_entries: vec![],
         }
@@ -1909,6 +1910,7 @@ fn gql_team_settings() -> GqlTeamSettings {
             enabled: bool_info(false),
             regexes: GqlSecretRedactionRegexListInfo {
                 values: vec![],
+                is_configured: false,
                 workspace_entries: vec![],
                 team_entries: vec![],
             },
