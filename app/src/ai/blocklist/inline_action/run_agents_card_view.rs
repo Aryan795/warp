@@ -1541,13 +1541,12 @@ fn render_summary(card: &RunAgentsCardFields, appearance: &Appearance) -> Box<dy
     // Multi-level orchestration: the server may grant launched children the
     // run_agents tool, so tell the approver up front. The client cannot
     // cheaply know the server-side depth budget, so this line is gated on
-    // the same dogfood flag as the rest of the client-side multi-level
-    // enablement.
-    if FeatureFlag::WaitForEventsParentRegistration.is_enabled() {
+    // the client-side multi-level enablement flag.
+    if FeatureFlag::MultiLevelOrchestration.is_enabled() {
         column = column.with_child(
             Container::new(
                 Text::new(
-                    "These agents may start their own sub-agents".to_string(),
+                    "These agents may start their own child agents".to_string(),
                     appearance.ui_font_family(),
                     appearance.monospace_font_size() - 1.,
                 )

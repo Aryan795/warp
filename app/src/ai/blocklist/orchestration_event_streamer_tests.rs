@@ -2481,6 +2481,113 @@ fn register_parent_on_wait_flag_off_is_noop() {
     });
 }
 
+// ---- should_register_parent_on_wait eligibility ---------------------------
+
+#[test]
+fn wait_registration_eligibility_child_conversation_is_eligible() {
+    // A child conversation must be eligible: with multi-level orchestration
+    // a mid-tree node can have children of its own to discover.
+    App::test((), |mut app| async move {
+        let _flag_guard = FeatureFlag::WaitForEventsParentRegistration.override_enabled(true);
+
+        let history_model =
+            app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
+        let mut conversation = AIConversation::new(false, false);
+        conversation.set_run_id("550e8400-e29b-41d4-a716-446655440526".to_string());
+        conversation.set_parent_agent_id("550e8400-e29b-41d4-a716-4466554405fe".to_string());
+        let conversation_id = conversation.id();
+        let terminal_view_id = warpui::EntityId::new();
+        history_model.update(&mut app, |model, ctx| {
+            model.restore_conversations(terminal_view_id, vec![conversation], ctx);
+        });
+
+        let poller = streamer_with_no_fetch_expected(&mut app);
+        poller.read(&app, |me, ctx| {
+            assert!(me.should_register_parent_on_wait(conversation_id, ctx));
+        });
+    });
+}
+
+#[test]
+fn wait_registration_eligibility_requires_the_flag() {
+    App::test((), |mut app| async move {
+        let _flag_guard = FeatureFlag::WaitForEventsParentRegistration.override_enabled(false);
+
+        let history_model =
+            app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
+        let mut conversation = AIConversation::new(false, false);
+        conversation.set_run_id("550e8400-e29b-41d4-a716-446655440527".to_string());
+        let conversation_id = conversation.id();
+        let terminal_view_id = warpui::EntityId::new();
+        history_model.update(&mut app, |model, ctx| {
+            model.restore_conversations(terminal_view_id, vec![conversation], ctx);
+        });
+
+        let poller = streamer_with_no_fetch_expected(&mut app);
+        poller.read(&app, |me, ctx| {
+            assert!(!me.should_register_parent_on_wait(conversation_id, ctx));
+        });
+    });
+}
+
+#[test]
+fn wait_registration_eligibility_excludes_remote_run_views() {
+    // A remote-child placeholder is a passive view of a run executing in
+    // another process; that process owns the inbox and the registration.
+    App::test((), |mut app| async move {
+        let _flag_guard = FeatureFlag::WaitForEventsParentRegistration.override_enabled(true);
+
+        // `mark_conversation_as_remote_child` persists the conversation,
+        // which needs the settings + persistence singletons wired up.
+        crate::test_util::settings::initialize_history_persistence_for_tests(&mut app);
+        let history_model =
+            app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
+        let mut conversation = AIConversation::new(false, false);
+        conversation.set_run_id("550e8400-e29b-41d4-a716-446655440528".to_string());
+        let conversation_id = conversation.id();
+        let terminal_view_id = warpui::EntityId::new();
+        history_model.update(&mut app, |model, ctx| {
+            model.restore_conversations(terminal_view_id, vec![conversation], ctx);
+            model.mark_conversation_as_remote_child(conversation_id, ctx);
+        });
+
+        let poller = streamer_with_no_fetch_expected(&mut app);
+        poller.read(&app, |me, ctx| {
+            assert!(!me.should_register_parent_on_wait(conversation_id, ctx));
+        });
+    });
+}
+
+#[test]
+fn wait_registration_eligibility_excludes_established_parents() {
+    // Once the parent role exists (a watched child run_id), the live
+    // ancestor stream discovers new children; no wait-time re-fetch.
+    App::test((), |mut app| async move {
+        let _flag_guard = FeatureFlag::WaitForEventsParentRegistration.override_enabled(true);
+
+        let history_model =
+            app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
+        let own_run_id = "550e8400-e29b-41d4-a716-446655440529";
+        let mut conversation = AIConversation::new(false, false);
+        conversation.set_run_id(own_run_id.to_string());
+        let conversation_id = conversation.id();
+        let terminal_view_id = warpui::EntityId::new();
+        history_model.update(&mut app, |model, ctx| {
+            model.restore_conversations(terminal_view_id, vec![conversation], ctx);
+        });
+
+        let poller = streamer_with_no_fetch_expected(&mut app);
+        poller.update(&mut app, |me, _| {
+            let stream = me.streams.entry(conversation_id).or_default();
+            stream.watched_run_ids.insert(own_run_id.to_string());
+            stream.watched_run_ids.insert("child-1".to_string());
+        });
+        poller.read(&app, |me, ctx| {
+            assert!(!me.should_register_parent_on_wait(conversation_id, ctx));
+        });
+    });
+}
+
 #[test]
 fn wait_registration_mid_tree_child_with_children_registers_as_parent() {
     // Multi-level orchestration: a mid-tree node is both a child and a

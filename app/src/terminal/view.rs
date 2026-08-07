@@ -4214,6 +4214,7 @@ impl TerminalView {
             ActionButton::new("for terminal", AgentViewHeaderTheme)
                 .with_icon(icons::Icon::ArrowLeft)
                 .with_size(ButtonSize::Small)
+                .with_max_label_width(BACK_BUTTON_LABEL_MAX_WIDTH)
                 .with_keybinding(
                     KeystrokeSource::Fixed(Keystroke {
                         key: "escape".to_string(),
@@ -11337,11 +11338,10 @@ impl TerminalView {
             .agent_view_state()
             .active_conversation_id();
         let history = BlocklistAIHistoryModel::as_ref(ctx);
-        let is_child_agent = active_conv_id
-            .and_then(|id| history.conversation(&id))
-            .and_then(|c| history.resolved_parent_conversation_id_for_conversation(c))
-            .is_some();
         let label = agent_view_back_button_label(history, active_conv_id);
+        // The label is "for terminal" exactly when no parent resolved, so
+        // it doubles as the child-agent signal.
+        let is_child_agent = label != "for terminal";
 
         // Never disable for child agents: the swap-back path can't be blocked.
         let disabled_reason = if is_child_agent {
@@ -28622,15 +28622,17 @@ fn is_rich_input_chip_in_cli_toolbar(app: &AppContext) -> bool {
         .any(|item| matches!(item, AgentToolbarItemKind::RichInput))
 }
 
-/// Longest parent-agent name shown verbatim in the back-button label before
-/// it is ellipsized, keeping the pane header compact.
-const BACK_BUTTON_PARENT_NAME_MAX_CHARS: usize = 24;
+/// Maximum pixel width of the back-button label before it ellipsizes
+/// (pixel-based, via the button's label clip), keeping the pane header
+/// compact for long parent-agent names.
+const BACK_BUTTON_LABEL_MAX_WIDTH: f32 = 160.;
 
 /// Returns the agent-view back button label. ESC navigates one level up, so
 /// the label names the direct parent: children of the tree root keep the
 /// classic "for Orchestrator" wording, nested subagents name their parent
 /// agent (falling back to a generic label), and non-child conversations exit
-/// back to the terminal.
+/// back to the terminal. Long parent names are ellipsized pixel-based by the
+/// button itself ([`BACK_BUTTON_LABEL_MAX_WIDTH`]).
 fn agent_view_back_button_label(
     history: &BlocklistAIHistoryModel,
     active_conversation_id: Option<AIConversationId>,
@@ -28655,18 +28657,7 @@ fn agent_view_back_button_label(
         .and_then(|parent| parent.agent_name())
         .filter(|name| !name.is_empty())
     {
-        Some(name) => {
-            let name = if name.chars().count() > BACK_BUTTON_PARENT_NAME_MAX_CHARS {
-                let truncated: String = name
-                    .chars()
-                    .take(BACK_BUTTON_PARENT_NAME_MAX_CHARS - 1)
-                    .collect();
-                format!("{truncated}\u{2026}")
-            } else {
-                name.to_string()
-            };
-            Cow::Owned(format!("for {name}"))
-        }
+        Some(name) => Cow::Owned(format!("for {name}")),
         None => Cow::Borrowed("for parent agent"),
     }
 }

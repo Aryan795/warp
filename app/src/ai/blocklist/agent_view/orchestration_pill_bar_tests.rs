@@ -396,6 +396,226 @@ fn breadcrumb_ids_are_empty_at_the_root() {
     });
 }
 
+#[test]
+fn drill_down_anchor_is_the_parent_level_for_a_leaf() {
+    use warpui::App;
+
+    App::test((), |mut app| async move {
+        let (_history_model, _root_id, mid_id, grandchild_id) = build_three_level_tree(&mut app);
+        app.read(|ctx| {
+            let grandchild = BlocklistAIHistoryModel::as_ref(ctx)
+                .conversation(&grandchild_id)
+                .expect("grandchild conversation exists");
+            assert_eq!(
+                drill_down_anchor_id(grandchild_id, grandchild, ctx),
+                mid_id,
+                "a leaf anchors its parent's level so sibling navigation stays symmetric",
+            );
+        });
+    });
+}
+
+#[test]
+fn drill_down_anchor_is_the_node_itself_when_it_has_children() {
+    use warpui::App;
+
+    App::test((), |mut app| async move {
+        let (_history_model, root_id, mid_id, _grandchild_id) = build_three_level_tree(&mut app);
+        app.read(|ctx| {
+            let history = BlocklistAIHistoryModel::as_ref(ctx);
+            let root = history
+                .conversation(&root_id)
+                .expect("root conversation exists");
+            let mid = history
+                .conversation(&mid_id)
+                .expect("mid conversation exists");
+            assert_eq!(drill_down_anchor_id(root_id, root, ctx), root_id);
+            assert_eq!(
+                drill_down_anchor_id(mid_id, mid, ctx),
+                mid_id,
+                "a node with children anchors its own level",
+            );
+        });
+    });
+}
+
+/// At orchestration depth 1 the drill-down anchoring must match the
+/// historical root-anchored behavior exactly: both the root and its leaf
+/// children anchor the root's level.
+#[test]
+fn drill_down_anchor_matches_root_anchoring_at_depth_one() {
+    use warpui::{App, EntityId};
+
+    use crate::test_util::settings::initialize_history_persistence_for_tests;
+
+    App::test((), |mut app| async move {
+        initialize_history_persistence_for_tests(&mut app);
+        let terminal_view_id = EntityId::new();
+        let history_model = app.add_singleton_model(|_| BlocklistAIHistoryModel::new_for_test());
+        let root_id = history_model.update(&mut app, |history, ctx| {
+            history.start_new_conversation(terminal_view_id, false, false, false, ctx)
+        });
+        let child_id = history_model.update(&mut app, |history, ctx| {
+            history.start_new_child_conversation(
+                terminal_view_id,
+                "child".to_string(),
+                root_id,
+                None,
+                ctx,
+            )
+        });
+
+        app.read(|ctx| {
+            let history = BlocklistAIHistoryModel::as_ref(ctx);
+            let root = history
+                .conversation(&root_id)
+                .expect("root conversation exists");
+            let child = history
+                .conversation(&child_id)
+                .expect("child conversation exists");
+            assert_eq!(drill_down_anchor_id(root_id, root, ctx), root_id);
+            assert_eq!(drill_down_anchor_id(child_id, child, ctx), root_id);
+        });
+    });
+}
+
+/// A restored child linked to its parent ONLY via a legacy server
+/// conversation token in `parent_agent_id` (no explicit parent conversation
+/// id, no run id) must index under the parent at restore and resolve
+/// breadcrumbs once the parent is loaded: child indexing, the root walk,
+/// and breadcrumb targets all flow through the history model's canonical
+/// parent resolution (run-id index with a server-token fallback).
+#[test]
+fn breadcrumbs_resolve_token_only_parent_linkage_after_restore() {
+    use chrono::Utc;
+    use warpui::App;
+
+    use crate::ai::blocklist::BlocklistAIHistoryModel;
+    use crate::persistence::model::{
+        AgentConversation, AgentConversationData, AgentConversationRecord,
+    };
+
+    fn user_query_task(
+        conversation_id: AIConversationId,
+        query: &str,
+    ) -> warp_multi_agent_api::Task {
+        warp_multi_agent_api::Task {
+            id: format!("task-{conversation_id}"),
+            messages: vec![warp_multi_agent_api::Message {
+                fetched_memories: vec![],
+                id: format!("msg-{conversation_id}"),
+                task_id: format!("task-{conversation_id}"),
+                server_message_data: String::new(),
+                citations: vec![],
+                message: Some(warp_multi_agent_api::message::Message::UserQuery(
+                    warp_multi_agent_api::message::UserQuery {
+                        query: query.to_string(),
+                        context: None,
+                        referenced_attachments: Default::default(),
+                        mode: None,
+                        intended_agent: Default::default(),
+                    },
+                )),
+                request_id: format!("request-{conversation_id}"),
+                timestamp: None,
+            }],
+            dependencies: None,
+            description: query.to_string(),
+            summary: String::new(),
+            server_data: String::new(),
+        }
+    }
+
+    App::test((), |mut app| async move {
+        let root_id = AIConversationId::new();
+        let child_id = AIConversationId::new();
+        let now = Utc::now().naive_utc();
+
+        let root_data = AgentConversationData {
+            server_conversation_token: Some("root-token".to_string()),
+            conversation_usage_metadata: None,
+            reverted_action_ids: None,
+            forked_from_server_conversation_token: None,
+            artifacts_json: None,
+            parent_agent_id: None,
+            agent_name: None,
+            orchestration_harness_type: None,
+            parent_conversation_id: None,
+            is_remote_child: false,
+            root_task_is_optimistic: None,
+            run_id: None,
+            autoexecute_override: None,
+            last_event_sequence: None,
+            pinned: false,
+        };
+        let child_data = AgentConversationData {
+            server_conversation_token: None,
+            conversation_usage_metadata: None,
+            reverted_action_ids: None,
+            forked_from_server_conversation_token: None,
+            artifacts_json: None,
+            parent_agent_id: Some("root-token".to_string()),
+            agent_name: Some("child".to_string()),
+            orchestration_harness_type: None,
+            parent_conversation_id: None,
+            is_remote_child: false,
+            root_task_is_optimistic: None,
+            run_id: None,
+            autoexecute_override: None,
+            last_event_sequence: None,
+            pinned: false,
+        };
+
+        let conversations = vec![
+            AgentConversation {
+                conversation: AgentConversationRecord {
+                    id: 1,
+                    conversation_id: child_id.to_string(),
+                    conversation_data: serde_json::to_string(&child_data)
+                        .expect("child conversation data should serialize"),
+                    last_modified_at: now,
+                    summary: None,
+                },
+                tasks: vec![user_query_task(child_id, "Child query")],
+            },
+            AgentConversation {
+                conversation: AgentConversationRecord {
+                    id: 2,
+                    conversation_id: root_id.to_string(),
+                    conversation_data: serde_json::to_string(&root_data)
+                        .expect("root conversation data should serialize"),
+                    last_modified_at: now - chrono::Duration::seconds(1),
+                    summary: None,
+                },
+                tasks: vec![user_query_task(root_id, "Root query")],
+            },
+        ];
+
+        let history_model = app
+            .add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &conversations));
+
+        // Token-linked children index under the parent at restore.
+        history_model.read(&app, |history, _| {
+            assert_eq!(history.child_conversation_ids_of(&root_id), &[child_id]);
+        });
+
+        // Load the root (its pane restore normally does this), then confirm
+        // the breadcrumb targets resolve across the token-only linkage.
+        history_model.update(&mut app, |history, _ctx| {
+            history
+                .insert_forked_conversation_from_tasks(
+                    root_id,
+                    vec![user_query_task(root_id, "Root query")],
+                    root_data,
+                )
+                .expect("root conversation should hydrate");
+        });
+        history_model.read(&app, |history, _| {
+            assert_eq!(breadcrumb_ids(history, child_id), (Some(root_id), None));
+        });
+    });
+}
+
 /// The pill bar's history subscription must treat
 /// `ConversationServerTokenAssigned` as a re-render trigger: a remote child's
 /// run-id linkage can land after `StartedNewConversation` (via
