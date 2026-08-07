@@ -81,6 +81,65 @@ enum Stage {
     Finished,
 }
 
+impl Stage {
+    fn kind(&self) -> &'static str {
+        match self {
+            Stage::BeforeJoined => "before_joined",
+            Stage::JoinedSuccessfully => "joined_successfully",
+            Stage::Reconnecting { .. } => "reconnecting",
+            Stage::Finished => "finished",
+        }
+    }
+}
+
+/// The result of handing an [`UpstreamMessage`] to the outbound websocket proxy channel.
+///
+/// `LocallyQueued` is not proof of delivery: serialization and the websocket write happen later in
+/// the proxy task and can still fail, and the server may never process the message. Callers that
+/// need delivery confirmation must wait for a correlated server acknowledgement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerMessageSendOutcome {
+    /// The message was accepted by the local proxy channel.
+    LocallyQueued,
+    /// The client rejected the message before it reached the proxy channel.
+    Undeliverable,
+}
+
+impl ServerMessageSendOutcome {
+    pub fn is_undeliverable(self) -> bool {
+        matches!(self, ServerMessageSendOutcome::Undeliverable)
+    }
+}
+
+/// A content-free label for an [`UpstreamMessage`]. Rendering the message itself would leak prompt
+/// text, attachment contents, and input buffer bytes into logs.
+fn upstream_message_kind(message: &UpstreamMessage) -> &'static str {
+    match message {
+        UpstreamMessage::Initialize(_) => "Initialize",
+        UpstreamMessage::Ping { .. } => "Ping",
+        UpstreamMessage::UpdateSelection(_) => "UpdateSelection",
+        UpstreamMessage::RequestRole(_) => "RequestRole",
+        UpstreamMessage::CancelRoleRequest(_) => "CancelRoleRequest",
+        UpstreamMessage::UpdateInput(_) => "UpdateInput",
+        UpstreamMessage::ExecuteCommand { .. } => "ExecuteCommand",
+        UpstreamMessage::WriteToPty { .. } => "WriteToPty",
+        UpstreamMessage::SendAgentPrompt(_) => "SendAgentPrompt",
+        UpstreamMessage::UpdateUniversalDeveloperInputContext(_) => {
+            "UpdateUniversalDeveloperInputContext"
+        }
+        UpstreamMessage::SendControlAction(_) => "SendControlAction",
+        UpstreamMessage::Reauthenticated { .. } => "Reauthenticated",
+        UpstreamMessage::UpdateLinkAccessLevel { .. } => "UpdateLinkAccessLevel",
+        UpstreamMessage::UpdateTeamAccessLevel { .. } => "UpdateTeamAccessLevel",
+        UpstreamMessage::AddGuests { .. } => "AddGuests",
+        UpstreamMessage::RemoveGuest { .. } => "RemoveGuest",
+        UpstreamMessage::RemovePendingGuest { .. } => "RemovePendingGuest",
+        UpstreamMessage::UpdateUserRole { .. } => "UpdateUserRole",
+        UpstreamMessage::UpdatePendingUserRole { .. } => "UpdatePendingUserRole",
+        UpstreamMessage::ReportTerminalSize { .. } => "ReportTerminalSize",
+    }
+}
+
 #[derive(Debug, Clone)]
 enum PtyBytesBatchStatus {
     /// We're not currently batching PTY write events.
@@ -826,13 +885,35 @@ impl Network {
         self.stage = Stage::Finished;
     }
 
-    fn send_message_to_server(&self, message: UpstreamMessage) {
+    /// Hands `message` to the outbound proxy channel, reporting whether the client accepted it.
+    ///
+    /// Every rejection is logged with the network stage, session ID, and a content-free message
+    /// kind so an undelivered prompt is diagnosable without recording user content.
+    fn send_message_to_server(&self, message: UpstreamMessage) -> ServerMessageSendOutcome {
+        let kind = upstream_message_kind(&message);
         let Stage::JoinedSuccessfully = self.stage else {
-            return;
+            log::warn!(
+                "Viewer network dropped outbound message: kind={kind} stage={} session_id={} \
+                 reason=not_joined",
+                self.stage.kind(),
+                self.session_id,
+            );
+            return ServerMessageSendOutcome::Undeliverable;
         };
         if let Err(e) = self.ws_proxy_tx.try_send(message) {
-            log::warn!("Failed to send message over ws_proxy channel in viewer network: {e}");
+            let reason = match e {
+                async_channel::TrySendError::Full(_) => "proxy_channel_full",
+                async_channel::TrySendError::Closed(_) => "proxy_channel_closed",
+            };
+            log::warn!(
+                "Viewer network dropped outbound message: kind={kind} stage={} session_id={} \
+                 reason={reason}",
+                self.stage.kind(),
+                self.session_id,
+            );
+            return ServerMessageSendOutcome::Undeliverable;
         }
+        ServerMessageSendOutcome::LocallyQueued
     }
 
     /// Send the presence selection to the server if it changed, with a throttle period.
@@ -942,19 +1023,23 @@ impl Network {
         self.send_message_to_server(UpstreamMessage::ExecuteCommand { buffer_id, command });
     }
 
+    /// Sends a viewer agent prompt under the caller-provided `request_id`, which the server echoes
+    /// back as [`NetworkEvent::AgentPromptRequestInFlight`]. The caller owns the ID so it can
+    /// correlate that acknowledgement with the prompt it staged.
     pub fn send_agent_prompt_request(
         &mut self,
+        request_id: AgentPromptRequestId,
         server_conversation_token: Option<ServerConversationToken>,
         prompt: String,
         attachments: Vec<AgentAttachment>,
-    ) {
+    ) -> ServerMessageSendOutcome {
         let request = AgentPromptRequest {
-            id: AgentPromptRequestId::new(),
+            id: request_id,
             server_conversation_token,
             prompt,
             attachments,
         };
-        self.send_message_to_server(UpstreamMessage::SendAgentPrompt(request));
+        self.send_message_to_server(UpstreamMessage::SendAgentPrompt(request))
     }
 
     pub fn send_cancel_control_action(
