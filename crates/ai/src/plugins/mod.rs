@@ -26,8 +26,9 @@ pub use data::{
 };
 pub use diagnostics::{PluginDiagnostic, PluginDiagnosticCode, PluginDiagnosticSeverity};
 pub use discovery::{
-    ActivePluginSet, PluginCandidate, PluginSearchRoot, ShadowedPlugin, precedence_rank,
-    repository_search_roots, resolve_active_packages, scan_search_root, user_search_roots,
+    ActivePluginSet, PluginCandidate, PluginSearchRoot, REPOSITORY_PLUGIN_PATHS, ShadowedPlugin,
+    precedence_rank, repository_search_roots, resolve_active_packages, scan_search_root,
+    user_search_roots,
 };
 pub use factory_mcp::{
     FACTORY_MCP_SCHEMA_1_0_0, FactoryMcpEntry, FactoryMcpFile, FactoryMcpServer,

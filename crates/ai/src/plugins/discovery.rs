@@ -18,6 +18,9 @@ use super::package::{PluginPackage, load_plugin_package};
 /// The directory name that holds plugin packages under each provider directory.
 const PLUGINS_DIR_NAME: &str = "plugins";
 
+/// Repository-relative directories that must remain visible to plugin discovery even when ignored.
+pub const REPOSITORY_PLUGIN_PATHS: [&str; 2] = [".agents/plugins", ".warp/plugins"];
+
 /// A directory whose immediate children are plugin candidates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginSearchRoot {
@@ -115,13 +118,13 @@ pub fn user_search_roots() -> Vec<PluginSearchRoot> {
 pub fn repository_search_roots(repo_root: &Path) -> Vec<PluginSearchRoot> {
     vec![
         PluginSearchRoot::new(
-            repo_root.join(".agents").join(PLUGINS_DIR_NAME),
+            repo_root.join(REPOSITORY_PLUGIN_PATHS[0]),
             PluginScopeId::Repository,
             PluginSourceKind::AgentsDirectory,
             repo_root,
         ),
         PluginSearchRoot::new(
-            repo_root.join(".warp").join(PLUGINS_DIR_NAME),
+            repo_root.join(REPOSITORY_PLUGIN_PATHS[1]),
             PluginScopeId::Repository,
             PluginSourceKind::WarpDirectory,
             repo_root,
