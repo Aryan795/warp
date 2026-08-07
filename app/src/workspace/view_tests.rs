@@ -5568,3 +5568,145 @@ fn test_cross_window_handoff_closes_the_source_window_by_default() {
         });
     });
 }
+
+/// Emits an input event the way the terminal's `Input` view does on submit, so the assertion
+/// runs against the real `Input` -> `TerminalView` -> `PaneGroup` -> `Workspace` chain rather
+/// than an injected workspace-level event.
+fn emit_input_event_on_active_tab(
+    workspace: &ViewHandle<Workspace>,
+    event: crate::terminal::input::Event,
+    app: &mut App,
+) {
+    let terminal_view = active_terminal_view(workspace, app);
+    terminal_view.update(app, |view, ctx| {
+        let input = view.input().clone();
+        input.update(ctx, |_, ctx| ctx.emit(event));
+    });
+}
+
+#[test]
+fn test_submitting_an_agent_prompt_marks_the_tab_non_pristine() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(disable_quit_warning);
+        app.update(keep_window_on_last_tab_close);
+
+        let workspace = mock_workspace(&mut app);
+
+        // One tab per submission path, because the marker is one-way.
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx);
+            workspace.add_terminal_tab(false, ctx);
+            workspace.activate_tab(0, ctx);
+            assert!(workspace.tabs.iter().all(TabData::is_pristine));
+        });
+
+        // A shared-session viewer submitting an agent prompt.
+        emit_input_event_on_active_tab(
+            &workspace,
+            crate::terminal::input::Event::SendAgentPrompt {
+                server_conversation_token: None,
+                prompt: "summarize this repo".to_string(),
+                attachments: Vec::new(),
+            },
+            &mut app,
+        );
+        workspace.update(&mut app, |workspace, ctx| {
+            assert!(
+                !workspace.tabs[0].is_pristine(),
+                "A submitted agent prompt writes into the session, so the tab is touched"
+            );
+            workspace.activate_tab(1, ctx);
+        });
+
+        // Submitting an agent query from the input box.
+        emit_input_event_on_active_tab(
+            &workspace,
+            crate::terminal::input::Event::ExecuteAIQuery,
+            &mut app,
+        );
+        workspace.update(&mut app, |workspace, ctx| {
+            assert!(!workspace.tabs[1].is_pristine());
+            workspace.activate_tab(2, ctx);
+        });
+
+        // Submitting input to a CLI agent.
+        emit_input_event_on_active_tab(
+            &workspace,
+            crate::terminal::input::Event::SubmitCLIAgentInput {
+                text: "run the tests".to_string(),
+            },
+            &mut app,
+        );
+        workspace.read(&app, |workspace, _| {
+            assert!(!workspace.tabs[2].is_pristine());
+        });
+
+        // The final tab left standing is one that received a prompt, so its close replaces
+        // rather than silently doing nothing.
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.close_tab(0, true, false, ctx);
+            workspace.close_tab(0, true, false, ctx);
+            assert_eq!(workspace.tab_count(), 1);
+
+            let sole_tab_id = workspace.active_tab_pane_group().id();
+            workspace.handle_action(&WorkspaceAction::CloseTab(0), ctx);
+            assert_eq!(workspace.tab_count(), 1);
+            assert_ne!(
+                workspace.active_tab_pane_group().id(),
+                sole_tab_id,
+                "Ctrl+W on a tab that received an agent prompt must not be a silent no-op"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_renaming_a_pane_marks_the_tab_non_pristine() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(disable_quit_warning);
+        app.update(keep_window_on_last_tab_close);
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let pane_group = workspace.active_tab_pane_group().clone();
+            let locator = PaneViewLocator {
+                pane_group_id: pane_group.id(),
+                pane_id: pane_group.as_ref(ctx).focused_pane_id(ctx),
+            };
+
+            workspace.set_custom_pane_name(locator, "build".to_string(), ctx);
+            assert!(
+                !workspace.tabs[0].is_pristine(),
+                "Renaming a pane changes the tab's identity"
+            );
+
+            let original_tab_id = workspace.active_tab_pane_group().id();
+            workspace.handle_action(&WorkspaceAction::CloseTab(0), ctx);
+            assert_eq!(workspace.tab_count(), 1);
+            assert_ne!(workspace.active_tab_pane_group().id(), original_tab_id);
+        });
+    });
+}
+
+#[test]
+fn test_resetting_a_tab_name_marks_the_tab_non_pristine() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(disable_quit_warning);
+        app.update(keep_window_on_last_tab_close);
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx);
+            assert!(workspace.tabs[1].is_pristine());
+
+            // Resetting a name is as much a user identity mutation as setting one.
+            workspace.handle_action(&WorkspaceAction::ResetTabName(1), ctx);
+            assert!(!workspace.tabs[1].is_pristine());
+        });
+    });
+}

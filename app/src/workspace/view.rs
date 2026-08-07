@@ -5719,6 +5719,7 @@ impl Workspace {
         tab.pane_group.update(ctx, |view, ctx| {
             view.clear_title(ctx);
         });
+        self.tabs[index].mark_non_pristine();
         send_telemetry_from_ctx!(
             TelemetryEvent::TabRenamed(TabRenameEvent::CustomNameCleared),
             ctx
@@ -5747,6 +5748,7 @@ impl Workspace {
             });
             ctx.emit(pane_group::Event::AppStateChanged);
         });
+        self.mark_tab_non_pristine(locator.pane_group_id);
     }
 
     pub fn clear_pane_name(&mut self, locator: PaneViewLocator, ctx: &mut ViewContext<Self>) {
@@ -5764,6 +5766,7 @@ impl Workspace {
             });
             ctx.emit(pane_group::Event::AppStateChanged);
         });
+        self.mark_tab_non_pristine(locator.pane_group_id);
         ctx.dispatch_global_action("workspace:save_app", ());
         ctx.notify();
     }

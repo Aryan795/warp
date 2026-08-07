@@ -21601,6 +21601,8 @@ impl TerminalView {
                     ScrollPositionUpdate::AfterCommandExecutionStarted,
                     ctx,
                 );
+
+                ctx.emit(Event::UserMutatedSession);
             }
             InputEvent::SendAgentPrompt {
                 server_conversation_token,
@@ -21612,11 +21614,13 @@ impl TerminalView {
                     prompt: prompt.clone(),
                     attachments: attachments.clone(),
                 });
+                ctx.emit(Event::UserMutatedSession);
             }
             InputEvent::SubmitCloudFollowup { prompt } => {
                 if FeatureFlag::HandoffCloudCloud.is_enabled()
                     && self.try_submit_pending_cloud_followup(prompt.clone(), ctx)
                 {
+                    ctx.emit(Event::UserMutatedSession);
                     return;
                 }
                 self.show_error_toast("Couldn't continue this cloud task.".to_string(), ctx);
@@ -21977,6 +21981,7 @@ impl TerminalView {
             }
             InputEvent::SubmitCLIAgentInput { text } => {
                 self.submit_cli_agent_rich_input(text.clone(), ctx);
+                ctx.emit(Event::UserMutatedSession);
             }
             InputEvent::OpenAIDocumentPane {
                 document_id,
