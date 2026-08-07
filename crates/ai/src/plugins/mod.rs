@@ -55,3 +55,7 @@ pub use package::{
     PluginPackage, PluginSkillComponent, SKILL_FILE_NAME, SKILLS_DIR_NAME, load_plugin_package,
 };
 pub use paths::{PluginPathError, is_plugin_relative, resolve_contained, resolve_partial};
+
+#[cfg(test)]
+#[path = "conformance_tests.rs"]
+mod conformance_tests;

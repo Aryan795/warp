@@ -312,8 +312,12 @@ fn validate_command_token(command: &str) -> Result<(), PluginDiagnostic> {
     Ok(())
 }
 
-/// Enforces the three `cwd` forms §7.2.1 permits. Containment is checked later, once
-/// `${PLUGIN_DATA}` is known.
+/// Enforces the three `cwd` forms §7.2.1 permits, and rejects a parent-directory component.
+///
+/// Full containment still has to wait until `${PLUGIN_DATA}` is known, but a literal `..`
+/// segment can never resolve to anything permitted whatever the roots turn out to be. Catching
+/// it here reports the entry as invalid when the package is read, rather than letting it look
+/// well-formed until someone tries to start the server.
 fn validate_cwd_form(cwd: &str) -> Result<(), PluginDiagnostic> {
     let rooted_at = |placeholder: &str| {
         cwd == placeholder
@@ -321,16 +325,22 @@ fn validate_cwd_form(cwd: &str) -> Result<(), PluginDiagnostic> {
                 .strip_prefix(placeholder)
                 .is_some_and(|rest| rest.starts_with('/'))
     };
-    if is_plugin_relative(cwd)
+    if !(is_plugin_relative(cwd)
         || rooted_at(PLUGIN_ROOT_PLACEHOLDER)
-        || rooted_at(PLUGIN_DATA_PLACEHOLDER)
+        || rooted_at(PLUGIN_DATA_PLACEHOLDER))
     {
-        return Ok(());
+        return Err(invalid_server(format!(
+            "stdio server 'cwd' must begin with './', '{PLUGIN_ROOT_PLACEHOLDER}', or \
+             '{PLUGIN_DATA_PLACEHOLDER}'"
+        )));
     }
-    Err(invalid_server(format!(
-        "stdio server 'cwd' must begin with './', '{PLUGIN_ROOT_PLACEHOLDER}', or \
-         '{PLUGIN_DATA_PLACEHOLDER}'"
-    )))
+    // A whole segment, not a substring: `./a..b` is an ordinary directory name.
+    if cwd.split('/').any(|segment| segment == "..") {
+        return Err(invalid_server(
+            "stdio server 'cwd' must not contain a parent-directory component",
+        ));
+    }
+    Ok(())
 }
 
 fn parse_streamable_http(
