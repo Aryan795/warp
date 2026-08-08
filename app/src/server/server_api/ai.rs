@@ -156,7 +156,6 @@ use crate::server::graphql::{get_request_context, get_user_facing_error_message}
 use crate::terminal::model::block::SerializedBlock;
 #[cfg(not(feature = "agent_mode_evals"))]
 use crate::{
-    ai::request_usage_model::BonusGrantScope,
     server::ids::ServerId,
     workspaces::{gql_convert::PLACEHOLDER_WORKSPACE_UID, workspace::WorkspaceUid},
 };
@@ -864,6 +863,7 @@ pub(crate) fn build_list_agent_runs_url(limit: i32, filter: &TaskListFilter) -> 
 pub(crate) fn build_run_followup_url(run_id: &AmbientAgentTaskId) -> String {
     format!("agent/runs/{run_id}/followups")
 }
+
 pub(crate) fn build_fork_conversation_url(conversation_id: &str) -> String {
     format!(
         "agent/conversations/{}/fork",
@@ -1222,6 +1222,12 @@ pub trait AIClient: 'static + Send + Sync {
         config: Option<AgentConfigSnapshot>,
     ) -> anyhow::Result<AmbientAgentTaskId, anyhow::Error>;
 
+    /// Updates a run's server-side record. Every argument is independently optional; omitted
+    /// fields are left untouched rather than cleared.
+    ///
+    /// `session_debug_until` is the deadline of an open post-failure debug window. It is
+    /// deliberately separate from `status_message` so a refresh can move the deadline without
+    /// rewriting the failure text the run reported.
     async fn update_agent_task(
         &self,
         task_id: AmbientAgentTaskId,
@@ -1229,6 +1235,7 @@ pub trait AIClient: 'static + Send + Sync {
         session_id: Option<session_sharing_protocol::common::SessionId>,
         conversation_id: Option<String>,
         status_message: Option<TaskStatusUpdate>,
+        session_debug_until: Option<DateTime<Utc>>,
     ) -> anyhow::Result<(), anyhow::Error>;
 
     async fn spawn_agent(
@@ -1780,7 +1787,7 @@ impl AIClient for ServerApi {
             warp_graphql::queries::get_request_limit_info::UserResult::UserOutput(user_output) => {
                 let request_limit_info = user_output.user.request_limit_info.into();
 
-                let workspace_bonus_grants = user_output
+                let workspace_and_team_bonus_grants = user_output
                     .user
                     .workspaces
                     .into_iter()
@@ -1793,9 +1800,9 @@ impl AIClient for ServerApi {
                             .grants
                             .into_iter()
                             .map(move |grant| {
-                                BonusGrant::from_gql_bonus_grant(
+                                BonusGrant::from_gql_workspace_or_team_bonus_grant(
                                     grant,
-                                    BonusGrantScope::Workspace(workspace_uid),
+                                    workspace_uid,
                                 )
                             })
                     });
@@ -1804,8 +1811,8 @@ impl AIClient for ServerApi {
                     .user
                     .bonus_grants
                     .into_iter()
-                    .map(|grant| BonusGrant::from_gql_bonus_grant(grant, BonusGrantScope::User))
-                    .chain(workspace_bonus_grants)
+                    .map(BonusGrant::from_gql_user_bonus_grant)
+                    .chain(workspace_and_team_bonus_grants)
                     .collect();
 
                 Ok(RequestUsageInfo {
@@ -2140,6 +2147,7 @@ impl AIClient for ServerApi {
         session_id: Option<session_sharing_protocol::common::SessionId>,
         conversation_id: Option<String>,
         status_message: Option<TaskStatusUpdate>,
+        session_debug_until: Option<DateTime<Utc>>,
     ) -> anyhow::Result<(), anyhow::Error> {
         let variables = UpdateAgentTaskVariables {
             input: UpdateAgentTaskInput {
@@ -2151,6 +2159,7 @@ impl AIClient for ServerApi {
                     message: update.message,
                     error_code: update.error_code,
                 }),
+                session_debug_until: session_debug_until.map(Into::into),
             },
             request_context: get_request_context(),
         };
