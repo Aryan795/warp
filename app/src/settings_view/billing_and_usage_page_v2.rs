@@ -1209,7 +1209,7 @@ impl BillingAndUsagePageV2View {
             .map(|o| format!("{} credits", o.credits.separate_with_commas()))
             .unwrap_or_else(|| "selected credit amount".to_string());
         let auto_reload_tooltip_text = format!(
-            "When your available add-on credit balance reaches 100 credits remaining, \
+            "When your available add-on credit balance falls below 100 credits remaining, \
             automatically purchase {auto_reload_credit_amount}. Purchased credits are added \
             to your personal balance."
         );
@@ -1269,11 +1269,11 @@ impl BillingAndUsagePageV2View {
                         option.price_usd_cents_with_premium(premium_bps) as f64 / 100.0
                     );
                     format!(
-                        "Your admin has enabled auto-reload for add-on credits. When your personal add-on credit balance runs low, Warp will automatically purchase {credits} credits for {price} and add them to your balance."
+                        "Your admin has enabled auto-reload for add-on credits. When your available add-on credit balance falls below 100 credits remaining, Warp will automatically purchase {credits} credits for {price} and add them to your personal balance."
                     )
                 }
                 None => {
-                    "Your admin has enabled auto-reload for add-on credits. When your personal add-on credit balance runs low, Warp will automatically purchase add-on credits and add them to your balance.".to_string()
+                    "Your admin has enabled auto-reload for add-on credits. When your available add-on credit balance falls below 100 credits remaining, Warp will automatically purchase add-on credits and add them to your personal balance.".to_string()
                 }
             };
             return AddonCreditsPanelState::AutoreloadNonAdmin {
