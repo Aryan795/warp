@@ -94,17 +94,20 @@ fn execute_invokes_parent_registration_for_child_conversations() {
         let history_model =
             app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
 
-        // The registration fetch must be issued exactly once for the child.
-        // Returning an error keeps the rest of the flow a graceful no-op.
+        // The registration fetch must be issued for the child (the old code
+        // short-circuited children entirely, i.e. zero fetches). At least
+        // once, not exactly once: the Err return below can also be refetched
+        // by the streamer's restore-retry loop, and whether a retry lands
+        // before test teardown is a platform timing race.
         let mut mock = MockAIClient::new();
         mock.expect_get_ambient_agent_task()
-            .times(1)
+            .times(1..)
             .returning(|_| Err(anyhow::anyhow!("fetch observed")));
         let ai_client: Arc<dyn AIClient> = Arc::new(mock);
         let server_api = ServerApiProvider::new_for_test().get();
-        // Held for the lifetime of the test so the mock's times(1) expectation
-        // is verified on drop; resolved internally by `execute()` via
-        // `OrchestrationEventStreamer::handle`.
+        // Held for the lifetime of the test so the mock's times(1..)
+        // expectation is verified on drop; resolved internally by `execute()`
+        // via `OrchestrationEventStreamer::handle`.
         let _streamer = app.add_singleton_model(|ctx| {
             OrchestrationEventStreamer::new_with_clients_for_test(ai_client, server_api, ctx)
         });
@@ -150,7 +153,7 @@ fn execute_invokes_parent_registration_for_child_conversations() {
         );
 
         // Drive the spawned registration fetch so the mock observes it; the
-        // times(1) expectation is verified when `_streamer` drops at test
+        // times(1..) expectation is verified when `_streamer` drops at test
         // teardown.
         for _ in 0..3 {
             futures_lite::future::yield_now().await;
