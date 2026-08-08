@@ -148,8 +148,8 @@ pub(super) fn merge_repos_deduped(
 }
 
 /// Environment variable carrying the authenticated remote URL of a Factory's
-/// code.storage definition repository. Attached to the run by the server only
-/// for Factory-agent runs.
+/// definition repository. Dispatch attaches it only to runs that execute as a
+/// Factory agent whose Factory definition lives in a Warp-managed repository.
 const FACTORY_REPO_CLONE_URL_ENV_VAR: &str = "WARP_FACTORY_REPO_CLONE_URL";
 
 /// Environment variable carrying the directory, relative to the working

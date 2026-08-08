@@ -619,7 +619,7 @@ fn no_checkout_ref_leaves_clone_on_default_branch() {
 fn factory_clone_is_prepended_when_clone_values_are_present() {
     let mut setup_commands = vec!["make setup".to_string()];
     super::prepend_factory_definition_clone_for_values(
-        "https://t:token@org.code.storage/team/factory.git",
+        "https://t:token@definitions.example.com/team/factory.git",
         "acme_factory_repo",
         &mut setup_commands,
     );
@@ -647,7 +647,7 @@ fn factory_clone_defers_to_a_persisted_environment_copy() {
         "git clone \"$WARP_FACTORY_REPO_CLONE_URL\" \"$WARP_FACTORY_REPO_DIR\"".to_string();
     let mut setup_commands = vec![persisted.clone(), "make setup".to_string()];
     super::prepend_factory_definition_clone_for_values(
-        "https://t:token@org.code.storage/team/factory.git",
+        "https://t:token@definitions.example.com/team/factory.git",
         "acme_factory_repo",
         &mut setup_commands,
     );
