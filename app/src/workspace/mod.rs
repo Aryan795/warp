@@ -1083,9 +1083,9 @@ pub fn init(app: &mut AppContext) {
         .with_group(bindings::BindingGroup::Navigation.as_str())
         .with_context_predicate(id!("Workspace") & !id!("Workspace_PaneDragging")),
         EditableBinding::new(
-            "workspace:activate_ninth_tab_group",
-            "Switch to 9th tab group",
-            WorkspaceAction::ActivateTabGroupByNumber(9),
+            "workspace:activate_last_tab_group",
+            "Switch to last tab group",
+            WorkspaceAction::ActivateLastTabGroup,
         )
         .with_enabled(|| FeatureFlag::GroupedTabs.is_enabled())
         .with_group(bindings::BindingGroup::Navigation.as_str())
@@ -1171,9 +1171,9 @@ pub fn init(app: &mut AppContext) {
             id!("Workspace") & id!("Workspace_ActiveTabInGroup") & !id!("Workspace_PaneDragging"),
         ),
         EditableBinding::new(
-            "workspace:activate_ninth_tab_in_current_group",
-            "Switch to 9th tab in current group",
-            WorkspaceAction::ActivateTabInCurrentGroupByNumber(9),
+            "workspace:activate_last_tab_in_current_group",
+            "Switch to last tab in current group",
+            WorkspaceAction::ActivateLastTabInCurrentGroup,
         )
         .with_enabled(|| FeatureFlag::GroupedTabs.is_enabled())
         .with_group(bindings::BindingGroup::Navigation.as_str())

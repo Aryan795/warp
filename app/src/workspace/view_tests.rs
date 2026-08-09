@@ -4301,6 +4301,36 @@ fn test_activate_tab_group_by_number_activates_first_member_in_group_order() {
 }
 
 #[test]
+fn test_activate_last_tab_group_activates_first_member_of_final_group() {
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            for _ in 0..10 {
+                workspace.add_terminal_tab(false, ctx);
+            }
+            assert_eq!(workspace.tab_count(), 11);
+
+            for index in 1..=10 {
+                let group = TabGroup::new();
+                let group_id = group.id;
+                workspace.tab_groups.insert(group_id, group);
+                workspace.tabs[index].group_id = Some(group_id);
+            }
+
+            workspace.activate_tab(0, ctx);
+            workspace.handle_action(&WorkspaceAction::ActivateTabGroupByNumber(9), ctx);
+            assert_eq!(workspace.active_tab_index(), 9);
+
+            workspace.handle_action(&WorkspaceAction::ActivateLastTabGroup, ctx);
+            assert_eq!(workspace.active_tab_index(), 10);
+        });
+    });
+}
+#[test]
 fn test_activate_tab_in_current_group_by_number_activates_member_in_group_order() {
     let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
 
@@ -4334,6 +4364,37 @@ fn test_activate_tab_in_current_group_by_number_activates_member_in_group_order(
             workspace.activate_tab(0, ctx);
             workspace.handle_action(&WorkspaceAction::ActivateTabInCurrentGroupByNumber(1), ctx);
             assert_eq!(workspace.active_tab_index(), 0);
+        });
+    });
+}
+
+#[test]
+fn test_activate_last_tab_in_current_group_activates_final_member() {
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            for _ in 0..10 {
+                workspace.add_terminal_tab(false, ctx);
+            }
+            assert_eq!(workspace.tab_count(), 11);
+
+            let group = TabGroup::new();
+            let group_id = group.id;
+            workspace.tab_groups.insert(group_id, group);
+            for index in 1..=10 {
+                workspace.tabs[index].group_id = Some(group_id);
+            }
+
+            workspace.activate_tab(1, ctx);
+            workspace.handle_action(&WorkspaceAction::ActivateTabInCurrentGroupByNumber(9), ctx);
+            assert_eq!(workspace.active_tab_index(), 9);
+
+            workspace.handle_action(&WorkspaceAction::ActivateLastTabInCurrentGroup, ctx);
+            assert_eq!(workspace.active_tab_index(), 10);
         });
     });
 }

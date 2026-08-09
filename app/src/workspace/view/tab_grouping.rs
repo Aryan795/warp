@@ -216,6 +216,25 @@ impl Workspace {
         self.activate_tab(tab_index, ctx);
     }
 
+    /// Activates the first member of the final tab group in tab bar order.
+    pub(super) fn activate_last_tab_group(&mut self, ctx: &mut ViewContext<Self>) {
+        if !FeatureFlag::GroupedTabs.is_enabled() {
+            return;
+        }
+        let Some(group_id) = self
+            .tabs
+            .iter()
+            .filter_map(|tab| tab.group_id)
+            .dedup()
+            .last()
+        else {
+            return;
+        };
+        let Some(tab_index) = group_member_indices(&self.tabs, group_id).next() else {
+            return;
+        };
+        self.activate_tab(tab_index, ctx);
+    }
     /// Activates the Nth member of the active tab's group, where `num` is
     /// one-based. Ungrouped active tabs and out-of-range indices are no-ops.
     pub(super) fn activate_tab_in_current_group_by_number(
@@ -239,6 +258,24 @@ impl Workspace {
         self.activate_tab(tab_index, ctx);
     }
 
+    /// Activates the final member of the active tab's group. Ungrouped active
+    /// tabs are no-ops.
+    pub(super) fn activate_last_tab_in_current_group(&mut self, ctx: &mut ViewContext<Self>) {
+        if !FeatureFlag::GroupedTabs.is_enabled() {
+            return;
+        }
+        let Some(group_id) = self
+            .tabs
+            .get(self.active_tab_index)
+            .and_then(|tab| tab.group_id)
+        else {
+            return;
+        };
+        let Some(tab_index) = group_member_indices(&self.tabs, group_id).last() else {
+            return;
+        };
+        self.activate_tab(tab_index, ctx);
+    }
     /// "Create group from tabs" menu action. Group membership requires
     /// tabs to be contiguous in the bar, so we gather the selected tabs into
     /// a single block anchored at the earliest selected tab's position before
