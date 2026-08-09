@@ -157,6 +157,11 @@ fn connected_provider_prefills_secret_input_and_saves_replacement() {
 #[test]
 fn open_and_connect_grok_matches_selecting_the_grok_row() {
     App::test((), |mut app| async move {
+        // Without these the Grok row bounces off its policy gates and both
+        // paths agree on an error state, which would compare equal for the
+        // wrong reason.
+        let _super_grok = FeatureFlag::SuperGrok.override_enabled(true);
+        let _byok = FeatureFlag::SoloUserByok.override_enabled(true);
         register_tui_session_view_test_singletons(&mut app);
 
         // Reference path: open the menu, then select and accept the Grok row.
@@ -184,6 +189,11 @@ fn open_and_connect_grok_matches_selecting_the_grok_row() {
         app.read(|ctx| {
             assert!(shortcut.as_ref(ctx).is_open(ctx));
             assert_eq!(
+                reference.as_ref(ctx).footer(ctx),
+                Some(TuiApiKeysFooter::ConnectingGrok),
+                "selecting the Grok row should start connecting",
+            );
+            assert_eq!(
                 shortcut.as_ref(ctx).footer(ctx),
                 reference.as_ref(ctx).footer(ctx),
                 "the shortcut should land in the same footer state as selecting the Grok row",
@@ -204,8 +214,9 @@ fn open_and_connect_grok_matches_selecting_the_grok_row() {
 
 #[test]
 fn connecting_grok_invites_the_user_to_paste_the_sign_in_code() {
-    let _super_grok = FeatureFlag::SuperGrok.override_enabled(true);
     App::test((), |mut app| async move {
+        let _super_grok = FeatureFlag::SuperGrok.override_enabled(true);
+        let _byok = FeatureFlag::SoloUserByok.override_enabled(true);
         let (_, _, menu) = add_menu(&mut app);
         app.read(|ctx| {
             assert_eq!(menu.as_ref(ctx).input_placeholder_ghost_text(ctx), None);
