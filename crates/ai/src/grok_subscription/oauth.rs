@@ -43,8 +43,11 @@ const AUTHORIZE_URL: &str = "https://auth.x.ai/oauth2/authorize";
 const TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
 const SCOPE: &str = "openid profile email offline_access grok-cli:access api:access";
 
-const REDIRECT_HOST: &str = "127.0.0.1";
-const REDIRECT_PORT: u16 = 56121;
+/// The loopback address xAI allowlisted for this `client_id`. It cannot move
+/// to an ephemeral port, so at most one attempt can be in flight per machine —
+/// exposed so callers (and their tests) can reason about that contention.
+pub const REDIRECT_HOST: &str = "127.0.0.1";
+pub const REDIRECT_PORT: u16 = 56121;
 
 /// How long we keep the loopback server open waiting for the user to approve
 /// the consent screen in their browser.

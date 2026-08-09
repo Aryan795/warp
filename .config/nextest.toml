@@ -10,6 +10,17 @@ filter = 'package(integration)'
 # of the test suite, despite running fewer integration tests at a time.
 threads-required = 2
 
+[test-groups]
+# `OauthAttempt` binds the fixed loopback port xAI allowlisted for Warp's
+# `client_id`, so two attempts cannot coexist on one machine.  Tests that drive
+# the Grok connect flow would otherwise race each other for that port across
+# nextest's per-test processes.
+grok-oauth = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'package(warp_tui) and test(/grok/)'
+test-group = 'grok-oauth'
+
 [profile.ci]
 # Print out output for failing tests as soon as they fail, and also at the end
 # of the run (for easy scrollability).

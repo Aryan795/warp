@@ -1,5 +1,9 @@
+use std::net::TcpListener;
+use std::time::{Duration, Instant};
+
 use ai::LLMProvider;
 use ai::api_keys::ApiKeyManager;
+use ai::grok_subscription::oauth::{REDIRECT_HOST, REDIRECT_PORT};
 use warp::editor::CodeEditorModel;
 use warp::settings::AISettings;
 use warp::tui_export::register_tui_session_view_test_singletons;
@@ -176,6 +180,27 @@ fn open_and_connect_grok_matches_selecting_the_grok_row() {
             });
             menu
         });
+        let expected = app.read(|ctx| {
+            (
+                reference.as_ref(ctx).footer(ctx),
+                reference
+                    .as_ref(ctx)
+                    .snapshot(ctx)
+                    .map(|snapshot| snapshot.header),
+            )
+        });
+        assert_eq!(
+            expected.0,
+            Some(TuiApiKeysFooter::ConnectingGrok),
+            "selecting the Grok row should start connecting",
+        );
+
+        // Only one attempt can hold the loopback callback port, so the
+        // reference attempt has to be torn down before the shortcut starts its
+        // own — otherwise the shortcut fails to bind and falls back to an
+        // error state that has nothing to do with the two paths differing.
+        reference.update(&mut app, |menu, ctx| menu.dismiss(ctx));
+        wait_for_grok_callback_port();
 
         // Shortcut path: a single call jumps straight into the Grok connect flow.
         let shortcut = app.update(|ctx| {
@@ -189,13 +214,8 @@ fn open_and_connect_grok_matches_selecting_the_grok_row() {
         app.read(|ctx| {
             assert!(shortcut.as_ref(ctx).is_open(ctx));
             assert_eq!(
-                reference.as_ref(ctx).footer(ctx),
-                Some(TuiApiKeysFooter::ConnectingGrok),
-                "selecting the Grok row should start connecting",
-            );
-            assert_eq!(
                 shortcut.as_ref(ctx).footer(ctx),
-                reference.as_ref(ctx).footer(ctx),
+                expected.0,
                 "the shortcut should land in the same footer state as selecting the Grok row",
             );
             assert_eq!(
@@ -203,13 +223,25 @@ fn open_and_connect_grok_matches_selecting_the_grok_row() {
                     .as_ref(ctx)
                     .snapshot(ctx)
                     .map(|snapshot| snapshot.header),
-                reference
-                    .as_ref(ctx)
-                    .snapshot(ctx)
-                    .map(|snapshot| snapshot.header),
+                expected.1,
             );
         });
     });
+}
+
+/// Blocks until a cancelled attempt has released the Grok callback listener.
+/// The loopback server owns it on a dedicated thread that notices cancellation
+/// only on its poll interval, so the port frees shortly after the attempt is
+/// cancelled rather than synchronously.
+fn wait_for_grok_callback_port() {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while let Err(error) = TcpListener::bind((REDIRECT_HOST, REDIRECT_PORT)) {
+        assert!(
+            Instant::now() < deadline,
+            "the Grok callback port was never released: {error}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 #[test]
