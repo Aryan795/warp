@@ -1,3 +1,10 @@
+[test-groups]
+# `OauthAttempt` binds the fixed loopback port xAI allowlisted for Warp's
+# `client_id`, so two attempts cannot coexist on one machine.  Tests that drive
+# the Grok connect flow would otherwise race each other for that port across
+# nextest's per-test processes.
+grok-oauth = { max-threads = 1 }
+
 [profile.default]
 # Mark a test as slow if it takes longer than 30s to execute, and terminate it
 # if it takes 2x as long as the slow timeout (i.e.: 60s total).
@@ -9,13 +16,6 @@ filter = 'package(integration)'
 # count twice against the parallelism limit.  This improves overall runtime
 # of the test suite, despite running fewer integration tests at a time.
 threads-required = 2
-
-[test-groups]
-# `OauthAttempt` binds the fixed loopback port xAI allowlisted for Warp's
-# `client_id`, so two attempts cannot coexist on one machine.  Tests that drive
-# the Grok connect flow would otherwise race each other for that port across
-# nextest's per-test processes.
-grok-oauth = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = 'package(warp_tui) and test(/grok/)'

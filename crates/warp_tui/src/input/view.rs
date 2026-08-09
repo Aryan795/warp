@@ -546,7 +546,12 @@ impl TuiInputView {
     /// construct it directly to exercise mouse dispatch.
     fn render_element(&self, ctx: &AppContext) -> TuiEditorElement {
         let builder = TuiUiBuilder::from_app(ctx);
-        let input_ownership = self.active_inline_menu_input_ownership(ctx);
+        let active_inline_menu = self.active_inline_menu(ctx);
+        let input_ownership = active_inline_menu
+            .as_ref()
+            .map_or(TuiInlineMenuInputOwnership::Composer, |inline_menu| {
+                inline_menu.input_ownership(ctx)
+            });
         let mut styles = TuiEditorStyles::default();
         if let Some(range) = self
             .inline_menus
@@ -575,6 +580,9 @@ impl TuiInputView {
         if input_ownership.is_masked() {
             element = element.masked();
         }
+        // Unlike the placeholder below, this scans every menu rather than the
+        // active one: a slash command's argument hint outlives its menu, and
+        // keeps describing the typed command after the menu has closed.
         if let Some(hint_text) = self
             .inline_menus
             .iter()
@@ -588,30 +596,28 @@ impl TuiInputView {
         // provider on every layout pass instead of being snapshotted here.
         // Shell mode teaches how to exit; agent mode adapts to the transcript
         // state.
-        if input_ownership.inline_menu_owns_input() {
-            // The composer's hints describe composer affordances, so a menu
-            // that owns the editor supplies its own placeholder instead.
-            let Some(inline_menu) = self.active_inline_menu(ctx) else {
-                return element;
-            };
-            element.with_placeholder_ghost_text(move |app| {
+        // The composer's hints describe composer affordances, so a menu that
+        // owns the editor supplies its own placeholder instead.
+        match active_inline_menu.filter(|_| input_ownership.inline_menu_owns_input()) {
+            Some(inline_menu) => element.with_placeholder_ghost_text(move |app| {
                 inline_menu.input_placeholder_ghost_text(app).map(|hint| {
                     (
                         hint.to_owned(),
                         TuiUiBuilder::from_app(app).muted_text_style(),
                     )
                 })
-            })
-        } else {
-            let session_state = self.session_state.clone();
-            element.with_placeholder_ghost_text(move |app| {
-                session_state
-                    .as_ref(app)
-                    .resolve(app)
-                    .ok()
-                    .and_then(|state| state.hint_text())
-                    .map(|hint| (hint, TuiUiBuilder::from_app(app).muted_text_style()))
-            })
+            }),
+            None => {
+                let session_state = self.session_state.clone();
+                element.with_placeholder_ghost_text(move |app| {
+                    session_state
+                        .as_ref(app)
+                        .resolve(app)
+                        .ok()
+                        .and_then(|state| state.hint_text())
+                        .map(|hint| (hint, TuiUiBuilder::from_app(app).muted_text_style()))
+                })
+            }
         }
     }
     /// Collapses the current text selection to its head without changing text.

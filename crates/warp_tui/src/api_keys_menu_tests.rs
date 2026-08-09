@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use ai::LLMProvider;
 use ai::api_keys::ApiKeyManager;
-use ai::grok_subscription::oauth::{REDIRECT_HOST, REDIRECT_PORT};
+use ai::grok_subscription::oauth::callback_addr;
 // `std::time::Instant` is disallowed (no wasm support); `instant::Instant` is a
 // drop-in that re-exports the std type on native targets.
 use instant::Instant;
@@ -183,17 +183,14 @@ fn open_and_connect_grok_matches_selecting_the_grok_row() {
             });
             menu
         });
-        let expected = app.read(|ctx| {
+        let (expected_footer, expected_snapshot) = app.read(|ctx| {
             (
                 reference.as_ref(ctx).footer(ctx),
-                reference
-                    .as_ref(ctx)
-                    .snapshot(ctx)
-                    .map(|snapshot| snapshot.header),
+                reference.as_ref(ctx).snapshot(ctx),
             )
         });
         assert_eq!(
-            expected.0,
+            expected_footer,
             Some(TuiApiKeysFooter::ConnectingGrok),
             "selecting the Grok row should start connecting",
         );
@@ -218,16 +215,13 @@ fn open_and_connect_grok_matches_selecting_the_grok_row() {
             assert!(shortcut.as_ref(ctx).is_open(ctx));
             assert_eq!(
                 shortcut.as_ref(ctx).footer(ctx),
-                expected.0,
+                expected_footer,
                 "the shortcut should land in the same footer state as selecting the Grok row",
             );
-            assert_eq!(
-                shortcut
-                    .as_ref(ctx)
-                    .snapshot(ctx)
-                    .map(|snapshot| snapshot.header),
-                expected.1,
-            );
+            // The whole snapshot, not just its header: the header reads
+            // "API keys" in the browsing state too, so comparing it alone
+            // would still hold if the shortcut never started connecting.
+            assert_eq!(shortcut.as_ref(ctx).snapshot(ctx), expected_snapshot);
         });
     });
 }
@@ -238,7 +232,7 @@ fn open_and_connect_grok_matches_selecting_the_grok_row() {
 /// cancelled rather than synchronously.
 fn wait_for_grok_callback_port() {
     let deadline = Instant::now() + Duration::from_secs(5);
-    while let Err(error) = TcpListener::bind((REDIRECT_HOST, REDIRECT_PORT)) {
+    while let Err(error) = TcpListener::bind(callback_addr()) {
         assert!(
             Instant::now() < deadline,
             "the Grok callback port was never released: {error}"

@@ -8,7 +8,7 @@ use warp_editor::selection::{TextDirection, TextUnit};
 use warpui_core::text::word_boundaries::WordBoundariesPolicy;
 use warpui_core::{AppContext, ModelHandle};
 
-use crate::clipboard::{copy_to_clipboard, read_from_clipboard};
+use crate::clipboard::copy_to_clipboard;
 use crate::editor_element::TuiEditorAction;
 
 /// Editing commands shared by TUI text fields.
@@ -602,29 +602,47 @@ pub(crate) fn apply_editor_paste(
     behavior: TuiEditorBehavior,
     ctx: &mut AppContext,
 ) -> anyhow::Result<bool> {
-    #[cfg(test)]
-    if let Some(text) = test_clipboard_text() {
-        return apply_editor_paste_with(model, || Ok(text), behavior, ctx);
-    }
-    apply_editor_paste_with(model, read_from_clipboard, behavior, ctx)
+    apply_editor_paste_with(model, read_clipboard, behavior, ctx)
+}
+
+#[cfg(not(test))]
+fn read_clipboard() -> anyhow::Result<String> {
+    crate::clipboard::read_from_clipboard()
+}
+
+/// Reads the stand-in clipboard, which is empty unless the test installed one
+/// with [`override_test_clipboard_text`]. A test run never reads the real OS
+/// clipboard: the paste path would otherwise need a display server the test
+/// runner lacks, and would leak whatever the developer last copied into an
+/// assertion.
+#[cfg(test)]
+fn read_clipboard() -> anyhow::Result<String> {
+    Ok(TEST_CLIPBOARD_TEXT.with(|text| text.borrow().clone().unwrap_or_default()))
 }
 
 #[cfg(test)]
 thread_local! {
-    /// Stands in for the OS clipboard so view-level tests can drive the paste
-    /// path, which otherwise needs a display server the test runner lacks.
     static TEST_CLIPBOARD_TEXT: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
 }
 
+/// Makes [`apply_editor_paste`] read `text` until the returned guard drops.
 #[cfg(test)]
-fn test_clipboard_text() -> Option<String> {
-    TEST_CLIPBOARD_TEXT.with(|text| text.borrow().clone())
+#[must_use = "the override lasts only as long as the returned guard"]
+pub(crate) fn override_test_clipboard_text(text: impl Into<String>) -> TestClipboardGuard {
+    TestClipboardGuard(TEST_CLIPBOARD_TEXT.with(|slot| slot.borrow_mut().replace(text.into())))
 }
 
+/// Restores the previous stand-in clipboard on drop, so a panicking test can't
+/// leak its override into whatever runs next on the thread.
 #[cfg(test)]
-pub(crate) fn set_test_clipboard_text(text: Option<String>) {
-    TEST_CLIPBOARD_TEXT.with(|slot| *slot.borrow_mut() = text);
+pub(crate) struct TestClipboardGuard(Option<String>);
+
+#[cfg(test)]
+impl Drop for TestClipboardGuard {
+    fn drop(&mut self) {
+        TEST_CLIPBOARD_TEXT.with(|slot| *slot.borrow_mut() = self.0.take());
+    }
 }
 
 fn apply_editor_paste_with(

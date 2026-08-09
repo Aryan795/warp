@@ -111,6 +111,9 @@ arboard = { workspace = true, features = ["wayland-data-control"] }
 dunce.workspace = true
 
 [dev-dependencies]
+# `test-util` exposes `oauth::callback_addr()`, used to wait for a cancelled
+# Grok attempt to release the fixed loopback callback port.
+ai = { workspace = true, features = ["test-util"] }
 criterion = { version = "0.5.1", features = ["html_reports"] }
 tempfile.workspace = true
 # `test-util` exposes `Appearance::mock()`, used to register the `Appearance`

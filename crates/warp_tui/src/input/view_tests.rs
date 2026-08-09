@@ -45,7 +45,7 @@ use super::{
 };
 use crate::completion_menu::{TuiCompletionAcceptance, TuiCompletionMenuModel};
 use crate::editor_element::{TuiEditorAction, TuiEditorElement};
-use crate::editor_interaction::{TuiEditorCommand, set_test_clipboard_text};
+use crate::editor_interaction::{TuiEditorCommand, override_test_clipboard_text};
 use crate::inline_menu::{
     TuiInlineMenu, TuiInlineMenuAccepted, TuiInlineMenuHandle, TuiInlineMenuHeader,
     TuiInlineMenuInputOwnership, TuiInlineMenuScrollAnchor, TuiInlineMenuSnapshot,
@@ -335,13 +335,12 @@ fn paste_command_reaches_a_plain_text_inline_menu_owned_editor() {
     App::test((), |mut app| async move {
         app.update(|ctx| {
             let view = build_view_with_placeholder_inline_menu(ctx);
-            set_test_clipboard_text(Some("grok-sign-in-code".to_owned()));
+            let _clipboard = override_test_clipboard_text("grok-sign-in-code");
             dispatch(
                 &view,
                 ctx,
                 &[TuiInputAction::EditorCommand(TuiEditorCommand::Paste)],
             );
-            set_test_clipboard_text(None);
             assert_eq!(text(&view, ctx), "grok-sign-in-code");
         });
     });
@@ -352,13 +351,12 @@ fn paste_command_reaches_a_masked_inline_menu_owned_editor() {
     App::test((), |mut app| async move {
         app.update(|ctx| {
             let view = build_view_with_masked_inline_menu(ctx);
-            set_test_clipboard_text(Some("pasted-secret".to_owned()));
+            let _clipboard = override_test_clipboard_text("pasted-secret");
             dispatch(
                 &view,
                 ctx,
                 &[TuiInputAction::EditorCommand(TuiEditorCommand::Paste)],
             );
-            set_test_clipboard_text(None);
             assert_eq!(text(&view, ctx), "pasted-secret");
             let rendered = render_input_buffer(&view, ctx).to_lines().join("\n");
             assert!(!rendered.contains("pasted-secret"), "{rendered}");

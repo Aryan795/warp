@@ -83,6 +83,7 @@ use super::{
     voice_argument_is_empty, voice_command_argument,
 };
 use crate::agent_block::{TuiAIBlock, upgrade_url};
+use crate::api_keys_menu::TuiApiKeysFooter;
 use crate::autoupdate::TuiAutoupdater;
 use crate::inline_menu::MAX_INLINE_MENU_ROWS;
 use crate::input_mode_policy::{AI_LOCKED_CONFIG, AI_UNLOCKED_CONFIG};
@@ -410,6 +411,11 @@ fn api_keys_slash_command_opens_inline_and_clears_the_input() {
 #[test]
 fn connect_grok_slash_command_opens_the_api_keys_menu_in_grok_flow() {
     App::test((), |mut app| async move {
+        // The Grok row refuses without these, and every assertion below the
+        // footer one also holds in the resulting error state, so the test
+        // would pass without ever reaching the connect flow.
+        let _super_grok = FeatureFlag::SuperGrok.override_enabled(true);
+        let _byok = FeatureFlag::SoloUserByok.override_enabled(true);
         let fixture = focus_test_fixture(&mut app);
         let (view, _) = add_focus_test_session(&mut app, &fixture, true);
         view.update(&mut app, |view, ctx| {
@@ -425,7 +431,24 @@ fn connect_grok_slash_command_opens_the_api_keys_menu_in_grok_flow() {
                 TuiInputSuggestionsMode::ApiKeys
             );
             assert!(view.input_view.as_ref(ctx).is_empty(ctx));
+            assert_eq!(
+                view.api_keys_menu.as_ref(ctx).footer(ctx),
+                Some(TuiApiKeysFooter::ConnectingGrok)
+            );
         });
+
+        // The empty input invites the manual paste, which is the only way
+        // through for a browser that never reaches the loopback callback.
+        let rendered = render_session(&mut app, &view, 100, 40).join("\n");
+        assert!(rendered.contains("(Connecting...)"), "{rendered}");
+        assert!(rendered.contains("Paste sign-in code"), "{rendered}");
+
+        view.update(&mut app, |view, ctx| {
+            view.input_view
+                .update(ctx, |input, ctx| input.set_text("pasted-code", ctx));
+        });
+        let rendered = render_session(&mut app, &view, 100, 40).join("\n");
+        assert!(!rendered.contains("Paste sign-in code"), "{rendered}");
     });
 }
 
