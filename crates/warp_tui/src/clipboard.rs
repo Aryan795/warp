@@ -98,6 +98,10 @@ fn set_native_text(text: &str) -> anyhow::Result<()> {
 /// requests, so a remote/SSH `cmd-v` still relies on the terminal's own
 /// bracketed-paste path (`TuiEditorAction::PasteText`). Returns an error only
 /// when the native backend is unavailable.
+///
+/// Compiled out of test builds in lockstep with its only caller, so a test run
+/// can never read the developer's real clipboard.
+#[cfg(not(test))]
 pub(crate) fn read_from_clipboard() -> anyhow::Result<String> {
     let mut clipboard = warpui::platform::create_system_clipboard()
         .map_err(|error| error.context("native OS clipboard is unavailable"))?;

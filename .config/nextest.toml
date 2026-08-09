@@ -2,7 +2,10 @@
 # `OauthAttempt` binds the fixed loopback port xAI allowlisted for Warp's
 # `client_id`, so two attempts cannot coexist on one machine.  Tests that drive
 # the Grok connect flow would otherwise race each other for that port across
-# nextest's per-test processes.
+# nextest's per-test processes.  The filter below deliberately errs wide and
+# catches every Grok test, including the few that never bind the port: they are
+# milliseconds each, and serializing a new one by default is safer than
+# discovering it races.
 grok-oauth = { max-threads = 1 }
 
 [profile.default]
