@@ -29,6 +29,11 @@ impl From<&proto::DiffMode> for DiffMode {
             Some(proto::diff_mode::Mode::OtherBranch(ob)) => {
                 DiffMode::OtherBranch(ob.branch_name.clone())
             }
+            Some(proto::diff_mode::Mode::PullRequestLayer(layer)) => DiffMode::PullRequestLayer {
+                pr_number: layer.pr_number,
+                base_oid: layer.base_oid.clone(),
+                head_oid: layer.head_oid.clone(),
+            },
         }
     }
 }
@@ -388,6 +393,15 @@ impl From<&DiffMode> for proto::DiffMode {
                     branch_name: branch.clone(),
                 })
             }
+            DiffMode::PullRequestLayer {
+                pr_number,
+                base_oid,
+                head_oid,
+            } => proto::diff_mode::Mode::PullRequestLayer(proto::DiffModePullRequestLayer {
+                pr_number: *pr_number,
+                base_oid: base_oid.clone(),
+                head_oid: head_oid.clone(),
+            }),
         };
         proto::DiffMode {
             mode: Some(mode_oneof),
