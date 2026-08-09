@@ -461,6 +461,12 @@ pub(crate) trait TuiInlineMenuHandle {
     fn input_highlight_range(&self, ctx: &AppContext) -> Option<Range<CharOffset>>;
     /// Returns the input argument hint shown by this menu.
     fn input_argument_hint_text(&self, ctx: &AppContext) -> Option<&'static str>;
+    /// Returns the placeholder hint shown while this menu owns an empty input.
+    /// Unlike [`Self::input_argument_hint_text`], which trails the cursor as
+    /// the user types, this is only painted while the buffer is empty.
+    fn input_placeholder_ghost_text(&self, _ctx: &AppContext) -> Option<&'static str> {
+        None
+    }
     /// Moves selection to the previous row.
     fn select_previous(&self, ctx: &mut AppContext);
     /// Moves selection to the next row.
@@ -585,6 +591,10 @@ impl TuiInlineMenu {
         self.handle.input_argument_hint_text(ctx)
     }
 
+    pub(crate) fn input_placeholder_ghost_text(&self, ctx: &AppContext) -> Option<&'static str> {
+        self.handle.input_placeholder_ghost_text(ctx)
+    }
+
     pub(crate) fn select_previous(&self, ctx: &mut AppContext) {
         self.handle.select_previous(ctx);
     }
@@ -641,6 +651,10 @@ impl TuiInlineMenuHandle for ModelHandle<TuiApiKeysMenuModel> {
 
     fn input_argument_hint_text(&self, _ctx: &AppContext) -> Option<&'static str> {
         None
+    }
+
+    fn input_placeholder_ghost_text(&self, ctx: &AppContext) -> Option<&'static str> {
+        self.as_ref(ctx).input_placeholder_ghost_text(ctx)
     }
 
     fn select_previous(&self, ctx: &mut AppContext) {

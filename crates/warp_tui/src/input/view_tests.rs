@@ -45,7 +45,7 @@ use super::{
 };
 use crate::completion_menu::{TuiCompletionAcceptance, TuiCompletionMenuModel};
 use crate::editor_element::{TuiEditorAction, TuiEditorElement};
-use crate::editor_interaction::TuiEditorCommand;
+use crate::editor_interaction::{TuiEditorCommand, set_test_clipboard_text};
 use crate::inline_menu::{
     TuiInlineMenu, TuiInlineMenuAccepted, TuiInlineMenuHandle, TuiInlineMenuHeader,
     TuiInlineMenuInputOwnership, TuiInlineMenuScrollAnchor, TuiInlineMenuSnapshot,
@@ -258,13 +258,133 @@ fn masked_inline_menu_input_suppresses_composer_modes() {
     });
 }
 
+/// A plain-text inline menu that owns the input and offers a placeholder,
+/// mirroring the `/api-keys` Grok connect state.
+struct TestPlaceholderMenu;
+
+const TEST_MENU_PLACEHOLDER: &str = "Paste sign-in code";
+
+impl Entity for TestPlaceholderMenu {
+    type Event = ();
+}
+
+impl TuiInlineMenuHandle for ModelHandle<TestPlaceholderMenu> {
+    fn mode(&self) -> TuiInputSuggestionsMode {
+        TuiInputSuggestionsMode::ApiKeys
+    }
+
+    fn is_open(&self, _ctx: &AppContext) -> bool {
+        true
+    }
+
+    fn input_ownership(&self, _ctx: &AppContext) -> TuiInlineMenuInputOwnership {
+        TuiInlineMenuInputOwnership::InlineMenuPlainText
+    }
+
+    fn input_highlight_range(&self, _ctx: &AppContext) -> Option<Range<CharOffset>> {
+        None
+    }
+
+    fn input_argument_hint_text(&self, _ctx: &AppContext) -> Option<&'static str> {
+        None
+    }
+
+    fn input_placeholder_ghost_text(&self, _ctx: &AppContext) -> Option<&'static str> {
+        Some(TEST_MENU_PLACEHOLDER)
+    }
+
+    fn select_previous(&self, _ctx: &mut AppContext) {}
+    fn select_next(&self, _ctx: &mut AppContext) {}
+    fn accept(&self, _ctx: &mut AppContext) -> Option<TuiInlineMenuAccepted> {
+        None
+    }
+    fn dismiss(&self, _ctx: &mut AppContext) {}
+    fn snapshot(&self, _ctx: &AppContext) -> Option<TuiInlineMenuSnapshot> {
+        None
+    }
+}
+
+#[test]
+fn inline_menu_placeholder_ghost_text_renders_only_while_the_input_is_empty() {
+    App::test((), |mut app| async move {
+        app.update(|ctx| {
+            let view = build_view_with_placeholder_inline_menu(ctx);
+            let buffer = render_input_buffer(&view, ctx);
+            let line = &buffer.to_lines()[0];
+            // One pad cell separates the cursor from the placeholder.
+            assert!(
+                line.starts_with(&format!(" {TEST_MENU_PLACEHOLDER}")),
+                "unexpected line: {line:?}"
+            );
+            let expected = TuiUiBuilder::from_app(ctx)
+                .muted_text_style()
+                .fg
+                .expect("placeholder hint has a foreground");
+            assert_eq!(buffer[(1, 0)].fg, expected);
+
+            type_str(&view, ctx, "code");
+            let line = &render_input_buffer(&view, ctx).to_lines()[0];
+            assert!(line.starts_with("code"), "unexpected line: {line:?}");
+            assert!(!line.contains(TEST_MENU_PLACEHOLDER), "{line:?}");
+        });
+    });
+}
+
+#[test]
+fn paste_command_reaches_a_plain_text_inline_menu_owned_editor() {
+    App::test((), |mut app| async move {
+        app.update(|ctx| {
+            let view = build_view_with_placeholder_inline_menu(ctx);
+            set_test_clipboard_text(Some("grok-sign-in-code".to_owned()));
+            dispatch(
+                &view,
+                ctx,
+                &[TuiInputAction::EditorCommand(TuiEditorCommand::Paste)],
+            );
+            set_test_clipboard_text(None);
+            assert_eq!(text(&view, ctx), "grok-sign-in-code");
+        });
+    });
+}
+
+#[test]
+fn paste_command_reaches_a_masked_inline_menu_owned_editor() {
+    App::test((), |mut app| async move {
+        app.update(|ctx| {
+            let view = build_view_with_masked_inline_menu(ctx);
+            set_test_clipboard_text(Some("pasted-secret".to_owned()));
+            dispatch(
+                &view,
+                ctx,
+                &[TuiInputAction::EditorCommand(TuiEditorCommand::Paste)],
+            );
+            set_test_clipboard_text(None);
+            assert_eq!(text(&view, ctx), "pasted-secret");
+            let rendered = render_input_buffer(&view, ctx).to_lines().join("\n");
+            assert!(!rendered.contains("pasted-secret"), "{rendered}");
+        });
+    });
+}
+
+fn build_view_with_placeholder_inline_menu(ctx: &mut AppContext) -> ViewHandle<TuiInputView> {
+    let menu = ctx.add_model(|_| TestPlaceholderMenu);
+    build_view_with_api_keys_inline_menu(TuiInlineMenu::new(menu), ctx)
+}
+
 fn build_view_with_masked_inline_menu(ctx: &mut AppContext) -> ViewHandle<TuiInputView> {
+    let menu = ctx.add_model(|_| TestSecretMenu);
+    build_view_with_api_keys_inline_menu(TuiInlineMenu::new(menu), ctx)
+}
+
+fn build_view_with_api_keys_inline_menu(
+    inline_menu: TuiInlineMenu,
+    ctx: &mut AppContext,
+) -> ViewHandle<TuiInputView> {
     ctx.add_singleton_model(|_| Appearance::mock());
     add_test_semantic_selection(ctx);
     let input_model = ctx.add_model(|ctx| CodeEditorModel::new_tui(W, ctx));
     let input_mode = add_test_input_mode(ctx);
     let suggestions_mode = add_suggestions_mode(ctx, TuiInputSuggestionsMode::ApiKeys);
-    let menu = ctx.add_model(|_| TestSecretMenu);
     let (_, view) = ctx.add_tui_window(
         AddWindowOptions {
             window_style: WindowStyle::NotStealFocus,
@@ -275,7 +395,7 @@ fn build_view_with_masked_inline_menu(ctx: &mut AppContext) -> ViewHandle<TuiInp
                 input_model,
                 input_mode,
                 suggestions_mode,
-                vec![TuiInlineMenu::new(menu)],
+                vec![inline_menu],
                 |_| false,
                 ctx,
             )

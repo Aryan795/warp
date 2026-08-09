@@ -602,7 +602,29 @@ pub(crate) fn apply_editor_paste(
     behavior: TuiEditorBehavior,
     ctx: &mut AppContext,
 ) -> anyhow::Result<bool> {
+    #[cfg(test)]
+    if let Some(text) = test_clipboard_text() {
+        return apply_editor_paste_with(model, || Ok(text), behavior, ctx);
+    }
     apply_editor_paste_with(model, read_from_clipboard, behavior, ctx)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Stands in for the OS clipboard so view-level tests can drive the paste
+    /// path, which otherwise needs a display server the test runner lacks.
+    static TEST_CLIPBOARD_TEXT: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn test_clipboard_text() -> Option<String> {
+    TEST_CLIPBOARD_TEXT.with(|text| text.borrow().clone())
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_clipboard_text(text: Option<String>) {
+    TEST_CLIPBOARD_TEXT.with(|slot| *slot.borrow_mut() = text);
 }
 
 fn apply_editor_paste_with(

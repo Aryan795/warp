@@ -27,6 +27,11 @@ use crate::tui_builder::TuiUiBuilder;
 const MAX_VISIBLE_ROWS: usize = result_row_capacity(MAX_INLINE_MENU_ROWS, true, false);
 const FALLBACK_DESCRIPTION: &str = "in the event of an error, requests may be routed to use Warp \
 credits. Warp will prioritize using your API keys over Warp credits.";
+/// Invites the user to finish the Grok connection by hand when the browser
+/// never hands the code back (an ad blocker breaks the loopback callback).
+/// Matches the desktop app's manual code entry placeholder so both surfaces
+/// read the same.
+const GROK_MANUAL_CODE_PLACEHOLDER: &str = "Paste sign-in code";
 const PROVIDER_ROWS: [TuiApiKeysRow; 4] = [
     TuiApiKeysRow {
         kind: TuiApiKeysRowKind::Provider(LLMProvider::Anthropic),
@@ -239,6 +244,19 @@ impl TuiApiKeysMenuModel {
                 TuiInlineMenuInputOwnership::InlineMenuPlainText
             }
             TuiApiKeysMenuState::Closed => TuiInlineMenuInputOwnership::Composer,
+        }
+    }
+
+    /// Returns the placeholder hint for the shared editor while it is empty.
+    pub(crate) fn input_placeholder_ghost_text(&self, ctx: &AppContext) -> Option<&'static str> {
+        if !self.is_open(ctx) {
+            return None;
+        }
+        match self.state {
+            TuiApiKeysMenuState::ConnectingGrok { .. } => Some(GROK_MANUAL_CODE_PLACEHOLDER),
+            TuiApiKeysMenuState::Closed
+            | TuiApiKeysMenuState::Browsing { .. }
+            | TuiApiKeysMenuState::EditingProvider { .. } => None,
         }
     }
 

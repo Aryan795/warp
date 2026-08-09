@@ -3,6 +3,7 @@ use ai::api_keys::ApiKeyManager;
 use warp::editor::CodeEditorModel;
 use warp::settings::AISettings;
 use warp::tui_export::register_tui_session_view_test_singletons;
+use warp_core::features::FeatureFlag;
 use warp_editor::model::CoreEditorModel;
 use warpui::SingletonEntity as _;
 use warpui_core::{App, ModelHandle};
@@ -197,6 +198,49 @@ fn open_and_connect_grok_matches_selecting_the_grok_row() {
                     .snapshot(ctx)
                     .map(|snapshot| snapshot.header),
             );
+        });
+    });
+}
+
+#[test]
+fn connecting_grok_invites_the_user_to_paste_the_sign_in_code() {
+    let _super_grok = FeatureFlag::SuperGrok.override_enabled(true);
+    App::test((), |mut app| async move {
+        let (_, _, menu) = add_menu(&mut app);
+        app.read(|ctx| {
+            assert_eq!(menu.as_ref(ctx).input_placeholder_ghost_text(ctx), None);
+        });
+
+        // Editing a plain provider key has no manual code to paste.
+        menu.update(&mut app, |menu, ctx| menu.accept_selected(ctx));
+        app.read(|ctx| {
+            assert_eq!(
+                menu.as_ref(ctx).footer(ctx),
+                Some(TuiApiKeysFooter::EditingProvider(LLMProvider::Anthropic))
+            );
+            assert_eq!(menu.as_ref(ctx).input_placeholder_ghost_text(ctx), None);
+        });
+
+        menu.update(&mut app, |menu, ctx| {
+            menu.dismiss(ctx);
+            menu.open_and_connect_grok(ctx);
+        });
+        app.read(|ctx| {
+            assert_eq!(
+                menu.as_ref(ctx).footer(ctx),
+                Some(TuiApiKeysFooter::ConnectingGrok),
+                "the Grok row must reach the connecting state"
+            );
+            assert_eq!(
+                menu.as_ref(ctx).input_placeholder_ghost_text(ctx),
+                Some("Paste sign-in code")
+            );
+        });
+
+        // Backing out of the connect flow drops the invitation.
+        menu.update(&mut app, |menu, ctx| menu.dismiss(ctx));
+        app.read(|ctx| {
+            assert_eq!(menu.as_ref(ctx).input_placeholder_ghost_text(ctx), None);
         });
     });
 }

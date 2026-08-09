@@ -588,7 +588,21 @@ impl TuiInputView {
         // provider on every layout pass instead of being snapshotted here.
         // Shell mode teaches how to exit; agent mode adapts to the transcript
         // state.
-        if !input_ownership.inline_menu_owns_input() {
+        if input_ownership.inline_menu_owns_input() {
+            // The composer's hints describe composer affordances, so a menu
+            // that owns the editor supplies its own placeholder instead.
+            let Some(inline_menu) = self.active_inline_menu(ctx) else {
+                return element;
+            };
+            element.with_placeholder_ghost_text(move |app| {
+                inline_menu.input_placeholder_ghost_text(app).map(|hint| {
+                    (
+                        hint.to_owned(),
+                        TuiUiBuilder::from_app(app).muted_text_style(),
+                    )
+                })
+            })
+        } else {
             let session_state = self.session_state.clone();
             element.with_placeholder_ghost_text(move |app| {
                 session_state
@@ -598,8 +612,6 @@ impl TuiInputView {
                     .and_then(|state| state.hint_text())
                     .map(|hint| (hint, TuiUiBuilder::from_app(app).muted_text_style()))
             })
-        } else {
-            element
         }
     }
     /// Collapses the current text selection to its head without changing text.
@@ -1073,6 +1085,14 @@ impl TuiInputView {
                         log::error!("Failed to copy TUI input selection: {error}");
                         ctx.emit(TuiInputViewEvent::ClipboardCopyFailed);
                     }
+                }
+                TuiEditorInteractionOutcome::FollowCursor
+            }
+            // Masking only suppresses clipboard *export*; pasting a credential
+            // in is exactly what a masked entry field is for.
+            TuiEditorInteractionOutcome::Paste => {
+                if let Err(error) = apply_editor_paste(&self.model, self.editor_behavior, ctx) {
+                    log::error!("Failed to paste into TUI input: {error}");
                 }
                 TuiEditorInteractionOutcome::FollowCursor
             }
