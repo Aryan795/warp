@@ -1,9 +1,12 @@
 use std::net::TcpListener;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ai::LLMProvider;
 use ai::api_keys::ApiKeyManager;
 use ai::grok_subscription::oauth::{REDIRECT_HOST, REDIRECT_PORT};
+// `std::time::Instant` is disallowed (no wasm support); `instant::Instant` is a
+// drop-in that re-exports the std type on native targets.
+use instant::Instant;
 use warp::editor::CodeEditorModel;
 use warp::settings::AISettings;
 use warp::tui_export::register_tui_session_view_test_singletons;
