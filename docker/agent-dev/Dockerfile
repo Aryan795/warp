@@ -130,7 +130,7 @@ COPY ./script ./setup/script
 RUN set -eux; \
   umask 002; \
   cd ./setup && ./script/linux/install_test_deps; \
-  [ -f "$CARGO_HOME/binstall.toml" ] && chmod g+rw "$CARGO_HOME/binstall.toml"
+  if [ -f "$CARGO_HOME/binstall.toml" ]; then chmod g+rw "$CARGO_HOME/binstall.toml"; fi
 
 # Add the Google Cloud SDK repository and install:
 # - The gcloud CLI
