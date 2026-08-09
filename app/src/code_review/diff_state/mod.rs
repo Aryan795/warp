@@ -309,6 +309,18 @@ pub enum DiffMode {
     MainBranch,
     /// Show changes in working directory against an arbitrary branch (git diff $(git merge-base HEAD <branch>))
     OtherBranch(#[serde(skip_serializing)] String),
+    /// Read-only diff for a single pull request layer in a GitHub-native stack: the exact
+    /// `base_oid...head_oid` range GitHub reports for that pull request, independent of the
+    /// working tree or `HEAD`. Unlike `OtherBranch`, neither endpoint is the working tree.
+    /// See `DiffMode::is_read_only`.
+    PullRequestLayer {
+        #[serde(skip_serializing)]
+        pr_number: u64,
+        #[serde(skip_serializing)]
+        base_oid: String,
+        #[serde(skip_serializing)]
+        head_oid: String,
+    },
 }
 
 impl DiffMode {
@@ -321,6 +333,14 @@ impl DiffMode {
         } else {
             DiffMode::OtherBranch(branch.to_string())
         }
+    }
+
+    /// Whether this mode is a fixed, immutable commit range rather than a
+    /// working-tree-backed diff. UI actions and editor construction must
+    /// consult this single invariant to disable save/discard and other
+    /// mutation while a historical range like `PullRequestLayer` is active.
+    pub fn is_read_only(&self) -> bool {
+        matches!(self, DiffMode::PullRequestLayer { .. })
     }
 }
 
