@@ -104,11 +104,14 @@ use crate::code_review::find_model::CodeReviewFindModel;
 use crate::code_review::git_repo_model::{GitRepoModels, GitRepoStatusEvent, GitRepoStatusModel};
 use crate::code_review::github_repo_model::{GitHubRepoEvent, GitHubRepoModel};
 use crate::code_review::hidden_lines::calculate_hidden_lines;
+use crate::code_review::stack_map::{
+    StackControl, StackControlEvent, StackMapPresentation, StackMapRow, StackRowState,
+};
 #[cfg(feature = "local_fs")]
 use crate::code_review::telemetry_event::DiffSetContextScope;
 use crate::code_review::telemetry_event::{
     AddToContextOrigin, CodeReviewContextDestination, CodeReviewTelemetryEvent, GitButtonKind,
-    PaneStateChange,
+    PaneStateChange, StackDiscoveryOutcome,
 };
 use crate::coding_panel_enablement_state::CodingPanelEnablementState;
 use crate::editor::InteractionState;
@@ -138,7 +141,7 @@ use crate::util::bindings::{
 };
 #[cfg(feature = "local_fs")]
 use crate::util::file::external_editor::EditorSettings;
-use crate::util::git::{BranchEntry, PrInfo};
+use crate::util::git::{BranchEntry, PrInfo, PrStackInfo};
 #[cfg(feature = "local_fs")]
 use crate::util::openable_file_type::FileTarget;
 #[cfg(feature = "local_fs")]
@@ -157,6 +160,10 @@ pub struct CodeReviewHeaderFields {
     pub diff_state_model: ModelHandle<DiffStateModel>,
     pub maximize_button: ViewHandle<ActionButton>,
     pub diff_selector: ViewHandle<DiffSelector>,
+    /// Stack control (trigger + overlay map) for a GitHub-native PR stack.
+    /// The view itself renders nothing when there's no stack to show, so
+    /// this is always present rather than `Option`.
+    pub stack_control: ViewHandle<StackControl>,
     pub header_menu: ViewHandle<Menu<CodeReviewAction>>,
     pub header_menu_open: bool,
     pub header_dropdown_button: ViewHandle<ActionButton>,
@@ -350,6 +357,8 @@ pub enum CodeReviewAction {
     ViewPr(String),
     PublishBranch,
     SubmitReviewComments,
+    /// Selects a pull request layer's read-only diff from the stack map.
+    SelectStackLayer(u64),
 }
 
 pub struct FileState {
@@ -672,6 +681,23 @@ pub struct CodeReviewView {
     git_repo_status: Option<ModelHandle<GitRepoStatusModel>>,
     /// Per-repo GitHub-info model for the current repository, if any.
     github_repo_model: Option<ModelHandle<GitHubRepoModel>>,
+    /// Stack control (header trigger + overlay map) for a GitHub-native PR stack.
+    stack_control: ViewHandle<StackControl>,
+    /// Pull request number of the layer currently under review, when the
+    /// user has selected a stack layer instead of the working tree.
+    selected_stack_pr: Option<u64>,
+    /// Comment batch backing the working-tree review. Retained separately
+    /// from `active_comment_model` so it can be restored exactly when the
+    /// user returns from a stack layer.
+    working_tree_comment_model: Option<ModelHandle<ReviewCommentBatch>>,
+    /// Per-pull-request comment batches for stack layers, created lazily and
+    /// kept for the view's lifetime (application-lifetime semantics, like
+    /// the working-tree batch) so switching layers doesn't lose drafts.
+    stack_comment_models: HashMap<u64, ModelHandle<ReviewCommentBatch>>,
+    /// The last stack discovery outcome reported to telemetry, so repeated
+    /// `StackInfoChanged` events with the same shape don't spam duplicate
+    /// `StackDiscoveryCompleted` events.
+    last_reported_stack_outcome: Option<StackDiscoveryOutcome>,
 }
 
 impl CodeReviewView {
@@ -1126,6 +1152,13 @@ impl CodeReviewView {
             me.handle_diff_selector_event(event, ctx);
         });
 
+        let stack_control = ctx.add_typed_action_view(StackControl::new);
+        ctx.subscribe_to_view(&stack_control, |me, _, event, ctx| match event {
+            StackControlEvent::SelectLayer(pr_number) => {
+                me.select_stack_layer(*pr_number, ctx);
+            }
+        });
+
         let random_str = rand::thread_rng()
             .sample_iter(&Alphanumeric)
             .take(8)
@@ -1361,6 +1394,11 @@ impl CodeReviewView {
             git_dialog: None,
             git_repo_status: None,
             github_repo_model: None,
+            stack_control,
+            selected_stack_pr: None,
+            working_tree_comment_model: comment_batch_model.clone(),
+            stack_comment_models: HashMap::new(),
+            last_reported_stack_outcome: None,
         };
         view.set_active_repo_comment_model(comment_batch_model, ctx);
         if has_repo {
@@ -1536,7 +1574,7 @@ impl CodeReviewView {
             }
             let is_selected = match &current_mode {
                 DiffMode::OtherBranch(name) => name == &entry.name,
-                DiffMode::Head | DiffMode::MainBranch => false,
+                DiffMode::Head | DiffMode::MainBranch | DiffMode::PullRequestLayer { .. } => false,
             };
             targets.push(DiffTarget::new(
                 entry.name.clone(),
@@ -1583,6 +1621,7 @@ impl CodeReviewView {
             return;
         }
 
+        let was_stack_review = self.selected_stack_pr.is_some();
         send_telemetry_from_ctx!(
             CodeReviewTelemetryEvent::BaseChanged {
                 is_local: self.repo_is_local(),
@@ -1591,12 +1630,189 @@ impl CodeReviewView {
             ctx
         );
 
+        self.switch_review_context_for_mode(&mode, ctx);
+        if was_stack_review && self.selected_stack_pr.is_none() {
+            send_telemetry_from_ctx!(
+                CodeReviewTelemetryEvent::StackReviewExited {
+                    is_local: self.repo_is_local(),
+                },
+                ctx
+            );
+        }
+
         let preferred_session = self.preferred_review_session(ctx);
         self.diff_state_model.update(ctx, |model, ctx| {
             model.set_diff_mode(mode, false, true, preferred_session, ctx);
         });
         self.update_diff_selector_selection(ctx);
+        self.update_stack_control(ctx);
+        if FeatureFlag::GitOperationsInCodeReview.is_enabled() {
+            self.update_git_operations_ui(ctx);
+        }
         self.invalidate_all(None, None, ctx);
+    }
+
+    /// Switches which review context (working tree vs. a specific pull
+    /// request layer) backs the active comment list, based on `mode`.
+    /// Every entry point that changes `DiffMode` — the branch-based diff
+    /// selector, the stack map, and imported-comment navigation — must call
+    /// this so comment isolation (spec item 24) holds regardless of how the
+    /// mode changed.
+    fn switch_review_context_for_mode(&mut self, mode: &DiffMode, ctx: &mut ViewContext<Self>) {
+        let new_pr = match mode {
+            DiffMode::PullRequestLayer { pr_number, .. } => Some(*pr_number),
+            _ => None,
+        };
+        if new_pr == self.selected_stack_pr {
+            return;
+        }
+        self.selected_stack_pr = new_pr;
+        let new_comment_model = match new_pr {
+            Some(pr_number) => Some(self.get_or_create_stack_comment_model(pr_number, ctx)),
+            None => self.working_tree_comment_model.clone(),
+        };
+        self.set_active_repo_comment_model(new_comment_model, ctx);
+    }
+
+    /// Gets or lazily creates the comment batch for a stack layer's pull
+    /// request. Kept for the view's lifetime (application-lifetime
+    /// semantics, matching the working-tree batch) so switching away and
+    /// back preserves draft comments.
+    fn get_or_create_stack_comment_model(
+        &mut self,
+        pr_number: u64,
+        ctx: &mut ViewContext<Self>,
+    ) -> ModelHandle<ReviewCommentBatch> {
+        if let Some(existing) = self.stack_comment_models.get(&pr_number) {
+            return existing.clone();
+        }
+        let model = ctx.add_model(|_ctx| ReviewCommentBatch::default());
+        self.stack_comment_models.insert(pr_number, model.clone());
+        model
+    }
+
+    /// Latest discovered GitHub-native stack for the current repo, if any.
+    /// `None` covers not-stacked, unavailable, and not-yet-discovered alike.
+    fn stack_info(&self, ctx: &AppContext) -> Option<PrStackInfo> {
+        self.github_repo_model
+            .as_ref()?
+            .as_ref(ctx)
+            .stack_info(ctx)
+            .cloned()
+    }
+
+    /// Rebuilds the stack control's presentation snapshot from the latest
+    /// `PrStackInfo` and pushes it to `self.stack_control`. Called whenever
+    /// `GitHubRepoEvent::StackInfoChanged` fires and whenever the selected
+    /// layer or current branch could have changed which row is highlighted.
+    fn update_stack_control(&mut self, ctx: &mut ViewContext<Self>) {
+        let stack_info = self.stack_info(ctx);
+        let outcome = StackDiscoveryOutcome::from_layer_count(
+            stack_info.as_ref().map(|info| info.layers.len()),
+        );
+        if self.last_reported_stack_outcome != Some(outcome) {
+            self.last_reported_stack_outcome = Some(outcome);
+            send_telemetry_from_ctx!(
+                CodeReviewTelemetryEvent::StackDiscoveryCompleted {
+                    is_local: self.repo_is_local(),
+                    outcome,
+                },
+                ctx
+            );
+        }
+
+        let current_branch_name = self
+            .diff_state_model
+            .read(ctx, |model, ctx| model.get_current_branch_name(ctx));
+
+        let presentation = stack_info.map(|info| {
+            let rows: Vec<StackMapRow> = info
+                .layers
+                .iter()
+                .map(|layer| StackMapRow {
+                    pr_number: layer.pr.number,
+                    title: layer.title.clone(),
+                    head_ref: layer.head_ref.clone(),
+                    state: StackRowState::from_pr_state(
+                        &layer.pr.state,
+                        layer.pr.draft,
+                        layer.merged_at.is_some(),
+                    ),
+                    is_current_branch: current_branch_name.as_deref() == Some(&layer.head_ref),
+                    is_selected: self.selected_stack_pr == Some(layer.pr.number),
+                })
+                .collect();
+            let current_position = current_branch_name.as_ref().and_then(|branch| {
+                // `layers` is bottom to top; position is 1-indexed from the
+                // bottom to match how GitHub numbers stack positions.
+                rows.iter()
+                    .position(|row| &row.head_ref == branch)
+                    .map(|index| index + 1)
+            });
+            StackMapPresentation {
+                trunk_ref: info.trunk_ref,
+                rows,
+                current_position,
+            }
+        });
+
+        self.stack_control.update(ctx, |control, ctx| {
+            control.set_presentation(presentation, ctx);
+        });
+    }
+
+    /// Selects a pull request layer from the stack map: resolves its exact
+    /// `base_oid...head_oid` range from the latest stack snapshot and enters
+    /// stack-layer review mode. A no-op when the layer can no longer be
+    /// found (e.g. a concurrent refresh removed it).
+    fn select_stack_layer(&mut self, pr_number: u64, ctx: &mut ViewContext<Self>) {
+        let Some(stack_info) = self.stack_info(ctx) else {
+            return;
+        };
+        let Some(layer) = stack_info
+            .layers
+            .iter()
+            .find(|layer| layer.pr.number == pr_number)
+        else {
+            return;
+        };
+        let mode = DiffMode::PullRequestLayer {
+            pr_number,
+            base_oid: layer.base_oid.clone(),
+            head_oid: layer.head_oid.clone(),
+        };
+        if self
+            .diff_state_model
+            .read(ctx, |model, ctx| model.diff_mode(ctx))
+            == mode
+        {
+            return;
+        }
+
+        let current_branch_name = self
+            .diff_state_model
+            .read(ctx, |model, ctx| model.get_current_branch_name(ctx));
+        send_telemetry_from_ctx!(
+            CodeReviewTelemetryEvent::StackLayerSelected {
+                is_local: self.repo_is_local(),
+                is_current_branch: current_branch_name.as_deref() == Some(layer.head_ref.as_str()),
+                stack_size: stack_info.layers.len(),
+            },
+            ctx
+        );
+
+        self.switch_review_context_for_mode(&mode, ctx);
+        let preferred_session = self.preferred_review_session(ctx);
+        self.diff_state_model.update(ctx, |model, ctx| {
+            model.set_diff_mode(mode, false, true, preferred_session, ctx);
+        });
+        self.update_diff_selector_selection(ctx);
+        self.update_stack_control(ctx);
+        if FeatureFlag::GitOperationsInCodeReview.is_enabled() {
+            self.update_git_operations_ui(ctx);
+        }
+        self.invalidate_all(None, None, ctx);
+        ctx.focus_self();
     }
 
     fn handle_find_event(
@@ -2311,6 +2527,7 @@ impl CodeReviewView {
             DiffStateModelEvent::CurrentBranchChanged => {
                 self.fetch_branches_and_setup_dropdown(ctx);
                 self.update_diff_selector_selection(ctx);
+                self.update_stack_control(ctx);
             }
             DiffStateModelEvent::NewDiffsComputed {
                 diffs,
@@ -2336,7 +2553,9 @@ impl CodeReviewView {
                             .against_base_branch
                             .as_ref()
                             .map(|base| base.aggregate_stats),
-                        DiffMode::OtherBranch(_) => None,
+                        // No synced metadata concept for a fixed commit range;
+                        // the loader sets `LoadedState`'s stats directly instead.
+                        DiffMode::OtherBranch(_) | DiffMode::PullRequestLayer { .. } => None,
                     };
                     if let Some(stats) = stats {
                         loaded_state.total_additions = stats.total_additions;
@@ -4189,6 +4408,7 @@ impl CodeReviewView {
             is_in_split_pane,
             maximize_button: self.maximize_button.clone(),
             diff_selector: self.diff_selector.clone(),
+            stack_control: self.stack_control.clone(),
             header_menu: self.header_menu.clone(),
             header_menu_open: self.header_menu_open,
             diff_state_model: self.diff_state_model.clone(),
@@ -5995,6 +6215,11 @@ impl CodeReviewView {
                 }
             }
             DiffMode::OtherBranch(branch_name) => Ok(DiffBase::BranchName(branch_name)),
+            // Not a named branch — the layer's exact base commit is the
+            // closest analog `DiffBase` offers.
+            DiffMode::PullRequestLayer { base_oid, .. } => {
+                Ok(DiffBase::HeadlessCommitSha(base_oid))
+            }
         }
     }
 
@@ -6138,6 +6363,9 @@ impl CodeReviewView {
                         }
                     }
                     DiffMode::OtherBranch(branch_name) => DiffBase::BranchName(branch_name),
+                    DiffMode::PullRequestLayer { base_oid, .. } => {
+                        DiffBase::HeadlessCommitSha(base_oid)
+                    }
                 };
 
                 send_telemetry_from_ctx!(
@@ -6434,8 +6662,12 @@ impl CodeReviewView {
             }
             // Repository name/owner doesn't affect the git-ops UI.
             GitHubRepoEvent::RepositoryInfoChanged => {}
+            GitHubRepoEvent::StackInfoChanged => {
+                me.update_stack_control(ctx);
+            }
         });
         self.github_repo_model = Some(handle);
+        self.update_stack_control(ctx);
     }
 
     fn unsubscribe_from_git_repo_status_model(&mut self, ctx: &mut ViewContext<Self>) {
@@ -6547,8 +6779,31 @@ impl CodeReviewView {
         ctx.notify();
     }
 
+    /// PR info to show in the header's primary action: the selected stack
+    /// layer's pull request while one is selected (spec item 16 — the
+    /// primary action always opens the *selected* layer's PR, never the
+    /// current branch's), otherwise the current branch's PR as usual.
+    fn effective_pr_info_for_header(&self, ctx: &AppContext) -> Option<PrInfo> {
+        if let Some(pr_number) = self.selected_stack_pr {
+            return self
+                .stack_info(ctx)?
+                .layers
+                .into_iter()
+                .find(|layer| layer.pr.number == pr_number)
+                .map(|layer| layer.pr);
+        }
+        self.pr_info(ctx)
+    }
+
     /// Computes the current primary git action from diff stats and the diff state model.
     fn primary_git_action_mode(&self, app: &AppContext) -> PrimaryGitActionMode {
+        // A selected pull request layer is read-only: never present commit,
+        // push, publish, or create-PR as actions on it (spec item 16). The
+        // only primary action is opening that layer's PR on GitHub.
+        if self.selected_stack_pr.is_some() {
+            return PrimaryGitActionMode::ViewPr;
+        }
+
         let diff_state = self.diff_state_model.as_ref(app);
         let has_uncommitted_changes = self.has_uncommitted_changes(app);
         let has_upstream = diff_state.upstream_ref(app).is_some();
@@ -6639,8 +6894,9 @@ impl CodeReviewView {
                 });
             }
             PrimaryGitActionMode::ViewPr => {
-                let pr_info = self.pr_info(ctx);
-                let is_pr_info_refreshing = self.is_pr_info_refreshing(ctx);
+                let is_layer_selected = self.selected_stack_pr.is_some();
+                let pr_info = self.effective_pr_info_for_header(ctx);
+                let is_pr_info_refreshing = !is_layer_selected && self.is_pr_info_refreshing(ctx);
                 if let Some(pr_info) = pr_info {
                     let url = pr_info.url.clone();
                     let number = pr_info.number;
@@ -6652,6 +6908,8 @@ impl CodeReviewView {
                         button.set_tooltip(
                             Some(if is_pr_info_refreshing {
                                 "Refreshing PR info"
+                            } else if is_layer_selected {
+                                "Open this pull request layer on GitHub"
                             } else {
                                 "View pull request on GitHub"
                             }),
@@ -7375,9 +7633,14 @@ impl TypedActionView for CodeReviewView {
                 ctx.emit(CodeReviewViewEvent::Pane(event.clone()));
             }
             CodeReviewAction::ShowDiscardConfirmDialog(file_path) => {
-                self.discard_dialog_state.show_discard_confirm_dialog = true;
-
                 let current_diff_mode = self.diff_state_model.as_ref(ctx).diff_mode(ctx);
+                // Discard is a working-tree mutation, hidden/disabled per spec
+                // while a read-only pull request layer is selected.
+                if current_diff_mode.is_read_only() {
+                    return;
+                }
+
+                self.discard_dialog_state.show_discard_confirm_dialog = true;
 
                 if let Some(path) = file_path {
                     // Single file remove
@@ -7390,6 +7653,9 @@ impl TypedActionView for CodeReviewView {
                         DiffMode::OtherBranch(branch) => {
                             DiscardOperationType::FileChangesAgainstBranch(Some(branch))
                         }
+                        DiffMode::PullRequestLayer { .. } => {
+                            unreachable!("discard is disabled for read-only pull request layers")
+                        }
                     };
                 } else {
                     // All files remove
@@ -7398,6 +7664,9 @@ impl TypedActionView for CodeReviewView {
                         DiffMode::MainBranch => DiscardOperationType::AllChangesAgainstBranch(None),
                         DiffMode::OtherBranch(branch) => {
                             DiscardOperationType::AllChangesAgainstBranch(Some(branch))
+                        }
+                        DiffMode::PullRequestLayer { .. } => {
+                            unreachable!("discard is disabled for read-only pull request layers")
                         }
                     };
 
@@ -7592,6 +7861,9 @@ impl TypedActionView for CodeReviewView {
                     self.handle_submit_review_with_comments(ctx);
                     ctx.notify();
                 }
+            }
+            CodeReviewAction::SelectStackLayer(pr_number) => {
+                self.select_stack_layer(*pr_number, ctx);
             }
         }
     }
