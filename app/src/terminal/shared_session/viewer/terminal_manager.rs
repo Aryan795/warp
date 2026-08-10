@@ -758,7 +758,7 @@ impl TerminalManager {
     // readability win, since the closure body still needs each clone
     // individually. Suppress the lint instead.
     #[allow(clippy::too_many_arguments)]
-    fn handle_network_events(
+    pub(crate) fn handle_network_events(
         network: &ModelHandle<Network>,
         view: &ViewHandle<TerminalView>,
         model: Arc<FairMutex<TerminalModel>>,

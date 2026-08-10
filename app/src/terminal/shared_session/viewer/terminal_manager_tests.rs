@@ -11,10 +11,12 @@
 //! `HiddenForClose` (undo-close grace window) and `Moved`.
 
 use std::collections::HashSet;
+use std::time::Duration;
 
 use async_broadcast::broadcast;
 use chrono::Local;
 use session_sharing_protocol::common::AgentPromptRequestId;
+use session_sharing_protocol::viewer::DownstreamMessage;
 use warpui::App;
 
 use super::*;
@@ -30,7 +32,9 @@ use crate::terminal::model::session::Sessions;
 use crate::terminal::shared_session::viewer::network::Stage;
 use crate::test_util::add_window_with_terminal;
 use crate::test_util::shared_session_viewer::{
-    drain_agent_prompts, reconnecting_stage, sent_agent_prompt, submit_viewer_prompt, viewer_pane,
+    ViewerRole, attach_network, drain_agent_prompts, flush, inject_downstream, reconnecting_stage,
+    sent_agent_prompt, submit_viewer_prompt, subscribe_network_events, viewer_pane,
+    viewer_pane_with_role,
 };
 use crate::test_util::terminal::initialize_app_for_terminal_view;
 use crate::workspace::ToastStack;
@@ -521,5 +525,272 @@ fn handle_viewer_session_end_ignores_stale_ambient_end() {
             !model.lock().shared_session_status().is_finished_viewer(),
             "an ignored stale ambient end must not finish the viewer"
         );
+    });
+}
+
+/// A `RejoinedSuccessfully` message, which the server sends when a reconnect completes.
+fn rejoined_message() -> DownstreamMessage {
+    DownstreamMessage::RejoinedSuccessfully {
+        participant_list: Default::default(),
+    }
+}
+
+/// Waits past the acknowledgement deadline. The timeout is shortened under `cfg!(test)`
+/// (see `VIEWER_PROMPT_ACK_TIMEOUT`), so this does not sleep for the production duration.
+async fn wait_past_ack_timeout() {
+    warpui::r#async::Timer::after(Duration::from_millis(120)).await;
+}
+
+#[test]
+fn a_prompt_the_sharer_never_acknowledges_falls_back_to_the_queue() {
+    // `try_send` only reaches the local proxy channel. If the sharer never acknowledges, the
+    // prompt is just as lost as a rejected one, and the input would stay frozen forever.
+    App::test((), |mut app| async move {
+        let _queue_flag = FeatureFlag::QueueSlashCommand.override_enabled(true);
+        let pane = viewer_pane(&mut app, Stage::JoinedSuccessfully);
+
+        submit_viewer_prompt(&mut app, &pane.view, "no reply expected");
+        // Accepted locally, so nothing is queued yet: the client is still waiting for the ack.
+        QueuedQueryModel::handle(&app).read(&app, |queue_model, _| {
+            assert!(queue_model.queue(pane.conversation_id).is_empty());
+        });
+
+        wait_past_ack_timeout().await;
+        flush(&mut app);
+
+        QueuedQueryModel::handle(&app).read(&app, |queue_model, _| {
+            let queue = queue_model.queue(pane.conversation_id);
+            assert_eq!(
+                queue.len(),
+                1,
+                "the unacknowledged prompt must be recovered"
+            );
+            assert_eq!(queue[0].text(), "no reply expected");
+            assert_eq!(queue[0].origin(), QueuedQueryOrigin::DisconnectedViewer);
+        });
+    });
+}
+
+#[test]
+fn an_acknowledgement_arriving_after_the_timeout_removes_the_row_instead_of_duplicating_it() {
+    // The double-submit case: the client gave up and made the prompt visible again, then the
+    // sharer's acknowledgement turns up late. The sharer *did* get it, so the row must be
+    // retired rather than left queued for a second delivery.
+    App::test((), |mut app| async move {
+        let _queue_flag = FeatureFlag::QueueSlashCommand.override_enabled(true);
+        let pane = viewer_pane(&mut app, Stage::JoinedSuccessfully);
+
+        submit_viewer_prompt(&mut app, &pane.view, "slow ack");
+        let request = sent_agent_prompt(&app, &pane.network);
+
+        wait_past_ack_timeout().await;
+        flush(&mut app);
+        QueuedQueryModel::handle(&app).read(&app, |queue_model, _| {
+            assert_eq!(queue_model.queue(pane.conversation_id).len(), 1);
+        });
+
+        inject_downstream(
+            &mut app,
+            &pane.network,
+            DownstreamMessage::AgentPromptRequestInFlight(request.id.clone()),
+        );
+
+        QueuedQueryModel::handle(&app).read(&app, |queue_model, _| {
+            assert!(
+                queue_model.queue(pane.conversation_id).is_empty(),
+                "a late acknowledgement must retire the row, not leave it to be sent twice"
+            );
+        });
+    });
+}
+
+#[test]
+fn a_rejoin_refires_only_the_head_and_only_once() {
+    // Two rows are waiting when the session comes back. Exactly one prompt may go out: the head.
+    // Re-delivering the rejoin must not send it again, nor promote the row behind it.
+    App::test((), |mut app| async move {
+        let _queue_flag = FeatureFlag::QueueSlashCommand.override_enabled(true);
+        let pane = viewer_pane(&mut app, reconnecting_stage());
+
+        submit_viewer_prompt(&mut app, &pane.view, "first");
+        submit_viewer_prompt(&mut app, &pane.view, "second");
+        QueuedQueryModel::handle(&app).read(&app, |queue_model, _| {
+            assert_eq!(queue_model.queue(pane.conversation_id).len(), 2);
+        });
+        drain_agent_prompts(&app, &pane.network);
+
+        inject_downstream(&mut app, &pane.network, rejoined_message());
+
+        let sent = drain_agent_prompts(&app, &pane.network);
+        assert_eq!(sent.len(), 1, "a rejoin refires exactly the FIFO head");
+        assert_eq!(sent[0].prompt, "first");
+        QueuedQueryModel::handle(&app).read(&app, |queue_model, _| {
+            let queue = queue_model.queue(pane.conversation_id);
+            assert_eq!(queue.len(), 1, "the row behind the head stays queued");
+            assert_eq!(queue[0].text(), "second");
+        });
+
+        // A duplicate rejoin must not resend the head that is already in flight.
+        inject_downstream(&mut app, &pane.network, rejoined_message());
+        assert!(
+            drain_agent_prompts(&app, &pane.network).is_empty(),
+            "a repeated rejoin must not send anything further"
+        );
+    });
+}
+
+#[test]
+fn a_rejoin_on_a_replaced_network_sends_nothing() {
+    // Ordering hazard: the old network can still emit a rejoin after the pane has swapped to a
+    // replacement. Acting on it would push the prompt into a session the user never addressed.
+    App::test((), |mut app| async move {
+        let _queue_flag = FeatureFlag::QueueSlashCommand.override_enabled(true);
+        let pane = viewer_pane(&mut app, reconnecting_stage());
+        submit_viewer_prompt(&mut app, &pane.view, "queued for the old session");
+        drain_agent_prompts(&app, &pane.network);
+
+        // The pane moves on to a different network, as a fatal disconnect would cause.
+        let replacement = attach_network(&mut app, &pane.view, Stage::JoinedSuccessfully);
+        pane.set_current_network(Some(replacement.clone()));
+
+        inject_downstream(&mut app, &pane.network, rejoined_message());
+
+        assert!(
+            drain_agent_prompts(&app, &pane.network).is_empty(),
+            "the replaced network must not carry the prompt"
+        );
+        assert!(
+            drain_agent_prompts(&app, &replacement).is_empty(),
+            "a stale rejoin must not redirect the prompt into the replacement session"
+        );
+        QueuedQueryModel::handle(&app).read(&app, |queue_model, _| {
+            assert_eq!(
+                queue_model.queue(pane.conversation_id).len(),
+                1,
+                "the row stays queued rather than being dispatched to the wrong session"
+            );
+        });
+    });
+}
+
+#[test]
+fn a_rejoin_into_a_different_session_leaves_the_row_queued() {
+    // The row records the session it was addressed to. A rejoin belonging to some other session
+    // is not the one it was waiting for, so the head must stay put.
+    App::test((), |mut app| async move {
+        let _queue_flag = FeatureFlag::QueueSlashCommand.override_enabled(true);
+        let pane = viewer_pane(&mut app, reconnecting_stage());
+        submit_viewer_prompt(&mut app, &pane.view, "addressed elsewhere");
+        drain_agent_prompts(&app, &pane.network);
+
+        // Re-point the live slot at a network with a different session id, then rejoin it.
+        let other_session = attach_network(&mut app, &pane.view, reconnecting_stage());
+        pane.set_current_network(Some(other_session.clone()));
+        subscribe_network_events(
+            &mut app,
+            &pane.view,
+            &pane.model,
+            &pane.current_network,
+            &other_session,
+        );
+
+        inject_downstream(&mut app, &other_session, rejoined_message());
+
+        assert!(
+            drain_agent_prompts(&app, &other_session).is_empty(),
+            "a row pinned to another session must not be sent into this one"
+        );
+        QueuedQueryModel::handle(&app).read(&app, |queue_model, _| {
+            assert_eq!(queue_model.queue(pane.conversation_id).len(), 1);
+        });
+    });
+}
+
+#[test]
+fn racing_rejoins_accept_each_prompt_at_most_once_and_in_order() {
+    // Ordering across repeated drain triggers: three rows, several rejoins. Every prompt that
+    // goes out must be distinct and strictly FIFO, which is what the per-row claim guarantees.
+    App::test((), |mut app| async move {
+        let _queue_flag = FeatureFlag::QueueSlashCommand.override_enabled(true);
+        let pane = viewer_pane(&mut app, reconnecting_stage());
+        for prompt in ["one", "two", "three"] {
+            submit_viewer_prompt(&mut app, &pane.view, prompt);
+        }
+        drain_agent_prompts(&app, &pane.network);
+
+        let mut accepted = Vec::new();
+        for _ in 0..3 {
+            // Put the network back into a reconnect so the next rejoin is meaningful, then
+            // acknowledge whatever went out so the queue can advance.
+            pane.network.update(&mut app, |network, _| {
+                network.stage = reconnecting_stage();
+            });
+            inject_downstream(&mut app, &pane.network, rejoined_message());
+            for request in drain_agent_prompts(&app, &pane.network) {
+                accepted.push(request.prompt.clone());
+                inject_downstream(
+                    &mut app,
+                    &pane.network,
+                    DownstreamMessage::AgentPromptRequestInFlight(request.id),
+                );
+            }
+        }
+
+        assert_eq!(
+            accepted,
+            vec!["one", "two", "three"],
+            "prompts must be accepted strictly in FIFO order, each exactly once"
+        );
+        QueuedQueryModel::handle(&app).read(&app, |queue_model, _| {
+            assert!(queue_model.queue(pane.conversation_id).is_empty());
+        });
+    });
+}
+
+#[test]
+fn with_the_queue_surface_disabled_the_prompt_returns_to_the_input_rather_than_a_hidden_row() {
+    // Feature-off behavior: with no queue panel to show it, filing a row would hide the prompt
+    // somewhere the user cannot reach. It goes back to the editor instead.
+    App::test((), |mut app| async move {
+        let _queue_flag = FeatureFlag::QueueSlashCommand.override_enabled(false);
+        let pane = viewer_pane(&mut app, reconnecting_stage());
+
+        submit_viewer_prompt(&mut app, &pane.view, "nowhere to queue this");
+
+        QueuedQueryModel::handle(&app).read(&app, |queue_model, _| {
+            assert!(
+                queue_model.queue(pane.conversation_id).is_empty(),
+                "no invisible row may be created when the queue surface is off"
+            );
+        });
+        let input = pane.view.read(&app, |view, _| view.input().clone());
+        assert_eq!(
+            input.read(&app, |input, ctx| input.buffer_text(ctx)),
+            "nowhere to queue this",
+            "the prompt must be restored to the input so it is not silently lost"
+        );
+    });
+}
+
+#[test]
+fn a_read_only_viewer_never_reaches_the_fallback_queue() {
+    // A reader cannot submit prompts at all, so an undeliverable send should never arise for one
+    // and no disconnected-viewer row may appear on their behalf.
+    App::test((), |mut app| async move {
+        let _queue_flag = FeatureFlag::QueueSlashCommand.override_enabled(true);
+        let pane = viewer_pane_with_role(&mut app, reconnecting_stage(), ViewerRole::Reader);
+
+        submit_viewer_prompt(&mut app, &pane.view, "not allowed");
+
+        assert!(
+            drain_agent_prompts(&app, &pane.network).is_empty(),
+            "a reader's prompt must not be sent"
+        );
+        QueuedQueryModel::handle(&app).read(&app, |queue_model, _| {
+            assert!(
+                queue_model.queue(pane.conversation_id).is_empty(),
+                "a reader must not accumulate disconnected-viewer rows"
+            );
+        });
     });
 }

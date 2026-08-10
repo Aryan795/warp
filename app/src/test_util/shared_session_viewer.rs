@@ -16,13 +16,15 @@ use super::terminal::{add_window_with_terminal, initialize_app_for_terminal_view
 use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::blocklist::BlocklistAIHistoryModel;
 use crate::ai::blocklist::agent_view::AgentViewEntryOrigin;
-use crate::terminal::TerminalView;
+use crate::context_chips::prompt_type::PromptType;
+use crate::settings::WarpPromptSeparator;
 use crate::terminal::event_listener::ChannelEventListener;
 use crate::terminal::model::session::SessionId as TerminalSessionId;
 use crate::terminal::shared_session::SharedSessionStatus;
 use crate::terminal::shared_session::shared_handlers::RemoteUpdateGuard;
 use crate::terminal::shared_session::viewer::TerminalManager;
 use crate::terminal::shared_session::viewer::network::{Network, Stage};
+use crate::terminal::{TerminalModel, TerminalView};
 use crate::workspace::ToastStack;
 
 /// What the viewer is allowed to do in the shared session. Only an executor may submit prompts,
@@ -50,6 +52,7 @@ pub struct ViewerPane {
     /// The slot the manager reads the live network from. Swapping it models the network
     /// replacement that `attach_execution_session` performs on a fatal disconnect.
     pub current_network: Arc<FairMutex<Option<ModelHandle<Network>>>>,
+    pub model: Arc<FairMutex<TerminalModel>>,
 }
 
 impl ViewerPane {
@@ -108,18 +111,49 @@ pub fn viewer_pane_with_role(app: &mut App, stage: Stage, role: ViewerRole) -> V
         TerminalManager::handle_view_events(
             current_network.clone(),
             &view,
-            model,
+            model.clone(),
             RemoteUpdateGuard::new(),
             ctx,
         );
     });
+    subscribe_network_events(app, &view, &model, &current_network, &network);
 
     ViewerPane {
         view,
         conversation_id,
         network,
         current_network,
+        model,
     }
+}
+
+/// Installs the manager's inbound subscription for `network`, so a message injected into it
+/// reaches the view the same way a real server message would.
+///
+/// Called for the pane's initial network, and again by the test for a replacement network so a
+/// stale event from the old one can be shown to be ignored.
+pub fn subscribe_network_events(
+    app: &mut App,
+    view: &ViewHandle<TerminalView>,
+    model: &Arc<FairMutex<TerminalModel>>,
+    current_network: &Arc<FairMutex<Option<ModelHandle<Network>>>>,
+    network: &ModelHandle<Network>,
+) {
+    let prompt_type =
+        app.add_model(|_| PromptType::new_static(vec![], false, WarpPromptSeparator::None));
+    app.update(|ctx| {
+        TerminalManager::handle_network_events(
+            network,
+            view,
+            model.clone(),
+            current_network.clone(),
+            prompt_type,
+            RemoteUpdateGuard::new(),
+            Arc::new(FairMutex::new(None)),
+            /* enable_orchestration_polling */ false,
+            ctx,
+        );
+    });
 }
 
 /// Builds an additional `Network` for `view` without installing it as the live one. Used to model
