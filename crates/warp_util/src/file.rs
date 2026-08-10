@@ -34,8 +34,12 @@ register_error!(FileSaveError);
 
 #[derive(thiserror::Error, Debug)]
 pub enum FileLoadError {
+    /// Nothing exists at the path. Callers that can create the file — an editor opening a buffer,
+    /// for instance — treat this as "not written yet" rather than as a failure.
     #[error("File does not exist")]
     DoesNotExist,
+    /// Something is at the path but could not be read: no permission, a directory, a dangling
+    /// symlink, or a device error. Always a real failure.
     #[error("IO error when loading file.")]
     IOError(#[from] io::Error),
 }

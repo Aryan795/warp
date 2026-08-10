@@ -447,9 +447,7 @@ impl FileModel {
         let file_path_buf = file_path.to_owned();
         let future = ctx.spawn(
             async move {
-                let contents = async_fs::read_to_string(&file_path_buf)
-                    .await
-                    .map_err(FileLoadError::from);
+                let contents = Self::read_and_classify(&file_path_buf).await;
                 (file_id, contents)
             },
             move |me, (file_id, load_result), ctx| {
@@ -494,6 +492,28 @@ impl FileModel {
 
         self.abort_handles.insert(file_id, future);
         file_id
+    }
+
+    /// Reads `file_path`, distinguishing "nothing is there" from "there is something there that
+    /// could not be read".
+    ///
+    /// Only a genuinely absent path yields [`FileLoadError::DoesNotExist`]; callers use that to
+    /// offer an empty buffer at a path the user intends to create. A dangling symlink also reads
+    /// as `NotFound`, but something *does* exist at the path, so it stays an
+    /// [`FileLoadError::IOError`] alongside permission failures, directories, and device errors.
+    async fn read_and_classify(file_path: &Path) -> Result<String, FileLoadError> {
+        match async_fs::read_to_string(file_path).await {
+            Ok(contents) => Ok(contents),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                // `symlink_metadata` does not follow links, so it still succeeds for a dangling
+                // symlink and fails only when the path itself is absent.
+                match async_fs::symlink_metadata(file_path).await {
+                    Ok(_) => Err(FileLoadError::IOError(error)),
+                    Err(_) => Err(FileLoadError::DoesNotExist),
+                }
+            }
+            Err(error) => Err(FileLoadError::IOError(error)),
+        }
     }
 
     /// The directory an individually-watched file is watched through.

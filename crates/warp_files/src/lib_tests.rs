@@ -177,23 +177,11 @@ fn test_load_missing_file() {
             model.open(Path::new("test_data/missing_file.rs"), false, ctx);
         });
 
-        // Check that the first event out is the failed to load event.
+        // A path with nothing at it reports `DoesNotExist` rather than a raw IO error, so callers
+        // can offer an empty buffer instead of an error treatment (APP-5266).
         let event = receiver.recv().await.expect("Could not receive the result");
         match event {
-            TestFileModelEvent::FailedToLoad(err) => {
-                // File not found error strings differ across operating systems.
-                #[cfg(not(windows))]
-                let os_error_message = "No such file or directory";
-                #[cfg(windows)]
-                let os_error_message = "The system cannot find the file specified.";
-
-                assert_eq!(
-                    err,
-                    format!(
-                        "IOError(Os {{ code: 2, kind: NotFound, message: \"{os_error_message}\" }})"
-                    )
-                );
-            }
+            TestFileModelEvent::FailedToLoad(err) => assert_eq!(err, "DoesNotExist"),
             _ => panic!("Failed to load file"),
         }
     });
@@ -354,6 +342,48 @@ fn test_a_failed_open_registers_no_watcher() {
         files.update(app, |model, ctx| model.unsubscribe(file_id, ctx));
         assert_eq!(files.read(app, |model, _| model.file_path(file_id)), None);
     });
+}
+
+/// APP-5266: only a genuinely absent path may be reported as `DoesNotExist`, because that is what
+/// callers turn into an empty buffer. Anything that exists but cannot be read stays an error.
+#[test]
+fn test_read_classifies_missing_paths_apart_from_unreadable_ones() {
+    let directory = tempfile::tempdir().expect("temp dir");
+
+    let missing = directory.path().join("not-here.md");
+    assert!(matches!(
+        block_on(FileModel::read_and_classify(&missing)),
+        Err(FileLoadError::DoesNotExist)
+    ));
+
+    // A directory exists, so reading it is a real failure.
+    assert!(matches!(
+        block_on(FileModel::read_and_classify(directory.path())),
+        Err(FileLoadError::IOError(_))
+    ));
+
+    let readable = directory.path().join("readable.md");
+    std::fs::write(&readable, "# readable").expect("write file");
+    assert_eq!(
+        block_on(FileModel::read_and_classify(&readable)).expect("read"),
+        "# readable"
+    );
+}
+
+/// A dangling symlink reads as `NotFound`, but something *is* at the path, so opening it as a new
+/// empty file would quietly write through the link. It stays an error.
+#[cfg(unix)]
+#[test]
+fn test_read_treats_a_dangling_symlink_as_an_error() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let link = directory.path().join("dangling.md");
+    std::os::unix::fs::symlink(directory.path().join("no-such-target.md"), &link)
+        .expect("create symlink");
+
+    assert!(matches!(
+        block_on(FileModel::read_and_classify(&link)),
+        Err(FileLoadError::IOError(_))
+    ));
 }
 
 static TEST_FILE_CONTENT: &[u8] = include_bytes!("../test_data/test_file.rs");
