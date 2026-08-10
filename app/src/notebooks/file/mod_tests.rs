@@ -487,7 +487,11 @@ fn test_rendered_search_terms_for_source_line() {
     // ASCII digits are one byte each.
     assert_eq!(
         rendered_search_terms_for_source_line("12. Install the toolchain", 1),
-        ["12. Install the toolchain", "Install the toolchain", "toolchain"]
+        [
+            "12. Install the toolchain",
+            "Install the toolchain",
+            "toolchain"
+        ]
     );
     assert_eq!(
         rendered_search_terms_for_source_line("3) Restart the daemon", 1),
@@ -578,7 +582,12 @@ fn test_rendered_view_scrolls_to_requested_line() {
 
             // The offset has to be the heading's own block; landing on any
             // other block is a mis-targeted scroll, not a success.
-            let block_text = file_notebook.editor.as_ref(ctx).model().as_ref(ctx).block_text_at(scrolled_to, ctx)
+            let block_text = file_notebook
+                .editor
+                .as_ref(ctx)
+                .model()
+                .as_ref(ctx)
+                .block_text_at(scrolled_to, ctx)
                 .expect("the scrolled-to offset should be a block start");
             assert_eq!(block_text.trim(), "Details section");
 
