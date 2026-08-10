@@ -357,7 +357,8 @@ pub(super) fn system_default_handler_is_warp(path: &Path) -> bool {
 /// `.desktop` entry, without the extension.
 ///
 /// Calls xdg-mime to first find the mime type of a file, and then find the xdg
-/// default app for that mime type.
+/// default app for that mime type. `query default` can list several entries in
+/// preference order; only the first one is the default.
 fn default_desktop_app_id(path: &Path) -> Option<String> {
     let mime_type = String::from_utf8(
         Command::new("xdg-mime")
@@ -379,7 +380,13 @@ fn default_desktop_app_id(path: &Path) -> Option<String> {
     )
     .ok()?;
 
-    Some(default_app.trim().replace(".desktop", ""))
+    let default_app = default_app.lines().next()?.trim();
+    Some(
+        default_app
+            .strip_suffix(".desktop")
+            .unwrap_or(default_app)
+            .to_owned(),
+    )
 }
 
 /// Attempt to match a file with an existing editor based on Mime type

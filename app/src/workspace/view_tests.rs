@@ -1113,8 +1113,9 @@ fn test_open_markdown_viewer_target_preserves_requested_line() {
     });
 }
 
-/// APP-5273: reopening the same Markdown file at a different line reuses the
-/// existing pane, which must still adopt the newly requested line.
+/// APP-5273: reopening the same Markdown file reuses the existing pane, which
+/// must adopt a newly requested line without re-reading the file, and must not
+/// lose the recorded line to a source that carries none.
 #[cfg(feature = "local_fs")]
 #[test]
 fn test_reopening_markdown_viewer_adopts_new_requested_line() {
@@ -1125,15 +1126,15 @@ fn test_reopening_markdown_viewer_adopts_new_requested_line() {
         let markdown_path = temp_dir.path().join("README.md");
         std::fs::write(&markdown_path, "# Test\n").expect("failed to write markdown file");
 
-        for line_num in [12, 34] {
-            workspace.update(&mut app, |workspace, ctx| {
+        let open_at_line = |app: &mut App, line_num: Option<usize>| {
+            workspace.update(app, |workspace, ctx| {
                 let pane_group = workspace.active_tab_pane_group().clone();
                 workspace.handle_file_tree_event(
                     pane_group,
                     &crate::pane_group::Event::OpenFileWithTarget {
                         path: markdown_path.clone(),
                         target: FileTarget::MarkdownViewer(EditorLayout::SplitPane),
-                        line_col: Some(LineAndColumnArg {
+                        line_col: line_num.map(|line_num| LineAndColumnArg {
                             line_num,
                             column_num: None,
                         }),
@@ -1141,14 +1142,32 @@ fn test_reopening_markdown_viewer_adopts_new_requested_line() {
                     ctx,
                 );
             });
-        }
+        };
 
-        workspace.read(&app, |workspace, ctx| {
-            let pane_group = workspace.active_tab_pane_group().as_ref(ctx);
-            let markdown_panes = pane_group.file_notebook_panes(ctx).collect_vec();
-            assert_eq!(markdown_panes.len(), 1);
+        let only_file_notebook = |app: &App| {
+            workspace.read(app, |workspace, ctx| {
+                let panes = workspace
+                    .active_tab_pane_group()
+                    .as_ref(ctx)
+                    .file_notebook_panes(ctx)
+                    .collect_vec();
+                assert_eq!(panes.len(), 1, "the pane should be reused, not duplicated");
+                panes[0].1.clone()
+            })
+        };
+
+        open_at_line(&mut app, Some(12));
+        let first_file_id = only_file_notebook(&app).read(&app, |view, _| view.file_id_for_test());
+        assert!(first_file_id.is_some());
+
+        open_at_line(&mut app, Some(34));
+        let view = only_file_notebook(&app);
+        view.read(&app, |view, _| {
+            // Reusing the pane must not re-read the file: a fresh read drops the
+            // rendered document back to its loading state, blanking the pane.
+            assert_eq!(view.file_id_for_test(), first_file_id);
             assert_eq!(
-                markdown_panes[0].1.as_ref(ctx).code_source(),
+                view.code_source(),
                 Some(&CodeSource::Link {
                     path: markdown_path.clone(),
                     range_start: Some(LineAndColumnArg {
@@ -1156,6 +1175,22 @@ fn test_reopening_markdown_viewer_adopts_new_requested_line() {
                         column_num: None,
                     }),
                     range_end: None,
+                })
+            );
+        });
+
+        // A source carrying no line (the file tree, say) must leave the recorded
+        // line alone, so the Rendered/Raw toggle still lands on it.
+        open_at_line(&mut app, None);
+        view.read(&app, |view, _| {
+            assert_eq!(
+                view.code_source().and_then(|source| match source {
+                    CodeSource::Link { range_start, .. } => *range_start,
+                    _ => None,
+                }),
+                Some(LineAndColumnArg {
+                    line_num: 34,
+                    column_num: None,
                 })
             );
         });

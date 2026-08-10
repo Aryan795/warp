@@ -6,8 +6,11 @@ pub mod settings;
 #[cfg(target_os = "windows")]
 mod windows;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use settings::EditorChoice;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
@@ -333,12 +336,45 @@ pub(crate) fn is_warp_app_id(app_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Answers already computed, keyed by lowercased file extension.
+///
+/// This question is asked on the click path of every file link, and answering
+/// it costs a Launch Services lookup on macOS and two `xdg-mime` subprocesses
+/// on Linux. The OS resolves handlers per file type, not per file, and a user
+/// rarely re-associates a type mid-session, so an answer is reused for the
+/// lifetime of the process; a changed association takes effect on restart.
+static DEFAULT_HANDLER_IS_WARP_BY_EXTENSION: OnceLock<Mutex<HashMap<String, bool>>> =
+    OnceLock::new();
+
 /// Whether the OS's registered default handler for `path` is Warp itself.
 ///
 /// Handing such a file to the OS bounces it straight back into Warp through the
 /// `file://` URL entry point, which carries no line number. Callers use this to
 /// open the file in-process instead, so a requested line survives.
 pub fn system_default_handler_is_warp(path: &Path) -> bool {
+    // Extensionless files are routed by sniffing their contents rather than by
+    // type, so there is no key to cache them under.
+    let Some(extension) = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_lowercase)
+    else {
+        return probe_system_default_handler_is_warp(path);
+    };
+
+    let mut cache = DEFAULT_HANDLER_IS_WARP_BY_EXTENSION
+        .get_or_init(Default::default)
+        .lock();
+    if let Some(is_warp) = cache.get(&extension) {
+        return *is_warp;
+    }
+
+    let is_warp = probe_system_default_handler_is_warp(path);
+    cache.insert(extension, is_warp);
+    is_warp
+}
+
+fn probe_system_default_handler_is_warp(path: &Path) -> bool {
     cfg_if::cfg_if! {
         if #[cfg(target_os = "macos")] {
             mac::system_default_handler_is_warp(path)

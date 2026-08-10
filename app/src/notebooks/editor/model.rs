@@ -1349,7 +1349,7 @@ impl NotebooksEditorModel {
     }
 
     /// Scrolls to the block whose rendered text contains `text`, and returns
-    /// whether the document moved.
+    /// the offset of that block.
     ///
     /// Nothing happens unless exactly one block matches: an ambiguous match
     /// would drop the reader at an arbitrary place, which is worse than leaving
@@ -1358,16 +1358,14 @@ impl NotebooksEditorModel {
         &mut self,
         text: &str,
         ctx: &mut ModelContext<Self>,
-    ) -> bool {
-        let Some(block_start) = self.find_block_containing_text(text, ctx) else {
-            return false;
-        };
+    ) -> Option<CharOffset> {
+        let block_start = self.find_block_containing_text(text, ctx)?;
 
         self.render_state.update(ctx, |render_state, _| {
             render_state
                 .request_autoscroll_to(AutoScrollMode::PositionOffsetInViewportCenter(block_start));
         });
-        true
+        Some(block_start)
     }
 
     fn find_block_containing_text(&self, text: &str, ctx: &AppContext) -> Option<CharOffset> {
@@ -1383,6 +1381,21 @@ impl NotebooksEditorModel {
             .map(|outline| outline.start)
             .exactly_one()
             .ok()
+    }
+
+    /// The rendered text of the block starting at `block_start`, so a test can
+    /// check *which* block a scroll landed on rather than only that it moved.
+    #[cfg(test)]
+    pub fn block_text_at(&self, block_start: CharOffset, ctx: &AppContext) -> Option<String> {
+        let content = self.content.as_ref(ctx);
+        content
+            .outline_blocks()
+            .find(|outline| outline.start == block_start)
+            .map(|outline| {
+                content
+                    .text_in_range(outline.start + 1..outline.end)
+                    .into_string()
+            })
     }
 
     fn find_matching_header(&self, fragment: &str, ctx: &AppContext) -> Option<Range<CharOffset>> {

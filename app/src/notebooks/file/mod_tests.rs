@@ -482,6 +482,43 @@ fn test_rendered_search_terms_for_source_line() {
         ]
     );
 
+    // Ordered list markers, in both `N.` and `N)` spellings. The stripper
+    // indexes past the digits by their count, which holds only because leading
+    // ASCII digits are one byte each.
+    assert_eq!(
+        rendered_search_terms_for_source_line("12. Install the toolchain", 1),
+        ["12. Install the toolchain", "Install the toolchain", "toolchain"]
+    );
+    assert_eq!(
+        rendered_search_terms_for_source_line("3) Restart the daemon", 1),
+        ["3) Restart the daemon", "Restart the daemon", "Restart"]
+    );
+
+    // Prefixes nest, and every layer comes off.
+    assert_eq!(
+        rendered_search_terms_for_source_line("> - [ ] audit the dependencies", 1),
+        [
+            "> - [ ] audit the dependencies",
+            "audit the dependencies",
+            "dependencies"
+        ]
+    );
+
+    // Fence delimiters, setext underlines and table rules render as nothing.
+    for invisible in ["~~~", "```", "---", "===", "| --- | :-: |"] {
+        assert!(
+            rendered_search_terms_for_source_line(invisible, 1).is_empty(),
+            "{invisible} renders as nothing and should yield no search term"
+        );
+    }
+
+    // A fence with a language is stripped to nothing too; only its verbatim
+    // form survives, and no rendered block contains that.
+    assert_eq!(
+        rendered_search_terms_for_source_line("~~~rust", 1),
+        ["~~~rust"]
+    );
+
     // Nothing visible to search for.
     assert!(rendered_search_terms_for_source_line(markdown, 2).is_empty());
     assert!(rendered_search_terms_for_source_line(markdown, 999).is_empty());
@@ -535,23 +572,91 @@ fn test_rendered_view_scrolls_to_requested_line() {
             .await;
 
         handle.update(&mut app, |file_notebook, ctx| {
-            assert!(
-                file_notebook.scroll_to_requested_line(MARKDOWN, ctx),
-                "the heading on line 5 should be locatable in the rendered document"
-            );
+            let scrolled_to = file_notebook
+                .scroll_to_requested_line(ctx)
+                .expect("the heading on line 5 should be locatable");
+
+            // The offset has to be the heading's own block; landing on any
+            // other block is a mis-targeted scroll, not a success.
+            let block_text = file_notebook.editor.as_ref(ctx).model().as_ref(ctx).block_text_at(scrolled_to, ctx)
+                .expect("the scrolled-to offset should be a block start");
+            assert_eq!(block_text.trim(), "Details section");
 
             // A blank line has no visible text, so the document stays put.
             file_notebook.set_code_source(link_to_line(&path, 4));
-            assert!(!file_notebook.scroll_to_requested_line(MARKDOWN, ctx));
+            assert_eq!(file_notebook.scroll_to_requested_line(ctx), None);
 
             // Line 3 is repeated verbatim on line 9, so no term identifies a
             // single block and the document stays put rather than guessing.
             file_notebook.set_code_source(link_to_line(&path, 3));
-            assert!(!file_notebook.scroll_to_requested_line(MARKDOWN, ctx));
+            assert_eq!(file_notebook.scroll_to_requested_line(ctx), None);
 
             // No requested line at all.
             file_notebook.set_code_source(None);
-            assert!(!file_notebook.scroll_to_requested_line(MARKDOWN, ctx));
+            assert_eq!(file_notebook.scroll_to_requested_line(ctx), None);
+        });
+    });
+}
+
+/// The rendered Markdown line heuristic must not run on Jupyter notebooks:
+/// their source is JSON, so matching it against rendered cells would scroll
+/// somewhere meaningless.
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_requested_line_is_ignored_for_jupyter_notebooks() {
+    use warp_util::path::LineAndColumnArg;
+
+    use crate::code::editor_management::CodeSource;
+
+    App::test((), |mut app| async move {
+        init_app(&mut app);
+        let _flag = FeatureFlag::JupyterNotebookRendering.override_enabled(true);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("analysis.ipynb");
+        // Line 6 is the markdown cell's source, so the naive heuristic would
+        // match the rendered heading and scroll there.
+        std::fs::write(
+            &path,
+            r##"{
+  "nbformat": 4,
+  "nbformat_minor": 5,
+  "metadata": {"language_info": {"name": "python"}},
+  "cells": [
+    {"cell_type": "markdown", "source": ["# Notebook heading"]}
+  ]
+}
+"##,
+        )
+        .unwrap();
+
+        let (_, handle) = app.add_window(WindowStyle::NotStealFocus, FileNotebookView::new);
+        let session = Arc::new(Session::test());
+        handle
+            .update(&mut app, |file_notebook, ctx| {
+                file_notebook.set_code_source(Some(CodeSource::Link {
+                    path: path.clone(),
+                    range_start: Some(LineAndColumnArg {
+                        line_num: 6,
+                        column_num: None,
+                    }),
+                    range_end: None,
+                }));
+                file_notebook.open_local(&path, Some(session), ctx);
+
+                let file_id = file_notebook
+                    .file_id
+                    .expect("File should be opened and have a file_id");
+                let future_handle = FileModel::as_ref(ctx)
+                    .get_future_handle(file_id)
+                    .expect("Loading future should be present");
+
+                ctx.await_spawned_future(future_handle.future_id())
+            })
+            .await;
+
+        handle.update(&mut app, |file_notebook, ctx| {
+            assert_eq!(file_notebook.scroll_to_requested_line(ctx), None);
         });
     });
 }

@@ -5,6 +5,8 @@ use std::sync::Arc;
 use pathfinder_geometry::vector::vec2f;
 #[cfg(not(target_family = "wasm"))]
 use remote_server::manager::RemoteServerManager;
+#[cfg(feature = "local_fs")]
+use string_offset::CharOffset;
 use warp_core::features::FeatureFlag;
 use warp_core::ui::icons::ICON_DIMENSIONS;
 use warp_editor::model::CoreEditorModel;
@@ -97,6 +99,10 @@ pub struct FileNotebookView {
     /// Set when the file was opened from a CodePane, and restored on a raw/rendered toggle.
     #[cfg(feature = "local_fs")]
     code_source: Option<CodeSource>,
+    /// Source text of the loaded file. Held so a pane that is reused for a new
+    /// requested line can be re-scrolled without re-reading from disk.
+    #[cfg(feature = "local_fs")]
+    loaded_source: Option<String>,
     /// Persistent hover state for the header title tooltip.
     header_title_mouse_state: MouseStateHandle,
 }
@@ -293,6 +299,8 @@ impl FileNotebookView {
             display_mode_segmented_control,
             #[cfg(feature = "local_fs")]
             code_source: None,
+            #[cfg(feature = "local_fs")]
+            loaded_source: None,
             header_title_mouse_state: Default::default(),
         }
     }
@@ -302,18 +310,23 @@ impl FileNotebookView {
         self.code_source = source;
     }
 
-    /// Points an already-open pane at a new code source.
+    /// Points an already-open pane at a new code source, scrolling to its line
+    /// when that line is new to this pane.
     ///
-    /// The rendered document is scrolled to the requested line as the file is
-    /// read, so a line this pane has not seen before needs another read to take
-    /// effect.
+    /// A source that carries no line is ignored while one that does is on
+    /// record: reopening the same file from, say, the file tree must not erase
+    /// the line the Rendered/Raw toggle would otherwise restore.
     #[cfg(feature = "local_fs")]
     pub fn update_code_source(&mut self, source: Option<CodeSource>, ctx: &mut ViewContext<Self>) {
         let previous_line = self.requested_line();
+        let incoming_line = source.as_ref().and_then(requested_line_of);
+        if incoming_line.is_none() && previous_line.is_some() {
+            return;
+        }
+
         self.code_source = source;
-        let requested_line = self.requested_line();
-        if requested_line.is_some() && requested_line != previous_line {
-            self.reload_file(ctx);
+        if incoming_line.is_some() && incoming_line != previous_line {
+            self.scroll_to_requested_line(ctx);
         }
     }
 
@@ -362,31 +375,35 @@ impl FileNotebookView {
     /// The source line the opener asked for, if any.
     #[cfg(feature = "local_fs")]
     fn requested_line(&self) -> Option<usize> {
-        match self.code_source.as_ref()? {
-            CodeSource::Link { range_start, .. } => Some(range_start.as_ref()?.line_num),
-            _ => None,
-        }
+        self.code_source.as_ref().and_then(requested_line_of)
     }
 
     /// Scrolls the rendered document to the requested source line, on a best
-    /// effort basis, and reports whether it landed anywhere.
+    /// effort basis, and reports the block offset it landed on.
     ///
     /// Rendered Markdown has no source lines to jump to, so this locates the
     /// line's visible text instead and scrolls to the block containing it. A
     /// line with nothing searchable (a blank line, a fence delimiter) leaves
     /// the document where it is.
+    ///
+    /// Only Markdown is handled. Jupyter notebooks render through this same
+    /// view, but their source is JSON whose text bears no relation to the
+    /// rendered cells, so matching it would scroll somewhere meaningless.
     #[cfg(feature = "local_fs")]
-    fn scroll_to_requested_line(&mut self, markdown: &str, ctx: &mut ViewContext<Self>) -> bool {
-        let Some(line_num) = self.requested_line() else {
-            return false;
-        };
-        let search_terms = rendered_search_terms_for_source_line(markdown, line_num);
+    fn scroll_to_requested_line(&mut self, ctx: &mut ViewContext<Self>) -> Option<CharOffset> {
+        if !self.is_markdown_file() {
+            return None;
+        }
+        let line_num = self.requested_line()?;
+        let source = self.loaded_source.take()?;
+        let search_terms = rendered_search_terms_for_source_line(&source, line_num);
+        self.loaded_source = Some(source);
 
         self.editor.update(ctx, |editor, ctx| {
             editor.model().update(ctx, |model, ctx| {
                 search_terms
                     .iter()
-                    .any(|term| model.scroll_to_block_containing_text(term, ctx))
+                    .find_map(|term| model.scroll_to_block_containing_text(term, ctx))
             })
         })
     }
@@ -458,6 +475,10 @@ impl FileNotebookView {
         ctx: &mut ViewContext<Self>,
     ) {
         let local_path = path.into();
+        #[cfg(feature = "local_fs")]
+        {
+            self.loaded_source = None;
+        }
 
         if let Some(session) = &session {
             self.set_context(&local_path, session.clone(), ctx);
@@ -493,7 +514,8 @@ impl FileNotebookView {
                     match event {
                         FileModelEvent::FileLoaded { content, .. } => {
                             me.set_content(content, ctx);
-                            me.scroll_to_requested_line(content, ctx);
+                            me.loaded_source = Some(content.clone());
+                            me.scroll_to_requested_line(ctx);
                             send_telemetry_from_ctx!(
                                 TelemetryEvent::OpenNotebook(me.open_telemetry_metadata(ctx)),
                                 ctx
@@ -533,6 +555,7 @@ impl FileNotebookView {
                         }
                         FileModelEvent::FileUpdated { content, .. } => {
                             me.set_content(content, ctx);
+                            me.loaded_source = Some(content.clone());
                         }
                         FileModelEvent::FileSaved { .. } | FileModelEvent::FailedToSave { .. } => {}
                     }
@@ -585,7 +608,10 @@ impl FileNotebookView {
         ctx: &mut ViewContext<Self>,
     ) {
         #[cfg(feature = "local_fs")]
-        self.release_file_model(ctx);
+        {
+            self.loaded_source = None;
+            self.release_file_model(ctx);
+        }
         self.set_content(content, ctx);
         let title = title.into();
         self.pane_configuration.update(ctx, |pane_config, ctx| {
@@ -1329,6 +1355,15 @@ impl BackingView for FileNotebookView {
     fn set_focus_handle(&mut self, focus_handle: PaneFocusHandle, _ctx: &mut ViewContext<Self>) {
         self.focus_handle = Some(focus_handle.clone());
         self.context_menu.set_focus_handle(focus_handle);
+    }
+}
+
+/// The source line a code source points at, if it carries one.
+#[cfg(feature = "local_fs")]
+fn requested_line_of(source: &CodeSource) -> Option<usize> {
+    match source {
+        CodeSource::Link { range_start, .. } => Some(range_start.as_ref()?.line_num),
+        _ => None,
     }
 }
 
