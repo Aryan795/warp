@@ -2804,9 +2804,7 @@ impl FeaturesPageView {
             general_widgets.push(Box::new(MouseScrollMultiplierWidget::default()));
         }
 
-        if FeatureFlag::AutoOpenCodeReviewPane.is_enabled()
-            && !FeatureFlag::OpenWarpNewSettingsModes.is_enabled()
-        {
+        if !FeatureFlag::OpenWarpNewSettingsModes.is_enabled() {
             general_widgets.push(Box::new(AutoOpenCodeReviewPaneWidget::default()));
         }
 
