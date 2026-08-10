@@ -447,6 +447,7 @@ pub fn render_permissions_section(
     app: &warpui::AppContext,
 ) -> Box<dyn Element> {
     let ai_settings = AISettings::as_ref(app);
+    let window_id = app.window_id_for_view(view.view_id());
     let mut column = Flex::column().with_children([
         render_separator(appearance),
         render_section_label("PERMISSIONS", appearance),
@@ -456,7 +457,7 @@ pub fn render_permissions_section(
             "Apply code diffs",
             &view.apply_code_diffs_dropdown,
             profile_data.apply_code_diffs.description(),
-            !ai_settings.is_code_diffs_permissions_editable(app),
+            !ai_settings.is_code_diffs_permissions_editable(window_id, app),
             view.tooltip_mouse_state_handles
                 .apply_code_diffs_tooltip_mouse_state
                 .clone(),
@@ -467,7 +468,7 @@ pub fn render_permissions_section(
             "Read files",
             &view.read_files_dropdown,
             profile_data.read_files.description(),
-            !ai_settings.is_read_files_permissions_editable(app),
+            !ai_settings.is_read_files_permissions_editable(window_id, app),
             view.tooltip_mouse_state_handles
                 .read_files_tooltip_mouse_state
                 .clone(),
@@ -491,7 +492,7 @@ pub fn render_permissions_section(
         "Execute commands",
         &view.execute_commands_dropdown,
         profile_data.execute_commands.description(),
-        !ai_settings.is_execute_commands_permissions_editable(app),
+        !ai_settings.is_execute_commands_permissions_editable(window_id, app),
         view.tooltip_mouse_state_handles
             .execute_commands_tooltip_mouse_state
             .clone(),
@@ -528,7 +529,7 @@ pub fn render_permissions_section(
         "Interact with running commands",
         &view.write_to_pty_dropdown,
         profile_data.write_to_pty.description(),
-        !ai_settings.is_write_to_pty_permissions_editable(app),
+        !ai_settings.is_write_to_pty_permissions_editable(window_id, app),
         view.tooltip_mouse_state_handles
             .write_to_pty_tooltip_mouse_state
             .clone(),
@@ -541,7 +542,7 @@ pub fn render_permissions_section(
             "Computer use",
             &view.computer_use_dropdown,
             profile_data.computer_use.description(),
-            !ai_settings.is_computer_use_permissions_editable(app),
+            !ai_settings.is_computer_use_permissions_editable(window_id, app),
             view.tooltip_mouse_state_handles
                 .computer_use_tooltip_mouse_state
                 .clone(),
@@ -718,7 +719,8 @@ fn render_directory_allowlist_section(
     app: &warpui::AppContext,
 ) -> Box<dyn Element> {
     let ai_settings = AISettings::as_ref(app);
-    let is_editable = ai_settings.is_directory_allowlist_editable(app);
+    let window_id = app.window_id_for_view(view.view_id());
+    let is_editable = ai_settings.is_directory_allowlist_editable(window_id, app);
 
     render_list_section(
         "Directory allowlist",
@@ -743,7 +745,8 @@ fn render_command_allowlist_section(
     app: &warpui::AppContext,
 ) -> Box<dyn Element> {
     let ai_settings = AISettings::as_ref(app);
-    let is_editable = ai_settings.is_command_allowlist_editable(app);
+    let window_id = app.window_id_for_view(view.view_id());
+    let is_editable = ai_settings.is_command_allowlist_editable(window_id, app);
 
     render_list_section(
         "Command allowlist",

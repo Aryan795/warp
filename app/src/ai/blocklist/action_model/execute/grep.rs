@@ -147,6 +147,7 @@ fn create_redacted_grep_error_event(
 
 #[allow(clippy::too_many_arguments)]
 fn log_grep_error(
+    terminal_view_id: EntityId,
     conversation_id: AIConversationId,
     queries: Vec<String>,
     path: String,
@@ -157,6 +158,7 @@ fn log_grep_error(
     ctx: &mut AppContext,
 ) {
     let should_collect_ugc = should_collect_ai_ugc_telemetry(
+        ctx.window_id_for_view(terminal_view_id),
         ctx,
         PrivacySettings::handle(ctx)
             .as_ref(ctx)
@@ -260,6 +262,7 @@ impl GrepExecutor {
         let absolute_path_clone = absolute_path.clone();
         let working_directory_clone = current_working_directory.clone();
         let conversation_id_clone = input.conversation_id;
+        let terminal_view_id = self.terminal_view_id;
         ActionExecution::new_async(
             async move {
                 match run_grep(queries_clone, absolute_path, session, shell_launch_data)
@@ -276,6 +279,7 @@ impl GrepExecutor {
                         GrepResult::Error(ref e) => {
                             log::warn!("Executing grep resulted in error: {e:?}");
                             log_grep_error(
+                                terminal_view_id,
                                 conversation_id_clone,
                                 other_queries_clone,
                                 path_clone,
@@ -297,6 +301,7 @@ impl GrepExecutor {
                     log::warn!("Failed to execute grep: {:?}", e.error_message());
                     let error_for_conversation = e.error_for_conversation();
                     log_grep_error(
+                        terminal_view_id,
                         conversation_id_clone,
                         other_queries_clone,
                         path_clone,

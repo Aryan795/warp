@@ -7,13 +7,14 @@ use warpui::elements::{
     Text,
 };
 use warpui::fonts::{Properties, Style};
-use warpui::{Action, AppContext, Element};
+use warpui::{Action, AppContext, Element, WindowId};
 
 use crate::ai::custom_model_routers::is_custom_router_id;
 use crate::ai::llms::{
     DisableReason, LLMId, LLMInfo, ModelIconFlags, model_leading_icon,
-    should_show_bedrock_icon_for_model,
-    should_show_gemini_enterprise_agent_platform_icon_for_model, should_show_key_icon_for_model,
+    should_show_bedrock_icon_for_model_in_window,
+    should_show_gemini_enterprise_agent_platform_icon_for_model_in_window,
+    should_show_key_icon_for_model_in_window,
 };
 use crate::menu::{MenuItem, MenuItemFields, MenuTooltipPosition};
 
@@ -68,6 +69,7 @@ fn with_cost_and_profile_info<A: Action + Clone>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn make_item_fields<A: Action + Clone>(
     llm: &LLMInfo,
     action: impl Fn(&LLMInfo) -> A,
@@ -75,6 +77,7 @@ fn make_item_fields<A: Action + Clone>(
     model_id_to_add_profile_default_label_to: Option<&LLMId>,
     collapse_auto: bool,
     collapse_reasoning_variants: bool,
+    window_id: Option<WindowId>,
     app: &AppContext,
 ) -> MenuItem<A> {
     let is_auto_model = is_auto(llm);
@@ -85,10 +88,10 @@ fn make_item_fields<A: Action + Clone>(
     } else {
         llm.menu_display_name()
     };
-    let is_using_bedrock = should_show_bedrock_icon_for_model(llm, app);
+    let is_using_bedrock = should_show_bedrock_icon_for_model_in_window(llm, window_id, app);
     let is_using_gemini_enterprise_agent_platform =
-        should_show_gemini_enterprise_agent_platform_icon_for_model(llm, app);
-    let is_using_api_key = should_show_key_icon_for_model(llm, app);
+        should_show_gemini_enterprise_agent_platform_icon_for_model_in_window(llm, window_id, app);
+    let is_using_api_key = should_show_key_icon_for_model_in_window(llm, window_id, app);
     let is_custom_router = is_custom_router_id(llm.id.as_str());
     let leading_icon = model_leading_icon(
         llm,
@@ -176,6 +179,7 @@ fn make_item_fields<A: Action + Clone>(
     with_cost_and_profile_info(item, llm, model_id_to_add_profile_default_label_to).into_item()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn available_model_menu_items<A: Action + Clone>(
     choices: Vec<&LLMInfo>,
     action: impl Fn(&LLMInfo) -> A,
@@ -183,6 +187,7 @@ pub fn available_model_menu_items<A: Action + Clone>(
     position_id_fn: Option<&dyn Fn(&LLMId) -> String>,
     collapse_auto: bool,
     collapse_reasoning_variants: bool,
+    window_id: Option<WindowId>,
     app: &AppContext,
 ) -> Vec<MenuItem<A>> {
     choices
@@ -195,6 +200,7 @@ pub fn available_model_menu_items<A: Action + Clone>(
                 model_id_to_add_profile_default_label_to,
                 collapse_auto,
                 collapse_reasoning_variants,
+                window_id,
                 app,
             )
         })

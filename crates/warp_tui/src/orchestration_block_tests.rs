@@ -263,6 +263,7 @@ impl OrchestrationBlockController for TestController {
         &self,
         page: ConfigPage,
         state: &OrchestrationConfigState,
+        _window_id: Option<warpui::WindowId>,
         _ctx: &warpui::AppContext,
     ) -> OptionSnapshot {
         let (rows, selected_id) = match page {

@@ -204,6 +204,7 @@ impl From<InputConfig> for InputMode {
 /// Terminal-surface-scoped model responsible for managing AI input state.
 #[derive(Clone)]
 pub struct BlocklistAIInputModel {
+    terminal_surface_id: EntityId,
     input_config: InputConfig,
 
     /// The timestamp of the last time the input mode was switched, if the switch was to AI mode and
@@ -304,6 +305,7 @@ impl BlocklistAIInputModel {
 
         let input_config = policy.initial_config(ctx);
         Self {
+            terminal_surface_id,
             input_config,
             conversation_selection,
             ai_context_model,
@@ -338,6 +340,7 @@ impl BlocklistAIInputModel {
         });
         let input_config = policy.initial_config(ctx);
         ctx.add_model(|_| Self {
+            terminal_surface_id: EntityId::new(),
             input_config,
             conversation_selection,
             ai_context_model,
@@ -830,6 +833,7 @@ impl BlocklistAIInputModel {
                     if current_input_type != new_input_type {
                         let buffer_length = other_buffer_cloned.len();
                         let input_buffer_text_for_telemetry = should_collect_ai_ugc_telemetry(
+                            ctx.window_id_for_view(me.terminal_surface_id),
                             ctx,
                             PrivacySettings::as_ref(ctx).is_telemetry_enabled,
                         )

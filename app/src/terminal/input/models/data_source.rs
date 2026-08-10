@@ -30,9 +30,10 @@ use crate::ai::custom_model_routers::is_custom_router_id;
 use crate::ai::execution_profiles::model_menu_items::is_auto;
 use crate::ai::llms::{
     ByoKeySource, DisableReason, LLMId, LLMInfo, LLMPreferences, LLMProvider, LLMSpec,
-    ModelIconFlags, byo_key_source_for_model, model_leading_icon,
-    should_show_bedrock_icon_for_model,
-    should_show_gemini_enterprise_agent_platform_icon_for_model, should_show_key_icon_for_model,
+    ModelIconFlags, byo_key_source_for_model_in_window, model_leading_icon,
+    should_show_bedrock_icon_for_model_in_window,
+    should_show_gemini_enterprise_agent_platform_icon_for_model_in_window,
+    should_show_key_icon_for_model_in_window,
 };
 use crate::auth::AuthStateProvider;
 use crate::features::FeatureFlag;
@@ -162,6 +163,7 @@ pub fn query_model_picker_choices<'a>(
     llm_preferences: &LLMPreferences,
     choices: impl IntoIterator<Item = &'a LLMInfo>,
     query_text: &str,
+    window_id: Option<WindowId>,
     app: &AppContext,
 ) -> Vec<ModelPickerChoice> {
     let choices = ModelSelectorDataSource::order_model_choices(
@@ -185,7 +187,7 @@ pub fn query_model_picker_choices<'a>(
                 Some(result)
             };
             let disable_reason = if llm.disable_reason == Some(DisableReason::RequiresUpgrade)
-                && should_show_key_icon_for_model(llm, app)
+                && should_show_key_icon_for_model_in_window(llm, window_id, app)
             {
                 None
             } else {
@@ -323,19 +325,23 @@ impl SyncDataSource for ModelSelectorDataSource {
                 })
                 .collect_vec()
         };
-        Ok(
-            query_model_picker_choices(llm_preferences, choices, &query.text, app)
-                .into_iter()
-                .map(|choice| {
-                    QueryResult::from(ModelSearchItem::new(
-                        choice,
-                        &active_llm_id,
-                        self.window_id,
-                        app,
-                    ))
-                })
-                .collect(),
+        Ok(query_model_picker_choices(
+            llm_preferences,
+            choices,
+            &query.text,
+            Some(self.window_id),
+            app,
         )
+        .into_iter()
+        .map(|choice| {
+            QueryResult::from(ModelSearchItem::new(
+                choice,
+                &active_llm_id,
+                self.window_id,
+                app,
+            ))
+        })
+        .collect())
     }
 }
 
@@ -378,10 +384,15 @@ impl ModelSearchItem {
         let llm = &choice.llm;
         let is_custom_router = is_custom_router_id(llm.id.as_str());
         let is_auto = is_auto(llm);
-        let is_using_bedrock = should_show_bedrock_icon_for_model(llm, app);
+        let is_using_bedrock =
+            should_show_bedrock_icon_for_model_in_window(llm, Some(window_id), app);
         let is_using_gemini_enterprise_agent_platform =
-            should_show_gemini_enterprise_agent_platform_icon_for_model(llm, app);
-        let byo_key_source = byo_key_source_for_model(llm, app);
+            should_show_gemini_enterprise_agent_platform_icon_for_model_in_window(
+                llm,
+                Some(window_id),
+                app,
+            );
+        let byo_key_source = byo_key_source_for_model_in_window(llm, Some(window_id), app);
         let leading_icon = model_leading_icon(
             llm,
             ModelIconFlags {

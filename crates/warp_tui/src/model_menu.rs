@@ -4,8 +4,9 @@ use warp::editor::{CodeEditorModel, CodeEditorModelEvent};
 use warp::settings::AISettings;
 use warp::tui_export::{
     AISettingsChangedEvent, LLMId, LLMPreferences, LLMPreferencesEvent, ModelPickerChoice,
-    query_model_picker_choices, should_show_bedrock_icon_for_model,
-    should_show_gemini_enterprise_agent_platform_icon_for_model, should_show_key_icon_for_model,
+    query_model_picker_choices, should_show_bedrock_icon_for_model_in_window,
+    should_show_gemini_enterprise_agent_platform_icon_for_model_in_window,
+    should_show_key_icon_for_model_in_window,
 };
 use warp_editor::model::CoreEditorModel;
 use warpui_core::{AppContext, Entity, EntityId, ModelContext, ModelHandle, SingletonEntity};
@@ -251,11 +252,13 @@ impl TuiModelMenuModel {
             preferences,
             preferences.get_base_llm_choices_for_agent_mode(ctx),
             &query,
+            ctx.window_id_for_view(self.terminal_view_id),
             ctx,
         );
+        let window_id = ctx.window_id_for_view(self.terminal_view_id);
         let rows = choices
             .into_iter()
-            .map(|choice| model_menu_row(choice, &profile_default_id, ctx))
+            .map(|choice| model_menu_row(choice, &profile_default_id, window_id, ctx))
             .collect::<Vec<_>>();
         let preferred_index = preferred_selection_index(&rows, &active_id, query.trim().is_empty());
         let TuiModelMenuState::Open { list } = &mut self.state else {
@@ -271,14 +274,20 @@ impl TuiModelMenuModel {
 fn model_menu_row(
     choice: ModelPickerChoice,
     profile_default_id: &LLMId,
+    window_id: Option<warpui_core::WindowId>,
     app: &AppContext,
 ) -> TuiModelMenuRow {
-    let uses_external_inference = should_show_key_icon_for_model(&choice.llm, app)
-        || should_show_bedrock_icon_for_model(&choice.llm, app)
-        || should_show_gemini_enterprise_agent_platform_icon_for_model(&choice.llm, app);
+    let uses_external_inference =
+        should_show_key_icon_for_model_in_window(&choice.llm, window_id, app)
+            || should_show_bedrock_icon_for_model_in_window(&choice.llm, window_id, app)
+            || should_show_gemini_enterprise_agent_platform_icon_for_model_in_window(
+                &choice.llm,
+                window_id,
+                app,
+            );
     TuiModelMenuRow {
         is_selectable: choice.is_selectable(),
-        is_key_connected: should_show_key_icon_for_model(&choice.llm, app),
+        is_key_connected: should_show_key_icon_for_model_in_window(&choice.llm, window_id, app),
         discount_percentage: choice
             .llm
             .discount_percentage

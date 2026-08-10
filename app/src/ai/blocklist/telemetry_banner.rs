@@ -5,7 +5,7 @@ use warpui::elements::{
 use warpui::platform::Cursor;
 use warpui::ui_components::button::ButtonVariant;
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
-use warpui::{AppContext, Element, Entity, SingletonEntity, View, ViewContext};
+use warpui::{AppContext, Element, Entity, SingletonEntity, View, ViewContext, WindowId};
 
 use crate::settings_view::SettingsSection;
 use crate::terminal::view::TerminalAction;
@@ -192,9 +192,12 @@ impl Entity for TelemetryBanner {
 /// For example, a metadata event that records if a user toggled Pair/Dispatch mode does not
 /// require this check, but an event that logs the input buffer for natural language detection
 /// _does_ need to check this.
-pub fn should_collect_ai_ugc_telemetry(app: &AppContext, is_telemetry_enabled: bool) -> bool {
-    // TODO(team-scoped-settings): thread a real window_id through once available here.
-    match UserWorkspaces::as_ref(app).get_ugc_collection_enablement_setting(None) {
+pub fn should_collect_ai_ugc_telemetry(
+    window_id: Option<WindowId>,
+    app: &AppContext,
+    is_telemetry_enabled: bool,
+) -> bool {
+    match UserWorkspaces::as_ref(app).get_ugc_collection_enablement_setting(window_id) {
         UgcCollectionEnablementSetting::Disable => false,
         UgcCollectionEnablementSetting::Enable => true,
         UgcCollectionEnablementSetting::RespectUserSetting => {

@@ -21,7 +21,7 @@ use warp_core::channel::{Channel, ChannelState};
 use warp_core::execution_mode::AppExecutionMode;
 use warp_core::features::FeatureFlag;
 use warp_core::user_preferences::GetUserPreferences;
-use warpui::{AppContext, EntityId, SingletonEntity as _};
+use warpui::{AppContext, EntityId, SingletonEntity as _, WindowId};
 
 use super::{AIAgentInput, MCPContext, MCPServer, RequestMetadata, ServerOutputId, Suggestions};
 use crate::ai::agent::conversation::AIConversationId;
@@ -120,6 +120,7 @@ impl TryFrom<ServerConversationToken>
 
 #[derive(Debug, Clone)]
 pub struct RequestParams {
+    pub window_id: Option<WindowId>,
     pub input: Vec<AIAgentInput>,
     pub conversation_token: Option<ServerConversationToken>,
     pub forked_from_conversation_token: Option<ServerConversationToken>,
@@ -189,6 +190,7 @@ impl RequestParams {
     #[cfg(test)]
     pub fn new_for_test() -> Self {
         Self {
+            window_id: None,
             input: vec![],
             conversation_token: None,
             forked_from_conversation_token: None,
@@ -310,14 +312,16 @@ impl RequestParams {
         let user_workspaces = UserWorkspaces::as_ref(app);
         let api_key_manager = ApiKeyManager::as_ref(app);
         let is_byo_enabled = user_workspaces.is_byo_api_key_enabled(app);
+        let window_id =
+            terminal_view_id.and_then(|terminal_view_id| app.window_id_for_view(terminal_view_id));
         #[cfg(not(target_family = "wasm"))]
-        let geap_binding = crate::ai::geap_credentials::current_geap_policy(app).mint_binding();
+        let geap_binding =
+            crate::ai::geap_credentials::current_geap_policy(window_id, app).mint_binding();
         #[cfg(target_family = "wasm")]
         let geap_binding: Option<::ai::api_keys::GeapMintBinding> = None;
         let api_keys = api_key_manager.api_keys_for_request(
             is_byo_enabled,
-            // TODO(team-scoped-settings): thread a real window_id through once available here.
-            user_workspaces.is_aws_bedrock_credentials_enabled(None, app),
+            user_workspaces.is_aws_bedrock_credentials_enabled(window_id, app),
             geap_binding,
         );
         let is_custom_inference_enabled = user_workspaces.is_custom_inference_enabled(app);
@@ -385,6 +389,7 @@ impl RequestParams {
             .context_window_limit_for_request(app);
 
         Self {
+            window_id,
             input: request_input.all_inputs().cloned().collect(),
             conversation_token: conversation.server_conversation_token,
             forked_from_conversation_token: conversation.forked_from_conversation_token,

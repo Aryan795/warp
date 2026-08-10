@@ -829,8 +829,8 @@ impl PersistedWorkspace {
         terminal_view_id: warpui::EntityId,
         ctx: &mut ModelContext<Self>,
     ) {
-        // TODO(team-scoped-settings): thread a real window_id through once available here.
-        if !UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(None, ctx) {
+        let window_id = ctx.window_id_for_view(terminal_view_id);
+        if !UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(window_id, ctx) {
             return;
         }
 

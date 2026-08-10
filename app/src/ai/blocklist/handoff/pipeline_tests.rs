@@ -245,6 +245,7 @@ fn pending(
     prompt: &str,
 ) -> PendingHandoff {
     PendingHandoff {
+        terminal_surface_id: None,
         source_conversation: None,
         source_conversation_active,
         source_paths: Vec::new(),

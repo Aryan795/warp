@@ -2467,9 +2467,12 @@ impl BlocklistAIController {
         #[cfg(not(target_family = "wasm"))]
         {
             use ::ai::api_keys::ApiKeyManager;
+            let window_id = ctx.window_id_for_view(self.terminal_surface_id);
 
             ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
-                crate::ai::geap_credentials::refresh_geap_credentials_if_needed(manager, ctx);
+                crate::ai::geap_credentials::refresh_geap_credentials_if_needed(
+                    manager, window_id, ctx,
+                );
             });
         }
 

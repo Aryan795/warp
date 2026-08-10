@@ -15,8 +15,8 @@ use warpui::platform::Cursor;
 use warpui::ui_components::slider::SliderStateHandle;
 use warpui::ui_components::switch::SwitchStateHandle;
 use warpui::{
-    AppContext, Element, Entity, ModelHandle, SingletonEntity, TypedActionView, View, ViewContext,
-    ViewHandle,
+    AppContext, Element, Entity, EntityId, ModelHandle, SingletonEntity, TypedActionView, View,
+    ViewContext, ViewHandle,
 };
 
 use crate::ai::blocklist::BlocklistAIPermissions;
@@ -236,6 +236,7 @@ pub enum ExecutionProfileEditorViewAction {
 }
 
 pub struct ExecutionProfileEditorView {
+    view_id: EntityId,
     profile_id: ExecutionProfileId,
     pane_configuration: ModelHandle<PaneConfiguration>,
     focus_handle: Option<PaneFocusHandle>,
@@ -643,6 +644,7 @@ impl ExecutionProfileEditorView {
         });
 
         let mut view = Self {
+            view_id: ctx.view_id(),
             profile_id,
             pane_configuration,
             focus_handle: None,
@@ -874,6 +876,10 @@ impl ExecutionProfileEditorView {
         &self.profile_id
     }
 
+    pub fn view_id(&self) -> EntityId {
+        self.view_id
+    }
+
     fn update_mouse_state_handles(&mut self, ctx: &mut ViewContext<Self>) {
         let app = ctx;
         let permissions = BlocklistAIPermissions::as_ref(app);
@@ -920,12 +926,17 @@ impl ExecutionProfileEditorView {
         let permissions = BlocklistAIPermissions::as_ref(ctx);
         let current_permissions = permissions.permissions_profile_for_id(ctx, &self.profile_id);
         let ai_settings = AISettings::as_ref(ctx);
+        let window_id = Some(ctx.window_id());
 
-        let apply_code_diffs_disabled = !ai_settings.is_code_diffs_permissions_editable(ctx);
-        let read_files_disabled = !ai_settings.is_read_files_permissions_editable(ctx);
-        let execute_commands_disabled = !ai_settings.is_execute_commands_permissions_editable(ctx);
-        let write_to_pty_disabled = !ai_settings.is_write_to_pty_permissions_editable(ctx);
-        let computer_use_disabled = !ai_settings.is_computer_use_permissions_editable(ctx);
+        let apply_code_diffs_disabled =
+            !ai_settings.is_code_diffs_permissions_editable(window_id, ctx);
+        let read_files_disabled = !ai_settings.is_read_files_permissions_editable(window_id, ctx);
+        let execute_commands_disabled =
+            !ai_settings.is_execute_commands_permissions_editable(window_id, ctx);
+        let write_to_pty_disabled =
+            !ai_settings.is_write_to_pty_permissions_editable(window_id, ctx);
+        let computer_use_disabled =
+            !ai_settings.is_computer_use_permissions_editable(window_id, ctx);
         let ask_user_question_disabled =
             !ai_settings.is_ask_user_question_permissions_editable(ctx);
         let run_agents_disabled = !ai_settings.is_run_agents_permissions_editable(ctx);
@@ -1194,6 +1205,7 @@ impl ExecutionProfileEditorView {
                 None,
                 false,
                 false,
+                Some(ctx.window_id()),
                 ctx,
             );
             dropdown.set_rich_items(items, ctx);
@@ -1246,6 +1258,7 @@ impl ExecutionProfileEditorView {
                 None,
                 false,
                 false,
+                Some(ctx.window_id()),
                 ctx,
             );
             dropdown.set_rich_items(items, ctx);

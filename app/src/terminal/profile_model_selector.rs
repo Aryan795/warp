@@ -48,7 +48,8 @@ use crate::ai::harness_availability::{
 };
 use crate::ai::llms::{
     ByoKeySource, LLMId, LLMInfo, LLMPreferences, LLMPreferencesEvent, LLMSpec,
-    byo_key_source_for_model, dedupe_model_display_names, should_show_key_icon_for_model,
+    byo_key_source_for_model_in_window, dedupe_model_display_names,
+    should_show_key_icon_for_model_in_window,
 };
 use crate::appearance::Appearance;
 use crate::cloud_object::model::generic_string_model::StringModel;
@@ -1072,6 +1073,7 @@ impl ProfileModelSelector {
             Some(&|llm_id| self.model_menu_item_position_id(llm_id)),
             true,
             true,
+            ctx.window_id_for_view(self.terminal_view_id),
             ctx,
         );
 
@@ -1096,7 +1098,11 @@ impl ProfileModelSelector {
             for llm in &custom_choices {
                 let mut fields = MenuItemFields::new(llm.menu_display_name())
                     .with_on_select_action(ProfileModelSelectorAction::SelectModel(llm.id.clone()));
-                if should_show_key_icon_for_model(llm, ctx) {
+                if should_show_key_icon_for_model_in_window(
+                    llm,
+                    ctx.window_id_for_view(self.terminal_view_id),
+                    ctx,
+                ) {
                     fields = fields.with_right_side_icon(Icon::Key);
                 }
                 items.push(MenuItem::Item(fields));
@@ -1125,6 +1131,7 @@ impl ProfileModelSelector {
                 Some(&|llm_id| self.model_menu_item_position_id(llm_id)),
                 true,
                 true,
+                ctx.window_id_for_view(self.terminal_view_id),
                 ctx,
             ));
         }
@@ -2329,7 +2336,11 @@ impl View for ProfileModelSelector {
                         .cloned();
                     Some(self.render_sidecar_spec_panel(&kind, &sidecar_spec, app))
                 } else if let Some(spec) = info.spec.as_ref() {
-                    let byo_key_source = byo_key_source_for_model(info, app);
+                    let byo_key_source = byo_key_source_for_model_in_window(
+                        info,
+                        app.window_id_for_view(self.terminal_view_id),
+                        app,
+                    );
                     Some(self.render_model_spec(spec, byo_key_source, app))
                 } else {
                     None

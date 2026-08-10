@@ -415,7 +415,8 @@ impl TuiOrchestrationModel {
         config: RemoteChildLaunchConfig,
         ctx: &mut ModelContext<Self>,
     ) {
-        let prepared = match prepare_remote_child_launch(&request, config, ctx) {
+        let window_id = ctx.window_id_for_view(parent_session_id.surface_id());
+        let prepared = match prepare_remote_child_launch(&request, config, window_id, ctx) {
             Ok(prepared) => prepared,
             Err(error) => {
                 self.fail_child_request(&request, error.user_message(), ctx);

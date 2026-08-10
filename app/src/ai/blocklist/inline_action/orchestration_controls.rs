@@ -286,6 +286,7 @@ fn oz_model_menu_items<A: OrchestrationControlAction, V: View>(
         None,
         false,
         false,
+        Some(ctx.window_id()),
         ctx,
     )
 }
@@ -569,7 +570,7 @@ pub fn populate_host_picker<V: View>(
             runner_id: String::new(),
         },
     );
-    let snapshot = host_snapshot(&state, ctx);
+    let snapshot = host_snapshot(&state, Some(ctx.window_id()), ctx);
     let selected = snapshot
         .selected_id
         .unwrap_or_else(|| ORCHESTRATION_WARP_WORKER_HOST.to_string());

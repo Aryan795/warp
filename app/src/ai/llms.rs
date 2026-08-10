@@ -11,7 +11,7 @@ use warp_core::ui::Icon;
 use warp_core::user_preferences::GetUserPreferences;
 use warp_errors::report_error;
 use warp_multi_agent_api as api;
-use warpui::{AppContext, Entity, EntityId, ModelContext, SingletonEntity};
+use warpui::{AppContext, Entity, EntityId, ModelContext, SingletonEntity, WindowId};
 
 use super::custom_model_routers::{self, CustomModelRouter, ModelConfigError};
 use super::execution_profiles::profiles::AIExecutionProfilesModel;
@@ -63,9 +63,17 @@ pub fn first_party_key_source_for_provider(
     provider: &LLMProvider,
     app: &AppContext,
 ) -> Option<ByoKeySource> {
+    first_party_key_source_for_provider_in_window(provider, None, app)
+}
+
+pub fn first_party_key_source_for_provider_in_window(
+    provider: &LLMProvider,
+    window_id: Option<WindowId>,
+    app: &AppContext,
+) -> Option<ByoKeySource> {
     let workspaces = UserWorkspaces::as_ref(app);
-    // TODO(team-scoped-settings): thread a real window_id through once available here.
-    if workspaces.are_member_byo_keys_allowed(None) && is_using_api_key_for_provider(provider, app)
+    if workspaces.are_member_byo_keys_allowed(window_id)
+        && is_using_api_key_for_provider(provider, app)
     {
         return Some(ByoKeySource::UserProvided);
     }
@@ -98,18 +106,22 @@ fn is_using_team_first_party_key_for_provider(provider: &LLMProvider, app: &AppC
         })
 }
 
-pub fn byo_key_source_for_model(llm: &LLMInfo, app: &AppContext) -> Option<ByoKeySource> {
+pub fn byo_key_source_for_model_in_window(
+    llm: &LLMInfo,
+    window_id: Option<WindowId>,
+    app: &AppContext,
+) -> Option<ByoKeySource> {
     let is_custom_endpoint = LLMPreferences::as_ref(app)
         .custom_llm_info_for_id(&llm.id)
         .is_some();
-    // TODO(team-scoped-settings): thread a real window_id through once available here.
-    if is_custom_endpoint && UserWorkspaces::as_ref(app).are_member_byo_endpoints_allowed(None) {
+    if is_custom_endpoint && UserWorkspaces::as_ref(app).are_member_byo_endpoints_allowed(window_id)
+    {
         return Some(ByoKeySource::UserProvided);
     }
     if is_using_team_byo_endpoint_for_model(llm, app) {
         return Some(ByoKeySource::TeamProvided);
     }
-    first_party_key_source_for_provider(&llm.provider, app)
+    first_party_key_source_for_provider_in_window(&llm.provider, window_id, app)
 }
 
 fn is_using_team_byo_endpoint_for_model(llm: &LLMInfo, app: &AppContext) -> bool {
@@ -133,8 +145,12 @@ fn is_using_team_byo_endpoint_for_model(llm: &LLMInfo, app: &AppContext) -> bool
         })
 }
 
-pub fn should_show_key_icon_for_model(llm: &LLMInfo, app: &AppContext) -> bool {
-    byo_key_source_for_model(llm, app).is_some()
+pub fn should_show_key_icon_for_model_in_window(
+    llm: &LLMInfo,
+    window_id: Option<WindowId>,
+    app: &AppContext,
+) -> bool {
+    byo_key_source_for_model_in_window(llm, window_id, app).is_some()
 }
 
 fn should_show_host_icon_for_model(
@@ -149,24 +165,27 @@ fn should_show_host_icon_for_model(
             .is_some_and(|config| config.enabled)
 }
 
-pub fn should_show_bedrock_icon_for_model(llm: &LLMInfo, app: &AppContext) -> bool {
-    // TODO(team-scoped-settings): thread a real window_id through once available here.
+pub fn should_show_bedrock_icon_for_model_in_window(
+    llm: &LLMInfo,
+    window_id: Option<WindowId>,
+    app: &AppContext,
+) -> bool {
     should_show_host_icon_for_model(
         llm,
         &LLMModelHost::AwsBedrock,
-        UserWorkspaces::as_ref(app).is_aws_bedrock_credentials_enabled(None, app),
+        UserWorkspaces::as_ref(app).is_aws_bedrock_credentials_enabled(window_id, app),
     )
 }
 
-pub fn should_show_gemini_enterprise_agent_platform_icon_for_model(
+pub fn should_show_gemini_enterprise_agent_platform_icon_for_model_in_window(
     llm: &LLMInfo,
+    window_id: Option<WindowId>,
     app: &AppContext,
 ) -> bool {
-    // TODO(team-scoped-settings): thread a real window_id through once available here.
     should_show_host_icon_for_model(
         llm,
         &LLMModelHost::GeminiEnterprise,
-        UserWorkspaces::as_ref(app).is_gemini_enterprise_credentials_enabled(None, app),
+        UserWorkspaces::as_ref(app).is_gemini_enterprise_credentials_enabled(window_id, app),
     )
 }
 

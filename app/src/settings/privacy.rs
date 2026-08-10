@@ -484,6 +484,7 @@ impl PrivacySettings {
             is_crash_reporting_enabled: self.is_crash_reporting_enabled,
             is_telemetry_force_enabled: self.is_telemetry_force_enabled,
             should_collect_ai_ugc_telemetry: should_collect_ai_ugc_telemetry(
+                None,
                 app,
                 self.is_telemetry_enabled,
             ),

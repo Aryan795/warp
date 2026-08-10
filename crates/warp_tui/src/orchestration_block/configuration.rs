@@ -7,7 +7,7 @@ use warp::tui_export::{
     host_snapshot, location_snapshot, model_snapshot, persist_environment_selection,
     persist_host_selection,
 };
-use warpui_core::{AppContext, ModelHandle};
+use warpui_core::{AppContext, ModelHandle, WindowId};
 
 /// Row id emitted by `location_snapshot` for remote execution.
 const LOCATION_CLOUD_ID: &str = "cloud";
@@ -87,6 +87,7 @@ pub(super) trait OrchestrationBlockController {
         &self,
         page: ConfigPage,
         state: &OrchestrationConfigState,
+        window_id: Option<WindowId>,
         ctx: &AppContext,
     ) -> OptionSnapshot;
 
@@ -129,13 +130,14 @@ impl OrchestrationBlockController for ModelOrchestrationBlockController {
         &self,
         page: ConfigPage,
         state: &OrchestrationConfigState,
+        window_id: Option<WindowId>,
         ctx: &AppContext,
     ) -> OptionSnapshot {
         match page {
             ConfigPage::Location => location_snapshot(state, ctx),
             ConfigPage::Harness => harness_snapshot(state, ctx),
             ConfigPage::ApiKey => api_key_snapshot(state, ctx),
-            ConfigPage::Host => host_snapshot(state, ctx),
+            ConfigPage::Host => host_snapshot(state, window_id, ctx),
             ConfigPage::Environment => environment_snapshot(state, ctx),
             ConfigPage::Model => model_snapshot(state, ctx),
         }

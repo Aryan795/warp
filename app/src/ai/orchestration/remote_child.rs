@@ -15,7 +15,7 @@ use warp_cli::skill::SkillSpec;
 use warp_multi_agent_api as multi_agent_api;
 #[cfg(not(target_family = "wasm"))]
 use warp_util::local_or_remote_path::LocalOrRemotePath;
-use warpui::{AppContext, SingletonEntity as _};
+use warpui::{AppContext, SingletonEntity as _, WindowId};
 
 use crate::ChannelState;
 use crate::ai::agent::UserQueryMode;
@@ -235,6 +235,7 @@ pub enum CloudAgentStartupIssue {
 pub fn prepare_remote_child_launch(
     request: &StartAgentRequest,
     config: RemoteChildLaunchConfig,
+    window_id: Option<WindowId>,
     ctx: &AppContext,
 ) -> Result<PreparedRemoteChildLaunch, PrepareRemoteChildLaunchError> {
     let orchestration_harness = config.orchestration_harness();
@@ -311,7 +312,7 @@ pub fn prepare_remote_child_launch(
         conversation_id: None,
         initial_snapshot_token: None,
         agent_identity_uid: agent_identity_uid.filter(|uid| !uid.trim().is_empty()),
-        snapshot_disabled: should_disable_snapshot(ctx).then_some(true),
+        snapshot_disabled: should_disable_snapshot(window_id, ctx).then_some(true),
         orchestration_handoff: None,
     };
     Ok(PreparedRemoteChildLaunch {
@@ -369,14 +370,13 @@ pub fn classify_cloud_agent_startup_error(error: &anyhow::Error) -> CloudAgentSt
     })
 }
 
-pub(crate) fn should_disable_snapshot(ctx: &AppContext) -> bool {
+pub(crate) fn should_disable_snapshot(window_id: Option<WindowId>, ctx: &AppContext) -> bool {
     let privacy = PrivacySettings::as_ref(ctx);
     if !privacy.is_cloud_conversation_storage_enabled {
         return true;
     }
-    // TODO(team-scoped-settings): thread a real window_id through once available here.
     matches!(
-        UserWorkspaces::as_ref(ctx).get_cloud_conversation_storage_enablement_setting(None),
+        UserWorkspaces::as_ref(ctx).get_cloud_conversation_storage_enablement_setting(window_id),
         AdminEnablementSetting::Disable
     )
 }

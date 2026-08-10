@@ -1505,7 +1505,7 @@ impl AISettingsPageView {
         Self::refresh_execution_profile_dropdown_menu(
             &apply_code_diffs_dropdown_menu,
             current_permission.apply_code_diffs,
-            !AISettings::as_ref(ctx).is_code_diffs_permissions_editable(ctx),
+            !AISettings::as_ref(ctx).is_code_diffs_permissions_editable(Some(ctx.window_id()), ctx),
             ctx,
         );
 
@@ -1535,7 +1535,7 @@ impl AISettingsPageView {
         Self::refresh_execution_profile_dropdown_menu(
             &read_files_dropdown_menu,
             current_permission.read_files,
-            !AISettings::as_ref(ctx).is_read_files_permissions_editable(ctx),
+            !AISettings::as_ref(ctx).is_read_files_permissions_editable(Some(ctx.window_id()), ctx),
             ctx,
         );
 
@@ -1565,7 +1565,8 @@ impl AISettingsPageView {
         Self::refresh_execution_profile_dropdown_menu(
             &execute_commands_dropdown_menu,
             current_permission.execute_commands,
-            !AISettings::as_ref(ctx).is_execute_commands_permissions_editable(ctx),
+            !AISettings::as_ref(ctx)
+                .is_execute_commands_permissions_editable(Some(ctx.window_id()), ctx),
             ctx,
         );
 
@@ -1595,7 +1596,8 @@ impl AISettingsPageView {
         Self::refresh_write_to_pty_dropdown_menu(
             &write_to_pty_autonomy_dropdown_menu,
             current_permission.write_to_pty,
-            !AISettings::as_ref(ctx).is_write_to_pty_permissions_editable(ctx),
+            !AISettings::as_ref(ctx)
+                .is_write_to_pty_permissions_editable(Some(ctx.window_id()), ctx),
             ctx,
         );
 
@@ -3179,6 +3181,7 @@ impl AISettingsPageView {
                 None,
                 false,
                 false,
+                Some(ctx.window_id()),
                 ctx,
             );
             menu.set_rich_items(items, ctx);
@@ -3218,6 +3221,7 @@ impl AISettingsPageView {
                 None,
                 false,
                 false,
+                Some(ctx.window_id()),
                 ctx,
             );
             menu.set_rich_items(items, ctx);
@@ -3276,7 +3280,7 @@ impl AISettingsPageView {
         Self::refresh_execution_profile_dropdown_menu(
             &self.apply_code_diffs_dropdown_menu,
             apply_code_diffs_setting,
-            !AISettings::as_ref(ctx).is_code_diffs_permissions_editable(ctx),
+            !AISettings::as_ref(ctx).is_code_diffs_permissions_editable(Some(ctx.window_id()), ctx),
             ctx,
         );
 
@@ -3284,7 +3288,7 @@ impl AISettingsPageView {
         Self::refresh_execution_profile_dropdown_menu(
             &self.read_files_dropdown_menu,
             read_files_setting,
-            !AISettings::as_ref(ctx).is_read_files_permissions_editable(ctx),
+            !AISettings::as_ref(ctx).is_read_files_permissions_editable(Some(ctx.window_id()), ctx),
             ctx,
         );
 
@@ -3294,7 +3298,8 @@ impl AISettingsPageView {
         Self::refresh_execution_profile_dropdown_menu(
             &self.execute_commands_dropdown_menu,
             execute_commands_setting,
-            !AISettings::as_ref(ctx).is_execute_commands_permissions_editable(ctx),
+            !AISettings::as_ref(ctx)
+                .is_execute_commands_permissions_editable(Some(ctx.window_id()), ctx),
             ctx,
         );
 
@@ -3303,7 +3308,8 @@ impl AISettingsPageView {
         Self::refresh_write_to_pty_dropdown_menu(
             &self.write_to_pty_autonomy_dropdown_menu,
             write_to_pty_setting,
-            !AISettings::as_ref(ctx).is_write_to_pty_permissions_editable(ctx),
+            !AISettings::as_ref(ctx)
+                .is_write_to_pty_permissions_editable(Some(ctx.window_id()), ctx),
             ctx,
         );
 
@@ -6238,7 +6244,7 @@ impl AgentsWidget {
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
-        let disabled = !ai_settings.is_command_allowlist_editable(app);
+        let disabled = !ai_settings.is_command_allowlist_editable(Some(view.window_id), app);
         let list = render_input_list(
             None,
             command_allowlist
@@ -6273,7 +6279,7 @@ impl AgentsWidget {
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
-        let disabled = !ai_settings.is_directory_allowlist_editable(app);
+        let disabled = !ai_settings.is_directory_allowlist_editable(Some(view.window_id), app);
         let list = render_input_list(
             None,
             directory_allowlist
@@ -8241,7 +8247,7 @@ impl SettingsWidget for CloudAgentComputerUseWidget {
 
     fn render(
         &self,
-        _view: &Self::View,
+        view: &Self::View,
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
@@ -8255,7 +8261,7 @@ impl SettingsWidget for CloudAgentComputerUseWidget {
         let CloudAgentComputerUseState {
             enabled: is_checked,
             is_forced_by_org,
-        } = resolve_cloud_agent_computer_use_state(app);
+        } = resolve_cloud_agent_computer_use_state(Some(view.window_id), app);
 
         // Toggle is disabled if forced by org settings OR if AI is globally disabled
         let is_disabled = is_forced_by_org || !is_any_ai_enabled;

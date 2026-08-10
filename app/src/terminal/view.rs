@@ -8338,31 +8338,25 @@ impl TerminalView {
             .all(|block| block.restored_block_was_local().unwrap_or(true))
     }
 
-    // This logic is only needed if the user has disabled AI in remote sessions.
-    // It has potential performance implications if called on every focus change,
-    // so we limit it to only when the user disables AI in remote sessions.
     fn update_focused_terminal_info(&mut self, ctx: &mut ViewContext<Self>) {
         if !ctx.is_self_or_child_focused() {
             return;
         }
 
-        let is_ai_allowed_in_remote_sessions =
-            UserWorkspaces::as_ref(ctx).is_ai_allowed_in_remote_sessions(Some(ctx.window_id()));
-
-        // Only update the FocusedTerminalInfo model if the user has disabled AI in remote sessions
-        // because it's a potentially expensive operation.
-        if !is_ai_allowed_in_remote_sessions {
-            let contains_remote_blocks = self.any_session_contains_remote_blocks;
-            let contains_restored_remote_blocks = self.any_session_contains_restored_remote_blocks;
-            let updated = FocusedTerminalInfo::handle(ctx).update(
-                ctx,
-                |model: &mut FocusedTerminalInfo, ctx| {
-                    model.update(contains_remote_blocks, contains_restored_remote_blocks, ctx)
-                },
-            );
-            if updated {
-                ctx.notify();
-            }
+        let window_id = ctx.window_id();
+        let contains_remote_blocks = self.any_session_contains_remote_blocks;
+        let contains_restored_remote_blocks = self.any_session_contains_restored_remote_blocks;
+        let updated =
+            FocusedTerminalInfo::handle(ctx).update(ctx, |model: &mut FocusedTerminalInfo, ctx| {
+                model.update(
+                    Some(window_id),
+                    contains_remote_blocks,
+                    contains_restored_remote_blocks,
+                    ctx,
+                )
+            });
+        if updated {
+            ctx.notify();
         }
     }
 
@@ -14085,7 +14079,9 @@ impl TerminalView {
             }
         });
 
-        let init_model = ctx.add_model(|ctx| InitProjectModel::new(pwd_path, path_env_var, ctx));
+        let terminal_view_id = self.view_id;
+        let init_model = ctx
+            .add_model(|ctx| InitProjectModel::new(pwd_path, path_env_var, terminal_view_id, ctx));
         self.active_init_project_model = Some(init_model.clone());
 
         ctx.subscribe_to_model(&init_model, move |me, model, event, ctx| {
@@ -14558,7 +14554,7 @@ impl TerminalView {
             && is_repo
             && self.active_ai_block(ctx).is_none()
             && !is_remote_session
-            && InitProjectModel::should_have_available_steps(directory, ctx)
+            && InitProjectModel::should_have_available_steps(directory, Some(self.view_id), ctx)
     }
 
     #[cfg(not(feature = "local_fs"))]
@@ -15626,6 +15622,7 @@ impl TerminalView {
                 }
 
                 let (query_string, block_command) = if should_collect_ai_ugc_telemetry(
+                    Some(ctx.window_id()),
                     ctx,
                     PrivacySettings::as_ref(ctx).is_telemetry_enabled,
                 ) {

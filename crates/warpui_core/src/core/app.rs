@@ -4693,6 +4693,9 @@ impl AppContext {
             .get(&window_id)
             .and_then(|window| window.focused_view)
     }
+    pub fn window_id_for_view(&self, view_id: EntityId) -> Option<WindowId> {
+        self.view_to_window.get(&view_id).copied()
+    }
 
     pub fn view_name(&self, window_id: WindowId, view_id: EntityId) -> Option<&str> {
         self.windows

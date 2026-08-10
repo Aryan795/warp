@@ -7,7 +7,7 @@ use lsp::supported_servers::LSPServerType;
 #[cfg(not(target_family = "wasm"))]
 use repo_metadata::repositories::DetectedRepositories;
 use warp_util::local_or_remote_path::LocalOrRemotePath;
-use warpui::{Entity, ModelContext, SingletonEntity as _};
+use warpui::{Entity, EntityId, ModelContext, SingletonEntity as _};
 
 use crate::ai::persisted_workspace::PersistedWorkspace;
 use crate::settings::CodeSettings;
@@ -102,6 +102,7 @@ impl InitStep {
 }
 
 pub struct InitProjectModel {
+    terminal_view_id: EntityId,
     /// Fixed-size array of steps. None = step disabled/not applicable.
     /// Index corresponds to InitStepKind discriminant.
     steps: [Option<InitStep>; INIT_STEP_COUNT],
@@ -122,11 +123,14 @@ impl InitProjectModel {
     pub fn new(
         pwd_path: PathBuf,
         path_env_var: Option<String>,
+        terminal_view_id: EntityId,
         ctx: &mut ModelContext<Self>,
     ) -> Self {
-        let is_already_setup = !Self::should_have_available_steps(&pwd_path, ctx);
+        let is_already_setup =
+            !Self::should_have_available_steps(&pwd_path, Some(terminal_view_id), ctx);
 
         Self {
+            terminal_view_id,
             steps: [None, None, None, None, None],
             current_step_index: 0,
             is_cancelled: false,
@@ -175,14 +179,17 @@ impl InitProjectModel {
     }
 
     /// Check if there are any steps that need user action
-    pub fn should_have_available_steps(path: &Path, ctx: &warpui::AppContext) -> bool {
+    pub fn should_have_available_steps(
+        path: &Path,
+        terminal_view_id: Option<EntityId>,
+        ctx: &warpui::AppContext,
+    ) -> bool {
         // Note that we consider auto-indexing setting to true to satisfy the codebase context step.
         // This avoids the potential race condition with the banner showing just when we start auto-indexing.
-        // TODO(team-scoped-settings): thread a real window_id through once available here.
-        // (`should_have_available_steps` is also called from `code_review_view.rs`, which
-        // doesn't have one readily available either.)
+        let window_id =
+            terminal_view_id.and_then(|terminal_view_id| ctx.window_id_for_view(terminal_view_id));
         let has_pending_codebase_context = UserWorkspaces::as_ref(ctx)
-            .is_codebase_context_enabled(None, ctx)
+            .is_codebase_context_enabled(window_id, ctx)
             && CodebaseIndexManager::as_ref(ctx)
                 .get_codebase_index_status_for_path(path, ctx)
                 .is_none()
@@ -366,8 +373,9 @@ impl InitProjectModel {
     }
 
     fn compute_codebase_context_step(&mut self, pwd_path: &Path, ctx: &mut ModelContext<Self>) {
-        // TODO(team-scoped-settings): thread a real window_id through once available here.
-        if !UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(None, ctx) {
+        if !UserWorkspaces::as_ref(ctx)
+            .is_codebase_context_enabled(ctx.window_id_for_view(self.terminal_view_id), ctx)
+        {
             // Feature disabled, leave as None
             return;
         }

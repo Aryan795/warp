@@ -12,7 +12,7 @@ use warp_errors::report_error;
 use warp_managed_secrets::ManagedSecretManager;
 use warp_managed_secrets::client::{IdentityTokenOptions, TaskIdentityToken};
 use warpui::r#async::Timer;
-use warpui::{AppContext, ModelContext, SingletonEntity};
+use warpui::{AppContext, ModelContext, SingletonEntity, WindowId};
 
 use crate::auth::AuthStateProvider;
 use crate::settings::{AISettings, AISettingsChangedEvent};
@@ -75,19 +75,18 @@ fn geap_mint_binding_from_parts(
     })
 }
 
-pub(crate) fn current_geap_policy(app: &AppContext) -> GeapPolicy {
+pub(crate) fn current_geap_policy(window_id: Option<WindowId>, app: &AppContext) -> GeapPolicy {
     if !FeatureFlag::GeminiEnterprise.is_enabled() {
         return GeapPolicy::Disabled;
     }
     let user_workspaces = UserWorkspaces::as_ref(app);
-    // TODO(team-scoped-settings): thread a real window_id through once available here.
-    if !user_workspaces.is_gemini_enterprise_credentials_enabled(None, app) {
+    if !user_workspaces.is_gemini_enterprise_credentials_enabled(window_id, app) {
         return GeapPolicy::Disabled;
     }
     let Some(user_id) = AuthStateProvider::as_ref(app).get().user_id() else {
         return GeapPolicy::Disabled;
     };
-    let Some(settings) = user_workspaces.gemini_enterprise_host_settings(None) else {
+    let Some(settings) = user_workspaces.gemini_enterprise_host_settings(window_id) else {
         return GeapPolicy::Unconfigured;
     };
     match geap_mint_binding_from_parts(
@@ -135,32 +134,34 @@ pub(crate) fn refresh_geap_credentials(
     manager: &mut ApiKeyManager,
     ctx: &mut ModelContext<ApiKeyManager>,
 ) {
-    refresh_geap_credentials_with_options(manager, false, None, ctx);
+    refresh_geap_credentials_with_options(manager, false, None, None, ctx);
 }
 
 pub(crate) fn force_refresh_geap_credentials(
     manager: &mut ApiKeyManager,
     ctx: &mut ModelContext<ApiKeyManager>,
 ) {
-    refresh_geap_credentials_with_options(manager, true, None, ctx);
+    refresh_geap_credentials_with_options(manager, true, None, None, ctx);
 }
 
 /// Mint kickoff for a request blocked on an expired credential.
 pub(crate) fn start_geap_refresh_for_waiter(
     manager: &mut ApiKeyManager,
+    window_id: Option<WindowId>,
     waiter: oneshot::Sender<GeapRefreshOutcome>,
     ctx: &mut ModelContext<ApiKeyManager>,
 ) {
-    refresh_geap_credentials_with_options(manager, false, Some(waiter), ctx);
+    refresh_geap_credentials_with_options(manager, false, Some(waiter), window_id, ctx);
 }
 
 /// Request-time safety net. The triggering request is never delayed —
 /// it carries the currently stored token.
 pub(crate) fn refresh_geap_credentials_if_needed(
     manager: &mut ApiKeyManager,
+    window_id: Option<WindowId>,
     ctx: &mut ModelContext<ApiKeyManager>,
 ) {
-    let binding = match current_geap_policy(ctx) {
+    let binding = match current_geap_policy(window_id, ctx) {
         GeapPolicy::Disabled | GeapPolicy::Unconfigured => return,
         GeapPolicy::Mintable(binding) => binding,
     };
@@ -178,7 +179,7 @@ pub(crate) fn refresh_geap_credentials_if_needed(
     };
     if needs_mint {
         log::info!("GEAP: request-time safety net arming a credential refresh");
-        refresh_geap_credentials(manager, ctx);
+        refresh_geap_credentials_with_options(manager, false, None, window_id, ctx);
     }
 }
 
@@ -187,9 +188,10 @@ fn refresh_geap_credentials_with_options(
     manager: &mut ApiKeyManager,
     force: bool,
     waiter: Option<oneshot::Sender<GeapRefreshOutcome>>,
+    window_id: Option<WindowId>,
     ctx: &mut ModelContext<ApiKeyManager>,
 ) {
-    let minted_for = match current_geap_policy(ctx) {
+    let minted_for = match current_geap_policy(window_id, ctx) {
         GeapPolicy::Disabled => {
             manager.set_geap_credentials_state(GeapCredentialsState::Disabled, ctx);
             return;
@@ -253,7 +255,9 @@ fn refresh_geap_credentials_with_options(
                     })?;
             exchange_identity_token_for_geap_credentials(identity_token, &binding).await
         },
-        move |manager, result, ctx| apply_geap_mint_result(manager, result, minted_for, force, ctx),
+        move |manager, result, ctx| {
+            apply_geap_mint_result(manager, result, minted_for, force, window_id, ctx)
+        },
     );
 }
 
@@ -262,10 +266,11 @@ fn apply_geap_mint_result(
     result: Result<GeapCredentials, LoadGeapCredentialsError>,
     minted_for: GeapMintBinding,
     force: bool,
+    window_id: Option<WindowId>,
     ctx: &mut ModelContext<ApiKeyManager>,
 ) {
     let waiters = manager.take_geap_refresh_waiters();
-    let outcome = apply_geap_mint_result_inner(manager, result, minted_for, force, ctx);
+    let outcome = apply_geap_mint_result_inner(manager, result, minted_for, force, window_id, ctx);
     for waiter in waiters {
         let _ = waiter.send(outcome);
     }
@@ -276,9 +281,10 @@ fn apply_geap_mint_result_inner(
     result: Result<GeapCredentials, LoadGeapCredentialsError>,
     minted_for: GeapMintBinding,
     force: bool,
+    window_id: Option<WindowId>,
     ctx: &mut ModelContext<ApiKeyManager>,
 ) -> GeapRefreshOutcome {
-    let current_binding = match current_geap_policy(ctx) {
+    let current_binding = match current_geap_policy(window_id, ctx) {
         GeapPolicy::Disabled => {
             log::info!("GEAP: gate flipped off mid-mint; discarding the mint result");
             manager.set_geap_credentials_state(GeapCredentialsState::Disabled, ctx);
@@ -312,7 +318,7 @@ fn apply_geap_mint_result_inner(
                     },
                     ctx,
                 );
-                schedule_geap_token_refresh(manager, ctx);
+                schedule_geap_token_refresh(manager, window_id, ctx);
             }
             None => {
                 manager.set_geap_credentials_state(GeapCredentialsState::Missing, ctx);
@@ -339,7 +345,7 @@ fn apply_geap_mint_result_inner(
             );
             // Arm the next one-shot proactive refresh — this is what makes
             // the ~hourly loop self-sustaining.
-            schedule_geap_token_refresh(manager, ctx);
+            schedule_geap_token_refresh(manager, window_id, ctx);
             manager.clear_geap_mint_failure();
             GeapRefreshOutcome::Refreshed
         }
@@ -381,7 +387,11 @@ fn apply_geap_mint_result_inner(
 /// A one-shot timer that re-mints [`GEAP_REFRESH_LEAD_TIME`] before the
 /// loaded token's expiry. The timer is armed once per token — no periodic
 /// polling; the process wakes exactly once per token lifetime.
-fn schedule_geap_token_refresh(manager: &mut ApiKeyManager, ctx: &mut ModelContext<ApiKeyManager>) {
+fn schedule_geap_token_refresh(
+    manager: &mut ApiKeyManager,
+    window_id: Option<WindowId>,
+    ctx: &mut ModelContext<ApiKeyManager>,
+) {
     let GeapCredentialsState::Loaded { credentials, .. } = manager.geap_credentials_state() else {
         return;
     };
@@ -393,8 +403,8 @@ fn schedule_geap_token_refresh(manager: &mut ApiKeyManager, ctx: &mut ModelConte
         async move {
             Timer::after(delay).await;
         },
-        |manager, _output, ctx| {
-            refresh_geap_credentials(manager, ctx);
+        move |manager, _output, ctx| {
+            refresh_geap_credentials_with_options(manager, false, None, window_id, ctx);
         },
     );
 }

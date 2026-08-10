@@ -24,7 +24,8 @@ use warpui::platform::Cursor;
 use warpui::presenter::ChildView;
 use warpui::ui_components::components::UiComponent;
 use warpui::{
-    AppContext, Element, Entity, SingletonEntity, TypedActionView, View, ViewContext, ViewHandle,
+    AppContext, Element, Entity, EntityId, SingletonEntity, TypedActionView, View, ViewContext,
+    ViewHandle, WindowId,
 };
 
 use crate::settings::PrivacySettings;
@@ -101,7 +102,7 @@ where
 
     /// Returns whether the checkbox should be shown.
     /// This is checked in addition to checkbox_config() returning Some.
-    fn should_show_checkbox(&self, _app: &AppContext) -> bool {
+    fn should_show_checkbox(&self, _window_id: Option<WindowId>, _app: &AppContext) -> bool {
         false
     }
 
@@ -137,6 +138,7 @@ impl<S: Slide> Default for StateHandles<S> {
 }
 
 pub struct LaunchModal<S: Slide> {
+    view_id: EntityId,
     slide: S,
     next_button: ViewHandle<ActionButton>,
     secondary_button: ViewHandle<ActionButton>,
@@ -149,6 +151,7 @@ impl<S: Slide> LaunchModal<S> {
         let secondary_button = ctx.add_view(|_| ActionButton::new("", SecondaryTheme));
 
         let mut me = LaunchModal {
+            view_id: ctx.view_id(),
             slide: S::first(),
             next_button,
             secondary_button,
@@ -214,7 +217,10 @@ impl<S: Slide> LaunchModal<S> {
     }
 
     fn render_checkbox(&self, app: &AppContext) -> Option<Box<dyn Element>> {
-        if !self.slide.should_show_checkbox(app) {
+        if !self
+            .slide
+            .should_show_checkbox(app.window_id_for_view(self.view_id), app)
+        {
             return None;
         }
         let checkbox_config = self.slide.checkbox_config()?;

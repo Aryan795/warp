@@ -1058,6 +1058,7 @@ fn fill_filterable_dropdown<F>(
         None,
         false,
         false,
+        Some(ctx.window_id()),
         ctx,
     );
     dropdown.set_rich_items(items, ctx);

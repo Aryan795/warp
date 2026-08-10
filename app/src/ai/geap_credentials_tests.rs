@@ -254,7 +254,7 @@ fn stale_binding() -> GeapMintBinding {
 /// The mintable binding for the harness gate. The harness enables the GEAP
 /// host with a configured audience, so the policy is always `Mintable`.
 fn current_binding(ctx: &mut ModelContext<ApiKeyManager>) -> GeapMintBinding {
-    match current_geap_policy(ctx) {
+    match current_geap_policy(None, ctx) {
         GeapPolicy::Mintable(binding) => binding,
         other => panic!("expected a mintable GEAP policy, got {other:?}"),
     }
@@ -436,6 +436,7 @@ fn mint_completion_discards_stale_binding_result_and_remints() {
                 Ok(fresh_credentials()),
                 stale_binding(),
                 false,
+                None,
                 ctx,
             );
             match manager.geap_credentials_state() {
@@ -471,6 +472,7 @@ fn mint_completion_failure_restores_servable_previous() {
                 }),
                 current.clone(),
                 false,
+                None,
                 ctx,
             );
             match manager.geap_credentials_state() {
@@ -507,6 +509,7 @@ fn mint_failure_starts_the_cooldown_that_suppresses_the_blocking_wait() {
                 }),
                 current.clone(),
                 false,
+                None,
                 ctx,
             );
             // Restoring the previous token leaves an expired credential in
@@ -548,6 +551,7 @@ fn mint_completion_failure_with_unservable_previous_fails() {
                 }),
                 current,
                 false,
+                None,
                 ctx,
             );
             match manager.geap_credentials_state() {
@@ -576,7 +580,7 @@ fn safety_net_noops_on_fresh_token_and_rearms_parked_chain() {
             };
             // Fresh token: the safety net must not touch anything.
             manager.set_geap_credentials_state(fresh.clone(), ctx);
-            refresh_geap_credentials_if_needed(manager, ctx);
+            refresh_geap_credentials_if_needed(manager, None, ctx);
             assert_eq!(*manager.geap_credentials_state(), fresh);
 
             // Parked chain (an earlier mint failed with nothing to keep):
@@ -590,7 +594,7 @@ fn safety_net_noops_on_fresh_token_and_rearms_parked_chain() {
                 },
                 ctx,
             );
-            refresh_geap_credentials_if_needed(manager, ctx);
+            refresh_geap_credentials_if_needed(manager, None, ctx);
             match manager.geap_credentials_state() {
                 GeapCredentialsState::Refreshing { .. } => {}
                 other => panic!("expected the safety net to arm a refresh, got {other:?}"),
@@ -608,7 +612,7 @@ fn safety_net_is_a_pure_noop_when_gate_is_off() {
         ApiKeyManager::handle(&app).update(&mut app, |manager, ctx| {
             // The request path must not mutate state when the gate is off;
             // state transitions belong to the event-driven triggers.
-            refresh_geap_credentials_if_needed(manager, ctx);
+            refresh_geap_credentials_if_needed(manager, None, ctx);
             assert_eq!(
                 *manager.geap_credentials_state(),
                 GeapCredentialsState::Missing

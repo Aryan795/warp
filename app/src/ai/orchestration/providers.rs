@@ -5,7 +5,7 @@ use ai::agent::action::RunAgentsRequest;
 use settings::Setting;
 use warp_cli::agent::Harness;
 use warp_errors::report_if_error;
-use warpui::{AppContext, SingletonEntity};
+use warpui::{AppContext, SingletonEntity, WindowId};
 
 use crate::LLMPreferences;
 use crate::ai::auth_secret_types::auth_secret_types_for_harness;
@@ -87,16 +87,15 @@ pub fn first_filtered_model_id(harness_type: &str, ctx: &AppContext) -> Option<S
 /// Resolves the workspace-configured default host slug, honoring the
 /// `WARP_CLOUD_MODE_DEFAULT_HOST` env var override for developer
 /// testing. Mirrors the single-agent ambient flow.
-pub fn resolve_default_host_slug(ctx: &AppContext) -> Option<String> {
+pub fn resolve_default_host_slug(window_id: Option<WindowId>, ctx: &AppContext) -> Option<String> {
     if let Ok(slug) = std::env::var(DEFAULT_HOST_ENV_VAR) {
         let trimmed = slug.trim();
         if !trimmed.is_empty() {
             return Some(trimmed.to_string());
         }
     }
-    // TODO(team-scoped-settings): thread a real window_id through once available here.
     UserWorkspaces::as_ref(ctx)
-        .default_host_slug(None)
+        .default_host_slug(window_id)
         .filter(|s| !s.trim().is_empty())
         .map(str::to_string)
 }
@@ -104,7 +103,7 @@ pub fn resolve_default_host_slug(ctx: &AppContext) -> Option<String> {
 /// Returns the user's last-selected custom host slug from
 /// `CloudAgentSettings.last_selected_host`, excluding `"warp"` and the
 /// workspace default (those are surfaced as separate menu rows).
-pub fn resolve_recent_host_slug(ctx: &AppContext) -> Option<String> {
+pub fn resolve_recent_host_slug(window_id: Option<WindowId>, ctx: &AppContext) -> Option<String> {
     let last = CloudAgentSettings::as_ref(ctx)
         .last_selected_host
         .value()
@@ -113,7 +112,7 @@ pub fn resolve_recent_host_slug(ctx: &AppContext) -> Option<String> {
     if last.eq_ignore_ascii_case(ORCHESTRATION_WARP_WORKER_HOST) {
         return None;
     }
-    if resolve_default_host_slug(ctx).as_deref() == Some(last.as_str()) {
+    if resolve_default_host_slug(window_id, ctx).as_deref() == Some(last.as_str()) {
         return None;
     }
     Some(last)

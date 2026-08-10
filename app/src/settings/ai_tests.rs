@@ -162,7 +162,7 @@ fn test_update_both_values_changed() {
 
         // Update both values to (true, false)
         model_handle.update(&mut app, |model, ctx| {
-            model.update(true, false, ctx);
+            model.update(None, true, false, ctx);
         });
 
         // Verify model state
@@ -202,7 +202,7 @@ fn test_update_additional_value_changed() {
 
         // First update to (true, false)
         model_handle.update(&mut app, |model, ctx| {
-            model.update(true, false, ctx);
+            model.update(None, true, false, ctx);
         });
 
         // Clear events by draining the channel
@@ -210,7 +210,7 @@ fn test_update_additional_value_changed() {
 
         // Now update to (true, true) - only changing restored blocks
         model_handle.update(&mut app, |model, ctx| {
-            model.update(true, true, ctx);
+            model.update(None, true, true, ctx);
         });
 
         // Verify model state
@@ -250,7 +250,7 @@ fn test_update_no_change() {
 
         // First update to (true, true)
         model_handle.update(&mut app, |model, ctx| {
-            model.update(true, true, ctx);
+            model.update(None, true, true, ctx);
         });
 
         // Clear events by draining the channel
@@ -258,7 +258,7 @@ fn test_update_no_change() {
 
         // Update with same values (true, true)
         model_handle.update(&mut app, |model, ctx| {
-            model.update(true, true, ctx);
+            model.update(None, true, true, ctx);
         });
 
         // Verify model state remains the same
@@ -298,7 +298,7 @@ fn test_update_only_remote_toggles() {
 
         // First update to (true, true)
         model_handle.update(&mut app, |model, ctx| {
-            model.update(true, true, ctx);
+            model.update(None, true, true, ctx);
         });
 
         // Clear events by draining the channel
@@ -306,7 +306,7 @@ fn test_update_only_remote_toggles() {
 
         // Update with (false, true) - only remote blocks changes
         model_handle.update(&mut app, |model, ctx| {
-            model.update(false, true, ctx);
+            model.update(None, false, true, ctx);
         });
 
         // Verify model state
@@ -346,7 +346,7 @@ fn test_update_only_restored_toggles() {
 
         // First update to (true, true)
         model_handle.update(&mut app, |model, ctx| {
-            model.update(true, true, ctx);
+            model.update(None, true, true, ctx);
         });
 
         // Clear events by draining the channel
@@ -354,7 +354,7 @@ fn test_update_only_restored_toggles() {
 
         // Update with (true, false) - only restored blocks changes
         model_handle.update(&mut app, |model, ctx| {
-            model.update(true, false, ctx);
+            model.update(None, true, false, ctx);
         });
 
         // Verify model state

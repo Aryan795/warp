@@ -271,6 +271,7 @@ pub type MaterializeHandoffTarget = Box<
 /// may update the selected environment or model. [`execute_handoff`] then
 /// consumes it, revalidates those selections, and runs the async stages.
 pub struct PendingHandoff {
+    terminal_surface_id: Option<EntityId>,
     source_conversation: Option<AIConversation>,
     source_conversation_active: bool,
     source_paths: Vec<StandardizedPath>,
@@ -547,14 +548,15 @@ pub fn prepare_handoff(
     let model_id = preferences.cloud_runnable_oz_model_id_or_fallback(active_model_id);
     let model_is_cloud_runnable =
         preferences.is_cloud_runnable_oz_model_id(&LLMId::from(model_id.as_str()));
+    let window_id = ctx.window_id_for_view(terminal_surface_id);
     let config = AgentConfigSnapshot {
         environment_id: environment_id.map(|id| id.to_string()),
         model_id: Some(model_id.clone()),
-        computer_use_enabled: Some(resolve_cloud_agent_computer_use_state(ctx).enabled),
-        worker_host: resolve_default_host_slug(ctx),
+        computer_use_enabled: Some(resolve_cloud_agent_computer_use_state(window_id, ctx).enabled),
+        worker_host: resolve_default_host_slug(window_id, ctx),
         ..Default::default()
     };
-    let snapshot_disabled = should_disable_snapshot(ctx);
+    let snapshot_disabled = should_disable_snapshot(window_id, ctx);
     let empty_prompt = prompt.is_empty();
     let injection_path = if !empty_prompt {
         HandoffInjectionPath::None
@@ -575,6 +577,7 @@ pub fn prepare_handoff(
     );
 
     Ok(PendingHandoff {
+        terminal_surface_id: Some(terminal_surface_id),
         source_conversation,
         source_conversation_active,
         source_paths,
@@ -694,8 +697,11 @@ pub fn execute_handoff(
     );
     pending.model_is_cloud_runnable = LLMPreferences::as_ref(ctx)
         .is_cloud_runnable_oz_model_id(&LLMId::from(pending.selected_model_id.as_str()));
-    pending.snapshot_disabled = should_disable_snapshot(ctx);
-    let validation = if AISettings::as_ref(ctx).is_cloud_handoff_enabled(ctx) {
+    let window_id = pending
+        .terminal_surface_id
+        .and_then(|view_id| ctx.window_id_for_view(view_id));
+    pending.snapshot_disabled = should_disable_snapshot(window_id, ctx);
+    let validation = if AISettings::as_ref(ctx).is_cloud_handoff_enabled_in_window(window_id, ctx) {
         pending.validate()
     } else {
         Err(HandoffPrepareError::HandoffDisabled)
@@ -880,6 +886,7 @@ async fn fork_source_conversation(
 /// failure and omits the token so execution can still create the cloud run.
 async fn prepare_snapshot_for_spawn(forked: ForkedHandoff) -> SnapshotSettledHandoff {
     let PendingHandoff {
+        terminal_surface_id: _,
         source_conversation: _,
         source_conversation_active,
         source_paths,

@@ -15,6 +15,7 @@ fn request_params_with_ask_user_question_enabled(ask_user_question_enabled: bool
     let model = LLMId::from("test-model");
 
     RequestParams {
+        window_id: None,
         input: vec![],
         conversation_token: None,
         forked_from_conversation_token: None,

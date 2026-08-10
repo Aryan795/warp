@@ -25,7 +25,7 @@ use warp_core::features::FeatureFlag;
 use warp_errors::report_if_error;
 use warpui::platform::OperatingSystem;
 use warpui::platform::keyboard::KeyCode;
-use warpui::{AppContext, Entity, ModelContext, SingletonEntity, UpdateModel};
+use warpui::{AppContext, Entity, ModelContext, SingletonEntity, UpdateModel, WindowId};
 
 use crate::ai::execution_profiles::ExecutionProfilesConfig;
 use crate::ai::request_usage_model::RequestLimitInfo;
@@ -43,6 +43,7 @@ pub enum FocusedTerminalInfoEvent {
 /// remote sessions.
 #[derive(Default, Clone, Debug)]
 pub struct FocusedTerminalInfo {
+    window_id: Option<WindowId>,
     contains_any_remote_blocks: bool,
     contains_any_restored_remote_blocks: bool,
 }
@@ -50,6 +51,7 @@ pub struct FocusedTerminalInfo {
 impl FocusedTerminalInfo {
     pub fn new(_: &mut ModelContext<Self>) -> Self {
         Self {
+            window_id: None,
             contains_any_remote_blocks: false,
             contains_any_restored_remote_blocks: false,
         }
@@ -62,21 +64,27 @@ impl FocusedTerminalInfo {
     pub fn contains_any_restored_remote_blocks(&self) -> bool {
         self.contains_any_restored_remote_blocks
     }
+    pub fn window_id(&self) -> Option<WindowId> {
+        self.window_id
+    }
 
     /// Updates both remote blocks and restored blocks status in a single atomic operation.
     /// Only emits a TerminalInfoUpdated event if either value changes.
     /// Returns true if the event was emitted.
     pub fn update(
         &mut self,
+        window_id: Option<WindowId>,
         contains_any_remote_blocks: bool,
         contains_any_restored_remote_blocks: bool,
         ctx: &mut ModelContext<Self>,
     ) -> bool {
+        let window_changed = self.window_id != window_id;
         let remote_changed = self.contains_any_remote_blocks != contains_any_remote_blocks;
         let restored_changed =
             self.contains_any_restored_remote_blocks != contains_any_restored_remote_blocks;
 
-        if remote_changed || restored_changed {
+        if window_changed || remote_changed || restored_changed {
+            self.window_id = window_id;
             self.contains_any_remote_blocks = contains_any_remote_blocks;
             self.contains_any_restored_remote_blocks = contains_any_restored_remote_blocks;
             ctx.emit(FocusedTerminalInfoEvent::TerminalInfoUpdated);
@@ -2164,14 +2172,13 @@ impl AISettings {
     }
 
     pub fn is_ai_disabled_due_to_remote_session_org_policy(&self, app: &AppContext) -> bool {
-        let contains_remote_blocks = FocusedTerminalInfo::as_ref(app).contains_any_remote_blocks();
+        let terminal_info = FocusedTerminalInfo::as_ref(app);
+        let contains_remote_blocks = terminal_info.contains_any_remote_blocks();
 
-        let contains_restored_remote_blocks =
-            FocusedTerminalInfo::as_ref(app).contains_any_restored_remote_blocks();
+        let contains_restored_remote_blocks = terminal_info.contains_any_restored_remote_blocks();
 
-        // TODO(team-scoped-settings): thread a real window_id through once available here.
         let is_ai_allowed_in_remote_sessions =
-            UserWorkspaces::as_ref(app).is_ai_allowed_in_remote_sessions(None);
+            UserWorkspaces::as_ref(app).is_ai_allowed_in_remote_sessions(terminal_info.window_id());
 
         if is_ai_allowed_in_remote_sessions {
             return false;
@@ -2350,6 +2357,14 @@ impl AISettings {
     /// False when the user/org has disabled it, cloud conversations are off,
     /// or AI is globally off.
     pub fn is_cloud_handoff_enabled(&self, app: &warpui::AppContext) -> bool {
+        self.is_cloud_handoff_enabled_in_window(None, app)
+    }
+
+    pub fn is_cloud_handoff_enabled_in_window(
+        &self,
+        window_id: Option<WindowId>,
+        app: &warpui::AppContext,
+    ) -> bool {
         if !self.is_any_ai_enabled(app) || *self.should_force_disable_cloud_handoff {
             return false;
         }
@@ -2363,9 +2378,9 @@ impl AISettings {
         if !privacy.is_cloud_conversation_storage_enabled {
             return false;
         }
-        // TODO(team-scoped-settings): thread a real window_id through once available here.
         !matches!(
-            UserWorkspaces::as_ref(app).get_cloud_conversation_storage_enablement_setting(None),
+            UserWorkspaces::as_ref(app)
+                .get_cloud_conversation_storage_enablement_setting(window_id),
             crate::workspaces::workspace::AdminEnablementSetting::Disable
         )
     }
@@ -2473,62 +2488,83 @@ impl AISettings {
         self.is_any_ai_enabled(app)
     }
 
-    pub fn is_command_allowlist_editable(&self, app: &AppContext) -> bool {
-        // TODO(team-scoped-settings): thread a real window_id through once available here.
+    pub fn is_command_allowlist_editable(
+        &self,
+        window_id: Option<WindowId>,
+        app: &AppContext,
+    ) -> bool {
         let set_by_workspace = UserWorkspaces::as_ref(app)
-            .ai_autonomy_settings(None)
+            .ai_autonomy_settings(window_id)
             .has_override_for_execute_commands_allowlist();
 
         self.is_any_ai_enabled(app) && !set_by_workspace
     }
 
-    pub fn is_directory_allowlist_editable(&self, app: &AppContext) -> bool {
-        // TODO(team-scoped-settings): thread a real window_id through once available here.
+    pub fn is_directory_allowlist_editable(
+        &self,
+        window_id: Option<WindowId>,
+        app: &AppContext,
+    ) -> bool {
         let set_by_workspace = UserWorkspaces::as_ref(app)
-            .ai_autonomy_settings(None)
+            .ai_autonomy_settings(window_id)
             .has_override_for_read_files_allowlist();
 
         self.is_any_ai_enabled(app) && !set_by_workspace
     }
 
-    pub fn is_execute_commands_permissions_editable(&self, app: &AppContext) -> bool {
-        // TODO(team-scoped-settings): thread a real window_id through once available here.
+    pub fn is_execute_commands_permissions_editable(
+        &self,
+        window_id: Option<WindowId>,
+        app: &AppContext,
+    ) -> bool {
         let set_by_workspace = UserWorkspaces::as_ref(app)
-            .ai_autonomy_settings(None)
+            .ai_autonomy_settings(window_id)
             .has_override_for_execute_commands();
 
         self.is_any_ai_enabled(app) && !set_by_workspace
     }
 
-    pub fn is_write_to_pty_permissions_editable(&self, app: &AppContext) -> bool {
-        // TODO(team-scoped-settings): thread a real window_id through once available here.
+    pub fn is_write_to_pty_permissions_editable(
+        &self,
+        window_id: Option<WindowId>,
+        app: &AppContext,
+    ) -> bool {
         let set_by_workspace = UserWorkspaces::as_ref(app)
-            .ai_autonomy_settings(None)
+            .ai_autonomy_settings(window_id)
             .has_override_for_write_to_pty();
         self.is_any_ai_enabled(app) && !set_by_workspace
     }
 
-    pub fn is_computer_use_permissions_editable(&self, app: &AppContext) -> bool {
-        // TODO(team-scoped-settings): thread a real window_id through once available here.
+    pub fn is_computer_use_permissions_editable(
+        &self,
+        window_id: Option<WindowId>,
+        app: &AppContext,
+    ) -> bool {
         let set_by_workspace = UserWorkspaces::as_ref(app)
-            .ai_autonomy_settings(None)
+            .ai_autonomy_settings(window_id)
             .has_override_for_computer_use();
         self.is_any_ai_enabled(app) && !set_by_workspace
     }
 
-    pub fn is_read_files_permissions_editable(&self, app: &AppContext) -> bool {
-        // TODO(team-scoped-settings): thread a real window_id through once available here.
+    pub fn is_read_files_permissions_editable(
+        &self,
+        window_id: Option<WindowId>,
+        app: &AppContext,
+    ) -> bool {
         let set_by_workspace = UserWorkspaces::as_ref(app)
-            .ai_autonomy_settings(None)
+            .ai_autonomy_settings(window_id)
             .has_override_for_read_files();
 
         self.is_any_ai_enabled(app) && !set_by_workspace
     }
 
-    pub fn is_code_diffs_permissions_editable(&self, app: &AppContext) -> bool {
-        // TODO(team-scoped-settings): thread a real window_id through once available here.
+    pub fn is_code_diffs_permissions_editable(
+        &self,
+        window_id: Option<WindowId>,
+        app: &AppContext,
+    ) -> bool {
         let set_by_workspace = UserWorkspaces::as_ref(app)
-            .ai_autonomy_settings(None)
+            .ai_autonomy_settings(window_id)
             .has_override_for_code_diffs();
 
         self.is_any_ai_enabled(app) && !set_by_workspace

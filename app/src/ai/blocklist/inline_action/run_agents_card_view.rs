@@ -282,6 +282,7 @@ pub struct RunAgentsCardView {
 fn resolve_interactive_defaults(
     orchestration_config_state: &mut OrchestrationConfigState,
     block_model: &dyn AIBlockModel<View = AIBlock>,
+    window_id: warpui::WindowId,
     ctx: &AppContext,
 ) {
     if orchestration_config_state.model_id.is_empty() {
@@ -307,7 +308,7 @@ fn resolve_interactive_defaults(
             // over the bare "warp" fallback so self-hosted teams see
             // their default pre-selected. Mirrors the Oz webapp's
             // `HostSelector` initial-selection behavior.
-            let default_host = oc::resolve_default_host_slug(ctx)
+            let default_host = oc::resolve_default_host_slug(Some(window_id), ctx)
                 .unwrap_or_else(|| oc::ORCHESTRATION_WARP_WORKER_HOST.to_string());
             orchestration_config_state.set_worker_host(default_host);
         }
@@ -413,6 +414,7 @@ impl RunAgentsCardView {
                 resolve_interactive_defaults(
                     &mut me.orchestration_edit_state.orchestration_config_state,
                     &*me.block_model,
+                    ctx.window_id(),
                     ctx,
                 );
                 oc::repopulate_all_pickers(

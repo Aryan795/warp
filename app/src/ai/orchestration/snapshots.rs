@@ -7,7 +7,7 @@
 
 use ai::agent::action::RunAgentsExecutionMode;
 use warp_cli::agent::Harness;
-use warpui::{AppContext, SingletonEntity};
+use warpui::{AppContext, SingletonEntity, WindowId};
 
 use super::config_state::{AuthSecretSelection, OrchestrationConfigState};
 use super::providers::{
@@ -478,9 +478,13 @@ fn build_api_key_snapshot(
 /// Builds the host options in the GUI host picker's order: workspace
 /// default (badged), warp, connected worker hosts (badged), the recent
 /// custom slug (badged), then a custom-host text-entry footer.
-pub fn host_snapshot(state: &OrchestrationConfigState, ctx: &AppContext) -> OptionSnapshot {
-    let default_host = resolve_default_host_slug(ctx);
-    let recent_host = resolve_recent_host_slug(ctx);
+pub fn host_snapshot(
+    state: &OrchestrationConfigState,
+    window_id: Option<WindowId>,
+    ctx: &AppContext,
+) -> OptionSnapshot {
+    let default_host = resolve_default_host_slug(window_id, ctx);
+    let recent_host = resolve_recent_host_slug(window_id, ctx);
     let mut connected_hosts = ConnectedSelfHostedWorkersModel::as_ref(ctx)
         .worker_hosts_excluding(default_host.as_deref());
     connected_hosts.sort();

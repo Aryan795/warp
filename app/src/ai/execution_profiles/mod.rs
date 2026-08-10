@@ -5,7 +5,7 @@ pub use cloud_object_models::{
 };
 use markdown_parser::{FormattedTextFragment, FormattedTextInline};
 use warp_core::features::FeatureFlag;
-use warpui::{AppContext, SingletonEntity};
+use warpui::{AppContext, SingletonEntity, WindowId};
 
 use super::llms::{LLMContextWindow, LLMInfo, LLMPreferences, LLMProvider};
 use crate::cloud_object::model::generic_string_model::StringModel;
@@ -54,7 +54,10 @@ fn effective_base_model<'a>(profile: &AIExecutionProfile, app: &'a AppContext) -
 
 /// Resolves the effective cloud agent computer use state by reading the workspace
 /// autonomy setting and user's local preference from their respective singletons.
-pub fn resolve_cloud_agent_computer_use_state(ctx: &AppContext) -> CloudAgentComputerUseState {
+pub fn resolve_cloud_agent_computer_use_state(
+    window_id: Option<WindowId>,
+    ctx: &AppContext,
+) -> CloudAgentComputerUseState {
     if !FeatureFlag::AgentModeComputerUse.is_enabled() {
         return CloudAgentComputerUseState {
             enabled: false,
@@ -62,9 +65,8 @@ pub fn resolve_cloud_agent_computer_use_state(ctx: &AppContext) -> CloudAgentCom
         };
     }
 
-    // TODO(team-scoped-settings): thread a real window_id through once available here.
     let autonomy_setting = UserWorkspaces::as_ref(ctx)
-        .ai_autonomy_settings(None)
+        .ai_autonomy_settings(window_id)
         .computer_use_setting;
     let user_preference = *AISettings::as_ref(ctx).cloud_agent_computer_use_enabled;
 

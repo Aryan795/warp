@@ -83,6 +83,7 @@ fn prepared_remote_request_matches_gui_wire_semantics() {
                     runner_id: "runner-1".to_string(),
                     agent_identity_uid: Some("researcher-agent".to_string()),
                 },
+                None,
                 ctx,
             )
             .unwrap();
@@ -185,6 +186,7 @@ fn repo_qualified_skill_spec_resolves_into_runtime_skills() {
                     runner_id: String::new(),
                     agent_identity_uid: None,
                 },
+                None,
                 ctx,
             )
             .unwrap();
@@ -231,6 +233,7 @@ fn missing_repo_qualified_skill_reports_repository_and_reason() {
                     working_dir: temp.path().to_path_buf(),
                     ..config("")
                 },
+                None,
                 ctx,
             )
             .unwrap_err()

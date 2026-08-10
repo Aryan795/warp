@@ -369,7 +369,7 @@ impl TuiOrchestrationBlock {
     /// conversation base model, a Remote run pre-fills the default host and
     /// environment, and an `Unset` auth selection re-seeds from persisted
     /// per-harness settings.
-    fn resolve_interactive_defaults(&mut self, ctx: &AppContext) {
+    fn resolve_interactive_defaults(&mut self, ctx: &ViewContext<Self>) {
         let state = &mut self.orchestration_edit_state.orchestration_config_state;
         if state.model_id.is_empty() {
             let harness = Harness::parse_orchestration_harness(&state.harness_type);
@@ -388,7 +388,7 @@ impl TuiOrchestrationBlock {
             let needs_host = worker_host.is_empty();
             let needs_env = environment_id.is_empty();
             if needs_host {
-                let default_host = resolve_default_host_slug(ctx)
+                let default_host = resolve_default_host_slug(Some(ctx.window_id()), ctx)
                     .unwrap_or_else(|| ORCHESTRATION_WARP_WORKER_HOST.to_string());
                 state.set_worker_host(default_host);
             }
@@ -490,10 +490,11 @@ impl TuiOrchestrationBlock {
     }
 
     /// Builds the option snapshot for `page` from the shared builders.
-    fn snapshot_for_page(&self, page: ConfigPage, ctx: &AppContext) -> OptionSnapshot {
+    fn snapshot_for_page(&self, page: ConfigPage, ctx: &ViewContext<Self>) -> OptionSnapshot {
         self.controller.snapshot_for_page(
             page,
             &self.orchestration_edit_state.orchestration_config_state,
+            Some(ctx.window_id()),
             ctx,
         )
     }

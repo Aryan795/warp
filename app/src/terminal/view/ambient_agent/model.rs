@@ -1005,10 +1005,11 @@ impl AmbientAgentViewModel {
     /// both flows route to the same worker host and inherit the same defaults.
     pub(crate) fn build_default_spawn_config(&self, ctx: &AppContext) -> AgentConfigSnapshot {
         let selected_harness = self.selected_harness();
+        let window_id = ctx.window_id_for_view(self.terminal_view_id);
         let computer_use_enabled = if selected_harness == Harness::Oz {
             // If the harness is Oz, determine computer use based on workspace AI autonomy settings.
             let CloudAgentComputerUseState { enabled, .. } =
-                resolve_cloud_agent_computer_use_state(ctx);
+                resolve_cloud_agent_computer_use_state(window_id, ctx);
             Some(enabled)
         } else {
             None
@@ -1078,7 +1079,11 @@ impl AmbientAgentViewModel {
             referenced_attachments: vec![],
             conversation_id: None,
             initial_snapshot_token: None,
-            snapshot_disabled: should_disable_snapshot(ctx).then_some(true),
+            snapshot_disabled: should_disable_snapshot(
+                ctx.window_id_for_view(self.terminal_view_id),
+                ctx,
+            )
+            .then_some(true),
             orchestration_handoff: None,
         };
 
