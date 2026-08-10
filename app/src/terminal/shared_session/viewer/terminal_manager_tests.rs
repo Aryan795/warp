@@ -315,10 +315,9 @@ fn streaming_exchange() -> AIAgentExchange {
 
 #[test]
 fn viewer_prompt_submitted_while_reconnecting_is_preserved_as_an_editable_queue_row() {
-    // The reported bug. `SharedSessionStatus` still says `ActiveViewer` while the websocket
-    // reconnects, so the prompt was routed to a network that dropped it silently: nothing reached
-    // the sharer, nothing was kept, and the input stayed frozen. The prompt must now survive as
-    // the user's own queue row.
+    // `SharedSessionStatus` reports `ActiveViewer` throughout a reconnect, so a prompt submitted
+    // then is routed to a network that cannot carry it. It must survive as the user's own queue
+    // row, with the editor released and no stale turn left advertised.
     App::test((), |mut app| async move {
         let _queue_flag = FeatureFlag::QueueSlashCommand.override_enabled(true);
         let pane = viewer_pane(&mut app, reconnecting_stage());
@@ -347,7 +346,7 @@ fn viewer_prompt_submitted_while_reconnecting_is_preserved_as_an_editable_queue_
             assert_eq!(row.origin(), QueuedQueryOrigin::DisconnectedViewer);
             assert!(!row.is_locked(), "the row must be editable and deletable");
             let target = row
-                .disconnected_viewer_target()
+                .shared_session_target()
                 .expect("the row records where it should be retried");
             assert_eq!(
                 target.session_id(),
@@ -356,16 +355,15 @@ fn viewer_prompt_submitted_while_reconnecting_is_preserved_as_an_editable_queue_
             );
         });
 
-        // The other half of the reported symptom: with the prompt gone and nothing running, the
-        // conversation must stop advertising a turn, or `Warping...` hangs around forever.
+        // With the prompt out of flight and nothing else running, the conversation must stop
+        // advertising a turn, otherwise `Warping...` renders indefinitely.
         assert!(
             !warping_gate_is_satisfied(&terminal_view, conversation_id, &app),
             "an undelivered prompt must not leave the Warping... gate satisfied"
         );
 
-        // The frozen editor was the other user-visible half of the bug. Freezing renders the
-        // prompt with a trailing loading marker, so its absence is what proves the input was
-        // handed back rather than left waiting on a reply that never comes.
+        // Freezing renders the prompt with a trailing loading marker, so the marker's absence is
+        // what shows the editor is back under the user's control rather than waiting on a reply.
         let input = terminal_view.read(&app, |view, _| view.input().clone());
         let buffer = input.read(&app, |input, ctx| input.buffer_text(ctx));
         assert!(
@@ -377,9 +375,9 @@ fn viewer_prompt_submitted_while_reconnecting_is_preserved_as_an_editable_queue_
 
 #[test]
 fn a_conversation_advertises_a_turn_before_the_prompt_is_even_submitted() {
-    // Anchors the precondition the fix depends on: a conversation reports `InProgress` from
-    // creation, so the status by itself proves nothing about whether work is running. Without
-    // this the reproduction test could pass simply because the gate was never armed.
+    // A conversation reports `InProgress` from creation, so the status alone says nothing about
+    // whether work is running. Pinning that here keeps the reproduction honest: without it, that
+    // test could pass merely because the gate was never armed in the first place.
     App::test((), |mut app| async move {
         let _queue_flag = FeatureFlag::QueueSlashCommand.override_enabled(true);
         let pane = viewer_pane(&mut app, reconnecting_stage());

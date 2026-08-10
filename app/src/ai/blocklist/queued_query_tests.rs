@@ -9,8 +9,8 @@ use session_sharing_protocol::common::{AgentPromptRequestId, ServerConversationT
 use warpui::{App, SingletonEntity};
 
 use super::{
-    AutofireAction, DisconnectedViewerTarget, QueuedQuery, QueuedQueryEvent, QueuedQueryId,
-    QueuedQueryModel, QueuedQueryOrigin,
+    AutofireAction, QueuedQuery, QueuedQueryEvent, QueuedQueryId, QueuedQueryModel,
+    QueuedQueryOrigin, SharedSessionTarget,
 };
 use crate::ai::agent::ImageContext;
 use crate::ai::agent::conversation::AIConversationId;
@@ -55,8 +55,8 @@ fn command_query(text: &str) -> QueuedQuery {
     QueuedQuery::new_command(text.to_owned(), QueuedQueryOrigin::AutoQueueToggle)
 }
 
-fn disconnected_viewer_target() -> DisconnectedViewerTarget {
-    DisconnectedViewerTarget::new(SessionId::new(), Some(ServerConversationToken::new()))
+fn shared_session_target() -> SharedSessionTarget {
+    SharedSessionTarget::new(SessionId::new(), Some(ServerConversationToken::new()))
 }
 
 fn disconnected_viewer_query(text: &str, attachments: Vec<PendingAttachment>) -> QueuedQuery {
@@ -64,7 +64,7 @@ fn disconnected_viewer_query(text: &str, attachments: Vec<PendingAttachment>) ->
         text.to_owned(),
         attachments,
         AgentPromptRequestId::new(),
-        disconnected_viewer_target(),
+        shared_session_target(),
     )
 }
 
@@ -1088,7 +1088,7 @@ fn disconnected_viewer_row_stays_user_managed() {
         let attachment = image_attachment("screenshot.png");
         let query = disconnected_viewer_query("retry me", vec![attachment]);
         let target = query
-            .disconnected_viewer_target()
+            .shared_session_target()
             .expect("a disconnected-viewer row carries its retry target")
             .clone();
         let query_id = model.update(&mut app, |m, ctx| m.append(conv, query, ctx));
@@ -1098,7 +1098,7 @@ fn disconnected_viewer_row_stays_user_managed() {
             assert_eq!(row.origin(), QueuedQueryOrigin::DisconnectedViewer);
             assert!(!row.is_locked(), "the row must remain editable and movable");
             assert_eq!(row.attachments().len(), 1);
-            assert_eq!(row.disconnected_viewer_target(), Some(&target));
+            assert_eq!(row.shared_session_target(), Some(&target));
         });
 
         let removed = model.update(&mut app, |m, ctx| m.remove_by_id(conv, query_id, ctx));
@@ -1181,9 +1181,9 @@ fn restoring_a_claim_can_retarget_it_without_losing_the_row() {
         let claim = model
             .update(&mut app, |m, ctx| m.claim_prompt_head(conv, ctx))
             .expect("the head is claimable");
-        let target = disconnected_viewer_target();
+        let target = shared_session_target();
         model.update(&mut app, |m, ctx| {
-            m.retarget_claim_to_disconnected_viewer(claim, target.clone(), ctx)
+            m.retarget_claim_to_shared_session(claim, target.clone(), ctx)
         });
 
         model.read(&app, |m, _| {
@@ -1194,7 +1194,7 @@ fn restoring_a_claim_can_retarget_it_without_losing_the_row() {
             assert_eq!(row.text(), "needs a retry");
             assert_eq!(row.attachments().len(), 1);
             assert_eq!(row.origin(), QueuedQueryOrigin::DisconnectedViewer);
-            assert_eq!(row.disconnected_viewer_target(), Some(&target));
+            assert_eq!(row.shared_session_target(), Some(&target));
         });
     });
 }

@@ -1039,7 +1039,7 @@ pub enum Event {
     /// A viewer in a shared session is requesting to send an agent prompt.
     SendAgentPrompt {
         /// Everything needed to recover the prompt if the sharer never receives it.
-        dispatch: Box<ViewerPromptDispatch>,
+        snapshot: Box<ViewerPromptSnapshot>,
         server_conversation_token: Option<ServerConversationToken>,
         prompt: String,
         attachments: Vec<AgentAttachment>,
@@ -1139,7 +1139,7 @@ pub enum Event {
 /// it so a send the client rejects — or one the server never acknowledges — can be turned back
 /// into an editable queue row carrying the user's original intent.
 #[derive(Clone, Debug)]
-pub struct ViewerPromptDispatch {
+pub struct ViewerPromptSnapshot {
     /// Correlates this send with the server's `AgentPromptRequestInFlight` acknowledgement.
     request_id: AgentPromptRequestId,
     /// The conversation the prompt belongs to, and therefore the queue that owns its fallback
@@ -1149,22 +1149,22 @@ pub struct ViewerPromptDispatch {
     /// The attachments as user intent, retained across the asynchronous upload so a post-upload
     /// rejection can still file a row that carries them.
     pending_attachments: Vec<PendingAttachment>,
-    /// Set when this send is retrying a row already claimed out of the queue; restoring the claim
-    /// puts that exact row back rather than filing a duplicate.
-    claim: Option<ClaimedQuery>,
+    /// True when this send is retrying a row claimed out of the queue. The claim itself is parked
+    /// in `QueuedQueryModel` under `request_id`, because this snapshot is cloned at every event
+    /// hop and a cloned claim would mean two owners of one prompt.
+    is_claimed_row: bool,
 }
 
-impl ViewerPromptDispatch {
+impl ViewerPromptSnapshot {
     pub fn new(
         conversation_id: Option<AIConversationId>,
         prompt: String,
         pending_attachments: Vec<PendingAttachment>,
-        claim: Option<ClaimedQuery>,
+        claim: Option<&ClaimedQuery>,
     ) -> Self {
         // Reuse the claimed row's stable ID so a late acknowledgement for an earlier attempt on
         // the same unedited row still resolves to it.
         let request_id = claim
-            .as_ref()
             .and_then(|claim| claim.query().request_id())
             .cloned()
             .unwrap_or_default();
@@ -1173,7 +1173,7 @@ impl ViewerPromptDispatch {
             conversation_id,
             prompt,
             pending_attachments,
-            claim,
+            is_claimed_row: claim.is_some(),
         }
     }
 
@@ -1193,8 +1193,8 @@ impl ViewerPromptDispatch {
         &self.pending_attachments
     }
 
-    pub fn take_claim(&mut self) -> Option<ClaimedQuery> {
-        self.claim.take()
+    pub fn is_claimed_row(&self) -> bool {
+        self.is_claimed_row
     }
 }
 
@@ -14179,14 +14179,21 @@ impl Input {
                         .attachments_for(conversation_id, query_id)
                         .to_vec()
                 });
-            let dispatch = ViewerPromptDispatch::new(
+            let snapshot = ViewerPromptSnapshot::new(
                 Some(conversation_id),
                 prompt.clone(),
                 pending_attachments,
-                claim,
+                claim.as_ref(),
             );
+            if let Some(claim) = claim {
+                // Park it under the request ID: the send event is cloned on the way to the
+                // manager, so only the ID may cross that boundary.
+                QueuedQueryModel::handle(ctx).update(ctx, |model, _| {
+                    model.park_claim(snapshot.request_id().clone(), claim);
+                });
+            }
             self.upload_and_send_viewer_prompt(
-                dispatch,
+                snapshot,
                 server_conversation_token,
                 prompt,
                 vec![],
@@ -14657,11 +14664,11 @@ impl Input {
             .map(PendingAttachment::Image)
             .chain(pending_files.iter().cloned().map(PendingAttachment::File))
             .collect();
-        let dispatch =
-            ViewerPromptDispatch::new(selected_conv_id, prompt.clone(), pending_attachments, None);
+        let snapshot =
+            ViewerPromptSnapshot::new(selected_conv_id, prompt.clone(), pending_attachments, None);
 
         self.upload_and_send_viewer_prompt(
-            dispatch,
+            snapshot,
             server_conversation_token,
             prompt,
             attachments,
@@ -14750,7 +14757,7 @@ impl Input {
     #[allow(clippy::too_many_arguments)]
     fn upload_and_send_viewer_prompt(
         &mut self,
-        dispatch: ViewerPromptDispatch,
+        snapshot: ViewerPromptSnapshot,
         server_conversation_token: Option<ServerConversationToken>,
         prompt: String,
         base_attachments: Vec<AgentAttachment>,
@@ -14768,7 +14775,7 @@ impl Input {
             // Upload files first, then send prompt with file references in callback
             Self::upload_files_then_send_prompt(
                 task_id,
-                dispatch,
+                snapshot,
                 server_conversation_token,
                 prompt,
                 base_attachments,
@@ -14782,7 +14789,7 @@ impl Input {
                 log::warn!("Cannot upload files: no task_id available");
             }
             ctx.emit(Event::SendAgentPrompt {
-                dispatch: Box::new(dispatch),
+                snapshot: Box::new(snapshot),
                 server_conversation_token,
                 prompt,
                 attachments: base_attachments,
@@ -14851,7 +14858,7 @@ impl Input {
     #[allow(clippy::too_many_arguments)]
     fn upload_files_then_send_prompt(
         task_id: crate::ai::ambient_agents::AmbientAgentTaskId,
-        dispatch: ViewerPromptDispatch,
+        snapshot: ViewerPromptSnapshot,
         server_conversation_token: Option<
             session_sharing_protocol::common::ServerConversationToken,
         >,
@@ -14925,16 +14932,15 @@ impl Input {
                 Some(uploaded)
             },
             move |input, maybe_uploaded, ctx| {
-                let mut dispatch = dispatch;
-                let is_queued_prompt = dispatch.claim.is_some();
+                let is_queued_prompt = snapshot.is_claimed_row();
                 let uploaded_files = match maybe_uploaded {
                     Some(uploaded_files) => uploaded_files,
                     None => {
-                        if let Some(claim) = dispatch.take_claim() {
-                            QueuedQueryModel::handle(ctx).update(ctx, |model, ctx| {
+                        QueuedQueryModel::handle(ctx).update(ctx, |model, ctx| {
+                            if let Some(claim) = model.take_parked_claim(snapshot.request_id()) {
                                 model.restore_claim(claim, ctx);
-                            });
-                        }
+                            }
+                        });
                         // Prepare request failed (e.g. attachment limit exceeded).
                         // Keep pending attachments so the user can retry, unfreeze input,
                         // and show an error toast.
@@ -14964,7 +14970,7 @@ impl Input {
                 all_attachments.extend(uploaded_files);
 
                 ctx.emit(Event::SendAgentPrompt {
-                    dispatch: Box::new(dispatch),
+                    snapshot: Box::new(snapshot),
                     server_conversation_token,
                     prompt,
                     attachments: all_attachments,

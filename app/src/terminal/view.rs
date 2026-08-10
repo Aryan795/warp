@@ -257,11 +257,11 @@ use crate::ai::blocklist::{
     BlocklistAIActionEvent, BlocklistAIActionModel, BlocklistAIContextEvent,
     BlocklistAIContextModel, BlocklistAIController, BlocklistAIControllerEvent,
     BlocklistAIHistoryEvent, BlocklistAIHistoryModel, BlocklistAIInputEvent, BlocklistAIInputModel,
-    ClientIdentifiers, ConversationSelection, ConversationStatusUpdate, DisconnectedViewerTarget,
-    InputConfig, InputType, InputTypeAutoDetectionSource, LegacyPassiveSuggestionsEvent,
-    LegacyPassiveSuggestionsModel, MaaPassiveSuggestionsEvent, MaaPassiveSuggestionsModel,
-    PRE_REWIND_PREFIX, PassiveSuggestionsModels, PendingAttachment, PendingQueryState, QueuedQuery,
-    QueuedQueryId, QueuedQueryModel, QueuedQueryOrigin, RequestFileEditsFormatKind,
+    ClientIdentifiers, ConversationSelection, ConversationStatusUpdate, InputConfig, InputType,
+    InputTypeAutoDetectionSource, LegacyPassiveSuggestionsEvent, LegacyPassiveSuggestionsModel,
+    MaaPassiveSuggestionsEvent, MaaPassiveSuggestionsModel, PRE_REWIND_PREFIX,
+    PassiveSuggestionsModels, PendingAttachment, PendingQueryState, QueuedQuery, QueuedQueryId,
+    QueuedQueryModel, QueuedQueryOrigin, RequestFileEditsFormatKind, SharedSessionTarget,
     ShellCommandExecutor, ShellCommandExecutorEvent, SlashCommandRequest, StartAgentExecutor,
     StartAgentExecutorEvent, StartAgentRequest, ai_brand_color, block_context_from_terminal_model,
     get_ai_block_overflow_menu_element_position_id, get_attached_blocks_chip_element_position_id,
@@ -509,7 +509,7 @@ use crate::terminal::{
     block_list_element::BlockHoverAction,
     // find::{Event as FindEvent, Find, FindDirection},
     input::{
-        Event as InputEvent, INPUT_A11Y_HELPER, INPUT_A11Y_LABEL, Input, ViewerPromptDispatch,
+        Event as InputEvent, INPUT_A11Y_HELPER, INPUT_A11Y_LABEL, Input, ViewerPromptSnapshot,
     },
     model::block::SerializedBlock,
     shell::ShellType,
@@ -1850,7 +1850,7 @@ pub enum Event {
     /// A viewer in a shared session is requesting to send an agent prompt.
     SendAgentPrompt {
         /// Everything needed to recover the prompt if the sharer never receives it.
-        dispatch: Box<ViewerPromptDispatch>,
+        snapshot: Box<ViewerPromptSnapshot>,
         server_conversation_token: Option<SessionSharingServerConversationToken>,
         prompt: String,
         attachments: Vec<AgentAttachment>,
@@ -2446,8 +2446,13 @@ const VIEWER_PROMPT_ACK_TIMEOUT: Duration = if cfg!(test) {
 };
 
 /// A viewer prompt handed to the network and awaiting the sharer's correlated acknowledgement.
-struct PendingViewerPrompt {
-    dispatch: ViewerPromptDispatch,
+///
+/// Distinct from the [`ViewerPromptSnapshot`] it holds: the snapshot is the transport-independent
+/// record of what the user submitted and travels across the event boundary, while this is the
+/// view's live bookkeeping for one outstanding send — where it went and when it gives up. It owns
+/// a timer handle tied to the view's lifetime, so it deliberately does not cross into an event.
+struct AwaitingAcknowledgement {
+    snapshot: ViewerPromptSnapshot,
     server_conversation_token: Option<SessionSharingServerConversationToken>,
     /// The session the prompt was addressed to, and therefore the only session a retry may go to.
     session_id: Option<SessionSharingSessionId>,
@@ -2929,7 +2934,7 @@ pub struct TerminalView {
     /// Viewer prompts the local network accepted but the sharer has not acknowledged yet, keyed by
     /// the request ID the server echoes back. An entry is the only remaining copy of the prompt,
     /// so it is either resolved by that acknowledgement or turned into a queue row.
-    pending_viewer_prompts: HashMap<AgentPromptRequestId, PendingViewerPrompt>,
+    pending_viewer_prompts: HashMap<AgentPromptRequestId, AwaitingAcknowledgement>,
 
     /// Active /init flow model, if any. Cleared when cancelled or completed.
     active_init_project_model: Option<ModelHandle<InitProjectModel>>,
@@ -5514,7 +5519,7 @@ impl TerminalView {
     /// timer rather than being treated as delivered.
     pub(crate) fn on_viewer_prompt_send_outcome(
         &mut self,
-        dispatch: ViewerPromptDispatch,
+        snapshot: ViewerPromptSnapshot,
         server_conversation_token: Option<SessionSharingServerConversationToken>,
         session_id: Option<SessionSharingSessionId>,
         outcome: ServerMessageSendOutcome,
@@ -5522,7 +5527,7 @@ impl TerminalView {
     ) {
         match (outcome, session_id) {
             (ServerMessageSendOutcome::LocallyQueued, Some(session_id)) => {
-                let request_id = dispatch.request_id().clone();
+                let request_id = snapshot.request_id().clone();
                 let timeout_request_id = request_id.clone();
                 let timeout = ctx.spawn_abortable(
                     Timer::after(VIEWER_PROMPT_ACK_TIMEOUT),
@@ -5533,8 +5538,8 @@ impl TerminalView {
                 );
                 self.pending_viewer_prompts.insert(
                     request_id,
-                    PendingViewerPrompt {
-                        dispatch,
+                    AwaitingAcknowledgement {
+                        snapshot,
                         server_conversation_token,
                         session_id: Some(session_id),
                         timeout: Some(timeout),
@@ -5543,12 +5548,12 @@ impl TerminalView {
             }
             (ServerMessageSendOutcome::LocallyQueued, None)
             | (ServerMessageSendOutcome::Undeliverable, _) => {
-                let request_id = dispatch.request_id().clone();
+                let request_id = snapshot.request_id().clone();
                 let session_id = session_id.or_else(|| self.shared_session_id().copied());
                 self.pending_viewer_prompts.insert(
                     request_id.clone(),
-                    PendingViewerPrompt {
-                        dispatch,
+                    AwaitingAcknowledgement {
+                        snapshot,
                         server_conversation_token,
                         session_id,
                         timeout: None,
@@ -5572,7 +5577,12 @@ impl TerminalView {
         if let Some(timeout) = pending.timeout {
             timeout.abort();
         }
-        // Dropping the claim finalizes the row's removal: the prompt is now the sharer's.
+        // The sharer has the prompt, so the claimed row stays out of the queue for good.
+        QueuedQueryModel::handle(ctx).update(ctx, |model, _| {
+            if let Some(claim) = model.take_parked_claim(request_id) {
+                claim.accept();
+            }
+        });
         self.input.update(ctx, |input, ctx| {
             input.unfreeze_agent_input(true, ctx);
         });
@@ -5617,8 +5627,8 @@ impl TerminalView {
         let Some(pending) = self.pending_viewer_prompts.remove(request_id) else {
             return;
         };
-        let PendingViewerPrompt {
-            mut dispatch,
+        let AwaitingAcknowledgement {
+            snapshot,
             server_conversation_token,
             session_id,
             timeout,
@@ -5627,25 +5637,26 @@ impl TerminalView {
             timeout.abort();
         }
 
-        let queued = match (dispatch.conversation_id(), session_id) {
+        let queued = match (snapshot.conversation_id(), session_id) {
             (Some(conversation_id), Some(session_id))
                 if FeatureFlag::QueueSlashCommand.is_enabled() =>
             {
-                let target = DisconnectedViewerTarget::new(session_id, server_conversation_token);
-                let claim = dispatch.take_claim();
-                QueuedQueryModel::handle(ctx).update(ctx, |model, ctx| match claim {
-                    Some(claim) => model.retarget_claim_to_disconnected_viewer(claim, target, ctx),
-                    None => {
-                        model.append(
-                            conversation_id,
-                            QueuedQuery::new_disconnected_viewer(
-                                dispatch.prompt().to_owned(),
-                                dispatch.pending_attachments().to_vec(),
-                                request_id.clone(),
-                                target,
-                            ),
-                            ctx,
-                        );
+                let target = SharedSessionTarget::new(session_id, server_conversation_token);
+                QueuedQueryModel::handle(ctx).update(ctx, |model, ctx| {
+                    match model.take_parked_claim(request_id) {
+                        Some(claim) => model.retarget_claim_to_shared_session(claim, target, ctx),
+                        None => {
+                            model.append(
+                                conversation_id,
+                                QueuedQuery::new_disconnected_viewer(
+                                    snapshot.prompt().to_owned(),
+                                    snapshot.pending_attachments().to_vec(),
+                                    request_id.clone(),
+                                    target,
+                                ),
+                                ctx,
+                            );
+                        }
                     }
                 });
                 self.clear_stale_viewer_turn(conversation_id, ctx);
@@ -5662,7 +5673,7 @@ impl TerminalView {
 
         if !queued {
             // With no queue to hold it, the prompt would otherwise vanish silently.
-            self.restore_undelivered_viewer_prompt_to_input(dispatch.prompt(), ctx);
+            self.restore_undelivered_viewer_prompt_to_input(snapshot.prompt(), ctx);
             self.show_error_toast(
                 "Couldn't send that prompt to the shared session.".to_string(),
                 ctx,
@@ -5693,8 +5704,8 @@ impl TerminalView {
     /// A conversation reports `InProgress` from the moment it is created, so that status alone
     /// says nothing about whether work is really running. The two signals that do are an
     /// in-flight response stream and an agent-controlled active block — the same pair
-    /// [`BlocklistAIStatusBar::render_warping_indicator_for_latest_exchange`] renders on. While
-    /// either holds, the turn is genuinely active and the indicator is not ours to clear.
+    /// `BlocklistAIStatusBar::render_warping_indicator_for_latest_exchange` renders on. While
+    /// either holds the turn is genuinely active, and the indicator belongs to it.
     fn clear_stale_viewer_turn(
         &mut self,
         conversation_id: AIConversationId,
@@ -5833,7 +5844,7 @@ impl TerminalView {
         let Some(target) = QueuedQueryModel::as_ref(ctx)
             .queue(conversation_id)
             .first()
-            .and_then(|row| row.disconnected_viewer_target())
+            .and_then(|row| row.shared_session_target())
         else {
             return false;
         };
@@ -5875,9 +5886,9 @@ impl TerminalView {
             let Some(claim) = model.claim_prompt_head(conversation_id, ctx) else {
                 return;
             };
-            model.retarget_claim_to_disconnected_viewer(
+            model.retarget_claim_to_shared_session(
                 claim,
-                DisconnectedViewerTarget::new(session_id, token),
+                SharedSessionTarget::new(session_id, token),
                 ctx,
             );
         });
@@ -22032,13 +22043,13 @@ impl TerminalView {
                 );
             }
             InputEvent::SendAgentPrompt {
-                dispatch,
+                snapshot,
                 server_conversation_token,
                 prompt,
                 attachments,
             } => {
                 ctx.emit(Event::SendAgentPrompt {
-                    dispatch: dispatch.clone(),
+                    snapshot: snapshot.clone(),
                     server_conversation_token: *server_conversation_token,
                     prompt: prompt.clone(),
                     attachments: attachments.clone(),

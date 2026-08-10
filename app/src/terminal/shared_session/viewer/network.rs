@@ -105,23 +105,6 @@ pub enum ServerMessageSendOutcome {
     Undeliverable,
 }
 
-/// Renders the diagnostic for a message the client refused to send.
-///
-/// Every field is a static label or an opaque identifier. Nothing derived from the message body
-/// reaches the line, because prompts, attachments, and input buffer bytes are all carried inside
-/// [`UpstreamMessage`].
-fn undeliverable_message_log_line(
-    kind: &'static str,
-    stage: &'static str,
-    session_id: SessionId,
-    reason: &'static str,
-) -> String {
-    format!(
-        "Viewer network dropped outbound message: kind={kind} stage={stage} \
-         session_id={session_id} reason={reason}"
-    )
-}
-
 /// A content-free label for an [`UpstreamMessage`]. Rendering the message itself would leak prompt
 /// text, attachment contents, and input buffer bytes into logs.
 fn upstream_message_kind(message: &UpstreamMessage) -> &'static str {
@@ -903,14 +886,11 @@ impl Network {
     fn send_message_to_server(&self, message: UpstreamMessage) -> ServerMessageSendOutcome {
         let kind = upstream_message_kind(&message);
         let Stage::JoinedSuccessfully = self.stage else {
+            let stage = self.stage.kind();
+            let session_id = self.session_id;
             log::warn!(
-                "{}",
-                undeliverable_message_log_line(
-                    kind,
-                    self.stage.kind(),
-                    self.session_id,
-                    "not_joined"
-                )
+                "Viewer network dropped outbound message: kind={kind} stage={stage} \
+                 session_id={session_id} reason=not_joined"
             );
             return ServerMessageSendOutcome::Undeliverable;
         };
@@ -919,9 +899,11 @@ impl Network {
                 async_channel::TrySendError::Full(_) => "proxy_channel_full",
                 async_channel::TrySendError::Closed(_) => "proxy_channel_closed",
             };
+            let stage = self.stage.kind();
+            let session_id = self.session_id;
             log::warn!(
-                "{}",
-                undeliverable_message_log_line(kind, self.stage.kind(), self.session_id, reason)
+                "Viewer network dropped outbound message: kind={kind} stage={stage} \
+                 session_id={session_id} reason={reason}"
             );
             return ServerMessageSendOutcome::Undeliverable;
         }

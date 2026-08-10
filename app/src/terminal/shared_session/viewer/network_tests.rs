@@ -6,16 +6,11 @@ use async_io::Timer;
 use futures_util::stream::AbortHandle;
 use instant::Instant;
 use parking_lot::FairMutex;
-use session_sharing_protocol::common::{
-    AgentAttachment, AgentPromptRequest, AgentPromptRequestId, SessionId,
-};
+use session_sharing_protocol::common::{AgentAttachment, AgentPromptRequest, AgentPromptRequestId};
 use session_sharing_protocol::viewer::UpstreamMessage;
 use warpui::{App, ModelHandle};
 
-use super::{
-    Network, PtyBytesBatchStatus, ServerMessageSendOutcome, Stage, undeliverable_message_log_line,
-    upstream_message_kind,
-};
+use super::{Network, PtyBytesBatchStatus, ServerMessageSendOutcome, Stage, upstream_message_kind};
 use crate::terminal::TerminalModel;
 use crate::terminal::event_listener::ChannelEventListener;
 use crate::terminal::shared_session::shared_handlers::RemoteUpdateGuard;
@@ -164,31 +159,6 @@ fn send_agent_prompt_request_locally_queues_under_the_callers_request_id() {
         assert_eq!(request.id, request_id);
         assert_eq!(request.prompt, "hello");
     });
-}
-
-#[test]
-fn undeliverable_diagnostic_reports_stage_and_session_without_user_content() {
-    // The diagnostic exists to make a dropped prompt debuggable, so it must name the stage, the
-    // session, and what kind of message was lost — and nothing the user typed or attached.
-    let session_id = SessionId::new();
-    let message = agent_prompt_message(AgentPromptRequestId::new());
-    let kind = upstream_message_kind(&message);
-
-    let line = undeliverable_message_log_line(kind, "reconnecting", session_id, "not_joined");
-
-    assert!(line.contains("kind=SendAgentPrompt"), "line was: {line}");
-    assert!(line.contains("stage=reconnecting"), "line was: {line}");
-    assert!(
-        line.contains(&format!("session_id={session_id}")),
-        "line was: {line}"
-    );
-    assert!(line.contains("reason=not_joined"), "line was: {line}");
-    for sentinel in [SENTINEL_PROMPT, SENTINEL_FILE_NAME, SENTINEL_ATTACHMENT_ID] {
-        assert!(
-            !line.contains(sentinel),
-            "diagnostic leaked user content ({sentinel}): {line}"
-        );
-    }
 }
 
 #[test]

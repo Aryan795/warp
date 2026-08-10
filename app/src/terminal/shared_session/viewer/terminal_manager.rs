@@ -1604,7 +1604,7 @@ impl TerminalManager {
                 });
             }
             TerminalViewEvent::SendAgentPrompt {
-                dispatch,
+                snapshot,
                 server_conversation_token,
                 prompt,
                 attachments,
@@ -1616,7 +1616,7 @@ impl TerminalManager {
                 let outcome = match &network {
                     Some(network) => network.update(ctx, |network, _| {
                         network.send_agent_prompt_request(
-                            dispatch.request_id().clone(),
+                            snapshot.request_id().clone(),
                             *server_conversation_token,
                             prompt.clone(),
                             attachments.clone(),
@@ -1625,11 +1625,11 @@ impl TerminalManager {
                     // No viewer network is attached, so nothing can carry the prompt.
                     None => ServerMessageSendOutcome::Undeliverable,
                 };
-                let dispatch = (**dispatch).clone();
+                let snapshot = (**snapshot).clone();
                 let server_conversation_token = *server_conversation_token;
                 view.update(ctx, |terminal_view, ctx| {
                     terminal_view.on_viewer_prompt_send_outcome(
-                        dispatch,
+                        snapshot,
                         server_conversation_token,
                         session_id,
                         outcome,

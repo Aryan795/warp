@@ -464,10 +464,17 @@ All criteria are required before merge.
    `LocallyQueued` only when the local channel accepts the message. Assert that only matching
    `AgentPromptRequestInFlight(request_id)` completes/removes the pending row and unfreezes normal
    input; a different or duplicate ID is a no-op.
-3. **Safe logging:** Exercise a dropped `SendAgentPrompt` containing sentinel prompt text,
-   attachment names, and attachment content. Capture the warning and assert it includes stage,
-   session ID, and message kind/discriminant but none of the sentinel user content. No
-   `report_error!`/Sentry event is added.
+3. **Safe logging:** Content safety is guaranteed structurally rather than by asserting on a
+   formatted string, because an assertion over arguments that are all static labels or opaque
+   identifiers cannot fail and therefore tests nothing. The enforceable properties are: every
+   argument interpolated into the undeliverable-send warning is a `&'static str` or an opaque
+   identifier (stage label, session ID, reason label, message kind), and the message kind comes
+   from an exhaustive `UpstreamMessage` -> `&'static str` mapping with no wildcard arm, so a new
+   protocol variant is a compile error rather than a silent fallback. The message itself is never
+   `Debug`-rendered. A test pins the mapping's content-independence by asserting the label is
+   identical for an empty message and one carrying prompt and attachment data. No
+   `report_error!`/Sentry event is added for a dropped message; `report_error!` is reserved for
+   the claimed-prompt leak invariant.
 4. **Immediate fallback queueing:** In `input_tests.rs` or `terminal_manager_tests.rs`, submit one
    plain prompt during reconnect and assert exactly one
    `QueuedQueryOrigin::DisconnectedViewer` row with the original conversation, session target, and

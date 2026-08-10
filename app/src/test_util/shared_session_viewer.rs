@@ -10,13 +10,19 @@ use std::sync::Arc;
 use parking_lot::FairMutex;
 use session_sharing_protocol::common::AgentPromptRequest;
 use session_sharing_protocol::viewer::{DownstreamMessage, UpstreamMessage};
+use warpui::platform::WindowStyle;
 use warpui::{App, ModelHandle, SingletonEntity, ViewHandle};
 
 use super::terminal::{add_window_with_terminal, initialize_app_for_terminal_view};
 use crate::ai::agent::conversation::AIConversationId;
+use crate::ai::agent_conversations_model::AgentConversationsModel;
+use crate::ai::ambient_agents::task::{AmbientAgentTask, TaskPrincipalInfo};
+use crate::ai::ambient_agents::{AgentSource, AmbientAgentTaskId};
 use crate::ai::blocklist::BlocklistAIHistoryModel;
 use crate::ai::blocklist::agent_view::AgentViewEntryOrigin;
+use crate::auth::user::TEST_USER_UID;
 use crate::context_chips::prompt_type::PromptType;
+use crate::server::server_api::ai::AmbientAgentTaskState;
 use crate::settings::WarpPromptSeparator;
 use crate::terminal::event_listener::ChannelEventListener;
 use crate::terminal::model::session::SessionId as TerminalSessionId;
@@ -68,12 +74,116 @@ pub fn viewer_pane(app: &mut App, stage: Stage) -> ViewerPane {
     viewer_pane_with_role(app, stage, ViewerRole::Executor)
 }
 
+/// Who owns the ambient task the pane is viewing. Ownership is what makes a fatal disconnect
+/// eligible to continue as a cloud follow-up, so the non-owner case is the ineligible path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AmbientTaskOwner {
+    CurrentUser,
+    SomeoneElse,
+}
+
+/// An ambient (cloud) viewer pane: a viewer pane that is also watching a cloud agent task, which
+/// is the only shape in which a fatal disconnect can hand the queue to a cloud follow-up.
+pub struct AmbientViewerPane {
+    pub pane: ViewerPane,
+    pub task_id: AmbientAgentTaskId,
+}
+
+/// Builds an ambient viewer pane whose network is in `stage`, live on `task_id`.
+///
+/// The pane is constructed in cloud mode so it carries an `AmbientAgentViewModel` up front, the
+/// task is seeded into `AgentConversationsModel` with `owner` as its creator, and the model is
+/// pointed at the live session. Until that session ends the pane is *not* follow-up eligible,
+/// which is the state a fatal disconnect transitions out of.
+pub fn ambient_viewer_pane(
+    app: &mut App,
+    stage: Stage,
+    owner: AmbientTaskOwner,
+) -> AmbientViewerPane {
+    initialize_app_for_terminal_view(app);
+    app.add_singleton_model(|_| ToastStack);
+
+    let tips_model = app.add_model(|_| Default::default());
+    let (_window_id, view) = app.add_window(WindowStyle::NotStealFocus, move |ctx| {
+        TerminalView::new_for_test_with_cloud_mode(
+            tips_model, None, /* is_cloud_mode */ true, ctx,
+        )
+    });
+
+    let creator_uid = match owner {
+        AmbientTaskOwner::CurrentUser => TEST_USER_UID,
+        AmbientTaskOwner::SomeoneElse => "a-different-user",
+    };
+    let task = owned_cloud_task(creator_uid);
+    let task_id = task.task_id;
+    AgentConversationsModel::handle(app).update(app, |model, _| {
+        model.insert_task_for_test(task);
+    });
+
+    let pane = finish_viewer_pane(app, view, stage, ViewerRole::Executor);
+    let session_id = pane.network.read(app, |network, _| network.session_id());
+    pane.view.update(app, |view, ctx| {
+        view.begin_viewing_ambient_session(task_id, session_id, ctx);
+    });
+    flush(app);
+
+    AmbientViewerPane { pane, task_id }
+}
+
+/// A finished cloud-mode task created by `creator_uid`.
+fn owned_cloud_task(creator_uid: &str) -> AmbientAgentTask {
+    let now = chrono::Utc::now();
+    AmbientAgentTask {
+        task_id: uuid::Uuid::new_v4()
+            .to_string()
+            .parse()
+            .expect("a generated uuid parses as a task id"),
+        parent_run_id: None,
+        title: "Cloud task".to_string(),
+        state: AmbientAgentTaskState::Succeeded,
+        prompt: "test".to_string(),
+        created_at: now,
+        started_at: Some(now),
+        updated_at: now,
+        run_time: Some("PT1S".parse().expect("a literal duration parses")),
+        status_message: None,
+        source: Some(AgentSource::CloudMode),
+        execution_location: None,
+        session_id: None,
+        session_link: None,
+        creator: Some(TaskPrincipalInfo {
+            creator_type: "USER".to_string(),
+            uid: creator_uid.to_string(),
+            display_name: None,
+        }),
+        executor: None,
+        conversation_id: None,
+        request_usage: None,
+        is_sandbox_running: false,
+        agent_config_snapshot: None,
+        artifacts: vec![],
+        last_event_sequence: None,
+        children: vec![],
+    }
+}
+
 /// Builds a viewer pane in `stage` with an explicit `role`.
 pub fn viewer_pane_with_role(app: &mut App, stage: Stage, role: ViewerRole) -> ViewerPane {
     initialize_app_for_terminal_view(app);
     app.add_singleton_model(|_| ToastStack);
 
     let view = add_window_with_terminal(app, None);
+    finish_viewer_pane(app, view, stage, role)
+}
+
+/// Turns an already-created `TerminalView` into a wired viewer pane. Shared by the plain and
+/// ambient variants so the two cannot drift in how they attach the network and subscriptions.
+fn finish_viewer_pane(
+    app: &mut App,
+    view: ViewHandle<TerminalView>,
+    stage: Stage,
+    role: ViewerRole,
+) -> ViewerPane {
     let terminal_view_id = view.id();
     let model = view.read(app, |view, _| view.model.clone());
     {
