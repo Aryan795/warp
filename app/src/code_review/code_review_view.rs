@@ -2813,6 +2813,20 @@ impl CodeReviewView {
         } else {
             "Discard changes".to_string()
         };
+        // A pull request layer is an immutable historical commit range, not
+        // the working tree. The global buffer is keyed by absolute file path
+        // and shared with the live working-tree editor for that same path,
+        // so using it here would show (and let the user edit) the live file
+        // instead of the layer's exact git-object content — exactly the
+        // "historical editors accidentally mutating files" risk called out
+        // in TECH.md. Route read-only modes through the non-global-buffer
+        // path instead, which is populated synchronously from this diff's
+        // own `content_at_head` and is never shared with another context.
+        let is_read_only_mode = self
+            .diff_state_model
+            .as_ref(ctx)
+            .diff_mode(ctx)
+            .is_read_only();
 
         let mut file_states = vec![];
         for file in files {
@@ -2824,7 +2838,7 @@ impl CodeReviewView {
                 // through the global-buffer path when we have a repo.
                 #[cfg(not(target_family = "wasm"))]
                 {
-                    if self.repo_path().is_some() {
+                    if self.repo_path().is_some() && !is_read_only_mode {
                         self.create_code_review_model_with_global_buffer(file, ctx)
                     } else {
                         self.create_code_review_model(file, ctx)
@@ -3295,10 +3309,16 @@ impl CodeReviewView {
                 }
             });
 
+            let is_read_only = self
+                .diff_state_model
+                .as_ref(ctx)
+                .diff_mode(ctx)
+                .is_read_only();
             Self::apply_diff_to_code_editor(
                 &local_code_view,
                 file,
                 true,
+                is_read_only,
                 &self.comment_line_numbers_for_file(&full_file_location, ctx),
                 ctx,
             );
@@ -3385,11 +3405,17 @@ impl CodeReviewView {
             });
 
             let comment_line_numbers = self.comment_line_numbers_for_file(&full_file_location, ctx);
+            let is_read_only = self
+                .diff_state_model
+                .as_ref(ctx)
+                .diff_mode(ctx)
+                .is_read_only();
 
             Self::apply_diff_to_code_editor(
                 &local_code_view,
                 file,
                 true,
+                is_read_only,
                 &comment_line_numbers,
                 ctx,
             );
@@ -3635,6 +3661,7 @@ impl CodeReviewView {
         code_editor_view: &ViewHandle<LocalCodeEditorView>,
         file: &FileDiffAndContent,
         is_initial_setup: bool,
+        is_read_only: bool,
         comment_line_numbers: &[LineCount],
         ctx: &mut ViewContext<Self>,
     ) {
@@ -3704,7 +3731,10 @@ impl CodeReviewView {
                     }
 
                     if is_initial_setup {
-                        if FeatureFlag::CodeReviewSaveChanges.is_enabled() {
+                        // A pull request layer is an immutable historical
+                        // commit range: never editable, regardless of the
+                        // `CodeReviewSaveChanges` rollout state.
+                        if FeatureFlag::CodeReviewSaveChanges.is_enabled() && !is_read_only {
                             editor.set_interaction_state(InteractionState::Editable, ctx);
                         } else {
                             editor.set_interaction_state(InteractionState::Selectable, ctx);
