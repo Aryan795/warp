@@ -1113,6 +1113,55 @@ fn test_open_markdown_viewer_target_preserves_requested_line() {
     });
 }
 
+/// APP-5273: reopening the same Markdown file at a different line reuses the
+/// existing pane, which must still adopt the newly requested line.
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_reopening_markdown_viewer_adopts_new_requested_line() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let markdown_path = temp_dir.path().join("README.md");
+        std::fs::write(&markdown_path, "# Test\n").expect("failed to write markdown file");
+
+        for line_num in [12, 34] {
+            workspace.update(&mut app, |workspace, ctx| {
+                let pane_group = workspace.active_tab_pane_group().clone();
+                workspace.handle_file_tree_event(
+                    pane_group,
+                    &crate::pane_group::Event::OpenFileWithTarget {
+                        path: markdown_path.clone(),
+                        target: FileTarget::MarkdownViewer(EditorLayout::SplitPane),
+                        line_col: Some(LineAndColumnArg {
+                            line_num,
+                            column_num: None,
+                        }),
+                    },
+                    ctx,
+                );
+            });
+        }
+
+        workspace.read(&app, |workspace, ctx| {
+            let pane_group = workspace.active_tab_pane_group().as_ref(ctx);
+            let markdown_panes = pane_group.file_notebook_panes(ctx).collect_vec();
+            assert_eq!(markdown_panes.len(), 1);
+            assert_eq!(
+                markdown_panes[0].1.as_ref(ctx).code_source(),
+                Some(&CodeSource::Link {
+                    path: markdown_path.clone(),
+                    range_start: Some(LineAndColumnArg {
+                        line_num: 34,
+                        column_num: None,
+                    }),
+                    range_end: None,
+                })
+            );
+        });
+    });
+}
+
 #[cfg(feature = "local_fs")]
 #[test]
 fn test_worktree_sidecar_search_editor_enter_executes_selection() {

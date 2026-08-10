@@ -99,6 +99,57 @@ fn test_resolve_file_target_binary_is_system_generic() {
     assert_eq!(target, FileTarget::SystemGeneric);
 }
 
+/// When the OS hands the file straight back to Warp, opening it in-process is
+/// the only path that can carry the requested line: the `file://` round trip
+/// through the OS drops it.
+#[test]
+#[cfg(feature = "local_fs")]
+fn test_resolve_file_target_system_default_handled_by_warp_opens_code_editor() {
+    let target = resolve_file_target_with_system_default_handler(
+        Path::new("main.rs"),
+        EditorChoice::SystemDefault,
+        true, /* prefer_markdown_viewer */
+        EditorLayout::SplitPane,
+        None,
+        |_| true, /* system_default_handler_is_warp */
+    );
+
+    assert_eq!(target, FileTarget::CodeEditor(EditorLayout::SplitPane));
+}
+
+#[test]
+#[cfg(feature = "local_fs")]
+fn test_resolve_file_target_system_default_handled_by_other_app_is_unchanged() {
+    let target = resolve_file_target_with_system_default_handler(
+        Path::new("main.rs"),
+        EditorChoice::SystemDefault,
+        true, /* prefer_markdown_viewer */
+        EditorLayout::SplitPane,
+        None,
+        |_| false, /* system_default_handler_is_warp */
+    );
+
+    assert_eq!(target, FileTarget::SystemDefault);
+}
+
+/// Binary files short-circuit to `SystemGeneric` before the handler is
+/// consulted: Warp cannot render them, so handing them to the OS stays correct
+/// even when Warp is the registered handler.
+#[test]
+#[cfg(feature = "local_fs")]
+fn test_resolve_file_target_binary_stays_system_generic_when_warp_is_handler() {
+    let target = resolve_file_target_with_system_default_handler(
+        Path::new("image.png"),
+        EditorChoice::SystemDefault,
+        true, /* prefer_markdown_viewer */
+        EditorLayout::SplitPane,
+        None,
+        |_| true, /* system_default_handler_is_warp */
+    );
+
+    assert_eq!(target, FileTarget::SystemGeneric);
+}
+
 #[test]
 #[cfg(feature = "local_fs")]
 fn test_resolve_file_target_binary_uses_env_editor() {

@@ -441,6 +441,106 @@ fn test_reload_and_discard_after_failed_open() {
     });
 }
 
+/// APP-5273: the rendered Markdown view has no source lines, so a requested
+/// line is located by its visible text.
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_rendered_search_terms_for_source_line() {
+    use super::rendered_search_terms_for_source_line;
+
+    let markdown = "# Heading one\n\n- a **bold** item\n\n```rust\nlet total = compute();\n```\n\n> quoted line here\n";
+
+    // Headings, list bullets and emphasis are stripped so the term matches the
+    // rendered text; the longest word is kept as a last resort.
+    assert_eq!(
+        rendered_search_terms_for_source_line(markdown, 1),
+        ["# Heading one", "Heading one", "Heading"]
+    );
+    assert_eq!(
+        rendered_search_terms_for_source_line(markdown, 3),
+        ["- a **bold** item", "a bold item", "bold"]
+    );
+    assert_eq!(
+        rendered_search_terms_for_source_line(markdown, 9),
+        ["> quoted line here", "quoted line here", "quoted"]
+    );
+
+    // Code blocks render verbatim, so the untouched line is tried first.
+    assert_eq!(
+        rendered_search_terms_for_source_line(markdown, 6),
+        ["let total = compute();", "compute"]
+    );
+
+    // Nothing visible to search for.
+    assert!(rendered_search_terms_for_source_line(markdown, 2).is_empty());
+    assert!(rendered_search_terms_for_source_line(markdown, 999).is_empty());
+}
+
+/// APP-5273: opening a Markdown snippet's file used to land at the top of the
+/// rendered document regardless of the line the snippet referenced.
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_rendered_view_scrolls_to_requested_line() {
+    use warp_util::path::LineAndColumnArg;
+
+    use crate::code::editor_management::CodeSource;
+
+    const MARKDOWN: &str =
+        "# Title\n\nIntro paragraph.\n\n## Details section\n\nBody text about details.\n";
+
+    fn link_to_line(path: &Path, line_num: usize) -> Option<CodeSource> {
+        Some(CodeSource::Link {
+            path: path.to_path_buf(),
+            range_start: Some(LineAndColumnArg {
+                line_num,
+                column_num: None,
+            }),
+            range_end: None,
+        })
+    }
+
+    App::test((), |mut app| async move {
+        init_app(&mut app);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("guide.md");
+        std::fs::write(&path, MARKDOWN).unwrap();
+
+        let (_, handle) = app.add_window(WindowStyle::NotStealFocus, FileNotebookView::new);
+        let session = Arc::new(Session::test());
+        handle
+            .update(&mut app, |file_notebook, ctx| {
+                file_notebook.set_code_source(link_to_line(&path, 5));
+                file_notebook.open_local(&path, Some(session), ctx);
+
+                let file_id = file_notebook
+                    .file_id
+                    .expect("File should be opened and have a file_id");
+                let future_handle = FileModel::as_ref(ctx)
+                    .get_future_handle(file_id)
+                    .expect("Loading future should be present");
+
+                ctx.await_spawned_future(future_handle.future_id())
+            })
+            .await;
+
+        handle.update(&mut app, |file_notebook, ctx| {
+            assert!(
+                file_notebook.scroll_to_requested_line(MARKDOWN, ctx),
+                "the heading on line 5 should be locatable in the rendered document"
+            );
+
+            // A blank line has no visible text, so the document stays put.
+            file_notebook.set_code_source(link_to_line(&path, 4));
+            assert!(!file_notebook.scroll_to_requested_line(MARKDOWN, ctx));
+
+            // No requested line at all.
+            file_notebook.set_code_source(None);
+            assert!(!file_notebook.scroll_to_requested_line(MARKDOWN, ctx));
+        });
+    });
+}
+
 #[test]
 fn test_markdown_file_detection() {
     assert!(is_markdown_file("README.md"));

@@ -220,6 +220,28 @@ pub fn resolve_file_target_with_editor_choice(
     default_layout: EditorLayout,
     layout: Option<EditorLayout>,
 ) -> FileTarget {
+    resolve_file_target_with_system_default_handler(
+        path,
+        editor_choice,
+        prefer_markdown_viewer,
+        default_layout,
+        layout,
+        crate::util::file::external_editor::system_default_handler_is_warp,
+    )
+}
+
+/// [`resolve_file_target_with_editor_choice`], with the "is Warp the OS default
+/// handler for this file?" probe injected so tests do not depend on the host's
+/// file associations.
+#[cfg(feature = "local_fs")]
+fn resolve_file_target_with_system_default_handler(
+    path: &Path,
+    editor_choice: EditorChoice,
+    prefer_markdown_viewer: bool,
+    default_layout: EditorLayout,
+    layout: Option<EditorLayout>,
+    system_default_handler_is_warp: impl Fn(&Path) -> bool,
+) -> FileTarget {
     let is_openable_in_warp = is_file_openable_in_warp(path);
     let is_markdown = matches!(is_openable_in_warp, Some(OpenableFileType::Markdown));
     let layout = layout.unwrap_or(default_layout);
@@ -258,6 +280,12 @@ pub fn resolve_file_target_with_editor_choice(
     // 5. External Editor or System Default (for text files)
     match editor_choice {
         EditorChoice::ExternalEditor(editor) => FileTarget::ExternalEditor(editor),
+        // When Warp is the OS handler, handing the file to the system bounces it
+        // back in as a bare `file://` URL, which cannot carry a line number.
+        // Open it in-process instead so the caller's requested line survives.
+        EditorChoice::SystemDefault if system_default_handler_is_warp(path) => {
+            FileTarget::CodeEditor(layout)
+        }
         EditorChoice::SystemDefault => FileTarget::SystemDefault,
         EditorChoice::Warp | EditorChoice::EnvEditor => unreachable!("Already matched above"),
     }

@@ -1348,6 +1348,37 @@ impl NotebooksEditorModel {
         true
     }
 
+    /// Scrolls to the first block whose rendered text contains `text`, and
+    /// returns whether such a block exists.
+    pub fn scroll_to_block_containing_text(
+        &mut self,
+        text: &str,
+        ctx: &mut ModelContext<Self>,
+    ) -> bool {
+        let Some(block_start) = self.find_block_containing_text(text, ctx) else {
+            return false;
+        };
+
+        self.render_state.update(ctx, |render_state, _| {
+            render_state
+                .request_autoscroll_to(AutoScrollMode::PositionOffsetInViewportCenter(block_start));
+        });
+        true
+    }
+
+    fn find_block_containing_text(&self, text: &str, ctx: &AppContext) -> Option<CharOffset> {
+        let content = self.content.as_ref(ctx);
+        content
+            .outline_blocks()
+            .find(|outline| {
+                content
+                    .text_in_range(outline.start + 1..outline.end)
+                    .into_string()
+                    .contains(text)
+            })
+            .map(|outline| outline.start)
+    }
+
     fn find_matching_header(&self, fragment: &str, ctx: &AppContext) -> Option<Range<CharOffset>> {
         let target = fragment.strip_prefix('#')?;
         if target.is_empty() {

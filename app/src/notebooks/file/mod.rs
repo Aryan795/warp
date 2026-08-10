@@ -302,6 +302,21 @@ impl FileNotebookView {
         self.code_source = source;
     }
 
+    /// Points an already-open pane at a new code source.
+    ///
+    /// The rendered document is scrolled to the requested line as the file is
+    /// read, so a line this pane has not seen before needs another read to take
+    /// effect.
+    #[cfg(feature = "local_fs")]
+    pub fn update_code_source(&mut self, source: Option<CodeSource>, ctx: &mut ViewContext<Self>) {
+        let previous_line = self.requested_line();
+        self.code_source = source;
+        let requested_line = self.requested_line();
+        if requested_line.is_some() && requested_line != previous_line {
+            self.reload_file(ctx);
+        }
+    }
+
     #[cfg(feature = "local_fs")]
     pub fn code_source(&self) -> Option<&CodeSource> {
         self.code_source.as_ref()
@@ -342,6 +357,38 @@ impl FileNotebookView {
                 model.set_document_path(doc_path, ctx);
             });
         });
+    }
+
+    /// The source line the opener asked for, if any.
+    #[cfg(feature = "local_fs")]
+    fn requested_line(&self) -> Option<usize> {
+        match self.code_source.as_ref()? {
+            CodeSource::Link { range_start, .. } => Some(range_start.as_ref()?.line_num),
+            _ => None,
+        }
+    }
+
+    /// Scrolls the rendered document to the requested source line, on a best
+    /// effort basis, and reports whether it landed anywhere.
+    ///
+    /// Rendered Markdown has no source lines to jump to, so this locates the
+    /// line's visible text instead and scrolls to the block containing it. A
+    /// line with nothing searchable (a blank line, a fence delimiter) leaves
+    /// the document where it is.
+    #[cfg(feature = "local_fs")]
+    fn scroll_to_requested_line(&mut self, markdown: &str, ctx: &mut ViewContext<Self>) -> bool {
+        let Some(line_num) = self.requested_line() else {
+            return false;
+        };
+        let search_terms = rendered_search_terms_for_source_line(markdown, line_num);
+
+        self.editor.update(ctx, |editor, ctx| {
+            editor.model().update(ctx, |model, ctx| {
+                search_terms
+                    .iter()
+                    .any(|term| model.scroll_to_block_containing_text(term, ctx))
+            })
+        })
     }
 
     #[cfg(feature = "local_fs")]
@@ -446,6 +493,7 @@ impl FileNotebookView {
                     match event {
                         FileModelEvent::FileLoaded { content, .. } => {
                             me.set_content(content, ctx);
+                            me.scroll_to_requested_line(content, ctx);
                             send_telemetry_from_ctx!(
                                 TelemetryEvent::OpenNotebook(me.open_telemetry_metadata(ctx)),
                                 ctx
@@ -1282,6 +1330,113 @@ impl BackingView for FileNotebookView {
         self.focus_handle = Some(focus_handle.clone());
         self.context_menu.set_focus_handle(focus_handle);
     }
+}
+
+/// Minimum length of a search term. Shorter fragments match too easily, and
+/// would scroll the reader to an arbitrary place in the document.
+#[cfg(feature = "local_fs")]
+const MIN_SEARCH_TERM_LEN: usize = 3;
+
+/// Search terms for locating line `line_num` (1-based) of `markdown` in the
+/// rendered document, in descending order of specificity.
+///
+/// The rendered view has no source lines to jump to, so the caller looks for
+/// the line's visible text instead. The verbatim line comes first because code
+/// blocks render unchanged; the syntax-stripped line covers headings, lists and
+/// emphasis; the longest word is a last resort for lines whose inline syntax
+/// (links, images, raw HTML) is not rewritten here.
+#[cfg(feature = "local_fs")]
+fn rendered_search_terms_for_source_line(markdown: &str, line_num: usize) -> Vec<String> {
+    use itertools::Itertools as _;
+
+    let Some(line) = markdown.lines().nth(line_num.saturating_sub(1)) else {
+        return Vec::new();
+    };
+
+    let stripped = strip_markdown_syntax(line);
+    let longest_word = stripped
+        .split_whitespace()
+        .map(|word| word.trim_matches(|c: char| !c.is_alphanumeric()))
+        .max_by_key(|word| word.chars().count())
+        .unwrap_or_default();
+
+    [line.trim(), stripped.as_str(), longest_word]
+        .into_iter()
+        .filter(|term| {
+            term.chars().count() >= MIN_SEARCH_TERM_LEN && term.chars().any(char::is_alphanumeric)
+        })
+        .map(str::to_owned)
+        .unique()
+        .collect()
+}
+
+/// The visible text of a single Markdown line: block prefixes and inline
+/// emphasis markers removed. Lines that render as nothing (fence delimiters,
+/// setext underlines, table rules) produce an empty string.
+#[cfg(feature = "local_fs")]
+fn strip_markdown_syntax(line: &str) -> String {
+    let mut rest = line.trim();
+
+    if rest.starts_with("```") || rest.starts_with("~~~") {
+        return String::new();
+    }
+    if !rest.is_empty()
+        && rest
+            .chars()
+            .all(|c| matches!(c, '-' | '=' | '|' | ':' | ' '))
+    {
+        return String::new();
+    }
+
+    // Prefixes nest (`> - [ ] todo`), so keep stripping until nothing matches.
+    loop {
+        let stripped = strip_block_prefix(rest);
+        if stripped == rest {
+            break;
+        }
+        rest = stripped;
+    }
+
+    rest.chars()
+        .filter(|c| !matches!(c, '*' | '_' | '`' | '~'))
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+/// Strips one leading blockquote marker, ATX heading marker, list bullet or
+/// task checkbox from `line`, returning `line` unchanged when none is present.
+#[cfg(feature = "local_fs")]
+fn strip_block_prefix(line: &str) -> &str {
+    let line = line.trim_start();
+
+    if let Some(rest) = line.strip_prefix('>') {
+        return rest.trim_start();
+    }
+    for prefix in ["- ", "* ", "+ ", "[ ] ", "[x] ", "[X] "] {
+        if let Some(rest) = line.strip_prefix(prefix) {
+            return rest.trim_start();
+        }
+    }
+    if let Some(rest) = line.strip_prefix('#')
+        && let Some(rest) = rest.trim_start_matches('#').strip_prefix(' ')
+    {
+        return rest.trim_start();
+    }
+    // Ordered list markers: `1. ` or `1) `. ASCII digits, so the count of
+    // leading digits doubles as a byte index.
+    let digits = line.chars().take_while(char::is_ascii_digit).count();
+    if digits > 0 {
+        let after_digits = &line[digits..];
+        if let Some(rest) = after_digits
+            .strip_prefix(". ")
+            .or_else(|| after_digits.strip_prefix(") "))
+        {
+            return rest.trim_start();
+        }
+    }
+
+    line
 }
 
 /// Location information for a file, used to show its title and context.
