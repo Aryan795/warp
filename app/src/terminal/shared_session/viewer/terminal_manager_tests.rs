@@ -18,7 +18,7 @@ use chrono::Local;
 use session_sharing_protocol::common::{
     AgentPromptRequestId, ServerConversationToken as SessionSharingServerConversationToken,
 };
-use session_sharing_protocol::viewer::DownstreamMessage;
+use session_sharing_protocol::viewer::{DownstreamMessage, UpstreamMessage};
 use warpui::App;
 
 use super::*;
@@ -1097,6 +1097,130 @@ fn a_failed_attachment_upload_restores_the_whole_row() {
                 queue[0].attachments().len(),
                 1,
                 "the attachment must survive with the row rather than being dropped"
+            );
+        });
+    });
+}
+
+#[test]
+fn a_rejoin_flushes_buffered_input_before_it_retries_the_prompt() {
+    // Criterion 8, ordering half. The editor clear that accompanied the original submission is
+    // buffered while disconnected. If the retried prompt overtook it, the sharer would apply the
+    // clear after the new prompt and wipe it.
+    App::test((), |mut app| async move {
+        let _queue_flag = FeatureFlag::QueueSlashCommand.override_enabled(true);
+        let pane = viewer_pane(&mut app, reconnecting_stage());
+
+        submit_viewer_prompt(&mut app, &pane.view, "retry me");
+        // Buffer an input update while disconnected, as the editor does during a reconnect.
+        pane.network.update(&mut app, |network, _| {
+            network.send_input_update(&Default::default(), std::iter::empty());
+        });
+        drain_agent_prompts(&app, &pane.network);
+
+        inject_downstream(&mut app, &pane.network, rejoined_message());
+
+        // Read the channel in order: every buffered input update must precede the prompt.
+        let ws_proxy_rx = pane
+            .network
+            .read(&app, |network, _| network.ws_proxy_rx.clone());
+        let mut saw_prompt = false;
+        let mut input_after_prompt = false;
+        while let Ok(message) = ws_proxy_rx.try_recv() {
+            match message {
+                UpstreamMessage::SendAgentPrompt(_) => saw_prompt = true,
+                UpstreamMessage::UpdateInput(_) if saw_prompt => input_after_prompt = true,
+                _ => {}
+            }
+        }
+        assert!(saw_prompt, "the rejoin must retry the prompt");
+        assert!(
+            !input_after_prompt,
+            "buffered input updates must be flushed before the retried prompt"
+        );
+    });
+}
+
+#[test]
+fn every_drain_trigger_together_accepts_each_prompt_at_most_once() {
+    // Criterion 13. The three entrypoints can fire in quick succession around one fatal
+    // disconnect: the rejoin attempt, the fatal end, and the replacement join. Each prompt may be
+    // accepted once and only once across all of them, which is what the per-row claim buys.
+    App::test((), |mut app| async move {
+        let _queue_flag = FeatureFlag::QueueSlashCommand.override_enabled(true);
+        let _handoff_flag = FeatureFlag::HandoffCloudCloud.override_enabled(true);
+        let ambient = ambient_viewer_pane(
+            &mut app,
+            reconnecting_stage(),
+            AmbientTaskOwner::CurrentUser,
+        );
+        let pane = &ambient.pane;
+
+        for prompt in ["one", "two", "three"] {
+            submit_viewer_prompt(&mut app, &pane.view, prompt);
+        }
+        drain_agent_prompts(&app, &pane.network);
+
+        let mut accepted: Vec<String> = Vec::new();
+
+        // Trigger 1: the session briefly comes back and takes the head.
+        inject_downstream(&mut app, &pane.network, rejoined_message());
+        for request in drain_agent_prompts(&app, &pane.network) {
+            accepted.push(request.prompt.clone());
+            inject_downstream(
+                &mut app,
+                &pane.network,
+                DownstreamMessage::AgentPromptRequestInFlight(request.id),
+            );
+        }
+
+        // Trigger 2: it then dies for good, handing the next row to a cloud follow-up.
+        pane.network.update(&mut app, |network, _| {
+            network.stage = reconnecting_stage();
+        });
+        exhaust_reconnect(&mut app, pane);
+        if let Some(followup) = pane.view.read(&app, |view, ctx| {
+            view.ambient_agent_view_model().and_then(|model| {
+                model
+                    .as_ref(ctx)
+                    .pending_followup_prompt()
+                    .map(str::to_owned)
+            })
+        }) {
+            accepted.push(followup);
+        }
+
+        // Trigger 3: the replacement joins and continues the queue.
+        let replacement = attach_network(&mut app, &pane.view, Stage::JoinedSuccessfully);
+        pane.set_current_network(Some(replacement.clone()));
+        subscribe_network_events(
+            &mut app,
+            &pane.view,
+            &pane.model,
+            &pane.current_network,
+            &replacement,
+        );
+        pane.model
+            .lock()
+            .set_shared_session_status(SharedSessionStatus::executor());
+        pane.view.update(&mut app, |view, ctx| {
+            let session_id = replacement.read(ctx, |network, _| network.session_id());
+            view.drain_disconnected_viewer_queue_after_replacement_join(session_id, ctx);
+        });
+        flush(&mut app);
+        for request in drain_agent_prompts(&app, &replacement) {
+            accepted.push(request.prompt.clone());
+        }
+
+        assert_eq!(
+            accepted,
+            vec!["one", "two", "three"],
+            "across all three drain triggers each prompt is accepted once, in FIFO order"
+        );
+        QueuedQueryModel::handle(&app).read(&app, |queue_model, _| {
+            assert!(
+                queue_model.queue(pane.conversation_id).is_empty(),
+                "nothing may be left behind once every trigger has run"
             );
         });
     });
