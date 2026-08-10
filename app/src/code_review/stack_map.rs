@@ -8,11 +8,13 @@
 
 use pathfinder_geometry::vector::vec2f;
 use warp_core::ui::theme::Fill;
+use warpui::elements::new_scrollable::{NewScrollable, ScrollableAppearance, SingleAxisConfig};
 use warpui::elements::{
-    ChildAnchor, Clipped, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Dismiss,
-    DispatchEventResult, DropShadow, Element, Empty, EventHandler, Flex, MainAxisSize,
-    MouseStateHandle, OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds, Radius,
-    Stack, Text,
+    ChildAnchor, ClippedScrollStateHandle, ConstrainedBox, Container, CornerRadius,
+    CrossAxisAlignment, Dismiss, DispatchEventResult, DropShadow, Element, Empty, EventHandler,
+    Flex, Hoverable, MainAxisSize, MouseStateHandle, OffsetPositioning, ParentAnchor,
+    ParentElement, ParentOffsetBounds, Radius, SavePosition, ScrollTarget, ScrollToPositionMode,
+    ScrollbarWidth, Stack, Text,
 };
 use warpui::fonts::{Properties, Weight};
 use warpui::keymap::FixedBinding;
@@ -157,16 +159,55 @@ pub struct StackControl {
     /// (bottom-to-top indexing, matching `rows`), when the map is open.
     focused_row_index: Option<usize>,
     trigger_mouse_state: MouseStateHandle,
+    /// Scroll state for the row list, so a stack with more layers than fit
+    /// in `MAP_MAX_LIST_HEIGHT` remains fully navigable (PRODUCT.md item 7
+    /// requires every layer to be reachable, not just the ones that fit).
+    list_scroll_state: ClippedScrollStateHandle,
+    /// Persisted hover state for the trunk row's tooltip. Pull request rows
+    /// reuse keyboard/mouse focus (`focused_row_index`) for their tooltip
+    /// instead, since trunk isn't a selectable row and has no such state.
+    trunk_mouse_state: MouseStateHandle,
+    /// Stable prefix for this control's row `SavePosition` ids, so
+    /// `scroll_to_position` can reveal a specific row regardless of how many
+    /// `StackControl` instances exist (e.g. split panes).
+    position_id_prefix: String,
 }
 
 impl StackControl {
-    pub fn new(_ctx: &mut ViewContext<Self>) -> Self {
+    pub fn new(ctx: &mut ViewContext<Self>) -> Self {
         Self {
             presentation: None,
             map_open: false,
             focused_row_index: None,
             trigger_mouse_state: MouseStateHandle::default(),
+            list_scroll_state: ClippedScrollStateHandle::new(),
+            trunk_mouse_state: MouseStateHandle::default(),
+            position_id_prefix: format!("stack_map_row:{}", ctx.view_id()),
         }
+    }
+
+    fn row_position_id(&self, pr_number: u64) -> String {
+        format!("{}:{pr_number}", self.position_id_prefix)
+    }
+
+    /// Scrolls the currently focused row fully into view. Called after every
+    /// change to `focused_row_index` (keyboard navigation, hover-follow, and
+    /// reopening the map on the previously selected row) so a stack larger
+    /// than the visible list area never leaves the focused row unreachable.
+    fn reveal_focused_row(&self) {
+        let Some(presentation) = &self.presentation else {
+            return;
+        };
+        let Some(row) = self
+            .focused_row_index
+            .and_then(|index| presentation.rows.get(index))
+        else {
+            return;
+        };
+        self.list_scroll_state.scroll_to_position(ScrollTarget {
+            position_id: self.row_position_id(row.pr_number),
+            mode: ScrollToPositionMode::FullyIntoView,
+        });
     }
 
     /// Replaces the presentation snapshot. Closes the map when the stack no
@@ -185,6 +226,7 @@ impl StackControl {
         self.presentation = presentation;
         if self.map_open {
             self.reset_focus_to_selected();
+            self.reveal_focused_row();
         }
         ctx.notify();
     }
@@ -212,6 +254,7 @@ impl StackControl {
         } else if self.presentation.is_some() {
             self.map_open = true;
             self.reset_focus_to_selected();
+            self.reveal_focused_row();
             ctx.notify();
         }
     }
@@ -241,6 +284,7 @@ impl StackControl {
             .unwrap_or(0);
         let next_visual = (current_visual + delta).clamp(0, visual_len - 1);
         self.focused_row_index = Some((presentation.rows.len() as i32 - 1 - next_visual) as usize);
+        self.reveal_focused_row();
         ctx.notify();
     }
 
@@ -359,7 +403,7 @@ impl StackControl {
         }
 
         let pr_number = row.pr_number;
-        EventHandler::new(container.finish())
+        let row_element = EventHandler::new(container.finish())
             .on_left_mouse_down(move |ctx, _, _| {
                 ctx.dispatch_typed_action(StackControlAction::ClickRow { pr_number });
                 DispatchEventResult::StopPropagation
@@ -372,7 +416,41 @@ impl StackControl {
                 },
                 None,
             )
-            .finish()
+            .finish();
+
+        let row_element = if is_focused {
+            Self::with_tooltip(
+                row_element,
+                format!("#{} {}", row.pr_number, row.title),
+                appearance,
+            )
+        } else {
+            row_element
+        };
+
+        SavePosition::new(row_element, &self.row_position_id(pr_number)).finish()
+    }
+
+    /// Wraps `element` with a tooltip carrying `full_text` positioned above
+    /// it, for labels that may be ellipsized in the row itself (PRODUCT.md
+    /// item 10: truncated stack labels must still be inspectable).
+    fn with_tooltip(
+        element: Box<dyn Element>,
+        full_text: String,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
+        let mut stack = Stack::new().with_child(element);
+        let tooltip = appearance.ui_builder().tool_tip(full_text).build().finish();
+        stack.add_positioned_overlay_child(
+            tooltip,
+            OffsetPositioning::offset_from_parent(
+                vec2f(0., -6.),
+                ParentOffsetBounds::WindowByPosition,
+                ParentAnchor::TopMiddle,
+                ChildAnchor::BottomMiddle,
+            ),
+        );
+        stack.finish()
     }
 
     fn render_row_content(
@@ -423,7 +501,7 @@ impl StackControl {
     fn render_trunk_row(&self, trunk_ref: &str, appearance: &Appearance) -> Box<dyn Element> {
         let theme = appearance.theme();
         let sub_color = theme.sub_text_color(theme.surface_2()).into_solid();
-        Container::new(
+        let content = Container::new(
             Text::new_inline(
                 format!("{trunk_ref} (trunk)"),
                 appearance.ui_font_family(),
@@ -435,6 +513,16 @@ impl StackControl {
         )
         .with_horizontal_padding(ROW_HORIZONTAL_PADDING)
         .with_vertical_padding(TRUNK_ROW_VERTICAL_PADDING)
+        .finish();
+
+        let full_text = format!("{trunk_ref} (trunk)");
+        Hoverable::new(self.trunk_mouse_state.clone(), move |mouse_state| {
+            if mouse_state.is_hovered() {
+                Self::with_tooltip(content, full_text.clone(), appearance)
+            } else {
+                content
+            }
+        })
         .finish()
     }
 
@@ -455,19 +543,35 @@ impl StackControl {
             let is_focused = self.focused_row_index == Some(row_index);
             column.add_child(self.render_row(row, is_focused, appearance));
         }
-        column.add_child(self.render_trunk_row(&presentation.trunk_ref, appearance));
 
-        // The stack map is a compact list (PRODUCT.md's "compact vertical
-        // stack map"), so a clipped max height without a dedicated scroll
-        // gesture is sufficient for V1; very large stacks are clipped rather
-        // than scrollable.
-        let list = ConstrainedBox::new(Clipped::new(column.finish()).finish())
+        // Scrollable so a stack with more layers than fit in
+        // `MAP_MAX_LIST_HEIGHT` remains fully navigable by pointer and
+        // keyboard (PRODUCT.md item 7). The trunk row is pinned below the
+        // scroll region since it's non-interactive context, not a layer.
+        let scrollable_rows = NewScrollable::vertical(
+            SingleAxisConfig::Clipped {
+                handle: self.list_scroll_state.clone(),
+                child: column.finish(),
+            },
+            theme.nonactive_ui_detail().into(),
+            theme.active_ui_detail().into(),
+            warpui::elements::Fill::None,
+        )
+        .with_vertical_scrollbar(ScrollableAppearance::new(ScrollbarWidth::Auto, false))
+        .with_propagate_mousewheel_if_not_handled(true)
+        .finish();
+
+        let list = ConstrainedBox::new(scrollable_rows)
             .with_width(MAP_WIDTH)
             .with_max_height(MAP_MAX_LIST_HEIGHT)
             .finish();
 
+        let mut card_column = Flex::column().with_main_axis_size(MainAxisSize::Min);
+        card_column.add_child(list);
+        card_column.add_child(self.render_trunk_row(&presentation.trunk_ref, appearance));
+
         let card = ConstrainedBox::new(
-            Container::new(list)
+            Container::new(card_column.finish())
                 .with_background(theme.surface_2())
                 .with_corner_radius(CornerRadius::with_all(Radius::Pixels(MAP_CORNER_RADIUS)))
                 .with_drop_shadow(DropShadow::default())

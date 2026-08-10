@@ -64,6 +64,7 @@ use super::{GlobalCodeReviewEvent, GlobalCodeReviewModel};
 use crate::TelemetryEvent;
 use crate::ai::agent::{
     AIAgentAttachment, AgentReviewCommentBatch, CurrentHead, DiffBase, DiffSetHunk,
+    StackLayerReference,
 };
 use crate::ai::blocklist::agent_view::AgentViewEntryOrigin;
 use crate::appearance::Appearance;
@@ -421,6 +422,7 @@ struct UiStateHandles {
     sidebar_scroll_state: ClippedScrollStateHandle,
     sidebar_resizable_state: ResizableStateHandle,
     retry_button_mouse_state: MouseStateHandle,
+    open_on_github_button_mouse_state: MouseStateHandle,
 }
 
 impl Default for UiStateHandles {
@@ -429,6 +431,7 @@ impl Default for UiStateHandles {
             sidebar_scroll_state: Default::default(),
             sidebar_resizable_state: resizable_state_handle(DEFAULT_FILE_SIDEBAR_WIDTH),
             retry_button_mouse_state: Default::default(),
+            open_on_github_button_mouse_state: Default::default(),
         }
     }
 }
@@ -613,6 +616,21 @@ pub trait ReviewActionTargetProvider {
     /// The focused (or active) terminal of the hosting pane group, regardless
     /// of repo. Used for environment checks and terminal-targeted actions.
     fn focused_terminal(&self, app: &AppContext) -> Option<ViewHandle<TerminalView>>;
+
+    /// The repository-scoped, application-lifetime comment batch for a
+    /// pull request stack layer. Backed by the same store as the
+    /// working-tree batch (`WorkingDirectoriesModel`) so a layer's draft
+    /// comments survive the owning `CodeReviewView` being evicted or closed
+    /// (spec item 24 / TECH.md's application-lifetime requirement), not just
+    /// the lifetime of a single view instance. Returns `None` when no
+    /// backing store is reachable (e.g. in unit tests without a hosting
+    /// `RightPanelView`); callers fall back to a view-lifetime-only model.
+    fn get_or_create_stack_layer_comment_batch(
+        &self,
+        repo_path: &LocalOrRemotePath,
+        pr_number: u64,
+        ctx: &mut AppContext,
+    ) -> Option<ModelHandle<ReviewCommentBatch>>;
 }
 
 /// State shared among the entire code review view.
@@ -1675,9 +1693,13 @@ impl CodeReviewView {
     }
 
     /// Gets or lazily creates the comment batch for a stack layer's pull
-    /// request. Kept for the view's lifetime (application-lifetime
-    /// semantics, matching the working-tree batch) so switching away and
-    /// back preserves draft comments.
+    /// request. Backed by the repository-scoped, application-lifetime store
+    /// (`WorkingDirectoriesModel`, via the injected `action_target_provider`)
+    /// so a layer's drafts survive this `CodeReviewView` being evicted or
+    /// closed — exactly like the working-tree batch. Falls back to a
+    /// view-lifetime-only model when no provider or repo path is available
+    /// (e.g. unit tests), caching either kind locally so repeated lookups
+    /// within this view's lifetime are cheap.
     fn get_or_create_stack_comment_model(
         &mut self,
         pr_number: u64,
@@ -1686,7 +1708,13 @@ impl CodeReviewView {
         if let Some(existing) = self.stack_comment_models.get(&pr_number) {
             return existing.clone();
         }
-        let model = ctx.add_model(|_ctx| ReviewCommentBatch::default());
+        let repo_path = self.repo_path().cloned();
+        let model = repo_path
+            .zip(self.action_target_provider.as_ref())
+            .and_then(|(repo_path, provider)| {
+                provider.get_or_create_stack_layer_comment_batch(&repo_path, pr_number, ctx)
+            })
+            .unwrap_or_else(|| ctx.add_model(|_ctx| ReviewCommentBatch::default()));
         self.stack_comment_models.insert(pr_number, model.clone());
         model
     }
@@ -4078,8 +4106,42 @@ impl CodeReviewView {
         .finish()
     }
 
-    fn render_error_state(&self, error: &str, appearance: &Appearance) -> Box<dyn Element> {
+    /// Layer context for a failed load, when the failure happened while a
+    /// stack layer was selected: its PR number and GitHub URL (when known),
+    /// so the error state can name the target and offer `Open on GitHub`
+    /// instead of the generic "Error loading diffs" message.
+    fn failed_layer_context(&self, ctx: &AppContext) -> Option<(u64, Option<String>)> {
+        let pr_number = self.selected_stack_pr?;
+        let url = self.stack_info(ctx).and_then(|info| {
+            info.layers
+                .iter()
+                .find(|layer| layer.pr.number == pr_number)
+                .map(|layer| layer.pr.url.clone())
+        });
+        Some((pr_number, url))
+    }
+
+    fn render_error_state(
+        &self,
+        error: &str,
+        appearance: &Appearance,
+        ctx: &AppContext,
+    ) -> Box<dyn Element> {
         let theme = appearance.theme();
+        let layer_context = self.failed_layer_context(ctx);
+
+        let title = match &layer_context {
+            Some((pr_number, _)) => format!("Couldn't load PR #{pr_number}"),
+            None => "Error loading diffs".to_string(),
+        };
+        let description = match &layer_context {
+            // The read-only layer loader never touches the working tree even
+            // on failure, so reassure the user their local changes are safe
+            // rather than leaving that ambiguous (PRODUCT.md item 18).
+            Some(_) => format!("Your working tree is unchanged. {error}"),
+            None => error.to_string(),
+        };
+        let github_url = layer_context.and_then(|(_, url)| url);
 
         let main_column = Flex::column()
             .with_main_axis_size(MainAxisSize::Max)
@@ -4103,7 +4165,7 @@ impl CodeReviewView {
             )
             .with_child(
                 Text::new(
-                    "Error loading diffs",
+                    title,
                     appearance.ui_font_family(),
                     appearance.ui_font_size() + 2.,
                 )
@@ -4119,7 +4181,7 @@ impl CodeReviewView {
                             Shrinkable::new(
                                 1.,
                                 Text::new(
-                                    error.to_string(),
+                                    description,
                                     appearance.ui_font_family(),
                                     appearance.ui_font_size() + 2.,
                                 )
@@ -4137,41 +4199,88 @@ impl CodeReviewView {
                 .finish(),
             )
             .with_child(
-                Container::new(
-                    appearance
-                        .ui_builder()
-                        .button(
-                            ButtonVariant::Secondary,
-                            self.ui_state_handles.retry_button_mouse_state.clone(),
+                Flex::row()
+                    .with_main_axis_size(MainAxisSize::Min)
+                    .with_child(
+                        Container::new(
+                            appearance
+                                .ui_builder()
+                                .button(
+                                    ButtonVariant::Secondary,
+                                    self.ui_state_handles.retry_button_mouse_state.clone(),
+                                )
+                                .with_text_and_icon_label(TextAndIcon::new(
+                                    TextAndIconAlignment::IconFirst,
+                                    " Retry".to_string(),
+                                    Icon::Refresh.to_warpui_icon(
+                                        warp_core::ui::theme::Fill::Solid(
+                                            theme.main_text_color(theme.background()).into(),
+                                        ),
+                                    ),
+                                    MainAxisSize::Min,
+                                    MainAxisAlignment::SpaceBetween,
+                                    vec2f(16., 16.),
+                                ))
+                                .with_style(UiComponentStyles {
+                                    font_weight: Some(Weight::Semibold),
+                                    padding: Some(Coords {
+                                        top: 4.,
+                                        bottom: 4.,
+                                        left: 8.,
+                                        right: 8.,
+                                    }),
+                                    ..Default::default()
+                                })
+                                .build()
+                                .on_click(|ctx, _, _| {
+                                    ctx.dispatch_typed_action(CodeReviewAction::RefreshGitState)
+                                })
+                                .finish(),
                         )
-                        .with_text_and_icon_label(TextAndIcon::new(
-                            TextAndIconAlignment::IconFirst,
-                            " Retry".to_string(),
-                            Icon::Refresh.to_warpui_icon(warp_core::ui::theme::Fill::Solid(
-                                theme.main_text_color(theme.background()).into(),
-                            )),
-                            MainAxisSize::Min,
-                            MainAxisAlignment::SpaceBetween,
-                            vec2f(16., 16.),
-                        ))
-                        .with_style(UiComponentStyles {
-                            font_weight: Some(Weight::Semibold),
-                            padding: Some(Coords {
-                                top: 4.,
-                                bottom: 4.,
-                                left: 8.,
-                                right: 8.,
-                            }),
-                            ..Default::default()
-                        })
-                        .build()
-                        .on_click(|ctx, _, _| {
-                            ctx.dispatch_typed_action(CodeReviewAction::RefreshGitState)
-                        })
+                        .with_margin_top(12.)
                         .finish(),
-                )
-                .with_margin_top(12.)
-                .finish(),
+                    )
+                    .with_children(github_url.map(|url| {
+                        Container::new(
+                            appearance
+                                .ui_builder()
+                                .button(
+                                    ButtonVariant::Secondary,
+                                    self.ui_state_handles
+                                        .open_on_github_button_mouse_state
+                                        .clone(),
+                                )
+                                .with_text_and_icon_label(TextAndIcon::new(
+                                    TextAndIconAlignment::IconFirst,
+                                    " Open on GitHub".to_string(),
+                                    Icon::Github.to_warpui_icon(warp_core::ui::theme::Fill::Solid(
+                                        theme.main_text_color(theme.background()).into(),
+                                    )),
+                                    MainAxisSize::Min,
+                                    MainAxisAlignment::SpaceBetween,
+                                    vec2f(16., 16.),
+                                ))
+                                .with_style(UiComponentStyles {
+                                    font_weight: Some(Weight::Semibold),
+                                    padding: Some(Coords {
+                                        top: 4.,
+                                        bottom: 4.,
+                                        left: 8.,
+                                        right: 8.,
+                                    }),
+                                    ..Default::default()
+                                })
+                                .build()
+                                .on_click(move |ctx, _, _| {
+                                    ctx.dispatch_typed_action(CodeReviewAction::ViewPr(url.clone()))
+                                })
+                                .finish(),
+                        )
+                        .with_margin_top(12.)
+                        .with_margin_left(8.)
+                        .finish()
+                    }))
+                    .finish(),
             )
             .finish();
 
@@ -4510,9 +4619,21 @@ impl CodeReviewView {
 
         let active_batch = ReviewCommentBatch::from_comments(active_comments);
         let diff_set = self.collect_diff_set(&active_batch);
+        let pull_request = self.selected_stack_pr.and_then(|pr_number| {
+            self.stack_info(ctx).and_then(|info| {
+                info.layers
+                    .iter()
+                    .find(|layer| layer.pr.number == pr_number)
+                    .map(|layer| StackLayerReference {
+                        number: pr_number,
+                        url: layer.pr.url.clone(),
+                    })
+            })
+        });
         let agent_comment_batch = AgentReviewCommentBatch {
             comments: active_batch.comments,
             diff_set,
+            pull_request,
         };
 
         ctx.emit(CodeReviewViewEvent::SubmitReviewComments {
@@ -6708,11 +6829,72 @@ impl CodeReviewView {
             // Repository name/owner doesn't affect the git-ops UI.
             GitHubRepoEvent::RepositoryInfoChanged => {}
             GitHubRepoEvent::StackInfoChanged => {
+                me.reconcile_selected_layer_after_stack_refresh(ctx);
                 me.update_stack_control(ctx);
             }
         });
         self.github_repo_model = Some(handle);
         self.update_stack_control(ctx);
+    }
+
+    /// Reconciles the selected stack layer (if any) against the latest
+    /// `PrStackInfo` snapshot. Called on every `GitHubRepoEvent::StackInfoChanged`
+    /// so a stale selected-layer diff and comment batch are never left
+    /// showing after the underlying pull request moved:
+    /// - If the layer is no longer part of the stack (merged, removed, or
+    ///   the stack itself was dissolved), returns to the working tree with
+    ///   a nonblocking notice rather than leaving a diff/comments under a
+    ///   header that no longer corresponds to anything real.
+    /// - If the layer is still present but its `base_oid`/`head_oid`
+    ///   changed (force-push, or a lower layer merging and GitHub
+    ///   retargeting this one), reloads the diff at the refreshed range and
+    ///   repositions its comment batch, without treating it as a fresh user
+    ///   selection (no `StackLayerSelected` telemetry, no map interaction).
+    fn reconcile_selected_layer_after_stack_refresh(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(selected_pr) = self.selected_stack_pr else {
+            return;
+        };
+        let stack_info = self.stack_info(ctx);
+        let layer = stack_info.as_ref().and_then(|info| {
+            info.layers
+                .iter()
+                .find(|layer| layer.pr.number == selected_pr)
+        });
+
+        let Some(layer) = layer else {
+            self.apply_diff_mode(DiffMode::Head, ctx);
+            let toast_id = self.stack_layer_removed_toast_id(ctx);
+            crate::workspace::ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                let toast = DismissibleToast::default(format!(
+                    "PR #{selected_pr} is no longer part of the stack. Returned to Uncommitted changes."
+                ))
+                .with_object_id(toast_id);
+                toast_stack.add_ephemeral_toast(toast, self.window_id, ctx);
+            });
+            return;
+        };
+
+        let refreshed_mode = DiffMode::PullRequestLayer {
+            pr_number: selected_pr,
+            base_oid: layer.base_oid.clone(),
+            head_oid: layer.head_oid.clone(),
+        };
+        let current_mode = self
+            .diff_state_model
+            .read(ctx, |model, ctx| model.diff_mode(ctx));
+        if current_mode == refreshed_mode {
+            return;
+        }
+
+        let preferred_session = self.preferred_review_session(ctx);
+        self.diff_state_model.update(ctx, |model, ctx| {
+            model.set_diff_mode(refreshed_mode, false, true, preferred_session, ctx);
+        });
+        self.invalidate_all(None, None, ctx);
+    }
+
+    fn stack_layer_removed_toast_id(&self, ctx: &mut ViewContext<Self>) -> String {
+        format!("stack_layer_removed_{}", ctx.view_id())
     }
 
     fn unsubscribe_from_git_repo_status_model(&mut self, ctx: &mut ViewContext<Self>) {
@@ -7368,7 +7550,7 @@ impl View for CodeReviewView {
                     self.render_loaded_state(loaded_state, appearance, is_in_split_pane, ctx)
                 }
             }
-            CodeReviewViewState::Error(err) => self.render_error_state(err, appearance),
+            CodeReviewViewState::Error(err) => self.render_error_state(err, appearance, ctx),
             CodeReviewViewState::NoRepoFound => self.render_no_repo_for_env(ctx, appearance),
         };
 
