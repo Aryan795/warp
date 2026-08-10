@@ -280,6 +280,9 @@ impl TryFrom<&proto::FileDiff> for FileDiffAndContent {
         Ok(Self {
             file_diff: FileDiff::try_from(file)?,
             content_at_head: file.content_at_base.clone(),
+            // A pull request layer never crosses the wire in V1 (stack
+            // review is local-only), so the proto has no equivalent field.
+            content_at_new_commit: None,
         })
     }
 }

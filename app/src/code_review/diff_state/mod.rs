@@ -221,6 +221,16 @@ pub struct FileDiffAndContent {
     /// that don't exist at the base (the diff correctly renders everything as
     /// additions) or files genuinely empty at the base commit.
     pub content_at_head: Option<String>,
+    /// Full file content at the diff's *new* endpoint (a pull request layer's
+    /// `head_oid`), read directly from the git object store.
+    ///
+    /// Every other diff mode reads its "current" side from disk via
+    /// `GlobalBufferModel`, so this is `None` for them. A pull request layer
+    /// diffs two immutable commits with no working-tree editor to piggyback
+    /// on, so the non-global-buffer editor construction path uses this field
+    /// to seed the buffer directly instead. `None` for a file deleted between
+    /// the base and head commits (no content at the new endpoint).
+    pub content_at_new_commit: Option<String>,
 }
 
 /// IMPORTANT: This struct contains expensive data like the full content of diff files
@@ -268,6 +278,7 @@ impl From<&GitDiffData> for GitDiffWithBaseContent {
                 .map(|file_diff| FileDiffAndContent {
                     file_diff: file_diff.clone(),
                     content_at_head: None,
+                    content_at_new_commit: None,
                 })
                 .collect(),
             total_additions: value.total_additions,

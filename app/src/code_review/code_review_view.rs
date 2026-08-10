@@ -3698,9 +3698,24 @@ impl CodeReviewView {
                     let state = InitialBufferState::plain_text(file_content).with_version(version);
                     // Reset editor state with incoming content.
                     local_editor.reset_with_state(state, ctx);
+                } else if is_read_only {
+                    // A pull request layer diffs two immutable commits, so
+                    // there's no disk-backed buffer for `file_loaded()` to
+                    // ever report as loaded (this editor was never opened
+                    // via `GlobalBufferModel`). Seed the buffer directly with
+                    // the head-side git-object content, then force the base
+                    // comparison to compute immediately.
+                    if let Some(head_content) = &file.content_at_new_commit {
+                        let state =
+                            InitialBufferState::plain_text(head_content).with_version(version);
+                        local_editor.reset_with_state(state, ctx);
+                    }
+                    local_editor.editor().update(ctx, |editor, ctx| {
+                        editor.set_base(file_content, true, ctx);
+                    });
                 }
                 #[cfg(not(target_family = "wasm"))]
-                if !is_deleted_file {
+                if !is_deleted_file && !is_read_only {
                     // We only want to recompute diff is the file is loaded. If not, we can rely on the file load event
                     // for diff computation.
                     let file_loaded = local_editor.file_loaded(ctx);

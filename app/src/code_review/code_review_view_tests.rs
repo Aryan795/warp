@@ -1228,7 +1228,8 @@ fn test_pull_request_layer_diff_uses_read_only_editor() {
                     has_hidden_bidi_chars: false,
                     size: DiffSize::Normal,
                 },
-                content_at_head: Some("# Say hello\n".to_string()),
+                content_at_head: Some("# Hello\n".to_string()),
+                content_at_new_commit: Some("# Say hello\n".to_string()),
             };
 
             let file_states = view.build_view_state_for_file_diffs(&[file], view_ctx);
@@ -1236,11 +1237,11 @@ fn test_pull_request_layer_diff_uses_read_only_editor() {
                 .editor_state
                 .as_ref()
                 .expect("editor should be created for a non-binary file with content");
-            editor_state
-                .editor()
-                .read(view_ctx, |local_editor, ctx| {
-                    local_editor.editor().read(ctx, |editor, ctx| editor.is_editable(ctx))
-                })
+            editor_state.editor().read(view_ctx, |local_editor, ctx| {
+                local_editor
+                    .editor()
+                    .read(ctx, |editor, ctx| editor.is_editable(ctx))
+            })
         });
 
         assert!(
