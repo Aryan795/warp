@@ -398,4 +398,3 @@ fn get_default_app_bundle_for_file(file_path: &NSString) -> Option<Retained<NSSt
     let app_bundle = NSBundle::bundleWithURL(&app_url)?;
     app_bundle.bundleIdentifier()
 }
-

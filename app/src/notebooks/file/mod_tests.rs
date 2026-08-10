@@ -451,14 +451,15 @@ fn test_rendered_search_terms_for_source_line() {
     let markdown = "# Heading one\n\n- a **bold** item\n\n```rust\nlet total = compute();\n```\n\n> quoted line here\n";
 
     // Headings, list bullets and emphasis are stripped so the term matches the
-    // rendered text; the longest word is kept as a last resort.
+    // rendered text; the longest word is kept as a last resort. Equally long
+    // words are just as usable as each other, so the last one wins.
     assert_eq!(
         rendered_search_terms_for_source_line(markdown, 1),
         ["# Heading one", "Heading one", "Heading"]
     );
     assert_eq!(
         rendered_search_terms_for_source_line(markdown, 3),
-        ["- a **bold** item", "a bold item", "bold"]
+        ["- a **bold** item", "a bold item", "item"]
     );
     assert_eq!(
         rendered_search_terms_for_source_line(markdown, 9),
