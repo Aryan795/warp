@@ -1073,9 +1073,18 @@ fn a_failed_attachment_upload_restores_the_whole_row() {
                 );
             });
         });
-        // The upload cannot succeed against the test server, so let the failure land.
-        warpui::r#async::Timer::after(Duration::from_millis(200)).await;
-        flush(&mut app);
+        // The upload cannot succeed against the test server. Poll for the failure to land rather
+        // than sleeping a fixed amount, so the test does not depend on how loaded the machine is.
+        for _ in 0..200 {
+            let settled = QueuedQueryModel::handle(&app).read(&app, |model, _| {
+                !model.queue(pane.conversation_id).is_empty()
+            });
+            if settled {
+                break;
+            }
+            warpui::r#async::Timer::after(Duration::from_millis(10)).await;
+            flush(&mut app);
+        }
 
         let pending_followup = pane.view.read(&app, |view, ctx| {
             view.ambient_agent_view_model().and_then(|model| {
@@ -1222,6 +1231,38 @@ fn every_drain_trigger_together_accepts_each_prompt_at_most_once() {
                 queue_model.queue(pane.conversation_id).is_empty(),
                 "nothing may be left behind once every trigger has run"
             );
+        });
+    });
+}
+
+#[test]
+fn a_rejoin_after_the_conversation_was_removed_sends_nothing() {
+    // Criterion 9, final arm. If the conversation the prompt belonged to is gone by the time the
+    // session returns, there is nothing to retry into — the prompt must not be redirected to
+    // whatever conversation happens to be active now.
+    App::test((), |mut app| async move {
+        let _queue_flag = FeatureFlag::QueueSlashCommand.override_enabled(true);
+        let pane = viewer_pane(&mut app, reconnecting_stage());
+
+        submit_viewer_prompt(&mut app, &pane.view, "orphaned");
+        drain_agent_prompts(&app, &pane.network);
+        QueuedQueryModel::handle(&app).read(&app, |queue_model, _| {
+            assert_eq!(queue_model.queue(pane.conversation_id).len(), 1);
+        });
+
+        let terminal_view_id = pane.view.id();
+        BlocklistAIHistoryModel::handle(&app).update(&mut app, |history, ctx| {
+            history.delete_conversation(pane.conversation_id, Some(terminal_view_id), ctx);
+        });
+
+        inject_downstream(&mut app, &pane.network, rejoined_message());
+
+        assert!(
+            drain_agent_prompts(&app, &pane.network).is_empty(),
+            "a removed conversation leaves nothing to retry"
+        );
+        QueuedQueryModel::handle(&app).read(&app, |queue_model, _| {
+            assert!(queue_model.queue(pane.conversation_id).is_empty());
         });
     });
 }
