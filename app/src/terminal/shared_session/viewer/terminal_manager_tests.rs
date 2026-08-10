@@ -362,6 +362,16 @@ fn viewer_prompt_submitted_while_reconnecting_is_preserved_as_an_editable_queue_
             !warping_gate_is_satisfied(&terminal_view, conversation_id, &app),
             "an undelivered prompt must not leave the Warping... gate satisfied"
         );
+
+        // The frozen editor was the other user-visible half of the bug. Freezing renders the
+        // prompt with a trailing loading marker, so its absence is what proves the input was
+        // handed back rather than left waiting on a reply that never comes.
+        let input = terminal_view.read(&app, |view, _| view.input().clone());
+        let buffer = input.read(&app, |input, ctx| input.buffer_text(ctx));
+        assert!(
+            !buffer.contains('\u{25cc}'),
+            "the input must not still be frozen in its loading state, but was {buffer:?}"
+        );
     });
 }
 
