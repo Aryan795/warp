@@ -588,7 +588,6 @@ const THEME_CHOOSER_RATIO: f32 = 3.5;
 /// Save position for the tab bar.
 pub(crate) const TAB_BAR_POSITION_ID: &str = "workspace_view:tab_bar";
 const TEAM_SWITCHER_PILL_POSITION_ID: &str = "workspace_view:team_switcher_pill";
-const TEAM_HEADER_TINT_ALPHA: u8 = 96;
 const TEAM_SWITCHER_DOT_ALPHA: u8 = 204;
 
 /// Save position for the vertical tabs panel.
@@ -21365,7 +21364,7 @@ impl Workspace {
         let tab_bar_border =
             Border::bottom(TAB_BAR_BORDER_HEIGHT).with_border_fill(appearance.theme().outline());
 
-        let mut tab_bar_container = Container::new(
+        let tab_bar_element = Container::new(
             EventHandler::new(Clipped::new(self.render_tab_bar_hoverable(bar_contents)).finish())
                 .on_back_mouse_down(move |ctx, _app, _position| {
                     ctx.dispatch_typed_action(WorkspaceAction::ActivatePrevTab);
@@ -21377,21 +21376,8 @@ impl Workspace {
                 })
                 .finish(),
         )
-        .with_border(tab_bar_border);
-        let is_multi_team = UserWorkspaces::as_ref(ctx).can_switch_teams();
-        let team_color = is_multi_team
-            .then(|| UserWorkspaces::as_ref(ctx).team_for_window(self.window_id))
-            .flatten()
-            .and_then(|team| team.color.as_deref())
-            .and_then(|hex| warp_core::ui::color::hex_color::coloru_from_hex_string(hex).ok())
-            .map(|mut color| {
-                color.a = TEAM_HEADER_TINT_ALPHA;
-                color
-            });
-        if let Some(team_color) = team_color {
-            tab_bar_container = tab_bar_container.with_background(Fill::Solid(team_color));
-        }
-        let tab_bar_element = tab_bar_container.finish();
+        .with_border(tab_bar_border)
+        .finish();
 
         let dimming_color = appearance.theme().background().into();
         SavePosition::new(
@@ -25544,24 +25530,34 @@ impl TypedActionView for Workspace {
                 session_id,
                 task_id,
             } => {
-                if let Some((_, locator)) =
-                    self.find_pane_with_ambient_agent_conversation(*task_id, ctx)
+                // An existing pane for this run is only reusable if it can host the live session.
+                // A read-only pane (e.g. a conversation transcript viewer opened earlier for the
+                // same run) must not be reused: focusing it would leave the user staring at a
+                // non-interactive transcript instead of a writable terminal. In that case fall
+                // through to opening a fresh shared-session tab.
+                let existing_pane = self.find_pane_with_ambient_agent_conversation(*task_id, ctx);
+                let mut attached_locator = None;
+                if let Some((_, locator)) = existing_pane
+                    && let Some(pane_group) = self
+                        .get_pane_group_view_with_id(locator.pane_group_id)
+                        .cloned()
                 {
-                    self.focus_pane(locator, ctx);
-                    if let Some(pane_group) =
-                        self.get_pane_group_view_with_id(locator.pane_group_id)
-                    {
-                        pane_group.update(ctx, |pane_group, ctx| {
-                            pane_group.attach_execution_session_to_ambient_pane(
-                                locator.pane_id,
-                                *session_id,
-                                ctx,
-                            );
-                        });
+                    let attached = pane_group.update(ctx, |pane_group, ctx| {
+                        pane_group.attach_execution_session_to_ambient_pane(
+                            locator.pane_id,
+                            *session_id,
+                            ctx,
+                        )
+                    });
+                    if attached {
+                        attached_locator = Some(locator);
                     }
-                } else {
+                }
+
+                match attached_locator {
+                    Some(locator) => self.focus_pane(locator, ctx),
                     // Attaching to a known ambient run: build the pane in ambient mode.
-                    self.add_tab_for_joining_shared_session(*session_id, true, ctx);
+                    None => self.add_tab_for_joining_shared_session(*session_id, true, ctx),
                 }
             }
             OpenConversationTranscriptViewer {
@@ -27641,7 +27637,9 @@ impl View for Workspace {
             );
         }
 
-        let window_corner_radius = app.windows().window_corner_radius();
+        let window_corner_radius = app
+            .windows()
+            .window_corner_radius_for_window(self.window_id);
         let workspace = Container::new(stack.finish()).with_corner_radius(window_corner_radius);
 
         let mut stack = Stack::new();
