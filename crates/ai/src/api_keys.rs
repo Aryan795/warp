@@ -65,7 +65,6 @@ pub struct CustomEndpointModelParams {
     pub name: String,
     pub alias: Option<String>,
     pub reasoning_effort: Option<String>,
-    pub reasoning_mode: Option<String>,
     pub config_key: Option<String>,
 }
 
@@ -129,8 +128,6 @@ pub struct CustomEndpointModel {
     /// Provider-specific reasoning effort forwarded to compatible endpoint
     /// schemas. `None` preserves the provider's default behavior.
     pub reasoning_effort: Option<String>,
-    /// Provider-specific reasoning execution mode.
-    pub reasoning_mode: Option<String>,
     /// Stable identifier used as `ModelConfig.{base,coding,cli_agent,computer_use_agent}` and
     /// as the `CustomModelProviders.providers[*].models[*].config_key` on the request wire.
     /// Generated as a UUIDv4 at model creation.
@@ -510,7 +507,6 @@ impl ApiKeyManager {
                     name: model.name,
                     alias: model.alias,
                     reasoning_effort: normalize_reasoning_value(model.reasoning_effort),
-                    reasoning_mode: normalize_reasoning_value(model.reasoning_mode),
                     config_key: model
                         .config_key
                         .filter(|k| !k.is_empty())
@@ -549,7 +545,6 @@ impl ApiKeyManager {
                     name: model.name,
                     alias: model.alias,
                     reasoning_effort: normalize_reasoning_value(model.reasoning_effort),
-                    reasoning_mode: normalize_reasoning_value(model.reasoning_mode),
                     config_key: model
                         .config_key
                         .filter(|k| !k.is_empty())
@@ -639,7 +634,6 @@ impl ApiKeyManager {
                                 slug: m.name.clone(),
                                 config_key: m.config_key.clone(),
                                 reasoning_effort: m.reasoning_effort.clone().unwrap_or_default(),
-                                reasoning_mode: m.reasoning_mode.clone().unwrap_or_default(),
                             },
                         )
                         .collect(),

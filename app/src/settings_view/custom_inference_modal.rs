@@ -87,7 +87,6 @@ struct ModelRow {
     name_editor: ViewHandle<EditorView>,
     alias_editor: ViewHandle<EditorView>,
     reasoning_effort_editor: ViewHandle<EditorView>,
-    reasoning_mode: Option<String>,
     remove_mouse_state: MouseStateHandle,
     config_key: Option<String>,
 }
@@ -225,7 +224,6 @@ impl CustomEndpointModal {
                     Some(&model.name),
                     model.alias.as_deref(),
                     model.reasoning_effort.as_deref(),
-                    model.reasoning_mode.clone(),
                     Some(model.config_key.clone()),
                     font_family,
                     &text_colors,
@@ -235,7 +233,6 @@ impl CustomEndpointModal {
         }
         if model_rows.is_empty() {
             model_rows.push(Self::create_model_row(
-                None,
                 None,
                 None,
                 None,
@@ -301,7 +298,6 @@ impl CustomEndpointModal {
         name: Option<&str>,
         alias: Option<&str>,
         reasoning_effort: Option<&str>,
-        reasoning_mode: Option<String>,
         config_key: Option<String>,
         font_family: FamilyId,
         text_colors: &crate::editor::TextColors,
@@ -370,7 +366,6 @@ impl CustomEndpointModal {
             name_editor,
             alias_editor,
             reasoning_effort_editor,
-            reasoning_mode,
             remove_mouse_state: Default::default(),
             config_key,
         }
@@ -416,7 +411,6 @@ impl CustomEndpointModal {
                     Some(&model.name),
                     model.alias.as_deref(),
                     model.reasoning_effort.as_deref(),
-                    model.reasoning_mode.clone(),
                     Some(model.config_key.clone()),
                     font_family,
                     &text_colors,
@@ -426,7 +420,6 @@ impl CustomEndpointModal {
         }
         if self.model_rows.is_empty() {
             self.model_rows.push(Self::create_model_row(
-                None,
                 None,
                 None,
                 None,
@@ -535,11 +528,6 @@ impl CustomEndpointModal {
                     name,
                     alias,
                     reasoning_effort,
-                    reasoning_mode: if schema == CustomEndpointSchema::OpenaiResponses {
-                        row.reasoning_mode.clone()
-                    } else {
-                        None
-                    },
                     config_key: row.config_key.clone(),
                 }
             })
@@ -586,8 +574,7 @@ impl CustomEndpointModal {
     fn add_model(&mut self, ctx: &mut ViewContext<Self>) {
         let font_family = Appearance::as_ref(ctx).ui_font_family();
         let text_colors = crate::settings_view::editor_text_colors(Appearance::as_ref(ctx));
-        let row =
-            Self::create_model_row(None, None, None, None, None, font_family, &text_colors, ctx);
+        let row = Self::create_model_row(None, None, None, None, font_family, &text_colors, ctx);
         // Subscribe to the new editors
         let name_editor = row.name_editor.clone();
         ctx.subscribe_to_view(&name_editor, |me, editor, event, ctx| {

@@ -19,7 +19,6 @@ fn endpoint_with_models(model_count: usize) -> CustomEndpoint {
                 name: format!("model-{index}"),
                 alias: None,
                 reasoning_effort: None,
-                reasoning_mode: None,
                 config_key: format!("config-{index}"),
             })
             .collect(),

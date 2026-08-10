@@ -217,7 +217,6 @@ fn endpoint_with_keys(
                 name: (*n).into(),
                 alias: a.map(|s| s.into()),
                 reasoning_effort: None,
-                reasoning_mode: None,
                 config_key: (*cfg).into(),
             })
             .collect(),
@@ -300,7 +299,6 @@ fn serde_round_trips_unknown_reasoning_effort() {
         name: "future-model".into(),
         alias: None,
         reasoning_effort: Some("ultra".into()),
-        reasoning_mode: None,
         config_key: "future-key".into(),
     };
     let json = serde_json::to_string(&model).unwrap();
@@ -517,7 +515,6 @@ fn display_label_uses_alias_when_present() {
         name: "raw-name".into(),
         alias: Some("My Alias".into()),
         reasoning_effort: None,
-        reasoning_mode: None,
         config_key: "k".into(),
     };
     assert_eq!(m.display_label(), "My Alias");
@@ -529,7 +526,6 @@ fn display_label_falls_back_to_name_when_alias_missing() {
         name: "raw-name".into(),
         alias: None,
         reasoning_effort: None,
-        reasoning_mode: None,
         config_key: "k".into(),
     };
     assert_eq!(m.display_label(), "raw-name");
@@ -541,7 +537,6 @@ fn display_label_falls_back_to_name_when_alias_is_whitespace() {
         name: "raw-name".into(),
         alias: Some("   ".into()),
         reasoning_effort: None,
-        reasoning_mode: None,
         config_key: "k".into(),
     };
     assert_eq!(m.display_label(), "raw-name");
