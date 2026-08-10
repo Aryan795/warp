@@ -1533,7 +1533,7 @@ impl TerminalManager {
         apply_selected_conversation_update(weak_view_handle, selected_conversation, guard, ctx);
     }
 
-    fn handle_view_events(
+    pub(crate) fn handle_view_events(
         current_network: Arc<FairMutex<Option<ModelHandle<Network>>>>,
         view: &ViewHandle<TerminalView>,
         model: Arc<FairMutex<TerminalModel>>,

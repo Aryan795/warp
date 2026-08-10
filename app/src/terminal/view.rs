@@ -2432,10 +2432,18 @@ type TerminalViewCallback = Box<dyn FnOnce(&mut TerminalView, &mut ViewContext<T
 /// How long a viewer prompt may sit locally accepted but unacknowledged before the client stops
 /// waiting and gives the prompt back to the user as a queue row.
 ///
-/// Matched to the shared-session startup timeout: comfortably longer than a healthy sharer
-/// round trip, and short enough that a proxy that swallowed the message does not leave the input
-/// frozen indefinitely.
-const VIEWER_PROMPT_ACK_TIMEOUT: Duration = Duration::from_secs(5);
+/// Production is matched to the shared-session startup timeout: comfortably longer than a healthy
+/// sharer round trip, and short enough that a proxy that swallowed the message does not leave the
+/// input frozen indefinitely.
+///
+/// **The test value is not authoritative.** It is shortened so the expiry can be awaited without
+/// sleeping for the production duration, following `PTY_WRITES_BATCH_THRESHOLD` in
+/// `terminal/shared_session/viewer/network.rs`. Five seconds is the real bound.
+const VIEWER_PROMPT_ACK_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_millis(20)
+} else {
+    Duration::from_secs(5)
+};
 
 /// A viewer prompt handed to the network and awaiting the sharer's correlated acknowledgement.
 struct PendingViewerPrompt {
@@ -5640,7 +5648,7 @@ impl TerminalView {
                         );
                     }
                 });
-                self.clear_stale_viewer_turn(conversation_id, &dispatch, ctx);
+                self.clear_stale_viewer_turn(conversation_id, ctx);
                 true
             }
             _ => false,
@@ -5682,22 +5690,26 @@ impl TerminalView {
     /// Clears a conversation left reported as in progress purely because of a viewer submission
     /// that never reached the sharer, so the `Warping...` indicator does not outlive it.
     ///
-    /// `dispatch` records whether the conversation was already running when the prompt was
-    /// submitted. If it was, some earlier turn owns that state and it is not ours to clear; the
-    /// same applies while the agent controls the active block.
+    /// A conversation reports `InProgress` from the moment it is created, so that status alone
+    /// says nothing about whether work is really running. The two signals that do are an
+    /// in-flight response stream and an agent-controlled active block — the same pair
+    /// [`BlocklistAIStatusBar::render_warping_indicator_for_latest_exchange`] renders on. While
+    /// either holds, the turn is genuinely active and the indicator is not ours to clear.
     fn clear_stale_viewer_turn(
         &mut self,
         conversation_id: AIConversationId,
-        dispatch: &ViewerPromptDispatch,
         ctx: &mut ViewContext<Self>,
     ) {
-        if dispatch.conversation_was_in_progress() {
-            return;
-        }
         let is_in_progress = BlocklistAIHistoryModel::as_ref(ctx)
             .conversation(&conversation_id)
             .is_some_and(|conversation| conversation.status().is_in_progress());
         if !is_in_progress {
+            return;
+        }
+        let has_active_stream = self.ai_controller.read(ctx, |controller, app| {
+            controller.has_active_stream_for_conversation(conversation_id, app)
+        });
+        if has_active_stream {
             return;
         }
         let agent_controls_active_block = {

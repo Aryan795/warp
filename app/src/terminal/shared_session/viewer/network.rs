@@ -71,7 +71,7 @@ const RECONNECT_RETRY_STRATEGY: RetryOption = RetryOption::exponential(
 .with_jitter(0.2);
 
 #[derive(Debug)]
-pub(super) enum Stage {
+pub(crate) enum Stage {
     BeforeJoined,
     JoinedSuccessfully,
     Reconnecting {
@@ -189,7 +189,7 @@ pub struct Network {
     initial_load_mode: SharedSessionInitialLoadMode,
     remote_update_guard: RemoteUpdateGuard,
 
-    pub(super) stage: Stage,
+    pub(crate) stage: Stage,
 
     /// Intermediate channel to queue up messages to send over
     /// over the websocket to the server.
@@ -197,7 +197,7 @@ pub struct Network {
     selection_throttled_tx: async_channel::Sender<Selection>,
 
     #[cfg(test)]
-    pub(super) ws_proxy_rx: async_channel::Receiver<UpstreamMessage>,
+    pub(crate) ws_proxy_rx: async_channel::Receiver<UpstreamMessage>,
 
     /// The participant ID we were assigned by the server.
     /// This is populated after successfully joining a session, and
@@ -1167,6 +1167,25 @@ impl Network {
 
     pub fn session_id(&self) -> SessionId {
         self.session_id
+    }
+
+    /// Feeds `message` through the real inbound websocket path so a test can drive server
+    /// behavior (join, rejoin, acknowledgement, session end) that no unit test could otherwise
+    /// produce.
+    ///
+    /// The round trip through JSON is deliberate: parsing and dispatch in
+    /// [`Self::process_websocket_message`] are part of what these tests are meant to cover, so
+    /// the seam must not bypass them.
+    #[cfg(test)]
+    pub(crate) fn inject_downstream_message_for_test(
+        &mut self,
+        message: DownstreamMessage,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let serialized = message
+            .to_json()
+            .expect("a downstream message built in a test serializes");
+        self.process_websocket_message(Message::new(serialized), ctx);
     }
 }
 

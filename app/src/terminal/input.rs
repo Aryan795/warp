@@ -1152,9 +1152,6 @@ pub struct ViewerPromptDispatch {
     /// Set when this send is retrying a row already claimed out of the queue; restoring the claim
     /// puts that exact row back rather than filing a duplicate.
     claim: Option<ClaimedQuery>,
-    /// Whether the conversation was already running a turn when this prompt was submitted. If it
-    /// was, an earlier turn owns the in-progress state and a failed send must not clear it.
-    conversation_was_in_progress: bool,
 }
 
 impl ViewerPromptDispatch {
@@ -1163,7 +1160,6 @@ impl ViewerPromptDispatch {
         prompt: String,
         pending_attachments: Vec<PendingAttachment>,
         claim: Option<ClaimedQuery>,
-        conversation_was_in_progress: bool,
     ) -> Self {
         // Reuse the claimed row's stable ID so a late acknowledgement for an earlier attempt on
         // the same unedited row still resolves to it.
@@ -1178,16 +1174,11 @@ impl ViewerPromptDispatch {
             prompt,
             pending_attachments,
             claim,
-            conversation_was_in_progress,
         }
     }
 
     pub fn request_id(&self) -> &AgentPromptRequestId {
         &self.request_id
-    }
-
-    pub fn conversation_was_in_progress(&self) -> bool {
-        self.conversation_was_in_progress
     }
 
     pub fn conversation_id(&self) -> Option<AIConversationId> {
@@ -14188,15 +14179,11 @@ impl Input {
                         .attachments_for(conversation_id, query_id)
                         .to_vec()
                 });
-            let conversation_was_in_progress = BlocklistAIHistoryModel::as_ref(ctx)
-                .conversation(&conversation_id)
-                .is_some_and(|conversation| conversation.status().is_in_progress());
             let dispatch = ViewerPromptDispatch::new(
                 Some(conversation_id),
                 prompt.clone(),
                 pending_attachments,
                 claim,
-                conversation_was_in_progress,
             );
             self.upload_and_send_viewer_prompt(
                 dispatch,
@@ -14670,18 +14657,8 @@ impl Input {
             .map(PendingAttachment::Image)
             .chain(pending_files.iter().cloned().map(PendingAttachment::File))
             .collect();
-        let conversation_was_in_progress = selected_conv_id.is_some_and(|conversation_id| {
-            BlocklistAIHistoryModel::as_ref(ctx)
-                .conversation(&conversation_id)
-                .is_some_and(|conversation| conversation.status().is_in_progress())
-        });
-        let dispatch = ViewerPromptDispatch::new(
-            selected_conv_id,
-            prompt.clone(),
-            pending_attachments,
-            None,
-            conversation_was_in_progress,
-        );
+        let dispatch =
+            ViewerPromptDispatch::new(selected_conv_id, prompt.clone(), pending_attachments, None);
 
         self.upload_and_send_viewer_prompt(
             dispatch,

@@ -10,16 +10,18 @@
 //! `DetachType::Closed`, while deliberately preserving it on
 //! `HiddenForClose` (undo-close grace window) and `Moved`.
 
+use std::collections::HashSet;
+
 use async_broadcast::broadcast;
-use futures_util::stream::AbortHandle;
+use chrono::Local;
 use session_sharing_protocol::common::AgentPromptRequestId;
-use session_sharing_protocol::viewer::UpstreamMessage;
 use warpui::App;
 
 use super::*;
-use crate::ai::blocklist::agent_view::AgentViewEntryOrigin;
+use crate::ai::agent::{AIAgentExchange, AIAgentExchangeId, AIAgentOutputStatus};
 use crate::ai::blocklist::orchestration_event_streamer::OrchestrationEventStreamer;
-use crate::ai::blocklist::{QueuedQueryModel, QueuedQueryOrigin};
+use crate::ai::blocklist::{QueuedQueryModel, QueuedQueryOrigin, ResponseStream, ResponseStreamId};
+use crate::ai::llms::LLMId;
 // Bring the `TerminalManager` trait into scope (named under a different alias
 // since the local `TerminalManager` struct shadows it) so the trait method
 // `on_view_detached` is callable on the struct.
@@ -27,6 +29,9 @@ use crate::terminal::TerminalManager as _;
 use crate::terminal::model::session::Sessions;
 use crate::terminal::shared_session::viewer::network::Stage;
 use crate::test_util::add_window_with_terminal;
+use crate::test_util::shared_session_viewer::{
+    drain_agent_prompts, reconnecting_stage, sent_agent_prompt, submit_viewer_prompt, viewer_pane,
+};
 use crate::test_util::terminal::initialize_app_for_terminal_view;
 use crate::workspace::ToastStack;
 
@@ -233,131 +238,75 @@ fn on_view_detached_moved_keeps_orchestration_viewer_model_alive() {
     });
 }
 
-/// Builds an executor viewer pane whose network is attached and wired through
-/// `handle_view_events`, the same subscription `connect_session` installs.
+/// Evaluates the two conditions that make
+/// [`BlocklistAIStatusBar::render_warping_indicator_for_latest_exchange`] render `Warping...`
+/// (`app/src/ai/blocklist/block/status_bar.rs:787-790`): an in-progress conversation, or an
+/// agent-driven active block. The other terms in that gate can only suppress the indicator
+/// further, so this disjunction is exactly what an undelivered prompt can wrongly leave true.
+fn warping_gate_is_satisfied(
+    terminal_view: &ViewHandle<TerminalView>,
+    conversation_id: crate::ai::agent::conversation::AIConversationId,
+    app: &App,
+) -> bool {
+    let conversation_in_progress = BlocklistAIHistoryModel::handle(app).read(app, |history, _| {
+        history
+            .conversation(&conversation_id)
+            .is_some_and(|conversation| conversation.status().is_in_progress())
+    });
+    let agent_drives_active_block = terminal_view.read(app, |view, _| {
+        let model = view.model.lock();
+        let active_block = model.block_list().active_block();
+        active_block.is_agent_in_control() && !active_block.is_agent_blocked()
+    });
+    conversation_in_progress || agent_drives_active_block
+}
+
+/// Registers an in-flight response stream for `conversation_id`, standing in for a turn that is
+/// genuinely still streaming when an unrelated prompt fails to send.
 ///
-/// `stage` is the whole point of these tests: the pane reports `ActiveViewer` either way, so only
-/// the network's stage separates a deliverable prompt from an undeliverable one.
-fn viewer_pane_with_network(
+/// The stream has to be attached on both sides: registered with the controller *and* bound to a
+/// streaming exchange on the conversation, because `has_active_stream_for_conversation` only
+/// counts a stream the conversation reports it is processing.
+fn register_active_stream(
     app: &mut App,
-    stage: Stage,
-) -> (
-    ViewHandle<TerminalView>,
-    crate::ai::agent::conversation::AIConversationId,
-    ModelHandle<Network>,
+    terminal_view: &ViewHandle<TerminalView>,
+    conversation_id: crate::ai::agent::conversation::AIConversationId,
 ) {
-    initialize_app_for_terminal_view(app);
-    app.add_singleton_model(|_| ToastStack);
+    terminal_view.update(app, |view, ctx| {
+        let stream_id = ResponseStreamId::new_for_test();
+        let terminal_view_id = view.view_id();
+        BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+            history
+                .conversation_mut(&conversation_id)
+                .expect("the pane's conversation exists")
+                .append_reassigned_exchange(&stream_id, streaming_exchange(), terminal_view_id, ctx)
+                .expect("a streaming exchange appends");
+        });
+        let stream = ctx.add_model(|_| ResponseStream::new_for_test(stream_id.clone()));
+        view.ai_controller().clone().update(ctx, |controller, ctx| {
+            controller.register_mock_stream_for_test(stream_id, conversation_id, stream, ctx);
+        });
+    });
+}
 
-    let terminal_view = add_window_with_terminal(app, None);
-    let terminal_view_id = terminal_view.id();
-    let model = terminal_view.read(app, |view, _| view.model.clone());
-    {
-        let mut model = model.lock();
-        model.block_list_mut().set_bootstrapped();
-        model
-            .block_list_mut()
-            .active_block_for_test()
-            .set_session_id(crate::terminal::model::session::SessionId::from(0));
-        model.set_shared_session_status(SharedSessionStatus::executor());
+/// A minimal exchange in the streaming state, which is what marks its response stream in flight.
+fn streaming_exchange() -> AIAgentExchange {
+    AIAgentExchange {
+        id: AIAgentExchangeId::new(),
+        input: Vec::new(),
+        output_status: AIAgentOutputStatus::Streaming { output: None },
+        added_message_ids: HashSet::new(),
+        start_time: Local::now(),
+        finish_time: None,
+        time_to_first_token_ms: None,
+        working_directory: None,
+        model_id: LLMId::from("test-model"),
+        request_cost: None,
+        coding_model_id: LLMId::from("test-coding-model"),
+        cli_agent_model_id: LLMId::from("test-cli-agent-model"),
+        computer_use_model_id: LLMId::from("test-computer-use-model"),
+        response_initiator: None,
     }
-
-    // Entering agent view is what makes a conversation *selected*, which is how the submission
-    // path resolves the queue that owns a fallback row.
-    let conversation_id = terminal_view.update(app, |view, ctx| {
-        view.agent_view_controller().update(ctx, |controller, ctx| {
-            controller
-                .try_enter_agent_view(
-                    None,
-                    AgentViewEntryOrigin::Input {
-                        was_prompt_autodetected: false,
-                    },
-                    ctx,
-                )
-                .expect("the pane can enter agent view")
-        })
-    });
-    BlocklistAIHistoryModel::handle(app).update(app, |history, ctx| {
-        history.set_active_conversation_id(conversation_id, terminal_view_id, ctx);
-    });
-
-    let channel_event_proxy = ChannelEventListener::new_for_test();
-    let (_write_to_pty_tx, write_to_pty_rx) = async_channel::unbounded();
-    let network = app.add_model(|ctx| {
-        Network::new_for_test(
-            channel_event_proxy,
-            terminal_view.downgrade(),
-            model.clone(),
-            write_to_pty_rx,
-            RemoteUpdateGuard::new(),
-            ctx,
-        )
-    });
-    network.update(app, |network, _| {
-        network.stage = stage;
-    });
-
-    let current_network = Arc::new(FairMutex::new(Some(network.clone())));
-    app.update(|ctx| {
-        TerminalManager::handle_view_events(
-            current_network,
-            &terminal_view,
-            model,
-            RemoteUpdateGuard::new(),
-            ctx,
-        );
-    });
-
-    (terminal_view, conversation_id, network)
-}
-
-fn reconnecting_stage() -> Stage {
-    let (abort_handle, _registration) = AbortHandle::new_pair();
-    Stage::Reconnecting { abort_handle }
-}
-
-fn submit_viewer_prompt(app: &mut App, terminal_view: &ViewHandle<TerminalView>, prompt: &str) {
-    let input = terminal_view.read(app, |view, _| view.input().clone());
-    input.update(app, |input, ctx| {
-        input.replace_buffer_content(prompt, ctx);
-    });
-    input.update(app, |input, ctx| {
-        input.maybe_route_ai_query_to_remote_target(ctx);
-    });
-    // The submission emits from `Input`, which `TerminalView` re-emits and the manager consumes;
-    // each hop is delivered on an effect flush.
-    app.update(|_| ());
-    app.update(|_| ());
-}
-
-/// Drains the outbound proxy channel and returns the single agent-prompt request on it. The
-/// channel also carries CRDT input updates for the same submission, so the prompt has to be
-/// picked out rather than assumed to be first.
-fn sent_agent_prompt(
-    network: &ModelHandle<Network>,
-    app: &App,
-) -> session_sharing_protocol::common::AgentPromptRequest {
-    let mut requests = drain_agent_prompts(network, app);
-    assert_eq!(
-        requests.len(),
-        1,
-        "exactly one agent prompt should have reached the network"
-    );
-    requests.remove(0)
-}
-
-fn drain_agent_prompts(
-    network: &ModelHandle<Network>,
-    app: &App,
-) -> Vec<session_sharing_protocol::common::AgentPromptRequest> {
-    let ws_proxy_rx = network.read(app, |network, _| network.ws_proxy_rx.clone());
-    let mut requests = Vec::new();
-    while let Ok(message) = ws_proxy_rx.try_recv() {
-        if let UpstreamMessage::SendAgentPrompt(request) = message {
-            requests.push(request);
-        }
-    }
-    requests
 }
 
 #[test]
@@ -368,14 +317,18 @@ fn viewer_prompt_submitted_while_reconnecting_is_preserved_as_an_editable_queue_
     // the user's own queue row.
     App::test((), |mut app| async move {
         let _queue_flag = FeatureFlag::QueueSlashCommand.override_enabled(true);
-        let (terminal_view, conversation_id, network) =
-            viewer_pane_with_network(&mut app, reconnecting_stage());
+        let pane = viewer_pane(&mut app, reconnecting_stage());
+        let (terminal_view, conversation_id, network) = (
+            pane.view.clone(),
+            pane.conversation_id,
+            pane.network.clone(),
+        );
         let session_id = network.read(&app, |network, _| network.session_id());
 
         submit_viewer_prompt(&mut app, &terminal_view, "finish the refactor");
 
         assert!(
-            drain_agent_prompts(&network, &app).is_empty(),
+            drain_agent_prompts(&app, &network).is_empty(),
             "a reconnecting network cannot carry the prompt"
         );
         QueuedQueryModel::handle(&app).read(&app, |queue_model, _| {
@@ -398,6 +351,56 @@ fn viewer_prompt_submitted_while_reconnecting_is_preserved_as_an_editable_queue_
                 "the row must stay pinned to the session it was addressed to"
             );
         });
+
+        // The other half of the reported symptom: with the prompt gone and nothing running, the
+        // conversation must stop advertising a turn, or `Warping...` hangs around forever.
+        assert!(
+            !warping_gate_is_satisfied(&terminal_view, conversation_id, &app),
+            "an undelivered prompt must not leave the Warping... gate satisfied"
+        );
+    });
+}
+
+#[test]
+fn a_conversation_advertises_a_turn_before_the_prompt_is_even_submitted() {
+    // Anchors the precondition the fix depends on: a conversation reports `InProgress` from
+    // creation, so the status by itself proves nothing about whether work is running. Without
+    // this the reproduction test could pass simply because the gate was never armed.
+    App::test((), |mut app| async move {
+        let _queue_flag = FeatureFlag::QueueSlashCommand.override_enabled(true);
+        let pane = viewer_pane(&mut app, reconnecting_stage());
+        let (terminal_view, conversation_id) = (pane.view.clone(), pane.conversation_id);
+
+        assert!(
+            warping_gate_is_satisfied(&terminal_view, conversation_id, &app),
+            "the Warping... gate is expected to be armed before submission"
+        );
+    });
+}
+
+#[test]
+fn an_undelivered_prompt_leaves_warping_alone_while_a_stream_is_still_running() {
+    // The dangerous over-correction: a prompt that fails to send must not silence the indicator
+    // for a turn that is genuinely still streaming. The fallback row is still filed either way.
+    App::test((), |mut app| async move {
+        let _queue_flag = FeatureFlag::QueueSlashCommand.override_enabled(true);
+        let pane = viewer_pane(&mut app, reconnecting_stage());
+        let (terminal_view, conversation_id) = (pane.view.clone(), pane.conversation_id);
+        register_active_stream(&mut app, &terminal_view, conversation_id);
+
+        submit_viewer_prompt(&mut app, &terminal_view, "another thought");
+
+        QueuedQueryModel::handle(&app).read(&app, |queue_model, _| {
+            assert_eq!(
+                queue_model.queue(conversation_id).len(),
+                1,
+                "the undelivered prompt is still preserved as a queue row"
+            );
+        });
+        assert!(
+            warping_gate_is_satisfied(&terminal_view, conversation_id, &app),
+            "a genuinely streaming turn must keep its Warping... indicator"
+        );
     });
 }
 
@@ -407,12 +410,16 @@ fn viewer_prompt_delivered_to_a_joined_session_leaves_no_queue_row() {
     // and no fallback row should linger in the panel.
     App::test((), |mut app| async move {
         let _queue_flag = FeatureFlag::QueueSlashCommand.override_enabled(true);
-        let (terminal_view, conversation_id, network) =
-            viewer_pane_with_network(&mut app, Stage::JoinedSuccessfully);
+        let pane = viewer_pane(&mut app, Stage::JoinedSuccessfully);
+        let (terminal_view, conversation_id, network) = (
+            pane.view.clone(),
+            pane.conversation_id,
+            pane.network.clone(),
+        );
 
         submit_viewer_prompt(&mut app, &terminal_view, "ship it");
 
-        let request = sent_agent_prompt(&network, &app);
+        let request = sent_agent_prompt(&app, &network);
         assert_eq!(request.prompt, "ship it");
         QueuedQueryModel::handle(&app).read(&app, |queue_model, _| {
             assert!(
@@ -439,11 +446,11 @@ fn an_unrelated_or_duplicate_acknowledgement_resolves_nothing() {
     // one already handled, incapable of resolving a prompt twice.
     App::test((), |mut app| async move {
         let _queue_flag = FeatureFlag::QueueSlashCommand.override_enabled(true);
-        let (terminal_view, _conversation_id, network) =
-            viewer_pane_with_network(&mut app, Stage::JoinedSuccessfully);
+        let pane = viewer_pane(&mut app, Stage::JoinedSuccessfully);
+        let (terminal_view, network) = (pane.view.clone(), pane.network.clone());
 
         submit_viewer_prompt(&mut app, &terminal_view, "ship it");
-        let request = sent_agent_prompt(&network, &app);
+        let request = sent_agent_prompt(&app, &network);
 
         terminal_view.update(&mut app, |view, ctx| {
             assert!(
