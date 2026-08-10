@@ -15,14 +15,19 @@ use std::time::Duration;
 
 use async_broadcast::broadcast;
 use chrono::Local;
-use session_sharing_protocol::common::AgentPromptRequestId;
+use session_sharing_protocol::common::{
+    AgentPromptRequestId, ServerConversationToken as SessionSharingServerConversationToken,
+};
 use session_sharing_protocol::viewer::DownstreamMessage;
 use warpui::App;
 
 use super::*;
-use crate::ai::agent::{AIAgentExchange, AIAgentExchangeId, AIAgentOutputStatus};
+use crate::ai::agent::{AIAgentExchange, AIAgentExchangeId, AIAgentOutputStatus, ImageContext};
 use crate::ai::blocklist::orchestration_event_streamer::OrchestrationEventStreamer;
-use crate::ai::blocklist::{QueuedQueryModel, QueuedQueryOrigin, ResponseStream, ResponseStreamId};
+use crate::ai::blocklist::{
+    PendingAttachment, QueuedQuery, QueuedQueryModel, QueuedQueryOrigin, ResponseStream,
+    ResponseStreamId,
+};
 use crate::ai::llms::LLMId;
 // Bring the `TerminalManager` trait into scope (named under a different alias
 // since the local `TerminalManager` struct shadows it) so the trait method
@@ -327,6 +332,16 @@ fn viewer_prompt_submitted_while_reconnecting_is_preserved_as_an_editable_queue_
             pane.network.clone(),
         );
         let session_id = network.read(&app, |network, _| network.session_id());
+        let server_conversation_token = BlocklistAIHistoryModel::handle(&app).read(&app, |h, _| {
+            h.conversation(&conversation_id)
+                .and_then(|c| c.server_conversation_token().cloned())
+                .and_then(|t| {
+                    t.as_str()
+                        .parse()
+                        .ok()
+                        .map(SessionSharingServerConversationToken::from_uuid)
+                })
+        });
 
         submit_viewer_prompt(&mut app, &terminal_view, "finish the refactor");
 
@@ -352,6 +367,11 @@ fn viewer_prompt_submitted_while_reconnecting_is_preserved_as_an_editable_queue_
                 target.session_id(),
                 session_id,
                 "the row must stay pinned to the session it was addressed to"
+            );
+            assert_eq!(
+                target.server_conversation_token(),
+                server_conversation_token,
+                "and to the server conversation it was continuing, so a rejoin cannot redirect it"
             );
         });
 
@@ -837,6 +857,15 @@ fn a_fatal_disconnect_hands_the_head_to_a_cloud_follow_up() {
             Some("first"),
             "the FIFO head must become the cloud follow-up that starts the replacement run"
         );
+        let followup_task = pane.view.read(&app, |view, ctx| {
+            view.ambient_agent_view_model()
+                .and_then(|model| model.as_ref(ctx).task_id())
+        });
+        assert_eq!(
+            followup_task,
+            Some(ambient.task_id),
+            "the follow-up must continue the task the pane was viewing, not some other run"
+        );
         assert!(
             drain_agent_prompts(&app, &pane.network).is_empty(),
             "the ended session must receive nothing"
@@ -990,5 +1019,85 @@ fn the_replacement_session_continues_the_queue_only_once_it_has_joined() {
             drain_agent_prompts(&app, &replacement).is_empty(),
             "a repeated join must not produce a duplicate send"
         );
+    });
+}
+
+#[test]
+fn a_failed_attachment_upload_restores_the_whole_row() {
+    // Criterion 15. A queued cloud follow-up uploads its attachments to the task before it
+    // dispatches, because the replacement VM downloads them at startup. If that upload fails the
+    // follow-up must not start, and the row must come back whole — text and attachments — rather
+    // than being consumed with its attachments silently dropped.
+    App::test((), |mut app| async move {
+        let _queue_flag = FeatureFlag::QueueSlashCommand.override_enabled(true);
+        let _handoff_flag = FeatureFlag::HandoffCloudCloud.override_enabled(true);
+        let _image_flag = FeatureFlag::CloudModeImageContext.override_enabled(true);
+        let ambient = ambient_viewer_pane(
+            &mut app,
+            reconnecting_stage(),
+            AmbientTaskOwner::CurrentUser,
+        );
+        let pane = &ambient.pane;
+
+        // End the execution so the pane is in the follow-up-eligible state, then queue a row that
+        // carries an attachment.
+        exhaust_reconnect(&mut app, pane);
+        QueuedQueryModel::handle(&app).update(&mut app, |model, ctx| {
+            model.append(
+                pane.conversation_id,
+                QueuedQuery::new_with_attachments(
+                    "look at this".to_owned(),
+                    QueuedQueryOrigin::QueueSlashCommand,
+                    vec![PendingAttachment::Image(ImageContext {
+                        data: String::new(),
+                        mime_type: "image/png".to_owned(),
+                        file_name: "diagram.png".to_owned(),
+                        is_figma: false,
+                    })],
+                ),
+                ctx,
+            );
+        });
+
+        let (query_id, text) = QueuedQueryModel::handle(&app).read(&app, |model, _| {
+            let row = &model.queue(pane.conversation_id)[0];
+            (row.id(), row.text().to_owned())
+        });
+        pane.view.update(&mut app, |view, ctx| {
+            view.input().clone().update(ctx, |input, ctx| {
+                input.submit_queued_prompt_for_active_pane(
+                    text,
+                    pane.conversation_id,
+                    query_id,
+                    ctx,
+                );
+            });
+        });
+        // The upload cannot succeed against the test server, so let the failure land.
+        warpui::r#async::Timer::after(Duration::from_millis(200)).await;
+        flush(&mut app);
+
+        let pending_followup = pane.view.read(&app, |view, ctx| {
+            view.ambient_agent_view_model().and_then(|model| {
+                model
+                    .as_ref(ctx)
+                    .pending_followup_prompt()
+                    .map(str::to_owned)
+            })
+        });
+        assert_eq!(
+            pending_followup, None,
+            "a follow-up must not start when its attachments never reached the task"
+        );
+        QueuedQueryModel::handle(&app).read(&app, |queue_model, _| {
+            let queue = queue_model.queue(pane.conversation_id);
+            assert_eq!(queue.len(), 1, "the row must be restored, not consumed");
+            assert_eq!(queue[0].text(), "look at this");
+            assert_eq!(
+                queue[0].attachments().len(),
+                1,
+                "the attachment must survive with the row rather than being dropped"
+            );
+        });
     });
 }

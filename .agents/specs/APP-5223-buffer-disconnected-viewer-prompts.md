@@ -460,8 +460,10 @@ All criteria are required before merge.
    prior turn remains in progress.
 2. **Network outcome and acknowledgement contract:** In `viewer/network_tests.rs` and
    `terminal_manager_tests.rs`, assert that `send_message_to_server`/`send_agent_prompt_request`
-   returns `Undeliverable` for every non-joined stage and a closed/full send channel, and
-   `LocallyQueued` only when the local channel accepts the message. Assert that only matching
+   returns `Undeliverable` for every non-joined stage and a closed send channel, and
+   `LocallyQueued` only when the local channel accepts the message. *Revised:* the "full channel"
+   case is dropped because `ws_proxy_tx` is an unbounded `async_channel`, so a full state is
+   unreachable by construction; the closed case covers channel rejection. Assert that only matching
    `AgentPromptRequestInFlight(request_id)` completes/removes the pending row and unfreezes normal
    input; a different or duplicate ID is a no-op.
 3. **Safe logging:** Content safety is guaranteed structurally rather than by asserting on a
@@ -480,14 +482,21 @@ All criteria are required before merge.
    `QueuedQueryOrigin::DisconnectedViewer` row with the original conversation, session target, and
    token; assert `is_locked() == false`, input unfreezes immediately, and the failed text is not
    independently resubmittable outside the row.
-5. **Async race with attachments:** Begin a viewer prompt with image and file attachments while
-   joined, hold the upload future, transition to reconnecting, then complete upload. Assert the
-   actual send returns `Undeliverable`, exactly one row retains both pending attachments, the
-   editor is usable, and neither text nor attachments are lost or duplicated.
-6. **Happy-path no queue:** Submit the same plain and attachment prompts while joined. Assert the
-   local channel receives one `AgentPromptRequest` with the staged row's request ID, a matching
-   in-flight acknowledgement arrives before timeout, no visible fallback row remains, and the
-   input unfreezes/clears as before.
+5. **Async race with attachments:** *Revised — not unit-testable under the current server-API
+   seam.* Reaching the post-upload send requires the attachment upload to **succeed**, and
+   `ServerApiProvider` stores a concrete `Arc<ServerApi>` whose `get_ai_client()` returns that
+   same value, so a `MockAIClient` cannot be substituted without either widening the field to a
+   trait object or adding a test-only setter to production code. Both are excluded. The race is
+   therefore covered indirectly: the claim/restore contract that protects it is exercised by
+   criterion 15 (upload failure restores the full row, attachments included) and by the
+   `Undeliverable`-after-async-work path in criterion 4, and the ordering invariant is covered by
+   criterion 13. Closing this properly requires making the AI client injectable; that is a
+   separate change and is deliberately not folded into this PR.
+6. **Happy-path no queue:** Submit a plain prompt while joined. Assert the local channel receives
+   one `AgentPromptRequest` with the staged row's request ID, a matching in-flight
+   acknowledgement resolves it, no visible fallback row remains, and the input unfreezes as
+   before. *Revised:* the attachment variant is excluded for the same reason as criterion 5 — it
+   needs a successful upload, which the current server-API seam cannot produce in a test.
 7. **Acknowledgement timeout and late acknowledgement:** Drive the five-second timer
    deterministically. Assert local `try_send` without a matching acknowledgement restores one
    unlocked row, unfreezes input, clears stale delivery/`Warping...` state for an otherwise idle
@@ -519,10 +528,14 @@ All criteria are required before merge.
     ordinary conversation-finished event around delayed upload futures, and assert accepted prompt
     IDs are strictly FIFO with each ID accepted at most once. Include a failed attempt restored
     between two rows.
-14. **Queued cloud attachments:** In `queued_prompts_tests.rs`/`input_tests.rs`, fire a queued cloud
-    follow-up with an image and file. Assert both are passed to
-    `upload_pending_attachments_to_task` before `submit_cloud_followup`, then assert the replacement
-    startup observes the task attachments using existing attachment-download coverage.
+14. **Queued cloud attachments:** *Revised — the success path is not unit-testable under the
+    current server-API seam*, for the reason given in criterion 5. What is enforced instead: the
+    queued cloud branch routes the row's `PendingAttachment`s through
+    `upload_pending_attachments_to_task` and dispatches the follow-up **only** after that upload
+    resolves successfully, so attachments can no longer be dropped on this path. The failure half
+    of that contract — no follow-up starts and the complete row is restored — is covered by
+    criterion 15 and mutation-checked. Verifying a successful upload end to end requires an
+    injectable AI client and is deferred with criterion 5.
 15. **Attachment failure restoration:** Fail image upload, file upload, and task upload completion
     separately. Assert no follow-up starts, the full row is restored at its original position, the
     existing toast appears, and a nonempty editor draft is unchanged.
