@@ -386,4 +386,94 @@ fn test_read_treats_a_dangling_symlink_as_an_error() {
     ));
 }
 
+/// A failed existence probe must not be read as "missing". Only the probe's own `NotFound`
+/// confirms absence; a permission or I/O failure would otherwise hand the user an empty buffer
+/// over a file that is really there.
+#[test]
+fn test_a_failed_existence_probe_is_not_treated_as_missing() {
+    let not_found = || io::Error::from(io::ErrorKind::NotFound);
+
+    // The probe succeeded, so something is at the path (e.g. a dangling symlink).
+    assert!(matches!(
+        FileModel::classify_missing_read(not_found(), None),
+        FileLoadError::IOError(_)
+    ));
+
+    // The probe agrees nothing is there.
+    assert!(matches!(
+        FileModel::classify_missing_read(not_found(), Some(not_found())),
+        FileLoadError::DoesNotExist
+    ));
+
+    // The probe failed for a reason that says nothing about existence.
+    for kind in [
+        io::ErrorKind::PermissionDenied,
+        io::ErrorKind::Other,
+        io::ErrorKind::InvalidInput,
+    ] {
+        assert!(
+            matches!(
+                FileModel::classify_missing_read(not_found(), Some(io::Error::from(kind))),
+                FileLoadError::IOError(_)
+            ),
+            "{kind:?} must not be reported as a missing file"
+        );
+    }
+}
+
+/// APP-5266: the first write of a buffer opened at a missing path must not clobber a file that
+/// appeared in the meantime. Nothing watches such a path, so there is no reload or conflict to
+/// warn us — the write itself has to refuse.
+#[test]
+fn test_creating_a_new_file_refuses_to_clobber() {
+    App::test((), |mut app| async move {
+        let app = &mut app;
+        app.add_singleton_model(|_| DetectedRepositories::default());
+        let files = app.add_singleton_model(FileModel::new);
+        let receiver = setup_event_channel(app, &files);
+
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("raced.md");
+
+        let file_id = files.update(app, |model, ctx| model.open(&path, true, ctx));
+        await_load(&receiver).await;
+
+        // Someone else creates the file between the open and the first save.
+        std::fs::write(&path, "written by someone else").expect("write file");
+
+        let dispatched = files.update(app, |model, ctx| {
+            model.create_new_file(
+                file_id,
+                "our content".to_string(),
+                ContentVersion::new(),
+                ctx,
+            )
+        });
+        std::mem::drop(dispatched.expect("save should dispatch"));
+
+        match receiver.recv().await.expect("Could not receive the result") {
+            TestFileModelEvent::FailedToSave => (),
+            event => panic!("Expected the save to be refused, got {event:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the other file should survive"),
+            "written by someone else"
+        );
+
+        // With nothing in the way, the same call creates the file.
+        let fresh = directory.path().join("unraced.md");
+        let fresh_id = files.update(app, |model, ctx| model.open(&fresh, true, ctx));
+        await_load(&receiver).await;
+        let dispatched = files.update(app, |model, ctx| {
+            model.create_new_file(fresh_id, "ours".to_string(), ContentVersion::new(), ctx)
+        });
+        std::mem::drop(dispatched.expect("save should dispatch"));
+        match receiver.recv().await.expect("Could not receive the result") {
+            TestFileModelEvent::FileSaved => (),
+            event => panic!("Expected the save to succeed, got {event:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&fresh).expect("created"), "ours");
+    });
+}
+
 static TEST_FILE_CONTENT: &[u8] = include_bytes!("../test_data/test_file.rs");

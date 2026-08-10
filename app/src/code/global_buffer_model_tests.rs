@@ -501,3 +501,51 @@ fn load_events(app: &mut App) -> async_channel::Receiver<bool> {
     });
     receiver
 }
+
+/// APP-5266: a remote path that does not exist is a new file too. The daemon reports it in the
+/// `OpenBuffer` response and the client has to record it, otherwise auto-save would write a
+/// remote file the user never saved.
+#[test]
+fn a_remote_buffer_records_whether_it_was_opened_as_a_new_file() {
+    use remote_server::proto::{OpenBufferResponse, OpenBufferSuccess, open_buffer_response};
+
+    App::test((), |mut app| async move {
+        init_app(&mut app);
+        app.add_singleton_model(GlobalBufferModel::new);
+
+        let response = |opened_as_new_file: bool| OpenBufferResponse {
+            result: Some(open_buffer_response::Result::Success(OpenBufferSuccess {
+                content: String::new(),
+                server_version: 1,
+                opened_as_new_file,
+            })),
+        };
+
+        for opened_as_new_file in [true, false] {
+            let buffer_state = gbm(&app).update(&mut app, |gbm, ctx| {
+                gbm.seed_remote_buffer_for_test(
+                    test_host_id(),
+                    StandardizedPath::try_new(if opened_as_new_file {
+                        "/test/new.txt"
+                    } else {
+                        "/test/existing.txt"
+                    })
+                    .unwrap(),
+                    "",
+                    1,
+                    ctx,
+                )
+            });
+            let file_id = buffer_state.file_id;
+
+            gbm(&app).update(&mut app, |gbm, ctx| {
+                gbm.apply_open_buffer_response(file_id, Ok(response(opened_as_new_file)), ctx);
+            });
+
+            assert_eq!(
+                gbm(&app).read(&app, |gbm, _| gbm.opened_as_new_file(file_id)),
+                opened_as_new_file,
+            );
+        }
+    })
+}

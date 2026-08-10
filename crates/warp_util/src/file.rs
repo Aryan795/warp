@@ -16,6 +16,10 @@ pub enum FileSaveError {
     },
     #[error("Remote file operation failed: {0}")]
     RemoteError(String),
+    /// The first write of a file that did not exist when it was opened found something already at
+    /// the path. Overwriting would discard whatever appeared there in the meantime.
+    #[error("{} already exists", .path.display())]
+    AlreadyExists { path: PathBuf },
     /// A non-IO failure with a self-describing message (e.g. content could
     /// not be derived for the write).
     #[error("{0}")]
@@ -26,7 +30,9 @@ impl ErrorExt for FileSaveError {
     fn is_actionable(&self) -> bool {
         match self {
             FileSaveError::NoFilePath(_) | FileSaveError::Other(_) => true,
-            FileSaveError::IOError { .. } | FileSaveError::RemoteError(_) => false,
+            FileSaveError::IOError { .. }
+            | FileSaveError::RemoteError(_)
+            | FileSaveError::AlreadyExists { .. } => false,
         }
     }
 }
