@@ -32,9 +32,9 @@ use crate::terminal::model::session::Sessions;
 use crate::terminal::shared_session::viewer::network::Stage;
 use crate::test_util::add_window_with_terminal;
 use crate::test_util::shared_session_viewer::{
-    ViewerRole, attach_network, drain_agent_prompts, flush, inject_downstream, reconnecting_stage,
-    sent_agent_prompt, submit_viewer_prompt, subscribe_network_events, viewer_pane,
-    viewer_pane_with_role,
+    AmbientTaskOwner, ViewerRole, ambient_viewer_pane, attach_network, drain_agent_prompts,
+    exhaust_reconnect, flush, inject_downstream, reconnecting_stage, sent_agent_prompt,
+    submit_viewer_prompt, subscribe_network_events, viewer_pane, viewer_pane_with_role,
 };
 use crate::test_util::terminal::initialize_app_for_terminal_view;
 use crate::workspace::ToastStack;
@@ -800,5 +800,195 @@ fn a_read_only_viewer_never_reaches_the_fallback_queue() {
                 "a reader must not accumulate disconnected-viewer rows"
             );
         });
+    });
+}
+
+#[test]
+fn a_fatal_disconnect_hands_the_head_to_a_cloud_follow_up() {
+    // Criterion 10. Once the execution is gone the old session cannot carry anything, so the head
+    // has to become the follow-up that starts a replacement run. Without this the queue deadlocks:
+    // the rows behind it only drain once a new execution joins, and nothing would request one.
+    App::test((), |mut app| async move {
+        let _queue_flag = FeatureFlag::QueueSlashCommand.override_enabled(true);
+        let _handoff_flag = FeatureFlag::HandoffCloudCloud.override_enabled(true);
+        let ambient = ambient_viewer_pane(
+            &mut app,
+            reconnecting_stage(),
+            AmbientTaskOwner::CurrentUser,
+        );
+        let pane = &ambient.pane;
+
+        submit_viewer_prompt(&mut app, &pane.view, "first");
+        submit_viewer_prompt(&mut app, &pane.view, "second");
+        drain_agent_prompts(&app, &pane.network);
+
+        exhaust_reconnect(&mut app, pane);
+
+        let pending_followup = pane.view.read(&app, |view, ctx| {
+            view.ambient_agent_view_model().and_then(|model| {
+                model
+                    .as_ref(ctx)
+                    .pending_followup_prompt()
+                    .map(str::to_owned)
+            })
+        });
+        assert_eq!(
+            pending_followup.as_deref(),
+            Some("first"),
+            "the FIFO head must become the cloud follow-up that starts the replacement run"
+        );
+        assert!(
+            drain_agent_prompts(&app, &pane.network).is_empty(),
+            "the ended session must receive nothing"
+        );
+        QueuedQueryModel::handle(&app).read(&app, |queue_model, _| {
+            let queue = queue_model.queue(pane.conversation_id);
+            assert_eq!(
+                queue.len(),
+                1,
+                "the remaining row must survive the teardown"
+            );
+            assert_eq!(queue[0].text(), "second");
+        });
+    });
+}
+
+#[test]
+fn a_fatal_disconnect_on_someone_elses_task_keeps_the_whole_queue() {
+    // Criterion 11. A viewer who does not own the task cannot start a replacement run, so the
+    // ineligible path must leave every row exactly where it was rather than consuming the head.
+    App::test((), |mut app| async move {
+        let _queue_flag = FeatureFlag::QueueSlashCommand.override_enabled(true);
+        let _handoff_flag = FeatureFlag::HandoffCloudCloud.override_enabled(true);
+        let ambient = ambient_viewer_pane(
+            &mut app,
+            reconnecting_stage(),
+            AmbientTaskOwner::SomeoneElse,
+        );
+        let pane = &ambient.pane;
+
+        submit_viewer_prompt(&mut app, &pane.view, "first");
+        submit_viewer_prompt(&mut app, &pane.view, "second");
+        drain_agent_prompts(&app, &pane.network);
+
+        exhaust_reconnect(&mut app, pane);
+
+        let pending_followup = pane.view.read(&app, |view, ctx| {
+            view.ambient_agent_view_model().and_then(|model| {
+                model
+                    .as_ref(ctx)
+                    .pending_followup_prompt()
+                    .map(str::to_owned)
+            })
+        });
+        assert_eq!(
+            pending_followup, None,
+            "a non-owner must not be able to start a replacement run"
+        );
+        QueuedQueryModel::handle(&app).read(&app, |queue_model, _| {
+            let queue = queue_model.queue(pane.conversation_id);
+            assert_eq!(queue.len(), 2, "the head must be restored, not consumed");
+            assert_eq!(
+                queue[0].text(),
+                "first",
+                "and restored at its original position"
+            );
+            assert_eq!(queue[1].text(), "second");
+        });
+    });
+}
+
+#[test]
+fn a_fatal_disconnect_with_handoff_disabled_keeps_the_whole_queue() {
+    // Criterion 11, second arm: the same ineligibility reached through the feature flag rather
+    // than through ownership.
+    App::test((), |mut app| async move {
+        let _queue_flag = FeatureFlag::QueueSlashCommand.override_enabled(true);
+        let _handoff_flag = FeatureFlag::HandoffCloudCloud.override_enabled(false);
+        let ambient = ambient_viewer_pane(
+            &mut app,
+            reconnecting_stage(),
+            AmbientTaskOwner::CurrentUser,
+        );
+        let pane = &ambient.pane;
+
+        submit_viewer_prompt(&mut app, &pane.view, "only");
+        drain_agent_prompts(&app, &pane.network);
+
+        exhaust_reconnect(&mut app, pane);
+
+        QueuedQueryModel::handle(&app).read(&app, |queue_model, _| {
+            let queue = queue_model.queue(pane.conversation_id);
+            assert_eq!(queue.len(), 1, "the row must remain queued and visible");
+            assert_eq!(queue[0].text(), "only");
+        });
+    });
+}
+
+#[test]
+fn the_replacement_session_continues_the_queue_only_once_it_has_joined() {
+    // Criterion 12. `ExecutionSessionReady` fires before the replacement network connects, so a
+    // send at that point would be dropped. Only the new session's join may drain the next row,
+    // and re-delivering that join must not send it twice.
+    App::test((), |mut app| async move {
+        let _queue_flag = FeatureFlag::QueueSlashCommand.override_enabled(true);
+        let _handoff_flag = FeatureFlag::HandoffCloudCloud.override_enabled(true);
+        let ambient = ambient_viewer_pane(
+            &mut app,
+            reconnecting_stage(),
+            AmbientTaskOwner::CurrentUser,
+        );
+        let pane = &ambient.pane;
+
+        submit_viewer_prompt(&mut app, &pane.view, "first");
+        submit_viewer_prompt(&mut app, &pane.view, "second");
+        drain_agent_prompts(&app, &pane.network);
+        exhaust_reconnect(&mut app, pane);
+
+        // The replacement execution exists but has not connected yet.
+        let replacement = attach_network(&mut app, &pane.view, Stage::BeforeJoined);
+        pane.set_current_network(Some(replacement.clone()));
+        subscribe_network_events(
+            &mut app,
+            &pane.view,
+            &pane.model,
+            &pane.current_network,
+            &replacement,
+        );
+        flush(&mut app);
+        assert!(
+            drain_agent_prompts(&app, &replacement).is_empty(),
+            "nothing may be sent before the replacement session has joined"
+        );
+
+        replacement.update(&mut app, |network, _| {
+            network.stage = Stage::JoinedSuccessfully;
+        });
+        // Joining the replacement puts the pane back in an executor role. The fatal teardown had
+        // moved an owned task to `NotShared`, and the real join path restores it via
+        // `on_session_share_joined`.
+        pane.model
+            .lock()
+            .set_shared_session_status(SharedSessionStatus::executor());
+        pane.view.update(&mut app, |view, ctx| {
+            let session_id = replacement.read(ctx, |network, _| network.session_id());
+            view.drain_disconnected_viewer_queue_after_replacement_join(session_id, ctx);
+        });
+        flush(&mut app);
+
+        let sent = drain_agent_prompts(&app, &replacement);
+        assert_eq!(sent.len(), 1, "the join drains exactly one row");
+        assert_eq!(sent[0].prompt, "second");
+
+        // Re-delivering the join must not resend the row already in flight.
+        pane.view.update(&mut app, |view, ctx| {
+            let session_id = replacement.read(ctx, |network, _| network.session_id());
+            view.drain_disconnected_viewer_queue_after_replacement_join(session_id, ctx);
+        });
+        flush(&mut app);
+        assert!(
+            drain_agent_prompts(&app, &replacement).is_empty(),
+            "a repeated join must not produce a duplicate send"
+        );
     });
 }

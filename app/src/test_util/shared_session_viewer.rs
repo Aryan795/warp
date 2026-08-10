@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use parking_lot::FairMutex;
 use session_sharing_protocol::common::AgentPromptRequest;
-use session_sharing_protocol::viewer::{DownstreamMessage, UpstreamMessage};
+use session_sharing_protocol::viewer::{DownstreamMessage, FailedToJoinReason, UpstreamMessage};
 use warpui::platform::WindowStyle;
 use warpui::{App, ModelHandle, SingletonEntity, ViewHandle};
 
@@ -26,10 +26,11 @@ use crate::server::server_api::ai::AmbientAgentTaskState;
 use crate::settings::WarpPromptSeparator;
 use crate::terminal::event_listener::ChannelEventListener;
 use crate::terminal::model::session::SessionId as TerminalSessionId;
-use crate::terminal::shared_session::SharedSessionStatus;
+use crate::terminal::shared_session::manager::Manager as SharedSessionManager;
 use crate::terminal::shared_session::shared_handlers::RemoteUpdateGuard;
 use crate::terminal::shared_session::viewer::TerminalManager;
 use crate::terminal::shared_session::viewer::network::{Network, Stage};
+use crate::terminal::shared_session::{SharedSessionSource, SharedSessionStatus};
 use crate::terminal::{TerminalModel, TerminalView};
 use crate::workspace::ToastStack;
 
@@ -121,6 +122,13 @@ pub fn ambient_viewer_pane(
     });
 
     let pane = finish_viewer_pane(app, view, stage, ViewerRole::Executor);
+    // Marks the pane as viewing a cloud run, which is what routes a fatal disconnect through the
+    // resumable ambient path rather than generic viewer teardown.
+    pane.model
+        .lock()
+        .set_shared_session_source(SharedSessionSource::ambient_agent(Some(
+            task_id.to_string(),
+        )));
     let session_id = pane.network.read(app, |network, _| network.session_id());
     pane.view.update(app, |view, ctx| {
         view.begin_viewing_ambient_session(task_id, session_id, ctx);
@@ -128,6 +136,19 @@ pub fn ambient_viewer_pane(
     flush(app);
 
     AmbientViewerPane { pane, task_id }
+}
+
+/// Ends the pane's live execution the way reconnect exhaustion does: the server refuses the
+/// rejoin, the network gives up, and the manager routes the ambient pane through its resumable
+/// execution-ended path. This is the trigger that can hand the queue to a cloud follow-up.
+pub fn exhaust_reconnect(app: &mut App, pane: &ViewerPane) {
+    inject_downstream(
+        app,
+        &pane.network.clone(),
+        DownstreamMessage::FailedToJoin {
+            reason: FailedToJoinReason::SessionNotFound,
+        },
+    );
 }
 
 /// A finished cloud-mode task created by `creator_uid`.
@@ -184,6 +205,9 @@ fn finish_viewer_pane(
     stage: Stage,
     role: ViewerRole,
 ) -> ViewerPane {
+    // The viewer teardown paths talk to the shared-session manager, so it has to exist before a
+    // session can end.
+    app.add_singleton_model(SharedSessionManager::new);
     let terminal_view_id = view.id();
     let model = view.read(app, |view, _| view.model.clone());
     {
