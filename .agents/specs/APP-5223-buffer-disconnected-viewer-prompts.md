@@ -501,9 +501,13 @@ All criteria are required before merge.
    deterministically. Assert local `try_send` without a matching acknowledgement restores one
    unlocked row, unfreezes input, clears stale delivery/`Warping...` state for an otherwise idle
    conversation, and does not immediately resend on the same connection. Cover acknowledgement at
-   the timeout boundary, after timeout but before another claim, after edit to a new revision,
-   during reconnect retry, and duplicate acknowledgement. Each unchanged logical revision is
-   accepted at most once; a retired ID never removes a newer edit.
+   after timeout but before another claim, after edit to a new revision, during reconnect retry,
+   and duplicate acknowledgement. Each unchanged logical revision is accepted at most once; a
+   retired ID never removes a newer edit. *Revised:* the exact-boundary case is dropped. The
+   timeout is a `cfg!(test)`-shortened constant rather than an injectable clock, and this
+   repository has no fake-clock utility, so "acknowledgement lands precisely at the deadline" can
+   only be approximated by racing wall-clock timers — a flaky test that asserts scheduler luck
+   rather than behavior. Both sides of the boundary are covered deterministically instead.
 8. **Transient rejoin:** In `terminal_manager_tests.rs`, queue at least two rows for the same
    disconnected viewer target, emit `RejoinedSuccessfully`, and assert buffered input updates flush
    first, exactly the FIFO head is accepted by the same session, and the second row remains queued
@@ -542,10 +546,11 @@ All criteria are required before merge.
 16. **Queue controls and lifecycle:** Assert disconnected rows can be edited, deleted, reordered,
     manually pushed, and auto-fired; deletion prevents retry; history conversation removal still
     cleans the queue; `attach_execution_session` leaves rows intact.
-17. **Feature-off behavior:** Override queued-prompts, handoff, and image-context flags separately.
-    Assert no hidden queue entry or attachment drop: either the visible input is safely restored or
-    the existing visible row remains, and an error toast identifies that submission did not
-    proceed.
+17. **Feature-off behavior:** Override the queued-prompts and handoff flags separately. Assert no
+    hidden queue entry: either the visible input is safely restored or the existing visible row
+    remains. *Revised:* the image-context arm is dropped as unreachable. `CloudModeImageContext`
+    gates *attaching* images in the first place, so a queued row cannot hold attachments while
+    that flag is off; there is no attachment-drop state to assert.
 18. **Existing regressions:** Run focused tests for
     `queued_query`, `queued_prompts`, `viewer::network`, `viewer::terminal_manager`, shared-session
     cloud continuation, and terminal input routing. Existing local queue, LRC auto-queue,
