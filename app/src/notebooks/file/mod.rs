@@ -1354,10 +1354,19 @@ fn rendered_search_terms_for_source_line(markdown: &str, line_num: usize) -> Vec
     };
 
     let stripped = strip_markdown_syntax(line);
+    // Split on non-alphanumerics rather than whitespace so a word survives the
+    // inline syntax `strip_markdown_syntax` leaves behind, such as a link's
+    // `[label](target)`. Ties keep the earliest word, so the chosen term does
+    // not hinge on which extreme the iterator happens to return.
     let longest_word = stripped
-        .split_whitespace()
-        .map(|word| word.trim_matches(|c: char| !c.is_alphanumeric()))
-        .max_by_key(|word| word.chars().count())
+        .split(|c: char| !c.is_alphanumeric())
+        .reduce(|longest, word| {
+            if word.chars().count() > longest.chars().count() {
+                word
+            } else {
+                longest
+            }
+        })
         .unwrap_or_default();
 
     [line.trim(), stripped.as_str(), longest_word]
