@@ -485,8 +485,7 @@ fn test_rendered_view_scrolls_to_requested_line() {
 
     use crate::code::editor_management::CodeSource;
 
-    const MARKDOWN: &str =
-        "# Title\n\nIntro paragraph.\n\n## Details section\n\nBody text about details.\n";
+    const MARKDOWN: &str = "# Title\n\nIntro paragraph.\n\n## Details section\n\nBody text about details.\n\nIntro paragraph.\n";
 
     fn link_to_line(path: &Path, line_num: usize) -> Option<CodeSource> {
         Some(CodeSource::Link {
@@ -532,6 +531,11 @@ fn test_rendered_view_scrolls_to_requested_line() {
 
             // A blank line has no visible text, so the document stays put.
             file_notebook.set_code_source(link_to_line(&path, 4));
+            assert!(!file_notebook.scroll_to_requested_line(MARKDOWN, ctx));
+
+            // Line 3 is repeated verbatim on line 9, so no term identifies a
+            // single block and the document stays put rather than guessing.
+            file_notebook.set_code_source(link_to_line(&path, 3));
             assert!(!file_notebook.scroll_to_requested_line(MARKDOWN, ctx));
 
             // No requested line at all.

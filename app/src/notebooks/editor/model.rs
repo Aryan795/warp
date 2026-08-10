@@ -1348,8 +1348,12 @@ impl NotebooksEditorModel {
         true
     }
 
-    /// Scrolls to the first block whose rendered text contains `text`, and
-    /// returns whether such a block exists.
+    /// Scrolls to the block whose rendered text contains `text`, and returns
+    /// whether the document moved.
+    ///
+    /// Nothing happens unless exactly one block matches: an ambiguous match
+    /// would drop the reader at an arbitrary place, which is worse than leaving
+    /// the document where it is.
     pub fn scroll_to_block_containing_text(
         &mut self,
         text: &str,
@@ -1370,13 +1374,15 @@ impl NotebooksEditorModel {
         let content = self.content.as_ref(ctx);
         content
             .outline_blocks()
-            .find(|outline| {
+            .filter(|outline| {
                 content
                     .text_in_range(outline.start + 1..outline.end)
                     .into_string()
                     .contains(text)
             })
             .map(|outline| outline.start)
+            .exactly_one()
+            .ok()
     }
 
     fn find_matching_header(&self, fragment: &str, ctx: &AppContext) -> Option<Range<CharOffset>> {
