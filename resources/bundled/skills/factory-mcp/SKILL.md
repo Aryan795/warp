@@ -20,7 +20,9 @@ This skill covers four everyday workflows:
 
 Match what the user actually asked for to one of these before calling any
 write tool — see "Choosing a workflow" below. "Continue"/"pick up"/"keep
-working on" a task almost always means #3, not #1.
+working on" a task almost always means #3, not #1 — unless the user names a
+factory agent as the one who should continue (e.g. "have Wilson continue"),
+which means #1/#4's `send_task` instead.
 
 ## Prerequisites
 
@@ -69,26 +71,33 @@ factory to act on it next.
 
 - **Local continuity language** — "continue/pick up/keep working on/resume
   `<task>`", "let's get back to X", or any request to work on an existing
-  task in the current local session — means the user wants the task on their
-  machine. Find it first if needed (Workflow 2), then pull it down with
-  `get_task(start_working = true)` (Workflow 3). Do **not** call `send_task`
-  for this — nothing needs to be handed anywhere until the user has iterated
-  locally, pushed, and explicitly asks to hand the work back (Workflow 4).
+  task in the current local session, **without naming a factory agent as the
+  actor** — means the user wants the task on their machine. Find it first if
+  needed (Workflow 2), then pull it down with `get_task(start_working =
+  true)` (Workflow 3). Do **not** call `send_task` for this — nothing needs
+  to be handed anywhere until the user has iterated locally, pushed, and
+  explicitly asks to hand the work back (Workflow 4).
 - **Explicit cloud/factory language** — "send this to the factory", "kick
   this up to `<agent name>`", "let the factory take it from here", "hand it
-  back to the factory" — means the user wants the cloud to act. Use
-  `send_task`: new work with `factory_uid` + `title` (Workflow 1), or an
-  existing task's follow-up with `factory_task_uid` (Workflow 4, step 4).
+  back to the factory", or **naming a factory agent as the one who should
+  continue** ("have/ask `<agent name>` to continue", e.g. "have Wilson
+  continue") — means the user wants the cloud to act. The tell is whether a
+  factory agent is named as the actor: that always means `send_task`, even
+  though the sentence itself may say "continue". Use `send_task`: new work
+  with `factory_uid` + `title` (Workflow 1), or an existing task's follow-up
+  with `factory_task_uid` (Workflow 4, step 4).
 - **Genuinely ambiguous phrasing** — ask once whether the user wants to work
   on it locally or hand it to the factory, rather than guessing. Never
   default to `send_task` when unsure: a pull-down is read-only and cheap to
   correct, a hand-off moves the work into the cloud.
 
-**If the user cancels or denies a `send_task` call, that is a rejection of
-the cloud route — not a transient failure.** Do not immediately retry the
-same `send_task` call. Stop, re-read what the user actually asked for, and
-either re-route to the local pull-down workflow (Workflow 3) or ask what
-they want instead.
+**If the user cancels or denies any factory write call — `send_task`,
+`message_foreman`, `complete_task`, or `create_factory` — that is a
+rejection of the requested action, not a transient failure.** Do not
+immediately retry the identical call. Stop, re-read what the user actually
+asked for, and either pick the appropriate workflow or ask what they want
+instead. The common case is a denied `send_task`: re-route to the local
+pull-down workflow (Workflow 3) rather than retrying the hand-off.
 
 ## Workflow 1 — Start work locally, then send it to the factory
 
@@ -178,7 +187,9 @@ links) over bare IDs.
 Use this whenever the user wants an existing factory task's work on their own
 machine — to continue it, iterate on it, or just test it. This is also the
 first step of Workflow 4 when the plan is to hand the work back afterward.
-A request to "continue" or "pick up" a task routes here, not to `send_task`.
+A request to "continue" or "pick up" a task routes here, not to `send_task`
+— unless the user names a factory agent as the one who should continue
+(see "Choosing a workflow"), which is a `send_task` hand-off instead.
 
 1. Find the task (Workflow 2) and note its `factory_task_uid`.
 2. Call `get_task` with `start_working = true`. Pass `workspace_dir` (the
@@ -287,8 +298,13 @@ complete raw transcript when the window is not enough.
   locally.** Only call it when the user actually wants the cloud to act: new
   work needs `factory_uid` + `title`; a hand-back needs `factory_task_uid`.
   Never open a second task for the same unit of work — hand it back to the
-  same `factory_task_uid`. If the call is cancelled or denied, don't retry it
-  — re-route locally or ask (see "Choosing a workflow").
+  same `factory_task_uid`. Naming a factory agent as the one who should
+  continue ("have Wilson continue") is a `send_task` request, not a local
+  pull-down.
+- **A cancelled or denied factory write is a rejection, not a glitch.**
+  Whether it's `send_task`, `message_foreman`, `complete_task`, or
+  `create_factory`, don't retry the identical call — re-route to the right
+  workflow or ask (see "Choosing a workflow").
 - **Always push before you send.** Neither new intake (aside from the WIP
   snapshot token) nor a hand-back can see unpushed work.
 - **Prefer named links over IDs** (`run_url`, `trigger_url`, `pr_url`) when
