@@ -18,6 +18,8 @@ fn endpoint_with_models(model_count: usize) -> CustomEndpoint {
             .map(|index| CustomEndpointModel {
                 name: format!("model-{index}"),
                 alias: None,
+                reasoning_effort: None,
+                reasoning_mode: None,
                 config_key: format!("config-{index}"),
             })
             .collect(),
@@ -131,6 +133,10 @@ fn modal_with_many_models_lays_out() {
 #[test]
 fn model_row_inputs_align_and_controls_fit_gutter() {
     assert_eq!(MODEL_INPUT_WIDTH * 2. + MODEL_ROW_SPACING, INPUT_WIDTH);
+    assert_eq!(
+        MODEL_INPUT_WIDTH_WITH_REASONING * 3. + MODEL_ROW_SPACING * 2.,
+        INPUT_WIDTH
+    );
     // SCROLL_CONTENT_RIGHT_MARGIN already includes MODAL_SCROLLBAR_WIDTH, so the
     // right gutter (button spacing + remove-button column + content right margin)
     // is 56 without adding the scrollbar width again.

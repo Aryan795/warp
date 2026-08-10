@@ -1,6 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use ::ai::api_keys::{CustomEndpoint, CustomEndpointSchema};
+use ::ai::api_keys::{CustomEndpoint, CustomEndpointModelParams, CustomEndpointSchema};
 use url::Url;
 use warp_editor::editor::NavigationKey;
 use warpui::elements::{
@@ -45,6 +45,7 @@ const MODAL_SCROLLBAR_WIDTH: f32 = 4.;
 // which have no scrollbar.
 const SCROLL_CONTENT_RIGHT_MARGIN: f32 = 24. + MODAL_SCROLLBAR_WIDTH;
 const MODEL_INPUT_WIDTH: f32 = (INPUT_WIDTH - MODEL_ROW_SPACING) / 2.;
+const MODEL_INPUT_WIDTH_WITH_REASONING: f32 = (INPUT_WIDTH - MODEL_ROW_SPACING * 2.) / 3.;
 fn model_row_scroll_position_id(index: usize) -> String {
     format!("custom_endpoint_model_row_{index}")
 }
@@ -57,7 +58,7 @@ pub enum CustomEndpointModalEvent {
         url: String,
         api_key: String,
         schema: CustomEndpointSchema,
-        models: Vec<(String, Option<String>, Option<String>)>,
+        models: Vec<CustomEndpointModelParams>,
     },
     SaveEndpoint {
         index: usize,
@@ -65,7 +66,7 @@ pub enum CustomEndpointModalEvent {
         url: String,
         api_key: String,
         schema: CustomEndpointSchema,
-        models: Vec<(String, Option<String>, Option<String>)>,
+        models: Vec<CustomEndpointModelParams>,
     },
     RemoveEndpoint {
         index: usize,
@@ -85,6 +86,8 @@ pub enum CustomEndpointModalAction {
 struct ModelRow {
     name_editor: ViewHandle<EditorView>,
     alias_editor: ViewHandle<EditorView>,
+    reasoning_effort_editor: ViewHandle<EditorView>,
+    reasoning_mode: Option<String>,
     remove_mouse_state: MouseStateHandle,
     config_key: Option<String>,
 }
@@ -221,6 +224,8 @@ impl CustomEndpointModal {
                 model_rows.push(Self::create_model_row(
                     Some(&model.name),
                     model.alias.as_deref(),
+                    model.reasoning_effort.as_deref(),
+                    model.reasoning_mode.clone(),
                     Some(model.config_key.clone()),
                     font_family,
                     &text_colors,
@@ -230,6 +235,8 @@ impl CustomEndpointModal {
         }
         if model_rows.is_empty() {
             model_rows.push(Self::create_model_row(
+                None,
+                None,
                 None,
                 None,
                 None,
@@ -258,6 +265,10 @@ impl CustomEndpointModal {
             });
             let alias_editor = row.alias_editor.clone();
             ctx.subscribe_to_view(&alias_editor, |me, editor, event, ctx| {
+                me.handle_model_editor_event(&editor, event, ctx);
+            });
+            let reasoning_effort_editor = row.reasoning_effort_editor.clone();
+            ctx.subscribe_to_view(&reasoning_effort_editor, |me, editor, event, ctx| {
                 me.handle_model_editor_event(&editor, event, ctx);
             });
         }
@@ -289,6 +300,8 @@ impl CustomEndpointModal {
     fn create_model_row(
         name: Option<&str>,
         alias: Option<&str>,
+        reasoning_effort: Option<&str>,
+        reasoning_mode: Option<String>,
         config_key: Option<String>,
         font_family: FamilyId,
         text_colors: &crate::editor::TextColors,
@@ -333,10 +346,31 @@ impl CustomEndpointModal {
             }
             editor
         });
+        let tc = text_colors.clone();
+        let reasoning_effort_editor = ctx.add_typed_action_view(move |ctx| {
+            let options = SingleLineEditorOptions {
+                text: TextOptions {
+                    font_family_override: Some(font_family),
+                    text_colors_override: Some(tc.clone()),
+                    ..Default::default()
+                },
+                propagate_and_no_op_vertical_navigation_keys:
+                    PropagateAndNoOpNavigationKeys::Always,
+                ..Default::default()
+            };
+            let mut editor = EditorView::single_line(options, ctx);
+            editor.set_placeholder_text("e.g., high or ultra", ctx);
+            if let Some(effort) = reasoning_effort {
+                editor.set_buffer_text(effort, ctx);
+            }
+            editor
+        });
 
         ModelRow {
             name_editor,
             alias_editor,
+            reasoning_effort_editor,
+            reasoning_mode,
             remove_mouse_state: Default::default(),
             config_key,
         }
@@ -381,6 +415,8 @@ impl CustomEndpointModal {
                 self.model_rows.push(Self::create_model_row(
                     Some(&model.name),
                     model.alias.as_deref(),
+                    model.reasoning_effort.as_deref(),
+                    model.reasoning_mode.clone(),
                     Some(model.config_key.clone()),
                     font_family,
                     &text_colors,
@@ -390,6 +426,8 @@ impl CustomEndpointModal {
         }
         if self.model_rows.is_empty() {
             self.model_rows.push(Self::create_model_row(
+                None,
+                None,
                 None,
                 None,
                 None,
@@ -405,6 +443,10 @@ impl CustomEndpointModal {
             });
             let alias_editor = row.alias_editor.clone();
             ctx.subscribe_to_view(&alias_editor, |me, editor, event, ctx| {
+                me.handle_model_editor_event(&editor, event, ctx);
+            });
+            let reasoning_effort_editor = row.reasoning_effort_editor.clone();
+            ctx.subscribe_to_view(&reasoning_effort_editor, |me, editor, event, ctx| {
                 me.handle_model_editor_event(&editor, event, ctx);
             });
         }
@@ -432,6 +474,9 @@ impl CustomEndpointModal {
             row.alias_editor.update(ctx, |editor, ctx| {
                 editor.clear_buffer_and_reset_undo_stack(ctx);
             });
+            row.reasoning_effort_editor.update(ctx, |editor, ctx| {
+                editor.clear_buffer_and_reset_undo_stack(ctx);
+            });
         }
     }
 
@@ -448,6 +493,7 @@ impl CustomEndpointModal {
         for row in &self.model_rows {
             editors.push(row.name_editor.clone());
             editors.push(row.alias_editor.clone());
+            editors.push(row.reasoning_effort_editor.clone());
         }
         for editor in editors {
             let colors = text_colors.clone();
@@ -466,20 +512,38 @@ impl CustomEndpointModal {
         let url = self.endpoint_url_editor.as_ref(ctx).buffer_text(ctx);
         let api_key = self.api_key_editor.as_ref(ctx).buffer_text(ctx);
         let schema = self.selected_schema(ctx);
-        let models: Vec<(String, Option<String>, Option<String>)> = self
+        let models: Vec<CustomEndpointModelParams> = self
             .model_rows
             .iter()
             .map(|row| {
                 let name = row.name_editor.as_ref(ctx).buffer_text(ctx);
                 let alias = row.alias_editor.as_ref(ctx).buffer_text(ctx);
-                let alias_opt = if alias.trim().is_empty() {
+                let reasoning_effort = row.reasoning_effort_editor.as_ref(ctx).buffer_text(ctx);
+                let alias = if alias.trim().is_empty() {
                     None
                 } else {
                     Some(alias)
                 };
-                (name, alias_opt, row.config_key.clone())
+                let reasoning_effort = if schema != CustomEndpointSchema::OpenaiResponses
+                    || reasoning_effort.trim().is_empty()
+                {
+                    None
+                } else {
+                    Some(reasoning_effort)
+                };
+                CustomEndpointModelParams {
+                    name,
+                    alias,
+                    reasoning_effort,
+                    reasoning_mode: if schema == CustomEndpointSchema::OpenaiResponses {
+                        row.reasoning_mode.clone()
+                    } else {
+                        None
+                    },
+                    config_key: row.config_key.clone(),
+                }
             })
-            .filter(|(name, _, _)| !name.trim().is_empty())
+            .filter(|model| !model.name.trim().is_empty())
             .collect();
         if let Some(index) = self.editing_index {
             ctx.emit(CustomEndpointModalEvent::SaveEndpoint {
@@ -522,7 +586,8 @@ impl CustomEndpointModal {
     fn add_model(&mut self, ctx: &mut ViewContext<Self>) {
         let font_family = Appearance::as_ref(ctx).ui_font_family();
         let text_colors = crate::settings_view::editor_text_colors(Appearance::as_ref(ctx));
-        let row = Self::create_model_row(None, None, None, font_family, &text_colors, ctx);
+        let row =
+            Self::create_model_row(None, None, None, None, None, font_family, &text_colors, ctx);
         // Subscribe to the new editors
         let name_editor = row.name_editor.clone();
         ctx.subscribe_to_view(&name_editor, |me, editor, event, ctx| {
@@ -530,6 +595,10 @@ impl CustomEndpointModal {
         });
         let alias_editor = row.alias_editor.clone();
         ctx.subscribe_to_view(&alias_editor, |me, editor, event, ctx| {
+            me.handle_model_editor_event(&editor, event, ctx);
+        });
+        let reasoning_effort_editor = row.reasoning_effort_editor.clone();
+        ctx.subscribe_to_view(&reasoning_effort_editor, |me, editor, event, ctx| {
             me.handle_model_editor_event(&editor, event, ctx);
         });
         self.model_rows.push(row);
@@ -571,7 +640,11 @@ impl CustomEndpointModal {
         } else {
             self.model_rows
                 .iter()
-                .position(|row| row.name_editor == *editor || row.alias_editor == *editor)
+                .position(|row| {
+                    row.name_editor == *editor
+                        || row.alias_editor == *editor
+                        || row.reasoning_effort_editor == *editor
+                })
                 .map(model_row_scroll_position_id)
         };
         if let Some(position_id) = position_id {
@@ -592,6 +665,8 @@ impl CustomEndpointModal {
         for row in &self.model_rows {
             editors.push(&row.name_editor);
             editors.push(&row.alias_editor);
+            editors.push(&row.reasoning_effort_editor);
+            editors.push(&row.reasoning_effort_editor);
         }
         if let Some(pos) = editors.iter().position(|e| *e == current) {
             let next = (pos + 1) % editors.len();
@@ -862,26 +937,38 @@ impl View for CustomEndpointModal {
         );
 
         // Model rows
+        let show_reasoning_effort =
+            self.selected_schema(app) == CustomEndpointSchema::OpenaiResponses;
+        let model_input_width = if show_reasoning_effort {
+            MODEL_INPUT_WIDTH_WITH_REASONING
+        } else {
+            MODEL_INPUT_WIDTH
+        };
         let has_remove_model_button = self.model_rows.len() > 1;
+        let mut model_label_inputs = Flex::row()
+            .with_spacing(MODEL_ROW_SPACING)
+            .with_child(
+                ConstrainedBox::new(label("Model name"))
+                    .with_width(model_input_width)
+                    .finish(),
+            )
+            .with_child(
+                ConstrainedBox::new(label("Model alias (optional)"))
+                    .with_width(model_input_width)
+                    .finish(),
+            );
+        if show_reasoning_effort {
+            model_label_inputs.add_child(
+                ConstrainedBox::new(label("Reasoning effort (optional)"))
+                    .with_width(model_input_width)
+                    .finish(),
+            );
+        }
         let mut model_labels = Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_spacing(REMOVE_MODEL_BUTTON_SPACING)
-            .with_child(
-                Flex::row()
-                    .with_spacing(MODEL_ROW_SPACING)
-                    .with_child(
-                        ConstrainedBox::new(label("Model name"))
-                            .with_width(MODEL_INPUT_WIDTH)
-                            .finish(),
-                    )
-                    .with_child(
-                        ConstrainedBox::new(label("Model alias (optional)"))
-                            .with_width(MODEL_INPUT_WIDTH)
-                            .finish(),
-                    )
-                    .finish(),
-            );
+            .with_child(model_label_inputs.finish());
         if has_remove_model_button {
             model_labels.add_child(
                 ConstrainedBox::new(Empty::new().finish())
@@ -902,7 +989,7 @@ impl View for CustomEndpointModal {
                 .ui_builder()
                 .text_input(row.name_editor.clone())
                 .with_style(UiComponentStyles {
-                    width: Some(MODEL_INPUT_WIDTH),
+                    width: Some(model_input_width),
                     ..Default::default()
                 })
                 .build()
@@ -912,7 +999,7 @@ impl View for CustomEndpointModal {
                 .ui_builder()
                 .text_input(row.alias_editor.clone())
                 .with_style(UiComponentStyles {
-                    width: Some(MODEL_INPUT_WIDTH),
+                    width: Some(model_input_width),
                     ..Default::default()
                 })
                 .build()
@@ -930,17 +1017,29 @@ impl View for CustomEndpointModal {
             } else {
                 Empty::new().finish()
             };
-            let model_inputs = Flex::row()
+            let mut model_inputs = Flex::row()
                 .with_spacing(MODEL_ROW_SPACING)
                 .with_child(name_input)
-                .with_child(alias_input)
-                .finish();
+                .with_child(alias_input);
+            if show_reasoning_effort {
+                model_inputs.add_child(
+                    appearance
+                        .ui_builder()
+                        .text_input(row.reasoning_effort_editor.clone())
+                        .with_style(UiComponentStyles {
+                            width: Some(model_input_width),
+                            ..Default::default()
+                        })
+                        .build()
+                        .finish(),
+                );
+            }
 
             let mut row = Flex::row()
                 .with_main_axis_size(MainAxisSize::Max)
                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
                 .with_spacing(REMOVE_MODEL_BUTTON_SPACING)
-                .with_child(model_inputs);
+                .with_child(model_inputs.finish());
             if has_remove_model_button {
                 row.add_child(
                     ConstrainedBox::new(remove_button)

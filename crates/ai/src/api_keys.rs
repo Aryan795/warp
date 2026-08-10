@@ -60,6 +60,22 @@ pub struct CustomEndpoint {
     pub schema: CustomEndpointSchema,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomEndpointModelParams {
+    pub name: String,
+    pub alias: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub reasoning_mode: Option<String>,
+    pub config_key: Option<String>,
+}
+
+fn normalize_reasoning_value(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_owned())
+    })
+}
+
 /// The request/response protocol used by a custom inference endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -110,6 +126,11 @@ impl CustomEndpointSchema {
 pub struct CustomEndpointModel {
     pub name: String,
     pub alias: Option<String>,
+    /// Provider-specific reasoning effort forwarded to compatible endpoint
+    /// schemas. `None` preserves the provider's default behavior.
+    pub reasoning_effort: Option<String>,
+    /// Provider-specific reasoning execution mode.
+    pub reasoning_mode: Option<String>,
     /// Stable identifier used as `ModelConfig.{base,coding,cli_agent,computer_use_agent}` and
     /// as the `CustomModelProviders.providers[*].models[*].config_key` on the request wire.
     /// Generated as a UUIDv4 at model creation.
@@ -279,7 +300,7 @@ pub struct CustomEndpointParams {
     pub name: String,
     pub url: String,
     pub api_key: String,
-    pub models: Vec<(String, Option<String>, Option<String>)>,
+    pub models: Vec<CustomEndpointModelParams>,
     pub schema: CustomEndpointSchema,
 }
 fn provider_credential_action(is_present: bool) -> ProviderCredentialTelemetryAction {
@@ -485,10 +506,13 @@ impl ApiKeyManager {
             schema,
             models: models
                 .into_iter()
-                .map(|(name, alias, config_key)| CustomEndpointModel {
-                    name,
-                    alias,
-                    config_key: config_key
+                .map(|model| CustomEndpointModel {
+                    name: model.name,
+                    alias: model.alias,
+                    reasoning_effort: normalize_reasoning_value(model.reasoning_effort),
+                    reasoning_mode: normalize_reasoning_value(model.reasoning_mode),
+                    config_key: model
+                        .config_key
                         .filter(|k| !k.is_empty())
                         .unwrap_or_else(|| Uuid::new_v4().to_string()),
                 })
@@ -521,10 +545,13 @@ impl ApiKeyManager {
             schema,
             models: models
                 .into_iter()
-                .map(|(name, alias, config_key)| CustomEndpointModel {
-                    name,
-                    alias,
-                    config_key: config_key
+                .map(|model| CustomEndpointModel {
+                    name: model.name,
+                    alias: model.alias,
+                    reasoning_effort: normalize_reasoning_value(model.reasoning_effort),
+                    reasoning_mode: normalize_reasoning_value(model.reasoning_mode),
+                    config_key: model
+                        .config_key
                         .filter(|k| !k.is_empty())
                         .unwrap_or_else(|| Uuid::new_v4().to_string()),
                 })
@@ -611,6 +638,8 @@ impl ApiKeyManager {
                             |m| api::request::settings::custom_model_providers::CustomModel {
                                 slug: m.name.clone(),
                                 config_key: m.config_key.clone(),
+                                reasoning_effort: m.reasoning_effort.clone().unwrap_or_default(),
+                                reasoning_mode: m.reasoning_mode.clone().unwrap_or_default(),
                             },
                         )
                         .collect(),
