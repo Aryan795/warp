@@ -27854,8 +27854,7 @@ impl View for Workspace {
 
     /// Update this workspace when it has been closed, but may still be restored.
     fn on_window_closed(&mut self, ctx: &mut ViewContext<Self>) {
-        let content_transferred = self.suppress_detach_panes_on_window_close;
-        if !content_transferred {
+        if !self.suppress_detach_panes_on_window_close {
             for pane_group in self.tab_views() {
                 pane_group.update(ctx, |pane_group, ctx| {
                     pane_group.detach_panes(ctx);
@@ -27869,24 +27868,13 @@ impl View for Workspace {
             registry.unregister(window_id);
         });
 
+        // If this workspace's close was registered as part of a tab-drag
+        // handoff, clear the entry now that the workspace is gone from the
+        // registry. Safe no-op if this window wasn't registered. See
+        // `CrossWindowTabDrag::pending_source_window_closes` for the
+        // `terminal_panes.uuid` race this guards.
         CrossWindowTabDrag::handle(ctx).update(ctx, |drag, _| {
-            // If this workspace's close was registered as part of a tab-drag
-            // handoff, clear the entry now that the workspace is gone from
-            // the registry. Safe no-op if this window wasn't registered. See
-            // `CrossWindowTabDrag::pending_source_window_closes` for the
-            // `terminal_panes.uuid` race this guards.
             drag.finish_pending_source_close(window_id);
-
-            // A transfer-driven close does not clear `self.tabs`, so this
-            // workspace still references a `PaneGroup` that has already been
-            // adopted by another, still-open window. Mark the close so the
-            // top-level `on_window_will_close` app callback skips pushing it
-            // onto `UndoCloseStack` -- resurrecting it via Cmd+Shift+T would
-            // give two windows ownership of the same pane group again (see
-            // APP-5285).
-            if content_transferred {
-                drag.mark_content_transferred_window_close(window_id);
-            }
         });
 
         ActiveSession::handle(ctx).update(ctx, |active_session, _| {
@@ -27956,8 +27944,19 @@ impl Workspace {
     /// been transferred elsewhere.
     pub(crate) fn close_window_for_content_transfer(&mut self, ctx: &mut ViewContext<Self>) {
         self.set_suppress_detach_panes_on_window_close(true);
+        let window_id = ctx.window_id();
+        // Mark the close as content-transferred right at the point it is
+        // issued, not by inferring it later from
+        // `suppress_detach_panes_on_window_close` -- that flag is also set
+        // (and not reliably cleared) on windows that stay open after a
+        // handoff or reverse-handoff, so it cannot be trusted as a proxy for
+        // "this specific close is a transfer". See the field doc on
+        // `CrossWindowTabDrag::content_transferred_window_closes`.
+        CrossWindowTabDrag::handle(ctx).update(ctx, |drag, _| {
+            drag.mark_content_transferred_window_close(window_id);
+        });
         ctx.windows()
-            .close_window(ctx.window_id(), TerminationMode::ContentTransferred);
+            .close_window(window_id, TerminationMode::ContentTransferred);
     }
 
     pub(crate) fn insert_transferred_tab_at_index(
@@ -28800,6 +28799,14 @@ impl Workspace {
                 if transferred_tab_index < self.tabs.len() {
                     self.remove_tab_without_undo(transferred_tab_index, ctx);
                 }
+                // Mark the close as content-transferred right at the point it
+                // is issued -- see the field doc on
+                // `CrossWindowTabDrag::content_transferred_window_closes` for
+                // why this can't be inferred later from
+                // `suppress_detach_panes_on_window_close`.
+                CrossWindowTabDrag::handle(ctx).update(ctx, |drag, _| {
+                    drag.mark_content_transferred_window_close(preview_window_id);
+                });
                 ctx.windows()
                     .close_window(preview_window_id, TerminationMode::ContentTransferred);
             }
@@ -28810,6 +28817,9 @@ impl Workspace {
                 // asynchronously; `finalize` has already registered the
                 // pending close so `is_active()` keeps persistence paused
                 // until `on_window_closed` fires.
+                CrossWindowTabDrag::handle(ctx).update(ctx, |drag, _| {
+                    drag.mark_content_transferred_window_close(preview_window_id);
+                });
                 ctx.windows()
                     .close_window(preview_window_id, TerminationMode::ContentTransferred);
             }

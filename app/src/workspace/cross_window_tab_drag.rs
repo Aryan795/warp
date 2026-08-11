@@ -123,9 +123,9 @@ pub struct CrossWindowTabDrag {
     /// `finalize` and removed via [`finish_pending_source_close`] from
     /// `Workspace::on_window_closed`.
     pending_source_window_closes: HashSet<WindowId>,
-    /// Window ids whose close was driven by a cross-window tab-drag content
-    /// transfer (i.e. `Workspace::suppress_detach_panes_on_window_close` was
-    /// `true` when `Workspace::on_window_closed` ran for that window).
+    /// Window ids whose close was issued with
+    /// `TerminationMode::ContentTransferred`: the window's content was
+    /// handed off to another window, not destroyed.
     ///
     /// A transfer-driven close does not clear the closing workspace's own
     /// `tabs` list, so the closing `Workspace` view still references the
@@ -136,11 +136,23 @@ pub struct CrossWindowTabDrag {
     /// tab-drag invariant that a pane group is owned by exactly one window
     /// (see APP-5285).
     ///
-    /// Entries are added via [`mark_content_transferred_window_close`] from
-    /// `Workspace::on_window_closed` and consumed via
+    /// Entries are added via [`mark_content_transferred_window_close`] at
+    /// each call site that issues a `close_window(_, ContentTransferred)`
+    /// (`Workspace::close_window_for_content_transfer`,
+    /// `Workspace::handle_drop_result`'s `RemoveSourceTabAndClosePreview` /
+    /// `ClosePreviewOnly` arms, and `CrossWindowTabDrag::finalize_handoff`'s
+    /// put-back preview close), and consumed via
     /// [`take_content_transferred_window_close`] from the top-level
     /// `on_window_will_close` app callback, which skips the undo-close
     /// registration when this returns `true`.
+    ///
+    /// Deliberately **not** inferred from
+    /// `Workspace::suppress_detach_panes_on_window_close`: that flag is also
+    /// set (and not reliably cleared) on windows that stay open after a
+    /// handoff or reverse-handoff, so treating it as a proxy for "this close
+    /// is a transfer" would wrongly suppress the undo-close and pane-detach
+    /// of a later, ordinary close of that same window (see APP-5285 review
+    /// discussion).
     ///
     /// [`mark_content_transferred_window_close`]: Self::mark_content_transferred_window_close
     /// [`take_content_transferred_window_close`]: Self::take_content_transferred_window_close
@@ -412,11 +424,13 @@ impl CrossWindowTabDrag {
     }
 
     /// Marks `window_id`'s close as content-transferred: its tab list still
-    /// references a `PaneGroup` that has already been adopted by another,
-    /// still-open window. Called from `Workspace::on_window_closed` right
-    /// before it returns, so the marker is visible to the top-level
-    /// `on_window_will_close` app callback that runs immediately afterward.
-    /// See the field doc on `CrossWindowTabDrag::content_transferred_window_closes`.
+    /// references (or will still reference, once the close completes) a
+    /// `PaneGroup` that has already been adopted by another window. Called
+    /// at the exact point a `close_window(_, TerminationMode::ContentTransferred)`
+    /// is issued for `window_id`, so the marker is set well before the
+    /// OS-delivered close later reaches the top-level `on_window_will_close`
+    /// app callback. See the field doc on
+    /// `CrossWindowTabDrag::content_transferred_window_closes`.
     pub fn mark_content_transferred_window_close(&mut self, window_id: WindowId) {
         self.content_transferred_window_closes.insert(window_id);
     }
@@ -1487,7 +1501,7 @@ impl CrossWindowTabDrag {
     /// Cleans up the target workspace's drag state and tells the calling
     /// workspace to clean up its source tab (if source ≠ target).
     fn finalize_handoff(
-        &self,
+        &mut self,
         drag: &ActiveDrag,
         target_window_id: WindowId,
         target_tab_index: usize,
@@ -1507,14 +1521,18 @@ impl CrossWindowTabDrag {
 
         if drag.source_window_id == target_window_id {
             if drag.has_dedicated_preview_window() {
+                let preview_window_id = drag.preview_window_id();
                 log::info!(
-                    "tab_drag: finalize_handoff source==target, closing preview_wid={}",
-                    drag.preview_window_id()
+                    "tab_drag: finalize_handoff source==target, closing preview_wid={preview_window_id}"
                 );
-                ctx.windows().close_window(
-                    drag.preview_window_id(),
-                    TerminationMode::ContentTransferred,
-                );
+                // Mark the close as content-transferred right at the point it
+                // is issued. This preview close does not flow through the
+                // `DropResult` match in `finalize` (it returns `NoOp` here),
+                // so it must be marked directly rather than relying on that
+                // match's registration.
+                self.mark_content_transferred_window_close(preview_window_id);
+                ctx.windows()
+                    .close_window(preview_window_id, TerminationMode::ContentTransferred);
             }
             return DropResult::NoOp;
         }

@@ -909,18 +909,25 @@ fn report_db_error(err_kind: &str, err: anyhow::Error, database_path: &Path) {
 }
 
 /// Returns `true` if `err`'s cause chain contains a `terminal_panes.uuid`
-/// UNIQUE-constraint violation, the DB-level symptom of two windows both
-/// holding ownership of the same pane group when `save_app_state` runs (see
-/// APP-5285). Matches on the raw error message rather than
-/// `DatabaseErrorInformation::table_name()`, since SQLite's UNIQUE-violation
-/// messages already embed the table and column (`UNIQUE constraint failed:
-/// terminal_panes.uuid`) and not every backend populates `table_name()`.
+/// UNIQUE-constraint violation specifically, the DB-level symptom of two
+/// windows both holding ownership of the same pane group when
+/// `save_app_state` runs (see APP-5285). Matches on the raw error message
+/// rather than `DatabaseErrorInformation::table_name()`, since SQLite's
+/// UNIQUE-violation messages already embed the table and column (`UNIQUE
+/// constraint failed: terminal_panes.uuid`) and not every backend populates
+/// `table_name()`.
+///
+/// Deliberately checks for the exact `terminal_panes.uuid` column, not just
+/// the `terminal_panes` table: a UNIQUE violation on a different column
+/// (e.g. `terminal_panes.id`, the primary key) is a distinct corruption
+/// signal that must keep reporting every time, not get silently folded into
+/// this throttle.
 fn is_terminal_panes_unique_violation(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         matches!(
             cause.downcast_ref::<Error>(),
             Some(Error::DatabaseError(DatabaseErrorKind::UniqueViolation, info))
-                if info.message().contains("terminal_panes")
+                if info.message().contains("terminal_panes.uuid")
         )
     })
 }
