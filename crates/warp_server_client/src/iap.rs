@@ -204,12 +204,15 @@ pub struct IapManager {
     managed_mint: Option<ManagedIapMint>,
     /// Number of consecutive failed fetches since the last success.
     consecutive_failures: u32,
-    /// `true` while a call to [`Self::ensure_access`] is waiting on either a
-    /// valid token or [`IAP_ACCESS_TIMEOUT`] elapsing. Lets a non-retryable
-    /// refresh failure (e.g. permanent misconfiguration) fail the gate
-    /// immediately instead of waiting out the full timeout for a token that
-    /// will never arrive.
-    access_gate_pending: bool,
+    /// Identifies the currently outstanding [`Self::ensure_access`] gate, if
+    /// any; `None` when no gate is pending. Each call to `ensure_access`
+    /// assigns a fresh id (see [`Self::next_access_gate_id`]) so that a stale
+    /// timer or early resolution from a previous gate can never be mistaken
+    /// for the current one (e.g. gate A resolves early, then gate B starts
+    /// before A's original timer fires).
+    access_gate: Option<u64>,
+    /// Source of fresh [`Self::access_gate`] ids.
+    next_access_gate_id: u64,
 }
 
 pub enum IapManagerEvent {
@@ -243,7 +246,8 @@ impl IapManager {
             path_resolver,
             managed_mint,
             consecutive_failures: 0,
-            access_gate_pending: false,
+            access_gate: None,
+            next_access_gate_id: 0,
         };
         manager.start_refresh(ctx);
         manager
@@ -292,26 +296,34 @@ impl IapManager {
         if self.state.is_none() {
             return;
         }
-        self.access_gate_pending = true;
+        let gate_id = self.next_access_gate_id;
+        self.next_access_gate_id += 1;
+        self.access_gate = Some(gate_id);
         self.start_refresh(ctx);
         ctx.spawn(
             async { Timer::after(IAP_ACCESS_TIMEOUT).await },
-            |manager, _, ctx| {
-                if !manager.access_gate_pending {
-                    // Already resolved early by a non-retryable failure.
-                    return;
-                }
-                manager.access_gate_pending = false;
-                if !manager.has_valid_token() {
-                    ctx.emit(IapManagerEvent::AccessUnavailable {
-                        message: format!(
-                            "Timed out after {}s establishing IAP access to warp-server.",
-                            IAP_ACCESS_TIMEOUT.as_secs()
-                        ),
-                    });
-                }
-            },
+            move |manager, _, ctx| manager.resolve_access_gate_timeout(gate_id, ctx),
         );
+    }
+
+    /// Resolves the access gate identified by `gate_id` once its
+    /// [`IAP_ACCESS_TIMEOUT`] timer fires. A no-op if `gate_id` no longer
+    /// matches the outstanding gate: it was already resolved early (e.g. by a
+    /// non-retryable failure or a cache hit) or superseded by a newer call to
+    /// [`Self::ensure_access`].
+    fn resolve_access_gate_timeout(&mut self, gate_id: u64, ctx: &mut ModelContext<Self>) {
+        if self.access_gate != Some(gate_id) {
+            return;
+        }
+        self.access_gate = None;
+        if !self.has_valid_token() {
+            ctx.emit(IapManagerEvent::AccessUnavailable {
+                message: format!(
+                    "Timed out after {}s establishing IAP access to warp-server.",
+                    IAP_ACCESS_TIMEOUT.as_secs()
+                ),
+            });
+        }
     }
 
     pub fn handle_challenge(&mut self, ctx: &mut ModelContext<Self>) {
@@ -393,6 +405,10 @@ impl IapManager {
         if let Some(cached) = cache::read() {
             let expires_at = cached.expires_at;
             state.set_loaded(cached);
+            // Resolve any outstanding `ensure_access` gate now, the same way
+            // `apply_refresh_result(Ok)` does: the caller already has a valid
+            // token, so it must not keep waiting out `IAP_ACCESS_TIMEOUT`.
+            self.access_gate = None;
             ctx.emit(IapManagerEvent::StateChanged);
             ctx.notify();
             self.schedule_next_refresh(expires_at, ctx);
@@ -453,7 +469,7 @@ impl IapManager {
                 }
                 state.set_loaded(cached);
                 self.consecutive_failures = 0;
-                self.access_gate_pending = false;
+                self.access_gate = None;
                 log::info!("Warp Staging IAP token refreshed");
                 ctx.emit(IapManagerEvent::StateChanged);
                 ctx.notify();
@@ -482,8 +498,7 @@ impl IapManager {
                     log::warn!(
                         "IAP token fetch failed with a non-retryable error; not scheduling a retry"
                     );
-                    if self.access_gate_pending {
-                        self.access_gate_pending = false;
+                    if self.access_gate.take().is_some() {
                         ctx.emit(IapManagerEvent::AccessUnavailable { message });
                     }
                     return;
@@ -630,8 +645,14 @@ async fn fetch_iap_token_via_wif(
     // The WIF provider resource name is the `aud` of the server-injected bootstrap
     // JWT, so we read it straight off that token instead of carrying it as
     // separate client config.
-    let federation_audience = parse_aud_from_jwt(&injected_jwt)
-        .ok_or_else(|| anyhow::anyhow!("injected OIDC JWT has no readable `aud` claim"))?;
+    let federation_audience = parse_aud_from_jwt(&injected_jwt).ok_or_else(|| {
+        // A missing/unreadable `aud` claim can never be resolved by retrying: the
+        // claim is fixed for the lifetime of the injected JWT, so this is a
+        // permanent misconfiguration rather than a transient mint failure.
+        anyhow::Error::new(NonRetryableIapError(
+            "injected OIDC JWT has no readable `aud` claim".to_string(),
+        ))
+    })?;
 
     // Leg 1: obtain the Warp-signed OIDC JWT used as the STS subject token.
     let identity_token =
