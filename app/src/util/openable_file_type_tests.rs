@@ -99,37 +99,88 @@ fn test_resolve_file_target_binary_is_system_generic() {
     assert_eq!(target, FileTarget::SystemGeneric);
 }
 
+/// Resolves `path` as a system-default open, with the "is Warp the OS handler"
+/// probe stubbed so the result does not depend on the host's file associations.
+#[cfg(feature = "local_fs")]
+fn resolve_system_default(path: &Path, handler_is_warp: bool) -> FileTarget {
+    resolve_file_target_with_system_default_handler(
+        path,
+        EditorChoice::SystemDefault,
+        true, /* prefer_markdown_viewer */
+        EditorLayout::SplitPane,
+        None,
+        |_| handler_is_warp,
+    )
+}
+
 /// When the OS hands the file straight back to Warp, opening it in-process is
 /// the only path that can carry the requested line: the `file://` round trip
 /// through the OS drops it.
 #[test]
 #[cfg(feature = "local_fs")]
 fn test_resolve_file_target_system_default_handled_by_warp_opens_code_editor() {
-    let target = resolve_file_target_with_system_default_handler(
-        Path::new("main.rs"),
-        EditorChoice::SystemDefault,
-        true, /* prefer_markdown_viewer */
-        EditorLayout::SplitPane,
-        None,
-        |_| true, /* system_default_handler_is_warp */
-    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("main.rs");
+    std::fs::write(&path, "fn main() {}\n").unwrap();
 
-    assert_eq!(target, FileTarget::CodeEditor(EditorLayout::SplitPane));
+    assert_eq!(
+        resolve_system_default(&path, true),
+        FileTarget::CodeEditor(EditorLayout::SplitPane)
+    );
 }
 
 #[test]
 #[cfg(feature = "local_fs")]
 fn test_resolve_file_target_system_default_handled_by_other_app_is_unchanged() {
-    let target = resolve_file_target_with_system_default_handler(
-        Path::new("main.rs"),
-        EditorChoice::SystemDefault,
-        true, /* prefer_markdown_viewer */
-        EditorLayout::SplitPane,
-        None,
-        |_| false, /* system_default_handler_is_warp */
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("main.rs");
+    std::fs::write(&path, "fn main() {}\n").unwrap();
+
+    assert_eq!(
+        resolve_system_default(&path, false),
+        FileTarget::SystemDefault
+    );
+}
+
+/// Short-circuiting the OS must not change *where* a file lands, only whether
+/// it keeps its line. A runnable script comes back from the OS through
+/// `uri::classify_open_file_action` and runs in a session, so it has to keep
+/// taking that route even when Warp is the registered handler.
+#[test]
+#[cfg(all(unix, feature = "local_fs"))]
+fn test_resolve_file_target_runnable_script_still_goes_to_system_default() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("deploy.sh");
+    std::fs::write(&path, b"#!/bin/bash\necho deploying\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert_eq!(
+        resolve_system_default(&path, true),
+        FileTarget::SystemDefault
     );
 
-    assert_eq!(target, FileTarget::SystemDefault);
+    // The same script without the execute bit is just text, and short-circuits
+    // like any other file.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(
+        resolve_system_default(&path, true),
+        FileTarget::CodeEditor(EditorLayout::SplitPane)
+    );
+}
+
+/// Only real files reach the editor on the far side of the round trip, so a
+/// directory must not be short-circuited into one.
+#[test]
+#[cfg(feature = "local_fs")]
+fn test_resolve_file_target_directory_still_goes_to_system_default() {
+    let dir = tempfile::tempdir().unwrap();
+
+    assert_eq!(
+        resolve_system_default(dir.path(), true),
+        FileTarget::SystemDefault
+    );
 }
 
 /// Binary files short-circuit to `SystemGeneric` before the handler is
@@ -138,16 +189,10 @@ fn test_resolve_file_target_system_default_handled_by_other_app_is_unchanged() {
 #[test]
 #[cfg(feature = "local_fs")]
 fn test_resolve_file_target_binary_stays_system_generic_when_warp_is_handler() {
-    let target = resolve_file_target_with_system_default_handler(
-        Path::new("image.png"),
-        EditorChoice::SystemDefault,
-        true, /* prefer_markdown_viewer */
-        EditorLayout::SplitPane,
-        None,
-        |_| true, /* system_default_handler_is_warp */
+    assert_eq!(
+        resolve_system_default(Path::new("image.png"), true),
+        FileTarget::SystemGeneric
     );
-
-    assert_eq!(target, FileTarget::SystemGeneric);
 }
 
 #[test]

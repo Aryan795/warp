@@ -283,12 +283,32 @@ fn resolve_file_target_with_system_default_handler(
         // When Warp is the OS handler, handing the file to the system bounces it
         // back in as a bare `file://` URL, which cannot carry a line number.
         // Open it in-process instead so the caller's requested line survives.
-        EditorChoice::SystemDefault if system_default_handler_is_warp(path) => {
+        //
+        // The local checks come first so a file the round trip would not have
+        // opened in the editor never pays for the handler lookup.
+        EditorChoice::SystemDefault
+            if os_round_trip_would_open_editor(path) && system_default_handler_is_warp(path) =>
+        {
             FileTarget::CodeEditor(layout)
         }
         EditorChoice::SystemDefault => FileTarget::SystemDefault,
         EditorChoice::Warp | EditorChoice::EnvEditor => unreachable!("Already matched above"),
     }
+}
+
+/// Whether skipping the OS round trip would land `path` where the round trip
+/// itself does.
+///
+/// Warp classifies whatever the OS hands back (`uri::classify_open_file_action`)
+/// rather than opening it blindly: a runnable script runs in a session, and only
+/// real files reach the editor at all. Short-circuiting is only safe where that
+/// classification would have chosen the editor, so the same conditions are
+/// checked here. Callers reach this having already excluded the other two
+/// classifications — Markdown and Jupyter route to the viewer above, and binary
+/// files to `SystemGeneric`.
+#[cfg(feature = "local_fs")]
+fn os_round_trip_would_open_editor(path: &Path) -> bool {
+    path.is_file() && !is_runnable_shell_script(path)
 }
 
 #[cfg(test)]
