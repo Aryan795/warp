@@ -402,18 +402,23 @@ fn test_short_circuit_matches_os_round_trip_classification() {
     std::fs::write(&notebook, "{\"nbformat\": 4, \"cells\": []}\n").unwrap();
     let missing = dir.path().join("gone.rs");
 
-    let mut paths = vec![code, markdown, notebook, missing];
-
+    // An executable script only exists as a distinct case on unix, where the
+    // execute bit is what makes it runnable.
     #[cfg(unix)]
-    {
+    let script = {
         use std::os::unix::fs::PermissionsExt;
         let script = dir.path().join("deploy.sh");
         std::fs::write(&script, b"#!/bin/bash\n:\n").unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        paths.push(script);
-    }
+        Some(script)
+    };
+    #[cfg(not(unix))]
+    let script = None;
 
-    for path in paths {
+    for path in [code, markdown, notebook, missing]
+        .into_iter()
+        .chain(script)
+    {
         let opens_editor_via_os =
             classify_open_file_action(&path, PREFER_MARKDOWN_VIEWER) == OpenFileAction::Editor;
         let short_circuited = matches!(

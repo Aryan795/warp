@@ -6,7 +6,9 @@ pub mod web_intent_parser;
 pub mod browser_url_handler;
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+#[cfg(feature = "local_fs")]
+use std::path::Path;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use anyhow::{Result, anyhow, ensure};
@@ -40,9 +42,9 @@ use crate::settings_view::{
 };
 use crate::tab_configs::TabConfig;
 use crate::user_config::{load_launch_configs, load_tab_configs, tab_configs_dir};
-use crate::util::openable_file_type::{
-    OpenFileAction, classify_open_file_action, is_file_openable_in_warp,
-};
+#[cfg(feature = "local_fs")]
+use crate::util::openable_file_type::is_file_openable_in_warp;
+use crate::util::openable_file_type::{OpenFileAction, classify_open_file_action};
 use crate::view_components::DismissibleToast;
 use crate::workspace::auto_handoff::trigger_auto_handoff_to_cloud;
 use crate::workspace::util::PaneViewLocator;
