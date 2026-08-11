@@ -5,8 +5,6 @@ use std::sync::Arc;
 use pathfinder_geometry::vector::vec2f;
 #[cfg(not(target_family = "wasm"))]
 use remote_server::manager::RemoteServerManager;
-#[cfg(feature = "local_fs")]
-use string_offset::CharOffset;
 use warp_core::features::FeatureFlag;
 use warp_core::ui::icons::ICON_DIMENSIONS;
 use warp_editor::model::CoreEditorModel;
@@ -99,10 +97,6 @@ pub struct FileNotebookView {
     /// Set when the file was opened from a CodePane, and restored on a raw/rendered toggle.
     #[cfg(feature = "local_fs")]
     code_source: Option<CodeSource>,
-    /// Source text of the loaded file. Held so a pane that is reused for a new
-    /// requested line can be re-scrolled without re-reading from disk.
-    #[cfg(feature = "local_fs")]
-    loaded_source: Option<String>,
     /// Persistent hover state for the header title tooltip.
     header_title_mouse_state: MouseStateHandle,
 }
@@ -299,8 +293,6 @@ impl FileNotebookView {
             display_mode_segmented_control,
             #[cfg(feature = "local_fs")]
             code_source: None,
-            #[cfg(feature = "local_fs")]
-            loaded_source: None,
             header_title_mouse_state: Default::default(),
         }
     }
@@ -308,26 +300,6 @@ impl FileNotebookView {
     #[cfg(feature = "local_fs")]
     pub fn set_code_source(&mut self, source: Option<CodeSource>) {
         self.code_source = source;
-    }
-
-    /// Points an already-open pane at a new code source, scrolling to its line
-    /// when that line is new to this pane.
-    ///
-    /// A source that carries no line is ignored while one that does is on
-    /// record: reopening the same file from, say, the file tree must not erase
-    /// the line the Rendered/Raw toggle would otherwise restore.
-    #[cfg(feature = "local_fs")]
-    pub fn update_code_source(&mut self, source: Option<CodeSource>, ctx: &mut ViewContext<Self>) {
-        let previous_line = self.requested_line();
-        let incoming_line = source.as_ref().and_then(requested_line_of);
-        if incoming_line.is_none() && previous_line.is_some() {
-            return;
-        }
-
-        self.code_source = source;
-        if incoming_line.is_some() && incoming_line != previous_line {
-            self.scroll_to_requested_line(ctx);
-        }
     }
 
     #[cfg(feature = "local_fs")]
@@ -370,42 +342,6 @@ impl FileNotebookView {
                 model.set_document_path(doc_path, ctx);
             });
         });
-    }
-
-    /// The source line the opener asked for, if any.
-    #[cfg(feature = "local_fs")]
-    fn requested_line(&self) -> Option<usize> {
-        self.code_source.as_ref().and_then(requested_line_of)
-    }
-
-    /// Scrolls the rendered document to the requested source line, on a best
-    /// effort basis, and reports the block offset it landed on.
-    ///
-    /// Rendered Markdown has no source lines to jump to, so this locates the
-    /// line's visible text instead and scrolls to the block containing it. A
-    /// line with nothing searchable (a blank line, a fence delimiter) leaves
-    /// the document where it is.
-    ///
-    /// Only Markdown is handled. Jupyter notebooks render through this same
-    /// view, but their source is JSON whose text bears no relation to the
-    /// rendered cells, so matching it would scroll somewhere meaningless.
-    #[cfg(feature = "local_fs")]
-    fn scroll_to_requested_line(&mut self, ctx: &mut ViewContext<Self>) -> Option<CharOffset> {
-        if !self.is_markdown_file() {
-            return None;
-        }
-        let line_num = self.requested_line()?;
-        let source = self.loaded_source.take()?;
-        let search_terms = rendered_search_terms_for_source_line(&source, line_num);
-        self.loaded_source = Some(source);
-
-        self.editor.update(ctx, |editor, ctx| {
-            editor.model().update(ctx, |model, ctx| {
-                search_terms
-                    .iter()
-                    .find_map(|term| model.scroll_to_block_containing_text(term, ctx))
-            })
-        })
     }
 
     #[cfg(feature = "local_fs")]
@@ -475,10 +411,6 @@ impl FileNotebookView {
         ctx: &mut ViewContext<Self>,
     ) {
         let local_path = path.into();
-        #[cfg(feature = "local_fs")]
-        {
-            self.loaded_source = None;
-        }
 
         if let Some(session) = &session {
             self.set_context(&local_path, session.clone(), ctx);
@@ -514,8 +446,6 @@ impl FileNotebookView {
                     match event {
                         FileModelEvent::FileLoaded { content, .. } => {
                             me.set_content(content, ctx);
-                            me.loaded_source = Some(content.clone());
-                            me.scroll_to_requested_line(ctx);
                             send_telemetry_from_ctx!(
                                 TelemetryEvent::OpenNotebook(me.open_telemetry_metadata(ctx)),
                                 ctx
@@ -555,7 +485,6 @@ impl FileNotebookView {
                         }
                         FileModelEvent::FileUpdated { content, .. } => {
                             me.set_content(content, ctx);
-                            me.loaded_source = Some(content.clone());
                         }
                         FileModelEvent::FileSaved { .. } | FileModelEvent::FailedToSave { .. } => {}
                     }
@@ -608,10 +537,7 @@ impl FileNotebookView {
         ctx: &mut ViewContext<Self>,
     ) {
         #[cfg(feature = "local_fs")]
-        {
-            self.loaded_source = None;
-            self.release_file_model(ctx);
-        }
+        self.release_file_model(ctx);
         self.set_content(content, ctx);
         let title = title.into();
         self.pane_configuration.update(ctx, |pane_config, ctx| {
@@ -1356,131 +1282,6 @@ impl BackingView for FileNotebookView {
         self.focus_handle = Some(focus_handle.clone());
         self.context_menu.set_focus_handle(focus_handle);
     }
-}
-
-/// The source line a code source points at, if it carries one.
-#[cfg(feature = "local_fs")]
-fn requested_line_of(source: &CodeSource) -> Option<usize> {
-    match source {
-        CodeSource::Link { range_start, .. } => Some(range_start.as_ref()?.line_num),
-        _ => None,
-    }
-}
-
-/// Minimum length of a search term. Shorter fragments match too easily, and
-/// would scroll the reader to an arbitrary place in the document.
-#[cfg(feature = "local_fs")]
-const MIN_SEARCH_TERM_LEN: usize = 3;
-
-/// Search terms for locating line `line_num` (1-based) of `markdown` in the
-/// rendered document, in descending order of specificity.
-///
-/// The rendered view has no source lines to jump to, so the caller looks for
-/// the line's visible text instead. The verbatim line comes first because code
-/// blocks render unchanged; the syntax-stripped line covers headings, lists and
-/// emphasis; the longest word is a last resort for lines whose inline syntax
-/// (links, images, raw HTML) is not rewritten here.
-#[cfg(feature = "local_fs")]
-fn rendered_search_terms_for_source_line(markdown: &str, line_num: usize) -> Vec<String> {
-    use itertools::Itertools as _;
-
-    let Some(line) = markdown.lines().nth(line_num.saturating_sub(1)) else {
-        return Vec::new();
-    };
-
-    let stripped = strip_markdown_syntax(line);
-    // Split on non-alphanumerics rather than whitespace so a word survives the
-    // inline syntax `strip_markdown_syntax` leaves behind, such as a link's
-    // `[label](target)`. Ties keep the earliest word, so the chosen term does
-    // not hinge on which extreme the iterator happens to return.
-    let longest_word = stripped
-        .split(|c: char| !c.is_alphanumeric())
-        .reduce(|longest, word| {
-            if word.chars().count() > longest.chars().count() {
-                word
-            } else {
-                longest
-            }
-        })
-        .unwrap_or_default();
-
-    [line.trim(), stripped.as_str(), longest_word]
-        .into_iter()
-        .filter(|term| {
-            term.chars().count() >= MIN_SEARCH_TERM_LEN && term.chars().any(char::is_alphanumeric)
-        })
-        .map(str::to_owned)
-        .unique()
-        .collect()
-}
-
-/// The visible text of a single Markdown line: block prefixes and inline
-/// emphasis markers removed. Lines that render as nothing (fence delimiters,
-/// setext underlines, table rules) produce an empty string.
-#[cfg(feature = "local_fs")]
-fn strip_markdown_syntax(line: &str) -> String {
-    let mut rest = line.trim();
-
-    if rest.starts_with("```") || rest.starts_with("~~~") {
-        return String::new();
-    }
-    if !rest.is_empty()
-        && rest
-            .chars()
-            .all(|c| matches!(c, '-' | '=' | '|' | ':' | ' '))
-    {
-        return String::new();
-    }
-
-    // Prefixes nest (`> - [ ] todo`), so keep stripping until nothing matches.
-    loop {
-        let stripped = strip_block_prefix(rest);
-        if stripped == rest {
-            break;
-        }
-        rest = stripped;
-    }
-
-    rest.chars()
-        .filter(|c| !matches!(c, '*' | '_' | '`' | '~'))
-        .collect::<String>()
-        .trim()
-        .to_owned()
-}
-
-/// Strips one leading blockquote marker, ATX heading marker, list bullet or
-/// task checkbox from `line`, returning `line` unchanged when none is present.
-#[cfg(feature = "local_fs")]
-fn strip_block_prefix(line: &str) -> &str {
-    let line = line.trim_start();
-
-    if let Some(rest) = line.strip_prefix('>') {
-        return rest.trim_start();
-    }
-    for prefix in ["- ", "* ", "+ ", "[ ] ", "[x] ", "[X] "] {
-        if let Some(rest) = line.strip_prefix(prefix) {
-            return rest.trim_start();
-        }
-    }
-    if let Some(rest) = line.strip_prefix('#')
-        && let Some(rest) = rest.trim_start_matches('#').strip_prefix(' ')
-    {
-        return rest.trim_start();
-    }
-    // Ordered list markers: `1. ` or `1) `. ASCII digits, so the count of
-    // leading digits doubles as a byte index.
-    let digits = line.chars().take_while(char::is_ascii_digit).count();
-    if digits > 0 {
-        let after_digits = &line[digits..];
-        if let Some(rest) = after_digits
-            .strip_prefix(". ")
-            .or_else(|| after_digits.strip_prefix(") "))
-        {
-            return rest.trim_start();
-        }
-    }
-
-    line
 }
 
 /// Location information for a file, used to show its title and context.

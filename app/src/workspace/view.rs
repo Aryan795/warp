@@ -8660,12 +8660,10 @@ impl Workspace {
                     !pane_group.as_ref(ctx).is_pane_hidden_for_close(*pane_id)
                         && file_view.as_ref(ctx).path() == Some(&path)
                 })
+                .map(|(pane_id, _)| pane_id)
         };
 
-        if let Some((pane_id, file_view)) = existing_file_pane {
-            file_view.update(ctx, |file_view, ctx| {
-                file_view.update_code_source(code_source, ctx);
-            });
+        if let Some(pane_id) = existing_file_pane {
             self.active_tab_pane_group().update(ctx, |pane_group, ctx| {
                 pane_group.focus_pane_by_id(pane_id, ctx);
             });
