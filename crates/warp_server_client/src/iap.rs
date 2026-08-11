@@ -186,6 +186,14 @@ impl http_client::iap::IapTokenProvider for IapState {
     }
 }
 
+/// Marks an IAP refresh failure as permanent misconfiguration (e.g. a
+/// required env var is unset) rather than a transient network/provider
+/// hiccup, so [`IapManager::apply_refresh_result`] can fail fast instead of
+/// burning retries on a condition that cannot change without intervention.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct NonRetryableIapError(String);
+
 /// Owns the IAP refresh lifecycle: initial fetch, proactive time-based
 /// refresh, and reactive refresh on challenge events.
 pub struct IapManager {
@@ -196,13 +204,25 @@ pub struct IapManager {
     managed_mint: Option<ManagedIapMint>,
     /// Number of consecutive failed fetches since the last success.
     consecutive_failures: u32,
+    /// `true` while a call to [`Self::ensure_access`] is waiting on either a
+    /// valid token or [`IAP_ACCESS_TIMEOUT`] elapsing. Lets a non-retryable
+    /// refresh failure (e.g. permanent misconfiguration) fail the gate
+    /// immediately instead of waiting out the full timeout for a token that
+    /// will never arrive.
+    access_gate_pending: bool,
 }
 
 pub enum IapManagerEvent {
     StateChanged,
-    /// Emitted when IAP access could not be established within the gate timeout,
-    /// so a blocking caller can fail closed instead of hanging.
-    AccessUnavailable,
+    /// Emitted when IAP access could not be established for a blocking caller
+    /// gated via [`IapManager::ensure_access`], so it can fail closed instead
+    /// of hanging. `message` describes the actual cause: either a genuine
+    /// [`IAP_ACCESS_TIMEOUT`] timeout, or the underlying error when a
+    /// non-retryable failure (e.g. permanent misconfiguration) let us fail
+    /// fast instead of waiting out the timeout.
+    AccessUnavailable {
+        message: String,
+    },
     RefreshFailed {
         /// A human-readable error message describing why the refresh failed.
         message: String,
@@ -223,6 +243,7 @@ impl IapManager {
             path_resolver,
             managed_mint,
             consecutive_failures: 0,
+            access_gate_pending: false,
         };
         manager.start_refresh(ctx);
         manager
@@ -259,6 +280,11 @@ impl IapManager {
     /// [`IapManagerEvent::AccessUnavailable`] so the caller can fail closed.
     /// A no-op when IAP is inactive.
     ///
+    /// If the refresh hits a non-retryable failure (e.g. permanent
+    /// misconfiguration) before the timeout elapses, [`Self::apply_refresh_result`]
+    /// emits [`IapManagerEvent::AccessUnavailable`] immediately instead of
+    /// waiting out the full timeout for a token that will never arrive.
+    ///
     /// Callers should subscribe before calling: on [`IapManagerEvent::StateChanged`],
     /// check [`Self::has_valid_token`] and, once it returns `true`, proceed with the
     /// IAP-gated request; treat [`IapManagerEvent::AccessUnavailable`] as fatal.
@@ -266,12 +292,23 @@ impl IapManager {
         if self.state.is_none() {
             return;
         }
+        self.access_gate_pending = true;
         self.start_refresh(ctx);
         ctx.spawn(
             async { Timer::after(IAP_ACCESS_TIMEOUT).await },
             |manager, _, ctx| {
+                if !manager.access_gate_pending {
+                    // Already resolved early by a non-retryable failure.
+                    return;
+                }
+                manager.access_gate_pending = false;
                 if !manager.has_valid_token() {
-                    ctx.emit(IapManagerEvent::AccessUnavailable);
+                    ctx.emit(IapManagerEvent::AccessUnavailable {
+                        message: format!(
+                            "Timed out after {}s establishing IAP access to warp-server.",
+                            IAP_ACCESS_TIMEOUT.as_secs()
+                        ),
+                    });
                 }
             },
         );
@@ -379,9 +416,9 @@ impl IapManager {
                     .ok()
                     .filter(|jwt| !jwt.is_empty())
                     .ok_or_else(|| {
-                        anyhow::anyhow!(
+                        anyhow::Error::new(NonRetryableIapError(format!(
                             "{STAGING_IAP_BOOTSTRAP_TOKEN_ENV_VAR} is unset; cannot mint an IAP token via WIF"
-                        )
+                        )))
                     })?;
                 fetch_iap_token_via_wif(
                     minter,
@@ -416,22 +453,42 @@ impl IapManager {
                 }
                 state.set_loaded(cached);
                 self.consecutive_failures = 0;
+                self.access_gate_pending = false;
                 log::info!("Warp Staging IAP token refreshed");
                 ctx.emit(IapManagerEvent::StateChanged);
                 ctx.notify();
                 self.schedule_next_refresh(expires_at, ctx);
             }
             Err(err) => {
+                let is_non_retryable = err.downcast_ref::<NonRetryableIapError>().is_some();
                 let message = format!("{err:#}");
                 log::warn!("Warp Staging IAP token fetch failed: {message}");
                 let is_first_failure_of_streak = self.consecutive_failures == 0;
                 state.set_failed(message.clone());
                 ctx.emit(IapManagerEvent::RefreshFailed {
-                    message,
+                    message: message.clone(),
                     is_first_failure_of_streak,
                 });
                 ctx.emit(IapManagerEvent::StateChanged);
                 ctx.notify();
+
+                if is_non_retryable {
+                    // A permanent misconfiguration (e.g. a required env var is
+                    // unset) cannot be fixed by retrying, so don't burn the
+                    // failure-retry budget on it. If a blocking caller is
+                    // waiting via `ensure_access`, fail the gate immediately
+                    // instead of making it wait out `IAP_ACCESS_TIMEOUT` for a
+                    // token that will never arrive.
+                    log::warn!(
+                        "IAP token fetch failed with a non-retryable error; not scheduling a retry"
+                    );
+                    if self.access_gate_pending {
+                        self.access_gate_pending = false;
+                        ctx.emit(IapManagerEvent::AccessUnavailable { message });
+                    }
+                    return;
+                }
+
                 self.schedule_failure_retry(ctx);
             }
         }
