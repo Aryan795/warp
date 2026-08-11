@@ -4845,3 +4845,238 @@ fn test_tools_panel_warp_drive_toggle_updates_available_views() {
         });
     });
 }
+
+/// Transfers the tab at `tab_index` from `source` to `target`, mirroring the
+/// production cross-window tab-drag handoff
+/// (`CrossWindowTabDrag::execute_handoff_single_tab_to_other` +
+/// `Workspace::handle_drop_result(DropResult::RemoveSourceTab)`): the pane
+/// group's view tree is moved to the target window, the target inserts a new
+/// tab for it, and the source removes its now-stale tab entry.
+fn transfer_tab_to_new_window(
+    app: &mut App,
+    source: &ViewHandle<Workspace>,
+    source_window: WindowId,
+    target: &ViewHandle<Workspace>,
+    target_window: WindowId,
+    tab_index: usize,
+) -> ViewHandle<PaneGroup> {
+    let transferred_tab = source
+        .read(app, |ws, ctx| ws.get_tab_transfer_info(tab_index, ctx))
+        .expect("tab should be transferable (workspace must have more than one tab)");
+    let pane_group = transferred_tab.pane_group.clone();
+    let pane_group_id = pane_group.id();
+
+    source.update(app, |ws, ctx| {
+        ws.prepare_for_transferred_tab_attach(&transferred_tab.pane_group, ctx);
+    });
+    app.update(|ctx| {
+        ctx.transfer_view_tree_to_window(pane_group_id, source_window, target_window);
+    });
+    let insertion_index = target.read(app, |ws, _| ws.tab_count());
+    target.update(app, |ws, ctx| {
+        ws.insert_transferred_tab_at_index(transferred_tab, insertion_index, ctx);
+    });
+    source.update(app, |ws, ctx| {
+        ws.remove_tab_without_undo(tab_index, ctx);
+    });
+
+    pane_group
+}
+
+/// Regression for APP-5311, symptom A: after a Settings tab is dragged into
+/// another window and closed there, clicking Settings in the original window
+/// silently did nothing because `SettingsPaneManager` kept a locator pointing
+/// at a pane group that no longer lived in that window.
+#[test]
+fn test_settings_pane_reopens_after_cross_window_transfer_and_close() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace_a = mock_workspace(&mut app);
+        let window_a = workspace_a.update(&mut app, |_, ctx| ctx.window_id());
+        let workspace_b = mock_workspace(&mut app);
+        let window_b = workspace_b.update(&mut app, |_, ctx| ctx.window_id());
+
+        workspace_a.update(&mut app, |ws, ctx| {
+            ws.open_settings_pane(None, None, ctx);
+        });
+        let settings_tab_index = workspace_a.read(&app, |ws, _| ws.tab_count() - 1);
+
+        let locator_before_transfer = app
+            .read(|ctx| SettingsPaneManager::as_ref(ctx).find_pane(window_a))
+            .expect("settings pane should be registered for window A");
+
+        transfer_tab_to_new_window(
+            &mut app,
+            &workspace_a,
+            window_a,
+            &workspace_b,
+            window_b,
+            settings_tab_index,
+        );
+
+        // The source window's locator must be cleared and the destination
+        // window must now own it; otherwise `open_settings_pane` in window A
+        // resolves a stale locator and silently no-ops.
+        app.read(|ctx| {
+            assert_eq!(SettingsPaneManager::as_ref(ctx).find_pane(window_a), None);
+            assert_eq!(
+                SettingsPaneManager::as_ref(ctx).find_pane(window_b),
+                Some(locator_before_transfer)
+            );
+        });
+
+        // Close the transferred Settings pane in window B (mirrors the
+        // reported repro's "close the new Settings window" step).
+        let b_settings_tab_index = workspace_b.read(&app, |ws, _| ws.tab_count() - 1);
+        workspace_b.update(&mut app, |ws, ctx| {
+            ws.remove_tab(b_settings_tab_index, false, true, ctx);
+        });
+        app.read(|ctx| {
+            assert_eq!(SettingsPaneManager::as_ref(ctx).find_pane(window_b), None);
+        });
+
+        // Reopening Settings in window A must create a fresh tab rather than
+        // silently doing nothing.
+        let tab_count_before_reopen = workspace_a.read(&app, |ws, _| ws.tab_count());
+        workspace_a.update(&mut app, |ws, ctx| {
+            ws.open_settings_pane(None, None, ctx);
+        });
+        let tab_count_after_reopen = workspace_a.read(&app, |ws, _| ws.tab_count());
+        assert_eq!(tab_count_after_reopen, tab_count_before_reopen + 1);
+    });
+}
+
+/// Regression for APP-5311, symptom B: a `SettingsView`'s event subscription
+/// is registered once, against whichever workspace created it. Without
+/// re-homing it on transfer, an action taken from a Settings pane living in
+/// window B (e.g. clicking "Rules") would execute in the stale window A.
+#[test]
+fn test_settings_pane_actions_execute_in_hosting_window_after_cross_window_transfer() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace_a = mock_workspace(&mut app);
+        let window_a = workspace_a.update(&mut app, |_, ctx| ctx.window_id());
+        let workspace_b = mock_workspace(&mut app);
+        let window_b = workspace_b.update(&mut app, |_, ctx| ctx.window_id());
+
+        workspace_a.update(&mut app, |ws, ctx| {
+            ws.open_settings_pane(None, None, ctx);
+        });
+        let settings_tab_index = workspace_a.read(&app, |ws, _| ws.tab_count() - 1);
+        let locator = app
+            .read(|ctx| SettingsPaneManager::as_ref(ctx).find_pane(window_a))
+            .expect("settings pane should be registered for window A");
+
+        let pane_group = transfer_tab_to_new_window(
+            &mut app,
+            &workspace_a,
+            window_a,
+            &workspace_b,
+            window_b,
+            settings_tab_index,
+        );
+
+        // Grab the exact `SettingsView` embedded in the transferred pane, as
+        // opposed to window B's own native settings view.
+        let settings_view = pane_group.read(&app, |pane_group, ctx| {
+            pane_group
+                .downcast_pane_by_id::<crate::pane_group::SettingsPane>(locator.pane_id)
+                .expect("transferred pane should still be a SettingsPane")
+                .settings_view(ctx)
+        });
+
+        let window_a_pane_count_before = workspace_a.read(&app, |ws, ctx| {
+            ws.active_tab_pane_group().as_ref(ctx).pane_count()
+        });
+        let pane_count_before = pane_group.read(&app, |pg, _| pg.pane_count());
+
+        // Simulate clicking "Rules" inside the (now window-B-hosted) Settings
+        // pane. Before the fix, this event's subscription still pointed at
+        // workspace A (the window the pane was created in), so the AI-fact
+        // pane would open in the wrong window.
+        settings_view.update(&mut app, |_, ctx| {
+            ctx.emit(SettingsViewEvent::OpenAIFactCollection);
+        });
+
+        assert_eq!(
+            workspace_a.read(&app, |ws, ctx| ws
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .pane_count()),
+            window_a_pane_count_before,
+            "window A should be untouched by an action from the transferred pane"
+        );
+        assert_eq!(
+            pane_group.read(&app, |pg, _| pg.pane_count()),
+            pane_count_before + 1,
+            "the AI fact pane should open as a split alongside Settings in window B"
+        );
+    });
+}
+
+/// Regression for APP-5311, symptom C: the `AIFactManager` equivalent of
+/// symptom A. Moving a tab containing both a Settings pane and a split-off
+/// Rules (AI fact) pane to a new window, then closing just the Rules pane,
+/// must not leave the source window's locator stale.
+#[test]
+fn test_ai_fact_pane_reopens_after_cross_window_transfer_and_close() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace_a = mock_workspace(&mut app);
+        let window_a = workspace_a.update(&mut app, |_, ctx| ctx.window_id());
+        let workspace_b = mock_workspace(&mut app);
+        let window_b = workspace_b.update(&mut app, |_, ctx| ctx.window_id());
+
+        // Open Settings, then open Rules as a split pane within the same tab,
+        // mirroring the reported repro.
+        workspace_a.update(&mut app, |ws, ctx| {
+            ws.open_settings_pane(None, None, ctx);
+        });
+        workspace_a.update(&mut app, |ws, ctx| {
+            ws.open_ai_fact_collection_pane(Some(Direction::Right), None, ctx);
+        });
+        let settings_tab_index = workspace_a.read(&app, |ws, _| ws.tab_count() - 1);
+
+        let locator_before_transfer = app
+            .read(|ctx| AIFactManager::as_ref(ctx).find_pane(window_a))
+            .expect("AI fact pane should be registered for window A");
+
+        let pane_group = transfer_tab_to_new_window(
+            &mut app,
+            &workspace_a,
+            window_a,
+            &workspace_b,
+            window_b,
+            settings_tab_index,
+        );
+
+        app.read(|ctx| {
+            assert_eq!(AIFactManager::as_ref(ctx).find_pane(window_a), None);
+            assert_eq!(
+                AIFactManager::as_ref(ctx).find_pane(window_b),
+                Some(locator_before_transfer)
+            );
+        });
+
+        // Close just the Rules pane (not the whole tab) in window B.
+        pane_group.update(&mut app, |pg, ctx| {
+            pg.close_pane(locator_before_transfer.pane_id, ctx);
+        });
+        app.read(|ctx| {
+            assert_eq!(AIFactManager::as_ref(ctx).find_pane(window_b), None);
+        });
+
+        // Reopening Rules from window B (e.g. via the Settings "Rules"
+        // button) must create a fresh pane rather than silently doing
+        // nothing.
+        let pane_count_before_reopen = pane_group.read(&app, |pg, _| pg.pane_count());
+        workspace_b.update(&mut app, |ws, ctx| {
+            ws.open_ai_fact_collection_pane(Some(Direction::Right), None, ctx);
+        });
+        let pane_count_after_reopen = pane_group.read(&app, |pg, _| pg.pane_count());
+        assert_eq!(pane_count_after_reopen, pane_count_before_reopen + 1);
+    });
+}

@@ -62,6 +62,7 @@ use crate::ai::blocklist::{BlocklistAIHistoryModel, InputConfig, SerializedBlock
 use crate::ai::document::ai_document_model::{AIDocumentId, AIDocumentModel, AIDocumentVersion};
 use crate::ai::execution_profiles::ExecutionProfileId;
 use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
+use crate::ai::facts::AIFactManager;
 use crate::ai::llms::LLMId;
 use crate::ai::restored_conversations::RestoredAgentConversations;
 use crate::ai_assistant::AskAIType;
@@ -116,6 +117,7 @@ use crate::session_management::SessionNavigationData;
 use crate::settings::{AISettings, DefaultSessionMode, PaneSettings};
 use crate::settings_view::SettingsSection;
 use crate::settings_view::mcp_servers_page::MCPServersSettingsPage;
+use crate::settings_view::pane_manager::SettingsPaneManager;
 use crate::shell_indicator::ShellIndicatorType;
 use crate::terminal::available_shells::{AvailableShell, AvailableShells};
 #[cfg(not(target_family = "wasm"))]
@@ -8217,9 +8219,91 @@ impl View for PaneGroup {
 
     fn on_window_transferred(
         &mut self,
-        _old_window_id: WindowId,
-        _new_window_id: WindowId,
-        _ctx: &mut ViewContext<Self>,
+        old_window_id: WindowId,
+        new_window_id: WindowId,
+        ctx: &mut ViewContext<Self>,
     ) {
+        // `SettingsPaneManager`/`AIFactManager` track at most one live pane of
+        // each kind per window, keyed by `WindowId`. A tab-drag transfer moves
+        // the pane's view tree to `new_window_id` without going through the
+        // normal `PaneContent::detach`/`attach` hooks (see
+        // `Workspace::prepare_for_transferred_tab_attach`), so without this the
+        // source window is left with a locator pointing at a pane that no
+        // longer lives there, and `open_settings_pane`/
+        // `open_ai_fact_collection_pane` silently no-op forever afterwards.
+        // Re-key the registration here instead.
+        let pane_group_id = ctx.view_id();
+
+        let settings_pane_ids: Vec<PaneId> = self
+            .panes_of::<SettingsPane>()
+            .map(|pane| pane.id())
+            .collect();
+        for pane_id in settings_pane_ids {
+            if let Some(pane) = self.downcast_pane_by_id::<SettingsPane>(pane_id) {
+                let settings_view = pane.settings_view(ctx);
+                SettingsPaneManager::handle(ctx).update(ctx, |manager, ctx| {
+                    manager.deregister_pane(&old_window_id, pane_group_id, pane_id, ctx);
+                    manager.register_pane(pane, pane_group_id, new_window_id, ctx);
+                });
+
+                // `SettingsView`'s `SettingsViewEvent` subscription is
+                // registered once, in `Workspace::build_settings_views`,
+                // against whichever workspace created it. That subscription
+                // does not follow the view when it transfers to another
+                // window, so actions taken from a transferred Settings pane
+                // (e.g. clicking "Rules") would otherwise execute in the
+                // stale, original window. Re-home the subscription to the
+                // workspace that now hosts the pane. See APP-5311.
+                if let Some(old_workspace) =
+                    workspace::WorkspaceRegistry::as_ref(ctx).get(old_window_id, ctx)
+                {
+                    old_workspace.update(ctx, |_, ctx| {
+                        ctx.unsubscribe_to_view(&settings_view);
+                    });
+                }
+                if let Some(new_workspace) =
+                    workspace::WorkspaceRegistry::as_ref(ctx).get(new_window_id, ctx)
+                {
+                    new_workspace.update(ctx, |_, ctx| {
+                        ctx.subscribe_to_view(&settings_view, move |me, _, event, ctx| {
+                            me.handle_settings_pane_event(event, ctx);
+                        });
+                    });
+                }
+            }
+        }
+
+        let ai_fact_pane_ids: Vec<PaneId> = self
+            .panes_of::<AIFactPane>()
+            .map(|pane| pane.id())
+            .collect();
+        for pane_id in ai_fact_pane_ids {
+            if let Some(pane) = self.downcast_pane_by_id::<AIFactPane>(pane_id) {
+                let ai_fact_view = pane.ai_fact_view(ctx);
+                AIFactManager::handle(ctx).update(ctx, |manager, ctx| {
+                    manager.deregister_pane(&old_window_id, ctx);
+                    manager.register_pane(pane, pane_group_id, new_window_id, ctx);
+                });
+
+                // Same re-homing as above, for the AI fact (Rules) pane's
+                // `AIFactViewEvent` subscription.
+                if let Some(old_workspace) =
+                    workspace::WorkspaceRegistry::as_ref(ctx).get(old_window_id, ctx)
+                {
+                    old_workspace.update(ctx, |_, ctx| {
+                        ctx.unsubscribe_to_view(&ai_fact_view);
+                    });
+                }
+                if let Some(new_workspace) =
+                    workspace::WorkspaceRegistry::as_ref(ctx).get(new_window_id, ctx)
+                {
+                    new_workspace.update(ctx, |_, ctx| {
+                        ctx.subscribe_to_view(&ai_fact_view, move |me, _, event, ctx| {
+                            me.handle_ai_fact_view_event(event, ctx);
+                        });
+                    });
+                }
+            }
+        }
     }
 }

@@ -6276,7 +6276,11 @@ impl Workspace {
         ctx.focus(&self.header_toolbar_editor_modal);
     }
 
-    fn handle_ai_fact_view_event(&mut self, event: &AIFactViewEvent, ctx: &mut ViewContext<Self>) {
+    pub(crate) fn handle_ai_fact_view_event(
+        &mut self,
+        event: &AIFactViewEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
         match event {
             AIFactViewEvent::OpenSettings => {
                 self.show_settings_with_section(Some(SettingsSection::WarpAgent), ctx);
@@ -8596,22 +8600,42 @@ impl Workspace {
         // Ensure there is only one settings pane per window
         let settings_pane_manager = SettingsPaneManager::handle(ctx);
         if let Some(locator) = settings_pane_manager.as_ref(ctx).find_pane(ctx.window_id()) {
-            // Update the page and/or search query if specified. The search query
-            // must be applied even when no page is given (e.g. `warp://settings?q=`)
-            // so an already-open settings tab reflects the new query.
-            if page.is_some() || search_query.is_some() {
-                self.settings_pane.update(ctx, |settings_pane, ctx| {
-                    if let Some(page) = page {
-                        settings_pane.set_and_refresh_current_page(page, ctx);
-                    }
-                    if let Some(search_query) = search_query {
-                        settings_pane.set_search_query(search_query, ctx);
-                    }
-                });
+            let pane_is_live = self.tabs.iter().any(|tab| {
+                tab.pane_group.id() == locator.pane_group_id
+                    && tab
+                        .pane_group
+                        .as_ref(ctx)
+                        .pane_by_id(locator.pane_id)
+                        .is_some()
+            });
+            if pane_is_live {
+                // Update the page and/or search query if specified. The search query
+                // must be applied even when no page is given (e.g. `warp://settings?q=`)
+                // so an already-open settings tab reflects the new query.
+                if page.is_some() || search_query.is_some() {
+                    self.settings_pane.update(ctx, |settings_pane, ctx| {
+                        if let Some(page) = page {
+                            settings_pane.set_and_refresh_current_page(page, ctx);
+                        }
+                        if let Some(search_query) = search_query {
+                            settings_pane.set_search_query(search_query, ctx);
+                        }
+                    });
+                }
+                // Navigate to and focus existing pane
+                self.focus_pane(locator, ctx);
+                return;
             }
-            // Navigate to and focus existing pane
-            self.focus_pane(locator, ctx);
-            return;
+
+            // The registered locator no longer resolves to a live tab in this
+            // window (e.g. the settings tab was dragged into another window).
+            // Clear it so we fall through to opening a fresh settings tab
+            // below, instead of silently no-op'ing forever. See APP-5311.
+            let window_id = ctx.window_id();
+            log::warn!("Clearing stale settings pane locator for window {window_id:?}");
+            settings_pane_manager.update(ctx, |manager, ctx| {
+                manager.deregister_pane(&window_id, locator.pane_group_id, locator.pane_id, ctx);
+            });
         }
 
         let ps1_grid_info = self.active_session_ps1_grid_info(ctx);
@@ -8958,13 +8982,33 @@ impl Workspace {
 
         // Navigate to and focus existing pane
         if let Some(locator) = manager.as_ref(ctx).find_pane(ctx.window_id()) {
-            if let Some(page) = page {
-                self.ai_fact_view.update(ctx, |view, ctx| {
-                    view.update_page(page, ctx);
-                });
+            let pane_is_live = self.tabs.iter().any(|tab| {
+                tab.pane_group.id() == locator.pane_group_id
+                    && tab
+                        .pane_group
+                        .as_ref(ctx)
+                        .pane_by_id(locator.pane_id)
+                        .is_some()
+            });
+            if pane_is_live {
+                if let Some(page) = page {
+                    self.ai_fact_view.update(ctx, |view, ctx| {
+                        view.update_page(page, ctx);
+                    });
+                }
+                self.focus_pane(locator, ctx);
+                return;
             }
-            self.focus_pane(locator, ctx);
-            return;
+
+            // The registered locator no longer resolves to a live tab in this
+            // window (e.g. the pane was dragged into another window as part
+            // of a tab transfer). Clear it so we fall through to opening a
+            // fresh pane below, instead of silently no-op'ing forever.
+            let window_id = ctx.window_id();
+            log::warn!("Clearing stale AI fact pane locator for window {window_id:?}");
+            manager.update(ctx, |manager, ctx| {
+                manager.deregister_pane(&window_id, ctx);
+            });
         }
 
         let pane = AIFactPane::from_view(self.ai_fact_view.clone(), ctx);
@@ -15106,7 +15150,7 @@ impl Workspace {
         })
     }
 
-    fn handle_settings_pane_event(
+    pub(crate) fn handle_settings_pane_event(
         &mut self,
         event: &SettingsViewEvent,
         ctx: &mut ViewContext<Self>,
