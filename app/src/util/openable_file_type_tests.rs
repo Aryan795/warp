@@ -171,15 +171,17 @@ fn test_resolve_file_target_runnable_script_still_goes_to_system_default() {
 }
 
 /// Only real files reach the editor on the far side of the round trip, so a
-/// directory must not be short-circuited into one.
+/// directory must not be short-circuited into one. It never reaches the guard
+/// to begin with: a directory is not openable in Warp, so rule 4 hands it to
+/// the OS generically before the handler is ever consulted.
 #[test]
 #[cfg(feature = "local_fs")]
-fn test_resolve_file_target_directory_still_goes_to_system_default() {
+fn test_resolve_file_target_directory_is_not_short_circuited() {
     let dir = tempfile::tempdir().unwrap();
 
     assert_eq!(
         resolve_system_default(dir.path(), true),
-        FileTarget::SystemDefault
+        FileTarget::SystemGeneric
     );
 }
 
@@ -427,8 +429,7 @@ fn test_short_circuit_matches_os_round_trip_classification() {
             FileTarget::CodeEditor(_)
         );
         assert_eq!(
-            short_circuited,
-            opens_editor_via_os,
+            short_circuited, opens_editor_via_os,
             "{path:?} short-circuits to the code editor only when the OS round trip would open one"
         );
     }

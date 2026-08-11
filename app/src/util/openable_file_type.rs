@@ -328,7 +328,8 @@ fn resolve_file_target_with_system_default_handler(
         // from drifting apart. It is also the cheap check, so a file it rejects
         // never pays for the handler lookup.
         EditorChoice::SystemDefault
-            if classify_open_file_action(path, prefer_markdown_viewer) == OpenFileAction::Editor
+            if classify_open_file_action(path, prefer_markdown_viewer)
+                == OpenFileAction::Editor
                 && system_default_handler_is_warp(path) =>
         {
             FileTarget::CodeEditor(layout)
