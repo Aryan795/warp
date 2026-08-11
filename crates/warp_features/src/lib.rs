@@ -943,18 +943,16 @@ pub enum FeatureFlag {
     /// setup or API key required.
     FactoryMcp,
 
-    /// Gates the TUI cost footer's credits⇄dollars toggle. When enabled (dogfood
-    /// / staging and local/dev builds), the footer usage entry follows the
-    /// persisted `agents.usage_display_mode` setting and is click-to-toggleable
-    /// between credits and dollars. When disabled (prod/stable), the footer
-    /// falls back to a static, non-interactive credits total.
-    TuiCostTransparency,
-
     /// Gates client-side display of the real dollar cost (from `RequestCost.cost_in_cents`)
     /// alongside credits in the GUI footer and TUI. Mirrors the server-side
     /// `PricingTransparencyEnabled` flag in warp-server, but is a fully independent
-    /// flag — the two do not sync automatically. Temporary rollout gate; not yet
-    /// consumed anywhere.
+    /// flag — the two do not sync automatically. Consolidated from the former
+    /// `TuiCostTransparency` flag: when enabled (dogfood/staging and local/dev
+    /// builds), the TUI footer usage entry follows the persisted
+    /// `agents.usage_display_mode` setting and is click-to-toggleable between
+    /// credits and dollars; when disabled (prod/stable), it falls back to a
+    /// static, non-interactive credits total. Will also gate the GUI footer's
+    /// dollar display once that's built.
     PricingTransparency,
 }
 
@@ -1031,7 +1029,6 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::BoxDrawingGlyphs,
     FeatureFlag::WellKnownMcpIds,
     FeatureFlag::FactoryMcp,
-    FeatureFlag::TuiCostTransparency,
     FeatureFlag::PricingTransparency,
 ];
 
