@@ -294,6 +294,14 @@ fn serde_legacy_custom_model_defaults_reasoning_effort_to_none() {
 }
 
 #[test]
+fn custom_endpoint_reasoning_efforts_match_openai_responses_values() {
+    assert_eq!(
+        CUSTOM_ENDPOINT_REASONING_EFFORTS,
+        &["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+    );
+}
+
+#[test]
 fn serde_round_trips_unknown_reasoning_effort() {
     let model = CustomEndpointModel {
         name: "future-model".into(),
