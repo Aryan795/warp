@@ -44,7 +44,7 @@ use warpui::elements::{
 use warpui::fonts::{Properties, Weight};
 use warpui::keymap::{ContextPredicate, EnabledPredicate, FixedBinding};
 use warpui::{
-    Action, AppContext, Element, Entity, ModelHandle, SingletonEntity, TypedActionView,
+    Action, AppContext, Element, Entity, EntityId, ModelHandle, SingletonEntity, TypedActionView,
     UpdateView as _, View, ViewContext, ViewHandle, id,
 };
 
@@ -2507,6 +2507,31 @@ impl Entity for SettingsView {
 impl View for SettingsView {
     fn ui_name() -> &'static str {
         "SettingsViewInTab"
+    }
+
+    fn child_view_ids(&self, _app: &AppContext) -> Vec<EntityId> {
+        // `SettingsView` owns every settings page, but `render` only ever
+        // embeds the currently active one (see `filtered_pages` below), so
+        // inactive pages are invisible to the render-time parent graph. Most
+        // pages are created with `add_typed_action_view`, which records a
+        // structural parent edge, but a couple (e.g. `AboutPageView`,
+        // `BillingAndUsageDispatchView`) use plain `ctx.add_view` and have no
+        // such edge. Without this override, a cross-window tab drag leaves
+        // those pages orphaned in the source window, and the destination
+        // window later panics trying to render them (see APP-5314).
+        //
+        // `settings_pages` is the single source of truth for the page list,
+        // so iterating it here (via the exhaustive `SettingsPageViewHandle::view_id`
+        // match) keeps this self-maintaining: a newly added page is covered
+        // automatically, with no separate list to remember to update.
+        let mut ids: Vec<EntityId> = self
+            .settings_pages
+            .iter()
+            .map(|page| page.view_handle.view_id())
+            .collect();
+        ids.push(self.search_editor.id());
+        ids.push(self.context_menu.id());
+        ids
     }
 
     fn render(&self, app: &AppContext) -> Box<dyn Element> {
