@@ -226,7 +226,6 @@ impl ShellCommandExecutor {
             AIAgentActionType::RequestCommandOutput {
                 command,
                 uses_pager,
-                wait_until_completion,
                 ..
             } => {
                 if model
@@ -250,15 +249,18 @@ impl ShellCommandExecutor {
                         RequestCommandOutputResult::CancelledBeforeExecution,
                     ));
                 }
-                // If the command might use pager and can't be interacted with,
-                // we pipe its output to cat so we can prevent activating the altscreen.
-                // The parentheses here ensures the command always gets evaluated first.
-                let decorated_command =
-                    if uses_pager.is_some_and(|uses_pager| uses_pager) && *wait_until_completion {
-                        self.turn_off_pager_for_command(command, ctx)
-                    } else {
-                        command.clone()
-                    };
+                // If the command might use a pager, we pipe its output to `cat` so we can
+                // prevent activating the altscreen. This applies regardless of whether the
+                // client waits synchronously for completion or hands the command off to a
+                // CLI subagent to monitor (`wait_until_completion` is not a reliable signal
+                // here: the server always reports it as `false` for the modern
+                // `run_shell_command` tool, in both `wait` and `interact` modes). The
+                // parentheses ensure the command always gets evaluated first.
+                let decorated_command = if uses_pager.is_some_and(|uses_pager| uses_pager) {
+                    self.turn_off_pager_for_command(command, ctx)
+                } else {
+                    command.clone()
+                };
                 // Let the recording controller decide whether this command's
                 // on-screen work should be kept in an active computer-use
                 // recording, opening an action group before it starts if so.
