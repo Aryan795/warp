@@ -1032,6 +1032,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::WellKnownMcpIds,
     FeatureFlag::FactoryMcp,
     FeatureFlag::TuiCostTransparency,
+    FeatureFlag::PricingTransparency,
 ];
 
 /// Features enabled for feature preview build users (e.g.: Friends of Warp).
