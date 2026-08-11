@@ -334,7 +334,7 @@ fn resolve_file_target_with_system_default_handler(
         // admits any file starting with a shebang. Such a file is diverted
         // before reaching here, so it opens via the OS at line 1 even though the
         // far side would put it in an editor. Pre-existing, and pinned by
-        // `test_short_circuit_matches_os_round_trip_classification`.
+        // `test_extensionless_shebang_file_is_diverted_before_the_short_circuit`.
         EditorChoice::SystemDefault
             if classify_open_file_action(path, prefer_markdown_viewer)
                 == OpenFileAction::Editor
