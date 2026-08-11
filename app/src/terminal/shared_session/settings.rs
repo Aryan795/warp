@@ -19,7 +19,9 @@ define_settings_group!(SharedSessionSettings, settings: [
         supported_platforms: SupportedPlatforms::ALL,
         sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
         surface: settings::SettingSurfaces::GUI,
-        private: true,
+        private: false,
+        toml_path: "session_sharing.inactivity.end_session_after_secs",
+        description: "How long a shared session can be inactive before it is automatically ended, in seconds.",
     },
     inactivity_period_before_warning: InactivityPeriodBeforeWarning {
         type: Duration,
@@ -28,7 +30,9 @@ define_settings_group!(SharedSessionSettings, settings: [
         supported_platforms: SupportedPlatforms::ALL,
         sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
         surface: settings::SettingSurfaces::GUI,
-        private: true,
+        private: false,
+        toml_path: "session_sharing.inactivity.warning_after_secs",
+        description: "How long a shared session can be inactive before you're warned it's about to end, in seconds.",
     },
     inactivity_period_before_revoking_roles: InactivityPeriodBeforeRevokingRoles {
         type: Duration,
@@ -37,7 +41,9 @@ define_settings_group!(SharedSessionSettings, settings: [
         supported_platforms: SupportedPlatforms::ALL,
         sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
         surface: settings::SettingSurfaces::GUI,
-        private: true,
+        private: false,
+        toml_path: "session_sharing.inactivity.revoke_edit_access_after_secs",
+        description: "How long a shared session can be inactive before edit access is automatically revoked from everyone you're sharing with, in seconds.",
     },
     // Killswitch: when false, the sharer ignores viewer terminal size reports.
     viewer_driven_sizing_enabled: ViewerDrivenSizingEnabled {

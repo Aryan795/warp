@@ -1403,6 +1403,7 @@ pub struct FeaturesPageView {
     #[cfg(feature = "local_tty")]
     startup_shell_view: ViewHandle<features::StartupShellView>,
     undo_close_view: ViewHandle<features::UndoCloseView>,
+    shared_session_inactivity_view: ViewHandle<features::SharedSessionInactivityView>,
 
     max_block_size_input_editor: ViewHandle<EditorView>,
     valid_max_block_size: bool,
@@ -2491,6 +2492,9 @@ impl FeaturesPageView {
 
         let undo_close_view = ctx.add_typed_action_view(features::UndoCloseView::new);
 
+        let shared_session_inactivity_view =
+            ctx.add_typed_action_view(features::SharedSessionInactivityView::new);
+
         let appearance_handle = Appearance::handle(ctx);
 
         let width_and_height_editor_options = SingleLineEditorOptions {
@@ -2695,6 +2699,7 @@ impl FeaturesPageView {
             #[cfg(feature = "local_tty")]
             startup_shell_view,
             undo_close_view,
+            shared_session_inactivity_view,
 
             max_block_size_input_editor: block_size_editor,
             valid_max_block_size: true,
@@ -2861,6 +2866,7 @@ impl FeaturesPageView {
                 .is_supported_on_current_platform()
         {
             session_widgets.push(Box::new(ConfirmCloseSharedSessionWidget::default()));
+            session_widgets.push(Box::new(SharedSessionInactivityWidget::default()));
         }
 
         let mut keys_widgets: Vec<Box<dyn SettingsWidget<View = Self>>> = vec![];
@@ -5583,6 +5589,26 @@ impl SettingsWidget for ConfirmCloseSharedSessionWidget {
                 .finish(),
             None,
         )
+    }
+}
+
+#[derive(Default)]
+struct SharedSessionInactivityWidget {}
+
+impl SettingsWidget for SharedSessionInactivityWidget {
+    type View = FeaturesPageView;
+
+    fn search_terms(&self) -> &str {
+        "shared session sharing remote control inactivity idle timeout auto end warning revoke edit access"
+    }
+
+    fn render(
+        &self,
+        view: &Self::View,
+        _appearance: &Appearance,
+        _app: &AppContext,
+    ) -> Box<dyn Element> {
+        ChildView::new(&view.shared_session_inactivity_view).finish()
     }
 }
 
