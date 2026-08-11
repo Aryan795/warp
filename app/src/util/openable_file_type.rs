@@ -150,6 +150,43 @@ pub fn is_runnable_shell_script(_path: &Path) -> bool {
     false
 }
 
+/// What Warp should do with a file handed to it by the OS through a `file://`
+/// URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenFileAction {
+    /// Open in the notebook viewer pane (Markdown, or Jupyter when enabled).
+    Notebook,
+    /// Open in Warp's code/text editor pane.
+    Editor,
+    /// Open a session at the parent directory and queue the file as the pending command,
+    /// or just open a session at the directory path if `path` is a directory.
+    ExecuteInSession,
+}
+
+/// Pure routing decision for `uri::open_file`. Extracted so it can be unit-tested without
+/// standing up a full `AppContext`.
+///
+/// The Markdown Viewer preference is passed in because macOS can hand Markdown
+/// file URLs to Warp via the file type registration in `Info.plist`. Since Warp
+/// cannot easily update that registration when the user toggles the viewer
+/// preference, the URI handler must check the preference before routing a
+/// Markdown file to the in-Warp notebook viewer. Other notebook viewer formats,
+/// such as Jupyter notebooks, are controlled by their own routing checks.
+pub fn classify_open_file_action(path: &Path, prefer_markdown_viewer: bool) -> OpenFileAction {
+    if renders_in_warp_notebook_viewer(path) && (!is_markdown_file(path) || prefer_markdown_viewer)
+    {
+        OpenFileAction::Notebook
+    } else if is_runnable_shell_script(path) {
+        OpenFileAction::ExecuteInSession
+    } else if path.is_file()
+        && (is_file_openable_in_warp(path).is_some() || starts_with_shebang(path))
+    {
+        OpenFileAction::Editor
+    } else {
+        OpenFileAction::ExecuteInSession
+    }
+}
+
 /// Determines if a file can be opened in Warp and returns its type.
 /// Returns `None` if the file is binary and should not be opened.
 pub fn is_file_openable_in_warp(path: &Path) -> Option<OpenableFileType> {
@@ -284,31 +321,21 @@ fn resolve_file_target_with_system_default_handler(
         // back in as a bare `file://` URL, which cannot carry a line number.
         // Open it in-process instead so the caller's requested line survives.
         //
-        // The local checks come first so a file the round trip would not have
-        // opened in the editor never pays for the handler lookup.
+        // Only where the round trip would itself have opened an editor, so that
+        // short-circuiting changes whether the line survives and nothing else:
+        // a runnable script still runs in a session, and a directory still goes
+        // to the OS. Asking the same classifier the far side uses keeps the two
+        // from drifting apart. It is also the cheap check, so a file it rejects
+        // never pays for the handler lookup.
         EditorChoice::SystemDefault
-            if os_round_trip_would_open_editor(path) && system_default_handler_is_warp(path) =>
+            if classify_open_file_action(path, prefer_markdown_viewer) == OpenFileAction::Editor
+                && system_default_handler_is_warp(path) =>
         {
             FileTarget::CodeEditor(layout)
         }
         EditorChoice::SystemDefault => FileTarget::SystemDefault,
         EditorChoice::Warp | EditorChoice::EnvEditor => unreachable!("Already matched above"),
     }
-}
-
-/// Whether skipping the OS round trip would land `path` where the round trip
-/// itself does.
-///
-/// Warp classifies whatever the OS hands back (`uri::classify_open_file_action`)
-/// rather than opening it blindly: a runnable script runs in a session, and only
-/// real files reach the editor at all. Short-circuiting is only safe where that
-/// classification would have chosen the editor, so the same conditions are
-/// checked here. Callers reach this having already excluded the other two
-/// classifications — Markdown and Jupyter route to the viewer above, and binary
-/// files to `SystemGeneric`.
-#[cfg(feature = "local_fs")]
-fn os_round_trip_would_open_editor(path: &Path) -> bool {
-    path.is_file() && !is_runnable_shell_script(path)
 }
 
 #[cfg(test)]
