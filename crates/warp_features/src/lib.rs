@@ -949,6 +949,13 @@ pub enum FeatureFlag {
     /// between credits and dollars. When disabled (prod/stable), the footer
     /// falls back to a static, non-interactive credits total.
     TuiCostTransparency,
+
+    /// Gates client-side display of the real dollar cost (from `RequestCost.cost_in_cents`)
+    /// alongside credits in the GUI footer and TUI. Mirrors the server-side
+    /// `PricingTransparencyEnabled` flag in warp-server, but is a fully independent
+    /// flag — the two do not sync automatically. Temporary rollout gate; not yet
+    /// consumed anywhere.
+    PricingTransparency,
 }
 
 static FLAG_STATES: [AtomicBool; cardinality::<FeatureFlag>()] =
