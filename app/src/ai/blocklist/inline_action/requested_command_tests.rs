@@ -1,6 +1,9 @@
 //! Unit tests for format_command_text in requested_command.rs
 
-use super::{format_command_text, mcp_blocked_title_text, mcp_viewing_detail_title_text};
+use super::{
+    apply_streamed_command_text, format_command_text, mcp_blocked_title_text,
+    mcp_viewing_detail_title_text,
+};
 
 #[test]
 fn single_line_without_newline_is_unchanged_ascii() {
@@ -69,6 +72,52 @@ fn newline_then_multibyte_results_in_ellipsis_only() {
     // Sanity: output remains valid UTF-8
     let reconstructed: String = output.chars().collect();
     assert_eq!(reconstructed, output);
+}
+
+#[test]
+fn apply_streamed_command_text_appends_suffix_on_valid_char_boundary() {
+    let mut text = "echo ".to_string();
+    apply_streamed_command_text(&mut text, "echo 你好");
+    assert_eq!(text, "echo 你好");
+}
+
+#[test]
+fn apply_streamed_command_text_resets_when_previous_length_splits_a_multibyte_char() {
+    // Regression test for APP-5288: the previously stored text has byte
+    // length 2, which falls in the middle of the 3-byte encoding of "你" in
+    // `new_value`. Slicing `new_value` at that offset directly would panic
+    // with "byte index is not a char boundary". This can happen when the
+    // server streams a non-prefix rewrite.
+    let mut text = "ab".to_string();
+    let new_value = "你b";
+    assert!(!new_value.is_char_boundary(text.len()));
+    apply_streamed_command_text(&mut text, new_value);
+    assert_eq!(text, new_value);
+}
+
+#[test]
+fn apply_streamed_command_text_shrinks_when_new_value_is_a_valid_prefix() {
+    let mut text = "cargo build\n``".to_string();
+    apply_streamed_command_text(&mut text, "cargo build");
+    assert_eq!(text, "cargo build");
+}
+
+#[test]
+fn apply_streamed_command_text_resets_when_shrink_would_split_a_multibyte_char() {
+    // Regression test for APP-5288's secondary shrink-path bug: truncating
+    // `text` at `new_value.len()` must not split a multi-byte character in
+    // `text`. "你" is 3 bytes, so byte offset 1 is invalid.
+    let mut text = "你".to_string();
+    let new_value = "a"; // 1 byte, shorter than `text`, but not a char boundary in "你".
+    apply_streamed_command_text(&mut text, new_value);
+    assert_eq!(text, new_value);
+}
+
+#[test]
+fn apply_streamed_command_text_is_noop_when_unchanged() {
+    let mut text = "echo hi".to_string();
+    apply_streamed_command_text(&mut text, "echo hi");
+    assert_eq!(text, "echo hi");
 }
 
 #[test]

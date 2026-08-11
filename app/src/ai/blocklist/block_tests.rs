@@ -12,10 +12,10 @@ use warpui::{App, SingletonEntity};
 #[cfg(feature = "local_fs")]
 use super::{AIBlockEvent, open_code_action_event};
 use super::{
-    CollapsibleElementState, CollapsibleExpansionState, UserAvatarInfo,
+    CollapsibleElementState, CollapsibleExpansionState, StreamedCodeUpdate, UserAvatarInfo,
     default_collapsible_state_for_orchestration_action,
     default_collapsible_state_for_orchestration_message, received_message_collapsible_id,
-    recording_artifact_view_url, user_avatar_info_for_conversation_creator,
+    recording_artifact_view_url, streamed_code_update, user_avatar_info_for_conversation_creator,
 };
 use crate::ai::agent::{AIAgentActionType, StartAgentExecutionMode};
 use crate::ai::ambient_agents::AmbientAgentTaskId;
@@ -131,6 +131,57 @@ fn recording_artifact_view_url_uses_configured_oz_origin() {
 #[test]
 fn recording_artifact_view_url_requires_task_id() {
     assert_eq!(recording_artifact_view_url(None, "recording-123"), None);
+}
+
+#[test]
+fn streamed_code_update_appends_suffix_on_valid_char_boundary() {
+    // "你" is 3 bytes, so byte offset 3 lands cleanly after it.
+    let code = "你好";
+    assert_eq!(
+        streamed_code_update(code, "你".len()),
+        StreamedCodeUpdate::Append("好")
+    );
+}
+
+#[test]
+fn streamed_code_update_resets_when_previous_length_splits_a_multibyte_char() {
+    // Regression test for APP-5288: byte offset 2 falls in the middle of the
+    // 3-byte encoding of "你", so slicing `code[2..]` directly would panic
+    // with "byte index is not a char boundary". The previous length landing
+    // mid-character can happen when a streamed rewrite isn't a clean append
+    // (e.g. a non-prefix rewrite, or a code-fence edge).
+    let code = "你b";
+    assert_eq!(streamed_code_update(code, 2), StreamedCodeUpdate::Reset);
+}
+
+#[test]
+fn streamed_code_update_truncates_on_shrink() {
+    let code = "a += 12";
+    assert_eq!(
+        streamed_code_update(code, "a += 12\n``".len()),
+        StreamedCodeUpdate::Truncate
+    );
+}
+
+#[test]
+fn streamed_code_update_truncates_on_shrink_with_multibyte_code() {
+    // Shrinking is routed through `CodeEditorView::truncate`, which resolves
+    // byte offsets against the buffer's rope rather than slicing a raw
+    // `&str`, so it never needs to reject a mid-character `code.len()`.
+    let code = "你";
+    assert_eq!(
+        streamed_code_update(code, "你好".len()),
+        StreamedCodeUpdate::Truncate
+    );
+}
+
+#[test]
+fn streamed_code_update_is_noop_when_unchanged() {
+    let code = "a += 12";
+    assert_eq!(
+        streamed_code_update(code, code.len()),
+        StreamedCodeUpdate::NoOp
+    );
 }
 
 #[cfg(feature = "local_fs")]

@@ -1049,21 +1049,7 @@ impl RequestedCommandView {
     ///
     /// If the command length is shorter than the previous update, then the command is truncated to the given byte length.
     pub fn apply_streamed_update(&mut self, command: &str, ctx: &mut ViewContext<Self>) {
-        match command.len().cmp(&self.command_text.len()) {
-            Ordering::Greater => {
-                // Check if the existing length falls on a valid UTF-8 character boundary.
-                let existing_length = self.command_text.len();
-                if command.is_char_boundary(existing_length) {
-                    self.command_text.push_str(&command[existing_length..]);
-                } else {
-                    self.command_text = command.to_string();
-                }
-            }
-            Ordering::Less => {
-                self.command_text.truncate(command.len());
-            }
-            Ordering::Equal => {}
-        }
+        apply_streamed_command_text(&mut self.command_text, command);
 
         // If the editor exists, sync it with the updated command text.
         if let Some(editor) = &self.editor {
@@ -2177,6 +2163,42 @@ impl RequestedCommand {
         self.view.update(ctx, |command, ctx| {
             command.set_is_header_expanded(false, ctx);
         })
+    }
+}
+
+/// Applies a streamed update to `text` in place, given the newly received
+/// `new_value`.
+///
+/// Streaming is assumed to only change the end of the string: either
+/// `new_value` extends `text` with a suffix, or `new_value` is `text` with a
+/// few trailing bytes removed (e.g. a partially-received token being
+/// trimmed). Under that assumption, `text`'s previous length is always a
+/// valid split point in `new_value` (grow) or `text` itself (shrink).
+/// However, when a streamed rewrite isn't a clean prefix-preserving update,
+/// that byte offset can fall inside a multi-byte UTF-8 character. Naively
+/// slicing or truncating at such an offset panics with "byte index is not a
+/// char boundary", so both directions are guarded and fall back to replacing
+/// `text` wholesale with `new_value` when the offset isn't a valid boundary.
+///
+/// Extracted for unit testing.
+fn apply_streamed_command_text(text: &mut String, new_value: &str) {
+    match new_value.len().cmp(&text.len()) {
+        Ordering::Greater => {
+            let existing_length = text.len();
+            if new_value.is_char_boundary(existing_length) {
+                text.push_str(&new_value[existing_length..]);
+            } else {
+                *text = new_value.to_string();
+            }
+        }
+        Ordering::Less => {
+            if text.is_char_boundary(new_value.len()) {
+                text.truncate(new_value.len());
+            } else {
+                *text = new_value.to_string();
+            }
+        }
+        Ordering::Equal => {}
     }
 }
 

@@ -1108,6 +1108,66 @@ struct EmbeddedCodeEditorView {
     language: Option<ProgrammingLanguage>,
     length: usize,
 }
+
+/// How a streamed code update should be applied to the buffer mirroring the
+/// previously rendered `code`, given `code`'s previous length in bytes.
+///
+/// Streamed AI code blocks are assumed to only change at the end of the
+/// string: either a suffix was appended, or a few trailing bytes (typically a
+/// partially-received closing code-fence marker, e.g. `` ` `` `` ` ``) were
+/// removed. Under that assumption `previous_len` is always a valid split
+/// point. But when a streamed rewrite isn't a clean append -- a non-prefix
+/// rewrite, or the fence edge landing mid-character -- `previous_len` can
+/// fall inside a multi-byte UTF-8 character. Slicing `code` at such an offset
+/// panics with "byte index is not a char boundary", so [`streamed_code_update`]
+/// only computes an append when the offset is a valid boundary and otherwise
+/// asks the caller to reset the buffer wholesale (see `apply_streamed_code_update`).
+#[derive(Debug, PartialEq, Eq)]
+enum StreamedCodeUpdate<'a> {
+    /// Append this suffix to the end of the existing buffer.
+    Append(&'a str),
+    /// `previous_len` is not a valid char boundary in `code`; the buffer
+    /// should be reset to the full `code` string instead of sliced.
+    Reset,
+    /// Truncate the buffer so it has `code.len()` bytes.
+    Truncate,
+    /// `code` is unchanged since the last update.
+    NoOp,
+}
+
+/// Extracted for unit testing. See [`StreamedCodeUpdate`] for the rationale.
+fn streamed_code_update(code: &str, previous_len: usize) -> StreamedCodeUpdate<'_> {
+    match code.len().cmp(&previous_len) {
+        Ordering::Greater => {
+            if code.is_char_boundary(previous_len) {
+                StreamedCodeUpdate::Append(&code[previous_len..])
+            } else {
+                StreamedCodeUpdate::Reset
+            }
+        }
+        Ordering::Less => StreamedCodeUpdate::Truncate,
+        Ordering::Equal => StreamedCodeUpdate::NoOp,
+    }
+}
+
+/// Applies a streamed code update to `view`, given the length (in bytes) of
+/// the code string most recently rendered. Shared by `AIBlock` and
+/// `CLISubagentView`, whose code-streaming logic is otherwise identical.
+fn apply_streamed_code_update(
+    view: &CodeEditorView,
+    code: &str,
+    previous_len: usize,
+    ctx: &mut ViewContext<CodeEditorView>,
+) {
+    match streamed_code_update(code, previous_len) {
+        StreamedCodeUpdate::Append(suffix) => view.append_at_end(suffix, ctx),
+        StreamedCodeUpdate::Reset => view.reset(InitialBufferState::plain_text(code), ctx),
+        StreamedCodeUpdate::Truncate => view.truncate(code.len(), ctx),
+        StreamedCodeUpdate::NoOp => return,
+    }
+    ctx.notify();
+}
+
 /// Builds the authenticated Oz run-page URL for a recording artifact.
 ///
 /// The task ID is assigned to the conversation by the server when the run
@@ -3041,17 +3101,10 @@ impl AIBlock {
                     // received the ``` end marker.
                     // Ex: Iteration 57: "a += 12\n``"
                     // Ex: Iteration 58: "a += 12"
-                    match code.len().cmp(&embedded_view.length) {
-                        Ordering::Greater => {
-                            view.append_at_end(&code[embedded_view.length..], ctx);
-                            ctx.notify();
-                        }
-                        Ordering::Less => {
-                            view.truncate(code.len(), ctx);
-                            ctx.notify();
-                        }
-                        Ordering::Equal => {}
-                    }
+                    //
+                    // See `apply_streamed_code_update`: `embedded_view.length` is a raw byte
+                    // offset into `code` that isn't always safe to slice at directly.
+                    apply_streamed_code_update(view, code, embedded_view.length, ctx);
                     embedded_view.length = code.len();
                 });
             }
