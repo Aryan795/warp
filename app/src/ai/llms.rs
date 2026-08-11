@@ -63,7 +63,16 @@ pub fn first_party_key_source_for_provider(
     provider: &LLMProvider,
     app: &AppContext,
 ) -> Option<ByoKeySource> {
-    first_party_key_source_for_provider_in_window(provider, None, app)
+    let workspaces = UserWorkspaces::as_ref(app);
+    if workspaces.are_workspace_member_byo_keys_allowed()
+        && is_using_api_key_for_provider(provider, app)
+    {
+        return Some(ByoKeySource::UserProvided);
+    }
+    if is_using_team_first_party_key_for_provider(provider, app) {
+        return Some(ByoKeySource::TeamProvided);
+    }
+    None
 }
 
 pub fn first_party_key_source_for_provider_in_window(
@@ -71,6 +80,7 @@ pub fn first_party_key_source_for_provider_in_window(
     window_id: Option<WindowId>,
     app: &AppContext,
 ) -> Option<ByoKeySource> {
+    let window_id = window_id?;
     let workspaces = UserWorkspaces::as_ref(app);
     if workspaces.are_member_byo_keys_allowed(window_id)
         && is_using_api_key_for_provider(provider, app)
@@ -111,6 +121,7 @@ pub fn byo_key_source_for_model_in_window(
     window_id: Option<WindowId>,
     app: &AppContext,
 ) -> Option<ByoKeySource> {
+    let window_id = window_id?;
     let is_custom_endpoint = LLMPreferences::as_ref(app)
         .custom_llm_info_for_id(&llm.id)
         .is_some();
@@ -121,7 +132,7 @@ pub fn byo_key_source_for_model_in_window(
     if is_using_team_byo_endpoint_for_model(llm, app) {
         return Some(ByoKeySource::TeamProvided);
     }
-    first_party_key_source_for_provider_in_window(&llm.provider, window_id, app)
+    first_party_key_source_for_provider_in_window(&llm.provider, Some(window_id), app)
 }
 
 fn is_using_team_byo_endpoint_for_model(llm: &LLMInfo, app: &AppContext) -> bool {
@@ -170,6 +181,9 @@ pub fn should_show_bedrock_icon_for_model_in_window(
     window_id: Option<WindowId>,
     app: &AppContext,
 ) -> bool {
+    let Some(window_id) = window_id else {
+        return false;
+    };
     should_show_host_icon_for_model(
         llm,
         &LLMModelHost::AwsBedrock,
@@ -182,6 +196,9 @@ pub fn should_show_gemini_enterprise_agent_platform_icon_for_model_in_window(
     window_id: Option<WindowId>,
     app: &AppContext,
 ) -> bool {
+    let Some(window_id) = window_id else {
+        return false;
+    };
     should_show_host_icon_for_model(
         llm,
         &LLMModelHost::GeminiEnterprise,
@@ -900,7 +917,7 @@ impl LLMPreferences {
     ) -> &'a LLMInfo {
         available
             .usable_default_llm_info(app)
-            .or_else(|| self.custom_llm_choices(app).next())
+            .or_else(|| self.custom_llm_choices_for_workspace(app).next())
             .unwrap_or_else(|| available.default_llm_info())
     }
 
@@ -967,6 +984,7 @@ impl LLMPreferences {
     /// Returns the set of LLMs available for Agent Mode use.
     pub fn get_base_llm_choices_for_agent_mode(
         &self,
+        window_id: WindowId,
         app: &AppContext,
     ) -> impl Iterator<Item = &LLMInfo> + use<'_> {
         // Don't show admin-disabled models in the dropdown
@@ -981,7 +999,24 @@ impl LLMPreferences {
             .filter(move |llm| {
                 routers_enabled || !custom_model_routers::is_cloud_custom_router_id(llm.id.as_str())
             })
-            .chain(self.custom_llm_choices(app))
+            .chain(self.custom_llm_choices(window_id, app))
+            .chain(self.custom_router_choices())
+    }
+
+    pub fn get_base_llm_choices_for_workspace(
+        &self,
+        app: &AppContext,
+    ) -> impl Iterator<Item = &LLMInfo> + use<'_> {
+        let routers_enabled = FeatureFlag::CustomModelRouters.is_enabled();
+        self.models_by_feature
+            .agent_mode
+            .choices
+            .iter()
+            .filter(|llm| !matches!(llm.disable_reason, Some(DisableReason::AdminDisabled)))
+            .filter(move |llm| {
+                routers_enabled || !custom_model_routers::is_cloud_custom_router_id(llm.id.as_str())
+            })
+            .chain(self.custom_llm_choices_for_workspace(app))
             .chain(self.custom_router_choices())
     }
 
@@ -993,6 +1028,7 @@ impl LLMPreferences {
     /// Returns the set of LLMs available for coding.
     pub fn get_coding_llm_choices(
         &self,
+        window_id: WindowId,
         app: &AppContext,
     ) -> impl Iterator<Item = &LLMInfo> + use<'_> {
         // Don't show admin-disabled models in the dropdown
@@ -1006,13 +1042,14 @@ impl LLMPreferences {
             .filter(move |llm| {
                 routers_enabled || !custom_model_routers::is_cloud_custom_router_id(llm.id.as_str())
             })
-            .chain(self.custom_llm_choices(app))
+            .chain(self.custom_llm_choices(window_id, app))
             .chain(self.custom_router_choices())
     }
 
     /// Returns the set of LLMs available for CLI agent.
     pub fn get_cli_agent_llm_choices(
         &self,
+        window_id: WindowId,
         app: &AppContext,
     ) -> impl Iterator<Item = &LLMInfo> + use<'_> {
         // Don't show admin-disabled models in the dropdown
@@ -1020,7 +1057,7 @@ impl LLMPreferences {
             .choices
             .iter()
             .filter(|llm| !matches!(llm.disable_reason, Some(DisableReason::AdminDisabled)))
-            .chain(self.custom_llm_choices(app))
+            .chain(self.custom_llm_choices(window_id, app))
     }
 
     /// Returns the `LLMInfo` for the CLI agent model.
@@ -1170,14 +1207,18 @@ impl LLMPreferences {
     }
 
     fn custom_llm_info_for_id_if_enabled(&self, id: &LLMId, app: &AppContext) -> Option<&LLMInfo> {
-        Self::custom_inference_enabled(app)
+        Self::custom_inference_enabled_for_workspace(app)
             .then(|| self.custom_llm_info_for_id(id))
             .flatten()
     }
 
     /// Iterator over the user's custom-endpoint LLMs, gated on the feature flag and entitlement.
-    pub fn custom_llm_choices(&self, app: &AppContext) -> std::slice::Iter<'_, LLMInfo> {
-        if Self::custom_inference_enabled(app) {
+    pub fn custom_llm_choices(
+        &self,
+        window_id: WindowId,
+        app: &AppContext,
+    ) -> std::slice::Iter<'_, LLMInfo> {
+        if Self::custom_inference_enabled_for_window(window_id, app) {
             self.custom_llms.iter()
         } else {
             // Empty slice with a matching element type so the return type stays consistent
@@ -1186,11 +1227,24 @@ impl LLMPreferences {
         }
     }
 
-    fn custom_inference_enabled(app: &AppContext) -> bool {
+    fn custom_inference_enabled_for_window(window_id: WindowId, app: &AppContext) -> bool {
         let workspaces = UserWorkspaces::as_ref(app);
-        // TODO(team-scoped-settings): thread a real window_id through once available here.
         workspaces.is_custom_inference_enabled(app)
-            && workspaces.are_member_byo_endpoints_allowed(None)
+            && workspaces.are_member_byo_endpoints_allowed(window_id)
+    }
+
+    fn custom_inference_enabled_for_workspace(app: &AppContext) -> bool {
+        let workspaces = UserWorkspaces::as_ref(app);
+        workspaces.is_custom_inference_enabled(app)
+            && workspaces.are_workspace_member_byo_endpoints_allowed()
+    }
+
+    fn custom_llm_choices_for_workspace(&self, app: &AppContext) -> std::slice::Iter<'_, LLMInfo> {
+        if Self::custom_inference_enabled_for_workspace(app) {
+            self.custom_llms.iter()
+        } else {
+            (&[] as &[LLMInfo]).iter()
+        }
     }
 
     /// Resolves a custom model router by its `config_key`/`LLMId`.
@@ -1357,7 +1411,7 @@ impl LLMPreferences {
     }
 
     fn sanitize_disabled_custom_model_preferences(&mut self, ctx: &mut ModelContext<Self>) {
-        if Self::custom_inference_enabled(ctx) || self.custom_llms.is_empty() {
+        if Self::custom_inference_enabled_for_workspace(ctx) || self.custom_llms.is_empty() {
             return;
         }
 

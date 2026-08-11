@@ -86,7 +86,7 @@ impl CreateProjectView {
 
                 // Send content event only if UGC collection is enabled
                 let should_collect_ugc = should_collect_ai_ugc_telemetry(
-                    Some(ctx.window_id()),
+                    ctx.window_id(),
                     ctx,
                     PrivacySettings::as_ref(ctx).is_telemetry_enabled,
                 );

@@ -310,7 +310,7 @@ impl SyncDataSource for ModelSelectorDataSource {
         let is_cloud_pane = self.ambient_agent_view_model.is_some();
         let choices = if is_full_terminal {
             llm_preferences
-                .get_cli_agent_llm_choices(app)
+                .get_cli_agent_llm_choices(self.window_id, app)
                 .filter(|llm| {
                     let is_custom = llm_preferences.custom_llm_info_for_id(&llm.id).is_some();
                     Self::include_model_in_picker(is_cloud_pane, is_custom)
@@ -318,7 +318,7 @@ impl SyncDataSource for ModelSelectorDataSource {
                 .collect_vec()
         } else {
             llm_preferences
-                .get_base_llm_choices_for_agent_mode(app)
+                .get_base_llm_choices_for_agent_mode(self.window_id, app)
                 .filter(|llm| {
                     let is_custom = llm_preferences.custom_llm_info_for_id(&llm.id).is_some();
                     Self::include_model_in_picker(is_cloud_pane, is_custom)

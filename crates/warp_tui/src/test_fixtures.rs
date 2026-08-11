@@ -120,10 +120,9 @@ pub(crate) fn add_test_action_model_and_events(
         app.add_model(|ctx| ModelEventDispatcher::new(model_events_rx, sessions.clone(), ctx));
     let active_session =
         app.add_model(|ctx| ActiveSession::new(sessions.clone(), dispatcher.clone(), ctx));
-    // `GetRelevantFilesController::new` subscribes to the `CodebaseIndexManager`
-    // singleton, which these tests don't register; `default` skips it.
-    let get_relevant_files = app.add_model(|_| GetRelevantFilesController::default());
     let terminal_surface_id = EntityId::new();
+    let get_relevant_files =
+        app.add_model(|_| GetRelevantFilesController::new_for_test(terminal_surface_id));
     let action_model = app.add_model(|ctx| {
         BlocklistAIActionModel::new(
             terminal_model,

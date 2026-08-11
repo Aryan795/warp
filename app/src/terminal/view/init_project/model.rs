@@ -7,7 +7,7 @@ use lsp::supported_servers::LSPServerType;
 #[cfg(not(target_family = "wasm"))]
 use repo_metadata::repositories::DetectedRepositories;
 use warp_util::local_or_remote_path::LocalOrRemotePath;
-use warpui::{Entity, EntityId, ModelContext, SingletonEntity as _};
+use warpui::{Entity, EntityId, ModelContext, SingletonEntity as _, WindowId};
 
 use crate::ai::persisted_workspace::PersistedWorkspace;
 use crate::settings::CodeSettings;
@@ -124,10 +124,10 @@ impl InitProjectModel {
         pwd_path: PathBuf,
         path_env_var: Option<String>,
         terminal_view_id: EntityId,
+        window_id: WindowId,
         ctx: &mut ModelContext<Self>,
     ) -> Self {
-        let is_already_setup =
-            !Self::should_have_available_steps(&pwd_path, Some(terminal_view_id), ctx);
+        let is_already_setup = !Self::should_have_available_steps(&pwd_path, window_id, ctx);
 
         Self {
             terminal_view_id,
@@ -181,13 +181,11 @@ impl InitProjectModel {
     /// Check if there are any steps that need user action
     pub fn should_have_available_steps(
         path: &Path,
-        terminal_view_id: Option<EntityId>,
+        window_id: WindowId,
         ctx: &warpui::AppContext,
     ) -> bool {
         // Note that we consider auto-indexing setting to true to satisfy the codebase context step.
         // This avoids the potential race condition with the banner showing just when we start auto-indexing.
-        let window_id =
-            terminal_view_id.and_then(|terminal_view_id| ctx.window_id_for_view(terminal_view_id));
         let has_pending_codebase_context = UserWorkspaces::as_ref(ctx)
             .is_codebase_context_enabled(window_id, ctx)
             && CodebaseIndexManager::as_ref(ctx)
@@ -373,9 +371,10 @@ impl InitProjectModel {
     }
 
     fn compute_codebase_context_step(&mut self, pwd_path: &Path, ctx: &mut ModelContext<Self>) {
-        if !UserWorkspaces::as_ref(ctx)
-            .is_codebase_context_enabled(ctx.window_id_for_view(self.terminal_view_id), ctx)
-        {
+        let Some(window_id) = ctx.window_id_for_view(self.terminal_view_id) else {
+            return;
+        };
+        if !UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(window_id, ctx) {
             // Feature disabled, leave as None
             return;
         }

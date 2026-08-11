@@ -811,18 +811,15 @@ impl AISettingsPageView {
         let is_any_ai_enabled = AISettings::as_ref(ctx).is_any_ai_enabled(ctx);
 
         let workspace = UserWorkspaces::handle(ctx);
-        let ai_autonomy_settings = workspace
-            .as_ref(ctx)
-            .ai_autonomy_settings(Some(ctx.window_id()));
+        let ai_autonomy_settings = workspace.as_ref(ctx).ai_autonomy_settings(ctx.window_id());
         ctx.subscribe_to_model(&workspace, |me, workspace, event, ctx| {
             if let UserWorkspacesEvent::TeamsChanged = event {
                 me.refresh_all_execution_profile_ui(ctx);
                 me.reset_execution_profile_mouse_state_handles(ctx);
 
                 let is_any_ai_enabled = AISettings::as_ref(ctx).is_any_ai_enabled(ctx);
-                let ai_autonomy_settings = workspace
-                    .as_ref(ctx)
-                    .ai_autonomy_settings(Some(ctx.window_id()));
+                let ai_autonomy_settings =
+                    workspace.as_ref(ctx).ai_autonomy_settings(ctx.window_id());
 
                 Self::update_editor_interaction_state(
                     me.command_denylist_editor.as_ref(ctx).editor().clone(),
@@ -1279,7 +1276,7 @@ impl AISettingsPageView {
                 AISettingsChangedEvent::IsAnyAIEnabled { .. } => {
                     let is_enabled = AISettings::as_ref(ctx).is_any_ai_enabled(ctx);
                     let ai_autonomy_settings =
-                        UserWorkspaces::as_ref(ctx).ai_autonomy_settings(Some(ctx.window_id()));
+                        UserWorkspaces::as_ref(ctx).ai_autonomy_settings(ctx.window_id());
 
                     Self::update_editor_interaction_state(
                         me.autodetection_denylist_editor.clone(),
@@ -1476,7 +1473,7 @@ impl AISettingsPageView {
         });
 
         let current_permission =
-            BlocklistAIPermissions::as_ref(ctx).active_permissions_profile(ctx, None);
+            BlocklistAIPermissions::as_ref(ctx).active_permissions_profile(ctx, ctx.window_id());
 
         let apply_code_diffs_dropdown_menu = ctx.add_typed_action_view(|ctx| {
             let mut dropdown = Dropdown::new(ctx);
@@ -1505,7 +1502,7 @@ impl AISettingsPageView {
         Self::refresh_execution_profile_dropdown_menu(
             &apply_code_diffs_dropdown_menu,
             current_permission.apply_code_diffs,
-            !AISettings::as_ref(ctx).is_code_diffs_permissions_editable(Some(ctx.window_id()), ctx),
+            !AISettings::as_ref(ctx).is_code_diffs_permissions_editable(ctx.window_id(), ctx),
             ctx,
         );
 
@@ -1535,7 +1532,7 @@ impl AISettingsPageView {
         Self::refresh_execution_profile_dropdown_menu(
             &read_files_dropdown_menu,
             current_permission.read_files,
-            !AISettings::as_ref(ctx).is_read_files_permissions_editable(Some(ctx.window_id()), ctx),
+            !AISettings::as_ref(ctx).is_read_files_permissions_editable(ctx.window_id(), ctx),
             ctx,
         );
 
@@ -1565,8 +1562,7 @@ impl AISettingsPageView {
         Self::refresh_execution_profile_dropdown_menu(
             &execute_commands_dropdown_menu,
             current_permission.execute_commands,
-            !AISettings::as_ref(ctx)
-                .is_execute_commands_permissions_editable(Some(ctx.window_id()), ctx),
+            !AISettings::as_ref(ctx).is_execute_commands_permissions_editable(ctx.window_id(), ctx),
             ctx,
         );
 
@@ -1596,8 +1592,7 @@ impl AISettingsPageView {
         Self::refresh_write_to_pty_dropdown_menu(
             &write_to_pty_autonomy_dropdown_menu,
             current_permission.write_to_pty,
-            !AISettings::as_ref(ctx)
-                .is_write_to_pty_permissions_editable(Some(ctx.window_id()), ctx),
+            !AISettings::as_ref(ctx).is_write_to_pty_permissions_editable(ctx.window_id(), ctx),
             ctx,
         );
 
@@ -1720,7 +1715,8 @@ impl AISettingsPageView {
             }
         });
 
-        let org_denylist = BlocklistAIPermissions::get_org_execute_commands_denylist(ctx);
+        let org_denylist =
+            BlocklistAIPermissions::get_org_execute_commands_denylist(ctx, ctx.window_id());
         let command_denylist_mouse_state_handles = current_permission
             .command_denylist
             .iter()
@@ -1850,7 +1846,7 @@ impl AISettingsPageView {
         // Custom inference
         let custom_inference_controls_enabled = is_any_ai_enabled
             && UserWorkspaces::as_ref(ctx).is_custom_inference_enabled(ctx)
-            && UserWorkspaces::as_ref(ctx).are_member_byo_endpoints_allowed(Some(ctx.window_id()));
+            && UserWorkspaces::as_ref(ctx).are_member_byo_endpoints_allowed(ctx.window_id());
         let custom_inference_add_button = ctx.add_typed_action_view(|_| {
             ActionButton::new("+ Add custom model", SecondaryTheme)
                 .with_size(ButtonSize::Small)
@@ -2277,7 +2273,7 @@ impl AISettingsPageView {
             return;
         }
         let choices: Vec<(LLMId, String)> = LLMPreferences::as_ref(ctx)
-            .get_base_llm_choices_for_agent_mode(ctx)
+            .get_base_llm_choices_for_agent_mode(ctx.window_id(), ctx)
             .filter(|llm| llm.provider == provider)
             .map(|llm| (llm.id.clone(), llm.menu_display_name()))
             .collect();
@@ -2301,7 +2297,7 @@ impl AISettingsPageView {
         endpoint_index: usize,
         ctx: &mut ViewContext<Self>,
     ) {
-        if !Self::can_use_custom_inference_controls(Some(ctx.window_id()), ctx) {
+        if !Self::can_use_custom_inference_controls(ctx.window_id(), ctx) {
             return;
         }
         if !Self::should_offer_default_model_switch(ctx) {
@@ -2342,7 +2338,7 @@ impl AISettingsPageView {
     }
 
     fn sync_custom_endpoint_buttons(&mut self, ctx: &mut ViewContext<Self>) {
-        let enabled = Self::can_use_custom_inference_controls(Some(ctx.window_id()), ctx);
+        let enabled = Self::can_use_custom_inference_controls(ctx.window_id(), ctx);
 
         self.custom_inference_add_button.update(ctx, |button, ctx| {
             button.set_disabled(!enabled, ctx);
@@ -2385,14 +2381,14 @@ impl AISettingsPageView {
             })
             .collect()
     }
-    fn can_use_custom_inference_controls(window_id: Option<WindowId>, app: &AppContext) -> bool {
+    fn can_use_custom_inference_controls(window_id: WindowId, app: &AppContext) -> bool {
         AISettings::as_ref(app).is_any_ai_enabled(app)
             && UserWorkspaces::as_ref(app).is_custom_inference_enabled(app)
             && UserWorkspaces::as_ref(app).are_member_byo_endpoints_allowed(window_id)
     }
 
     fn show_add_custom_endpoint_modal(&mut self, ctx: &mut ViewContext<Self>) {
-        if !Self::can_use_custom_inference_controls(Some(ctx.window_id()), ctx) {
+        if !Self::can_use_custom_inference_controls(ctx.window_id(), ctx) {
             return;
         }
         self.remove_custom_endpoint_confirmation_dialog
@@ -2410,7 +2406,7 @@ impl AISettingsPageView {
     }
 
     fn show_edit_custom_endpoint_modal(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
-        if !Self::can_use_custom_inference_controls(Some(ctx.window_id()), ctx) {
+        if !Self::can_use_custom_inference_controls(ctx.window_id(), ctx) {
             return;
         }
         let endpoint = ApiKeyManager::as_ref(ctx)
@@ -2471,7 +2467,7 @@ impl AISettingsPageView {
                 schema,
                 models,
             } => {
-                if !Self::can_use_custom_inference_controls(Some(ctx.window_id()), ctx) {
+                if !Self::can_use_custom_inference_controls(ctx.window_id(), ctx) {
                     self.hide_custom_endpoint_modal(ctx);
                     return;
                 }
@@ -2514,7 +2510,7 @@ impl AISettingsPageView {
                 schema,
                 models,
             } => {
-                if !Self::can_use_custom_inference_controls(Some(ctx.window_id()), ctx) {
+                if !Self::can_use_custom_inference_controls(ctx.window_id(), ctx) {
                     self.hide_custom_endpoint_modal(ctx);
                     return;
                 }
@@ -2544,7 +2540,7 @@ impl AISettingsPageView {
                 ctx.notify();
             }
             CustomEndpointModalEvent::RemoveEndpoint { index } => {
-                if !Self::can_use_custom_inference_controls(Some(ctx.window_id()), ctx) {
+                if !Self::can_use_custom_inference_controls(ctx.window_id(), ctx) {
                     self.hide_custom_endpoint_modal(ctx);
                     return;
                 }
@@ -2559,7 +2555,7 @@ impl AISettingsPageView {
         index: usize,
         ctx: &mut ViewContext<Self>,
     ) {
-        if !Self::can_use_custom_inference_controls(Some(ctx.window_id()), ctx) {
+        if !Self::can_use_custom_inference_controls(ctx.window_id(), ctx) {
             return;
         }
         let endpoint = ApiKeyManager::as_ref(ctx)
@@ -2601,7 +2597,7 @@ impl AISettingsPageView {
                 ctx.notify();
             }
             RemoveCustomEndpointConfirmationDialogEvent::Confirm(index) => {
-                if !Self::can_use_custom_inference_controls(Some(ctx.window_id()), ctx) {
+                if !Self::can_use_custom_inference_controls(ctx.window_id(), ctx) {
                     self.pending_remove_custom_endpoint_index = None;
                     self.remove_custom_endpoint_confirmation_dialog
                         .update(ctx, |dialog, ctx| {
@@ -3167,7 +3163,7 @@ impl AISettingsPageView {
             }
 
             let choices = LLMPreferences::as_ref(ctx)
-                .get_base_llm_choices_for_agent_mode(ctx)
+                .get_base_llm_choices_for_agent_mode(ctx.window_id(), ctx)
                 .collect_vec();
 
             let items = available_model_menu_items(
@@ -3207,7 +3203,7 @@ impl AISettingsPageView {
             }
 
             let choices = LLMPreferences::as_ref(ctx)
-                .get_coding_llm_choices(ctx)
+                .get_coding_llm_choices(ctx.window_id(), ctx)
                 .collect_vec();
 
             let items = available_model_menu_items(
@@ -3272,53 +3268,39 @@ impl AISettingsPageView {
     }
 
     fn refresh_all_execution_profile_ui(&self, ctx: &mut ViewContext<Self>) {
-        let permissions = BlocklistAIPermissions::handle(ctx);
-
-        let apply_code_diffs_setting = permissions
-            .as_ref(ctx)
-            .get_apply_code_diffs_setting(ctx, None);
+        let permissions = BlocklistAIPermissions::as_ref(ctx);
+        let profile = permissions.active_permissions_profile(ctx, ctx.window_id());
         Self::refresh_execution_profile_dropdown_menu(
             &self.apply_code_diffs_dropdown_menu,
-            apply_code_diffs_setting,
-            !AISettings::as_ref(ctx).is_code_diffs_permissions_editable(Some(ctx.window_id()), ctx),
+            profile.apply_code_diffs,
+            !AISettings::as_ref(ctx).is_code_diffs_permissions_editable(ctx.window_id(), ctx),
             ctx,
         );
 
-        let read_files_setting = permissions.as_ref(ctx).get_read_files_setting(ctx, None);
         Self::refresh_execution_profile_dropdown_menu(
             &self.read_files_dropdown_menu,
-            read_files_setting,
-            !AISettings::as_ref(ctx).is_read_files_permissions_editable(Some(ctx.window_id()), ctx),
+            profile.read_files,
+            !AISettings::as_ref(ctx).is_read_files_permissions_editable(ctx.window_id(), ctx),
             ctx,
         );
 
-        let execute_commands_setting: ActionPermission = permissions
-            .as_ref(ctx)
-            .get_execute_commands_setting(ctx, None);
         Self::refresh_execution_profile_dropdown_menu(
             &self.execute_commands_dropdown_menu,
-            execute_commands_setting,
-            !AISettings::as_ref(ctx)
-                .is_execute_commands_permissions_editable(Some(ctx.window_id()), ctx),
+            profile.execute_commands,
+            !AISettings::as_ref(ctx).is_execute_commands_permissions_editable(ctx.window_id(), ctx),
             ctx,
         );
 
-        let write_to_pty_setting: WriteToPtyPermission =
-            permissions.as_ref(ctx).get_write_to_pty_setting(ctx, None);
         Self::refresh_write_to_pty_dropdown_menu(
             &self.write_to_pty_autonomy_dropdown_menu,
-            write_to_pty_setting,
-            !AISettings::as_ref(ctx)
-                .is_write_to_pty_permissions_editable(Some(ctx.window_id()), ctx),
+            profile.write_to_pty,
+            !AISettings::as_ref(ctx).is_write_to_pty_permissions_editable(ctx.window_id(), ctx),
             ctx,
         );
 
-        let mcp_permissions_setting = permissions
-            .as_ref(ctx)
-            .get_mcp_permissions_setting(ctx, None);
         Self::refresh_execution_profile_dropdown_menu(
             &self.mcp_permissions_dropdown_menu,
-            mcp_permissions_setting,
+            profile.mcp_permissions,
             !AISettings::as_ref(ctx).is_mcp_permission_editable(ctx),
             ctx,
         );
@@ -3333,37 +3315,39 @@ impl AISettingsPageView {
 
     fn reset_execution_profile_mouse_state_handles(&mut self, ctx: &mut ViewContext<Self>) {
         let blocklist_permissions = BlocklistAIPermissions::as_ref(ctx);
+        let profile = blocklist_permissions.active_permissions_profile(ctx, ctx.window_id());
 
-        self.directory_allowlist_mouse_state_handles = blocklist_permissions
-            .get_read_files_allowlist(ctx, None)
+        self.directory_allowlist_mouse_state_handles = profile
+            .directory_allowlist
             .iter()
             .map(|_| Default::default())
             .collect();
 
-        self.command_denylist_mouse_state_handles = blocklist_permissions
-            .get_execute_commands_denylist(ctx, None)
+        self.command_denylist_mouse_state_handles = profile
+            .command_denylist
             .iter()
             .map(|_| Default::default())
             .collect();
 
-        let org_denylist = BlocklistAIPermissions::get_org_execute_commands_denylist(ctx);
+        let org_denylist =
+            BlocklistAIPermissions::get_org_execute_commands_denylist(ctx, ctx.window_id());
         self.command_denylist_tooltip_mouse_state_handles =
             org_denylist.iter().map(|_| Default::default()).collect();
 
-        self.command_allowlist_mouse_state_handles = blocklist_permissions
-            .get_execute_commands_allowlist(ctx, None)
+        self.command_allowlist_mouse_state_handles = profile
+            .command_allowlist
             .iter()
             .map(|_| Default::default())
             .collect();
 
-        self.mcp_allowlist_mouse_state_handles = blocklist_permissions
-            .get_mcp_allowlist(ctx, None)
+        self.mcp_allowlist_mouse_state_handles = profile
+            .mcp_allowlist
             .iter()
             .map(|_| Default::default())
             .collect();
 
-        self.mcp_denylist_mouse_state_handles = blocklist_permissions
-            .get_mcp_denylist(ctx, None)
+        self.mcp_denylist_mouse_state_handles = profile
+            .mcp_denylist
             .iter()
             .map(|_| Default::default())
             .collect();
@@ -6073,7 +6057,7 @@ impl AgentsWidget {
         let mut widget_children = vec![permissions_subheader];
 
         if UserWorkspaces::as_ref(app)
-            .ai_autonomy_settings(Some(view.window_id))
+            .ai_autonomy_settings(view.window_id)
             .has_any_overrides()
         {
             widget_children.push(
@@ -6194,7 +6178,8 @@ impl AgentsWidget {
         app: &AppContext,
     ) -> Box<dyn Element> {
         let ai_disabled = !ai_settings.is_any_ai_enabled(app);
-        let org_denylist = BlocklistAIPermissions::get_org_execute_commands_denylist(app);
+        let org_denylist =
+            BlocklistAIPermissions::get_org_execute_commands_denylist(app, view.window_id);
         let mut tooltip_idx = 0usize;
         let list = render_input_list(
             None,
@@ -6244,7 +6229,7 @@ impl AgentsWidget {
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
-        let disabled = !ai_settings.is_command_allowlist_editable(Some(view.window_id), app);
+        let disabled = !ai_settings.is_command_allowlist_editable(view.window_id, app);
         let list = render_input_list(
             None,
             command_allowlist
@@ -6279,7 +6264,7 @@ impl AgentsWidget {
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
-        let disabled = !ai_settings.is_directory_allowlist_editable(Some(view.window_id), app);
+        let disabled = !ai_settings.is_directory_allowlist_editable(view.window_id, app);
         let list = render_input_list(
             None,
             directory_allowlist
@@ -8156,8 +8141,7 @@ impl SettingsWidget for AgentAttributionWidget {
         let ai_settings = AISettings::as_ref(app);
         let is_any_ai_enabled = ai_settings.is_any_ai_enabled(app);
 
-        let org_setting =
-            UserWorkspaces::as_ref(app).get_agent_attribution_setting(Some(view.window_id));
+        let org_setting = UserWorkspaces::as_ref(app).get_agent_attribution_setting(view.window_id);
         let state = derive_agent_attribution_toggle_state(
             &org_setting,
             *ai_settings.agent_attribution_enabled,
@@ -8367,7 +8351,7 @@ impl SettingsWidget for CloudHandoffWidget {
         let cloud_convos_off = !privacy.is_cloud_conversation_storage_enabled
             || matches!(
                 UserWorkspaces::as_ref(app)
-                    .get_cloud_conversation_storage_enablement_setting(Some(view.window_id)),
+                    .get_cloud_conversation_storage_enablement_setting(view.window_id),
                 AdminEnablementSetting::Disable
             );
         let is_force_disabled = !is_any_ai_enabled || cloud_convos_off;
@@ -8532,7 +8516,7 @@ impl ApiKeysWidget {
         let is_byo_enabled = workspace_handle.as_ref(ctx).is_byo_api_key_enabled(ctx);
         let member_byo_keys_allowed = workspace_handle
             .as_ref(ctx)
-            .are_member_byo_keys_allowed(Some(ctx.window_id()));
+            .are_member_byo_keys_allowed(ctx.window_id());
 
         let provider_api_key_editors = LLMProvider::API_KEY_PROVIDERS
             .into_iter()
@@ -8591,7 +8575,7 @@ impl ApiKeysWidget {
                         let is_byo_enabled = workspace.as_ref(ctx).is_byo_api_key_enabled(ctx);
                         let member_byo_keys_allowed = workspace
                             .as_ref(ctx)
-                            .are_member_byo_keys_allowed(Some(ctx.window_id()));
+                            .are_member_byo_keys_allowed(ctx.window_id());
                         let is_enabled = is_any_ai_enabled && is_byo_enabled;
                         let has_key = !editor_clone.as_ref(ctx).is_empty(ctx);
                         if !is_byo_enabled && has_key {
@@ -8697,7 +8681,7 @@ impl ApiKeysWidget {
                 let is_byo_enabled = workspace.as_ref(ctx).is_byo_api_key_enabled(ctx);
                 let member_byo_keys_allowed = workspace
                     .as_ref(ctx)
-                    .are_member_byo_keys_allowed(Some(ctx.window_id()));
+                    .are_member_byo_keys_allowed(ctx.window_id());
                 for button in &grok_buttons {
                     button.update(ctx, |button, ctx| {
                         button.set_disabled(
@@ -9301,9 +9285,8 @@ impl CustomInferenceVisibility {
         let is_any_ai_enabled = AISettings::as_ref(app).is_any_ai_enabled(app);
         let is_byo_enabled = workspaces.is_byo_api_key_enabled(app);
         let is_custom_inference_enabled = workspaces.is_custom_inference_enabled(app);
-        let member_byo_keys_allowed = workspaces.are_member_byo_keys_allowed(Some(window_id));
-        let member_byo_endpoints_allowed =
-            workspaces.are_member_byo_endpoints_allowed(Some(window_id));
+        let member_byo_keys_allowed = workspaces.are_member_byo_keys_allowed(window_id);
+        let member_byo_endpoints_allowed = workspaces.are_member_byo_endpoints_allowed(window_id);
 
         // BYOK: shown even when BYO is off so the upgrade CTA can render.
         let show_provider_keys = member_byo_keys_allowed;
@@ -9619,8 +9602,7 @@ impl AwsBedrockWidget {
         let aws_auth_refresh_command = ai_settings.aws_bedrock_auth_refresh_command.value().clone();
         let aws_auth_refresh_profile = ai_settings.aws_bedrock_profile.value().clone();
         let is_usage_enabled = is_any_ai_enabled
-            && UserWorkspaces::as_ref(ctx)
-                .is_aws_bedrock_credentials_enabled(Some(ctx.window_id()), ctx);
+            && UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_enabled(ctx.window_id(), ctx);
 
         let aws_auth_refresh_command_editor = ctx.add_typed_action_view(move |ctx| {
             let appearance = Appearance::as_ref(ctx);
@@ -9741,7 +9723,7 @@ impl AwsBedrockWidget {
                 let is_any_ai_enabled = AISettings::as_ref(ctx).is_any_ai_enabled(ctx);
                 let is_usage_enabled = is_any_ai_enabled
                     && UserWorkspaces::as_ref(ctx)
-                        .is_aws_bedrock_credentials_enabled(Some(ctx.window_id()), ctx);
+                        .is_aws_bedrock_credentials_enabled(ctx.window_id(), ctx);
 
                 AISettingsPageView::update_editor_interaction_state(
                     aws_auth_refresh_command_editor_clone.clone(),
@@ -9772,7 +9754,7 @@ impl AwsBedrockWidget {
                     let is_usage_enabled = is_any_ai_enabled
                         && workspace
                             .as_ref(ctx)
-                            .is_aws_bedrock_credentials_enabled(Some(ctx.window_id()), ctx);
+                            .is_aws_bedrock_credentials_enabled(ctx.window_id(), ctx);
 
                     AISettingsPageView::update_editor_interaction_state(
                         aws_auth_refresh_command_editor_clone.clone(),
@@ -9814,13 +9796,13 @@ impl AwsBedrockWidget {
         let is_any_ai_enabled = ai_settings.is_any_ai_enabled(app);
         let is_section_enabled = is_any_ai_enabled && is_bedrock_available;
         let is_admin_enforced = matches!(
-            user_workspaces.aws_bedrock_host_enablement_setting(Some(window_id)),
+            user_workspaces.aws_bedrock_host_enablement_setting(window_id),
             crate::workspaces::workspace::HostEnablementSetting::Enforce
         );
-        let is_toggleable = is_section_enabled
-            && user_workspaces.is_aws_bedrock_credentials_toggleable(Some(window_id));
+        let is_toggleable =
+            is_section_enabled && user_workspaces.is_aws_bedrock_credentials_toggleable(window_id);
         let are_credentials_enabled =
-            user_workspaces.is_aws_bedrock_credentials_enabled(Some(window_id), app);
+            user_workspaces.is_aws_bedrock_credentials_enabled(window_id, app);
         let is_usage_enabled = is_section_enabled && are_credentials_enabled;
         let toggle_description = if is_admin_enforced {
             "Warp loads and sends local AWS CLI credentials for Bedrock-supported models. This setting is managed by your organization.".to_string()
@@ -10017,7 +9999,7 @@ impl SettingsWidget for AwsBedrockWidget {
         // no window to resolve here -- this uses the workspace-level fallback even when a
         // window is bound to a team with a different effective value. The value actually
         // displayed inside `render` below is correctly window-scoped.
-        UserWorkspaces::as_ref(app).is_aws_bedrock_available_from_workspace(None)
+        UserWorkspaces::as_ref(app).is_aws_bedrock_available_from_workspace()
     }
 
     fn render(
@@ -10028,8 +10010,8 @@ impl SettingsWidget for AwsBedrockWidget {
     ) -> Box<dyn Element> {
         let ai_settings = AISettings::as_ref(app);
         let is_any_ai_enabled = ai_settings.is_any_ai_enabled(app);
-        let is_bedrock_available = UserWorkspaces::as_ref(app)
-            .is_aws_bedrock_available_from_workspace(Some(view.window_id));
+        let is_bedrock_available =
+            UserWorkspaces::as_ref(app).is_aws_bedrock_available(view.window_id);
 
         let column = Flex::column()
             .with_child(render_separator(appearance))
@@ -10061,7 +10043,7 @@ struct GeminiEnterpriseWidget {
 }
 
 impl GeminiEnterpriseWidget {
-    fn is_refresh_enabled(window_id: Option<WindowId>, app: &AppContext) -> bool {
+    fn is_refresh_enabled(window_id: WindowId, app: &AppContext) -> bool {
         AISettings::as_ref(app).is_any_ai_enabled(app)
             && UserWorkspaces::as_ref(app).is_gemini_enterprise_credentials_enabled(window_id, app)
             && !ApiKeyManager::as_ref(app)
@@ -10081,7 +10063,7 @@ impl GeminiEnterpriseWidget {
                 })
         });
         refresh_credentials_button.update(ctx, |button, ctx| {
-            button.set_disabled(!Self::is_refresh_enabled(Some(ctx.window_id()), ctx), ctx);
+            button.set_disabled(!Self::is_refresh_enabled(ctx.window_id(), ctx), ctx);
         });
 
         let refresh_credentials_button_clone = refresh_credentials_button.clone();
@@ -10092,7 +10074,7 @@ impl GeminiEnterpriseWidget {
                     | UserWorkspacesEvent::UpdateWorkspaceSettingsSuccess
             ) {
                 refresh_credentials_button_clone.update(ctx, |button, ctx| {
-                    button.set_disabled(!Self::is_refresh_enabled(Some(ctx.window_id()), ctx), ctx);
+                    button.set_disabled(!Self::is_refresh_enabled(ctx.window_id(), ctx), ctx);
                 });
                 ctx.notify();
             }
@@ -10106,7 +10088,7 @@ impl GeminiEnterpriseWidget {
                     | AISettingsChangedEvent::IsAnyAIEnabled { .. }
             ) {
                 refresh_credentials_button_clone.update(ctx, |button, ctx| {
-                    button.set_disabled(!Self::is_refresh_enabled(Some(ctx.window_id()), ctx), ctx);
+                    button.set_disabled(!Self::is_refresh_enabled(ctx.window_id(), ctx), ctx);
                 });
                 ctx.notify();
             }
@@ -10116,7 +10098,7 @@ impl GeminiEnterpriseWidget {
         ctx.subscribe_to_model(&ApiKeyManager::handle(ctx), move |_, _, event, ctx| {
             if matches!(event, ApiKeyManagerEvent::KeysUpdated) {
                 refresh_credentials_button_clone.update(ctx, |button, ctx| {
-                    button.set_disabled(!Self::is_refresh_enabled(Some(ctx.window_id()), ctx), ctx);
+                    button.set_disabled(!Self::is_refresh_enabled(ctx.window_id(), ctx), ctx);
                 });
             }
         });
@@ -10138,13 +10120,13 @@ impl GeminiEnterpriseWidget {
         let is_any_ai_enabled = AISettings::as_ref(app).is_any_ai_enabled(app);
         let is_section_enabled = is_any_ai_enabled && is_gemini_enterprise_available;
         let is_admin_enforced = matches!(
-            user_workspaces.gemini_enterprise_host_enablement_setting(Some(window_id)),
+            user_workspaces.gemini_enterprise_host_enablement_setting(window_id),
             crate::workspaces::workspace::HostEnablementSetting::Enforce
         );
         let is_toggleable = is_section_enabled
-            && user_workspaces.is_gemini_enterprise_credentials_toggleable(Some(window_id));
+            && user_workspaces.is_gemini_enterprise_credentials_toggleable(window_id);
         let are_credentials_enabled =
-            user_workspaces.is_gemini_enterprise_credentials_enabled(Some(window_id), app);
+            user_workspaces.is_gemini_enterprise_credentials_enabled(window_id, app);
         let toggle_description = if is_admin_enforced {
             "Warp routes eligible requests through your workspace's Gemini Enterprise Google Cloud \
              project. This setting is managed by your organization."
@@ -10269,7 +10251,7 @@ impl SettingsWidget for GeminiEnterpriseWidget {
         // window is bound to a team with a different effective value. The value actually
         // displayed inside `render` below is correctly window-scoped.
         FeatureFlag::GeminiEnterprise.is_enabled()
-            && UserWorkspaces::as_ref(app).is_gemini_enterprise_available_from_workspace(None)
+            && UserWorkspaces::as_ref(app).is_gemini_enterprise_available_from_workspace()
     }
 
     fn render(
@@ -10279,8 +10261,8 @@ impl SettingsWidget for GeminiEnterpriseWidget {
         app: &AppContext,
     ) -> Box<dyn Element> {
         let is_any_ai_enabled = AISettings::as_ref(app).is_any_ai_enabled(app);
-        let is_gemini_enterprise_available = UserWorkspaces::as_ref(app)
-            .is_gemini_enterprise_available_from_workspace(Some(view.window_id));
+        let is_gemini_enterprise_available =
+            UserWorkspaces::as_ref(app).is_gemini_enterprise_available(view.window_id);
         let column = Flex::column()
             .with_child(render_separator(appearance))
             .with_child(

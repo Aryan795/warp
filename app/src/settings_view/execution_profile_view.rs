@@ -8,7 +8,8 @@ use warpui::elements::{
 };
 use warpui::fonts::{Properties, Weight};
 use warpui::{
-    AppContext, Element, Entity, SingletonEntity, TypedActionView, View, ViewContext, ViewHandle,
+    AppContext, Element, Entity, EntityId, SingletonEntity, TypedActionView, View, ViewContext,
+    ViewHandle,
 };
 
 use crate::TemplatableMCPServerManager;
@@ -37,6 +38,7 @@ pub enum ExecutionProfileViewEvent {
 }
 
 pub struct ExecutionProfileView {
+    view_id: EntityId,
     profile_id: ExecutionProfileId,
     edit_button: ViewHandle<ActionButton>,
 }
@@ -77,6 +79,7 @@ impl ExecutionProfileView {
         });
 
         Self {
+            view_id: ctx.view_id(),
             profile_id,
             edit_button,
         }
@@ -97,7 +100,10 @@ impl View for ExecutionProfileView {
         let is_any_ai_enabled = AISettings::as_ref(app).is_any_ai_enabled(app);
 
         let permissions = BlocklistAIPermissions::as_ref(app);
-        let profile = permissions.permissions_profile_for_id(app, &self.profile_id);
+        let window_id = app
+            .window_id_for_view(self.view_id)
+            .expect("execution profile view must be attached while rendering");
+        let profile = permissions.permissions_profile_for_id(app, &self.profile_id, window_id);
 
         let llm_preferences = LLMPreferences::as_ref(app);
 

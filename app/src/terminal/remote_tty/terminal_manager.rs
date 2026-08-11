@@ -88,6 +88,7 @@ impl TerminalManager {
                 shell_type: ShellType::Zsh,
             },
             BlockSpacing::for_gui(ctx),
+            window_id,
             ctx,
         );
 

@@ -21,7 +21,7 @@ use warpui::ui_components::button::ButtonVariant;
 use warpui::ui_components::components::{Coords, UiComponent as _, UiComponentStyles};
 use warpui::{
     AppContext, Element, Entity, SingletonEntity as _, View, ViewContext, ViewHandle,
-    WeakViewHandle,
+    WeakViewHandle, WindowId,
 };
 
 use crate::ai::request_usage_model::{
@@ -49,6 +49,7 @@ struct MouseStates {
 
 pub struct BuyCreditsBanner {
     view_handle: WeakViewHandle<Self>,
+    window_id: WindowId,
     mouse_states: MouseStates,
     denomination_dropdown: ViewHandle<Dropdown<Action>>,
     addon_credits_options: Vec<AddonCreditsOption>,
@@ -71,6 +72,7 @@ impl BuyCreditsBanner {
     }
 
     pub fn new(ctx: &mut ViewContext<Self>) -> Self {
+        let window_id = ctx.window_id();
         ctx.subscribe_to_model(&PricingInfoModel::handle(ctx), |me, _handle, event, ctx| {
             #[allow(irrefutable_let_patterns)]
             if let PricingInfoModelEvent::PricingInfoUpdated = event {
@@ -87,7 +89,7 @@ impl BuyCreditsBanner {
                     if me.checkout_pending
                         && matches!(
                             AIRequestUsageModel::as_ref(ctx)
-                                .compute_buy_addon_credits_banner_display_state(ctx),
+                                .compute_buy_addon_credits_banner_display_state(me.window_id, ctx),
                             BuyCreditsBannerDisplayState::Hidden
                         )
                     {
@@ -129,6 +131,7 @@ impl BuyCreditsBanner {
 
         let mut me = Self {
             view_handle: ctx.handle(),
+            window_id,
             mouse_states: Default::default(),
             denomination_dropdown,
             addon_credits_options: Default::default(),
@@ -978,7 +981,7 @@ impl View for BuyCreditsBanner {
         let display_state = if self.should_display_banner {
             BuyCreditsBannerDisplayState::MonthlyLimitReached
         } else {
-            ai_request_usage.compute_buy_addon_credits_banner_display_state(app)
+            ai_request_usage.compute_buy_addon_credits_banner_display_state(self.window_id, app)
         };
 
         match display_state {

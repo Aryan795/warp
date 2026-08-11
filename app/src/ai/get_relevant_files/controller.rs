@@ -12,7 +12,7 @@ use futures_util::stream::AbortHandle;
 use instant::Instant;
 use warp_core::features::FeatureFlag;
 use warp_errors::report_error;
-use warpui::{AppContext, Entity, ModelContext, ModelHandle, SingletonEntity};
+use warpui::{AppContext, Entity, EntityId, ModelContext, ModelHandle, SingletonEntity};
 
 #[cfg(not(target_family = "wasm"))]
 use crate::ai::agent::SearchCodebaseFailureReason;
@@ -21,6 +21,7 @@ use crate::ai::blocklist::SessionContext;
 use crate::ai::get_relevant_files::api::{FileContext as FileContextRequest, GetRelevantFiles};
 use crate::ai::outline::{OutlineStatus, RepoOutlines};
 use crate::server::server_api::{AIApiError, ServerApiProvider};
+use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::{TelemetryEvent, send_telemetry_from_ctx};
 #[cfg_attr(not(target_family = "wasm"), path = "remote_search/native.rs")]
 #[cfg_attr(target_family = "wasm", path = "remote_search/wasm.rs")]
@@ -108,8 +109,8 @@ impl RequestHandle {
 }
 
 /// Controller for GetRelevantFiles action. This is scoped per terminal session.
-#[derive(Default)]
 pub struct GetRelevantFilesController {
+    terminal_view_id: EntityId,
     /// Search requests currently in flight, keyed by the originating action ID.
     /// This allows several SearchCodebase actions to be active at once without newer requests
     /// cancelling unrelated older ones.
@@ -117,10 +118,21 @@ pub struct GetRelevantFilesController {
 }
 
 impl GetRelevantFilesController {
-    pub fn new(ctx: &mut ModelContext<Self>) -> Self {
+    pub fn new(terminal_view_id: EntityId, ctx: &mut ModelContext<Self>) -> Self {
         let codebase_manager = CodebaseIndexManager::handle(ctx);
         ctx.subscribe_to_model(&codebase_manager, Self::handle_codebase_manager_event);
-        Self::default()
+        Self {
+            terminal_view_id,
+            pending_requests: Default::default(),
+        }
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn new_for_test(terminal_view_id: EntityId) -> Self {
+        Self {
+            terminal_view_id,
+            pending_requests: Default::default(),
+        }
     }
 
     fn pending_request_details_for_retrieval_id(
@@ -210,6 +222,12 @@ impl GetRelevantFilesController {
         action_id: AIAgentActionId,
         ctx: &mut ModelContext<Self>,
     ) -> Result<(), GetRelevantFilesError> {
+        let Some(window_id) = ctx.window_id_for_view(self.terminal_view_id) else {
+            return Err(GetRelevantFilesError::Missing);
+        };
+        if !UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(window_id, ctx) {
+            return Err(GetRelevantFilesError::Missing);
+        }
         // Cancel any previous request for this action before dispatching to either the local or
         // remote implementation.
         self.cancel_request_for_action(&action_id, ctx);
@@ -354,7 +372,11 @@ impl GetRelevantFilesController {
         action_id: AIAgentActionId,
         ctx: &mut ModelContext<Self>,
     ) -> Result<(), GetRelevantFilesError> {
+        let Some(window_id) = ctx.window_id_for_view(self.terminal_view_id) else {
+            return Err(GetRelevantFilesError::Missing);
+        };
         match remote_search::send_request(
+            window_id,
             query,
             partial_path_segments,
             session_context,

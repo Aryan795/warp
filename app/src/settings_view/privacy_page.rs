@@ -1423,8 +1423,7 @@ impl AppAnalyticsWidget {
     }
 
     fn should_show_zdr_badge(&self, window_id: WindowId, app: &AppContext) -> bool {
-        let setting =
-            UserWorkspaces::as_ref(app).get_ugc_collection_enablement_setting(Some(window_id));
+        let setting = UserWorkspaces::as_ref(app).get_ugc_collection_enablement_setting(window_id);
         matches!(setting, UgcCollectionEnablementSetting::Disable)
     }
 }
@@ -1468,7 +1467,7 @@ impl SettingsWidget for AppAnalyticsWidget {
 
         let org_setting = UserWorkspaces::handle(app)
             .as_ref(app)
-            .get_ugc_collection_enablement_setting(Some(view.window_id));
+            .get_ugc_collection_enablement_setting(view.window_id);
 
         let (is_toggleable, is_checked) = match org_setting {
             UgcCollectionEnablementSetting::Enable => (false, true),
@@ -1680,7 +1679,7 @@ impl SettingsWidget for CloudConversationStorageWidget {
         let ui_builder = appearance.ui_builder();
         let privacy_settings = PrivacySettings::as_ref(app);
         let org_setting = UserWorkspaces::as_ref(app)
-            .get_cloud_conversation_storage_enablement_setting(Some(view.window_id));
+            .get_cloud_conversation_storage_enablement_setting(view.window_id);
 
         let (toggle_state, is_checked) = match org_setting {
             AdminEnablementSetting::Enable => (ToggleState::Disabled, true),

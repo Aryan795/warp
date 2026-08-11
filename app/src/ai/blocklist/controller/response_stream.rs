@@ -338,18 +338,15 @@ impl ResponseStream {
                         .is_some_and(|host| host.enabled)
                 });
             if uses_geap
+                && let Some(window_id) = params.window_id
                 && let Some(binding) =
-                    crate::ai::geap_credentials::current_geap_policy(params.window_id, ctx)
-                        .mint_binding()
+                    crate::ai::geap_credentials::current_geap_policy(window_id, ctx).mint_binding()
             {
                 let refresh_binding = binding.clone();
                 let refresh_rx = ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
                     manager.begin_expired_geap_refresh(&binding, ctx, |manager, waiter, ctx| {
                         crate::ai::geap_credentials::start_geap_refresh_for_waiter(
-                            manager,
-                            params.window_id,
-                            waiter,
-                            ctx,
+                            manager, window_id, waiter, ctx,
                         );
                     })
                 });

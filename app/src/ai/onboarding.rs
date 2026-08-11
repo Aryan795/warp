@@ -4,7 +4,7 @@ use ai::LLMId;
 use onboarding::slides::OnboardingModelInfo;
 use onboarding::{CreditPackOption, OnboardingAuthState};
 use warp_core::ui::icons::Icon;
-use warpui::{AppContext, SingletonEntity};
+use warpui::{AppContext, SingletonEntity, WindowId};
 
 use super::llms::{LLMInfo, LLMPreferences};
 use crate::auth::AuthStateProvider;
@@ -24,11 +24,12 @@ impl From<&LLMInfo> for OnboardingModelInfo {
 
 pub fn build_onboarding_models(
     prefs: &LLMPreferences,
+    window_id: WindowId,
     app: &AppContext,
 ) -> (Vec<OnboardingModelInfo>, LLMId) {
     let default_id = prefs.get_default_base_model(app).id.clone();
     let models: Vec<OnboardingModelInfo> = prefs
-        .get_base_llm_choices_for_agent_mode(app)
+        .get_base_llm_choices_for_agent_mode(window_id, app)
         .map(|llm| {
             let mut info = OnboardingModelInfo::from(llm);
             info.is_default = info.id == default_id;

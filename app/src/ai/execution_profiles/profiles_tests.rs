@@ -3,7 +3,9 @@ use settings::Setting as _;
 use warp_core::features::FeatureFlag;
 use warp_graphql::object_permissions::AccessLevel;
 use warp_util::path::EscapeChar;
-use warpui::{App, EntityId, SingletonEntity};
+use warpui::elements::Empty;
+use warpui::platform::WindowStyle;
+use warpui::{App, AppContext, Element, Entity, SingletonEntity, TypedActionView, View};
 
 use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::blocklist::{BlocklistAIHistoryModel, BlocklistAIPermissions};
@@ -36,6 +38,26 @@ use crate::workspaces::team_tester::TeamTesterStatus;
 use crate::workspaces::user_profiles::UserProfiles;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::{LaunchMode, TuiEntryPoint};
+
+struct TestTerminalSurface;
+
+impl Entity for TestTerminalSurface {
+    type Event = ();
+}
+
+impl View for TestTerminalSurface {
+    fn ui_name() -> &'static str {
+        "TestTerminalSurface"
+    }
+
+    fn render(&self, _: &AppContext) -> Box<dyn Element> {
+        Empty::new().finish()
+    }
+}
+
+impl TypedActionView for TestTerminalSurface {
+    type Action = ();
+}
 
 fn mock_server_metadata(uid: ServerId) -> ServerMetadata {
     ServerMetadata {
@@ -209,7 +231,9 @@ fn tui_default_denylist_overrides_agent_decides_command_execution() {
         });
         app.add_singleton_model(|_| BlocklistAIHistoryModel::default());
         let permissions = app.add_singleton_model(BlocklistAIPermissions::new);
-        let terminal_view_id = EntityId::new();
+        let (_, terminal_view) =
+            app.add_window(WindowStyle::NotStealFocus, |_| TestTerminalSurface);
+        let terminal_view_id = terminal_view.id();
         let conversation_id = AIConversationId::new();
 
         profile_model.update(&mut app, |model, ctx| {
@@ -235,7 +259,7 @@ fn tui_default_denylist_overrides_agent_decides_command_execution() {
                 EscapeChar::Backslash,
                 false,
                 Some(false),
-                Some(terminal_view_id),
+                terminal_view_id,
                 ctx,
             );
             assert!(!result.is_allowed());

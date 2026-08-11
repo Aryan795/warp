@@ -178,6 +178,9 @@ impl Slide for OzLaunchSlide {
     }
 
     fn should_show_checkbox(&self, window_id: Option<WindowId>, app: &AppContext) -> bool {
+        let Some(window_id) = window_id else {
+            return false;
+        };
         let cloud_storage_setting = UserWorkspaces::as_ref(app)
             .get_cloud_conversation_storage_enablement_setting(window_id);
         let ugc_setting =

@@ -15,11 +15,13 @@ use super::manager::{
 use crate::ai::blocklist::SessionContext;
 use crate::ai::codebase_auto_indexing::{
     CodebaseAutoIndexingSurface, auto_index_candidate_roots, should_auto_index_codebase,
-    should_use_codebase_indexing,
+    should_auto_index_codebase_in_any_window, should_use_codebase_indexing,
+    should_use_codebase_indexing_in_any_window,
 };
 use crate::server::telemetry::{
     RemoteCodebaseAutoIndexTrigger, RemoteCodebaseIndexStatusTelemetrySource,
 };
+use crate::workspace::ActiveSession;
 use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
 use crate::{TelemetryEvent, send_telemetry_from_ctx};
 
@@ -237,6 +239,13 @@ impl RemoteCodebaseIndexModel {
         )
     }
 
+    fn active_git_repo_paths_needing_auto_index(&self) -> Vec<RemotePath> {
+        auto_index_candidate_roots(
+            self.active_git_repos_by_session.values().cloned(),
+            |remote_path| self.should_request_auto_index_for_navigated_git_repo(remote_path),
+        )
+    }
+
     pub fn active_repo_path(
         &self,
         session_context: &SessionContext,
@@ -249,11 +258,12 @@ impl RemoteCodebaseIndexModel {
 
     pub fn request_active_repo_index(
         &self,
+        window_id: warpui::WindowId,
         session_context: &SessionContext,
         explicit_repo_path: Option<&str>,
         ctx: &mut ModelContext<Self>,
     ) -> bool {
-        if !should_use_codebase_indexing(CodebaseAutoIndexingSurface::Remote, ctx) {
+        if !should_use_codebase_indexing(CodebaseAutoIndexingSurface::Remote, window_id, ctx) {
             return false;
         }
         let Some(host_id) = session_context.host_id() else {
@@ -304,8 +314,13 @@ impl RemoteCodebaseIndexModel {
         entries
     }
 
-    pub fn request_index(&self, remote_path: RemotePath, ctx: &mut ModelContext<Self>) {
-        if !should_use_codebase_indexing(CodebaseAutoIndexingSurface::Remote, ctx) {
+    pub fn request_index(
+        &self,
+        window_id: warpui::WindowId,
+        remote_path: RemotePath,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if !should_use_codebase_indexing(CodebaseAutoIndexingSurface::Remote, window_id, ctx) {
             return;
         }
         RemoteServerManager::handle(ctx).update(ctx, |manager, ctx| {
@@ -319,8 +334,13 @@ impl RemoteCodebaseIndexModel {
         });
     }
 
-    pub fn resync_index(&self, remote_path: RemotePath, ctx: &mut ModelContext<Self>) {
-        if !should_use_codebase_indexing(CodebaseAutoIndexingSurface::Remote, ctx) {
+    pub fn resync_index(
+        &self,
+        window_id: warpui::WindowId,
+        remote_path: RemotePath,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if !should_use_codebase_indexing(CodebaseAutoIndexingSurface::Remote, window_id, ctx) {
             return;
         }
         RemoteServerManager::handle(ctx).update(ctx, |manager, ctx| {
@@ -358,7 +378,10 @@ impl RemoteCodebaseIndexModel {
     ) {
         match event {
             RemoteServerManagerEvent::CodebaseIndexStatusesSnapshot { host_id, statuses } => {
-                if !should_use_codebase_indexing(CodebaseAutoIndexingSurface::Remote, ctx) {
+                if !should_use_codebase_indexing_in_any_window(
+                    CodebaseAutoIndexingSurface::Remote,
+                    ctx,
+                ) {
                     return;
                 }
                 let (changed, telemetry_updates) =
@@ -381,7 +404,10 @@ impl RemoteCodebaseIndexModel {
                 mutation_kind,
                 session_id: _,
             } => {
-                if !should_use_codebase_indexing(CodebaseAutoIndexingSurface::Remote, ctx) {
+                if !should_use_codebase_indexing_in_any_window(
+                    CodebaseAutoIndexingSurface::Remote,
+                    ctx,
+                ) {
                     return;
                 }
                 if let Some(update) =
@@ -402,8 +428,15 @@ impl RemoteCodebaseIndexModel {
                 is_git,
             } => {
                 self.record_navigated_directory(*session_id, remote_path, *is_git);
+                let window_id = ActiveSession::as_ref(ctx).window_id_for_session(*session_id);
                 if *is_git
-                    && should_auto_index_codebase(CodebaseAutoIndexingSurface::Remote, ctx)
+                    && window_id.is_some_and(|window_id| {
+                        should_auto_index_codebase(
+                            CodebaseAutoIndexingSurface::Remote,
+                            window_id,
+                            ctx,
+                        )
+                    })
                     && self.should_request_auto_index_for_navigated_git_repo(remote_path)
                 {
                     // Mirrors local auto-indexing: remote navigation silently requests indexing
@@ -479,7 +512,7 @@ impl RemoteCodebaseIndexModel {
     }
 
     fn handle_codebase_context_enablement_changed(&mut self, ctx: &mut ModelContext<Self>) {
-        if !should_use_codebase_indexing(CodebaseAutoIndexingSurface::Remote, ctx) {
+        if !should_use_codebase_indexing_in_any_window(CodebaseAutoIndexingSurface::Remote, ctx) {
             let remote_paths = self.clear_remote_codebase_indexing_state();
             if !remote_paths.is_empty() {
                 ctx.emit(RemoteCodebaseIndexModelEvent::SettingsEntriesChanged);
@@ -492,9 +525,9 @@ impl RemoteCodebaseIndexModel {
             return;
         }
 
-        let remote_paths = self.active_git_repo_paths_needing_auto_index();
+        let remote_paths = self.enabled_active_git_repo_paths_needing_auto_index(ctx);
         if remote_paths.is_empty()
-            || !should_auto_index_codebase(CodebaseAutoIndexingSurface::Remote, ctx)
+            || !should_auto_index_codebase_in_any_window(CodebaseAutoIndexingSurface::Remote, ctx)
         {
             return;
         }
@@ -540,9 +573,25 @@ impl RemoteCodebaseIndexModel {
         }
     }
 
-    fn active_git_repo_paths_needing_auto_index(&self) -> Vec<RemotePath> {
+    fn enabled_active_git_repo_paths_needing_auto_index(
+        &self,
+        ctx: &ModelContext<Self>,
+    ) -> Vec<RemotePath> {
         auto_index_candidate_roots(
-            self.active_git_repos_by_session.values().cloned(),
+            self.active_git_repos_by_session
+                .iter()
+                .filter(|(session_id, _)| {
+                    ActiveSession::as_ref(ctx)
+                        .window_id_for_session(**session_id)
+                        .is_some_and(|window_id| {
+                            should_auto_index_codebase(
+                                CodebaseAutoIndexingSurface::Remote,
+                                window_id,
+                                ctx,
+                            )
+                        })
+                })
+                .map(|(_, remote_path)| remote_path.clone()),
             |remote_path| self.should_request_auto_index_for_navigated_git_repo(remote_path),
         )
     }

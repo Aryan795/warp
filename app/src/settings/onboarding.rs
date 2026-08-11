@@ -3,7 +3,7 @@ use onboarding::{SelectedSettings, SessionDefault, UICustomizationSettings};
 use settings::Setting as _;
 use warp_core::features::FeatureFlag;
 use warp_errors::report_if_error;
-use warpui::{AppContext, SingletonEntity as _};
+use warpui::{AppContext, SingletonEntity as _, WindowId};
 
 use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
 use crate::ai::execution_profiles::{ActionPermission, WriteToPtyPermission};
@@ -17,6 +17,7 @@ use crate::workspaces::workspace::FtueAccountClass;
 pub fn apply_account_first_onboarding_settings(
     selected_settings: &SelectedSettings,
     account_class: Option<FtueAccountClass>,
+    window_id: WindowId,
     app: &mut AppContext,
 ) {
     // Every authenticated account-first user gets the Warp Agent surface,
@@ -35,7 +36,7 @@ pub fn apply_account_first_onboarding_settings(
             ui_customization,
             ..
         } => {
-            apply_agent_settings(agent_settings, app);
+            apply_agent_settings(agent_settings, window_id, app);
             if let Some(ui) = ui_customization {
                 apply_ui_customization_settings(ui, true, app);
             }
@@ -76,6 +77,7 @@ pub fn apply_account_first_onboarding_settings(
 pub fn apply_onboarding_settings(
     selected_settings: &SelectedSettings,
     has_account: bool,
+    window_id: WindowId,
     app: &mut AppContext,
 ) {
     let is_ai_enabled = match selected_settings {
@@ -84,7 +86,7 @@ pub fn apply_onboarding_settings(
             ui_customization,
             ..
         } => {
-            apply_agent_settings(agent_settings, app);
+            apply_agent_settings(agent_settings, window_id, app);
             if let Some(ui) = ui_customization {
                 apply_ui_customization_settings(ui, true, app);
             }
@@ -191,7 +193,11 @@ fn apply_ui_customization_settings(
     }
 }
 
-fn apply_agent_settings(agent_settings: &AgentDevelopmentSettings, app: &mut AppContext) {
+fn apply_agent_settings(
+    agent_settings: &AgentDevelopmentSettings,
+    window_id: WindowId,
+    app: &mut AppContext,
+) {
     // Apply session default mode.
     let default_mode = match agent_settings.session_default {
         SessionDefault::Agent => DefaultSessionMode::Agent,
@@ -205,8 +211,7 @@ fn apply_agent_settings(agent_settings: &AgentDevelopmentSettings, app: &mut App
         );
     });
 
-    // TODO(team-scoped-settings): thread a real window_id through once available here.
-    let workspace_autonomy_settings = UserWorkspaces::as_ref(app).ai_autonomy_settings(None);
+    let workspace_autonomy_settings = UserWorkspaces::as_ref(app).ai_autonomy_settings(window_id);
 
     AISettings::handle(app).update(app, |settings, ctx| {
         report_if_error!(

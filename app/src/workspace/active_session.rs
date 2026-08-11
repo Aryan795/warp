@@ -4,6 +4,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 
+use warp_core::SessionId;
 use warp_util::local_or_remote_path::LocalOrRemotePath;
 use warpui::{Entity, EntityId, ModelContext, SingletonEntity, WindowId};
 
@@ -47,6 +48,17 @@ impl ActiveSession {
 
     pub fn terminal_view_id(&self, window_id: WindowId) -> Option<EntityId> {
         self.window_sessions.get(&window_id)?.terminal_view_id
+    }
+
+    pub fn window_id_for_session(&self, session_id: SessionId) -> Option<WindowId> {
+        self.window_sessions.iter().find_map(|(window_id, state)| {
+            state
+                .session
+                .as_ref()
+                .and_then(Weak::upgrade)
+                .is_some_and(|session| session.id() == session_id)
+                .then_some(*window_id)
+        })
     }
 
     /// The current working directory of the active session, if it's local.

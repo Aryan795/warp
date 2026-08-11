@@ -2177,8 +2177,11 @@ impl AISettings {
 
         let contains_restored_remote_blocks = terminal_info.contains_any_restored_remote_blocks();
 
+        let Some(window_id) = terminal_info.window_id() else {
+            return false;
+        };
         let is_ai_allowed_in_remote_sessions =
-            UserWorkspaces::as_ref(app).is_ai_allowed_in_remote_sessions(terminal_info.window_id());
+            UserWorkspaces::as_ref(app).is_ai_allowed_in_remote_sessions(window_id);
 
         if is_ai_allowed_in_remote_sessions {
             return false;
@@ -2357,12 +2360,27 @@ impl AISettings {
     /// False when the user/org has disabled it, cloud conversations are off,
     /// or AI is globally off.
     pub fn is_cloud_handoff_enabled(&self, app: &warpui::AppContext) -> bool {
-        self.is_cloud_handoff_enabled_in_window(None, app)
+        if !self.is_any_ai_enabled(app) || *self.should_force_disable_cloud_handoff {
+            return false;
+        }
+        if !FeatureFlag::OzHandoff.is_enabled()
+            || !FeatureFlag::HandoffLocalCloud.is_enabled()
+            || !cfg!(all(feature = "local_fs", not(target_family = "wasm")))
+        {
+            return false;
+        }
+        if !PrivacySettings::as_ref(app).is_cloud_conversation_storage_enabled {
+            return false;
+        }
+        !matches!(
+            UserWorkspaces::as_ref(app).workspace_cloud_conversation_storage_enablement_setting(),
+            crate::workspaces::workspace::AdminEnablementSetting::Disable
+        )
     }
 
     pub fn is_cloud_handoff_enabled_in_window(
         &self,
-        window_id: Option<WindowId>,
+        window_id: WindowId,
         app: &warpui::AppContext,
     ) -> bool {
         if !self.is_any_ai_enabled(app) || *self.should_force_disable_cloud_handoff {
@@ -2488,11 +2506,7 @@ impl AISettings {
         self.is_any_ai_enabled(app)
     }
 
-    pub fn is_command_allowlist_editable(
-        &self,
-        window_id: Option<WindowId>,
-        app: &AppContext,
-    ) -> bool {
+    pub fn is_command_allowlist_editable(&self, window_id: WindowId, app: &AppContext) -> bool {
         let set_by_workspace = UserWorkspaces::as_ref(app)
             .ai_autonomy_settings(window_id)
             .has_override_for_execute_commands_allowlist();
@@ -2500,11 +2514,7 @@ impl AISettings {
         self.is_any_ai_enabled(app) && !set_by_workspace
     }
 
-    pub fn is_directory_allowlist_editable(
-        &self,
-        window_id: Option<WindowId>,
-        app: &AppContext,
-    ) -> bool {
+    pub fn is_directory_allowlist_editable(&self, window_id: WindowId, app: &AppContext) -> bool {
         let set_by_workspace = UserWorkspaces::as_ref(app)
             .ai_autonomy_settings(window_id)
             .has_override_for_read_files_allowlist();
@@ -2514,7 +2524,7 @@ impl AISettings {
 
     pub fn is_execute_commands_permissions_editable(
         &self,
-        window_id: Option<WindowId>,
+        window_id: WindowId,
         app: &AppContext,
     ) -> bool {
         let set_by_workspace = UserWorkspaces::as_ref(app)
@@ -2526,7 +2536,7 @@ impl AISettings {
 
     pub fn is_write_to_pty_permissions_editable(
         &self,
-        window_id: Option<WindowId>,
+        window_id: WindowId,
         app: &AppContext,
     ) -> bool {
         let set_by_workspace = UserWorkspaces::as_ref(app)
@@ -2537,7 +2547,7 @@ impl AISettings {
 
     pub fn is_computer_use_permissions_editable(
         &self,
-        window_id: Option<WindowId>,
+        window_id: WindowId,
         app: &AppContext,
     ) -> bool {
         let set_by_workspace = UserWorkspaces::as_ref(app)
@@ -2548,7 +2558,7 @@ impl AISettings {
 
     pub fn is_read_files_permissions_editable(
         &self,
-        window_id: Option<WindowId>,
+        window_id: WindowId,
         app: &AppContext,
     ) -> bool {
         let set_by_workspace = UserWorkspaces::as_ref(app)
@@ -2560,7 +2570,7 @@ impl AISettings {
 
     pub fn is_code_diffs_permissions_editable(
         &self,
-        window_id: Option<WindowId>,
+        window_id: WindowId,
         app: &AppContext,
     ) -> bool {
         let set_by_workspace = UserWorkspaces::as_ref(app)

@@ -271,7 +271,7 @@ pub type MaterializeHandoffTarget = Box<
 /// may update the selected environment or model. [`execute_handoff`] then
 /// consumes it, revalidates those selections, and runs the async stages.
 pub struct PendingHandoff {
-    terminal_surface_id: Option<EntityId>,
+    terminal_surface_id: EntityId,
     source_conversation: Option<AIConversation>,
     source_conversation_active: bool,
     source_paths: Vec<StandardizedPath>,
@@ -577,7 +577,7 @@ pub fn prepare_handoff(
     );
 
     Ok(PendingHandoff {
-        terminal_surface_id: Some(terminal_surface_id),
+        terminal_surface_id,
         source_conversation,
         source_conversation_active,
         source_paths,
@@ -697,14 +697,15 @@ pub fn execute_handoff(
     );
     pending.model_is_cloud_runnable = LLMPreferences::as_ref(ctx)
         .is_cloud_runnable_oz_model_id(&LLMId::from(pending.selected_model_id.as_str()));
-    let window_id = pending
-        .terminal_surface_id
-        .and_then(|view_id| ctx.window_id_for_view(view_id));
+    let window_id = ctx.window_id_for_view(pending.terminal_surface_id);
     pending.snapshot_disabled = should_disable_snapshot(window_id, ctx);
-    let validation = if AISettings::as_ref(ctx).is_cloud_handoff_enabled_in_window(window_id, ctx) {
-        pending.validate()
-    } else {
-        Err(HandoffPrepareError::HandoffDisabled)
+    let validation = match window_id {
+        Some(window_id)
+            if AISettings::as_ref(ctx).is_cloud_handoff_enabled_in_window(window_id, ctx) =>
+        {
+            pending.validate()
+        }
+        Some(_) | None => Err(HandoffPrepareError::HandoffDisabled),
     };
     if let Err(error) = validation {
         return Box::pin(async move {

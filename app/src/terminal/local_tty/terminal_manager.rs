@@ -18,7 +18,9 @@ use settings::Setting as _;
 use warp_core::SessionId;
 use warp_errors::report_error;
 use warpui::r#async::executor::Background;
-use warpui::{AppContext, Entity, ModelContext, ModelHandle, SingletonEntity, ViewHandle};
+use warpui::{
+    AppContext, Entity, ModelContext, ModelHandle, SingletonEntity, ViewHandle, WindowId,
+};
 
 use super::event_loop::EventLoop;
 use super::shell::{ShellStarter, ShellStarterSource};
@@ -203,6 +205,7 @@ impl<S> TerminalManager<S> {
         initial_size: Vector2F,
         model_event_sender: Option<SyncSender<ModelEvent>>,
         chosen_shell: Option<AvailableShell>,
+        window_id: WindowId,
         ctx: &mut AppContext,
         create_surface: impl FnOnce(
             TerminalSurfaceInit,
@@ -226,6 +229,7 @@ impl<S> TerminalManager<S> {
             chosen_shell,
             BlockSpacing::for_gui(ctx),
             SshRemoteServerSupport::Enabled,
+            window_id,
             ctx,
             create_surface,
             |manager| Box::new(manager),
@@ -245,6 +249,7 @@ impl<S> TerminalManager<S> {
         model_event_sender: Option<SyncSender<ModelEvent>>,
         chosen_shell: Option<AvailableShell>,
         block_spacing: BlockSpacing,
+        window_id: WindowId,
         ctx: &mut AppContext,
         create_surface: impl FnOnce(
             TerminalSurfaceInit,
@@ -267,6 +272,7 @@ impl<S> TerminalManager<S> {
             chosen_shell,
             block_spacing,
             SshRemoteServerSupport::Disabled,
+            window_id,
             ctx,
             create_surface,
             |manager| Box::new(TuiTerminalManager(manager)),
@@ -286,6 +292,7 @@ impl<S> TerminalManager<S> {
         chosen_shell: Option<AvailableShell>,
         block_spacing: BlockSpacing,
         ssh_remote_server_support: SshRemoteServerSupport,
+        window_id: WindowId,
         ctx: &mut AppContext,
         create_surface: impl FnOnce(
             TerminalSurfaceInit,
@@ -356,6 +363,7 @@ impl<S> TerminalManager<S> {
                     .unwrap_or(ShellName::LessDescriptive("Shell".to_owned())),
             },
             block_spacing,
+            window_id,
             ctx,
         );
         let colors = model.colors();

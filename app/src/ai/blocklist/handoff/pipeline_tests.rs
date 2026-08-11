@@ -7,7 +7,7 @@ use chrono::Local;
 use futures::channel::oneshot;
 use tempfile::NamedTempFile;
 use warp_util::standardized_path::StandardizedPath;
-use warpui::App;
+use warpui::{App, EntityId};
 
 use super::*;
 use crate::ai::agent::conversation::{AIConversation, ConversationStatus};
@@ -182,6 +182,7 @@ fn execute_revalidates_current_model_before_returning_future() {
         mock.expect_spawn_agent().times(0);
         let client: Arc<dyn AIClient> = Arc::new(mock);
         let mut pending = pending(client.clone(), None, false, "continue");
+        pending.terminal_surface_id = add_window_with_terminal(&mut app, None).id();
         pending.selected_model_id = "custom-router:local:byok".to_owned();
         pending.model_is_cloud_runnable = true;
 
@@ -203,6 +204,7 @@ fn execute_revalidates_current_environment_catalog_before_returning_future() {
         mock.expect_spawn_agent().times(0);
         let client: Arc<dyn AIClient> = Arc::new(mock);
         let mut pending = pending(client.clone(), None, false, "continue");
+        pending.terminal_surface_id = add_window_with_terminal(&mut app, None).id();
         let environment_id = SyncId::ServerId(ServerId::from(1));
         pending.selected_environment_id = Some(environment_id);
         pending.valid_environment_ids.insert(environment_id);
@@ -225,7 +227,8 @@ fn execute_revalidates_current_handoff_enablement_before_returning_future() {
         let mut mock = MockAIClient::new();
         mock.expect_spawn_agent().times(0);
         let client: Arc<dyn AIClient> = Arc::new(mock);
-        let pending = pending(client.clone(), None, false, "continue");
+        let mut pending = pending(client.clone(), None, false, "continue");
+        pending.terminal_surface_id = add_window_with_terminal(&mut app, None).id();
 
         let future = app.update(|ctx| execute_handoff(pending, client, None, None, ctx));
         let HandoffCommitOutcome::Rejected { error, .. } = future.await else {
@@ -245,7 +248,7 @@ fn pending(
     prompt: &str,
 ) -> PendingHandoff {
     PendingHandoff {
-        terminal_surface_id: None,
+        terminal_surface_id: EntityId::new(),
         source_conversation: None,
         source_conversation_active,
         source_paths: Vec::new(),

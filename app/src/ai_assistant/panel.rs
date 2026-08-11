@@ -913,7 +913,9 @@ impl AIAssistantPanelView {
                 .finish(),
             );
 
-        if AIRequestUsageModel::as_ref(app).has_any_ai_remaining(app) {
+        if self.view_handle.window_id(app).is_some_and(|window_id| {
+            AIRequestUsageModel::as_ref(app).has_any_ai_remaining(window_id, app)
+        }) {
             column.add_children([
                 Container::new(render_prepared_response_button(
                     appearance,

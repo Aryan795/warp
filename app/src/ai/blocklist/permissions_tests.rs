@@ -4,7 +4,11 @@ use uuid::Uuid;
 use warp_core::execution_mode::ExecutionMode;
 use warp_core::settings::Setting as _;
 use warp_util::path::EscapeChar;
-use warpui::{App, EntityId, ModelHandle, SingletonEntity};
+use warpui::elements::Empty;
+use warpui::platform::WindowStyle;
+use warpui::{
+    App, AppContext, Element, Entity, EntityId, ModelHandle, SingletonEntity, TypedActionView, View,
+};
 
 use super::{BlocklistAIHistoryModel, BlocklistAIPermissions};
 use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
@@ -42,6 +46,26 @@ struct PermissionsTestState {
     profile_model: ModelHandle<AIExecutionProfilesModel>,
 }
 
+struct TestTerminalSurface;
+
+impl Entity for TestTerminalSurface {
+    type Event = ();
+}
+
+impl View for TestTerminalSurface {
+    fn ui_name() -> &'static str {
+        "TestTerminalSurface"
+    }
+
+    fn render(&self, _: &AppContext) -> Box<dyn Element> {
+        Empty::new().finish()
+    }
+}
+
+impl TypedActionView for TestTerminalSurface {
+    type Action = ();
+}
+
 fn initialize_permissions_test(app: &mut App) -> PermissionsTestState {
     initialize_permissions_test_with_mode(app, ExecutionMode::App, false)
 }
@@ -68,7 +92,8 @@ fn initialize_permissions_test_with_mode(
     app.add_singleton_model(|_| ActiveAgentViewsModel::new());
     app.add_singleton_model(AgentNotificationsModel::new);
     let permissions = app.add_singleton_model(BlocklistAIPermissions::new);
-    let terminal_view_id = EntityId::new();
+    let (_, terminal_view) = app.add_window(WindowStyle::NotStealFocus, |_| TestTerminalSurface);
+    let terminal_view_id = terminal_view.id();
     app.add_singleton_model(|_| AuthStateProvider::new_for_test());
     app.add_singleton_model(SyncQueue::mock);
     app.add_singleton_model(|_| NetworkStatus::new());
@@ -531,7 +556,7 @@ fn test_can_autoexecute_command_workspace_settings_override_profile() {
                 EscapeChar::Backslash,
                 false,
                 None,
-                Some(terminal_view_id),
+                terminal_view_id,
                 ctx,
             );
             assert!(result.is_allowed());
@@ -562,7 +587,7 @@ fn test_can_autoexecute_command_workspace_settings_override_profile() {
                 EscapeChar::Backslash,
                 false,
                 None,
-                Some(terminal_view_id),
+                terminal_view_id,
                 ctx,
             );
             assert!(!result.is_allowed());
@@ -605,7 +630,7 @@ fn test_can_autoexecute_command_denylist_precedence() {
                 EscapeChar::Backslash,
                 false,
                 None,
-                Some(terminal_view_id),
+                terminal_view_id,
                 ctx,
             );
             assert!(!result.is_allowed());
@@ -638,7 +663,7 @@ fn test_can_autoexecute_command_denylist_precedence() {
                 EscapeChar::Backslash,
                 false,
                 None,
-                Some(terminal_view_id),
+                terminal_view_id,
                 ctx,
             );
             assert!(!result.is_allowed());
@@ -655,7 +680,7 @@ fn test_can_autoexecute_command_denylist_precedence() {
                 EscapeChar::Backslash,
                 false,
                 None,
-                Some(terminal_view_id),
+                terminal_view_id,
                 ctx,
             );
             assert!(
@@ -707,7 +732,7 @@ fn test_can_autoexecute_command_denylist_matches_env_prefixed_commands() {
                     EscapeChar::Backslash,
                     false,
                     None,
-                    Some(terminal_view_id),
+                    terminal_view_id,
                     ctx,
                 );
                 assert!(
@@ -729,7 +754,7 @@ fn test_can_autoexecute_command_denylist_matches_env_prefixed_commands() {
                 EscapeChar::Backslash,
                 false,
                 None,
-                Some(terminal_view_id),
+                terminal_view_id,
                 ctx,
             );
             assert!(matches!(
@@ -776,7 +801,7 @@ fn test_can_autoexecute_command_allowlist_precedence() {
                 EscapeChar::Backslash,
                 false,
                 None,
-                Some(terminal_view_id),
+                terminal_view_id,
                 ctx,
             );
             assert!(result.is_allowed());
@@ -811,7 +836,7 @@ fn test_can_autoexecute_command_allowlist_precedence() {
                 EscapeChar::Backslash,
                 false,
                 None,
-                Some(terminal_view_id),
+                terminal_view_id,
                 ctx,
             );
             assert!(!result.is_allowed());
@@ -829,7 +854,7 @@ fn test_can_autoexecute_command_allowlist_precedence() {
                 EscapeChar::Backslash,
                 false,
                 None,
-                Some(terminal_view_id),
+                terminal_view_id,
                 ctx,
             );
             assert!(result.is_allowed());
@@ -846,7 +871,7 @@ fn test_can_autoexecute_command_allowlist_precedence() {
                 EscapeChar::Backslash,
                 false,
                 None,
-                Some(terminal_view_id),
+                terminal_view_id,
                 ctx,
             );
             assert!(
@@ -907,7 +932,7 @@ fn test_can_autoexecute_command_auto_approve_bypasses_user_denylist_but_not_work
                 EscapeChar::Backslash,
                 false,
                 None,
-                Some(terminal_view_id),
+                terminal_view_id,
                 ctx,
             );
             assert!(matches!(
@@ -923,7 +948,7 @@ fn test_can_autoexecute_command_auto_approve_bypasses_user_denylist_but_not_work
                 EscapeChar::Backslash,
                 false,
                 None,
-                Some(terminal_view_id),
+                terminal_view_id,
                 ctx,
             );
             assert!(matches!(
@@ -974,7 +999,7 @@ fn test_can_autoexecute_command_auto_approve_respects_local_denylist_when_bypass
                 EscapeChar::Backslash,
                 false,
                 None,
-                Some(terminal_view_id),
+                terminal_view_id,
                 ctx,
             );
             assert!(matches!(
@@ -990,7 +1015,7 @@ fn test_can_autoexecute_command_auto_approve_respects_local_denylist_when_bypass
                 EscapeChar::Backslash,
                 false,
                 None,
-                Some(terminal_view_id),
+                terminal_view_id,
                 ctx,
             );
             assert!(matches!(
@@ -1027,7 +1052,7 @@ fn test_can_autoexecute_command_auto_approve_allows_non_denylisted() {
                 EscapeChar::Backslash,
                 true,        // read-only command
                 Some(false), // not risky
-                Some(terminal_view_id),
+                terminal_view_id,
                 ctx,
             );
             assert!(result.is_allowed());
@@ -1462,7 +1487,7 @@ fn test_sandboxed_denylist_used_in_sandboxed_mode() {
                 EscapeChar::Backslash,
                 false,
                 None,
-                Some(terminal_view_id),
+                terminal_view_id,
                 ctx,
             );
             assert!(matches!(
@@ -1479,7 +1504,7 @@ fn test_sandboxed_denylist_used_in_sandboxed_mode() {
                 EscapeChar::Backslash,
                 false,
                 None,
-                Some(terminal_view_id),
+                terminal_view_id,
                 ctx,
             );
             assert!(!result.is_allowed());
@@ -1548,11 +1573,16 @@ fn test_get_org_execute_commands_denylist() {
         let PermissionsTestState {
             permissions,
             user_workspaces,
+            terminal_view_id,
             ..
         } = initialize_permissions_test(&mut app);
 
         permissions.read(&app, |_, ctx| {
-            let org_list = BlocklistAIPermissions::get_org_execute_commands_denylist(ctx);
+            let window_id = ctx
+                .window_id_for_view(terminal_view_id)
+                .expect("test terminal must be registered");
+            let org_list =
+                BlocklistAIPermissions::get_org_execute_commands_denylist(ctx, window_id);
             assert!(org_list.is_empty());
         });
 
@@ -1569,7 +1599,11 @@ fn test_get_org_execute_commands_denylist() {
         });
 
         permissions.read(&app, |_, ctx| {
-            let org_list = BlocklistAIPermissions::get_org_execute_commands_denylist(ctx);
+            let window_id = ctx
+                .window_id_for_view(terminal_view_id)
+                .expect("test terminal must be registered");
+            let org_list =
+                BlocklistAIPermissions::get_org_execute_commands_denylist(ctx, window_id);
             assert_eq!(org_list.len(), 1);
             assert_eq!(org_list[0].to_string(), "git .*");
         });
@@ -1613,7 +1647,7 @@ fn test_empty_org_denylist_allows_user_entries() {
                 EscapeChar::Backslash,
                 false,
                 None,
-                Some(terminal_view_id),
+                terminal_view_id,
                 ctx,
             );
             assert!(
@@ -1652,7 +1686,7 @@ fn test_denylist_matches_multiline_commands() {
                 EscapeChar::Backslash,
                 false,
                 None,
-                Some(terminal_view_id),
+                terminal_view_id,
                 ctx,
             );
             assert!(!result.is_allowed());
@@ -1672,7 +1706,7 @@ fn test_denylist_matches_multiline_commands() {
                 EscapeChar::Backslash,
                 false,
                 None,
-                Some(terminal_view_id),
+                terminal_view_id,
                 ctx,
             );
             assert!(
@@ -1695,7 +1729,7 @@ fn test_denylist_matches_multiline_commands() {
                 EscapeChar::Backslash,
                 false,
                 None,
-                Some(terminal_view_id),
+                terminal_view_id,
                 ctx,
             );
             assert!(
@@ -1718,7 +1752,7 @@ fn test_denylist_matches_multiline_commands() {
                 EscapeChar::Backtick,
                 false,
                 None,
-                Some(terminal_view_id),
+                terminal_view_id,
                 ctx,
             );
             assert!(

@@ -1721,7 +1721,10 @@ impl NewWorkspaceSource {
             }
         };
 
-        UserWorkspaces::as_ref(ctx).inherited_or_default_team_uid(source_window_id)
+        let user_workspaces = UserWorkspaces::as_ref(ctx);
+        source_window_id
+            .and_then(|window_id| user_workspaces.team_uid_for_window(window_id))
+            .or_else(|| user_workspaces.default_team_uid())
     }
 }
 
@@ -2190,10 +2193,10 @@ impl RootView {
         let themes = onboarding_theme_picker_themes();
         let onboarding_view = ctx.add_typed_action_view(move |ctx| {
             let (models, default_model_id) =
-                build_onboarding_models(LLMPreferences::as_ref(ctx), ctx);
+                build_onboarding_models(LLMPreferences::as_ref(ctx), ctx.window_id(), ctx);
 
             let workspace_enforces_autonomy = UserWorkspaces::as_ref(ctx)
-                .ai_autonomy_settings(Some(ctx.window_id()))
+                .ai_autonomy_settings(ctx.window_id())
                 .has_any_overrides();
 
             let auth_state = current_onboarding_auth_state(ctx);
@@ -2233,7 +2236,7 @@ impl RootView {
             move |_, llm_preferences, event, ctx| match event {
                 LLMPreferencesEvent::UpdatedAvailableLLMs => {
                     let (models, default_model_id) =
-                        build_onboarding_models(llm_preferences.as_ref(ctx), ctx);
+                        build_onboarding_models(llm_preferences.as_ref(ctx), ctx.window_id(), ctx);
                     onboarding_view_clone.update(ctx, |onboarding_view, ctx| {
                         onboarding_view.set_onboarding_models(models, default_model_id, ctx);
                     })
@@ -2253,7 +2256,7 @@ impl RootView {
                 if matches!(event, UserWorkspacesEvent::UpdateWorkspaceSettingsSuccess) {
                     let workspace_enforces_autonomy = user_workspaces
                         .as_ref(ctx)
-                        .ai_autonomy_settings(Some(ctx.window_id()))
+                        .ai_autonomy_settings(ctx.window_id())
                         .has_any_overrides();
                     onboarding_view_for_workspaces.update(ctx, |onboarding_view, ctx| {
                         onboarding_view
@@ -2286,7 +2289,8 @@ impl RootView {
                 if !matches!(event, AIRequestUsageModelEvent::CreditAvailabilityUpdated) {
                     return;
                 }
-                let available = AIRequestUsageModel::as_ref(ctx).has_any_ai_remaining(ctx);
+                let available =
+                    AIRequestUsageModel::as_ref(ctx).has_any_ai_remaining(ctx.window_id(), ctx);
                 onboarding_view_for_usage.update(ctx, |onboarding_view, ctx| {
                     onboarding_view.on_ai_credit_availability_observed(available, ctx);
                 });
@@ -2546,7 +2550,12 @@ impl RootView {
         let settings_applied = if account_class.is_none() || cloud_ready {
             self.pending_account_first_settings_class = None;
             if let Some(selected_settings) = self.pending_post_auth_onboarding_settings.take() {
-                apply_account_first_onboarding_settings(&selected_settings, account_class, ctx);
+                apply_account_first_onboarding_settings(
+                    &selected_settings,
+                    account_class,
+                    ctx.window_id(),
+                    ctx,
+                );
             }
             true
         } else {
@@ -2617,7 +2626,7 @@ impl RootView {
                 // User opted out of login: apply locally (no cloud race).
                 // Skipping leaves the user without an account, so AI is disabled.
                 if let Some(selected_settings) = self.pending_post_auth_onboarding_settings.take() {
-                    apply_onboarding_settings(&selected_settings, false, ctx);
+                    apply_onboarding_settings(&selected_settings, false, ctx.window_id(), ctx);
                 }
                 self.auth_onboarding_state = AuthOnboardingState::Terminal(workspace);
                 ctx.emit(RootViewEvent::AuthOnboardingStateChanged);
@@ -2772,7 +2781,7 @@ impl RootView {
                     return;
                 }
 
-                apply_onboarding_settings(selected_settings, is_logged_in, ctx);
+                apply_onboarding_settings(selected_settings, is_logged_in, ctx.window_id(), ctx);
 
                 if is_logged_in {
                     AuthManager::handle(ctx)
@@ -3712,7 +3721,7 @@ impl RootView {
                         self.pending_post_auth_onboarding_settings.take()
                     {
                         // Skipped login → no account → AI disabled.
-                        apply_onboarding_settings(&selected_settings, false, ctx);
+                        apply_onboarding_settings(&selected_settings, false, ctx.window_id(), ctx);
                     }
                     self.auth_onboarding_state = AuthOnboardingState::Terminal(workspace);
                     ctx.emit(RootViewEvent::AuthOnboardingStateChanged);
@@ -3921,6 +3930,7 @@ impl RootView {
                 apply_account_first_onboarding_settings(
                     &selected_settings,
                     Some(account_class),
+                    ctx.window_id(),
                     ctx,
                 );
             }
@@ -3943,7 +3953,7 @@ impl RootView {
             return;
         };
         // Reached only after a successful login, so the user has an account.
-        apply_onboarding_settings(&selected_settings, true, ctx);
+        apply_onboarding_settings(&selected_settings, true, ctx.window_id(), ctx);
     }
 
     /// If onboarding stored a pending tutorial (because login was required first),

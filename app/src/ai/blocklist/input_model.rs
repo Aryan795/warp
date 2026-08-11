@@ -832,12 +832,16 @@ impl BlocklistAIInputModel {
                     );
                     if current_input_type != new_input_type {
                         let buffer_length = other_buffer_cloned.len();
-                        let input_buffer_text_for_telemetry = should_collect_ai_ugc_telemetry(
-                            ctx.window_id_for_view(me.terminal_surface_id),
-                            ctx,
-                            PrivacySettings::as_ref(ctx).is_telemetry_enabled,
-                        )
-                        .then_some(other_buffer_cloned);
+                        let input_buffer_text_for_telemetry = ctx
+                            .window_id_for_view(me.terminal_surface_id)
+                            .is_some_and(|window_id| {
+                                should_collect_ai_ugc_telemetry(
+                                    window_id,
+                                    ctx,
+                                    PrivacySettings::as_ref(ctx).is_telemetry_enabled,
+                                )
+                            })
+                            .then_some(other_buffer_cloned);
                         send_telemetry_from_ctx!(
                             TelemetryEvent::AgentModeChangedInputType {
                                 input: input_buffer_text_for_telemetry,

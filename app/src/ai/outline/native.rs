@@ -138,9 +138,8 @@ impl RepoOutlines {
     /// Check if outlines should be built based on if codebase context enabled OR
     /// outline codebase symbols for @ context menu settings.
     fn should_build_outlines(&self, ctx: &ModelContext<Self>) -> bool {
-        // TODO(team-scoped-settings): thread a real window_id through once available here.
         self.indexing_enabled
-            && (UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(None, ctx)
+            && (UserWorkspaces::as_ref(ctx).has_codebase_context_enabled_window(ctx)
                 || *InputSettings::as_ref(ctx)
                     .outline_codebase_symbols_for_at_context_menu
                     .value())

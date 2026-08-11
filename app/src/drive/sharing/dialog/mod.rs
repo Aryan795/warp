@@ -476,12 +476,15 @@ impl SharingDialog {
     }
 
     fn can_anyone_with_link_share(&self, app: &AppContext) -> bool {
-        UserWorkspaces::as_ref(app)
-            .is_anyone_with_link_sharing_enabled(self.self_handle.window_id(app))
+        self.self_handle.window_id(app).is_some_and(|window_id| {
+            UserWorkspaces::as_ref(app).is_anyone_with_link_sharing_enabled(window_id)
+        })
     }
 
     fn can_direct_link_share(&self, app: &AppContext) -> bool {
-        UserWorkspaces::as_ref(app).is_direct_link_sharing_enabled(self.self_handle.window_id(app))
+        self.self_handle.window_id(app).is_some_and(|window_id| {
+            UserWorkspaces::as_ref(app).is_direct_link_sharing_enabled(window_id)
+        })
     }
 
     /// The editability state of the object.

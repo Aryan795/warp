@@ -1065,7 +1065,7 @@ fn shared_model_picker_query_orders_filters_and_marks_disabled_choices() {
     with_model_picker_query_test_context(|preferences, app| {
         let all = query_model_picker_choices(
             preferences,
-            preferences.get_base_llm_choices_for_agent_mode(app),
+            preferences.get_base_llm_choices_for_agent_mode(WindowId::new(), app),
             "",
             None,
             app,
@@ -1082,7 +1082,7 @@ fn shared_model_picker_query_orders_filters_and_marks_disabled_choices() {
 
         let filtered = query_model_picker_choices(
             preferences,
-            preferences.get_base_llm_choices_for_agent_mode(app),
+            preferences.get_base_llm_choices_for_agent_mode(WindowId::new(), app),
             "gpt 5",
             None,
             app,

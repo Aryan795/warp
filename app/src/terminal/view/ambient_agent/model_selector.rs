@@ -486,7 +486,10 @@ impl ModelSelector {
 
         let mut auto_choices = Vec::new();
         let mut other_choices = Vec::new();
-        for llm in llm_preferences.get_base_llm_choices_for_agent_mode(ctx) {
+        let Some(window_id) = ctx.window_id_for_view(self.terminal_view_id) else {
+            return (Vec::new(), ModelSelectorAction::SelectModel(active_llm_id));
+        };
+        for llm in llm_preferences.get_base_llm_choices_for_agent_mode(window_id, ctx) {
             if llm_preferences.custom_llm_info_for_id(&llm.id).is_some() {
                 continue;
             }

@@ -17471,8 +17471,12 @@ impl Workspace {
                         ctx,
                     );
                 });
-
-                CodebaseIndexManager::handle(ctx).update(ctx, |manager, _ctx| {
+                let codebase_context_enabled =
+                    UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(window_id, ctx);
+                CodebaseIndexManager::handle(ctx).update(ctx, |manager, ctx| {
+                    if codebase_context_enabled {
+                        manager.start_persisted_index_restore(ctx);
+                    }
                     if let Some(working_directory) = working_directory_clone {
                         manager.handle_active_session_changed(working_directory.as_path());
                     }
@@ -23106,7 +23110,7 @@ impl Workspace {
         if !privacy_settings.is_telemetry_force_enabled()
             && matches!(
                 UserWorkspaces::as_ref(app)
-                    .get_cloud_conversation_storage_enablement_setting(Some(self.window_id)),
+                    .get_cloud_conversation_storage_enablement_setting(self.window_id),
                 AdminEnablementSetting::RespectUserSetting
             )
         {

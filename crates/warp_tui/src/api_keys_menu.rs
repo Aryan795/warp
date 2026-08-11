@@ -11,7 +11,7 @@ use warp_core::settings::ToggleableSetting as _;
 use warp_editor::model::CoreEditorModel;
 use warpui::SingletonEntity as _;
 use warpui_core::elements::tui::{TuiElement, TuiText};
-use warpui_core::{AppContext, Entity, ModelContext, ModelHandle};
+use warpui_core::{AppContext, Entity, ModelContext, ModelHandle, WindowId};
 
 use crate::grok_oauth::{TuiGrokOAuthController, TuiGrokOAuthControllerEvent};
 use crate::inline_menu::{
@@ -91,6 +91,7 @@ pub(crate) enum TuiApiKeysFooter {
 pub(crate) struct TuiApiKeysMenuEvent;
 
 pub(crate) struct TuiApiKeysMenuModel {
+    window_id: WindowId,
     input_editor: ModelHandle<CodeEditorModel>,
     suggestions_mode: ModelHandle<TuiInputSuggestionsModeModel>,
     state: TuiApiKeysMenuState,
@@ -98,6 +99,7 @@ pub(crate) struct TuiApiKeysMenuModel {
 
 impl TuiApiKeysMenuModel {
     pub(crate) fn new(
+        window_id: WindowId,
         input_editor: ModelHandle<CodeEditorModel>,
         suggestions_mode: ModelHandle<TuiInputSuggestionsModeModel>,
         ctx: &mut ModelContext<Self>,
@@ -151,6 +153,7 @@ impl TuiApiKeysMenuModel {
             },
         );
         Self {
+            window_id,
             input_editor,
             suggestions_mode,
             state: TuiApiKeysMenuState::Closed,
@@ -163,7 +166,7 @@ impl TuiApiKeysMenuModel {
             Some("Grok subscriptions aren't available in this build.")
         } else if !workspaces.is_byo_api_key_enabled(ctx) {
             Some("Grok subscriptions require BYOK access for this workspace.")
-        } else if !workspaces.are_member_byo_keys_allowed(None) {
+        } else if !workspaces.are_member_byo_keys_allowed(self.window_id) {
             Some("Your organization doesn't allow member-provided credentials.")
         } else {
             None

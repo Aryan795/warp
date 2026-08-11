@@ -32,7 +32,7 @@ pub(crate) fn get_base_model_choices<'a>(
     is_local: bool,
 ) -> impl Iterator<Item = &'a LLMInfo> {
     llm_prefs
-        .get_base_llm_choices_for_agent_mode(app)
+        .get_base_llm_choices_for_workspace(app)
         .filter(move |llm| is_local || llm_prefs.custom_llm_info_for_id(&llm.id).is_none())
 }
 
@@ -76,7 +76,7 @@ pub fn first_filtered_model_id(harness_type: &str, ctx: &AppContext) -> Option<S
         Some(Harness::Oz) | None => {
             let llm_prefs = LLMPreferences::as_ref(ctx);
             llm_prefs
-                .get_base_llm_choices_for_agent_mode(ctx)
+                .get_base_llm_choices_for_workspace(ctx)
                 .next()
                 .map(|llm| llm.id.to_string())
         }
@@ -94,8 +94,8 @@ pub fn resolve_default_host_slug(window_id: Option<WindowId>, ctx: &AppContext) 
             return Some(trimmed.to_string());
         }
     }
-    UserWorkspaces::as_ref(ctx)
-        .default_host_slug(window_id)
+    window_id
+        .and_then(|window_id| UserWorkspaces::as_ref(ctx).default_host_slug(window_id))
         .filter(|s| !s.trim().is_empty())
         .map(str::to_string)
 }

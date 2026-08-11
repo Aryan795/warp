@@ -702,7 +702,7 @@ fn test_render_list_page_with_personal_and_team_environments_shows_section_heade
                     },
                     ctx,
                 );
-                let team_uid = user_workspaces.inherited_or_default_team_uid(None);
+                let team_uid = user_workspaces.default_team_uid();
                 user_workspaces.register_window(window_id, team_uid, ctx);
             });
 

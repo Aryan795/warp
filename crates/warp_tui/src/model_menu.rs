@@ -248,14 +248,16 @@ impl TuiModelMenuModel {
             .get_active_profile_base_model(ctx, Some(self.terminal_view_id))
             .id
             .clone();
+        let Some(window_id) = ctx.window_id_for_view(self.terminal_view_id) else {
+            return;
+        };
         let choices = query_model_picker_choices(
             preferences,
-            preferences.get_base_llm_choices_for_agent_mode(ctx),
+            preferences.get_base_llm_choices_for_agent_mode(window_id, ctx),
             &query,
-            ctx.window_id_for_view(self.terminal_view_id),
+            Some(window_id),
             ctx,
         );
-        let window_id = ctx.window_id_for_view(self.terminal_view_id);
         let rows = choices
             .into_iter()
             .map(|choice| model_menu_row(choice, &profile_default_id, window_id, ctx))
@@ -274,20 +276,24 @@ impl TuiModelMenuModel {
 fn model_menu_row(
     choice: ModelPickerChoice,
     profile_default_id: &LLMId,
-    window_id: Option<warpui_core::WindowId>,
+    window_id: warpui_core::WindowId,
     app: &AppContext,
 ) -> TuiModelMenuRow {
     let uses_external_inference =
-        should_show_key_icon_for_model_in_window(&choice.llm, window_id, app)
-            || should_show_bedrock_icon_for_model_in_window(&choice.llm, window_id, app)
+        should_show_key_icon_for_model_in_window(&choice.llm, Some(window_id), app)
+            || should_show_bedrock_icon_for_model_in_window(&choice.llm, Some(window_id), app)
             || should_show_gemini_enterprise_agent_platform_icon_for_model_in_window(
                 &choice.llm,
-                window_id,
+                Some(window_id),
                 app,
             );
     TuiModelMenuRow {
         is_selectable: choice.is_selectable(),
-        is_key_connected: should_show_key_icon_for_model_in_window(&choice.llm, window_id, app),
+        is_key_connected: should_show_key_icon_for_model_in_window(
+            &choice.llm,
+            Some(window_id),
+            app,
+        ),
         discount_percentage: choice
             .llm
             .discount_percentage

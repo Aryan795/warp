@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use warpui::{AppContext, ModelContext};
+use warpui::{AppContext, ModelContext, WindowId};
 
 use crate::ai::agent::{AIAgentActionId, SearchCodebaseFailureReason, SearchCodebaseResult};
 use crate::ai::blocklist::SessionContext;
@@ -19,6 +19,7 @@ pub(super) fn root_directory_for_search(
 }
 
 pub(super) fn send_request(
+    _window_id: WindowId,
     _query: String,
     _partial_paths: Option<Vec<String>>,
     _session_context: SessionContext,

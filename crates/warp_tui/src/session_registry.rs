@@ -190,6 +190,7 @@ impl TuiSessions {
             model_event_sender,
             None,
             TRANSCRIPT_BLOCK_SPACING,
+            window_id,
             ctx,
             move |surface_init, ctx| {
                 let surface = ctx.add_typed_action_tui_view(window_id, |ctx| {

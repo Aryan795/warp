@@ -650,7 +650,7 @@ impl TypedActionView for CodeSettingsPageView {
             CodeSettingsPageAction::ToggleCodebaseContext => {
                 // If the organization has an explicit setting (on or off), ignore user toggles.
                 let setting =
-                    UserWorkspaces::as_ref(ctx).team_allows_codebase_context(Some(ctx.window_id()));
+                    UserWorkspaces::as_ref(ctx).team_allows_codebase_context(ctx.window_id());
                 match setting {
                     AdminEnablementSetting::Enable | AdminEnablementSetting::Disable => {
                         return;
@@ -709,14 +709,16 @@ impl TypedActionView for CodeSettingsPageView {
             }
             #[cfg(not(target_family = "wasm"))]
             CodeSettingsPageAction::RequestRemoteIndex(remote_path) => {
+                let window_id = ctx.window_id();
                 RemoteCodebaseIndexModel::handle(ctx).update(ctx, |model, ctx| {
-                    model.request_index(remote_path.clone(), ctx);
+                    model.request_index(window_id, remote_path.clone(), ctx);
                 });
             }
             #[cfg(not(target_family = "wasm"))]
             CodeSettingsPageAction::ManualResyncRemote(remote_path) => {
+                let window_id = ctx.window_id();
                 RemoteCodebaseIndexModel::handle(ctx).update(ctx, |model, ctx| {
-                    model.resync_index(remote_path.clone(), ctx);
+                    model.resync_index(window_id, remote_path.clone(), ctx);
                 });
             }
             #[cfg(not(target_family = "wasm"))]
@@ -1068,7 +1070,7 @@ impl SettingsWidget for CodePageWidget {
         ));
 
         let codebase_context_enabled =
-            UserWorkspaces::as_ref(app).is_codebase_context_enabled(Some(view.window_id), app);
+            UserWorkspaces::as_ref(app).is_codebase_context_enabled(view.window_id, app);
         if global_ai_enabled && codebase_context_enabled {
             content.add_children(self.render_autoindexing_rows(view.window_id, appearance, app));
         }
@@ -1108,7 +1110,7 @@ impl CodePageWidget {
     ) -> Vec<Box<dyn Element>> {
         let auto_indexing_enabled = *CodeSettings::as_ref(app).auto_indexing_enabled;
         let codebase_indexing_enabled =
-            UserWorkspaces::as_ref(app).is_codebase_context_enabled(Some(window_id), app);
+            UserWorkspaces::as_ref(app).is_codebase_context_enabled(window_id, app);
 
         let mut rows = vec![
             self.render_autoindex_row(
@@ -1265,8 +1267,7 @@ impl CodePageWidget {
     ) -> Box<dyn Element> {
         let ui_builder = appearance.ui_builder();
         let theme = appearance.theme();
-        let admin_setting =
-            UserWorkspaces::as_ref(app).team_allows_codebase_context(Some(window_id));
+        let admin_setting = UserWorkspaces::as_ref(app).team_allows_codebase_context(window_id);
 
         let label = ui_builder
             .span(CODEBASE_INDEXING_LABEL)
@@ -1281,7 +1282,7 @@ impl CodePageWidget {
 
         let switch = ui_builder
             .switch(self.switch_state.clone())
-            .check(UserWorkspaces::as_ref(app).is_codebase_context_enabled(Some(window_id), app));
+            .check(UserWorkspaces::as_ref(app).is_codebase_context_enabled(window_id, app));
 
         let disabled_tooltip_text = match admin_setting {
             AdminEnablementSetting::Enable => Some(INDEXING_WORKSPACE_ENABLED_ADMIN_TEXT),
@@ -2488,13 +2489,13 @@ impl SettingsWidget for CodebaseIndexingCategorizedWidget {
         let ui_builder = appearance.ui_builder();
         let global_ai_enabled = AISettings::as_ref(app).is_any_ai_enabled(app);
         let codebase_context_enabled =
-            UserWorkspaces::as_ref(app).is_codebase_context_enabled(Some(view.window_id), app);
+            UserWorkspaces::as_ref(app).is_codebase_context_enabled(view.window_id, app);
 
         let mut content = Flex::column();
 
         // Codebase indexing toggle using render_body_item for consistent styling
         let admin_setting =
-            UserWorkspaces::as_ref(app).team_allows_codebase_context(Some(view.window_id));
+            UserWorkspaces::as_ref(app).team_allows_codebase_context(view.window_id);
         let switch = ui_builder
             .switch(self.inner.switch_state.clone())
             .check(codebase_context_enabled);

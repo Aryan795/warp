@@ -3507,7 +3507,8 @@ impl TerminalView {
             model
         });
 
-        let get_relevant_files_controller = ctx.add_model(GetRelevantFilesController::new);
+        let get_relevant_files_controller =
+            ctx.add_model(|ctx| GetRelevantFilesController::new(terminal_view_id, ctx));
         let ai_action_model = ctx.add_model(|ctx| {
             BlocklistAIActionModel::new(
                 model.clone(),
@@ -4211,7 +4212,7 @@ impl TerminalView {
         ctx.subscribe_to_model(&AISettings::handle(ctx), |me, _, ai_settings_event, ctx| {
             if let AISettingsChangedEvent::AwsBedrockCredentialsEnabled { .. } = ai_settings_event
                 && !UserWorkspaces::as_ref(ctx)
-                    .is_aws_bedrock_credentials_enabled(Some(ctx.window_id()), ctx)
+                    .is_aws_bedrock_credentials_enabled(ctx.window_id(), ctx)
             {
                 me.remove_aws_bedrock_login_banner(ctx);
             }
@@ -10131,7 +10132,7 @@ impl TerminalView {
         };
 
         // Return early if we've run out of AI usage.
-        if !AIRequestUsageModel::as_ref(ctx).has_any_ai_remaining(ctx) {
+        if !AIRequestUsageModel::as_ref(ctx).has_any_ai_remaining(ctx.window_id(), ctx) {
             return false;
         }
 
@@ -10762,9 +10763,7 @@ impl TerminalView {
         }
 
         // Check if AWS Bedrock is available in the workspace
-        if !UserWorkspaces::as_ref(ctx)
-            .is_aws_bedrock_credentials_enabled(Some(ctx.window_id()), ctx)
-        {
+        if !UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_enabled(ctx.window_id(), ctx) {
             return;
         }
 
@@ -11224,7 +11223,9 @@ impl TerminalView {
             return false;
         };
 
-        let window_id = self.view_handle.window_id(app);
+        let Some(window_id) = self.view_handle.window_id(app) else {
+            return false;
+        };
         if UserWorkspaces::as_ref(app).is_ai_allowed_in_remote_sessions(window_id) {
             // We don't check any regexes if the user is allowed to run AI in remote sessions.
             return false;
@@ -14080,8 +14081,10 @@ impl TerminalView {
         });
 
         let terminal_view_id = self.view_id;
-        let init_model = ctx
-            .add_model(|ctx| InitProjectModel::new(pwd_path, path_env_var, terminal_view_id, ctx));
+        let window_id = ctx.window_id();
+        let init_model = ctx.add_model(|ctx| {
+            InitProjectModel::new(pwd_path, path_env_var, terminal_view_id, window_id, ctx)
+        });
         self.active_init_project_model = Some(init_model.clone());
 
         ctx.subscribe_to_model(&init_model, move |me, model, event, ctx| {
@@ -14549,12 +14552,16 @@ impl TerminalView {
         // 4) There is no in-progress AI conversation (we don't want setup to show up mid conversation flow)
         // 5) Session is not remote
         // 6) There are available steps to show
+        let Some(window_id) = ctx.window_id_for_view(self.view_id) else {
+            return false;
+        };
+
         !already_shown
             && is_any_ai_enabled
             && is_repo
             && self.active_ai_block(ctx).is_none()
             && !is_remote_session
-            && InitProjectModel::should_have_available_steps(directory, Some(self.view_id), ctx)
+            && InitProjectModel::should_have_available_steps(directory, window_id, ctx)
     }
 
     #[cfg(not(feature = "local_fs"))]
@@ -15622,7 +15629,7 @@ impl TerminalView {
                 }
 
                 let (query_string, block_command) = if should_collect_ai_ugc_telemetry(
-                    Some(ctx.window_id()),
+                    ctx.window_id(),
                     ctx,
                     PrivacySettings::as_ref(ctx).is_telemetry_enabled,
                 ) {
@@ -27477,8 +27484,8 @@ impl TypedActionView for TerminalView {
             }
             SummarizeConversation => self.summarize_conversation(ctx),
             IndexProjectSpeedbump => {
-                let codebase_context_enabled = UserWorkspaces::as_ref(ctx)
-                    .is_codebase_context_enabled(Some(ctx.window_id()), ctx);
+                let codebase_context_enabled =
+                    UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(ctx.window_id(), ctx);
 
                 if FeatureFlag::FullSourceCodeEmbedding.is_enabled() && codebase_context_enabled {
                     #[cfg(feature = "local_fs")]

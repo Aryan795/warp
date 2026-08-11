@@ -1032,7 +1032,8 @@ impl Input {
             }
             #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
             SlashCommandKind::MoveToCloud => {
-                if !AISettings::as_ref(ctx).is_cloud_handoff_enabled(ctx) {
+                if !AISettings::as_ref(ctx).is_cloud_handoff_enabled_in_window(ctx.window_id(), ctx)
+                {
                     return false;
                 }
                 if self.block_cloud_handoff_if_model_unsupported(ctx) {

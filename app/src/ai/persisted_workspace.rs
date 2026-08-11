@@ -36,7 +36,8 @@ use crate::ai::AIRequestUsageModel;
 use crate::ai::blocklist::{BlocklistAIHistoryEvent, BlocklistAIHistoryModel};
 #[cfg(feature = "local_fs")]
 use crate::ai::codebase_auto_indexing::{
-    CodebaseAutoIndexingSurface, auto_index_candidate_roots, should_auto_index_codebase,
+    CodebaseAutoIndexingSurface, auto_index_candidate_roots,
+    should_auto_index_codebase_in_any_window,
 };
 use crate::ai::metadata_project_rules::read_project_rule_contents;
 #[cfg(feature = "local_fs")]
@@ -640,9 +641,8 @@ impl PersistedWorkspace {
             if !manager.is_indexing_enabled() {
                 return;
             }
-            // TODO(team-scoped-settings): thread a real window_id through once available here.
             let codebase_context_enabled =
-                UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(None, ctx);
+                UserWorkspaces::as_ref(ctx).has_codebase_context_enabled_window(ctx);
             if codebase_context_enabled {
                 Self::enable_codebase_indexing(manager, ctx);
             } else {
@@ -665,7 +665,7 @@ impl PersistedWorkspace {
         );
 
         #[cfg(feature = "local_fs")]
-        if should_auto_index_codebase(CodebaseAutoIndexingSurface::Local, ctx) {
+        if should_auto_index_codebase_in_any_window(CodebaseAutoIndexingSurface::Local, ctx) {
             let roots = all_working_directories(ctx).into_iter().filter_map(|dir| {
                 DetectedRepositories::as_ref(ctx)
                     .get_root_for_path(&LocalOrRemotePath::Local(dir))
@@ -686,9 +686,8 @@ impl PersistedWorkspace {
                 ctx,
             );
         });
-        // TODO(team-scoped-settings): thread a real window_id through once available here.
         if FeatureFlag::FullSourceCodeEmbedding.is_enabled()
-            && UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(None, ctx)
+            && UserWorkspaces::as_ref(ctx).has_codebase_context_enabled_window(ctx)
             && *CodeSettings::as_ref(ctx).auto_indexing_enabled
         {
             CodebaseIndexManager::handle(ctx).update(ctx, |manager, ctx| {
@@ -829,7 +828,9 @@ impl PersistedWorkspace {
         terminal_view_id: warpui::EntityId,
         ctx: &mut ModelContext<Self>,
     ) {
-        let window_id = ctx.window_id_for_view(terminal_view_id);
+        let Some(window_id) = ctx.window_id_for_view(terminal_view_id) else {
+            return;
+        };
         if !UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(window_id, ctx) {
             return;
         }

@@ -2401,7 +2401,8 @@ fn test_agent_block_with_registered_singletons(
         app.add_model(|ctx| ModelEventDispatcher::new(model_events_rx, sessions.clone(), ctx));
     let active_session =
         app.add_model(|ctx| ActiveSession::new(sessions, model_events.clone(), ctx));
-    let get_relevant_files = app.add_model(|_| GetRelevantFilesController::default());
+    let get_relevant_files =
+        app.add_model(|_| GetRelevantFilesController::new_for_test(EntityId::new()));
     let action_model = app.add_model(|ctx| {
         BlocklistAIActionModel::new(
             action_terminal_model,

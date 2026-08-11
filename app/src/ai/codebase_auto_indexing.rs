@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::hash::Hash;
 
 use warp_core::features::FeatureFlag;
-use warpui::{AppContext, SingletonEntity};
+use warpui::{AppContext, SingletonEntity, WindowId};
 
 use crate::settings::CodeSettings;
 use crate::workspaces::user_workspaces::UserWorkspaces;
@@ -24,23 +24,44 @@ impl CodebaseAutoIndexingSurface {
 
 pub(crate) fn should_use_codebase_indexing(
     surface: CodebaseAutoIndexingSurface,
+    window_id: WindowId,
     ctx: &AppContext,
 ) -> bool {
-    // TODO(team-scoped-settings): thread a real window_id through once available here.
     codebase_indexing_enabled(
         surface,
-        UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(None, ctx),
+        UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(window_id, ctx),
     )
 }
 
 pub(crate) fn should_auto_index_codebase(
     surface: CodebaseAutoIndexingSurface,
+    window_id: WindowId,
     ctx: &AppContext,
 ) -> bool {
-    // TODO(team-scoped-settings): thread a real window_id through once available here.
     codebase_auto_indexing_enabled(
         surface,
-        UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(None, ctx),
+        UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(window_id, ctx),
+        *CodeSettings::as_ref(ctx).auto_indexing_enabled,
+    )
+}
+
+pub(crate) fn should_use_codebase_indexing_in_any_window(
+    surface: CodebaseAutoIndexingSurface,
+    ctx: &AppContext,
+) -> bool {
+    codebase_indexing_enabled(
+        surface,
+        UserWorkspaces::as_ref(ctx).has_codebase_context_enabled_window(ctx),
+    )
+}
+
+pub(crate) fn should_auto_index_codebase_in_any_window(
+    surface: CodebaseAutoIndexingSurface,
+    ctx: &AppContext,
+) -> bool {
+    codebase_auto_indexing_enabled(
+        surface,
+        UserWorkspaces::as_ref(ctx).has_codebase_context_enabled_window(ctx),
         *CodeSettings::as_ref(ctx).auto_indexing_enabled,
     )
 }

@@ -2338,7 +2338,7 @@ impl Input {
             .filter(|s| !s.is_empty())
             .or_else(|| {
                 UserWorkspaces::as_ref(ctx)
-                    .default_host_slug(Some(ctx.window_id()))
+                    .default_host_slug(ctx.window_id())
                     .map(str::to_string)
             });
         if let Some(slug) = &effective_host {
@@ -2386,7 +2386,7 @@ impl Input {
                 .filter(|s| !s.is_empty())
                 .or_else(|| {
                     UserWorkspaces::as_ref(ctx)
-                        .default_host_slug(Some(ctx.window_id()))
+                        .default_host_slug(ctx.window_id())
                         .map(str::to_string)
                 });
             if let Some(slug) = &effective_host {
@@ -6245,7 +6245,7 @@ impl Input {
         triggered_from: ZeroStatePromptSuggestionTriggeredFrom,
         ctx: &mut ViewContext<Self>,
     ) {
-        if !AIRequestUsageModel::as_ref(ctx).has_any_ai_remaining(ctx) {
+        if !AIRequestUsageModel::as_ref(ctx).has_any_ai_remaining(ctx.window_id(), ctx) {
             return;
         }
 
@@ -7639,7 +7639,7 @@ impl Input {
                     });
 
                 let should_collect_ugc = should_collect_ai_ugc_telemetry(
-                    Some(ctx.window_id()),
+                    ctx.window_id(),
                     ctx,
                     PrivacySettings::as_ref(ctx).is_telemetry_enabled,
                 );
@@ -9468,7 +9468,7 @@ impl Input {
         let input_buffer_text = self.buffer_text(ctx);
         let buffer_length = input_buffer_text.len();
         let input = should_collect_ai_ugc_telemetry(
-            Some(ctx.window_id()),
+            ctx.window_id(),
             ctx,
             PrivacySettings::as_ref(ctx).is_telemetry_enabled,
         )
@@ -14374,14 +14374,15 @@ impl Input {
             return;
         }
 
-        let has_any_ai = AIRequestUsageModel::as_ref(ctx).has_any_ai_remaining(ctx);
+        let window_id = ctx.window_id();
+        let has_any_ai = AIRequestUsageModel::as_ref(ctx).has_any_ai_remaining(window_id, ctx);
         if !has_any_ai {
             AIRequestUsageModel::handle(ctx).update(ctx, |model, ctx| {
                 model.enable_buy_credits_banner(ctx);
             });
         }
 
-        if PromptAlertView::does_alert_block_ai_requests(ctx) {
+        if PromptAlertView::does_alert_block_ai_requests(window_id, ctx) {
             AIRequestUsageModel::handle(ctx).update(ctx, |usage_model, ctx| {
                 // Rate limit requests to fetch the user's AI usage if triggered by enter
                 // keypress.

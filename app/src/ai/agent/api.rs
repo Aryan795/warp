@@ -315,16 +315,22 @@ impl RequestParams {
         let window_id =
             terminal_view_id.and_then(|terminal_view_id| app.window_id_for_view(terminal_view_id));
         #[cfg(not(target_family = "wasm"))]
-        let geap_binding =
-            crate::ai::geap_credentials::current_geap_policy(window_id, app).mint_binding();
+        let geap_binding = window_id.and_then(|window_id| {
+            crate::ai::geap_credentials::current_geap_policy(window_id, app).mint_binding()
+        });
         #[cfg(target_family = "wasm")]
         let geap_binding: Option<::ai::api_keys::GeapMintBinding> = None;
         let api_keys = api_key_manager.api_keys_for_request(
             is_byo_enabled,
-            user_workspaces.is_aws_bedrock_credentials_enabled(window_id, app),
+            window_id.is_some_and(|window_id| {
+                user_workspaces.is_aws_bedrock_credentials_enabled(window_id, app)
+            }),
             geap_binding,
         );
-        let is_custom_inference_enabled = user_workspaces.is_custom_inference_enabled(app);
+        let is_custom_inference_enabled = window_id.is_some_and(|window_id| {
+            user_workspaces.is_custom_inference_enabled(app)
+                && user_workspaces.are_member_byo_endpoints_allowed(window_id)
+        });
         let custom_model_providers =
             api_key_manager.custom_model_providers_for_request(is_custom_inference_enabled);
         let custom_model_routers = FeatureFlag::CustomModelRouters.is_enabled().then(|| {

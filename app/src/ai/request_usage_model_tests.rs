@@ -7,7 +7,7 @@ use chrono::Duration;
 use warp_core::features::FeatureFlag;
 use warp_core::telemetry::testing::MockTelemetryContextProvider;
 use warp_graphql::billing::{AddonCreditsOption, OveragesPricing, PricingInfo};
-use warpui::{App, ModelHandle};
+use warpui::{App, ModelHandle, WindowId};
 
 use super::*;
 use crate::ai::credit_availability::{AICreditAvailability, AICreditDenialReason, AICreditSource};
@@ -257,7 +257,7 @@ fn test_has_any_ai_remaining_true_with_remaining_requests() {
         request_usage_model.update(&mut app, |model, ctx| {
             // Some requests remaining, no bonus or overages needed.
             model.request_limit_info = RequestLimitInfo::new_for_test(10, 5);
-            assert!(model.has_any_ai_remaining(ctx));
+            assert!(model.has_any_ai_remaining(WindowId::new(), ctx));
         });
     });
 }
@@ -289,7 +289,7 @@ fn test_buy_credits_banner_shows_with_only_ambient_bonus_credits() {
             }];
 
             assert_eq!(
-                model.compute_buy_addon_credits_banner_display_state(ctx),
+                model.compute_buy_addon_credits_banner_display_state(WindowId::new(), ctx),
                 BuyCreditsBannerDisplayState::OutOfCredits,
             );
         });
@@ -320,7 +320,7 @@ fn test_buy_credits_banner_shows_for_premium_enabled_plan_out_of_credits() {
             model.bonus_grants.clear();
 
             assert_eq!(
-                model.compute_buy_addon_credits_banner_display_state(ctx),
+                model.compute_buy_addon_credits_banner_display_state(WindowId::new(), ctx),
                 BuyCreditsBannerDisplayState::OutOfCredits,
             );
         });
@@ -350,7 +350,7 @@ fn test_buy_credits_banner_hidden_when_policy_fully_disabled() {
             model.bonus_grants.clear();
 
             assert_eq!(
-                model.compute_buy_addon_credits_banner_display_state(ctx),
+                model.compute_buy_addon_credits_banner_display_state(WindowId::new(), ctx),
                 BuyCreditsBannerDisplayState::Hidden,
             );
         });
@@ -384,7 +384,7 @@ fn test_buy_credits_banner_hidden_with_non_ambient_bonus_credits() {
             }];
 
             assert_eq!(
-                model.compute_buy_addon_credits_banner_display_state(ctx),
+                model.compute_buy_addon_credits_banner_display_state(WindowId::new(), ctx),
                 BuyCreditsBannerDisplayState::Hidden,
             );
         });
@@ -418,7 +418,7 @@ fn test_buy_credits_banner_shows_when_non_ambient_bonus_credits_are_depleted() {
             }];
 
             assert_eq!(
-                model.compute_buy_addon_credits_banner_display_state(ctx),
+                model.compute_buy_addon_credits_banner_display_state(WindowId::new(), ctx),
                 BuyCreditsBannerDisplayState::OutOfCredits,
             );
         });
@@ -450,7 +450,7 @@ fn test_buy_credits_banner_hidden_when_server_reports_available() {
             );
 
             assert_eq!(
-                model.compute_buy_addon_credits_banner_display_state(ctx),
+                model.compute_buy_addon_credits_banner_display_state(WindowId::new(), ctx),
                 BuyCreditsBannerDisplayState::Hidden,
             );
         });
@@ -482,7 +482,7 @@ fn test_buy_credits_banner_shows_when_server_reports_out_of_credits() {
             );
 
             assert_eq!(
-                model.compute_buy_addon_credits_banner_display_state(ctx),
+                model.compute_buy_addon_credits_banner_display_state(WindowId::new(), ctx),
                 BuyCreditsBannerDisplayState::OutOfCredits,
             );
         });
@@ -512,7 +512,7 @@ fn test_buy_credits_banner_shows_when_server_source_is_ambient_only() {
             );
 
             assert_eq!(
-                model.compute_buy_addon_credits_banner_display_state(ctx),
+                model.compute_buy_addon_credits_banner_display_state(WindowId::new(), ctx),
                 BuyCreditsBannerDisplayState::OutOfCredits,
             );
         });
@@ -548,11 +548,11 @@ fn test_buy_credits_banner_hidden_when_out_of_credits_refined_by_local_byo() {
             );
 
             assert!(
-                model.has_any_ai_remaining(ctx),
+                model.has_any_ai_remaining(WindowId::new(), ctx),
                 "local BYO should refine OutOfCredits into available AI"
             );
             assert_eq!(
-                model.compute_buy_addon_credits_banner_display_state(ctx),
+                model.compute_buy_addon_credits_banner_display_state(WindowId::new(), ctx),
                 BuyCreditsBannerDisplayState::Hidden,
             );
         });
@@ -589,7 +589,7 @@ fn test_buy_credits_banner_respects_monthly_limit_under_server_out_of_credits() 
             );
 
             assert_eq!(
-                model.compute_buy_addon_credits_banner_display_state(ctx),
+                model.compute_buy_addon_credits_banner_display_state(WindowId::new(), ctx),
                 BuyCreditsBannerDisplayState::MonthlyLimitReached,
             );
         });
@@ -643,7 +643,7 @@ fn test_has_any_ai_remaining_false_when_no_requests_or_bonus() {
         request_usage_model.update(&mut app, |model, ctx| {
             // At limit, no bonus credits and no overages.
             model.request_limit_info = RequestLimitInfo::new_for_test(10, 10);
-            assert!(!model.has_any_ai_remaining(ctx));
+            assert!(!model.has_any_ai_remaining(WindowId::new(), ctx));
         });
     });
 }
@@ -672,7 +672,7 @@ fn test_has_any_ai_remaining_true_with_user_bonus_credits() {
             }];
 
             assert!(
-                model.has_any_ai_remaining(ctx),
+                model.has_any_ai_remaining(WindowId::new(), ctx),
                 "expected has_any_ai_remaining to be true when user bonus credits exist",
             );
         });
@@ -704,7 +704,7 @@ fn test_has_any_ai_remaining_true_with_workspace_overages() {
             model.bonus_grants.clear();
 
             assert!(
-                model.has_any_ai_remaining(ctx),
+                model.has_any_ai_remaining(WindowId::new(), ctx),
                 "expected overages to count as remaining AI when standard requests are exhausted",
             );
         });
@@ -736,7 +736,7 @@ fn test_has_any_ai_remaining_true_with_workspace_bonus_credits() {
             }];
 
             assert!(
-                model.has_any_ai_remaining(ctx),
+                model.has_any_ai_remaining(WindowId::new(), ctx),
                 "expected has_any_ai_remaining to be true when workspace bonus credits exist",
             );
         });
@@ -799,7 +799,7 @@ fn test_has_any_ai_remaining_true_with_payg_enabled() {
             model.bonus_grants.clear();
 
             assert!(
-                model.has_any_ai_remaining(ctx),
+                model.has_any_ai_remaining(WindowId::new(), ctx),
                 "expected has_any_ai_remaining to be true when pay-as-you-go is enabled",
             );
         });
@@ -827,7 +827,7 @@ fn test_has_any_ai_remaining_true_with_enterprise_auto_reload() {
             model.bonus_grants.clear();
 
             assert!(
-                model.has_any_ai_remaining(ctx),
+                model.has_any_ai_remaining(WindowId::new(), ctx),
                 "expected has_any_ai_remaining to be true when enterprise auto-reload is enabled",
             );
         });
@@ -852,7 +852,7 @@ fn test_has_any_ai_remaining_false_with_enterprise_auto_reload_policy_on_non_ent
             model.bonus_grants.clear();
 
             assert!(
-                !model.has_any_ai_remaining(ctx),
+                !model.has_any_ai_remaining(WindowId::new(), ctx),
                 "expected has_any_ai_remaining to be false when enterprise auto-reload policy is enabled for a non-enterprise workspace",
             );
         });
@@ -878,7 +878,7 @@ fn test_has_any_ai_remaining_true_with_self_serve_auto_reload() {
             model.bonus_grants.clear();
 
             assert!(
-                model.has_any_ai_remaining(ctx),
+                model.has_any_ai_remaining(WindowId::new(), ctx),
                 "expected has_any_ai_remaining to be true when self-serve auto-reload is enabled",
             );
         });
@@ -904,7 +904,7 @@ fn test_has_any_ai_remaining_true_with_premium_auto_reload() {
             model.bonus_grants.clear();
 
             assert!(
-                model.has_any_ai_remaining(ctx),
+                model.has_any_ai_remaining(WindowId::new(), ctx),
                 "expected has_any_ai_remaining to be true when premium-plan auto-reload is enabled",
             );
         });
@@ -937,7 +937,7 @@ fn test_has_any_ai_remaining_false_when_premium_auto_reload_would_exceed_limit()
             model.bonus_grants.clear();
 
             assert!(
-                !model.has_any_ai_remaining(ctx),
+                !model.has_any_ai_remaining(WindowId::new(), ctx),
                 "expected has_any_ai_remaining to be false when the premium-priced reload would exceed the monthly spend limit",
             );
         });
@@ -965,7 +965,7 @@ fn test_has_any_ai_remaining_true_with_self_serve_auto_reload_and_billing_v2_dis
             model.bonus_grants.clear();
 
             assert!(
-                model.has_any_ai_remaining(ctx),
+                model.has_any_ai_remaining(WindowId::new(), ctx),
                 "expected has_any_ai_remaining to be true when self-serve auto-reload is enabled without Billing and Usage V2",
             );
         });
@@ -996,7 +996,7 @@ fn test_has_any_ai_remaining_false_with_add_on_credits_policy_when_purchase_woul
             model.bonus_grants.clear();
 
             assert!(
-                !model.has_any_ai_remaining(ctx),
+                !model.has_any_ai_remaining(WindowId::new(), ctx),
                 "expected has_any_ai_remaining to be false when add-on credit purchase would exceed the monthly spend limit",
             );
         });
@@ -1018,7 +1018,7 @@ fn test_has_any_ai_remaining_false_with_workspace_no_pricing_no_overages_no_cred
             model.bonus_grants.clear();
 
             assert!(
-                !model.has_any_ai_remaining(ctx),
+                !model.has_any_ai_remaining(WindowId::new(), ctx),
                 "expected has_any_ai_remaining to be false with no pricing, no overages, no credits",
             );
         });
@@ -1049,7 +1049,7 @@ fn test_has_any_ai_remaining_false_both_payg_and_autoreload_disabled() {
             model.bonus_grants.clear();
 
             assert!(
-                !model.has_any_ai_remaining(ctx),
+                !model.has_any_ai_remaining(WindowId::new(), ctx),
                 "expected has_any_ai_remaining to be false with policies but payg and auto-reload disabled",
             );
         });
@@ -1077,7 +1077,7 @@ fn test_has_any_ai_remaining_true_with_byok_enabled_and_key_provided() {
             model.bonus_grants.clear();
 
             assert!(
-                model.has_any_ai_remaining(ctx),
+                model.has_any_ai_remaining(WindowId::new(), ctx),
                 "expected has_any_ai_remaining to be true when BYOK is enabled and a key is provided",
             );
         });
@@ -1101,7 +1101,7 @@ fn test_has_any_ai_remaining_false_with_byok_enabled_but_no_key() {
             model.bonus_grants.clear();
 
             assert!(
-                !model.has_any_ai_remaining(ctx),
+                !model.has_any_ai_remaining(WindowId::new(), ctx),
                 "expected has_any_ai_remaining to be false when BYOK is enabled but no key is provided",
             );
         });
@@ -1137,7 +1137,7 @@ fn test_has_any_ai_remaining_true_with_grok_subscription_connected() {
             model.bonus_grants.clear();
 
             assert!(
-                model.has_any_ai_remaining(ctx),
+                model.has_any_ai_remaining(WindowId::new(), ctx),
                 "expected has_any_ai_remaining to be true when a Grok subscription is connected and BYO is enabled",
             );
         });
@@ -1169,7 +1169,7 @@ fn test_has_any_ai_remaining_false_with_grok_subscription_but_byo_disabled() {
             model.bonus_grants.clear();
 
             assert!(
-                !model.has_any_ai_remaining(ctx),
+                !model.has_any_ai_remaining(WindowId::new(), ctx),
                 "expected has_any_ai_remaining to be false when a Grok subscription is connected but BYO is disabled",
             );
         });
@@ -1195,7 +1195,7 @@ fn test_has_any_ai_remaining_true_with_byo_key_and_no_workspace() {
             model.bonus_grants.clear();
 
             assert!(
-                model.has_any_ai_remaining(ctx),
+                model.has_any_ai_remaining(WindowId::new(), ctx),
                 "expected has_any_ai_remaining to be true when user has a BYO key but no workspace",
             );
         });
@@ -1226,7 +1226,7 @@ fn test_byo_api_key_disabled_for_anonymous_firebase_user() {
             model.bonus_grants.clear();
 
             assert!(
-                !model.has_any_ai_remaining(ctx),
+                !model.has_any_ai_remaining(WindowId::new(), ctx),
                 "expected has_any_ai_remaining to be false for anonymous Firebase user even with BYO key and SoloUserByok enabled",
             );
         });
@@ -1257,7 +1257,7 @@ fn test_has_any_ai_remaining_false_with_only_ambient_bonus_credits() {
             }];
 
             assert!(
-                !model.has_any_ai_remaining(ctx),
+                !model.has_any_ai_remaining(WindowId::new(), ctx),
                 "expected has_any_ai_remaining to be false when only ambient-only bonus credits exist",
             );
         });
@@ -1273,7 +1273,7 @@ fn test_server_availability_overrides_locally_derived_state() {
         request_usage_model.update(&mut app, |model, ctx| {
             // Local state says AI is available.
             model.request_limit_info = RequestLimitInfo::new_for_test(10, 5);
-            assert!(model.has_any_ai_remaining(ctx));
+            assert!(model.has_any_ai_remaining(WindowId::new(), ctx));
 
             // The server-authoritative decision wins over local state.
             model.apply_server_availability(
@@ -1282,7 +1282,7 @@ fn test_server_availability_overrides_locally_derived_state() {
                 )),
                 ctx,
             );
-            assert!(!model.has_any_ai_remaining(ctx));
+            assert!(!model.has_any_ai_remaining(WindowId::new(), ctx));
 
             // And in the other direction: local state is exhausted, but the
             // server reports a usable fallback source.
@@ -1293,7 +1293,7 @@ fn test_server_availability_overrides_locally_derived_state() {
                 ))),
                 ctx,
             );
-            assert!(model.has_any_ai_remaining(ctx));
+            assert!(model.has_any_ai_remaining(WindowId::new(), ctx));
         });
     });
 }
@@ -1317,7 +1317,7 @@ fn test_availability_refresh_failure_keeps_last_known_good() {
             // recorded but neither flips availability nor re-enables the
             // pre-server-decision fallback.
             assert_eq!(model.server_availability(), Some(denied));
-            assert!(!model.has_any_ai_remaining(ctx));
+            assert!(!model.has_any_ai_remaining(WindowId::new(), ctx));
             assert_eq!(
                 model.server_availability.last_error.as_deref(),
                 Some("transient failure")
@@ -1339,7 +1339,7 @@ fn test_availability_refresh_failure_before_first_success_uses_prefetch_fallback
             // Without any successful fetch (e.g. server doesn't support the
             // field yet), the pre-server-decision fallback still applies.
             assert_eq!(model.server_availability(), None);
-            assert!(model.has_any_ai_remaining(ctx));
+            assert!(model.has_any_ai_remaining(WindowId::new(), ctx));
         });
     });
 }
@@ -1358,13 +1358,13 @@ fn test_reset_server_availability_restores_prefetch_fallback() {
                 )),
                 ctx,
             );
-            assert!(!model.has_any_ai_remaining(ctx));
+            assert!(!model.has_any_ai_remaining(WindowId::new(), ctx));
 
             // On logout the server decision is cleared and the pre-server-decision
             // fallback is restored for the next principal.
             model.reset_server_availability(ctx);
             assert_eq!(model.server_availability(), None);
-            assert!(model.has_any_ai_remaining(ctx));
+            assert!(model.has_any_ai_remaining(WindowId::new(), ctx));
         });
     });
 }
@@ -1390,7 +1390,7 @@ fn test_out_of_credits_refined_by_local_byo_key() {
                 ctx,
             );
             assert!(
-                !model.has_any_ai_remaining(ctx),
+                !model.has_any_ai_remaining(WindowId::new(), ctx),
                 "out of credits without a stored key should gate AI",
             );
         });
@@ -1401,7 +1401,7 @@ fn test_out_of_credits_refined_by_local_byo_key() {
         });
         request_usage_model.read(&app, |model, ctx| {
             assert!(
-                model.has_any_ai_remaining(ctx),
+                model.has_any_ai_remaining(WindowId::new(), ctx),
                 "out of credits with a stored key should permit AI",
             );
         });
@@ -1434,7 +1434,7 @@ fn test_out_of_credits_refined_by_local_bedrock_credentials() {
                 )),
                 ctx,
             );
-            assert!(!model.has_any_ai_remaining(ctx));
+            assert!(!model.has_any_ai_remaining(WindowId::new(), ctx));
         });
 
         ApiKeyManager::handle(&app).update(&mut app, |manager, ctx| {
@@ -1452,7 +1452,7 @@ fn test_out_of_credits_refined_by_local_bedrock_credentials() {
             );
         });
         request_usage_model.read(&app, |model, ctx| {
-            assert!(model.has_any_ai_remaining(ctx));
+            assert!(model.has_any_ai_remaining(WindowId::new(), ctx));
         });
     });
 }
@@ -1472,7 +1472,7 @@ fn test_server_managed_availability_trusted_without_local_keys() {
                 Ok(AICreditAvailability::available_with_source(None)),
                 ctx,
             );
-            assert!(model.has_any_ai_remaining(ctx));
+            assert!(model.has_any_ai_remaining(WindowId::new(), ctx));
         });
     });
 }
@@ -1499,7 +1499,7 @@ fn test_server_unavailable_overrides_local_byo_key() {
                 )),
                 ctx,
             );
-            assert!(!model.has_any_ai_remaining(ctx));
+            assert!(!model.has_any_ai_remaining(WindowId::new(), ctx));
         });
     });
 }

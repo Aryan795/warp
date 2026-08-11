@@ -4,7 +4,11 @@ use std::time::{Duration, SystemTime};
 use ai::api_keys::ApiKeyManager;
 use settings::{PrivatePreferences, PublicPreferences};
 use warp_managed_secrets::ManagedSecretManager;
-use warpui::{AddSingletonModel, App};
+use warpui::elements::Empty;
+use warpui::platform::WindowStyle;
+use warpui::{
+    AddSingletonModel, App, AppContext, Element, Entity, TypedActionView, View, WindowId,
+};
 use warpui_extras::user_preferences;
 
 use super::*;
@@ -18,6 +22,26 @@ use crate::workspaces::workspace::{HostEnablementSetting, LlmHostSettings, Works
 
 const TEST_AUDIENCE: &str = "//iam.googleapis.com/projects/123456/locations/global/workloadIdentityPools/warp-pool/providers/warp-provider";
 const TEST_SA_EMAIL: &str = "warp-geap@test-project.iam.gserviceaccount.com";
+
+struct TestRootView;
+
+impl Entity for TestRootView {
+    type Event = ();
+}
+
+impl View for TestRootView {
+    fn ui_name() -> &'static str {
+        "TestRootView"
+    }
+
+    fn render(&self, _: &AppContext) -> Box<dyn Element> {
+        Empty::new().finish()
+    }
+}
+
+impl TypedActionView for TestRootView {
+    type Action = ();
+}
 
 #[test]
 fn mint_binding_from_parts_trims_and_normalizes() {
@@ -254,10 +278,18 @@ fn stale_binding() -> GeapMintBinding {
 /// The mintable binding for the harness gate. The harness enables the GEAP
 /// host with a configured audience, so the policy is always `Mintable`.
 fn current_binding(ctx: &mut ModelContext<ApiKeyManager>) -> GeapMintBinding {
-    match current_geap_policy(None, ctx) {
+    match current_geap_policy_for_scope(GeapPolicyScope::Workspace, ctx) {
         GeapPolicy::Mintable(binding) => binding,
         other => panic!("expected a mintable GEAP policy, got {other:?}"),
     }
+}
+
+fn test_window(app: &mut App) -> WindowId {
+    let (window_id, _) = app.add_window(WindowStyle::NotStealFocus, |_| TestRootView);
+    UserWorkspaces::handle(app).update(app, |workspaces, ctx| {
+        workspaces.register_window(window_id, None, ctx);
+    });
+    window_id
 }
 
 #[test]
@@ -436,7 +468,7 @@ fn mint_completion_discards_stale_binding_result_and_remints() {
                 Ok(fresh_credentials()),
                 stale_binding(),
                 false,
-                None,
+                GeapPolicyScope::Workspace,
                 ctx,
             );
             match manager.geap_credentials_state() {
@@ -472,7 +504,7 @@ fn mint_completion_failure_restores_servable_previous() {
                 }),
                 current.clone(),
                 false,
-                None,
+                GeapPolicyScope::Workspace,
                 ctx,
             );
             match manager.geap_credentials_state() {
@@ -509,7 +541,7 @@ fn mint_failure_starts_the_cooldown_that_suppresses_the_blocking_wait() {
                 }),
                 current.clone(),
                 false,
-                None,
+                GeapPolicyScope::Workspace,
                 ctx,
             );
             // Restoring the previous token leaves an expired credential in
@@ -551,7 +583,7 @@ fn mint_completion_failure_with_unservable_previous_fails() {
                 }),
                 current,
                 false,
-                None,
+                GeapPolicyScope::Workspace,
                 ctx,
             );
             match manager.geap_credentials_state() {
@@ -572,6 +604,7 @@ fn safety_net_noops_on_fresh_token_and_rearms_parked_chain() {
     App::test((), |mut app| async move {
         let _geap_flag = FeatureFlag::GeminiEnterprise.override_enabled(true);
         initialize_app(&mut app, vec![workspace]);
+        let window_id = test_window(&mut app);
         ApiKeyManager::handle(&app).update(&mut app, |manager, ctx| {
             let fresh = GeapCredentialsState::Loaded {
                 credentials: fresh_credentials(),
@@ -580,7 +613,7 @@ fn safety_net_noops_on_fresh_token_and_rearms_parked_chain() {
             };
             // Fresh token: the safety net must not touch anything.
             manager.set_geap_credentials_state(fresh.clone(), ctx);
-            refresh_geap_credentials_if_needed(manager, None, ctx);
+            refresh_geap_credentials_if_needed(manager, window_id, ctx);
             assert_eq!(*manager.geap_credentials_state(), fresh);
 
             // Parked chain (an earlier mint failed with nothing to keep):
@@ -594,7 +627,7 @@ fn safety_net_noops_on_fresh_token_and_rearms_parked_chain() {
                 },
                 ctx,
             );
-            refresh_geap_credentials_if_needed(manager, None, ctx);
+            refresh_geap_credentials_if_needed(manager, window_id, ctx);
             match manager.geap_credentials_state() {
                 GeapCredentialsState::Refreshing { .. } => {}
                 other => panic!("expected the safety net to arm a refresh, got {other:?}"),
@@ -609,10 +642,11 @@ fn safety_net_is_a_pure_noop_when_gate_is_off() {
     App::test((), |mut app| async move {
         let _geap_flag = FeatureFlag::GeminiEnterprise.override_enabled(true);
         initialize_app(&mut app, vec![workspace]);
+        let window_id = test_window(&mut app);
         ApiKeyManager::handle(&app).update(&mut app, |manager, ctx| {
             // The request path must not mutate state when the gate is off;
             // state transitions belong to the event-driven triggers.
-            refresh_geap_credentials_if_needed(manager, None, ctx);
+            refresh_geap_credentials_if_needed(manager, window_id, ctx);
             assert_eq!(
                 *manager.geap_credentials_state(),
                 GeapCredentialsState::Missing

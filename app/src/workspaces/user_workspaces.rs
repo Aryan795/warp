@@ -264,7 +264,7 @@ impl UserWorkspaces {
     }
 
     pub fn admin_billing_link_for_default_team(&self, user_email: &str) -> Option<String> {
-        let team_uid = self.inherited_or_default_team_uid(None)?;
+        let team_uid = self.default_team_uid()?;
         self.team_from_uid(team_uid)
             .filter(|team| team.has_admin_permissions(user_email))
             .map(|_| Self::admin_billing_link_for_team(team_uid))
@@ -288,17 +288,10 @@ impl UserWorkspaces {
         }
         ctx.notify();
     }
-    pub fn inherited_or_default_team_uid(
-        &self,
-        source_window_id: Option<WindowId>,
-    ) -> Option<ServerId> {
-        source_window_id
-            .and_then(|source_window_id| self.team_uid_for_window(source_window_id))
-            .or_else(|| {
-                self.current_workspace()
-                    .and_then(|workspace| workspace.teams.first())
-                    .map(|team| team.uid)
-            })
+    pub fn default_team_uid(&self) -> Option<ServerId> {
+        self.current_workspace()
+            .and_then(|workspace| workspace.teams.first())
+            .map(|team| team.uid)
     }
 
     pub fn set_team_for_window(
@@ -346,19 +339,17 @@ impl UserWorkspaces {
     }
 
     /// Returns the window's bound team's real [`Team::settings`], when
-    /// [`FeatureFlag::TeamScopedSettings`] is enabled and the window has a team bound
-    /// (`window_id` given and known to [`Self::team_for_window`]). Returns `None` in every
-    /// other case (no window, no bound team, or the flag disabled) -- callers fall back to
-    /// reading the current workspace's own settings fields directly in that case, exactly as
-    /// they did before per-team settings existed, so the common (currently: universal)
-    /// no-team case pays no allocation cost here.
-    pub fn team_settings_for_window(&self, window_id: Option<WindowId>) -> Option<&TeamSettings> {
+    /// [`FeatureFlag::TeamScopedSettings`] is enabled and the window has a team bound.
+    pub fn team_settings_for_window(&self, window_id: WindowId) -> Option<&TeamSettings> {
         if !FeatureFlag::TeamScopedSettings.is_enabled() {
             return None;
         }
-        window_id
-            .and_then(|window_id| self.team_for_window(window_id))
-            .map(|team| &team.settings)
+        self.team_for_window(window_id).map(|team| &team.settings)
+    }
+
+    pub fn has_codebase_context_enabled_window(&self, app: &AppContext) -> bool {
+        app.window_ids()
+            .any(|window_id| self.is_codebase_context_enabled(window_id, app))
     }
 
     /// Returns the windows whose team assignment changed.
@@ -642,6 +633,49 @@ impl UserWorkspaces {
         })
     }
 
+    pub fn is_aws_bedrock_credentials_enabled_from_workspace(&self, app: &AppContext) -> bool {
+        let Some(host) = self.current_workspace().and_then(|workspace| {
+            workspace
+                .settings
+                .llm_settings
+                .host_configs
+                .get(&LLMModelHost::AwsBedrock)
+        }) else {
+            return false;
+        };
+        if !self.is_aws_bedrock_available_from_workspace() {
+            return false;
+        }
+        match host.enablement_setting {
+            HostEnablementSetting::Enforce => true,
+            HostEnablementSetting::RespectUserSetting => *AISettings::as_ref(app)
+                .aws_bedrock_credentials_enabled
+                .value(),
+        }
+    }
+
+    pub fn are_workspace_gemini_enterprise_credentials_enabled(&self, app: &AppContext) -> bool {
+        if !FeatureFlag::GeminiEnterprise.is_enabled()
+            || AuthStateProvider::as_ref(app)
+                .get()
+                .is_anonymous_or_logged_out()
+            || !self.is_gemini_enterprise_available_from_workspace()
+        {
+            return false;
+        }
+
+        match self
+            .workspace_gemini_enterprise_host_settings()
+            .map(|settings| settings.enablement_setting.clone())
+            .unwrap_or_default()
+        {
+            HostEnablementSetting::Enforce => true,
+            HostEnablementSetting::RespectUserSetting => *AISettings::as_ref(app)
+                .gemini_enterprise_credentials_enabled
+                .value(),
+        }
+    }
+
     pub fn ai_allowed_for_team(team: Option<&Team>) -> bool {
         !team.is_some_and(|team| team.billing_metadata.customer_type == CustomerType::Enterprise)
             || team.is_some_and(|team| team.billing_metadata.is_warp_plan())
@@ -741,7 +775,7 @@ impl UserWorkspaces {
     /// to use their own provider API keys. Users with no workspace, or
     /// workspaces without the managed BYOK/BYOE policy, have no team-level
     /// restriction, so this returns true and the normal BYO entitlement applies.
-    pub fn are_member_byo_keys_allowed(&self, window_id: Option<WindowId>) -> bool {
+    pub fn are_member_byo_keys_allowed(&self, window_id: WindowId) -> bool {
         let Some(workspace) = self.current_workspace() else {
             return true;
         };
@@ -753,6 +787,20 @@ impl UserWorkspaces {
             None => workspace.settings.team_byo.as_ref(),
         };
         team_byo.is_some_and(|team_byo| team_byo.first_party_enabled && team_byo.allow_user_keys)
+    }
+
+    pub fn are_workspace_member_byo_keys_allowed(&self) -> bool {
+        let Some(workspace) = self.current_workspace() else {
+            return true;
+        };
+        if !workspace.billing_metadata.is_managed_byok_byoe_enabled() {
+            return true;
+        }
+        workspace
+            .settings
+            .team_byo
+            .as_ref()
+            .is_some_and(|team_byo| team_byo.first_party_enabled && team_byo.allow_user_keys)
     }
     /// Whether custom inference endpoints are enabled for the current user.
     /// Anonymous or logged-out users are not allowed to use custom inference.
@@ -774,7 +822,7 @@ impl UserWorkspaces {
     /// to use their own custom endpoints. Users with no workspace, or
     /// workspaces without the managed BYOK/BYOE policy, have no team-level
     /// restriction, so this returns true and the normal BYO entitlement applies.
-    pub fn are_member_byo_endpoints_allowed(&self, window_id: Option<WindowId>) -> bool {
+    pub fn are_member_byo_endpoints_allowed(&self, window_id: WindowId) -> bool {
         let Some(workspace) = self.current_workspace() else {
             return true;
         };
@@ -788,9 +836,23 @@ impl UserWorkspaces {
         team_byo.is_some_and(|team_byo| team_byo.endpoints_enabled && team_byo.allow_user_endpoints)
     }
 
+    pub fn are_workspace_member_byo_endpoints_allowed(&self) -> bool {
+        let Some(workspace) = self.current_workspace() else {
+            return true;
+        };
+        if !workspace.billing_metadata.is_managed_byok_byoe_enabled() {
+            return true;
+        }
+        workspace
+            .settings
+            .team_byo
+            .as_ref()
+            .is_some_and(|team_byo| team_byo.endpoints_enabled && team_byo.allow_user_endpoints)
+    }
+
     pub fn aws_bedrock_host_settings(
         &self,
-        window_id: Option<WindowId>,
+        window_id: WindowId,
     ) -> Option<&super::workspace::LlmHostSettings> {
         match self.team_settings_for_window(window_id) {
             Some(team_settings) => team_settings
@@ -807,7 +869,7 @@ impl UserWorkspaces {
     }
 
     /// Did the admin enable AWS Bedrock for the given window's effective settings?
-    pub fn is_aws_bedrock_available_from_workspace(&self, window_id: Option<WindowId>) -> bool {
+    pub fn is_aws_bedrock_available(&self, window_id: WindowId) -> bool {
         let llm_enabled = match self.team_settings_for_window(window_id) {
             Some(team_settings) => team_settings.llm_settings.enabled,
             None => self
@@ -819,16 +881,52 @@ impl UserWorkspaces {
                 .aws_bedrock_host_settings(window_id)
                 .is_some_and(|host| host.enabled)
     }
+
+    pub fn is_aws_bedrock_available_from_workspace(&self) -> bool {
+        self.current_workspace().is_some_and(|workspace| {
+            workspace.settings.llm_settings.enabled
+                && workspace
+                    .settings
+                    .llm_settings
+                    .host_configs
+                    .get(&LLMModelHost::AwsBedrock)
+                    .is_some_and(|host| host.enabled)
+        })
+    }
+
+    pub fn workspace_gemini_enterprise_host_settings(
+        &self,
+    ) -> Option<&super::workspace::LlmHostSettings> {
+        self.current_workspace()?
+            .settings
+            .llm_settings
+            .host_configs
+            .get(&LLMModelHost::GeminiEnterprise)
+    }
     pub fn aws_bedrock_host_enablement_setting(
         &self,
-        window_id: Option<WindowId>,
+        window_id: WindowId,
     ) -> HostEnablementSetting {
         self.aws_bedrock_host_settings(window_id)
             .map(|settings| settings.enablement_setting.clone())
             .unwrap_or_default()
     }
 
-    pub fn is_aws_bedrock_credentials_toggleable(&self, window_id: Option<WindowId>) -> bool {
+    pub fn workspace_cloud_conversation_storage_enablement_setting(
+        &self,
+    ) -> AdminEnablementSetting {
+        self.current_workspace()
+            .map(|workspace| {
+                workspace
+                    .settings
+                    .cloud_conversation_storage_settings
+                    .setting
+                    .clone()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn is_aws_bedrock_credentials_toggleable(&self, window_id: WindowId) -> bool {
         matches!(
             self.aws_bedrock_host_enablement_setting(window_id),
             HostEnablementSetting::RespectUserSetting
@@ -837,11 +935,11 @@ impl UserWorkspaces {
 
     pub fn is_aws_bedrock_credentials_enabled(
         &self,
-        window_id: Option<WindowId>,
+        window_id: WindowId,
         app: &AppContext,
     ) -> bool {
         // i.e. did the admin go and toggle on aws bedrock in the admin panel?
-        if !self.is_aws_bedrock_available_from_workspace(window_id) {
+        if !self.is_aws_bedrock_available(window_id) {
             return false;
         }
 
@@ -855,7 +953,7 @@ impl UserWorkspaces {
 
     pub fn gemini_enterprise_host_settings(
         &self,
-        window_id: Option<WindowId>,
+        window_id: WindowId,
     ) -> Option<&super::workspace::LlmHostSettings> {
         match self.team_settings_for_window(window_id) {
             Some(team_settings) => team_settings
@@ -872,10 +970,7 @@ impl UserWorkspaces {
     }
 
     /// Did the admin enable Gemini Enterprise (GEAP) for the given window's effective settings?
-    pub fn is_gemini_enterprise_available_from_workspace(
-        &self,
-        window_id: Option<WindowId>,
-    ) -> bool {
+    pub fn is_gemini_enterprise_available(&self, window_id: WindowId) -> bool {
         let llm_enabled = match self.team_settings_for_window(window_id) {
             Some(team_settings) => team_settings.llm_settings.enabled,
             None => self
@@ -888,16 +983,28 @@ impl UserWorkspaces {
                 .is_some_and(|host| host.enabled)
     }
 
+    pub fn is_gemini_enterprise_available_from_workspace(&self) -> bool {
+        self.current_workspace().is_some_and(|workspace| {
+            workspace.settings.llm_settings.enabled
+                && workspace
+                    .settings
+                    .llm_settings
+                    .host_configs
+                    .get(&LLMModelHost::GeminiEnterprise)
+                    .is_some_and(|host| host.enabled)
+        })
+    }
+
     pub fn gemini_enterprise_host_enablement_setting(
         &self,
-        window_id: Option<WindowId>,
+        window_id: WindowId,
     ) -> HostEnablementSetting {
         self.gemini_enterprise_host_settings(window_id)
             .map(|settings| settings.enablement_setting.clone())
             .unwrap_or_default()
     }
 
-    pub fn is_gemini_enterprise_credentials_toggleable(&self, window_id: Option<WindowId>) -> bool {
+    pub fn is_gemini_enterprise_credentials_toggleable(&self, window_id: WindowId) -> bool {
         matches!(
             self.gemini_enterprise_host_enablement_setting(window_id),
             HostEnablementSetting::RespectUserSetting
@@ -910,7 +1017,7 @@ impl UserWorkspaces {
     /// there is nothing to mint from.
     pub fn is_gemini_enterprise_credentials_enabled(
         &self,
-        window_id: Option<WindowId>,
+        window_id: WindowId,
         app: &AppContext,
     ) -> bool {
         if !FeatureFlag::GeminiEnterprise.is_enabled() {
@@ -923,7 +1030,7 @@ impl UserWorkspaces {
             return false;
         }
         // i.e. did the admin toggle on Gemini Enterprise in the admin panel?
-        if !self.is_gemini_enterprise_available_from_workspace(window_id) {
+        if !self.is_gemini_enterprise_available(window_id) {
             return false;
         }
 
@@ -939,7 +1046,7 @@ impl UserWorkspaces {
     /// settings when [`FeatureFlag::TeamScopedSettings`] is enabled and the window has a team,
     /// otherwise the current workspace's. If a setting is `None`, nothing enforces a particular
     /// value for it (the execution profile's own value applies).
-    pub fn ai_autonomy_settings(&self, window_id: Option<WindowId>) -> AiAutonomySettings {
+    pub fn ai_autonomy_settings(&self, window_id: WindowId) -> AiAutonomySettings {
         if let Some(team_settings) = self.team_settings_for_window(window_id) {
             return AiAutonomySettings::from(&team_settings.ai_autonomy);
         }
@@ -950,10 +1057,7 @@ impl UserWorkspaces {
 
     /// Returns the effective sandboxed agent settings for the given window, if any, following
     /// the same team-vs-workspace resolution as [`Self::ai_autonomy_settings`].
-    pub fn sandboxed_agent_settings(
-        &self,
-        window_id: Option<WindowId>,
-    ) -> Option<SandboxedAgentSettings> {
+    pub fn sandboxed_agent_settings(&self, window_id: WindowId) -> Option<SandboxedAgentSettings> {
         if let Some(team_settings) = self.team_settings_for_window(window_id) {
             return Some(SandboxedAgentSettings::from(&team_settings.sandboxed_agent));
         }
@@ -968,7 +1072,7 @@ impl UserWorkspaces {
     /// feature set disabled. To capture that case, we'll see if all the settings are `None`;
     /// if so, we'll fall back to their billing metadata's value. Once we've migrated everyone
     /// into org settings, we should remove `is_enabled` from the policy and delete this function.
-    pub fn is_ai_autonomy_allowed(&self, window_id: Option<WindowId>) -> bool {
+    pub fn is_ai_autonomy_allowed(&self, window_id: WindowId) -> bool {
         let Some(workspace) = self.current_workspace() else {
             return true;
         };
@@ -1780,10 +1884,7 @@ impl UserWorkspaces {
         }
     }
 
-    pub fn usage_based_pricing_settings(
-        &self,
-        window_id: Option<WindowId>,
-    ) -> UsageBasedPricingSettings {
+    pub fn usage_based_pricing_settings(&self, window_id: WindowId) -> UsageBasedPricingSettings {
         if let Some(team_settings) = self.team_settings_for_window(window_id) {
             return team_settings.usage_based_pricing_settings.clone();
         }
@@ -1812,7 +1913,7 @@ impl UserWorkspaces {
 
     pub fn get_ugc_collection_enablement_setting(
         &self,
-        window_id: Option<WindowId>,
+        window_id: WindowId,
     ) -> UgcCollectionEnablementSetting {
         if let Some(team_settings) = self.team_settings_for_window(window_id) {
             return team_settings.ugc_collection.value.clone();
@@ -1822,9 +1923,15 @@ impl UserWorkspaces {
             .unwrap_or_default()
     }
 
+    pub fn workspace_ugc_collection_enablement_setting(&self) -> UgcCollectionEnablementSetting {
+        self.current_workspace()
+            .map(|workspace| workspace.settings.ugc_collection_settings.setting.clone())
+            .unwrap_or_default()
+    }
+
     pub fn get_cloud_conversation_storage_enablement_setting(
         &self,
-        window_id: Option<WindowId>,
+        window_id: WindowId,
     ) -> AdminEnablementSetting {
         if let Some(team_settings) = self.team_settings_for_window(window_id) {
             return team_settings.cloud_conversation_storage.value.clone();
@@ -1840,7 +1947,7 @@ impl UserWorkspaces {
             .unwrap_or_default()
     }
 
-    pub fn is_ai_allowed_in_remote_sessions(&self, window_id: Option<WindowId>) -> bool {
+    pub fn is_ai_allowed_in_remote_sessions(&self, window_id: WindowId) -> bool {
         if let Some(team_settings) = self.team_settings_for_window(window_id) {
             return team_settings
                 .ai_permissions
@@ -1857,7 +1964,7 @@ impl UserWorkspaces {
             .unwrap_or(true)
     }
 
-    pub fn get_remote_session_regex_list(&self, window_id: Option<WindowId>) -> Vec<Regex> {
+    pub fn get_remote_session_regex_list(&self, window_id: WindowId) -> Vec<Regex> {
         if let Some(team_settings) = self.team_settings_for_window(window_id) {
             return team_settings
                 .ai_permissions
@@ -1887,7 +1994,7 @@ impl UserWorkspaces {
             .unwrap_or_default()
     }
 
-    pub fn is_anyone_with_link_sharing_enabled(&self, window_id: Option<WindowId>) -> bool {
+    pub fn is_anyone_with_link_sharing_enabled(&self, window_id: WindowId) -> bool {
         if let Some(team_settings) = self.team_settings_for_window(window_id) {
             return team_settings
                 .link_sharing
@@ -1904,7 +2011,7 @@ impl UserWorkspaces {
             .unwrap_or(true)
     }
 
-    pub fn is_direct_link_sharing_enabled(&self, window_id: Option<WindowId>) -> bool {
+    pub fn is_direct_link_sharing_enabled(&self, window_id: WindowId) -> bool {
         if let Some(team_settings) = self.team_settings_for_window(window_id) {
             return team_settings.link_sharing.direct_link_sharing_enabled.value;
         }
@@ -1939,16 +2046,22 @@ impl UserWorkspaces {
     /// Returns the codebase context settings, taking into account the organization,
     /// global AI settings, and codebase-specific settings.
     /// Prefer this function to determine whether to show indexing-related functionality.
-    pub fn is_codebase_context_enabled(
-        &self,
-        window_id: Option<WindowId>,
-        app: &AppContext,
-    ) -> bool {
+    pub fn is_codebase_context_enabled(&self, window_id: WindowId, app: &AppContext) -> bool {
         // If the organization has an explicit setting, respect it and make user toggle irrelevant.
         // - Enable: forced ON by org, regardless of user preference.
         // - Disable: forced OFF by org.
         // - RespectUserSetting: respect the user setting.
-        let org_setting = self.team_allows_codebase_context(window_id);
+        self.is_codebase_context_enabled_for_setting(
+            self.team_allows_codebase_context(window_id),
+            app,
+        )
+    }
+
+    fn is_codebase_context_enabled_for_setting(
+        &self,
+        org_setting: AdminEnablementSetting,
+        app: &AppContext,
+    ) -> bool {
         let ai_globally_enabled = AISettings::as_ref(app).is_any_ai_enabled(app);
 
         match org_setting {
@@ -1960,7 +2073,7 @@ impl UserWorkspaces {
         }
     }
 
-    pub fn default_host_slug(&self, window_id: Option<WindowId>) -> Option<&str> {
+    pub fn default_host_slug(&self, window_id: WindowId) -> Option<&str> {
         if let Some(team_settings) = self.team_settings_for_window(window_id) {
             return team_settings.default_host_slug.as_deref();
         }
@@ -1972,10 +2085,7 @@ impl UserWorkspaces {
     ///
     /// Use this to decide whether the user's attribution toggle should be locked
     /// (`Enable`/`Disable`) or editable (`RespectUserSetting`).
-    pub fn get_agent_attribution_setting(
-        &self,
-        window_id: Option<WindowId>,
-    ) -> AdminEnablementSetting {
+    pub fn get_agent_attribution_setting(&self, window_id: WindowId) -> AdminEnablementSetting {
         if let Some(team_settings) = self.team_settings_for_window(window_id) {
             return team_settings.enable_warp_attribution.clone();
         }
@@ -1987,10 +2097,7 @@ impl UserWorkspaces {
     /// Returns only the organization-specific codebase context enablement setting.
     /// Do not use this function to determine whether codebase context is generally enabled --
     /// use `is_codebase_context_enabled` instead.
-    pub fn team_allows_codebase_context(
-        &self,
-        window_id: Option<WindowId>,
-    ) -> AdminEnablementSetting {
+    pub fn team_allows_codebase_context(&self, window_id: WindowId) -> AdminEnablementSetting {
         if let Some(team_settings) = self.team_settings_for_window(window_id) {
             return team_settings.codebase_context.value.clone();
         }

@@ -340,7 +340,9 @@ pub trait SlashCommandDataSource {
         }
 
         let window_id = ctx.window_id_for_view(self.terminal_view_id());
-        if UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(window_id, ctx) {
+        if window_id.is_some_and(|window_id| {
+            UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(window_id, ctx)
+        }) {
             availability |= Availability::CODEBASE_CONTEXT;
         }
 
@@ -421,17 +423,22 @@ pub trait SlashCommandDataSource {
 
     fn common_command_gates(&self, ctx: &AppContext) -> CommonCommandGates {
         let ai_settings = AISettings::as_ref(ctx);
+        let window_id = ctx.window_id_for_view(self.terminal_view_id());
         // Hide /host when no default host is configured (env var or workspace setting).
         let has_default_host = std::env::var("WARP_CLOUD_MODE_DEFAULT_HOST")
             .ok()
             .filter(|s| !s.is_empty())
             .is_some()
-            || UserWorkspaces::as_ref(ctx)
-                .default_host_slug(ctx.window_id_for_view(self.terminal_view_id()))
-                .is_some();
+            || window_id.is_some_and(|window_id| {
+                UserWorkspaces::as_ref(ctx)
+                    .default_host_slug(window_id)
+                    .is_some()
+            });
         CommonCommandGates {
             is_orchestration_enabled: ai_settings.is_orchestration_enabled(ctx),
-            is_cloud_handoff_enabled: ai_settings.is_cloud_handoff_enabled(ctx),
+            is_cloud_handoff_enabled: window_id.is_some_and(|window_id| {
+                ai_settings.is_cloud_handoff_enabled_in_window(window_id, ctx)
+            }),
             has_default_host,
             is_cli_agent_input: self.is_cli_agent_input_open(ctx),
         }

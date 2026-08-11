@@ -65,9 +65,9 @@ pub fn resolve_cloud_agent_computer_use_state(
         };
     }
 
-    let autonomy_setting = UserWorkspaces::as_ref(ctx)
-        .ai_autonomy_settings(window_id)
-        .computer_use_setting;
+    let autonomy_setting = window_id
+        .map(|window_id| UserWorkspaces::as_ref(ctx).ai_autonomy_settings(window_id))
+        .and_then(|settings| settings.computer_use_setting);
     let user_preference = *AISettings::as_ref(ctx).cloud_agent_computer_use_enabled;
 
     match autonomy_setting {

@@ -303,9 +303,17 @@ impl CommentListView {
     fn repo_is_local(&self) -> Option<bool> {
         self.repo_path.as_ref().map(LocalOrRemotePath::is_local)
     }
+    fn has_ai_available(&self, ctx: &AppContext) -> bool {
+        self.parent
+            .upgrade(ctx)
+            .map(|parent| parent.window_id(ctx))
+            .is_some_and(|window_id| {
+                AIRequestUsageModel::as_ref(ctx).has_any_ai_remaining(window_id, ctx)
+            })
+    }
 
     pub fn debug_state(&self, ctx: &AppContext) -> CommentListDebugState {
-        let ai_available = AIRequestUsageModel::as_ref(ctx).has_any_ai_remaining(ctx);
+        let ai_available = self.has_ai_available(ctx);
         let ai_enabled = AISettings::as_ref(ctx).is_any_ai_enabled(ctx);
         let sendable_comments = self
             .comments_by_id
@@ -920,16 +928,14 @@ impl CommentListView {
             ReviewDestination::None => false,
             // CLI agents don't consume AI credits, so bypass the ai check.
             ReviewDestination::Cli(_) => has_sendable_comments,
-            ReviewDestination::Warp => {
-                AIRequestUsageModel::as_ref(ctx).has_any_ai_remaining(ctx) && has_sendable_comments
-            }
+            ReviewDestination::Warp => self.has_ai_available(ctx) && has_sendable_comments,
         }
     }
 
     /// Keep the stored "Send to Agent" button's enabled state and tooltip in sync with the current
     /// destination / comment / AI-availability state.
     fn sync_send_button(&mut self, ctx: &mut ViewContext<Self>) {
-        let ai_available = AIRequestUsageModel::as_ref(ctx).has_any_ai_remaining(ctx);
+        let ai_available = self.has_ai_available(ctx);
         let ai_enabled = AISettings::as_ref(ctx).is_any_ai_enabled(ctx);
         let enabled = self.can_send(ctx);
         let tooltip = Self::send_button_tooltip_text(

@@ -291,7 +291,7 @@ fn test_codebase_context_enabled_with_no_workspace() {
 
         app.read(|ctx| {
             let codebase_context_enabled =
-                UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(None, ctx);
+                UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(WindowId::new(), ctx);
             assert!(
                 codebase_context_enabled,
                 "codebase context should be on by default"
@@ -343,11 +343,12 @@ fn test_aws_bedrock_credentials_default_off_when_admin_respects_user_setting() {
 
         app.read(|ctx| {
             assert!(
-                !UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_enabled(None, ctx),
+                !UserWorkspaces::as_ref(ctx)
+                    .is_aws_bedrock_credentials_enabled(WindowId::new(), ctx),
                 "respect-user-setting should default the local Bedrock credentials toggle to off"
             );
             assert!(
-                UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_toggleable(None),
+                UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_toggleable(WindowId::new()),
                 "respect-user-setting should leave the local Bedrock credentials toggle editable"
             );
         });
@@ -401,11 +402,12 @@ fn test_aws_bedrock_credentials_respect_user_setting() {
 
         app.read(|ctx| {
             assert!(
-                !UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_enabled(None, ctx),
+                !UserWorkspaces::as_ref(ctx)
+                    .is_aws_bedrock_credentials_enabled(WindowId::new(), ctx),
                 "respect-user-setting should honor the local Bedrock credentials toggle"
             );
             assert!(
-                UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_toggleable(None),
+                UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_toggleable(WindowId::new()),
                 "respect-user-setting should leave the local Bedrock credentials toggle editable"
             );
         });
@@ -459,11 +461,12 @@ fn test_aws_bedrock_credentials_enforced_by_admin() {
 
         app.read(|ctx| {
             assert!(
-                UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_enabled(None, ctx),
+                UserWorkspaces::as_ref(ctx)
+                    .is_aws_bedrock_credentials_enabled(WindowId::new(), ctx),
                 "enforced Bedrock host policy should ignore the local Bedrock credentials toggle"
             );
             assert!(
-                !UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_toggleable(None),
+                !UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_toggleable(WindowId::new()),
                 "enforced Bedrock host policy should disable the local Bedrock credentials toggle"
             );
         });
@@ -514,11 +517,11 @@ fn test_gemini_enterprise_credentials_default_off_when_admin_respects_user_setti
 
         app.read(|ctx| {
             assert!(
-                !UserWorkspaces::as_ref(ctx).is_gemini_enterprise_credentials_enabled(None, ctx),
+                !UserWorkspaces::as_ref(ctx).is_gemini_enterprise_credentials_enabled(WindowId::new(), ctx),
                 "respect-user-setting should default the local Gemini Enterprise credentials toggle to off"
             );
             assert!(
-                UserWorkspaces::as_ref(ctx).is_gemini_enterprise_credentials_toggleable(None),
+                UserWorkspaces::as_ref(ctx).is_gemini_enterprise_credentials_toggleable(WindowId::new()),
                 "respect-user-setting should leave the local Gemini Enterprise credentials toggle editable"
             );
         });
@@ -553,7 +556,8 @@ fn test_gemini_enterprise_credentials_respect_user_setting_honors_member_toggle(
 
         app.read(|ctx| {
             assert!(
-                UserWorkspaces::as_ref(ctx).is_gemini_enterprise_credentials_enabled(None, ctx),
+                UserWorkspaces::as_ref(ctx)
+                    .is_gemini_enterprise_credentials_enabled(WindowId::new(), ctx),
                 "respect-user-setting should honor an opted-in Gemini Enterprise credentials toggle"
             );
         });
@@ -585,11 +589,13 @@ fn test_gemini_enterprise_credentials_enforced_by_admin() {
 
         app.read(|ctx| {
             assert!(
-                UserWorkspaces::as_ref(ctx).is_gemini_enterprise_credentials_enabled(None, ctx),
+                UserWorkspaces::as_ref(ctx)
+                    .is_gemini_enterprise_credentials_enabled(WindowId::new(), ctx),
                 "enforced Gemini Enterprise host policy should ignore the local credentials toggle"
             );
             assert!(
-                !UserWorkspaces::as_ref(ctx).is_gemini_enterprise_credentials_toggleable(None),
+                !UserWorkspaces::as_ref(ctx)
+                    .is_gemini_enterprise_credentials_toggleable(WindowId::new()),
                 "enforced Gemini Enterprise host policy should disable the local credentials toggle"
             );
         });
@@ -615,11 +621,12 @@ fn test_gemini_enterprise_credentials_disabled_when_host_disabled() {
 
         app.read(|ctx| {
             assert!(
-                !UserWorkspaces::as_ref(ctx).is_gemini_enterprise_available_from_workspace(None),
+                !UserWorkspaces::as_ref(ctx).is_gemini_enterprise_available_from_workspace(),
                 "a disabled Gemini Enterprise host should not be available from the workspace"
             );
             assert!(
-                !UserWorkspaces::as_ref(ctx).is_gemini_enterprise_credentials_enabled(None, ctx),
+                !UserWorkspaces::as_ref(ctx)
+                    .is_gemini_enterprise_credentials_enabled(WindowId::new(), ctx),
                 "a disabled Gemini Enterprise host should gate credentials off even under ENFORCE"
             );
         });
@@ -655,12 +662,13 @@ fn test_gemini_enterprise_credentials_disabled_when_host_absent() {
         app.read(|ctx| {
             assert!(
                 UserWorkspaces::as_ref(ctx)
-                    .gemini_enterprise_host_settings(None)
+                    .gemini_enterprise_host_settings(WindowId::new())
                     .is_none(),
                 "a workspace without a Gemini Enterprise host entry should expose no settings"
             );
             assert!(
-                !UserWorkspaces::as_ref(ctx).is_gemini_enterprise_credentials_enabled(None, ctx),
+                !UserWorkspaces::as_ref(ctx)
+                    .is_gemini_enterprise_credentials_enabled(WindowId::new(), ctx),
                 "a workspace without a Gemini Enterprise host entry should gate credentials off"
             );
         });
@@ -687,7 +695,8 @@ fn test_gemini_enterprise_credentials_disabled_when_logged_out() {
 
         app.read(|ctx| {
             assert!(
-                !UserWorkspaces::as_ref(ctx).is_gemini_enterprise_credentials_enabled(None, ctx),
+                !UserWorkspaces::as_ref(ctx)
+                    .is_gemini_enterprise_credentials_enabled(WindowId::new(), ctx),
                 "logged-out users should never mint or attach Gemini Enterprise credentials"
             );
         });
@@ -716,7 +725,7 @@ fn test_gemini_enterprise_host_settings_carries_federation_config() {
         app.read(|ctx| {
             let user_workspaces = UserWorkspaces::as_ref(ctx);
             let settings = user_workspaces
-                .gemini_enterprise_host_settings(None)
+                .gemini_enterprise_host_settings(WindowId::new())
                 .expect("workspace should expose the Gemini Enterprise host settings");
             assert_eq!(settings.gcp_audience.as_deref(), Some(TEST_GCP_AUDIENCE));
             assert_eq!(settings.gcp_sa_email.as_deref(), Some(TEST_GCP_SA_EMAIL));
@@ -821,9 +830,8 @@ fn test_window_team_assignment_inherits_from_source_or_default_team() {
         let fallback_window_id = WindowId::new();
         UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
             user_workspaces.set_team_for_window(source_window_id, second_team.uid, ctx);
-            let inherited_team_uid =
-                user_workspaces.inherited_or_default_team_uid(Some(source_window_id));
-            let fallback_team_uid = user_workspaces.inherited_or_default_team_uid(None);
+            let inherited_team_uid = user_workspaces.team_uid_for_window(source_window_id);
+            let fallback_team_uid = user_workspaces.default_team_uid();
             user_workspaces.register_window(inherited_window_id, inherited_team_uid, ctx);
             user_workspaces.register_window(fallback_window_id, fallback_team_uid, ctx);
         });
@@ -1147,7 +1155,7 @@ fn test_codebase_context_enabled_by_team_disabled_by_user() {
 
         app.read(|ctx| {
             let codebase_context_enabled = UserWorkspaces::as_ref(ctx)
-                .is_codebase_context_enabled(None, ctx);
+                .is_codebase_context_enabled(WindowId::new(), ctx);
             assert!(codebase_context_enabled,
             "codebase context should be on when it's enabled by the team, regardless of user setting");
         });
@@ -1175,7 +1183,7 @@ fn test_codebase_context_enabled_by_team_and_user() {
 
         app.read(|ctx| {
             let codebase_context_enabled =
-                UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(None, ctx);
+                UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(WindowId::new(), ctx);
             assert!(
                 codebase_context_enabled,
                 "codebase context should be on when it's enabled by the team"
@@ -1205,7 +1213,7 @@ fn test_codebase_context_disabled_by_workspace() {
 
         app.read(|ctx| {
             let codebase_context_enabled =
-                UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(None, ctx);
+                UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(WindowId::new(), ctx);
             assert!(
                 !codebase_context_enabled,
                 "codebase context should be off when it's disabled by the workspace"
@@ -1235,7 +1243,7 @@ fn test_codebase_context_respect_user_setting() {
 
         app.read(|ctx| {
             let codebase_context_enabled = UserWorkspaces::as_ref(ctx)
-                .is_codebase_context_enabled(None, ctx);
+                .is_codebase_context_enabled(WindowId::new(), ctx);
             // Should respect user setting, which defaults to true when AI is enabled
             assert!(
                 codebase_context_enabled,
@@ -1244,7 +1252,7 @@ fn test_codebase_context_respect_user_setting() {
 
             // Test that team_allows_codebase_context returns the correct setting
             let team_setting = UserWorkspaces::as_ref(ctx)
-                .team_allows_codebase_context(None);
+                .team_allows_codebase_context(WindowId::new());
             assert_eq!(
                 team_setting,
                 AdminEnablementSetting::RespectUserSetting,
@@ -1350,7 +1358,8 @@ fn test_agent_attribution_default_with_no_workspace() {
         );
 
         app.read(|ctx| {
-            let setting = UserWorkspaces::as_ref(ctx).get_agent_attribution_setting(None);
+            let setting =
+                UserWorkspaces::as_ref(ctx).get_agent_attribution_setting(WindowId::new());
             assert_eq!(
                 setting,
                 AdminEnablementSetting::RespectUserSetting,
@@ -1377,7 +1386,8 @@ fn test_agent_attribution_forced_on_by_team() {
         );
 
         app.read(|ctx| {
-            let setting = UserWorkspaces::as_ref(ctx).get_agent_attribution_setting(None);
+            let setting =
+                UserWorkspaces::as_ref(ctx).get_agent_attribution_setting(WindowId::new());
             assert_eq!(
                 setting,
                 AdminEnablementSetting::Enable,
@@ -1404,7 +1414,8 @@ fn test_agent_attribution_forced_off_by_team() {
         );
 
         app.read(|ctx| {
-            let setting = UserWorkspaces::as_ref(ctx).get_agent_attribution_setting(None);
+            let setting =
+                UserWorkspaces::as_ref(ctx).get_agent_attribution_setting(WindowId::new());
             assert_eq!(
                 setting,
                 AdminEnablementSetting::Disable,
@@ -1431,7 +1442,8 @@ fn test_agent_attribution_respects_user_setting() {
         );
 
         app.read(|ctx| {
-            let setting = UserWorkspaces::as_ref(ctx).get_agent_attribution_setting(None);
+            let setting =
+                UserWorkspaces::as_ref(ctx).get_agent_attribution_setting(WindowId::new());
             assert_eq!(
                 setting,
                 AdminEnablementSetting::RespectUserSetting,
@@ -2268,8 +2280,7 @@ fn team_scoped_settings_falls_back_to_workspace_when_flag_disabled() {
         app.read(|ctx| {
             assert!(
                 matches!(
-                    UserWorkspaces::as_ref(ctx)
-                        .get_ugc_collection_enablement_setting(Some(window_id)),
+                    UserWorkspaces::as_ref(ctx).get_ugc_collection_enablement_setting(window_id),
                     UgcCollectionEnablementSetting::Disable
                 ),
                 "flag disabled: should fall back to the workspace's value, not the team's"
@@ -2300,8 +2311,7 @@ fn team_scoped_settings_uses_the_bound_teams_own_settings_when_flag_enabled() {
         app.read(|ctx| {
             assert!(
                 matches!(
-                    UserWorkspaces::as_ref(ctx)
-                        .get_ugc_collection_enablement_setting(Some(window_id)),
+                    UserWorkspaces::as_ref(ctx).get_ugc_collection_enablement_setting(window_id),
                     UgcCollectionEnablementSetting::Enable
                 ),
                 "flag enabled with a team bound to the window: should use the team's own settings"
@@ -2323,7 +2333,8 @@ fn team_scoped_settings_falls_back_to_workspace_when_window_has_no_team() {
         app.read(|ctx| {
             assert!(
                 matches!(
-                    UserWorkspaces::as_ref(ctx).get_ugc_collection_enablement_setting(None),
+                    UserWorkspaces::as_ref(ctx)
+                        .get_ugc_collection_enablement_setting(WindowId::new()),
                     UgcCollectionEnablementSetting::Enable
                 ),
                 "no team bound to the window: should fall back to the workspace's value"
@@ -2342,7 +2353,8 @@ fn team_scoped_settings_defaults_without_any_workspace() {
         app.read(|ctx| {
             assert!(
                 matches!(
-                    UserWorkspaces::as_ref(ctx).get_ugc_collection_enablement_setting(None),
+                    UserWorkspaces::as_ref(ctx)
+                        .get_ugc_collection_enablement_setting(WindowId::new()),
                     UgcCollectionEnablementSetting::RespectUserSetting
                 ),
                 "individual/solo users have no workspace, so the accessor's own default applies"

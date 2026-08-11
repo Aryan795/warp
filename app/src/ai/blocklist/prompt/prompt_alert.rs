@@ -7,7 +7,7 @@ use warpui::elements::{
 };
 use warpui::{
     AppContext, Element, Entity, SingletonEntity, TypedActionView, View, ViewContext,
-    WeakViewHandle,
+    WeakViewHandle, WindowId,
 };
 
 use crate::ai::AIRequestUsageModel;
@@ -79,45 +79,48 @@ pub enum PromptAlertState {
 
 pub struct PromptAlertView {
     view_handle: WeakViewHandle<Self>,
+    window_id: WindowId,
     state: PromptAlertState,
     action_hyperlink: HighlightedHyperlink,
 }
 
 impl PromptAlertView {
     pub fn new(ctx: &mut ViewContext<Self>) -> Self {
+        let window_id = ctx.window_id();
         let request_usage_model = AIRequestUsageModel::handle(ctx);
         let user_workspaces = UserWorkspaces::handle(ctx);
         let network_status = NetworkStatus::handle(ctx);
         let api_key_manager = ApiKeyManager::handle(ctx);
 
         ctx.subscribe_to_model(&request_usage_model, |me, _, _, ctx| {
-            me.state = Self::determine_state(ctx);
+            me.state = Self::determine_state(me.window_id, ctx);
             ctx.notify();
         });
 
         ctx.subscribe_to_model(&user_workspaces, |me, _, _, ctx| {
-            me.state = Self::determine_state(ctx);
+            me.state = Self::determine_state(me.window_id, ctx);
             ctx.notify();
         });
 
         ctx.subscribe_to_model(&network_status, |me, _, _, ctx| {
-            me.state = Self::determine_state(ctx);
+            me.state = Self::determine_state(me.window_id, ctx);
             ctx.notify();
         });
 
         ctx.subscribe_to_model(&api_key_manager, |me, _, _, ctx| {
-            me.state = Self::determine_state(ctx);
+            me.state = Self::determine_state(me.window_id, ctx);
             ctx.notify();
         });
 
         Self {
             view_handle: ctx.handle(),
-            state: Self::determine_state(ctx),
+            window_id,
+            state: Self::determine_state(window_id, ctx),
             action_hyperlink: Default::default(),
         }
     }
 
-    pub fn determine_state(app: &AppContext) -> PromptAlertState {
+    pub fn determine_state(window_id: WindowId, app: &AppContext) -> PromptAlertState {
         // First, if the user is offline, no AI features will work.
         if !NetworkStatus::as_ref(app).is_online() {
             return PromptAlertState::NoConnection;
@@ -149,7 +152,7 @@ impl PromptAlertView {
         // The server-authoritative availability decision drives the alert once
         // it has been fetched; local data below is only a pre-fetch fallback.
         if let Some(availability) = request_usage_model.server_availability() {
-            return Self::state_from_server_availability(availability, app);
+            return Self::state_from_server_availability(availability, window_id, app);
         }
 
         // Legacy locally derived fallback, used only before the first
@@ -163,7 +166,7 @@ impl PromptAlertView {
         }
 
         // If there is ever any ai remaining, no alert
-        if request_usage_model.has_any_ai_remaining(app) {
+        if request_usage_model.has_any_ai_remaining(window_id, app) {
             return PromptAlertState::NoAlert;
         }
 
@@ -175,6 +178,7 @@ impl PromptAlertView {
     /// only shapes the call-to-action copy.
     fn state_from_server_availability(
         availability: AICreditAvailability,
+        window_id: WindowId,
         app: &AppContext,
     ) -> PromptAlertState {
         if availability.available {
@@ -194,7 +198,7 @@ impl PromptAlertView {
                 // An out-of-credits denial only means the server found no path
                 // it can see; a locally stored API key still permits requests,
                 // which `has_any_ai_remaining` accounts for.
-                if AIRequestUsageModel::as_ref(app).has_any_ai_remaining(app) {
+                if AIRequestUsageModel::as_ref(app).has_any_ai_remaining(window_id, app) {
                     return PromptAlertState::NoAlert;
                 }
                 Self::out_of_credits_presentation(app)
@@ -232,8 +236,8 @@ impl PromptAlertView {
         &self.state
     }
 
-    pub fn does_alert_block_ai_requests(app: &AppContext) -> bool {
-        does_alert_block_ai_requests(&Self::determine_state(app))
+    pub fn does_alert_block_ai_requests(window_id: WindowId, app: &AppContext) -> bool {
+        does_alert_block_ai_requests(&Self::determine_state(window_id, app))
     }
 
     fn primary_text(
@@ -420,7 +424,7 @@ impl View for PromptAlertView {
 
     fn render(&self, app: &AppContext) -> Box<dyn Element> {
         let appearance = Appearance::as_ref(app);
-        let state = Self::determine_state(app);
+        let state = Self::determine_state(self.window_id, app);
         let mut text_fragments = vec![];
 
         self.primary_text(&state, &mut text_fragments);

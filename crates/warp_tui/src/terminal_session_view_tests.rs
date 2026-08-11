@@ -1628,7 +1628,11 @@ fn accepted_model_only_changes_the_current_session() {
                 .id
                 .clone();
             let alternate_id = preferences
-                .get_base_llm_choices_for_agent_mode(ctx)
+                .get_base_llm_choices_for_agent_mode(
+                    ctx.window_id_for_view(first_view.id())
+                        .expect("first session should have a window"),
+                    ctx,
+                )
                 .find(|model| model.id != profile_default_id && model.disable_reason.is_none())
                 .expect("test model catalog should include an alternate model")
                 .id

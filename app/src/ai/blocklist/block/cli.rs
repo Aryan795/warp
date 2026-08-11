@@ -1558,12 +1558,12 @@ impl TypedActionView for CLISubagentView {
 }
 
 fn should_show_write_to_pty_speedbump(terminal_view_id: EntityId, app: &AppContext) -> bool {
-    is_agent_mode_autonomy_allowed(Some(terminal_view_id), app)
+    is_agent_mode_autonomy_allowed(terminal_view_id, app)
         && *AISettings::as_ref(app).should_show_agent_mode_write_to_pty_speedbump
 }
 
 fn should_show_read_files_speedbump(terminal_view_id: EntityId, app: &AppContext) -> bool {
-    is_agent_mode_autonomy_allowed(Some(terminal_view_id), app)
+    is_agent_mode_autonomy_allowed(terminal_view_id, app)
         && *AISettings::as_ref(app).should_show_agent_mode_autoread_files_speedbump
 }
 

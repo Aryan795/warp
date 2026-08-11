@@ -5,7 +5,7 @@ use std::sync::Arc;
 use parking_lot::FairMutex;
 use pathfinder_geometry::vector::Vector2F;
 use settings::Setting as _;
-use warpui::{AppContext, SingletonEntity};
+use warpui::{AppContext, SingletonEntity, WindowId};
 
 use super::event_listener::ChannelEventListener;
 use super::model::block::BlockSize;
@@ -115,6 +115,7 @@ pub(super) fn create_terminal_model(
     channel_event_proxy: ChannelEventListener,
     shell_state: ShellLaunchState,
     block_spacing: BlockSpacing,
+    window_id: WindowId,
     ctx: &mut AppContext,
 ) -> TerminalModel {
     let (should_show_bootstrap_block, should_show_in_band_command_blocks) = {
@@ -132,7 +133,7 @@ pub(super) fn create_terminal_model(
 
     let obfuscate_secrets = get_secret_obfuscation_mode(ctx);
     let is_ai_ugc_telemetry_enabled = should_collect_ai_ugc_telemetry(
-        None,
+        window_id,
         ctx,
         PrivacySettings::as_ref(ctx).is_telemetry_enabled,
     );

@@ -375,6 +375,9 @@ pub(crate) fn should_disable_snapshot(window_id: Option<WindowId>, ctx: &AppCont
     if !privacy.is_cloud_conversation_storage_enabled {
         return true;
     }
+    let Some(window_id) = window_id else {
+        return true;
+    };
     matches!(
         UserWorkspaces::as_ref(ctx).get_cloud_conversation_storage_enablement_setting(window_id),
         AdminEnablementSetting::Disable

@@ -2757,7 +2757,7 @@ impl AIBlock {
                 }
             })
         {
-            if is_agent_mode_autonomy_allowed(Some(self.terminal_view_id), ctx) {
+            if is_agent_mode_autonomy_allowed(self.terminal_view_id, ctx) {
                 let autoexecute_decision = escape_char.map(|escape_char| {
                     BlocklistAIPermissions::as_ref(ctx).can_autoexecute_command(
                         &self.client_ids.conversation_id,
@@ -2765,7 +2765,7 @@ impl AIBlock {
                         escape_char,
                         is_read_only,
                         is_risky,
-                        Some(self.terminal_view_id),
+                        self.terminal_view_id,
                         ctx,
                     )
                 });
@@ -2844,7 +2844,7 @@ impl AIBlock {
             .actions()
             .filter_map(|action| (action.is_get_relevant_files()).then_some(&action.id))
         {
-            if is_agent_mode_autonomy_allowed(Some(self.terminal_view_id), ctx)
+            if is_agent_mode_autonomy_allowed(self.terminal_view_id, ctx)
                 && *AISettings::as_ref(ctx).should_show_agent_mode_autoread_files_speedbump
             {
                 // Try to show the speedbump for codebase search.
@@ -2877,7 +2877,7 @@ impl AIBlock {
             let is_file_access =
                 action.is_get_specific_files() || action.is_grep() || action.is_file_glob();
             if is_file_access {
-                if is_agent_mode_autonomy_allowed(Some(self.terminal_view_id), ctx)
+                if is_agent_mode_autonomy_allowed(self.terminal_view_id, ctx)
                     && *AISettings::as_ref(ctx).should_show_agent_mode_autoread_files_speedbump
                 {
                     // Try to show the speedbump for autoread files setting
@@ -2903,7 +2903,7 @@ impl AIBlock {
             } else if matches!(action.action, AIAgentActionType::AskUserQuestion { .. })
                 && !self.model.is_restored()
                 && FeatureFlag::AskUserQuestion.is_enabled()
-                && is_agent_mode_autonomy_allowed(Some(self.terminal_view_id), ctx)
+                && is_agent_mode_autonomy_allowed(self.terminal_view_id, ctx)
                 && *AISettings::as_ref(ctx).should_show_agent_mode_ask_user_question_speedbump
             {
                 self.autonomy_setting_speedbump =
@@ -4284,11 +4284,15 @@ impl AIBlock {
         let identifiers = view.as_ref(ctx).identifiers().clone();
         let query = view.as_ref(ctx).query().unwrap_or_default();
 
-        let should_collect_ugc = should_collect_ai_ugc_telemetry(
-            ctx.window_id_for_view(self.terminal_view_id),
-            ctx,
-            PrivacySettings::as_ref(ctx).is_telemetry_enabled,
-        );
+        let should_collect_ugc =
+            ctx.window_id_for_view(self.terminal_view_id)
+                .is_some_and(|window_id| {
+                    should_collect_ai_ugc_telemetry(
+                        window_id,
+                        ctx,
+                        PrivacySettings::as_ref(ctx).is_telemetry_enabled,
+                    )
+                });
         let redacted_query = if should_collect_ugc {
             let mut redacted_query = query.clone();
             redact_secrets(&mut redacted_query);

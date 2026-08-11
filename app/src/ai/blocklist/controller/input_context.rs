@@ -69,6 +69,7 @@ pub(super) fn input_context_for_request(
 
     if FeatureFlag::FullSourceCodeEmbedding.is_enabled()
         && FeatureFlag::CrossRepoContext.is_enabled()
+        && context_model.is_codebase_context_enabled(app)
     {
         let session_context = SessionContext::from_session(active_session, app);
         if session_context.is_remote() {

@@ -984,6 +984,9 @@ impl ProfileModelSelector {
         }
 
         let llm_preferences = LLMPreferences::as_ref(ctx);
+        let Some(window_id) = ctx.window_id_for_view(self.terminal_view_id) else {
+            return;
+        };
 
         let active_llm = llm_preferences.get_active_base_model(ctx, Some(self.terminal_view_id));
 
@@ -1005,7 +1008,7 @@ impl ProfileModelSelector {
 
         // Store all model choices for reasoning variant lookups
         self.all_model_choices = llm_preferences
-            .get_base_llm_choices_for_agent_mode(ctx)
+            .get_base_llm_choices_for_agent_mode(window_id, ctx)
             .cloned()
             .collect();
 
@@ -1013,7 +1016,7 @@ impl ProfileModelSelector {
         // custom-endpoint choices (rendered separately under a `Custom models` sub-header so
         // the server-curated list stays visually distinct).
         let custom_ids: std::collections::HashSet<LLMId> = llm_preferences
-            .custom_llm_choices(ctx)
+            .custom_llm_choices(window_id, ctx)
             .map(|info| info.id.clone())
             .collect();
         let server_choices: Vec<&LLMInfo> = self
@@ -1073,7 +1076,7 @@ impl ProfileModelSelector {
             Some(&|llm_id| self.model_menu_item_position_id(llm_id)),
             true,
             true,
-            ctx.window_id_for_view(self.terminal_view_id),
+            Some(window_id),
             ctx,
         );
 
@@ -1098,11 +1101,7 @@ impl ProfileModelSelector {
             for llm in &custom_choices {
                 let mut fields = MenuItemFields::new(llm.menu_display_name())
                     .with_on_select_action(ProfileModelSelectorAction::SelectModel(llm.id.clone()));
-                if should_show_key_icon_for_model_in_window(
-                    llm,
-                    ctx.window_id_for_view(self.terminal_view_id),
-                    ctx,
-                ) {
+                if should_show_key_icon_for_model_in_window(llm, Some(window_id), ctx) {
                     fields = fields.with_right_side_icon(Icon::Key);
                 }
                 items.push(MenuItem::Item(fields));
@@ -1131,7 +1130,7 @@ impl ProfileModelSelector {
                 Some(&|llm_id| self.model_menu_item_position_id(llm_id)),
                 true,
                 true,
-                ctx.window_id_for_view(self.terminal_view_id),
+                Some(window_id),
                 ctx,
             ));
         }
@@ -1152,12 +1151,15 @@ impl ProfileModelSelector {
         ctx: &mut ViewContext<Self>,
     ) {
         let llm_preferences = LLMPreferences::as_ref(ctx);
+        let Some(window_id) = ctx.window_id_for_view(self.terminal_view_id) else {
+            return;
+        };
         let active_llm = llm_preferences.get_active_base_model(ctx, Some(self.terminal_view_id));
         let active_llm_id = active_llm.id.clone();
 
         let items: Vec<MenuItem<ProfileModelSelectorAction>> = match kind {
             ModelSpecSidecarKind::Auto => llm_preferences
-                .get_base_llm_choices_for_agent_mode(ctx)
+                .get_base_llm_choices_for_agent_mode(window_id, ctx)
                 .filter(|llm| is_auto(llm))
                 .map(|llm| {
                     let is_selected = llm.id == active_llm_id;
@@ -1337,6 +1339,7 @@ impl ProfileModelSelector {
         index: usize,
         ctx: &mut ViewContext<Self>,
     ) -> Option<LLMInfo> {
+        let window_id = ctx.window_id_for_view(self.terminal_view_id)?;
         let model_dropdown = match &menu_type {
             MenuType::Main => &self.model_dropdown,
             MenuType::Sidecar => &self.model_spec_sidecar.dropdown,
@@ -1354,7 +1357,7 @@ impl ProfileModelSelector {
                             // Get the first "auto" variant as the generic auto model
                             let llm_prefs = LLMPreferences::as_ref(ctx);
                             llm_prefs
-                                .get_base_llm_choices_for_agent_mode(ctx)
+                                .get_base_llm_choices_for_agent_mode(window_id, ctx)
                                 .find(|llm| is_auto(llm))
                                 .cloned()
                         }

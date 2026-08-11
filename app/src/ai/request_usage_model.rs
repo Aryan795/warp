@@ -10,7 +10,7 @@ use warp_core::user_preferences::GetUserPreferences as _;
 use warp_errors::report_error;
 pub use warp_graphql::billing::BonusGrantType;
 use warp_graphql::scalars::time::ServerTimestamp;
-use warpui::{AppContext, Entity, ModelContext, SingletonEntity};
+use warpui::{AppContext, Entity, ModelContext, SingletonEntity, WindowId};
 
 use crate::BlocklistAIHistoryModel;
 use crate::ai::agent::AIAgentExchangeId;
@@ -498,16 +498,17 @@ impl AIRequestUsageModel {
 
     /// Returns `true` if the user can start an interactive AI request.
     /// Prefers the server decision when present; otherwise uses the pre-fetch fallback.
-    pub fn has_any_ai_remaining(&self, ctx: &AppContext) -> bool {
+    pub fn has_any_ai_remaining(&self, window_id: WindowId, ctx: &AppContext) -> bool {
         if let Some(availability) = self.server_availability.latest {
-            return Self::server_availability_permits_ai(availability, ctx);
+            return Self::server_availability_permits_ai(availability, window_id, ctx);
         }
-        self.has_any_ai_remaining_before_server_decision(ctx)
+        self.has_any_ai_remaining_before_server_decision(window_id, ctx)
     }
 
     /// Trusts `available`; only `OutOfCredits` may be refined by local BYO credentials.
     fn server_availability_permits_ai(
         availability: AICreditAvailability,
+        window_id: WindowId,
         ctx: &AppContext,
     ) -> bool {
         if availability.available {
@@ -516,19 +517,18 @@ impl AIRequestUsageModel {
         matches!(
             availability.denial_reason,
             AICreditDenialReason::OutOfCredits
-        ) && Self::has_usable_byo_inference_path(ctx)
+        ) && Self::has_usable_byo_inference_path(window_id, ctx)
     }
 
     /// Whether a local BYO path is usable: stored API key/endpoint/Grok when
     /// BYOK is allowed, or loaded AWS credentials for an enabled Bedrock host.
-    fn has_usable_byo_inference_path(ctx: &AppContext) -> bool {
+    fn has_usable_byo_inference_path(window_id: WindowId, ctx: &AppContext) -> bool {
         let user_workspaces = UserWorkspaces::as_ref(ctx);
         let api_keys = ApiKeyManager::as_ref(ctx);
         if user_workspaces.is_byo_api_key_enabled(ctx) && api_keys.has_any_key() {
             return true;
         }
-        // TODO(team-scoped-settings): thread a real window_id through once available here.
-        user_workspaces.is_aws_bedrock_credentials_enabled(None, ctx)
+        user_workspaces.is_aws_bedrock_credentials_enabled(window_id, ctx)
             && matches!(
                 api_keys.aws_credentials_state(),
                 AwsCredentialsState::Loaded { .. }
@@ -536,7 +536,11 @@ impl AIRequestUsageModel {
     }
 
     /// Prefetch fallback used only before any successful server availability decision this session.
-    fn has_any_ai_remaining_before_server_decision(&self, ctx: &AppContext) -> bool {
+    fn has_any_ai_remaining_before_server_decision(
+        &self,
+        window_id: WindowId,
+        ctx: &AppContext,
+    ) -> bool {
         let current_workspace = UserWorkspaces::as_ref(ctx).current_workspace();
 
         let has_base_plan_ai_requests = self.has_base_plan_requests_remaining();
@@ -571,8 +575,7 @@ impl AIRequestUsageModel {
 
         // If you have provided your own API key or connected a Grok
         // subscription, it doesn't matter if you are out of warp-provided requests.
-        let has_byo_credentials = UserWorkspaces::as_ref(ctx).is_byo_api_key_enabled(ctx)
-            && ApiKeyManager::as_ref(ctx).has_any_key();
+        let has_byo_credentials = Self::has_usable_byo_inference_path(window_id, ctx);
 
         has_base_plan_ai_requests
             || (user_bonus_credits || workspace_and_team_bonus_credits)
@@ -706,6 +709,7 @@ impl AIRequestUsageModel {
     /// Computes the current banner state based on live conditions.
     pub fn compute_buy_addon_credits_banner_display_state(
         &self,
+        window_id: WindowId,
         ctx: &AppContext,
     ) -> BuyCreditsBannerDisplayState {
         // Early return if user dismissed
@@ -747,7 +751,7 @@ impl AIRequestUsageModel {
                 );
             // Hide when interactive AI is permitted, except ambient-only sources
             // which do not fund interactive requests.
-            if self.has_any_ai_remaining(ctx) && !only_ambient_server_source {
+            if self.has_any_ai_remaining(window_id, ctx) && !only_ambient_server_source {
                 return BuyCreditsBannerDisplayState::Hidden;
             }
         } else if self.has_base_plan_requests_remaining() || has_non_ambient_bonus_credits {

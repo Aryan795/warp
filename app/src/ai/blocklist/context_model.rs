@@ -147,6 +147,12 @@ pub fn block_context_from_terminal_model(
 }
 
 impl BlocklistAIContextModel {
+    pub fn is_codebase_context_enabled(&self, app: &AppContext) -> bool {
+        app.window_id_for_view(self.terminal_surface_id)
+            .is_some_and(|window_id| {
+                UserWorkspaces::as_ref(app).is_codebase_context_enabled(window_id, app)
+            })
+    }
     /// Creates pending context state for a terminal surface.
     pub fn new(
         sessions: ModelHandle<Sessions>,
@@ -350,8 +356,7 @@ impl BlocklistAIContextModel {
             // source code embedding based context is still available.
             false
         } else {
-            let window_id = app.window_id_for_view(self.terminal_surface_id);
-            UserWorkspaces::as_ref(app).is_codebase_context_enabled(window_id, app)
+            self.is_codebase_context_enabled(app)
                 && pwd.as_ref().is_some_and(|pwd| {
                     RepoOutlines::as_ref(app).is_directory_indexed(Path::new(pwd))
                 })

@@ -40,8 +40,11 @@ pub(crate) fn apply_selected_agent_model_update(
 
     // Check if the model is available to the viewer. If not, skip the update.
     // This handles cases where the viewer and sharer have different model permissions.
+    let Some(window_id) = ctx.window_id_for_view(terminal_view_id) else {
+        return;
+    };
     let model_is_available = llm_prefs
-        .get_base_llm_choices_for_agent_mode(ctx)
+        .get_base_llm_choices_for_agent_mode(window_id, ctx)
         .any(|info| info.id == model_id);
     if !model_is_available {
         log::warn!("Skipping shared-session model update - {model_id} is unknown");

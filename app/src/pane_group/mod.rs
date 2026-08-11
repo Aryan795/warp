@@ -6027,6 +6027,7 @@ impl PaneGroup {
                     initial_size,
                     model_event_sender,
                     chosen_shell,
+                    window_id,
                     ctx,
                     |surface_init, ctx| {
                         create_terminal_view_surface(

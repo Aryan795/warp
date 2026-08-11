@@ -17,7 +17,7 @@ use remote_server::proto::{
     ReadFileContextRequest, ReadFileContextResponse, file_context_proto,
 };
 use string_offset::ByteOffset;
-use warpui::{AppContext, ModelContext, SingletonEntity};
+use warpui::{AppContext, ModelContext, SingletonEntity, WindowId};
 
 use crate::ai::agent::{
     AnyFileContent, FileContext, SearchCodebaseFailureReason, SearchCodebaseResult,
@@ -54,6 +54,7 @@ pub(super) fn root_directory_for_search(
 }
 
 pub(super) fn send_request(
+    window_id: WindowId,
     query: String,
     partial_paths: Option<Vec<String>>,
     session_context: SessionContext,
@@ -61,7 +62,7 @@ pub(super) fn send_request(
     action_id: crate::ai::agent::AIAgentActionId,
     ctx: &mut ModelContext<GetRelevantFilesController>,
 ) -> RemoteSearchRequest {
-    if !should_use_codebase_indexing(CodebaseAutoIndexingSurface::Remote, ctx) {
+    if !should_use_codebase_indexing(CodebaseAutoIndexingSurface::Remote, window_id, ctx) {
         return RemoteSearchRequest::Ready(SearchCodebaseResult::Failed {
             reason: SearchCodebaseFailureReason::CodebaseNotIndexed,
             message: "Remote codebase search is not enabled.".to_string(),

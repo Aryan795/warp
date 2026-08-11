@@ -1522,7 +1522,8 @@ impl TuiTerminalSessionView {
                 ctx,
             )
         });
-        let get_relevant_files_controller = ctx.add_model(GetRelevantFilesController::new);
+        let get_relevant_files_controller =
+            ctx.add_model(|ctx| GetRelevantFilesController::new(terminal_surface_id, ctx));
         let action_model = ctx.add_model(|ctx| {
             BlocklistAIActionModel::new(
                 model.clone(),
@@ -1637,7 +1638,12 @@ impl TuiTerminalSessionView {
         ctx.subscribe_to_model(&slash_commands, |_, _, _, ctx| ctx.notify());
         let window_id = ctx.window_id();
         let api_keys_menu = ctx.add_model(|ctx| {
-            TuiApiKeysMenuModel::new(input_editor_model.clone(), suggestions_mode.clone(), ctx)
+            TuiApiKeysMenuModel::new(
+                window_id,
+                input_editor_model.clone(),
+                suggestions_mode.clone(),
+                ctx,
+            )
         });
         ctx.subscribe_to_model(&api_keys_menu, |_, _, _: &TuiApiKeysMenuEvent, ctx| {
             ctx.notify();

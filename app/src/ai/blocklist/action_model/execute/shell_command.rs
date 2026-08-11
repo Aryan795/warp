@@ -131,7 +131,7 @@ impl ShellCommandExecutor {
                     escape_char,
                     is_read_only.unwrap_or(false),
                     *is_risky,
-                    Some(self.terminal_view_id),
+                    self.terminal_view_id,
                     ctx,
                 );
                 if let CommandExecutionPermission::Allowed(reason) = autoexecution_permission {

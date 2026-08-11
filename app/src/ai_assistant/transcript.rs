@@ -817,7 +817,9 @@ impl View for Transcript {
         let theme = appearance.theme();
         let transcript = self.requests_model.as_ref(app).transcript();
         let request_status = self.requests_model.as_ref(app).request_status();
-        let has_ai_available = AIRequestUsageModel::as_ref(app).has_any_ai_remaining(app);
+        let has_ai_available = self.view_handle.window_id(app).is_some_and(|window_id| {
+            AIRequestUsageModel::as_ref(app).has_any_ai_remaining(window_id, app)
+        });
 
         let mut blocks = Flex::column();
         for (index, part) in transcript.iter().enumerate() {

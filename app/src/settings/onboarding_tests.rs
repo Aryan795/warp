@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use onboarding::slides::{AgentAutonomy, AgentDevelopmentSettings, ProjectOnboardingSettings};
 use onboarding::{SelectedSettings, UICustomizationSettings};
 use warp_core::features::FeatureFlag;
-use warpui::{App, SingletonEntity};
+use warpui::{App, SingletonEntity, WindowId};
 
 use crate::LaunchMode;
 use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
@@ -134,7 +134,7 @@ fn apply_onboarding_settings_preserves_existing_cloud_profile_on_existing_user_l
         };
 
         app.update(|ctx| {
-            apply_onboarding_settings(&onboarding_settings, true, ctx);
+            apply_onboarding_settings(&onboarding_settings, true, WindowId::new(), ctx);
         });
 
         // Post-condition: the cloud profile retains its stored values.
@@ -221,7 +221,12 @@ fn account_first_settings_enable_agent_for_authenticated_users_and_apply_ui_choi
             (Some(FtueAccountClass::Paid), true),
         ] {
             app.update(|ctx| {
-                apply_account_first_onboarding_settings(&selected_settings, account_class, ctx);
+                apply_account_first_onboarding_settings(
+                    &selected_settings,
+                    account_class,
+                    WindowId::new(),
+                    ctx,
+                );
             });
             app.read(|ctx| {
                 assert_eq!(*AISettings::as_ref(ctx).is_any_ai_enabled, expected_ai);
@@ -271,7 +276,7 @@ fn apply_onboarding_settings_gates_third_party_ai_on_account() {
 
         // Skipping login (no account) leaves AI off, even for agent intent.
         app.update(|ctx| {
-            apply_onboarding_settings(&onboarding_settings, false, ctx);
+            apply_onboarding_settings(&onboarding_settings, false, WindowId::new(), ctx);
         });
         let ai_disabled = app.read(|ctx| !*AISettings::as_ref(ctx).is_any_ai_enabled);
         assert!(
@@ -281,7 +286,7 @@ fn apply_onboarding_settings_gates_third_party_ai_on_account() {
 
         // Creating an account turns AI on, including for third-party agents.
         app.update(|ctx| {
-            apply_onboarding_settings(&onboarding_settings, true, ctx);
+            apply_onboarding_settings(&onboarding_settings, true, WindowId::new(), ctx);
         });
         let ai_enabled = app.read(|ctx| *AISettings::as_ref(ctx).is_any_ai_enabled);
         assert!(

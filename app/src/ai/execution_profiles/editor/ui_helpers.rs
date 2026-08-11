@@ -427,7 +427,7 @@ fn render_context_window_row(
         .with_child(Container::new(label_desc).with_margin_bottom(4.).finish())
         .with_child(slider_row);
     if BlocklistAIPermissions::as_ref(app)
-        .permissions_profile_for_id(app, view.profile_id())
+        .permissions_profile_for_id(app, view.profile_id(), view.window_id())
         .should_show_long_context_pricing_warning(view.dragged_context_window_value, app)
     {
         column.add_child(render_long_context_pricing_warning(appearance));
@@ -447,7 +447,7 @@ pub fn render_permissions_section(
     app: &warpui::AppContext,
 ) -> Box<dyn Element> {
     let ai_settings = AISettings::as_ref(app);
-    let window_id = app.window_id_for_view(view.view_id());
+    let window_id = view.window_id();
     let mut column = Flex::column().with_children([
         render_separator(appearance),
         render_section_label("PERMISSIONS", appearance),
@@ -719,7 +719,7 @@ fn render_directory_allowlist_section(
     app: &warpui::AppContext,
 ) -> Box<dyn Element> {
     let ai_settings = AISettings::as_ref(app);
-    let window_id = app.window_id_for_view(view.view_id());
+    let window_id = view.window_id();
     let is_editable = ai_settings.is_directory_allowlist_editable(window_id, app);
 
     render_list_section(
@@ -745,7 +745,7 @@ fn render_command_allowlist_section(
     app: &warpui::AppContext,
 ) -> Box<dyn Element> {
     let ai_settings = AISettings::as_ref(app);
-    let window_id = app.window_id_for_view(view.view_id());
+    let window_id = view.window_id();
     let is_editable = ai_settings.is_command_allowlist_editable(window_id, app);
 
     render_list_section(
@@ -774,7 +774,8 @@ fn render_command_denylist_section(
     use crate::ai::blocklist::BlocklistAIPermissions;
 
     let ai_disabled = !AISettings::as_ref(app).is_any_ai_enabled(app);
-    let org_denylist = BlocklistAIPermissions::get_org_execute_commands_denylist(app);
+    let org_denylist =
+        BlocklistAIPermissions::get_org_execute_commands_denylist(app, view.window_id());
     let mut tooltip_idx = 0usize;
 
     let input_items: Vec<InputListItem<ExecutionProfileEditorViewAction>> = profile_data

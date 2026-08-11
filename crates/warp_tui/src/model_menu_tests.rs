@@ -3,7 +3,7 @@ use ai::api_keys::ApiKeyManager;
 use warp::tui_export::register_tui_session_view_test_singletons;
 use warp_core::features::FeatureFlag;
 use warpui::SingletonEntity as _;
-use warpui_core::App;
+use warpui_core::{App, WindowId};
 
 use super::*;
 
@@ -95,11 +95,17 @@ fn provider_key_controls_key_connected_callout() {
                 manager.persist_provider_key(LLMProvider::OpenAI, Some("test-key".to_owned()), ctx)
             })
             .unwrap();
+        let window_id = WindowId::new();
         let connected_row = app.read(|ctx| {
-            let choice =
-                query_model_picker_choices(LLMPreferences::as_ref(ctx), [&llm], "", None, ctx)
-                    .remove(0);
-            model_menu_row(choice, &LLMId::from("profile-default"), None, ctx)
+            let choice = query_model_picker_choices(
+                LLMPreferences::as_ref(ctx),
+                [&llm],
+                "",
+                Some(window_id),
+                ctx,
+            )
+            .remove(0);
+            model_menu_row(choice, &LLMId::from("profile-default"), window_id, ctx)
         });
         assert_eq!(
             snapshot_row(&connected_row).state_suffix.as_deref(),
@@ -112,10 +118,15 @@ fn provider_key_controls_key_connected_callout() {
             })
             .unwrap();
         let disconnected_row = app.read(|ctx| {
-            let choice =
-                query_model_picker_choices(LLMPreferences::as_ref(ctx), [&llm], "", None, ctx)
-                    .remove(0);
-            model_menu_row(choice, &LLMId::from("profile-default"), None, ctx)
+            let choice = query_model_picker_choices(
+                LLMPreferences::as_ref(ctx),
+                [&llm],
+                "",
+                Some(window_id),
+                ctx,
+            )
+            .remove(0);
+            model_menu_row(choice, &LLMId::from("profile-default"), window_id, ctx)
         });
         assert_eq!(snapshot_row(&disconnected_row).state_suffix, None);
     });
