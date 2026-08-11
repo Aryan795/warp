@@ -5,6 +5,7 @@ use super::search_item::WorkflowSearchItem;
 use crate::cloud_object::CloudModelType;
 use crate::cloud_object::model::persistence::CloudModel;
 use crate::search::ai_context_menu::mixer::AIContextMenuSearchableAction;
+use crate::search::ai_context_menu::safe_truncate;
 use crate::search::data_source::{Query, QueryResult};
 use crate::search::mixer::{DataSourceRunErrorWrapper, SyncDataSource};
 use crate::workspaces::user_workspaces::UserWorkspaces;
@@ -64,12 +65,12 @@ impl SyncDataSource for WorkflowDataSource {
             let content_preview = content_lines.join("\n");
             let workflow_description = if content_preview.is_empty() {
                 None
+            } else if content_preview.len() > 200 {
+                let mut truncated = content_preview;
+                safe_truncate(&mut truncated, 197);
+                Some(format!("{truncated}..."))
             } else {
-                Some(if content_preview.len() > 200 {
-                    format!("{}...", &content_preview[..197])
-                } else {
-                    content_preview
-                })
+                Some(content_preview)
             };
             let workflow_uid = workflow.id.uid();
             let recency_bonus = (30 * (index + 1) / total_workflows) as i64;
@@ -129,3 +130,7 @@ impl SyncDataSource for WorkflowDataSource {
 impl warpui::Entity for WorkflowDataSource {
     type Event = ();
 }
+
+#[cfg(test)]
+#[path = "data_source_tests.rs"]
+mod tests;
