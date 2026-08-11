@@ -380,11 +380,12 @@ fn test_open_file_non_runnable_shebang_routes_to_editor() {
     assert_eq!(classify_open_file_action(&p, true), OpenFileAction::Editor);
 }
 
-/// Pins the invariant the short circuit rests on: it fires exactly when the OS
-/// round trip would itself have opened an editor. Both sides consult
-/// `classify_open_file_action`, so this fails loudly if a future change to the
-/// classifier stops lining up with the resolver's own rules — the Notebook arm
-/// against rules 0 and 1, the non-openable arm against rule 4.
+/// Pins the invariant the short circuit rests on: among files that reach it,
+/// it fires exactly when the OS round trip would itself have opened an editor.
+/// Both sides consult `classify_open_file_action`, so this fails loudly if a
+/// future change to the classifier stops lining up with the resolver's own
+/// rules — the Notebook arm against rules 0 and 1, the non-openable arm
+/// against rule 4.
 #[test]
 #[cfg(feature = "local_fs")]
 fn test_short_circuit_matches_os_round_trip_classification() {
@@ -399,18 +400,9 @@ fn test_short_circuit_matches_os_round_trip_classification() {
     std::fs::write(&markdown, "# hi\n").unwrap();
     let notebook = dir.path().join("analysis.ipynb");
     std::fs::write(&notebook, "{\"nbformat\": 4, \"cells\": []}\n").unwrap();
-    let binary = dir.path().join("image.png");
-    std::fs::write(&binary, b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR").unwrap();
     let missing = dir.path().join("gone.rs");
 
-    let mut paths = vec![
-        code,
-        markdown,
-        notebook,
-        binary,
-        missing,
-        dir.path().to_path_buf(),
-    ];
+    let mut paths = vec![code, markdown, notebook, missing];
 
     #[cfg(unix)]
     {
@@ -433,6 +425,41 @@ fn test_short_circuit_matches_os_round_trip_classification() {
             "{path:?} short-circuits to the code editor only when the OS round trip would open one"
         );
     }
+}
+
+/// The one place the two verdicts disagree, pinned so it stays visible and
+/// cannot widen unnoticed.
+///
+/// `classify_open_file_action` admits any file starting with a shebang, while
+/// `is_file_openable_in_warp` calls an extensionless file with no recognized
+/// name binary. Such a file is diverted by rule 4 before the short circuit is
+/// reachable, so it goes out to the OS and comes back into an editor at line 1.
+/// Pre-existing: `master` behaves the same way. Closing it means relaxing what
+/// rule 4 considers openable, which reaches well beyond opening files at a
+/// line.
+#[test]
+#[cfg(all(unix, feature = "local_fs"))]
+fn test_extensionless_shebang_file_is_diverted_before_the_short_circuit() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("noext");
+    std::fs::write(&path, b"#!/bin/sh\necho hi\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    assert_eq!(
+        classify_open_file_action(&path, true),
+        OpenFileAction::Editor,
+        "the far side of the round trip opens this in an editor"
+    );
+    assert!(
+        is_file_openable_in_warp(&path).is_none(),
+        "but rule 4 treats it as binary and diverts it first"
+    );
+    assert_eq!(
+        resolve_system_default(&path, true),
+        FileTarget::SystemGeneric
+    );
 }
 
 #[test]

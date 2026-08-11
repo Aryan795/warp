@@ -324,9 +324,17 @@ fn resolve_file_target_with_system_default_handler(
         // Only where the round trip would itself have opened an editor, so that
         // short-circuiting changes whether the line survives and nothing else:
         // a runnable script still runs in a session, and a directory still goes
-        // to the OS. Asking the same classifier the far side uses keeps the two
-        // from drifting apart. It is also the cheap check, so a file it rejects
-        // never pays for the handler lookup.
+        // to the OS. Asking the classifier the far side uses, rather than
+        // restating its conditions, is what keeps the two from drifting apart.
+        // It is also the cheap check, so a file it rejects never pays for the
+        // handler lookup.
+        //
+        // Rule 4 above is stricter than the classifier for extensionless files:
+        // it treats one with no recognized name as binary, where the classifier
+        // admits any file starting with a shebang. Such a file is diverted
+        // before reaching here, so it opens via the OS at line 1 even though the
+        // far side would put it in an editor. Pre-existing, and pinned by
+        // `test_short_circuit_matches_os_round_trip_classification`.
         EditorChoice::SystemDefault
             if classify_open_file_action(path, prefer_markdown_viewer)
                 == OpenFileAction::Editor
