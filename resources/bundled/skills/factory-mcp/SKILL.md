@@ -237,10 +237,13 @@ anywhere in the task's run tree (for a factory agent, its own run id works) or
 the `factory_task_uid` explicitly.
 
 **A merged PR is the primary trigger.** Most tasks finish by landing their work
-as a pull request. Do not take a merge notification at face value — check the
-linked PR(s) yourself before completing. When a task carries several linked
-PRs, every one that carries the work needs to have merged, not just one of
-them.
+as a pull request. Do not take a merge notification at face value — a message
+or a task's own metadata is not proof. Get the task's PR outputs (e.g. from
+`get_task`) to see which PRs are relevant, then check each one's state against
+the code host itself, the authoritative source of merged state. When a task
+carries several linked PRs, every one that carries the work needs to have
+merged, not just one of them. If any relevant PR is not merged, or you cannot
+verify one's state, leave the task uncompleted.
 
 **Done without a merge is the secondary trigger.** Some tasks legitimately
 finish without merging anything: a question got answered, an investigation
@@ -259,11 +262,14 @@ handing work off is not finishing it.
 **Call it once, near the end, and treat it as best-effort.** The call is
 idempotent (completing an already-complete task is a successful no-op), but it
 is also terminal, so completing too early — not a repeat call — is the real
-risk: the stage cannot be walked back through this tool. Make it the last step
-of closing out a task, after the tracking issue is updated and the
-human-facing wrap-up is sent, and treat the call itself as best-effort — when
-the Factory MCP is not connected, `complete_task` simply is not in your tool
-set, and that must not stop the rest of your close-out.
+risk: the stage cannot be walked back through this tool. Make it the last
+*applicable* close-out step: when a tracking issue and a human-facing wrap-up
+exist for the task, update and send those first. But do not let those
+artifacts gate `complete_task` when a task has neither — an ad-hoc task, or
+one an outside MCP caller has no ownership of — since it may be the only
+durable close-out signal you can give. Treat the call itself as best-effort
+too — when the Factory MCP is not connected, `complete_task` simply is not in
+your tool set, and that must not stop the rest of your close-out.
 
 ## Inspecting the foreman conversation
 
