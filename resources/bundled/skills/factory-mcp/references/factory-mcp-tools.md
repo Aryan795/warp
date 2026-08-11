@@ -77,12 +77,14 @@ tasks fit the tool response size limit.
 
 Get one factory task, either by its authoritative `factory_task_uid` or — when
 the connected server's live schema advertises it — by an exact `reference`: a
-GitHub PR URL, a Slack thread URL, a ticket ref/URL (Linear, Jira, or generic
-`ticket:<source>:<id>`), a run or task URL/UID, or a repository-scoped branch.
-Exactly one of `factory_task_uid` / `reference` identifies the task. **`reference`
-is a newer addition and may not be present on every server** — check your
-session's live input schema before relying on it, and fall back to `list_tasks`
-+ client-side matching (see the skill's Workflow 2) when it's absent.
+GitHub PR URL, a Slack message permalink, a ticket ref/URL (Linear, Jira, or
+generic `ticket:<source>:<id>`), an Oz run URL, a bare run/task UUID, an
+explicit `run:<uuid>` / `task:<uuid>` reference, or a repository-scoped branch
+(there is no separate task-URL form). Exactly one of `factory_task_uid` /
+`reference` identifies the task. **`reference` is a newer addition and may not
+be present on every server** — check your session's live input schema before
+relying on it, and fall back to `list_tasks` + client-side matching (see the
+skill's Workflow 2) when it's absent.
 
 Default (read-only): status and context (runs, stage, outputs) — safe to call
 anytime. The task and every run in its history carry a `run_url` opening them in
@@ -116,11 +118,13 @@ Inputs:
 - `factory_task_uid` — authoritative task UID from `list_tasks`. Required unless
   `reference` is given.
 - `reference` — alternative to `factory_task_uid`: an exact pointer to the task —
-  a GitHub PR URL, a Slack thread URL, a ticket ref/URL (`linear:<id>`,
-  `jira:<id>`, a ticket URL, or generic `ticket:<source>:<id>`), a run or task
-  URL/UID, or a bare branch name (requires `repository`). Required unless
-  `factory_task_uid` is given. Only present when the connected server's live
-  schema advertises it.
+  a GitHub PR URL, a Slack message permalink, a ticket ref/URL (`linear:<id>`,
+  `jira:<id>`, a Linear/Jira issue URL, or generic `ticket:<source>:<id>`), an
+  Oz run URL, a bare run/task UUID, an explicit `run:<uuid>` / `task:<uuid>`
+  reference, or a bare branch name (requires `repository`) / self-contained
+  `branch:<owner>/<repo>:<branch>` reference — **there is no task-URL form**.
+  Required unless `factory_task_uid` is given. Only present when the connected
+  server's live schema advertises it.
 - `factory_uid` — optional scope to narrow a `reference` lookup to one factory;
   also helps disambiguate multiple candidates.
 - `repository` — optional `owner/repo` scope to narrow a `reference` lookup;

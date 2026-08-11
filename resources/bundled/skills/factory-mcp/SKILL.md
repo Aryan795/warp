@@ -145,12 +145,15 @@ Check whether the connected `get_task`'s live input schema advertises a
 **If `reference` is available**, call `get_task` once with the exact identifier
 from above:
 - a GitHub PR URL, e.g. `https://github.com/acme/app/pull/42`
-- a Slack thread URL / permalink
+- a Slack message permalink, e.g. `https://acme.slack.com/archives/C0123/p1234567890123456`
+  (a reply permalink's `thread_ts` is canonicalized to the thread root)
 - a ticket ref or URL — Linear or Jira, e.g. `linear:APP-1234`, `jira:PROJ-123`,
-  a ticket URL, or the generic `ticket:<source>:<id>` form
-- a run or task URL/UID
-- a bare branch name — pass `repository` (`owner/repo`) alongside it; `get_task`
-  cannot resolve a branch without repository scope
+  a Linear/Jira issue URL, or the generic `ticket:<source>:<id>` form
+- an Oz run URL, a bare run or task UUID, or an explicit `run:<uuid>` /
+  `task:<uuid>` reference — **there is no separate task-URL form**
+- a bare branch name plus `repository` (`owner/repo`), or a self-contained
+  `branch:<owner>/<repo>:<branch>` reference; `get_task` cannot resolve a bare
+  branch without repository scope
 
 Pass `factory_uid` and/or `repository` too whenever you already know them —
 they narrow the match instead of searching across every factory you can see,
