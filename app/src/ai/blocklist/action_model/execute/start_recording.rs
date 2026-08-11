@@ -81,11 +81,11 @@ impl StartRecordingExecutor {
                 // frame rate 0 means unspecified, and absent limits would otherwise
                 // leave the capture unbounded.
                 let defaults = computer_use::RecordingConfig::default();
-                // Use server-provided integer speed multiplier (> 1 means faster
-                // playback); fall back to the client default (4x) when absent.
+                // Use the server-provided fractional speed multiplier (> 1.0
+                // means faster playback); fall back to the client default
+                // (1.5x) when absent.
                 let playback_speed_multiplier = playback_speed_multiplier
-                    .filter(|&s| s > 1)
-                    .map(|s| s as f32)
+                    .filter(|&s| s > 1.0)
                     .unwrap_or(defaults.playback_speed_multiplier);
                 let resolved_frame_rate = if frame_rate > 0 {
                     frame_rate
@@ -99,12 +99,19 @@ impl StartRecordingExecutor {
                     playback_speed_multiplier,
                     target,
                 };
-                // Carry the resolved frame rate to the completion callback so the
-                // controller can store it for the post-stop smart cut's one-frame
-                // minimum, even though it is not echoed back to the server.
-                (recorder.start(config).await, resolved_frame_rate)
+                // Carry the resolved frame rate and speed multiplier to the
+                // completion callback: the controller stores the frame rate for
+                // the post-stop smart cut's one-frame minimum, and the speed
+                // multiplier for the post-stop speed pass (Linux) / as a record
+                // of what was already applied live during capture (macOS).
+                // Neither is echoed back to the server.
+                (
+                    recorder.start(config).await,
+                    resolved_frame_rate,
+                    playback_speed_multiplier,
+                )
             },
-            move |(result, frame_rate), ctx| match result {
+            move |(result, frame_rate, playback_speed_multiplier), ctx| match result {
                 Ok(handle) => {
                     let recording_id = Uuid::new_v4().to_string();
                     let started_at = SystemTime::now();
@@ -128,6 +135,7 @@ impl StartRecordingExecutor {
                             conversation_id,
                             handle,
                             frame_rate,
+                            playback_speed_multiplier,
                             summary,
                             description,
                             target,

@@ -4,6 +4,10 @@ use warp_multi_agent_api as api;
 use crate::agent::action::AIAgentActionType;
 use crate::agent::convert::ToolToAIAgentActionError;
 
+// The deprecated legacy field must still be set to construct this struct
+// literal (it is a plain, non-optional proto3 field); tests exercise the
+// current `playback_speed` field instead.
+#[allow(deprecated)]
 fn start_recording(
     target: Option<api::message::tool_call::ComputerUseTarget>,
 ) -> api::message::tool_call::StartRecording {
@@ -14,6 +18,7 @@ fn start_recording(
         playback_speed_multiplier: 0,
         target,
         description: String::new(),
+        playback_speed: 0.0,
     }
 }
 
@@ -63,4 +68,39 @@ fn start_recording_without_target_records_whole_screen() {
         action,
         AIAgentActionType::StartRecording { window: None, .. }
     ));
+}
+
+#[test]
+fn start_recording_carries_fractional_playback_speed_above_one() {
+    let mut tool_call = start_recording(None);
+    tool_call.playback_speed = 1.5;
+    let action =
+        AIAgentActionType::try_from(tool_call).expect("valid start_recording should convert");
+    match action {
+        AIAgentActionType::StartRecording {
+            playback_speed_multiplier,
+            ..
+        } => assert_eq!(playback_speed_multiplier, Some(1.5)),
+        other => panic!("expected StartRecording, got {other:?}"),
+    }
+}
+
+#[test]
+fn start_recording_treats_real_time_playback_speed_as_unset() {
+    for speed in [0.0, 1.0] {
+        let mut tool_call = start_recording(None);
+        tool_call.playback_speed = speed;
+        let action =
+            AIAgentActionType::try_from(tool_call).expect("valid start_recording should convert");
+        match action {
+            AIAgentActionType::StartRecording {
+                playback_speed_multiplier,
+                ..
+            } => assert_eq!(
+                playback_speed_multiplier, None,
+                "speed {speed} should convert to None (real-time)"
+            ),
+            other => panic!("expected StartRecording, got {other:?}"),
+        }
+    }
 }

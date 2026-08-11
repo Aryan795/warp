@@ -287,22 +287,39 @@ pub fn create_recorder() -> Box<dyn Recorder> {
 }
 
 /// Applies platform-specific post-processing and returns the path to upload.
-/// Linux trims inactive gaps and burns action overlays; other platforms return
-/// `input` unchanged.
+/// Linux trims inactive gaps, burns action overlays, then applies
+/// `playback_speed_multiplier` as a final pass; other platforms return `input`
+/// unchanged (macOS applies the multiplier live during capture instead; see
+/// `mac::recording`).
 pub async fn post_process_recording(
     input: &Path,
     entries: &[ActionLogEntry],
     dimensions: (u32, u32),
     source_duration: Duration,
     frame_rate: u32,
+    playback_speed_multiplier: f32,
 ) -> Result<PathBuf, RecordingError> {
     #[cfg(all(linux, not(noop)))]
     {
-        imp::post_process_recording(input, entries, dimensions, source_duration, frame_rate).await
+        imp::post_process_recording(
+            input,
+            entries,
+            dimensions,
+            source_duration,
+            frame_rate,
+            playback_speed_multiplier,
+        )
+        .await
     }
     #[cfg(not(all(linux, not(noop))))]
     {
-        let _ = (entries, dimensions, source_duration, frame_rate);
+        let _ = (
+            entries,
+            dimensions,
+            source_duration,
+            frame_rate,
+            playback_speed_multiplier,
+        );
         Ok(input.to_path_buf())
     }
 }
@@ -400,10 +417,12 @@ impl Default for RecordingConfig {
             // NOTE: Bounds every capture so an unattended recording can't grow without bound (~10 min / 1 GiB).
             max_duration: Duration::from_secs(10 * 60),
             max_size_bytes: 1024 * 1024 * 1024,
-            // NOTE: 4x playback speed keeps demo videos short and watchable. A 4-minute
-            // recording plays in 1 minute. The server can override via the StartRecording
-            // tool call's playback_speed_multiplier field.
-            playback_speed_multiplier: 4.0,
+            // NOTE: 1.5x playback speed is the universal default applied on every
+            // substrate. The server sends this on every StartRecording tool call
+            // (see `computer_use_recording.playback_speed_multiplier` in
+            // warp-server); this constant is only the fallback used when the
+            // server omits a value.
+            playback_speed_multiplier: 1.5,
             target: Target::Screen,
         }
     }

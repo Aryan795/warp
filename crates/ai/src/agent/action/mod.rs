@@ -33,7 +33,10 @@ use crate::diff_validation::ParsedDiff;
 use crate::document::AIDocumentId;
 use crate::skills::SkillReference;
 
-#[derive(Debug, Clone, Eq, PartialEq, EnumDiscriminants)]
+// Not `Eq`: `StartRecording::playback_speed_multiplier` is an `Option<f32>`,
+// and `f32` does not implement `Eq` (NaN is not reflexive). `PartialEq` is
+// sufficient for every current use of this type.
+#[derive(Debug, Clone, PartialEq, EnumDiscriminants)]
 pub enum AIAgentActionType {
     /// The AI requested the output for a given command to be retrieved as context in responding to
     /// a user's query.
@@ -147,15 +150,16 @@ pub enum AIAgentActionType {
     /// arrives on the tool call; the client applies it. `frame_rate` of 0 means
     /// unset. `summary` is a short agent-authored title shown in badges.
     /// `description` is an optional longer description shown in detail views.
-    /// `playback_speed_multiplier` is the integer speed factor from the proto
-    /// (e.g. 4 = 4×). `None` or a value ≤ 1 means real-time (use client default).
+    /// `playback_speed_multiplier` is the fractional speed factor from the
+    /// proto's `playback_speed` field (e.g. 1.5 = 1.5×). `None` or a value ≤ 1
+    /// means real-time (use client default).
     StartRecording {
         frame_rate: u32,
         max_duration: Option<Duration>,
         max_size_bytes: Option<u64>,
         summary: Option<String>,
         description: Option<String>,
-        playback_speed_multiplier: Option<u32>,
+        playback_speed_multiplier: Option<f32>,
         /// The surface to record. `None` records the whole screen; a `Window`
         /// target records just that window via native ffmpeg `x11grab
         /// -window_id` on the foreground-visible window. Applied by the client

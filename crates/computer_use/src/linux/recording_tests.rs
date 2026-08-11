@@ -416,6 +416,70 @@ fn capture_command_disables_cursor_compositing_for_screen_and_window() {
     }
 }
 
+/// The final speed-pass command applies `setpts` scaled by the inverse of the
+/// multiplier, forces the constant output frame rate, and writes to the given
+/// output path — mirroring macOS's live setpts filter format exactly, so the
+/// two platforms converge on the same final video timing.
+#[test]
+fn playback_speed_command_applies_setpts_filter() {
+    let input = Path::new("/tmp/input.mp4");
+    let output = Path::new("/tmp/input.speed.mp4");
+    let command = super::new_playback_speed_command(input, output, 15, 1.5);
+    let args: Vec<String> = command
+        .as_std()
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+
+    // 1.0 / 1.5 = 0.666667, formatted to six decimals — matches macOS's format.
+    let setpts = args
+        .iter()
+        .find(|arg| arg.starts_with("setpts="))
+        .expect("argv should contain a setpts filter");
+    assert_eq!(setpts, "setpts=0.666667*PTS");
+    assert!(
+        args.iter().any(|arg| arg == "-vf"),
+        "argv should pass setpts via -vf, got {args:?}"
+    );
+
+    let r_index = args
+        .iter()
+        .position(|arg| arg == "-r")
+        .expect("argv should contain -r");
+    assert_eq!(args.get(r_index + 1), Some(&"15".to_string()));
+}
+
+/// End-to-end: applying a 1.5x speed pass to a fixture video shrinks its
+/// duration by the expected ratio.
+#[tokio::test]
+async fn apply_playback_speed_rescales_duration() {
+    if !ffmpeg_available().await {
+        eprintln!("skipping apply_playback_speed_rescales_duration: no ffmpeg");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!("warp-speed-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let source = dir.join("source.mp4");
+    write_fixture_source(&source).await;
+    let source_duration = probe_duration(&source).await;
+
+    let sped_path = super::apply_playback_speed(&source, FIXTURE_FRAME_RATE, 1.5)
+        .await
+        .expect("apply playback speed");
+    let sped_duration = probe_duration(&sped_path).await;
+
+    let expected = source_duration / 1.5;
+    assert!(
+        (sped_duration - expected).abs() < 0.15,
+        "expected ~{expected}s after a 1.5x speedup of a {source_duration}s source, got \
+         {sped_duration}s"
+    );
+
+    let _ = std::fs::remove_file(&sped_path);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The cut-only filtergraph emits one `trim`+`setpts=PTS-STARTPTS` branch per
 /// retained segment, concatenates them video-only, and maps the result to
 /// `[vout]`. It contains no overlay/subtitles logic, which is handled in a

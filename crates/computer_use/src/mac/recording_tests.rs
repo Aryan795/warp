@@ -44,6 +44,22 @@ fn applies_setpts_filter_when_playback_speed_exceeds_one() {
 }
 
 #[test]
+fn applies_setpts_filter_for_the_default_1_5x_speed() {
+    // The universal default is 1.5x, sent by the server on every
+    // StartRecording call and mirrored by the client-side fallback default.
+    let config = RecordingConfig::default();
+    assert_eq!(config.playback_speed_multiplier, 1.5);
+    let args = argv(&config);
+
+    // 1.0 / 1.5 = 0.666667, formatted to six decimals.
+    let setpts = args
+        .iter()
+        .find(|arg| arg.starts_with("setpts="))
+        .expect("argv should contain a setpts filter at the default 1.5x speed");
+    assert_eq!(setpts, "setpts=0.666667*PTS");
+}
+
+#[test]
 fn omits_setpts_filter_when_playback_speed_is_real_time() {
     for multiplier in [0.0_f32, 1.0] {
         let config = RecordingConfig {

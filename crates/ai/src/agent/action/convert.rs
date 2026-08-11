@@ -504,9 +504,12 @@ impl TryFrom<api::message::tool_call::StartRecording> for AIAgentActionType {
 
     fn try_from(value: api::message::tool_call::StartRecording) -> Result<Self, Self::Error> {
         let limits = value.limits;
-        // Only carry values > 1 (0 means unset; 1 means real-time).
+        // Read the fractional playback_speed field; the legacy integer
+        // playback_speed_multiplier field is deprecated and no longer
+        // populated by the server (see task.proto). Only carry values > 1.0
+        // (0.0 means unset; <= 1.0 means real-time).
         let playback_speed_multiplier =
-            (value.playback_speed_multiplier > 1).then_some(value.playback_speed_multiplier);
+            (value.playback_speed > 1.0).then_some(value.playback_speed);
         let window = match convert_recording_target(value.target)? {
             Some(target @ computer_use::Target::Window { .. }) => Some(target),
             Some(computer_use::Target::Screen) | None => None,
@@ -807,3 +810,7 @@ impl From<api::message::tool_call::insert_review_comments::Comment> for InsertRe
         }
     }
 }
+
+#[cfg(test)]
+#[path = "convert_tests.rs"]
+mod tests;
