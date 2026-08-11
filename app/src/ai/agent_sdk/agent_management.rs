@@ -306,7 +306,7 @@ fn apply_secret_deltas(
 }
 
 /// Add and remove the requested values, starting with `current` as a baseline.
-fn apply_string_deltas(
+pub(super) fn apply_string_deltas(
     current: &[String],
     add_values: Vec<String>,
     remove_values: Vec<String>,

@@ -2120,6 +2120,151 @@ fn environment_update_accepts_remove_description() {
 }
 
 #[test]
+fn environment_create_accepts_repeated_secret_flags() {
+    let args = Args::try_parse_from([
+        "warp",
+        "environment",
+        "create",
+        "--name",
+        "test-env",
+        "--docker-image",
+        "ubuntu:latest",
+        "--secret",
+        "GITHUB_TOKEN",
+        "--secret",
+        "NPM_TOKEN",
+    ])
+    .unwrap();
+
+    let Some(Command::CommandLine(boxed_cmd)) = args.command else {
+        panic!("Expected `warp environment create` command");
+    };
+    let CliCommand::Environment(EnvironmentCommand::Create { secret, .. }) = boxed_cmd.as_ref()
+    else {
+        panic!("Expected `warp environment create` command");
+    };
+
+    assert_eq!(secret, &["GITHUB_TOKEN", "NPM_TOKEN"]);
+}
+
+#[test]
+fn environment_create_defaults_to_no_secret_flags() {
+    let args = Args::try_parse_from([
+        "warp",
+        "environment",
+        "create",
+        "--name",
+        "test-env",
+        "--docker-image",
+        "ubuntu:latest",
+    ])
+    .unwrap();
+
+    let Some(Command::CommandLine(boxed_cmd)) = args.command else {
+        panic!("Expected `warp environment create` command");
+    };
+    let CliCommand::Environment(EnvironmentCommand::Create { secret, .. }) = boxed_cmd.as_ref()
+    else {
+        panic!("Expected `warp environment create` command");
+    };
+
+    assert!(secret.is_empty());
+}
+
+#[test]
+fn environment_update_accepts_secret_deltas() {
+    let args = Args::try_parse_from([
+        "warp",
+        "environment",
+        "update",
+        "env-id",
+        "--add-secret",
+        "GITHUB_TOKEN",
+        "--add-secret",
+        "NPM_TOKEN",
+        "--remove-secret",
+        "OLD_TOKEN",
+    ])
+    .unwrap();
+
+    let Some(Command::CommandLine(boxed_cmd)) = args.command else {
+        panic!("Expected `warp environment update` command");
+    };
+    let CliCommand::Environment(EnvironmentCommand::Update {
+        add_secret,
+        remove_secret,
+        remove_all_secrets,
+        ..
+    }) = boxed_cmd.as_ref()
+    else {
+        panic!("Expected `warp environment update` command");
+    };
+
+    assert_eq!(add_secret, &["GITHUB_TOKEN", "NPM_TOKEN"]);
+    assert_eq!(remove_secret, &["OLD_TOKEN"]);
+    assert!(!remove_all_secrets);
+}
+
+#[test]
+fn environment_update_accepts_remove_all_secrets() {
+    let args = Args::try_parse_from([
+        "warp",
+        "environment",
+        "update",
+        "env-id",
+        "--remove-all-secrets",
+    ])
+    .unwrap();
+
+    let Some(Command::CommandLine(boxed_cmd)) = args.command else {
+        panic!("Expected `warp environment update` command");
+    };
+    let CliCommand::Environment(EnvironmentCommand::Update {
+        add_secret,
+        remove_secret,
+        remove_all_secrets,
+        ..
+    }) = boxed_cmd.as_ref()
+    else {
+        panic!("Expected `warp environment update` command");
+    };
+
+    assert!(add_secret.is_empty());
+    assert!(remove_secret.is_empty());
+    assert!(remove_all_secrets);
+}
+
+#[test]
+fn environment_update_rejects_remove_all_secrets_with_add_secret() {
+    let result = Args::try_parse_from([
+        "warp",
+        "environment",
+        "update",
+        "env-id",
+        "--add-secret",
+        "GITHUB_TOKEN",
+        "--remove-all-secrets",
+    ]);
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn environment_update_rejects_remove_all_secrets_with_remove_secret() {
+    let result = Args::try_parse_from([
+        "warp",
+        "environment",
+        "update",
+        "env-id",
+        "--remove-secret",
+        "GITHUB_TOKEN",
+        "--remove-all-secrets",
+    ]);
+
+    assert!(result.is_err());
+}
+
+#[test]
 fn agent_run_accepts_computer_use_flag() {
     let args = Args::try_parse_from([
         "warp",

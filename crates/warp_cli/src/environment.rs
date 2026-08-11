@@ -46,6 +46,10 @@ pub enum EnvironmentCommand {
         /// Accept multiple setup command args to be run after cloning
         #[arg(long = "setup-command", short = 'c', action = ArgAction::Append)]
         setup_command: Vec<String>,
+        /// Managed secret to expose to runs using this environment (can be specified multiple
+        /// times). When omitted, runs receive every secret available to them.
+        #[arg(long = "secret", value_name = "NAME", action = ArgAction::Append)]
+        secret: Vec<String>,
 
         #[command(flatten)]
         scope: ObjectScope,
@@ -95,6 +99,31 @@ pub enum EnvironmentCommand {
         /// Setup command to remove from the list (can be specified multiple times)
         #[arg(long, action = ArgAction::Append)]
         remove_setup_command: Vec<String>,
+        /// Managed secret to expose to runs using this environment (can be specified multiple
+        /// times). Adding a secret to an environment that exposes every available secret narrows
+        /// it to only the secrets you list.
+        #[arg(
+            long = "add-secret",
+            value_name = "NAME",
+            action = ArgAction::Append,
+            conflicts_with = "remove_all_secrets",
+        )]
+        add_secret: Vec<String>,
+        /// Managed secret to stop exposing to runs using this environment (can be specified
+        /// multiple times)
+        #[arg(
+            long = "remove-secret",
+            value_name = "NAME",
+            action = ArgAction::Append,
+            conflicts_with = "remove_all_secrets",
+        )]
+        remove_secret: Vec<String>,
+        /// Stop exposing any secret to runs using this environment
+        #[arg(
+            long = "remove-all-secrets",
+            conflicts_with_all = ["add_secret", "remove_secret"],
+        )]
+        remove_all_secrets: bool,
         /// Force update without checking for integration usage
         #[arg(long, default_value_t = false)]
         force: bool,

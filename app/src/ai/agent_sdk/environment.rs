@@ -23,7 +23,7 @@ use crate::ai::agent_sdk::oauth_flow::poll_oauth_until_terminal;
 use crate::ai::agent_sdk::output::{self, TableFormat};
 use crate::ai::cloud_environments::{
     AmbientAgentEnvironment, BaseImage, CloudAmbientAgentEnvironment,
-    CloudAmbientAgentEnvironmentModel, GithubRepo,
+    CloudAmbientAgentEnvironmentModel, EnvironmentSecretRef, GithubRepo,
 };
 use crate::auth::UserUid;
 use crate::cloud_object::model::generic_string_model::GenericStringObjectId;
@@ -55,6 +55,116 @@ fn parse_repos(repo_strings: Vec<String>) -> anyhow::Result<Vec<GithubRepo>> {
         .collect()
 }
 
+/// The `--add-secret`, `--remove-secret`, and `--remove-all-secrets` flags of
+/// `warp environment update`.
+#[derive(Debug, Default)]
+struct SecretFlags {
+    add: Vec<String>,
+    remove: Vec<String>,
+    remove_all: bool,
+}
+
+/// New secret configuration produced by applying [`SecretFlags`] to an
+/// environment.
+#[derive(Debug)]
+struct SecretsUpdate {
+    /// Replacement value for [`AmbientAgentEnvironment::secrets`].
+    secrets: Option<Vec<EnvironmentSecretRef>>,
+    /// Requested removals for secrets the environment did not expose.
+    missing_removals: Vec<String>,
+    /// The environment exposed every available secret and the requested
+    /// additions narrowed it to an explicit list.
+    narrowed_from_all_secrets: bool,
+}
+
+/// Builds the `secrets` value for a newly created environment.
+///
+/// No `--secret` flags leaves the field absent, which exposes every secret the
+/// run has access to.
+fn secrets_for_create(secrets: Vec<String>) -> Option<Vec<EnvironmentSecretRef>> {
+    if secrets.is_empty() {
+        return None;
+    }
+    Some(secret_refs(super::agent_management::apply_string_deltas(
+        &[],
+        secrets,
+        vec![],
+    )))
+}
+
+fn secret_refs(names: Vec<String>) -> Vec<EnvironmentSecretRef> {
+    names
+        .into_iter()
+        .map(|name| EnvironmentSecretRef { name })
+        .collect()
+}
+
+/// Applies the update command's secret flags to an environment's `current`
+/// secrets.
+///
+/// Returns `Ok(None)` when no secret flag was supplied, leaving the field
+/// untouched. A `current` of `None` means the environment exposes every
+/// available secret; adding to such an environment narrows it to exactly the
+/// requested secrets, which the caller reports back to the user.
+fn apply_secret_flags(
+    current: Option<&[EnvironmentSecretRef]>,
+    flags: SecretFlags,
+) -> anyhow::Result<Option<SecretsUpdate>> {
+    if flags.remove_all {
+        return Ok(Some(SecretsUpdate {
+            secrets: Some(vec![]),
+            missing_removals: vec![],
+            narrowed_from_all_secrets: false,
+        }));
+    }
+
+    if flags.add.is_empty() && flags.remove.is_empty() {
+        return Ok(None);
+    }
+
+    // Subtracting from "every available secret" has no sensible result: it
+    // would either silently do nothing or silently drop every other secret.
+    if current.is_none() && flags.add.is_empty() {
+        return Err(anyhow::anyhow!(
+            "This environment exposes every available secret, so there is no secret list to remove from.\nUse --add-secret to narrow it to a specific set of secrets, or --remove-all-secrets to expose none."
+        ));
+    }
+
+    let current_names = current
+        .unwrap_or_default()
+        .iter()
+        .map(|secret| secret.name.clone())
+        .collect::<Vec<_>>();
+    let missing_removals = flags
+        .remove
+        .iter()
+        .filter(|name| !current_names.contains(name))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let names =
+        super::agent_management::apply_string_deltas(&current_names, flags.add, flags.remove);
+
+    Ok(Some(SecretsUpdate {
+        secrets: Some(secret_refs(names)),
+        missing_removals,
+        narrowed_from_all_secrets: current.is_none(),
+    }))
+}
+
+/// Renders an environment's secret configuration for single-line display.
+fn display_secrets(secrets: Option<&[EnvironmentSecretRef]>) -> String {
+    match secrets {
+        None => "All available secrets".to_string(),
+        Some([]) => "None".to_string(),
+        Some(secrets) => secrets
+            .iter()
+            .map(|secret| secret.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
 /// Handle environment-related CLI commands.
 pub fn run(
     ctx: &mut AppContext,
@@ -73,9 +183,11 @@ pub fn run(
             docker_image,
             repo,
             setup_command,
+            secret,
             scope,
         } => {
             let repos = parse_repos(repo)?;
+            let secrets = secrets_for_create(secret);
 
             runner.update(ctx, |runner, ctx| {
                 runner.create(
@@ -84,6 +196,7 @@ pub fn run(
                     docker_image,
                     repos,
                     setup_command,
+                    secrets,
                     scope,
                     ctx,
                 )
@@ -104,10 +217,18 @@ pub fn run(
             setup_command,
             remove_repo,
             remove_setup_command,
+            add_secret,
+            remove_secret,
+            remove_all_secrets,
             force,
         } => {
             let repos = parse_repos(repo)?;
             let remove_repos = parse_repos(remove_repo)?;
+            let secret_flags = SecretFlags {
+                add: add_secret,
+                remove: remove_secret,
+                remove_all: remove_all_secrets,
+            };
 
             runner.update(ctx, |runner, ctx| {
                 runner.update_environment(
@@ -120,6 +241,7 @@ pub fn run(
                     setup_command,
                     remove_repos,
                     remove_setup_command,
+                    secret_flags,
                     force,
                     ctx,
                 )
@@ -208,6 +330,7 @@ impl EnvironmentCommandRunner {
                     let base_image = environment.model().string_model.base_image.clone();
                     let github_repos = environment.model().string_model.github_repos.clone();
                     let setup_commands = environment.model().string_model.setup_commands.clone();
+                    let secrets = environment.model().string_model.secrets.clone();
 
                     let creator_email = environment
                         .metadata()
@@ -241,6 +364,7 @@ impl EnvironmentCommandRunner {
                         base_image,
                         github_repos,
                         setup_commands,
+                        secrets,
                         creator_email,
                         last_edited,
                         last_edited_utc,
@@ -323,6 +447,15 @@ impl EnvironmentCommandRunner {
             for (i, cmd) in env.setup_commands.iter().enumerate() {
                 println!("  {}. {}", i + 1, cmd);
             }
+        }
+        match env.secrets.as_deref() {
+            Some(secrets @ [_, ..]) => {
+                println!("Secrets:");
+                for secret in secrets {
+                    println!("  - {}", secret.name);
+                }
+            }
+            secrets => println!("Secrets: {}", display_secrets(secrets)),
         }
     }
 
@@ -427,6 +560,7 @@ impl EnvironmentCommandRunner {
         docker_image: Option<String>,
         github_repos: Vec<GithubRepo>,
         setup_commands: Vec<String>,
+        secrets: Option<Vec<EnvironmentSecretRef>>,
         scope: warp_cli::scope::ObjectScope,
         ctx: &mut ModelContext<Self>,
     ) {
@@ -437,6 +571,7 @@ impl EnvironmentCommandRunner {
                 image,
                 github_repos,
                 setup_commands,
+                secrets,
                 scope,
                 ctx,
             );
@@ -449,6 +584,7 @@ impl EnvironmentCommandRunner {
                         image,
                         github_repos,
                         setup_commands,
+                        secrets,
                         scope,
                         ctx,
                     );
@@ -465,6 +601,7 @@ impl EnvironmentCommandRunner {
         docker_image: String,
         github_repos: Vec<GithubRepo>,
         setup_commands: Vec<String>,
+        secrets: Option<Vec<EnvironmentSecretRef>>,
         scope: warp_cli::scope::ObjectScope,
         ctx: &mut ModelContext<Self>,
     ) {
@@ -493,6 +630,7 @@ impl EnvironmentCommandRunner {
                         github_repos,
                         docker_image,
                         setup_commands,
+                        secrets,
                         scope,
                         ctx,
                     );
@@ -722,22 +860,25 @@ impl EnvironmentCommandRunner {
     }
 
     // Helper function to create environment after successful auth check
+    #[allow(clippy::too_many_arguments)]
     fn create_environment_after_auth_check(
         name: String,
         description: Option<String>,
         github_repos: Vec<GithubRepo>,
         docker_image: String,
         setup_commands: Vec<String>,
+        secrets: Option<Vec<EnvironmentSecretRef>>,
         scope: ObjectScope,
         ctx: &mut ModelContext<Self>,
     ) {
-        let environment = AmbientAgentEnvironment::new(
+        let mut environment = AmbientAgentEnvironment::new(
             name,
             description,
             github_repos,
             docker_image,
             setup_commands,
         );
+        environment.secrets = secrets;
         let client_id = ClientId::default();
 
         let owner = match super::common::resolve_owner(scope.team, scope.personal, ctx) {
@@ -846,6 +987,7 @@ impl EnvironmentCommandRunner {
         add_setup_commands: Vec<String>,
         remove_repos: Vec<GithubRepo>,
         remove_setup_commands: Vec<String>,
+        secret_flags: SecretFlags,
         force: bool,
         ctx: &mut ModelContext<Self>,
     ) {
@@ -885,6 +1027,22 @@ impl EnvironmentCommandRunner {
                 return;
             };
 
+            // Resolve the secret flags before prompting or authorizing so an
+            // unsatisfiable request fails immediately.
+            let secrets_update = match apply_secret_flags(
+                environment.model().string_model.secrets.as_deref(),
+                secret_flags,
+            ) {
+                Ok(secrets_update) => secrets_update,
+                Err(error) => {
+                    ctx.terminate_app(
+                        warpui::platform::TerminationMode::ForceTerminate,
+                        Some(Err(error)),
+                    );
+                    return;
+                }
+            };
+
             // Set up the update environment callback, to be run after we've
             // confirmed with the user and checked on auth.
             let environment_clone = environment.clone();
@@ -901,6 +1059,7 @@ impl EnvironmentCommandRunner {
                     add_setup_commands,
                     remove_repos,
                     remove_setup_commands,
+                    secrets_update,
                     ctx,
                 );
             };
@@ -938,6 +1097,7 @@ impl EnvironmentCommandRunner {
         add_setup_commands: Vec<String>,
         remove_repos: Vec<GithubRepo>,
         remove_setup_commands: Vec<String>,
+        secrets_update: Option<SecretsUpdate>,
         ctx: &mut ModelContext<Self>,
     ) {
         let mut updated_env = environment.model().string_model.clone();
@@ -986,6 +1146,18 @@ impl EnvironmentCommandRunner {
                     "Warning: setup command '{cmd}' not found in environment, skipping removal"
                 );
             }
+        }
+
+        if let Some(secrets_update) = secrets_update {
+            for name in &secrets_update.missing_removals {
+                eprintln!("Warning: secret '{name}' not found in environment, skipping removal");
+            }
+            if secrets_update.narrowed_from_all_secrets {
+                println!(
+                    "Note: this environment previously exposed every available secret. It now exposes only the secrets listed below."
+                );
+            }
+            updated_env.secrets = secrets_update.secrets;
         }
 
         // Update the environment via UpdateManager
@@ -1120,6 +1292,10 @@ struct EnvironmentInfo {
     base_image: Option<BaseImage>,
     github_repos: Vec<GithubRepo>,
     setup_commands: Vec<String>,
+    /// Managed secrets exposed to runs using this environment. Absent when the
+    /// environment does not restrict secrets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    secrets: Option<Vec<EnvironmentSecretRef>>,
     creator_email: String,
     #[serde(skip_serializing)]
     last_edited: String,
@@ -1137,6 +1313,7 @@ impl TableFormat for EnvironmentInfo {
             Cell::new("Base image"),
             Cell::new("Git repos"),
             Cell::new("Setup commands"),
+            Cell::new("Secrets"),
             Cell::new("Creator"),
             Cell::new("Last edited"),
             Cell::new("Scope"),
@@ -1165,6 +1342,7 @@ impl TableFormat for EnvironmentInfo {
             ),
             Cell::new(github_repos_display),
             Cell::new(setup_commands_display),
+            Cell::new(display_secrets(self.secrets.as_deref())),
             Cell::new(&self.creator_email),
             Cell::new(&self.last_edited),
             Cell::new(&self.scope),
@@ -1197,3 +1375,7 @@ impl TableFormat for ImageInfo {
         ]
     }
 }
+
+#[cfg(test)]
+#[path = "environment_tests.rs"]
+mod tests;
