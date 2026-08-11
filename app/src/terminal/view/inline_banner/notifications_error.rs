@@ -1,3 +1,4 @@
+use pathfinder_color::ColorU;
 use serde::Serialize;
 use warpui::Element;
 use warpui::elements::MouseStateHandle;
@@ -10,7 +11,7 @@ use super::{
 use crate::appearance::Appearance;
 use crate::terminal::view::{InlineBannerId, TerminalAction};
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 pub enum NotificationsErrorBannerAction {
     SetPermissions,
     /// Opens the Notifications pane of System Settings, deep-linked to Warp's own entry when
@@ -37,14 +38,14 @@ pub struct NotificationsErrorBannerState {
     pub mouse_states: NotificationsErrorBannerMouseStates,
 }
 
-pub fn render_inline_notifications_error_banner(
-    title: &str,
-    state: &NotificationsErrorBannerState,
+/// Builds the (non-close) buttons offered by the banner for the given error state. Extracted
+/// from [`render_inline_notifications_error_banner`] so tests can assert on exactly which
+/// actions are offered without needing to introspect the rendered `Element` tree.
+fn notifications_error_banner_buttons(
     error: &Option<NotificationSendError>,
-    appearance: &Appearance,
-) -> Box<dyn Element> {
-    let active_ui_text_color = appearance.theme().active_ui_text_color().into_solid();
-
+    state: &NotificationsErrorBannerState,
+    active_ui_text_color: ColorU,
+) -> Vec<InlineBannerTextButton> {
     let mut buttons: Vec<InlineBannerTextButton> = vec![];
 
     // If permissions haven't been granted or denied, add a button to set the permissions.
@@ -97,6 +98,18 @@ pub fn render_inline_notifications_error_banner(
         variant: InlineBannerTextButtonVariant::Secondary,
     });
 
+    buttons
+}
+
+pub fn render_inline_notifications_error_banner(
+    title: &str,
+    state: &NotificationsErrorBannerState,
+    error: &Option<NotificationSendError>,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    let active_ui_text_color = appearance.theme().active_ui_text_color().into_solid();
+    let buttons = notifications_error_banner_buttons(error, state, active_ui_text_color);
+
     let close_button = InlineBannerCloseButton(InlineBannerButtonState {
         on_click_event: TerminalAction::NotificationsErrorBanner(
             NotificationsErrorBannerAction::Close,
@@ -115,3 +128,7 @@ pub fn render_inline_notifications_error_banner(
         },
     )
 }
+
+#[cfg(test)]
+#[path = "notifications_error_tests.rs"]
+mod tests;
