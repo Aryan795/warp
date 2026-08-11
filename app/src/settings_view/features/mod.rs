@@ -1,6 +1,3 @@
-pub mod shared_session_inactivity;
-pub use shared_session_inactivity::SharedSessionInactivityView;
-
 pub mod undo_close;
 pub use undo_close::UndoCloseView;
 
