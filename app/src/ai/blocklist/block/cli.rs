@@ -748,10 +748,10 @@ impl CLISubagentView {
                     // Ex: Iteration 57: "a += 12\n``"
                     // Ex: Iteration 58: "a += 12"
                     //
-                    // See `apply_streamed_code_update`: `embedded_view.length` is a raw byte
-                    // offset into `code` that isn't always safe to slice at directly.
-                    apply_streamed_code_update(view, code, embedded_view.length, ctx);
-                    embedded_view.length = code.len();
+                    // See `apply_streamed_code_update`/`streamed_code_update`: a non-prefix
+                    // rewrite resets the buffer instead of corrupting it.
+                    apply_streamed_code_update(view, code, &embedded_view.rendered_code, ctx);
+                    embedded_view.rendered_code = code.to_string();
                 });
             }
             None => {
@@ -798,7 +798,7 @@ impl CLISubagentView {
                 self.code_editor_views.push(EmbeddedCodeEditorView {
                     view,
                     language: Default::default(),
-                    length: code.len(),
+                    rendered_code: code.to_string(),
                 });
                 self.code_editor_buttons.push(Default::default());
             }

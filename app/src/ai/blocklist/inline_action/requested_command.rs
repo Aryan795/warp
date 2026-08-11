@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::cmp::{Ordering, PartialEq};
+use std::cmp::PartialEq;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -45,7 +45,9 @@ use crate::ai::blocklist::block::view_impl::{
     CONTENT_HORIZONTAL_PADDING, CONTENT_ITEM_VERTICAL_MARGIN,
     render_autonomy_checkbox_setting_speedbump_footer, render_citation, render_citation_chips,
 };
-use crate::ai::blocklist::block::{AIBlockAction, AutonomySettingSpeedbump};
+use crate::ai::blocklist::block::{
+    AIBlockAction, AutonomySettingSpeedbump, StreamedCodeUpdate, streamed_code_update,
+};
 use crate::ai::blocklist::inline_action::inline_action_header::{
     ExpandedConfig, HeaderConfig, INLINE_ACTION_HORIZONTAL_PADDING, InteractionMode,
     RightClickConfig,
@@ -1048,40 +1050,25 @@ impl RequestedCommandView {
     /// This is to reduce flicker.
     ///
     /// If the command length is shorter than the previous update, then the command is truncated to the given byte length.
+    /// If `command` is not a content-stable append/truncate of the previous command text (e.g. a
+    /// non-prefix rewrite from the server, or a same-length correction), `command_text` -- and, if
+    /// an editor already exists, the editor -- are reset wholesale to `command` instead.
     pub fn apply_streamed_update(&mut self, command: &str, ctx: &mut ViewContext<Self>) {
-        apply_streamed_command_text(&mut self.command_text, command);
+        let update = streamed_code_update(command, &self.command_text);
+        match update {
+            StreamedCodeUpdate::Append(suffix) => self.command_text.push_str(suffix),
+            StreamedCodeUpdate::Truncate => self.command_text.truncate(command.len()),
+            StreamedCodeUpdate::Reset => self.command_text = command.to_string(),
+            StreamedCodeUpdate::NoOp => {}
+        }
 
-        // If the editor exists, sync it with the updated command text.
+        // If the editor exists, sync it with the same decision that was just applied to
+        // `command_text` above, rather than letting it independently re-derive an update by
+        // comparing lengths against its own current content (see `apply_streamed_command_editor_update`).
         if let Some(editor) = &self.editor {
+            let command_text = self.command_text.clone();
             editor.update(ctx, |editor, ctx| {
-                let editor_length = editor.text(ctx).as_str().len();
-                match self.command_text.len().cmp(&editor_length) {
-                    Ordering::Greater => {
-                        let slice_to_append = if self.command_text.is_char_boundary(editor_length) {
-                            &self.command_text[editor_length..]
-                        } else {
-                            editor.truncate(0, ctx);
-                            &self.command_text
-                        };
-                        // TODO(Simon): The first insertion into an empty Buffer creates a trailing newline.
-                        // If the requested command is streamed in in a single chunk, then there will
-                        // be an extra newline rendered at the end of the `CodeEditorView`. This is likely
-                        // caused by an initial insertion bug somewhere in the `Buffer` logic.
-                        //
-                        // To reproduce this bug, simply clear the buffer and type in two letters. You'll
-                        // notice that a newline is created on the first letter, but removed on the second.
-                        // The temporary workaround is to append an empty string to the end of each chunk,
-                        // which acts as the second insertion that clears the trailing newline.
-                        editor.system_append_autoscroll_vertical_only(slice_to_append, ctx);
-                        editor.system_append_autoscroll_vertical_only("", ctx);
-                        ctx.notify();
-                    }
-                    Ordering::Less => {
-                        editor.truncate(self.command_text.len(), ctx);
-                        ctx.notify();
-                    }
-                    Ordering::Equal => {}
-                }
+                apply_streamed_command_editor_update(editor, update, &command_text, ctx);
             });
         }
     }
@@ -2166,40 +2153,44 @@ impl RequestedCommand {
     }
 }
 
-/// Applies a streamed update to `text` in place, given the newly received
-/// `new_value`.
-///
-/// Streaming is assumed to only change the end of the string: either
-/// `new_value` extends `text` with a suffix, or `new_value` is `text` with a
-/// few trailing bytes removed (e.g. a partially-received token being
-/// trimmed). Under that assumption, `text`'s previous length is always a
-/// valid split point in `new_value` (grow) or `text` itself (shrink).
-/// However, when a streamed rewrite isn't a clean prefix-preserving update,
-/// that byte offset can fall inside a multi-byte UTF-8 character. Naively
-/// slicing or truncating at such an offset panics with "byte index is not a
-/// char boundary", so both directions are guarded and fall back to replacing
-/// `text` wholesale with `new_value` when the offset isn't a valid boundary.
-///
-/// Extracted for unit testing.
-fn apply_streamed_command_text(text: &mut String, new_value: &str) {
-    match new_value.len().cmp(&text.len()) {
-        Ordering::Greater => {
-            let existing_length = text.len();
-            if new_value.is_char_boundary(existing_length) {
-                text.push_str(&new_value[existing_length..]);
-            } else {
-                *text = new_value.to_string();
+/// Applies a [`StreamedCodeUpdate`] decision -- already computed and applied
+/// to `command_text` by the caller -- to the [`CodeEditorView`] that mirrors
+/// it, so the two never diverge. Used by
+/// [`RequestedCommandView::apply_streamed_update`] instead of having the
+/// editor independently re-derive its own update by comparing lengths
+/// against its current content: that approach has the same "length/boundary
+/// lines up but content diverged" bug as `command_text` itself (APP-5288).
+fn apply_streamed_command_editor_update(
+    editor: &CodeEditorView,
+    update: StreamedCodeUpdate,
+    command_text: &str,
+    ctx: &mut ViewContext<CodeEditorView>,
+) {
+    match update {
+        StreamedCodeUpdate::Append(suffix) => {
+            // TODO(Simon): The first insertion into an empty Buffer creates a trailing newline.
+            // If the requested command is streamed in in a single chunk, then there will
+            // be an extra newline rendered at the end of the `CodeEditorView`. This is likely
+            // caused by an initial insertion bug somewhere in the `Buffer` logic.
+            //
+            // To reproduce this bug, simply clear the buffer and type in two letters. You'll
+            // notice that a newline is created on the first letter, but removed on the second.
+            // The temporary workaround is to append an empty string to the end of each chunk,
+            // which acts as the second insertion that clears the trailing newline.
+            editor.system_append_autoscroll_vertical_only(suffix, ctx);
+            editor.system_append_autoscroll_vertical_only("", ctx);
+        }
+        StreamedCodeUpdate::Reset => {
+            editor.truncate(0, ctx);
+            if !command_text.is_empty() {
+                editor.system_append_autoscroll_vertical_only(command_text, ctx);
+                editor.system_append_autoscroll_vertical_only("", ctx);
             }
         }
-        Ordering::Less => {
-            if text.is_char_boundary(new_value.len()) {
-                text.truncate(new_value.len());
-            } else {
-                *text = new_value.to_string();
-            }
-        }
-        Ordering::Equal => {}
+        StreamedCodeUpdate::Truncate => editor.truncate(command_text.len(), ctx),
+        StreamedCodeUpdate::NoOp => return,
     }
+    ctx.notify();
 }
 
 /// Formats the command text to truncate at the first newline and add an ellipsis.
