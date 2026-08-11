@@ -1064,15 +1064,25 @@ fn test_transfer_view_tree_reconciles_views_known_only_to_target_presenter() {
 }
 
 #[test]
-fn test_transfer_settings_view_like_tree_moves_never_active_add_view_pages() {
-    // Regression test for APP-5314 ("Crash: dragging Settings tab between
-    // windows panics in BillingAndUsageDispatchView (circular view
-    // reference)"), mirroring `app::settings_view::SettingsView`'s real
-    // structure without pulling in warp's full application dependency graph
-    // (constructing the real `SettingsView` requires ~18 sub-pages spanning
-    // billing, teams, warp drive, MCP servers, etc., each with their own
-    // singleton-model dependencies, which is impractical for a fast unit
-    // test in this crate).
+fn test_transfer_view_tree_moves_add_view_pages_never_made_active_when_declared_via_child_view_ids()
+{
+    // NOTE: this is a transfer-machinery test, not an APP-5314 regression
+    // test. It exercises a synthetic `SettingsViewLike` type that supplies
+    // its own `child_view_ids` override, mirroring the *shape* of the real
+    // `app::settings_view::SettingsView` bug (a view that renders only its
+    // active child, with a mix of structural `add_typed_action_view`
+    // children and plain `add_view` children) — but it does not call, and
+    // therefore cannot catch a regression in, the real
+    // `SettingsView::child_view_ids`. The actual APP-5314 regression
+    // coverage lives in `app/src/settings_view/mod_tests.rs`
+    // (`settings_view_owned_view_ids_covers_pages_and_own_handles`), which
+    // exercises `SettingsView::owned_view_ids` directly against real
+    // `SettingsPage`/`SettingsPageViewHandle` values. This test is kept
+    // because it's still a valid, generic check that
+    // `transfer_view_tree_to_window` honors `View::child_view_ids` for
+    // views whose owned children are a mix of structural and non-structural
+    // (never-rendered) handles — the general mechanism the real fix relies
+    // on — not because it protects `SettingsView` itself.
     //
     // `SettingsView` owns every settings page, but `SettingsView::render`
     // (via `filtered_pages`) only ever embeds the currently *active* page, so
