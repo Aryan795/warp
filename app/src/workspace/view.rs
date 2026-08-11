@@ -27854,7 +27854,8 @@ impl View for Workspace {
 
     /// Update this workspace when it has been closed, but may still be restored.
     fn on_window_closed(&mut self, ctx: &mut ViewContext<Self>) {
-        if !self.suppress_detach_panes_on_window_close {
+        let content_transferred = self.suppress_detach_panes_on_window_close;
+        if !content_transferred {
             for pane_group in self.tab_views() {
                 pane_group.update(ctx, |pane_group, ctx| {
                     pane_group.detach_panes(ctx);
@@ -27868,13 +27869,24 @@ impl View for Workspace {
             registry.unregister(window_id);
         });
 
-        // If this workspace's close was registered as part of a tab-drag
-        // handoff, clear the entry now that the workspace is gone from the
-        // registry. Safe no-op if this window wasn't registered. See
-        // `CrossWindowTabDrag::pending_source_window_closes` for the
-        // `terminal_panes.uuid` race this guards.
         CrossWindowTabDrag::handle(ctx).update(ctx, |drag, _| {
+            // If this workspace's close was registered as part of a tab-drag
+            // handoff, clear the entry now that the workspace is gone from
+            // the registry. Safe no-op if this window wasn't registered. See
+            // `CrossWindowTabDrag::pending_source_window_closes` for the
+            // `terminal_panes.uuid` race this guards.
             drag.finish_pending_source_close(window_id);
+
+            // A transfer-driven close does not clear `self.tabs`, so this
+            // workspace still references a `PaneGroup` that has already been
+            // adopted by another, still-open window. Mark the close so the
+            // top-level `on_window_will_close` app callback skips pushing it
+            // onto `UndoCloseStack` -- resurrecting it via Cmd+Shift+T would
+            // give two windows ownership of the same pane group again (see
+            // APP-5285).
+            if content_transferred {
+                drag.mark_content_transferred_window_close(window_id);
+            }
         });
 
         ActiveSession::handle(ctx).update(ctx, |active_session, _| {

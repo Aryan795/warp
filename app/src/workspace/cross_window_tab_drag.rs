@@ -123,6 +123,28 @@ pub struct CrossWindowTabDrag {
     /// `finalize` and removed via [`finish_pending_source_close`] from
     /// `Workspace::on_window_closed`.
     pending_source_window_closes: HashSet<WindowId>,
+    /// Window ids whose close was driven by a cross-window tab-drag content
+    /// transfer (i.e. `Workspace::suppress_detach_panes_on_window_close` was
+    /// `true` when `Workspace::on_window_closed` ran for that window).
+    ///
+    /// A transfer-driven close does not clear the closing workspace's own
+    /// `tabs` list, so the closing `Workspace` view still references the
+    /// `PaneGroup` that was already adopted by another, still-open window.
+    /// If that stale `Workspace` were pushed onto `UndoCloseStack` like an
+    /// ordinary user-initiated window close, `Cmd+Shift+T` would resurrect a
+    /// window that duplicates ownership of a live pane group, corrupting the
+    /// tab-drag invariant that a pane group is owned by exactly one window
+    /// (see APP-5285).
+    ///
+    /// Entries are added via [`mark_content_transferred_window_close`] from
+    /// `Workspace::on_window_closed` and consumed via
+    /// [`take_content_transferred_window_close`] from the top-level
+    /// `on_window_will_close` app callback, which skips the undo-close
+    /// registration when this returns `true`.
+    ///
+    /// [`mark_content_transferred_window_close`]: Self::mark_content_transferred_window_close
+    /// [`take_content_transferred_window_close`]: Self::take_content_transferred_window_close
+    content_transferred_window_closes: HashSet<WindowId>,
 }
 
 /// Describes how the drag was initiated, which determines how the preview window is
@@ -360,6 +382,7 @@ impl CrossWindowTabDrag {
         Self {
             active_drag: None,
             pending_source_window_closes: HashSet::new(),
+            content_transferred_window_closes: HashSet::new(),
         }
     }
 
@@ -386,6 +409,28 @@ impl CrossWindowTabDrag {
     /// id that wasn't registered — it is a no-op in that case.
     pub fn finish_pending_source_close(&mut self, window_id: WindowId) {
         self.pending_source_window_closes.remove(&window_id);
+    }
+
+    /// Marks `window_id`'s close as content-transferred: its tab list still
+    /// references a `PaneGroup` that has already been adopted by another,
+    /// still-open window. Called from `Workspace::on_window_closed` right
+    /// before it returns, so the marker is visible to the top-level
+    /// `on_window_will_close` app callback that runs immediately afterward.
+    /// See the field doc on `CrossWindowTabDrag::content_transferred_window_closes`.
+    pub fn mark_content_transferred_window_close(&mut self, window_id: WindowId) {
+        self.content_transferred_window_closes.insert(window_id);
+    }
+
+    /// Returns `true` and forgets `window_id` if it was previously marked via
+    /// [`mark_content_transferred_window_close`]. Called once from the
+    /// top-level `on_window_will_close` app callback to decide whether this
+    /// close should be pushed onto `UndoCloseStack`: a content-transferred
+    /// close must not be, since undoing it would resurrect a window that
+    /// duplicates ownership of a pane group that is still live elsewhere.
+    ///
+    /// [`mark_content_transferred_window_close`]: Self::mark_content_transferred_window_close
+    pub fn take_content_transferred_window_close(&mut self, window_id: WindowId) -> bool {
+        self.content_transferred_window_closes.remove(&window_id)
     }
 
     pub fn source_window_id(&self) -> Option<WindowId> {
