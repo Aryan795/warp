@@ -5,6 +5,7 @@ use warpui::{Entity, EntityId, ModelContext, SingletonEntity, ViewHandle, Window
 use super::SettingsView;
 use crate::PaneViewLocator;
 use crate::pane_group::{PaneContent, PaneId, SettingsPane};
+
 struct SettingsPaneData {
     locator: Option<PaneViewLocator>,
     settings_view: ViewHandle<SettingsView>,
@@ -64,6 +65,38 @@ impl SettingsPaneManager {
             });
         } else {
             log::warn!("Settings view should already exist for settings pane");
+        }
+    }
+
+    /// Registers `pane` as transferred into `window_id`, preserving the
+    /// invariant that at most one Settings pane is tracked per window. If
+    /// `window_id` already has a *different* live pane registered, the
+    /// existing registration is left untouched and its locator is returned
+    /// so the caller can reconcile the collision (the transferred pane must
+    /// be discarded and the existing one kept). `None` means there was no
+    /// collision -- the slot was empty, or already pointed at this exact
+    /// pane -- and the transferred pane is now the registered one.
+    pub fn register_transferred_pane(
+        &mut self,
+        pane: &SettingsPane,
+        pane_group_id: EntityId,
+        window_id: WindowId,
+        _ctx: &mut ModelContext<Self>,
+    ) -> Option<PaneViewLocator> {
+        let incoming = PaneViewLocator {
+            pane_group_id,
+            pane_id: pane.id(),
+        };
+        let Some(data) = self.panes.get_mut(&window_id) else {
+            log::warn!("Settings view should already exist for settings pane");
+            return None;
+        };
+        match data.locator {
+            Some(existing) if existing != incoming => Some(existing),
+            _ => {
+                data.locator = Some(incoming);
+                None
+            }
         }
     }
 
