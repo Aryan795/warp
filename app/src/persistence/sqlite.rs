@@ -888,14 +888,24 @@ fn report_db_error(err_kind: &str, err: anyhow::Error, database_path: &Path) {
     // storm dozens of times within a couple of minutes -- once per
     // `save_app` -- before the underlying duplicate state is cleared. Report
     // only the first occurrence per run so a storm produces one Sentry event
-    // instead of dozens; every occurrence is still logged locally. Other
-    // SQLite errors are unaffected and keep reporting every time.
-    let log_mode = if is_terminal_panes_unique_violation(&err) {
-        ReportErrorLogMode::OncePerRun
+    // instead of dozens; every occurrence is still logged locally, and the
+    // message names the known cause so the report is actionable without
+    // re-deriving it from the raw SQLite error. Other SQLite errors are
+    // unaffected and keep reporting every time.
+    let (context, log_mode) = if is_terminal_panes_unique_violation(&err) {
+        (
+            format!(
+                "SQLite {err_kind} error: duplicate terminal_panes.uuid -- two windows hold the same pane group (see APP-5285)"
+            ),
+            ReportErrorLogMode::OncePerRun,
+        )
     } else {
-        ReportErrorLogMode::EveryTime
+        (
+            format!("SQLite {err_kind} error"),
+            ReportErrorLogMode::EveryTime,
+        )
     };
-    report_error!(err.context(format!("SQLite {err_kind} error")), log_mode);
+    report_error!(err.context(context), log_mode);
 }
 
 /// Returns `true` if `err`'s cause chain contains a `terminal_panes.uuid`
