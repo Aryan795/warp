@@ -13,6 +13,11 @@ use crate::terminal::view::{InlineBannerId, TerminalAction};
 #[derive(Clone, Copy, Debug, Serialize)]
 pub enum NotificationsErrorBannerAction {
     SetPermissions,
+    /// Opens the Notifications pane of System Settings, deep-linked to Warp's own entry when
+    /// possible. Only offered once the user has already denied the OS-level permissions request,
+    /// since macOS won't show the request again and `SetPermissions` would be a no-op.
+    #[cfg(target_os = "macos")]
+    OpenSystemSettings,
     Troubleshoot,
     Close,
 }
@@ -22,6 +27,8 @@ pub struct NotificationsErrorBannerMouseStates {
     pub troubleshoot: MouseStateHandle,
     pub close: MouseStateHandle,
     pub set_permissions: MouseStateHandle,
+    #[cfg(target_os = "macos")]
+    pub open_system_settings: MouseStateHandle,
 }
 
 /// State necessary to render the (singleton) notifications error banner.
@@ -50,6 +57,25 @@ pub fn render_inline_notifications_error_banner(
                     NotificationsErrorBannerAction::SetPermissions,
                 ),
                 mouse_state_handle: state.mouse_states.set_permissions.clone(),
+            },
+            font: Default::default(),
+            position_id: None,
+            variant: InlineBannerTextButtonVariant::Primary,
+        });
+    }
+
+    // If the user has already denied permissions, re-requesting them is a no-op on macOS (the
+    // system won't show the prompt again), so offer a direct path to System Settings instead.
+    #[cfg(target_os = "macos")]
+    if matches!(error, Some(NotificationSendError::PermissionsDenied)) {
+        buttons.push(InlineBannerTextButton {
+            text: "Open System Settings".to_string(),
+            text_color: active_ui_text_color,
+            button_state: InlineBannerButtonState {
+                on_click_event: TerminalAction::NotificationsErrorBanner(
+                    NotificationsErrorBannerAction::OpenSystemSettings,
+                ),
+                mouse_state_handle: state.mouse_states.open_system_settings.clone(),
             },
             font: Default::default(),
             position_id: None,

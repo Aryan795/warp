@@ -9183,3 +9183,18 @@ fn back_button_label_resolves_token_only_parent_linkage() {
         });
     });
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn mac_notification_settings_url_deep_links_to_notifications_pane_with_app_id() {
+    let url = mac_notification_settings_url();
+    assert!(
+        url.starts_with("x-apple.systempreferences:com.apple.preference.notifications?id="),
+        "expected a deep link into the Notifications pane, got: {url}"
+    );
+    let app_id = warp_core::channel::ChannelState::app_id().to_string();
+    assert!(
+        url.ends_with(&app_id),
+        "expected the URL to be scoped to the current app ID ({app_id}), got: {url}"
+    );
+}

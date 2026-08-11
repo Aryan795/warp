@@ -674,6 +674,18 @@ const NOTIFICATIONS_LEARN_MORE_URL: &str =
 pub const NOTIFICATIONS_TROUBLESHOOT_URL: &str =
     "https://docs.warp.dev/terminal/more-features/notifications#troubleshooting-notifications";
 
+/// Builds the `x-apple.systempreferences:` URL that deep-links into the Notifications pane of
+/// macOS System Settings. When possible, it's scoped with Warp's own bundle identifier (via the
+/// undocumented but widely-relied-upon `?id=` query parameter) so the user lands directly on
+/// Warp's entry instead of the generic Notifications list.
+#[cfg(target_os = "macos")]
+fn mac_notification_settings_url() -> String {
+    format!(
+        "x-apple.systempreferences:com.apple.preference.notifications?id={}",
+        ChannelState::app_id()
+    )
+}
+
 const DEBOUNCE_PERIOD: Duration = Duration::from_millis(40);
 
 /// Key used in user preferences to persist the "don't show again" choice for the OSC 52
@@ -25311,6 +25323,10 @@ impl TerminalView {
                         view.close_notification_error_banner(ctx);
                     }
                 });
+            }
+            #[cfg(target_os = "macos")]
+            OpenSystemSettings => {
+                ctx.open_url(&mac_notification_settings_url());
             }
         }
 
