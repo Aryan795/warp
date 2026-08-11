@@ -2,7 +2,7 @@
 
 ## Summary
 
-Keep an accepted `run_agents` action running when a remote child cannot start because GitHub authentication is required. Show the blocker and the server-provided authentication link on the parent card. Mark the parent conversation blocked so the user learns that the agent needs them. Retry the retained child request after the OAuth callback. Complete the original tool action only after every child reaches a terminal launch state.
+Keep an accepted `run_agents` action alive when a remote child cannot start because GitHub authentication is required. Report the action as blocked on the user while it waits, through a new non-terminal action status. Show the blocker and the server-provided authentication link on the parent card. Retry the retained child request after the OAuth callback. Complete the original tool action only after every child reaches a terminal launch state.
 
 References:
 
@@ -19,14 +19,15 @@ References:
 - `RunAgentsExecutor` consumes one terminal outcome per child. It applies one 30-second timeout around each receiver and exposes only a batch count while spawning in `app/src/ai/blocklist/action_model/execute/run_agents.rs:42-88,191-372`.
 - The parent card renders only “Spawning N agents” while active and status-only copy after completion. It does not render child blockers or per-child errors in `app/src/ai/blocklist/inline_action/run_agents_card_view.rs:381-410,1202-1274,1557-1649`. The top-level cloud-agent launch screen also shows only launch-phase status, not resolved configuration, in `app/src/terminal/view/ambient_agent/view_impl.rs:874-932`.
 - Cancellation only prevents fan-out while plan publication is pending. It does not cancel unresolved child launches after spawning starts in `app/src/ai/blocklist/action_model/execute/run_agents.rs:99-119`.
-- `AIActionStatus` is derived, not stored. `BlocklistAIActionModel::get_action_status` returns `Blocked` only for an action that is still the head of the `pending_actions` queue, and `RunningAsync` for an action that has moved into `running_actions` in `app/src/ai/blocklist/action_model.rs:616-648,859-914`.
-- `ConversationStatus::Blocked { blocked_action }` is the conversation-level “the agent needs the user” signal. `handle_not_executed_action` sets it today when an action needs confirmation in `app/src/ai/blocklist/action_model.rs:809-832`.
+- `AIActionStatus` is derived, not stored. `BlocklistAIActionModel::get_action_status` returns `Blocked` only for an action that is still the head of the `pending_actions` queue, and `RunningAsync` for an action that has moved into `running_actions` in `app/src/ai/blocklist/action_model.rs:616-648,859-914`. There is no value that means “started, and cannot continue until the user acts”.
+- `AIActionStatus::Blocked` today means exactly one thing: the action has not run and waits for the user to accept or reject it. The canonical transition into it emits `ActionBlockedOnUserConfirmation` in `app/src/ai/blocklist/action_model.rs:809-832`.
+- Two matches on `AIActionStatus` are exhaustive with no wildcard arm, so a new variant is a compile error until each decides how to treat it: the GUI status icon in `app/src/ai/blocklist/block/view_impl/output.rs:3834-3858` and the shared TUI tool-call label state in `crates/warp_tui/src/tool_call_labels.rs:142-156`.
 - Every `AmbientAgentViewModel` subscribes to the singleton `GitHubAuthNotifier`. A single `AuthCompleted` event calls `handle_github_auth_completed` in every model, and every model that is both `NeedsGithubAuth` and retaining an initial request calls `spawn_internal` in `app/src/terminal/view/ambient_agent/model.rs:198-214,1394-1444`. Therefore, completing any one valid GitHub OAuth flow retries all eligible auth-blocked initial children in the process.
 
 ## Goals
 
-1. Keep the accepted parent action in `AIActionStatus::RunningAsync` while any child is recoverably blocked.
-2. Set the parent conversation to `ConversationStatus::Blocked` while any child is recoverably blocked, so the user is told that the agent needs them.
+1. Keep the accepted parent action alive and non-terminal while any child is recoverably blocked, and report it as blocked on the user rather than as plain running.
+2. Make that new status additive: no existing consumer of `AIActionStatus::Blocked` changes behavior, and every exhaustive consumer is forced by the compiler to decide.
 3. Preserve the structured GitHub-auth message and URL from the hidden child to the parent card.
 4. Automatically retry each retained initial child request once for each new OAuth completion.
 5. Preserve launched siblings while other children launch, block, retry, fail, or are cancelled.
@@ -35,7 +36,8 @@ References:
 
 ## Non-goals
 
-- Do not report the accepted action as `AIActionStatus::Blocked`. See the “Accepted action status” decision. The parent conversation carries the “needs the user” signal instead.
+- Do not reuse the existing `AIActionStatus::Blocked` value for the accepted action. See the “Accepted action status” decision.
+- Do not change the parent conversation's `ConversationStatus`. That status feeds notifications, prompt queueing, handoff eligibility, and the tab-close guard; changing what it means is out of scope for this tool call.
 - Do not change the `run_agents` tool schema, server error contract, proto result, or `RunAgentsResult`.
 - Do not resume a server run. The blocked create request has no run ID; retry creates the run after authentication.
 - Do not retry GitHub-auth-blocked follow-up executions. Existing follow-up behavior remains unchanged.
@@ -58,7 +60,7 @@ References:
 6. All GitHub-auth blockers share one button, because one authentication unblocks the whole batch. A blocker from a different provider, if one is ever added, adds a second button.
 7. A launched child stays counted in `N agents launched` while another child waits for authentication.
 8. The card emits no tool result while any child is launching, retrying, or recoverably blocked.
-9. While any child is recoverably blocked, the parent conversation status is `ConversationStatus::Blocked`. The status returns to `ConversationStatus::InProgress` as soon as no child is blocked.
+9. While any child is recoverably blocked, the parent action reports `AIActionStatus::RunningBlocked`. It returns to `AIActionStatus::RunningAsync` as soon as no child is blocked. The parent conversation's own status does not change.
 10. The OAuth return callback automatically retries every eligible blocked initial child. The user authenticates once for the whole batch.
 11. When all children are terminal, the existing result semantics apply:
    - all launched: successful `RunAgentsResult::Launched`;
@@ -164,25 +166,47 @@ Process child update streams concurrently. A blocked first slot must not prevent
 
 Record launched children as soon as `Started` arrives. Keep the agent ID in the slot and existing duplicate-launch registry. Build the final `RunAgentsAgentOutcome` vector in input order only after every slot is terminal.
 
-The async action future and result sender stay open while a slot is blocked. This keeps the existing action in `AIActionStatus::RunningAsync`.
+The async action future and result sender stay open while a slot is blocked, so the action stays non-terminal.
 
-### Parent conversation status
+### Accepted action status
 
-The accepted action stays `RunningAsync`, so the “needs the user” signal must come from the conversation status.
+Add a fifth non-terminal variant so an action that has started can report that it cannot continue without the user:
 
-- `BlocklistAIActionModel` owns the transition. It already owns `update_conversation_in_progress_status` (`app/src/ai/blocklist/action_model.rs:794-807`) and the blocked transition in `handle_not_executed_action` (`app/src/ai/blocklist/action_model.rs:809-832`). Add the run-agents transition beside them; do not add a new status writer elsewhere.
-- On `RunAgentsExecutorEvent::ProgressUpdated`, set `ConversationStatus::Blocked { blocked_action: "GitHub authentication".to_string() }` when the snapshot holds at least one recoverably blocked child.
-- Set `ConversationStatus::InProgress` when the snapshot holds no blocked child and the action has not finished. Setting the status is idempotent; write it only when the blocked-ness changes.
-- Do not write a status once the action is terminal. The existing result path owns the final status.
+```rust
+pub enum AIActionStatus {
+    Preprocessing,
+    Queued,
+    /// The action has not started. It waits on ordering or on the user's confirmation.
+    Blocked,
+    /// The action started and runs asynchronously.
+    RunningAsync,
+    /// The action started, and it cannot continue until the user acts.
+    RunningBlocked,
+    Finished(Arc<AIAgentActionResult>),
+}
+```
 
-Behavior this produces, all of it existing and desirable:
+The variant name is not load-bearing; `BlockedWhileRunning` reads equally well. What matters is that it is distinct from `Blocked`.
 
-- The conversation badge becomes the yellow stop treatment (`ConversationStatus::render_icon`, `app/src/ai/agent/conversation.rs:4698-4709`).
-- The user receives a `NotificationsTrigger::NeedsAttention` desktop notification instead of a completion notification (`app/src/terminal/view.rs:15887-15891`).
-- A typed prompt queues instead of auto-sending (`app/src/terminal/input.rs:14189-14193`, `app/src/terminal/input/slash_commands/mod.rs:1249-1254`).
-- Closing the tab warns the user (`app/src/terminal/view.rs:9013-9018`).
-- Handoff still treats the source conversation as active (`app/src/ai/blocklist/handoff/pipeline.rs:441-449`).
-- `FinishReason` mapping already treats `Blocked` as non-terminal and emits nothing (`app/src/terminal/view.rs:6453-6462`), so no ambient-session tombstone or finish event fires.
+Helper rules:
+
+- `is_blocked()` keeps its current meaning and matches only `Blocked`. Every existing `is_blocked()` call site therefore keeps its current behavior. This is what makes the change additive.
+- `is_running()` matches `RunningAsync` and `RunningBlocked`. An action that waits for authentication is still in flight for phase, scheduling, and cancellation purposes.
+- Add `is_blocked_on_user()`, which matches `Blocked` and `RunningBlocked`, for surfaces that want “a human must act” regardless of phase.
+
+Derivation and ownership:
+
+- `BlocklistAIActionModel` holds the set of running action IDs that are blocked on the user. `get_action_status` consults that set before it returns `RunningAsync` (`app/src/ai/blocklist/action_model.rs:616-648`). The queue-based arms are unchanged.
+- `RunAgentsExecutor` adds the action to the set when its snapshot gains a first recoverably blocked child, and removes it when no child is blocked or when the action becomes terminal. Nothing else writes the set in this change.
+- Do not emit `ActionBlockedOnUserConfirmation` for `RunningBlocked`. That event drives the confirmation flow and the CLI-agent `permission_request` (`crates/warp_tui/src/cli_agent_osc_event_publisher.rs:93-137`, `app/src/ai/blocklist/block/cli_controller.rs:223-247`).
+
+Consumers the compiler will flag, and how each must resolve:
+
+- `app/src/ai/blocklist/block/view_impl/output.rs:3834-3858` (status icon): use the running treatment, not the yellow approval stop glyph.
+- `crates/warp_tui/src/tool_call_labels.rs:142-156`: add a label state that reads as waiting on the user. Do not reuse `State::Blocked`, whose copy says “awaiting approval”.
+- Any further exhaustive match the compiler reports: default to the `RunningAsync` treatment unless the surface has a reason to distinguish. Record the decision in the implementation PR rather than adding a wildcard arm.
+
+Surfaces that are not compiler-flagged and must still be checked by hand, because they gate on `Blocked` through `matches!` or `is_blocked()`: `run_agents_card_view.rs:1266-1279`, `requested_command.rs:1195-1420`, `code_diff_view.rs:603-638`, `search_codebase.rs:450-500`, `block/model/helper.rs:144-160`, `block.rs:4560-4574`, and the TUI orchestration block listed under “Card changes”. None of them changes behavior under the additive `is_blocked()` rule; the check is to confirm that, not to edit them.
 
 ### Timeout policy
 
@@ -217,6 +241,8 @@ A late OAuth callback, blocker update, timeout, or server token after cancellati
 
 Update `RunAgentsCardView` to render a grouped summary of the progress snapshot rather than a count-only status card.
 
+- Card selection: gate the pre-approval confirmation card on `AIActionStatus::Blocked` only, and the progress card on `RunningAsync` or `RunningBlocked`. This replaces the current `matches!(status, Some(AIActionStatus::Blocked))` check at `run_agents_card_view.rs:1266-1279`, which is the check that would otherwise show Approve/Deny over a launched batch.
+- The TUI run-agents surface makes the identical split: keep its acceptance card on `Blocked` only, and do not register itself as the active blocking input source for `RunningBlocked` (`crates/warp_tui/src/orchestration_block/render.rs:230-259`, `crates/warp_tui/src/orchestration_block.rs:463-479`, `crates/warp_tui/src/agent_block.rs:951-997`).
 - Header: retain the current aggregate label and status icon.
 - Grouping: fold the ordered child slots into counts by state at render time. Emit one line for the launched group and one line for the blocked group. Emit a `N agents failed` line followed by one line per failed child, because each failure carries a different reason that the user needs.
 - Group order: launched, blocked, failed. Omit an empty group. Launching and retrying children get no group line.
@@ -247,25 +273,33 @@ The card remains the remediation surface. Do not require the user to discover th
 
 ### Accepted action status
 
-The user asked whether the accepted action should become `AIActionStatus::Blocked`, because the tool call has barely started and it waits on the user. The instinct is right; the enum is the wrong lever.
+The review's definition of blocked is the one this spec adopts: the action cannot continue until the user acts, so it should say so. The open question was only which value carries it.
 
-- **Selected:** Keep the parent action `RunningAsync`, model the blocker per child, and put the “needs the user” signal on the parent conversation with `ConversationStatus::Blocked`.
-- **Rejected:** Report the parent action as `AIActionStatus::Blocked`.
+- **Selected:** Add a distinct `AIActionStatus::RunningBlocked` and report it for the accepted action while any child waits for authentication.
+- **Rejected:** Reuse the existing `AIActionStatus::Blocked`.
+- **Rejected:** Keep `RunningAsync` and disambiguate with a flag local to the run-agents card view.
+- **Rejected in an earlier revision:** Keep `RunningAsync` and mark the parent conversation `ConversationStatus::Blocked`. Conversation status feeds desktop notifications, prompt queueing, handoff eligibility, and the tab-close guard. Redefining it is too large a semantic change to make in passing for one tool call.
 
-Why the action enum does not work:
+Why not reuse `Blocked`:
 
-- `AIActionStatus` is derived, not stored. `get_action_status` returns `Blocked` only for an action that is still the head of `pending_actions` while nothing is running for the conversation, and `RunningAsync` for an action that has moved into `running_actions` (`app/src/ai/blocklist/action_model.rs:616-648`). An accepted `run_agents` action is in `running_actions`, so `Blocked` is unreachable for it without either a new variant or putting the action back on the pending queue. Putting it back would re-run `try_to_execute_action` on the next drain and launch the batch a second time (`app/src/ai/blocklist/action_model.rs:859-914`).
-- Every direct production consumer reads `Blocked` as “this action has not run and is waiting for the user to accept or reject it”:
+- It is not reachable for an accepted action without a structural change anyway. `get_action_status` derives `Blocked` only for an action that is still the head of `pending_actions` while nothing is running for the conversation, and `RunningAsync` once the action has moved into `running_actions` (`app/src/ai/blocklist/action_model.rs:616-648`). Putting the action back on the pending queue to make it derivable would re-run `try_to_execute_action` on the next drain and launch the batch a second time (`app/src/ai/blocklist/action_model.rs:859-914`). Either way, the model needs a new way to express this state; the only choice is whether that new expression reuses an existing value with existing meaning.
+- Reusing it silently changes behavior in surfaces that have nothing to do with `run_agents`. Every direct production consumer reads `Blocked` as “this action has not run and is waiting for the user to accept or reject it”:
   - GUI requested-command and generic action renderers show approval copy, stop icons, and accept/reject controls instead of running/expandable UI in `app/src/ai/blocklist/inline_action/requested_command.rs:1217-1420` and `app/src/ai/blocklist/block/view_impl/output.rs:1495-1565,3828-3845`. Several generic render paths require prebuilt action buttons and can panic if an executing action is reported as blocked.
   - GUI search and edit surfaces render confirmation/past-tense state or reset to waiting-for-user instead of running progress in `app/src/ai/blocklist/inline_action/search_codebase.rs:450-500` and `app/src/ai/blocklist/inline_action/code_diff_view.rs:603-638`.
   - GUI block routing treats `Blocked` as user-confirmation input takeover and focus state in `app/src/ai/blocklist/block/model/helper.rs:144-160` and `app/src/ai/blocklist/block.rs:4560-4574,4790-4810`.
   - TUI shell, generic-tool, and file-edit views render permission cards instead of running output in `crates/warp_tui/src/tui_shell_command_view.rs:410-463`, `crates/warp_tui/src/tui_generic_tool_call_view.rs:345-368`, and `crates/warp_tui/src/tui_file_edits_view.rs:750-807`. Shared labels render a stop glyph and append “awaiting approval” in `crates/warp_tui/src/tool_call_labels.rs:129-190`.
   - The TUI run-agents surface re-enables its acceptance card and registers itself as the active blocking input source in `crates/warp_tui/src/orchestration_block/render.rs:230-259`, `crates/warp_tui/src/orchestration_block.rs:463-479`, and `crates/warp_tui/src/agent_block.rs:951-997`.
   - The canonical transition into `Blocked` emits `ActionBlockedOnUserConfirmation`. Subscribers publish a CLI-agent `permission_request` and mark the active long-running command as waiting on approval in `crates/warp_tui/src/cli_agent_osc_event_publisher.rs:93-137` and `app/src/ai/blocklist/block/cli_controller.rs:223-247`.
-- Decisively for this feature, the `run_agents` card itself keys off it: `run_agents_card_view.rs:1266-1279` renders the pre-approval confirmation card exactly when the status is `Some(AIActionStatus::Blocked)`. Reporting `Blocked` for an accepted batch would replace the progress card with the Approve/Deny card over agents that have already launched.
-- The parent action is also genuinely running, not merely waiting: siblings may already be launched and executing while one child waits for authentication.
+- Most visibly, the `run_agents` card itself keys off it: `run_agents_card_view.rs:1266-1279` renders the pre-approval confirmation card exactly when the status is `Some(AIActionStatus::Blocked)`. Reporting `Blocked` for an accepted batch would replace the progress card with the Approve/Deny card over agents that have already launched.
 
-`ConversationStatus::Blocked { blocked_action }` is the state that already means “the agent needs you”, and it is separate from `AIActionStatus`. It drives the yellow stop badge, the needs-attention desktop notification, prompt queueing, and the tab-close guard. Using it gives the user-facing treatment the review asked for without redefining the action enum. See the “Parent conversation status” section for the transitions and the consumers that were checked.
+Why not a card-local flag:
+
+- The review suggested carrying the distinction inside the run-agents card view. That is the right split, but the wrong place for it. The GUI card is not the only run-agents surface: the TUI orchestration block makes the same acceptance-card and blocking-input decision independently (`crates/warp_tui/src/orchestration_block/render.rs:230-259`, `crates/warp_tui/src/orchestration_block.rs:463-479`, `crates/warp_tui/src/agent_block.rs:951-997`), and the CLI-agent OSC publisher and the shared TUI label state read the status too. A card-local flag would have to be duplicated into each of them, and any surface that forgot would show an approval prompt for an authentication wait.
+- Putting the split in the shared enum expresses it once and makes it verifiable. Two matches on `AIActionStatus` are exhaustive, so the compiler enumerates the components that care about action state and refuses to build until each one decides. That is the guarantee the review asked for in the original comment, and no reviewer or author has to remember the list.
+
+What the new variant deliberately does not do:
+
+- It does not notify. The user learns that the batch needs them by looking at the card. Nothing raises a desktop notification or a conversation badge, because that would require the conversation-status change this spec now rejects. See “Open questions”.
 
 ### Card density
 
@@ -333,8 +367,10 @@ Add focused tests to the existing external test modules for `start_agent`, `run_
 12. **Restoration:** restoring an in-flight/blocked card renders cancelled and does not retry.
 13. **Card content:** active and terminal snapshots render the grouped counts in launched/blocked/failed order, one line per failed child with its public error, and one shared authentication button. Empty groups, prompt bodies, secret names, and run-wide launch parameters do not render.
 14. **Card grouping edge cases:** a one-child group uses singular copy; a batch with only launching children shows no group lines; a batch with ten blocked children still shows one group line and one button.
-15. **Parent conversation status:** the parent conversation becomes `ConversationStatus::Blocked` on the first blocker, returns to `InProgress` once no child is blocked, and is not written again after the action is terminal. A blocked parent does not emit a `FinishReason` or an ambient-session tombstone.
-16. **Existing regressions:** top-level initial auth retry, follow-up no-retry, non-auth launch, all-failed result, mixed result, plan-publication cancellation, and terminal-label tests remain green.
+15. **Action status transitions:** `get_action_status` returns `RunningBlocked` on the first blocker, `RunningAsync` once no child is blocked, and `Finished` after the terminal result. `is_blocked()` returns false throughout, `is_running()` returns true throughout, and `is_blocked_on_user()` returns true only while blocked.
+16. **Status isolation:** a `RunningBlocked` action does not emit `ActionBlockedOnUserConfirmation`, does not publish a CLI-agent `permission_request`, does not change the parent conversation's `ConversationStatus`, and does not make `AIBlock::is_blocked_on_user_confirmation` true.
+17. **Card selection:** the GUI card renders the confirmation card only for `Blocked` and the progress card for both `RunningAsync` and `RunningBlocked`. The TUI orchestration block makes the same split and does not become the active blocking input source for `RunningBlocked`.
+18. **Existing regressions:** top-level initial auth retry, follow-up no-retry, non-auth launch, all-failed result, mixed result, plan-publication cancellation, terminal-label, and existing action-status tests remain green.
 
 Run focused tests with:
 
@@ -354,9 +390,9 @@ cargo clippy -p warp --all-targets --tests -- -D warnings
 
 ## Acceptance criteria
 
-1. A GitHub-auth-blocked child leaves the parent `run_agents` action in `AIActionStatus::RunningAsync` and produces no tool result.
-2. While a child is blocked, the parent conversation reports `ConversationStatus::Blocked` and returns to `InProgress` once no child is blocked.
-3. The parent card shows the blocked count, the public auth message, and a working `Authenticate with GitHub` button.
+1. A GitHub-auth-blocked child leaves the parent `run_agents` action non-terminal, reporting `AIActionStatus::RunningBlocked`, and produces no tool result.
+2. The new status is additive: `is_blocked()` stays false for it, no existing `is_blocked()` consumer changes behavior, the parent conversation's `ConversationStatus` is untouched, and no confirmation or permission-request event fires.
+3. The parent card shows the blocked count, the public auth message, and a working `Authenticate with GitHub` button, and never shows Approve/Deny for an accepted batch.
 4. OAuth callback retry completes the original child slot when the new request receives an agent/run ID.
 5. The original `run_agents` action completes only when all slots are terminal.
 6. Launched siblings stay counted in the launched group while another child is blocked.
@@ -372,5 +408,8 @@ cargo clippy -p warp --all-targets --tests -- -D warnings
 
 - **Assumption:** The server-provided GitHub-auth message is public user-facing text. The client still treats the URL query as sensitive and does not log it.
 - **Verified current behavior:** One global GitHub OAuth completion is delivered to every `AmbientAgentViewModel` in the app process. Every model that is auth-blocked and retains an initial request retries from that event.
-- **Assumption:** Marking the parent conversation `Blocked` is wanted. It is the mechanism that gives the user the needs-attention treatment the review asked for, and every consumer of that status was checked in the “Parent conversation status” section. Say so if the desktop notification or the prompt-queueing side effect is unwanted, and the transition can be dropped without affecting the rest of the design.
-- **Unresolved product questions:** None. The requester approved the parent-card CTA, automatic retained-request retry, and successful completion of the original `run_agents` action.
+- **Assumption:** `RunningBlocked` is the right shape for the new status, and the name is negotiable. The requirement is only that it is distinct from `Blocked` so that existing consumers keep their meaning.
+
+### Open questions
+
+- **Nothing tells the user the batch is waiting.** With the conversation-status change dropped, a `RunningBlocked` action produces no badge and no desktop notification. A user who switches tabs after accepting `run_agents` will not learn that authentication is needed until they come back to the card. This is a real gap, and it is out of scope here on purpose: closing it means giving the conversation status a “running but waiting on the user” concept, which is its own change. Worth a follow-up issue; say so and I will file one.
