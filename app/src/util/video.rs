@@ -111,6 +111,16 @@ pub const MAX_NATIVE_VIDEO_BYTES: usize = 8 * 1000 * 1000;
 /// `MAX_IMAGE_COUNT_FOR_QUERY` (20) limit that image-as-context already enforces per query.
 pub const MAX_VIDEO_FRAMES: usize = 16;
 
+/// Hard cap on how long a video's audio track may be before we skip transcribing it entirely.
+/// Chosen generously enough for the vast majority of screen recordings and short clips (a typical
+/// bug-repro or walkthrough recording), while keeping transcription time and cost bounded: a
+/// full-length movie or multi-hour screen recording would otherwise produce an enormous WAV file
+/// and a slow, expensive transcription call for a single attachment. Past this cap, frames are
+/// still attached as usual; only the audio transcript is skipped, and the user is told why rather
+/// than silently getting a transcript that is truncated mid-sentence -- a half-transcript the
+/// model cannot tell is incomplete is worse than no transcript at all.
+pub const MAX_AUDIO_DURATION_SECS: f64 = 20.0 * 60.0;
+
 /// Density floor: if scene-change detection alone would yield fewer than this many frames (e.g.
 /// a mostly-static screen recording with few visual cuts), evenly spaced frames top up the set
 /// so the model still sees the video's progression over time.
@@ -143,6 +153,9 @@ pub enum VideoProcessingError {
     Io(String),
     /// `ffmpeg` produced no usable frames for this video.
     NoFramesExtracted,
+    /// The video's audio track is longer than [`MAX_AUDIO_DURATION_SECS`]; transcription was
+    /// skipped rather than run on (and potentially truncate) an overly long track.
+    AudioTooLong { duration_secs: f64 },
 }
 
 impl std::fmt::Display for VideoProcessingError {
@@ -156,6 +169,14 @@ impl std::fmt::Display for VideoProcessingError {
             VideoProcessingError::Io(reason) => write!(f, "{reason}"),
             VideoProcessingError::NoFramesExtracted => {
                 write!(f, "couldn't extract any frames from this video")
+            }
+            VideoProcessingError::AudioTooLong { duration_secs } => {
+                let minutes = *duration_secs / 60.0;
+                write!(
+                    f,
+                    "audio is {minutes:.0} min long, over the {:.0} min limit for transcription \u{2014} frames were still attached, but audio was skipped",
+                    MAX_AUDIO_DURATION_SECS / 60.0
+                )
             }
         }
     }
@@ -380,10 +401,19 @@ fn evenly_spaced_timestamps(duration_secs: f64, count: usize) -> Vec<f64> {
 
 /// Extracts the video's audio track as 16kHz mono PCM16 WAV bytes, suitable for the same
 /// transcription endpoint used for voice input. Returns `None` if the video has no audio track
-/// (rather than an error), since audio is optional for video-as-context.
+/// (rather than an error), since audio is optional for video-as-context. Returns
+/// [`VideoProcessingError::AudioTooLong`] without attempting extraction if the video's duration
+/// exceeds [`MAX_AUDIO_DURATION_SECS`] -- callers should still attach the video's frames, just
+/// skip the transcript, and tell the user plainly why rather than silently truncating it.
 pub async fn extract_audio_wav(video_path: &Path) -> Result<Option<Vec<u8>>, VideoProcessingError> {
     if !ffmpeg_available().await {
         return Err(VideoProcessingError::FfmpegUnavailable);
+    }
+
+    if let Some(duration_secs) = probe_duration_secs(video_path).await
+        && duration_secs > MAX_AUDIO_DURATION_SECS
+    {
+        return Err(VideoProcessingError::AudioTooLong { duration_secs });
     }
 
     let temp_dir = tempfile::Builder::new()

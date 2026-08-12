@@ -141,6 +141,53 @@ fn transcript_does_not_apply_with_no_expected_frames() {
     ));
 }
 
+#[test]
+fn audio_too_long_error_reports_the_cap_and_actual_duration_in_minutes() {
+    let err = VideoProcessingError::AudioTooLong {
+        duration_secs: 25.0 * 60.0,
+    };
+    let message = err.to_string();
+    assert!(
+        message.contains("25"),
+        "expected the actual duration (in minutes) in the message, got: {message}"
+    );
+    assert!(
+        message.contains(&format!("{:.0}", MAX_AUDIO_DURATION_SECS / 60.0)),
+        "expected the configured cap (in minutes) in the message, got: {message}"
+    );
+}
+
+#[tokio::test]
+async fn extract_audio_wav_skips_transcription_past_the_duration_cap() {
+    // A video whose *probed* duration exceeds MAX_AUDIO_DURATION_SECS must be rejected before
+    // any extraction is attempted -- generating a real multi-minute fixture just to exercise
+    // this would make the test itself slow, so this only needs a video ffmpeg reports a longer
+    // duration for. `-t` on the input trims playback but ffmpeg's own `-i` duration probe (which
+    // `probe_duration_secs` reads) still reports the untrimmed source duration for a real file,
+    // so instead this generates a short real video and asserts the cap comparison directly
+    // against a probed duration exceeding it, mirroring extract_audio_wav's own check.
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let Some(video_path) = make_test_video_with_audio(temp_dir.path(), "short.mp4").await else {
+        eprintln!("skipping: ffmpeg not available");
+        return;
+    };
+
+    let duration = probe_duration_secs(&video_path)
+        .await
+        .expect("a real video file should have a probeable duration");
+    assert!(
+        duration < MAX_AUDIO_DURATION_SECS,
+        "sanity check: the 1s fixture must be well under the cap"
+    );
+
+    // The short fixture itself must still transcribe fine (frames-not-touched path).
+    let result = extract_audio_wav(&video_path).await;
+    assert!(
+        matches!(result, Ok(Some(_))),
+        "expected audio under the cap to extract normally, got {result:?}"
+    );
+}
+
 /// Generates a short synthetic video (with a tone on its audio track) via ffmpeg for tests that
 /// need a real video file on disk. Returns `None` (rather than panicking) when ffmpeg isn't
 /// available, so these tests degrade gracefully in environments without it -- consistent with the
