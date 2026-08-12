@@ -6,17 +6,17 @@ use ai::agent::orchestration_config::{
 };
 use warp::tui_export::{
     AIActionStatus, AIAgentAction, AIAgentActionId, AIAgentActionType, AIConversationId,
-    Appearance, AuthSecretSelection, OptionRow, OptionSnapshot, OptionSourceStatus,
-    OrchestrationConfigState, OrchestrationEditState, RunAgentsAgentRunConfig,
+    Appearance, AuthSecretSelection, BlocklistAIHistoryModel, OptionRow, OptionSnapshot,
+    OptionSourceStatus, OrchestrationConfigState, OrchestrationEditState, RunAgentsAgentRunConfig,
     RunAgentsExecutionMode, RunAgentsRequest, TaskId, register_tui_session_view_test_singletons,
 };
 use warp_core::features::FeatureFlag;
 use warpui::platform::WindowStyle;
-use warpui::{AddWindowOptions, App, ViewHandle};
+use warpui::{AddWindowOptions, App, SingletonEntity, ViewHandle};
 use warpui_core::elements::tui::{TuiBufferExt, TuiRect};
 use warpui_core::keymap::Keystroke;
 use warpui_core::presenter::tui::TuiPresenter;
-use warpui_core::{TuiView as _, TypedActionView as _, WindowInvalidation};
+use warpui_core::{EntityId, TuiView as _, TypedActionView as _, WindowInvalidation};
 
 use super::{
     CardMode, ConfigPage, OrchestrationBlockController, TuiOrchestrationBlock,
@@ -245,10 +245,31 @@ fn build_request_omits_the_auth_secret_when_the_picker_is_not_applicable() {
     );
 }
 
-#[derive(Default)]
 struct TestController {
     executed_requests: RefCell<Vec<RunAgentsRequest>>,
     accept_error: RefCell<Option<String>>,
+    status: RefCell<Option<AIActionStatus>>,
+}
+
+impl Default for TestController {
+    fn default() -> Self {
+        Self {
+            executed_requests: RefCell::new(Vec::new()),
+            accept_error: RefCell::new(None),
+            status: RefCell::new(Some(AIActionStatus::Blocked)),
+        }
+    }
+}
+
+impl TestController {
+    /// Builds a controller reporting the given action status (e.g. `None`
+    /// to simulate a tool call that never reached the action model).
+    fn with_status(status: Option<AIActionStatus>) -> Self {
+        Self {
+            status: RefCell::new(status),
+            ..Default::default()
+        }
+    }
 }
 
 impl OrchestrationBlockController for TestController {
@@ -257,7 +278,7 @@ impl OrchestrationBlockController for TestController {
         _action_id: &AIAgentActionId,
         _ctx: &warpui::AppContext,
     ) -> Option<AIActionStatus> {
-        Some(AIActionStatus::Blocked)
+        self.status.borrow().clone()
     }
 
     fn snapshot_for_page(
@@ -440,6 +461,121 @@ fn rendered_block_lines(block: &ViewHandle<TuiOrchestrationBlock>, app: &App) ->
             .buffer
             .to_lines()
     })
+}
+
+/// Builds a block for the given conversation with a custom controller
+/// (bypassing `TuiOrchestrationBlock::new`'s model subscriptions, like
+/// `test_block`/`renderable_test_block`).
+fn test_block_with_controller_and_conversation(
+    app: &mut App,
+    conversation_id: AIConversationId,
+    controller: Rc<dyn OrchestrationBlockController>,
+) -> ViewHandle<TuiOrchestrationBlock> {
+    let request = request("oz", RunAgentsExecutionMode::Local);
+    let action = AIAgentAction {
+        id: AIAgentActionId::from("run-agents-1".to_string()),
+        task_id: TaskId::new("task-1".to_string()),
+        action: AIAgentActionType::RunAgents(request.clone()),
+        requires_result: true,
+    };
+    app.update(|ctx| {
+        let (window_id, _) = ctx.add_tui_window(
+            AddWindowOptions {
+                window_style: WindowStyle::NotStealFocus,
+                ..Default::default()
+            },
+            |_| TestHostView,
+        );
+        ctx.add_typed_action_tui_view(window_id, move |ctx| {
+            TuiOrchestrationBlock::from_parts(
+                conversation_id,
+                action,
+                &request,
+                None,
+                controller,
+                Some("auto".to_string()),
+                false,
+                Vec::new(),
+                ctx,
+            )
+        })
+    })
+}
+
+/// A `run_agents` tool call with no action status is normally still being
+/// streamed. Lightweight test harnesses that never register the history
+/// model (like `test_block`) can't tell the difference, so the fallback
+/// must default to the "still streaming" placeholder rather than guessing
+/// cancelled or panicking on a missing singleton.
+#[test]
+fn no_status_with_unregistered_history_model_keeps_configuring_placeholder() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|_| Appearance::mock());
+        app.update(warp_core::telemetry::testing::MockTelemetryContextProvider::register);
+        let controller: Rc<dyn OrchestrationBlockController> =
+            Rc::new(TestController::with_status(None));
+        let block = test_block_with_controller_and_conversation(
+            &mut app,
+            AIConversationId::new(),
+            controller,
+        );
+        let lines = rendered_block_lines(&block, &app);
+        assert!(
+            lines.iter().any(|line| line.contains("Configuring agents")),
+            "{lines:?}"
+        );
+    });
+}
+
+/// Once the history model is available but the block's conversation was
+/// never added to it — mirroring a response stream cancelled before the
+/// `run_agents` tool call finished streaming, so the action never reached
+/// the action model — the block must not hang on the "Configuring
+/// agents…" placeholder forever.
+#[test]
+fn no_status_after_conversation_leaves_history_shows_cancelled() {
+    App::test((), |mut app| async move {
+        register_tui_session_view_test_singletons(&mut app);
+        let controller: Rc<dyn OrchestrationBlockController> =
+            Rc::new(TestController::with_status(None));
+        let block = test_block_with_controller_and_conversation(
+            &mut app,
+            AIConversationId::new(),
+            controller,
+        );
+        let lines = rendered_block_lines(&block, &app);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Spawn agents cancelled")),
+            "{lines:?}"
+        );
+    });
+}
+
+/// A `run_agents` tool call with no status whose conversation is still
+/// genuinely in progress must keep showing the "still streaming"
+/// placeholder, not the cancelled fallback.
+#[test]
+fn no_status_while_conversation_still_in_progress_keeps_configuring_placeholder() {
+    App::test((), |mut app| async move {
+        register_tui_session_view_test_singletons(&mut app);
+        let conversation_id = app.update(|ctx| {
+            let terminal_view_id = EntityId::new();
+            BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+                history.start_new_conversation(terminal_view_id, false, false, false, ctx)
+            })
+        });
+        let controller: Rc<dyn OrchestrationBlockController> =
+            Rc::new(TestController::with_status(None));
+        let block =
+            test_block_with_controller_and_conversation(&mut app, conversation_id, controller);
+        let lines = rendered_block_lines(&block, &app);
+        assert!(
+            lines.iter().any(|line| line.contains("Configuring agents")),
+            "{lines:?}"
+        );
+    });
 }
 
 #[test]

@@ -49,6 +49,14 @@ struct CapturedStartAgentRequests(Vec<StartAgentRequest>);
 impl Entity for CapturedStartAgentRequests {
     type Event = ();
 }
+
+#[derive(Default)]
+struct CapturedSpawningFinishedEvents(Vec<AIAgentActionId>);
+
+impl Entity for CapturedSpawningFinishedEvents {
+    type Event = ();
+}
+
 fn with_plan_id(mut action: AIAgentAction, plan_id: &str) -> AIAgentAction {
     let AIAgentActionType::RunAgents(request) = &mut action.action else {
         panic!("expected run_agents action");
@@ -594,6 +602,77 @@ fn cancel_during_plan_publication_does_not_dispatch_children() {
         // Cancellation won the race: the resolved wait does not fan out children.
         captured.read(&app, |captured, _ctx| {
             assert!(captured.0.is_empty());
+        });
+    });
+}
+
+/// A run_agents call whose children have already been dispatched to
+/// `StartAgentExecutor` sits in the `Spawning` state until each child
+/// confirms or times out. This verifies that cancelling from that state
+/// releases the pending marker and emits `SpawningFinished` immediately,
+/// symmetric with the `Publishing`-phase cancellation above — so the card
+/// views don't hang on their "Spawning…" snapshot waiting for the
+/// background dispatch to resolve (or time out) on its own.
+#[test]
+fn cancel_during_spawning_releases_pending_state_and_emits_spawning_finished() {
+    App::test((), |mut app| async move {
+        let state = initialize_run_agents_test(&mut app, ExecutionMode::Sdk);
+        // A run_id is required for the Remote dispatch to actually reach
+        // `StartAgentExecutor` (otherwise every child fails synchronously
+        // with "parent run_id" missing, resolving before `Spawning` can be
+        // observed as pending). Nothing responds to the resulting
+        // `CreateAgent` request, so the dispatch stays pending until cancelled.
+        BlocklistAIHistoryModel::handle(&app).update(&mut app, |model, ctx| {
+            model.assign_run_id_for_conversation(
+                state.conversation_id,
+                "00000000-0000-0000-0000-000000000002".to_string(),
+                None,
+                EntityId::new(),
+                ctx,
+            );
+        });
+        let action = remote_run_agents_action("oz");
+        let action_id = action.id.clone();
+
+        let execution = state.executor.update(&mut app, |executor, ctx| {
+            executor
+                .execute(
+                    ExecuteActionInput {
+                        action: &action,
+                        conversation_id: state.conversation_id,
+                    },
+                    ctx,
+                )
+                .into()
+        });
+        assert!(matches!(execution, AnyActionExecution::Async { .. }));
+
+        // No plan to publish, so the dispatch moves past `Publishing`
+        // straight into `Spawning` once the child dispatch is issued.
+        for _ in 0..3 {
+            futures_lite::future::yield_now().await;
+        }
+
+        let events = app.add_model(|_| CapturedSpawningFinishedEvents::default());
+        events.update(&mut app, |_, ctx| {
+            ctx.subscribe_to_model(&state.executor, |captured, _, event, _ctx| {
+                if let RunAgentsExecutorEvent::SpawningFinished { action_id } = event {
+                    captured.0.push(action_id.clone());
+                }
+            });
+        });
+
+        state.executor.update(&mut app, |executor, ctx| {
+            assert!(
+                executor.is_pending(&action_id),
+                "expected the Spawning phase to still be pending"
+            );
+            executor.cancel_execution(&action_id, ctx);
+            assert!(!executor.is_pending(&action_id));
+        });
+
+        events.read(&app, |captured, _ctx| {
+            assert_eq!(captured.0, vec![action_id.clone()]);
         });
     });
 }

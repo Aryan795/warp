@@ -104,17 +104,23 @@ impl RunAgentsExecutor {
         self.pending.contains_key(action_id)
     }
 
-    /// Cancels a pending run so publication completion cannot fan out children.
+    /// Releases in-flight dispatch bookkeeping for a cancelled run, whether
+    /// cancellation lands while still waiting on plan publication or after
+    /// children have already been dispatched to `StartAgentExecutor`. Either
+    /// way, emitting `SpawningFinished` here lets the card views drop their
+    /// stale "Spawning…" snapshot immediately instead of waiting on the
+    /// background dispatch to finish or time out on its own.
+    ///
+    /// This does not abort already-dispatched child launches — they keep
+    /// running in the background and may still complete after this call
+    /// returns. Aborting them is a follow-up (see PR description), not in
+    /// scope here.
     pub(super) fn cancel_execution(
         &mut self,
         action_id: &AIAgentActionId,
         ctx: &mut ModelContext<Self>,
     ) {
-        if matches!(
-            self.pending.get(action_id),
-            Some(PendingRunAgents::Publishing)
-        ) {
-            self.pending.remove(action_id);
+        if self.pending.remove(action_id).is_some() {
             ctx.emit(RunAgentsExecutorEvent::SpawningFinished {
                 action_id: action_id.clone(),
             });

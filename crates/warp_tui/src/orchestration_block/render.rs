@@ -1,9 +1,9 @@
 //! Element construction for the orchestration card.
 
 use warp::tui_export::{
-    AIActionStatus, AuthSecretSelection, Harness, HarnessAvailabilityModel,
-    ORCHESTRATION_WARP_WORKER_HOST, OptionSnapshot, RunAgentsExecutionMode,
-    empty_env_recommendation_message, environment_snapshot, model_snapshot,
+    AIActionStatus, AuthSecretSelection, BlocklistAIHistoryModel, Harness,
+    HarnessAvailabilityModel, ORCHESTRATION_WARP_WORKER_HOST, OptionSnapshot,
+    RunAgentsExecutionMode, empty_env_recommendation_message, environment_snapshot, model_snapshot,
     should_show_auth_secret_picker,
 };
 use warp_core::features::FeatureFlag;
@@ -17,6 +17,7 @@ use warpui_core::elements::tui::{
 use super::{CardMode, ORCHESTRATION_BLOCK_TITLE, TuiOrchestrationBlock};
 use crate::agent_block_sections::render_fallback_tool_call_section;
 use crate::orchestrated_agent_identity_styling::{AgentIdentity, assign_agent_identity_indices};
+use crate::tool_call_labels::{ToolCallDisplayState, styled_tool_call_label_spans};
 use crate::tui_builder::TuiUiBuilder;
 
 impl TuiOrchestrationBlock {
@@ -242,6 +243,46 @@ impl TuiOrchestrationBlock {
     }
 }
 
+/// Whether the block's owning conversation is still actively producing
+/// output. Used to distinguish a `run_agents` tool call that is genuinely
+/// still being constructed from one that will never reach the action model
+/// at all because the response stream was cancelled before it finished
+/// streaming (see `render` below). Some lightweight test harnesses don't
+/// register the history model; treat that as "still in progress" rather
+/// than risk an incorrect cancelled render.
+fn conversation_in_progress(block: &TuiOrchestrationBlock, app: &AppContext) -> bool {
+    if !app.has_singleton_model::<BlocklistAIHistoryModel>() {
+        return true;
+    }
+    BlocklistAIHistoryModel::as_ref(app)
+        .conversation(&block.conversation_id)
+        .is_some_and(|conversation| conversation.status().is_in_progress())
+}
+
+/// Renders the terminal "cancelled" row for a `run_agents` tool call whose
+/// arguments never finished streaming: the action never reached the action
+/// model (`status` stays `None` forever), so it can never become `Blocked`
+/// on its own. Mirrors the shared fallback tool-call row's `Cancelled`
+/// state and the GUI card's equivalent copy.
+fn render_cancelled_before_construction(app: &AppContext) -> Box<dyn TuiElement> {
+    let builder = TuiUiBuilder::from_app(app);
+    let state = ToolCallDisplayState::Cancelled;
+    TuiFlex::row()
+        .child(
+            TuiText::new(format!("{} ", state.glyph()))
+                .with_style(state.glyph_style(&builder))
+                .finish(),
+        )
+        .child(
+            TuiText::from_spans(styled_tool_call_label_spans(
+                "Spawn agents cancelled",
+                &builder,
+            ))
+            .finish(),
+        )
+        .finish()
+}
+
 /// Renders the orchestration block in interactive or fallback form.
 pub(super) fn render(block: &TuiOrchestrationBlock, app: &AppContext) -> Box<dyn TuiElement> {
     let status = block.controller.action_status(&block.action_id, app);
@@ -249,6 +290,16 @@ pub(super) fn render(block: &TuiOrchestrationBlock, app: &AppContext) -> Box<dyn
         && block.spawning.is_none()
         && matches!(status, Some(AIActionStatus::Blocked));
     if !interactive {
+        // A `run_agents` tool call with no status at all is normally still
+        // being constructed. But if the owning conversation has already
+        // stopped producing output (e.g. the response stream was cancelled
+        // mid-construction), the action will never be queued and `status`
+        // stays `None` forever — the shared fallback would otherwise show
+        // "Configuring agents…" indefinitely. Render the terminal cancelled
+        // row instead, mirroring the GUI card's equivalent fix.
+        if status.is_none() && !conversation_in_progress(block, app) {
+            return render_cancelled_before_construction(app);
+        }
         return render_fallback_tool_call_section(&block.action, status.as_ref(), false, None, app);
     }
 
