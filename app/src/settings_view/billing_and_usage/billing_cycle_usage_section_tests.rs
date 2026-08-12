@@ -6,12 +6,14 @@ use warpui::{AddSingletonModel, App, WindowId};
 
 use super::*;
 use crate::auth::UserUid;
+use crate::network::NetworkStatus;
 use crate::server::server_api::ServerApiProvider;
 use crate::server::server_api::team::MockTeamClient;
 use crate::server::server_api::workspace::MockWorkspaceClient;
 use crate::settings::PrivacySettings;
 use crate::test_util::settings::initialize_settings_for_tests;
 use crate::workspaces::team::{MembershipRole, TeamMember};
+use crate::workspaces::team_tester::TeamTesterStatus;
 use crate::workspaces::workspace::{
     AiCreditsUsageAndCostSubjectType, AiCreditsUsageAndCostType, AiCreditsUsageBucket,
     AiCreditsUsageSource, BillingCycleUsageData, BillingCycleUsageEntry, WorkspaceMember,
@@ -202,9 +204,10 @@ fn init_section_test_app(app: &mut App, workspaces: Vec<Workspace>) {
             ctx,
         )
     });
-    app.add_singleton_model(|ctx| {
-        TeamUpdateManager::new(Arc::new(MockTeamClient::new()), None, ctx)
-    });
+    // `TeamUpdateManager::new` subscribes to both of these on construction.
+    app.add_singleton_model(|_| NetworkStatus::new());
+    app.add_singleton_model(TeamTesterStatus::new);
+    app.add_singleton_model(TeamUpdateManager::mock);
     app.add_singleton_model(|ctx| {
         AIRequestUsageModel::new_for_test(ServerApiProvider::as_ref(ctx).get_ai_client(), ctx)
     });
@@ -283,8 +286,11 @@ fn scoped_usage_keeps_the_viewers_own_usage_on_another_teams_page() {
     // window defaults to the first one -- which may be a team they are not in
     // and where none of their usage is attributed. Their own row must still
     // show real numbers rather than zero.
+    //
+    // Bob's team-B row is the control: it is neither the viewer's own nor
+    // team A's, so the carve-out must not widen into "show all of team B".
     let team_a = team(1, &[ALICE]);
-    let team_b = team(2, &[]);
+    let team_b = team(2, &[BOB]);
 
     App::test((), |mut app| async move {
         init_section_test_app(&mut app, vec![]);
@@ -303,11 +309,18 @@ fn scoped_usage_keeps_the_viewers_own_usage_on_another_teams_page() {
             vec![
                 usage_entry(&viewer_uid, Some(&team_b), 42),
                 usage_entry(ALICE, Some(&team_a), 10),
+                usage_entry(BOB, Some(&team_b), 999),
             ],
         );
         let workspaces = vec![workspace.clone()];
+        let workspace_uid = workspace.uid;
         UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
             user_workspaces.update_workspaces(workspaces, ctx);
+            // `UserWorkspaces::mock` pins the current workspace at
+            // construction and this app was built with none, so without this
+            // the page resolves no workspace, no team, and silently exercises
+            // the unscoped pass-through instead of the filter.
+            user_workspaces.set_current_workspace_uid(workspace_uid, ctx);
         });
         let (_, section) = open_section_window(&mut app, &team_a);
 
@@ -317,7 +330,8 @@ fn scoped_usage_keeps_the_viewers_own_usage_on_another_teams_page() {
                 credits(&scoped),
                 vec![42, 10],
                 "the viewer's own team-B usage survives on team A's page, \
-                 alongside team A's own usage"
+                 alongside team A's own usage -- but Bob's team-B usage does \
+                 not come along with it"
             );
         });
     })
