@@ -342,6 +342,7 @@ fn make_image_attachment(file_name: &str) -> PendingAttachment {
         mime_type: "image/png".to_owned(),
         file_name: file_name.to_owned(),
         is_figma: false,
+        source_video_file_name: None,
     })
 }
 
@@ -363,6 +364,7 @@ fn make_video_attachment(file_name: &str, frame_names: &[&str]) -> PendingAttach
                 mime_type: "image/jpeg".to_owned(),
                 file_name: (*frame_name).to_owned(),
                 is_figma: false,
+                source_video_file_name: Some(file_name.to_owned()),
             })
             .collect(),
     })
@@ -611,12 +613,14 @@ fn append_pending_video_groups_frames_into_a_single_chip() {
                         mime_type: "image/jpeg".to_owned(),
                         file_name: "clip.mp4-frame-01.jpg".to_owned(),
                         is_figma: false,
+                        source_video_file_name: Some("clip.mp4".to_owned()),
                     },
                     ImageContext {
                         data: String::new(),
                         mime_type: "image/jpeg".to_owned(),
                         file_name: "clip.mp4-frame-02.jpg".to_owned(),
                         is_figma: false,
+                        source_video_file_name: Some("clip.mp4".to_owned()),
                     },
                 ],
                 ctx,

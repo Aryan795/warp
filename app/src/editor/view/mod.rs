@@ -5411,6 +5411,7 @@ impl EditorView {
                         mime_type: image.mime_type,
                         file_name: image.file_name,
                         is_figma,
+                        source_video_file_name: None,
                     });
                 }
 
@@ -5613,6 +5614,7 @@ impl EditorView {
                                         index + 1
                                     ),
                                     is_figma: false,
+                                    source_video_file_name: Some(frames_file_name.clone()),
                                 })
                             })
                             .collect();

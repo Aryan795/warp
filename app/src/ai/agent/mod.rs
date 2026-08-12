@@ -2353,6 +2353,13 @@ pub struct ImageContext {
     /// the `Software: Figma` PNG metadata field.
     #[serde(default)]
     pub is_figma: bool,
+
+    /// Client-local only (never sent to the server, see `convert_context`): the source video's
+    /// file name when this image is a frame extracted from a video-as-context attachment, so
+    /// the sent-message transcript can group frames from the same video back into a single
+    /// chip instead of rendering one chip per frame. `None` for a directly-attached image.
+    #[serde(default)]
+    pub source_video_file_name: Option<String>,
 }
 
 impl std::fmt::Debug for ImageContext {
@@ -2363,6 +2370,7 @@ impl std::fmt::Debug for ImageContext {
             .field("data", &"REDACTED_B64_IMAGE_DATA_UGC")
             .field("mime_type", &self.mime_type)
             .field("file_name", &"REDACTED_FILE_NAME_UGC")
+            .field("source_video_file_name", &"REDACTED_FILE_NAME_UGC")
             .finish()
     }
 }
