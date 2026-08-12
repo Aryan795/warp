@@ -25,7 +25,6 @@ use warpui::{
 
 use crate::ai::agent::conversation::{AIConversationId, ConversationStatus};
 use crate::ai::agent::{AIAgentActionId, AIAgentActionResultType, icons};
-use crate::ai::blocklist::BlocklistAIHistoryModel;
 use crate::ai::blocklist::action_model::{
     AIActionStatus, BlocklistAIActionEvent, BlocklistAIActionModel, RunAgentsExecutor,
     RunAgentsExecutorEvent, RunAgentsSpawningSnapshot,
@@ -51,6 +50,7 @@ use crate::ai::blocklist::telemetry::{
     BlocklistOrchestrationTelemetryEvent, OrchestrationEnteredEvent, OrchestrationEntrySource,
     RunAgentsCardDecision, run_agents_card_decision_event,
 };
+use crate::ai::blocklist::{BlocklistAIHistoryEvent, BlocklistAIHistoryModel};
 use crate::ai::connected_self_hosted_workers::{
     ConnectedSelfHostedWorkersEvent, ConnectedSelfHostedWorkersModel,
 };
@@ -547,6 +547,28 @@ impl RunAgentsCardView {
                 }
             },
         );
+
+        // Re-render on a conversation status change so a cancel that lands
+        // while this call is still streaming (before it ever reaches the
+        // action model) promptly flips the card to its cancelled terminal
+        // state, instead of leaving "Configuring agents…" stuck until some
+        // unrelated event happens to trigger a re-render.
+        if let Some(conversation_id) = block_model.conversation_id(ctx) {
+            ctx.subscribe_to_model(
+                &BlocklistAIHistoryModel::handle(ctx),
+                move |_, _, event, ctx| {
+                    if let BlocklistAIHistoryEvent::UpdatedConversationStatus {
+                        conversation_id: updated_conversation_id,
+                        ..
+                    } = event
+                        && *updated_conversation_id == conversation_id
+                    {
+                        ctx.notify();
+                    }
+                },
+            );
+        }
+
         // When auto_launched is true, execution is deferred to the
         // ActionBlockedOnUserConfirmation subscription above — the action
         // hasn't been queued in pending_actions yet at construction time.
