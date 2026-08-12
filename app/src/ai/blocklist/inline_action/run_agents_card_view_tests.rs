@@ -324,6 +324,40 @@ fn to_request_round_trips_request_fields() {
     assert_eq!(round_tripped.plan_id, req.plan_id);
 }
 
+mod should_render_no_status_as_cancelled_tests {
+    use super::super::should_render_no_status_as_cancelled;
+
+    #[test]
+    fn conversation_still_in_progress_stays_configuring() {
+        // Still streaming: conversation is in progress, so the card should
+        // keep showing "Configuring agents…" rather than jump to cancelled.
+        assert!(!should_render_no_status_as_cancelled(Some(true), false));
+    }
+
+    #[test]
+    fn conversation_stopped_with_no_unfinished_actions_is_cancelled() {
+        // The conversation was cancelled while this tool call was still
+        // streaming, so it never reached the action model. Nothing else is
+        // pending/running for the conversation either.
+        assert!(should_render_no_status_as_cancelled(Some(false), false));
+    }
+
+    #[test]
+    fn conversation_stopped_but_other_actions_still_unfinished_stays_configuring() {
+        // Guard against a race where the conversation status has already
+        // flipped but another action for the same conversation is still
+        // pending/running; don't jump to cancelled prematurely.
+        assert!(!should_render_no_status_as_cancelled(Some(false), true));
+    }
+
+    #[test]
+    fn unknown_conversation_stays_configuring() {
+        // The conversation could not be resolved (e.g. no conversation ID
+        // yet); keep the existing streaming placeholder rather than guessing.
+        assert!(!should_render_no_status_as_cancelled(None, false));
+    }
+}
+
 mod format_terminal_state_tests {
     use super::super::{StatusKind, format_terminal_state};
     use super::*;

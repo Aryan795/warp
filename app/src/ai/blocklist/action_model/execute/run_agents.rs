@@ -104,17 +104,18 @@ impl RunAgentsExecutor {
         self.pending.contains_key(action_id)
     }
 
-    /// Cancels a pending run so publication completion cannot fan out children.
+    /// Cancels a pending run. While the run is still `Publishing` (waiting
+    /// on plan publication before fan-out), this also prevents publication
+    /// completion from dispatching children. While `Spawning`, children have
+    /// already been dispatched and this only clears the local pending marker
+    /// so dependent UI (e.g. the confirmation card's spawning snapshot) does
+    /// not get stuck showing an in-progress state.
     pub(super) fn cancel_execution(
         &mut self,
         action_id: &AIAgentActionId,
         ctx: &mut ModelContext<Self>,
     ) {
-        if matches!(
-            self.pending.get(action_id),
-            Some(PendingRunAgents::Publishing)
-        ) {
-            self.pending.remove(action_id);
+        if self.pending.remove(action_id).is_some() {
             ctx.emit(RunAgentsExecutorEvent::SpawningFinished {
                 action_id: action_id.clone(),
             });
