@@ -1,4 +1,6 @@
 use super::{MemberUsageRow, SourceFilter};
+use crate::auth::UserUid;
+use crate::workspaces::team::{MembershipRole, TeamMember};
 use crate::workspaces::workspace::{
     AiCreditsUsageAndCostSubjectType, AiCreditsUsageAndCostType, AiCreditsUsageBucket,
     AiCreditsUsageSource, BillingCycleUsageEntry,
@@ -6,6 +8,14 @@ use crate::workspaces::workspace::{
 
 const VIEWER_UID: &str = "viewer-uid";
 const OTHER_UID: &str = "other-uid";
+
+fn team_member(uid: &str, email: &str) -> TeamMember {
+    TeamMember {
+        uid: UserUid::new(uid),
+        email: email.to_string(),
+        role: MembershipRole::User,
+    }
+}
 
 fn entry(
     subject_type: AiCreditsUsageAndCostSubjectType,
@@ -23,6 +33,7 @@ fn entry(
         usage_source,
         credits_used,
         cost_cents,
+        attributed_team_uid: None,
     }
 }
 
@@ -136,4 +147,56 @@ fn build_own_usage_row_cloud_filter_drops_local_entries() {
         SourceFilter::Cloud,
     );
     assert_eq!(row.total_credits, 20);
+}
+
+#[test]
+fn for_each_member_zero_fills_only_the_given_roster() {
+    // Regression for the cross-team leak: `for_each_member` zero-fills every
+    // member it's handed, so callers must pass the *current team's* roster
+    // rather than the full workspace roster (which can span other teams
+    // sharing the workspace) — otherwise members of other teams would get a
+    // synthetic zero-usage row just for sharing a workspace with the viewer.
+    let team_a_roster = vec![team_member(VIEWER_UID, "viewer@example.com")];
+    let wider_workspace_roster = vec![
+        team_member(VIEWER_UID, "viewer@example.com"),
+        team_member(OTHER_UID, "other-team-member@example.com"),
+    ];
+
+    let team_a_rows = MemberUsageRow::for_each_member(&[], &team_a_roster, SourceFilter::All);
+    assert_eq!(team_a_rows.len(), 1);
+    assert_eq!(team_a_rows[0].subject_uid.as_deref(), Some(VIEWER_UID));
+
+    let wider_rows =
+        MemberUsageRow::for_each_member(&[], &wider_workspace_roster, SourceFilter::All);
+    assert_eq!(
+        wider_rows.len(),
+        2,
+        "sanity check: passing a wider roster does zero-fill more rows, which is exactly why \
+         the call site must pass the team roster, not the workspace roster"
+    );
+}
+
+#[test]
+fn for_each_member_includes_zero_usage_team_members() {
+    // A team member with no usage this cycle still gets a row.
+    let members = vec![
+        team_member(VIEWER_UID, "viewer@example.com"),
+        team_member("idle-uid", "idle@example.com"),
+    ];
+    let entries = vec![entry(
+        AiCreditsUsageAndCostSubjectType::User,
+        Some(VIEWER_UID),
+        AiCreditsUsageSource::Local,
+        10,
+        5,
+    )];
+
+    let rows = MemberUsageRow::for_each_member(&entries, &members, SourceFilter::All);
+
+    assert_eq!(rows.len(), 2);
+    let idle_row = rows
+        .iter()
+        .find(|row| row.subject_uid.as_deref() == Some("idle-uid"))
+        .expect("idle team member should still get a zero-usage row");
+    assert_eq!(idle_row.total_credits, 0);
 }

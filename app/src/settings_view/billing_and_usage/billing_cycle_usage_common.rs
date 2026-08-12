@@ -197,6 +197,27 @@ pub fn filter_legacy_buckets(entries: &[BillingCycleUsageEntry]) -> Vec<BillingC
         .collect()
 }
 
+/// Filters `entries` down to those attributed to `team_uid`, mirroring the
+/// web admin panel's `filterEntriesByAttributedTeam` (see
+/// `warp-server/client/src/components/admin/team/billing/utils.ts`).
+///
+/// `Workspace.billing_cycle_usage` is workspace-scoped and can carry usage
+/// attributed to any team in the workspace, so a team-scoped view must apply
+/// this filter before it feeds team totals or member rows. Entries with no
+/// attribution (`attributed_team_uid: None`) are excluded — usage only
+/// appears in a team-scoped view when it's positively attributed to that
+/// team, matching web's strict equality check.
+pub fn filter_entries_by_attributed_team(
+    entries: &[BillingCycleUsageEntry],
+    team_uid: &str,
+) -> Vec<BillingCycleUsageEntry> {
+    entries
+        .iter()
+        .filter(|e| e.attributed_team_uid.as_deref() == Some(team_uid))
+        .cloned()
+        .collect()
+}
+
 /// Cost-type buckets to surface in the usage legend, in display order.
 ///
 /// Mirrors the buckets the stacked bars actually render: legacy buckets are

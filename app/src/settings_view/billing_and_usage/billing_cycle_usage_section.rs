@@ -21,7 +21,8 @@ use crate::auth::{AuthManager, AuthStateProvider};
 use crate::menu::{self, Menu, MenuItem, MenuItemFields};
 use crate::settings_view::admin_actions::AdminActions;
 use crate::settings_view::billing_and_usage::billing_cycle_usage_common::{
-    BillingUsageMouseStates, filter_legacy_buckets, has_non_viewer_data, legend_cost_types,
+    BillingUsageMouseStates, filter_entries_by_attributed_team, filter_legacy_buckets,
+    has_non_viewer_data, legend_cost_types,
 };
 use crate::settings_view::billing_and_usage::billing_cycle_usage_rows::{
     SourceFilter, has_cloud_usage, render_own_usage_solo_row, render_own_usage_with_workspace_row,
@@ -277,11 +278,23 @@ impl BillingCycleUsageSectionView {
         let mut column = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
         column.add_child(self.render_header(Some(workspace), &visibility, appearance, app));
 
-        let entries = filter_legacy_buckets(
+        let team = UserWorkspaces::as_ref(app).team_for_view_handle(&self.self_handle, app);
+        let team_members = team.map(|team| team.members.as_slice()).unwrap_or_default();
+
+        let all_entries = filter_legacy_buckets(
             self.current_summary(workspace)
                 .map(|summary| summary.entries.as_slice())
                 .unwrap_or_default(),
         );
+        // `Workspace.billing_cycle_usage` is workspace-scoped and can carry
+        // usage attributed to other teams sharing the workspace, so scope it
+        // down to the team currently being viewed before it feeds team
+        // totals or member rows (mirrors the web admin panel's
+        // `filterEntriesByAttributedTeam`).
+        let entries = match team {
+            Some(team) => filter_entries_by_attributed_team(&all_entries, &team.uid.to_string()),
+            None => all_entries,
+        };
 
         let is_source_filter_shown = visibility.granularity
             == UsageVisibilityGranularity::FullBreakdown
@@ -309,7 +322,7 @@ impl BillingCycleUsageSectionView {
 
         column.add_child(
             Container::new(render_rows(
-                workspace,
+                team_members,
                 &entries,
                 &visibility,
                 source_filter,
