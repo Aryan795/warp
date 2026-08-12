@@ -819,7 +819,7 @@ impl View for CustomEndpointModal {
         column.add_child(
             Container::new(
                 Text::new(
-                    "Provide your endpoint details below. You can add as many models from the endpoint as you'd like and can also provide aliases for the model picker in your input.",
+                    "Provide your endpoint details below. You can add as many models from the endpoint as you'd like and can also provide aliases for the model picker in your input. If providing a reasoning level, be sure to check that your model supports that reasoning level.",
                     appearance.ui_font_family(),
                     LABEL_FONT_SIZE,
                 )

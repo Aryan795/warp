@@ -72,13 +72,6 @@ pub struct CustomEndpointModelParams {
     pub config_key: Option<String>,
 }
 
-fn normalize_reasoning_value(value: Option<String>) -> Option<String> {
-    value.and_then(|value| {
-        let value = value.trim();
-        (!value.is_empty()).then(|| value.to_owned())
-    })
-}
-
 /// The request/response protocol used by a custom inference endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -510,7 +503,7 @@ impl ApiKeyManager {
                 .map(|model| CustomEndpointModel {
                     name: model.name,
                     alias: model.alias,
-                    reasoning_effort: normalize_reasoning_value(model.reasoning_effort),
+                    reasoning_effort: model.reasoning_effort,
                     config_key: model
                         .config_key
                         .filter(|k| !k.is_empty())
@@ -548,7 +541,7 @@ impl ApiKeyManager {
                 .map(|model| CustomEndpointModel {
                     name: model.name,
                     alias: model.alias,
-                    reasoning_effort: normalize_reasoning_value(model.reasoning_effort),
+                    reasoning_effort: model.reasoning_effort,
                     config_key: model
                         .config_key
                         .filter(|k| !k.is_empty())
