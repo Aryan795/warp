@@ -1939,6 +1939,14 @@ pub struct EditorView {
     /// checked.
     video_audio_transcript_future_handle: Option<SpawnedFutureHandle>,
 
+    /// File names of the image-context frames most recently attached by
+    /// [`Self::read_and_process_video_async`], if any are still pending. Used to verify, when an
+    /// in-flight audio transcript resolves, that its video's frames are still pending (i.e. the
+    /// query hasn't already been sent) before inserting the transcript text — frame extraction
+    /// and transcription run as independent async tasks, so this is the only way to avoid a
+    /// transcript landing in an unrelated later query.
+    video_pending_frame_file_names: Option<Vec<String>>,
+
     is_password: bool,
 
     /// Optional closure that allows parent views to add flags to this editor's keymap context.
@@ -3278,6 +3286,7 @@ impl EditorView {
             process_attached_images_future_handle: None,
             process_attached_video_future_handle: None,
             video_audio_transcript_future_handle: None,
+            video_pending_frame_file_names: None,
             is_password: options.is_password,
             keymap_context_modifier: options.keymap_context_modifier,
         }
@@ -5532,17 +5541,47 @@ impl EditorView {
         let window_id = ctx.window_id();
         let frames_file_name = file_name.clone();
 
+        // Reserve room for these frames within the existing per-query and per-conversation image
+        // limits *before* extraction begins. Attaching up to `MAX_VIDEO_FRAMES` unconditionally
+        // would let a query silently exceed the server's per-query image limit (which then
+        // rejects the whole request) whenever images were already pending.
+        let num_images_attached = self.image_context_options.num_images_attached();
+        let num_images_in_conversation = self.image_context_options.num_images_in_conversation();
+        let max_frames = crate::util::video::capped_frame_count(
+            crate::util::video::MAX_VIDEO_FRAMES,
+            num_images_attached,
+            num_images_in_conversation,
+            MAX_IMAGE_COUNT_FOR_QUERY,
+            MAX_IMAGES_PER_CONVERSATION,
+        );
+        if max_frames == 0 {
+            let limit_reason = if MAX_IMAGE_COUNT_FOR_QUERY.saturating_sub(num_images_attached) == 0
+            {
+                format!("limit is {MAX_IMAGE_COUNT_FOR_QUERY} images per query")
+            } else {
+                format!("limit is {MAX_IMAGES_PER_CONVERSATION} images per conversation")
+            };
+            ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                toast_stack.add_persistent_toast(
+                    DismissibleToast::error(format!(
+                        "Couldn't attach \u{201c}{file_name}\u{201d} as frames \u{2014} {limit_reason}."
+                    )),
+                    window_id,
+                    ctx,
+                );
+            });
+            return;
+        }
+        let min_frames = crate::util::video::MIN_VIDEO_FRAMES.min(max_frames);
+
+        // Clear any stale association from a previous video attach so an in-flight transcript
+        // for that earlier video can't be mistaken for applying to this one.
+        self.video_pending_frame_file_names = None;
+
         self.process_attached_video_future_handle = Some(ctx.spawn(
             {
                 let file_path = file_path.clone();
-                async move {
-                    crate::util::video::extract_frames(
-                        &file_path,
-                        crate::util::video::MAX_VIDEO_FRAMES,
-                        crate::util::video::MIN_VIDEO_FRAMES,
-                    )
-                    .await
-                }
+                async move { crate::util::video::extract_frames(&file_path, max_frames, min_frames).await }
             },
             move |this, result, ctx| {
                 // Future was aborted.
@@ -5566,6 +5605,13 @@ impl EditorView {
                             })
                             .collect();
 
+                        this.video_pending_frame_file_names = Some(
+                            attached_images
+                                .iter()
+                                .map(|image| image.file_name.clone())
+                                .collect(),
+                        );
+
                         this.process_and_attach_images_as_ai_context(
                             frame_count,
                             attached_images,
@@ -5584,6 +5630,7 @@ impl EditorView {
                         });
                     }
                     Err(err) => {
+                        this.video_pending_frame_file_names = None;
                         ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
                             toast_stack.add_persistent_toast(
                                 DismissibleToast::error(format!(
@@ -5661,8 +5708,48 @@ impl EditorView {
                     this.video_audio_transcript_future_handle = Some(ctx.spawn(
                         async move { transcriber.transcribe(wav_base64, None).await },
                         move |this, result, ctx| {
-                            match result {
+                        match result {
                                 Ok(transcript) if !transcript.trim().is_empty() => {
+                                    // Frame extraction and audio transcription run as independent
+                                    // async tasks. If the user already sent this video's query (or
+                                    // removed its frames) before transcription resolved, the
+                                    // frames will no longer be pending — inserting the transcript
+                                    // now would silently land it in an unrelated buffer/query.
+                                    let frames_still_pending = this
+                                        .video_pending_frame_file_names
+                                        .as_ref()
+                                        .is_some_and(|expected| {
+                                            let pending_names: Vec<String> = this
+                                                .context_model
+                                                .as_ref()
+                                                .map(|context_model| {
+                                                    context_model
+                                                        .as_ref(ctx)
+                                                        .pending_images()
+                                                        .iter()
+                                                        .map(|image| image.file_name.clone())
+                                                        .collect()
+                                                })
+                                                .unwrap_or_default();
+                                            crate::util::video::transcript_still_applies(
+                                                expected,
+                                                &pending_names,
+                                            )
+                                        });
+
+                                    if !frames_still_pending {
+                                        ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                                            toast_stack.add_persistent_toast(
+                                                DismissibleToast::error(format!(
+"\u{201c}{transcript_file_name}\u{201d} audio transcript arrived after the video was sent (or its frames were removed) \u{2014} it wasn't included."
+                                                )),
+                                                window_id,
+                                                ctx,
+                                            );
+                                        });
+                                        return;
+                                    }
+
                                     this.user_insert(
                                         &format!(
                                             "\n\n[Transcript of \u{201c}{transcript_file_name}\u{201d} audio]:\n{transcript}\n"

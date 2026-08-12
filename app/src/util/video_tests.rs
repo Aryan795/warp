@@ -63,3 +63,79 @@ fn frame_and_density_floor_constants_stay_under_the_query_image_limit() {
     assert!(MAX_VIDEO_FRAMES <= 16);
     assert!(MIN_VIDEO_FRAMES < MAX_VIDEO_FRAMES);
 }
+
+#[test]
+fn is_supported_video_filepath_checks_extension() {
+    assert!(is_supported_video_filepath("/tmp/clip.mp4"));
+    assert!(is_supported_video_filepath("/tmp/clip.mov"));
+    assert!(!is_supported_video_filepath("/tmp/photo.png"));
+    assert!(!is_supported_video_filepath("/tmp/clip.mpeg"));
+}
+
+#[test]
+fn capped_frame_count_is_unrestricted_with_no_existing_attachments() {
+    assert_eq!(capped_frame_count(16, 0, 0, 20, 200), 16);
+}
+
+#[test]
+fn capped_frame_count_reserves_room_for_images_already_pending_on_the_query() {
+    // Regression test: with 10 images already pending on the query, attaching 16 more frames
+    // unconditionally would push the query to 26 images, well past the server's 20-per-query
+    // limit (which then rejects the whole request). The cap must leave only the 10 remaining
+    // slots for frames.
+    assert_eq!(capped_frame_count(16, 10, 0, 20, 200), 10);
+}
+
+#[test]
+fn capped_frame_count_reserves_room_for_the_conversation_limit() {
+    // Regression test: near the 200-image conversation limit, the conversation limit is more
+    // restrictive than the per-query limit and must win.
+    assert_eq!(capped_frame_count(16, 0, 195, 20, 200), 5);
+}
+
+#[test]
+fn capped_frame_count_is_zero_when_the_query_is_already_at_the_limit() {
+    assert_eq!(capped_frame_count(16, 20, 0, 20, 200), 0);
+    assert_eq!(capped_frame_count(16, 0, 200, 20, 200), 0);
+}
+
+#[test]
+fn transcript_still_applies_when_all_frames_are_still_pending() {
+    let expected = vec![
+        "video.mp4-frame-01.jpg".to_string(),
+        "video.mp4-frame-02.jpg".to_string(),
+    ];
+    let pending = vec![
+        "video.mp4-frame-01.jpg".to_string(),
+        "video.mp4-frame-02.jpg".to_string(),
+        "unrelated.png".to_string(),
+    ];
+    assert!(transcript_still_applies(&expected, &pending));
+}
+
+#[test]
+fn transcript_does_not_apply_after_the_frames_were_already_sent() {
+    // Regression test for the send-before-transcript race: once a query is sent, its pending
+    // image attachments (including the video's frames) are drained from the context model. A
+    // transcript that resolves afterwards must detect that its frames are gone and refuse to
+    // land in whatever the composer now contains (e.g. the user's next prompt).
+    let expected = vec![
+        "video.mp4-frame-01.jpg".to_string(),
+        "video.mp4-frame-02.jpg".to_string(),
+    ];
+    let pending_after_send: Vec<String> = vec![];
+    assert!(!transcript_still_applies(&expected, &pending_after_send));
+
+    // Also refuse if only some of the frames are still pending (e.g. the user removed one).
+    let partially_pending = vec!["video.mp4-frame-01.jpg".to_string()];
+    assert!(!transcript_still_applies(&expected, &partially_pending));
+}
+
+#[test]
+fn transcript_does_not_apply_with_no_expected_frames() {
+    // Defensive: an empty expectation should never be treated as "still applies".
+    assert!(!transcript_still_applies(
+        &[],
+        &["anything.jpg".to_string()]
+    ));
+}

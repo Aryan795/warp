@@ -77,6 +77,30 @@ pub enum VideoAttachBannerAction {
 }
 
 impl Input {
+    /// Shows the video-attach confirmation banner for a video file path obtained outside the
+    /// file picker (drag-and-drop or a system-clipboard paste of a file path). Mirrors what the
+    /// file picker does in `EditorView::attach_files`, so every entrypoint that can produce a
+    /// video file path routes through the same disclaimer/checkbox confirmation rather than only
+    /// the picker.
+    pub(crate) fn show_video_attach_banner_for_path(
+        &mut self,
+        video_path: String,
+        ctx: &mut warpui::ViewContext<Self>,
+    ) {
+        let file_name = std::path::Path::new(&video_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&video_path)
+            .to_string();
+        self.handle_video_attach_banner_action(
+            VideoAttachBannerAction::Show {
+                file_path: PathBuf::from(video_path),
+                file_name,
+            },
+            ctx,
+        );
+    }
+
     /// Handles a [`VideoAttachBannerAction`] dispatched from the banner (or from the file picker,
     /// for `Show`).
     pub(crate) fn handle_video_attach_banner_action(

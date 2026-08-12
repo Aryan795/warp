@@ -42,6 +42,53 @@ pub fn is_supported_video_mime_type(mime_type: &str) -> bool {
     SUPPORTED_VIDEO_MIME_TYPES.contains(&mime_type)
 }
 
+/// Returns whether the file at `path` (identified by extension, since drag-drop/paste/file-picker
+/// paths reference files on disk rather than in-memory data) is a supported video type.
+pub fn is_supported_video_filepath(path: &str) -> bool {
+    is_supported_video_mime_type(mime_guess::from_path(path).first_or_octet_stream().as_ref())
+}
+
+/// Given `desired_frames` frames we'd like to extract from a video, returns how many we're
+/// actually allowed to attach given images already pending on the current query and already
+/// attached elsewhere in the conversation — the same per-query (`max_per_query`) and
+/// per-conversation (`max_per_conversation`) limits image-as-context already enforces. Returns
+/// `0` when there's no remaining capacity at all, in which case callers should not attempt
+/// extraction. This must be computed *before* frame extraction begins: attaching frames straight
+/// through to the image-context pipeline without reserving room for images already pending would
+/// let a query silently exceed the server's per-query image limit (which rejects the whole
+/// request) or the conversation limit.
+pub fn capped_frame_count(
+    desired_frames: usize,
+    num_images_attached: usize,
+    num_images_in_conversation: usize,
+    max_per_query: usize,
+    max_per_conversation: usize,
+) -> usize {
+    let remaining_for_query = max_per_query.saturating_sub(num_images_attached);
+    let remaining_for_conversation =
+        max_per_conversation.saturating_sub(num_images_attached + num_images_in_conversation);
+    let remaining_capacity = remaining_for_query.min(remaining_for_conversation);
+    desired_frames.min(remaining_capacity)
+}
+
+/// Returns `true` if every frame file name in `expected_frame_file_names` is still present among
+/// `currently_pending_file_names`. Used to guard against inserting a just-finished audio
+/// transcript into the wrong query: frame extraction and audio transcription run as independent
+/// async tasks, so if the user sends the query (which drains pending attachments) before
+/// transcription resolves, the transcript must not land in whatever buffer/attachment set happens
+/// to exist when it finally arrives.
+pub fn transcript_still_applies(
+    expected_frame_file_names: &[String],
+    currently_pending_file_names: &[String],
+) -> bool {
+    !expected_frame_file_names.is_empty()
+        && expected_frame_file_names.iter().all(|name| {
+            currently_pending_file_names
+                .iter()
+                .any(|other| other == name)
+        })
+}
+
 /// Hard cap on frames extracted from a single video. Keeps us comfortably under the existing
 /// `MAX_IMAGE_COUNT_FOR_QUERY` (20) limit that image-as-context already enforces per query.
 pub const MAX_VIDEO_FRAMES: usize = 16;

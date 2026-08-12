@@ -11447,13 +11447,31 @@ impl Input {
             // If we have image data, process the image data.
             self.handle_pasted_image_data(content.clone(), ctx) == 0
         } else if content.num_paths() > 0 {
+            let all_paths: Vec<String> = content.paths.clone().unwrap_or_default();
+
             // Else, we check the pasted file paths for any images.
-            let image_filepaths = warpui::clipboard_utils::get_image_filepaths_from_paths(
-                content.paths.as_deref().unwrap_or(&[]),
-            );
+            let image_filepaths =
+                warpui::clipboard_utils::get_image_filepaths_from_paths(&all_paths);
             let num_images_expected = image_filepaths.len();
-            self.handle_pasted_or_dragdropped_image_filepaths(image_filepaths, ctx)
-                < num_images_expected
+            let num_images_attached =
+                self.handle_pasted_or_dragdropped_image_filepaths(image_filepaths, ctx);
+
+            // If there were no images, check for a supported video path (prototype: one at a
+            // time) and route it through the same confirmation banner the file picker uses,
+            // instead of falling through to inserting the path as text.
+            let mut handled_video = false;
+            if num_images_expected == 0 && FeatureFlag::VideoAsContext.is_enabled() {
+                let video_path = all_paths
+                    .iter()
+                    .find(|path| crate::util::video::is_supported_video_filepath(path))
+                    .cloned();
+                if let Some(video_path) = video_path {
+                    self.show_video_attach_banner_for_path(video_path, ctx);
+                    handled_video = true;
+                }
+            }
+
+            !handled_video && num_images_attached < num_images_expected
         } else {
             true
         };
