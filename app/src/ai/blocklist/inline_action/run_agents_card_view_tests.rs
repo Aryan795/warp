@@ -324,6 +324,43 @@ fn to_request_round_trips_request_fields() {
     assert_eq!(round_tripped.plan_id, req.plan_id);
 }
 
+mod is_cancelled_before_action_registered_tests {
+    use super::super::is_cancelled_before_action_registered;
+    use crate::ai::blocklist::action_model::AIActionStatus;
+
+    #[test]
+    fn no_status_after_stream_ends_is_cancelled() {
+        // Mid-stream cancel: the action was never registered with the
+        // action model, so `status` is `None`; once the stream is no
+        // longer active this must be treated as cancelled rather than
+        // spinning forever.
+        assert!(is_cancelled_before_action_registered(None, false));
+    }
+
+    #[test]
+    fn no_status_while_still_streaming_is_not_cancelled() {
+        // The tool call is still being streamed in; `status` is `None`
+        // simply because the action hasn't been registered yet.
+        assert!(!is_cancelled_before_action_registered(None, true));
+    }
+
+    #[test]
+    fn registered_status_is_never_treated_as_cancelled_here() {
+        // Once the action has a status of its own (Preprocessing, Queued,
+        // Blocked, etc.), this fallback must not kick in regardless of the
+        // streaming state -- those statuses are handled by their own
+        // render branches.
+        assert!(!is_cancelled_before_action_registered(
+            Some(&AIActionStatus::Preprocessing),
+            false
+        ));
+        assert!(!is_cancelled_before_action_registered(
+            Some(&AIActionStatus::Blocked),
+            false
+        ));
+    }
+}
+
 mod format_terminal_state_tests {
     use super::super::{StatusKind, format_terminal_state};
     use super::*;

@@ -1265,8 +1265,23 @@ impl View for RunAgentsCardView {
 
         // Still streaming: show "Configuring agents..." placeholder until
         // the action reaches Blocked status (i.e., streaming is complete
-        // and the action is queued for user confirmation).
+        // and the action is queued for user confirmation). If the stream
+        // ended (or was cancelled) before the action was ever registered
+        // with the action model, `status` stays `None` forever rather than
+        // advancing to `Blocked` -- mirror `action_icon`'s fallback and
+        // treat that as cancelled instead of spinning indefinitely.
         if !matches!(status, Some(AIActionStatus::Blocked)) {
+            if is_cancelled_before_action_registered(
+                status.as_ref(),
+                self.block_model.status(app).is_streaming(),
+            ) {
+                return render_status_only_card(
+                    "Spawn agents cancelled".to_string(),
+                    appearance,
+                    StatusKind::Cancelled,
+                    app,
+                );
+            }
             return render_status_only_card(
                 "Configuring agents\u{2026}".to_string(),
                 appearance,
@@ -1599,6 +1614,19 @@ fn render_terminal_state(
 ) -> Box<dyn Element> {
     let (label, kind) = format_terminal_state(result);
     render_status_only_card(label, appearance, kind, app)
+}
+
+/// Returns `true` when the `RunAgents` tool call's stream ended (or was
+/// cancelled) without the action ever being registered with the action
+/// model, e.g. because the user cancelled the conversation mid-stream. In
+/// that case `get_action_status` never advances past `None`, so the render
+/// path must fall back to a cancelled state instead of showing the
+/// "Configuring agents..." placeholder forever.
+pub(crate) fn is_cancelled_before_action_registered(
+    status: Option<&AIActionStatus>,
+    is_streaming: bool,
+) -> bool {
+    status.is_none() && !is_streaming
 }
 
 pub(crate) fn format_terminal_state(result: &RunAgentsResult) -> (String, StatusKind) {
