@@ -25,12 +25,13 @@ use crate::ai::blocklist::usage::render_context_window_usage_icon;
 use crate::ai::blocklist::usage::rollup::{
     AgentAvatar, OrchestrationCreditRollup, PerAgentCreditEntry, compute_orchestration_rollup,
 };
-use crate::ai::blocklist::view_util::format_credits;
+use crate::ai::blocklist::view_util::{format_credits, format_credits_with_cost};
 use crate::ai::blocklist::{BlocklistAIHistoryEvent, BlocklistAIHistoryModel};
 use crate::appearance::Appearance;
 use crate::persistence::model::{
-    ContextWindowSegment, ContextWindowSegmentType, FULL_TERMINAL_USE_CATEGORY, ModelTokenUsage,
-    PRIMARY_AGENT_CATEGORY, token_usage_category_display_name,
+    ContextWindowSegment, ContextWindowSegmentType, FULL_TERMINAL_USE_CATEGORY,
+    InferenceCostBreakdown, ModelTokenUsage, PRIMARY_AGENT_CATEGORY,
+    token_usage_category_display_name,
 };
 use crate::ui_components::blended_colors;
 
@@ -56,6 +57,17 @@ pub struct ConversationUsageInfo {
     pub lines_added: i32,
     pub lines_removed: i32,
     pub commands_executed: i32,
+    /// Total provider cost across all models, in US cents, gated by
+    /// `FeatureFlag::PricingTransparency`. `None` means the server did not
+    /// provide a historical baseline (or, for the settings usage-history
+    /// surface, that the source is a GraphQL entry that never carries a
+    /// live per-request cost).
+    pub cost_in_cents: Option<f32>,
+    /// Cumulative LLM inference cost broken down by token category. `None`
+    /// when unavailable — for example, the settings usage-history surface
+    /// sources this view from a GraphQL query that does not yet expose a
+    /// per-category cost breakdown (documented gap; see `gql_convert.rs`).
+    pub inference_cost_breakdown: Option<InferenceCostBreakdown>,
 }
 
 /// Timing information for the last set of agent responses
@@ -367,6 +379,21 @@ impl ConversationUsageView {
         // existing flex spacing handles indentation.
         self.append_per_agent_rows(&mut labels, &mut values, rollup.as_ref(), appearance);
 
+        // Total token count, gated by `FeatureFlag::PricingTransparency`. Computed
+        // locally from the per-model breakdown so it's available regardless of
+        // whether the underlying source is the live streaming protocol or a
+        // GraphQL usage-history entry.
+        let total_tokens: u32 = self
+            .usage_info
+            .models
+            .iter()
+            .map(|model| model.warp_tokens + model.byok_tokens + model.custom_endpoint_tokens)
+            .sum();
+        if FeatureFlag::PricingTransparency.is_enabled() && total_tokens > 0 {
+            labels.push(render_label_text("Tokens used", appearance));
+            values.push(render_value_text(total_tokens.to_string(), appearance));
+        }
+
         labels.push(render_label_text("Tool calls", appearance));
         values.push(render_value_text(
             format_value_text(self.usage_info.tool_calls, "call"),
@@ -513,6 +540,8 @@ impl ConversationUsageView {
             context_window_breakdown_enabled,
             appearance,
         );
+
+        self.append_inference_cost_breakdown_section(&mut labels, &mut values, appearance);
 
         // Space between sections
         labels.push(
@@ -697,13 +726,26 @@ impl ConversationUsageView {
     /// Renders the "Credits spent (total)" value cell. When a rollup
     /// applies, the cell is a row with the value followed by a
     /// "View details ▾" / "Hide details ▴" toggle.
+    ///
+    /// The dollar-cost suffix (`format_credits_with_cost`) is only shown
+    /// when there's no rollup: the rollup sums credits across the
+    /// orchestrator and its descendants but has no matching aggregated cost
+    /// figure, mirroring the same tradeoff the compact footer pill makes
+    /// (see `render_usage_button` in `block/view_impl/output.rs`).
     fn render_total_credits_value_row(
         &self,
         total_credits: f32,
         rollup: Option<&OrchestrationCreditRollup>,
         appearance: &Appearance,
     ) -> Box<dyn Element> {
-        let value_text = render_value_text(format_credits(total_credits), appearance);
+        let cost_in_cents = rollup
+            .is_none()
+            .then_some(self.usage_info.cost_in_cents)
+            .flatten();
+        let value_text = render_value_text(
+            format_credits_with_cost(total_credits, cost_in_cents),
+            appearance,
+        );
         if rollup.is_none() {
             return value_text;
         }
@@ -781,6 +823,56 @@ impl ConversationUsageView {
                 .with_color(value_color)
                 .finish(),
             );
+        }
+    }
+
+    /// Pushes a "PRICING BREAKDOWN" section with a row per inference
+    /// token category (input, cache-read, cache-write, output), gated by
+    /// `FeatureFlag::PricingTransparency`. Absent entirely when the flag is
+    /// off or the breakdown is unavailable (e.g. the settings usage-history
+    /// surface, which sources this view from a GraphQL query that doesn't
+    /// yet expose a per-category cost breakdown — documented gap).
+    fn append_inference_cost_breakdown_section(
+        &self,
+        labels: &mut Vec<Box<dyn Element>>,
+        values: &mut Vec<Box<dyn Element>>,
+        appearance: &Appearance,
+    ) {
+        if !FeatureFlag::PricingTransparency.is_enabled() {
+            return;
+        }
+        let Some(breakdown) = self.usage_info.inference_cost_breakdown else {
+            return;
+        };
+
+        labels.push(
+            Container::new(Empty::new().finish())
+                .with_margin_top(12.)
+                .finish(),
+        );
+        values.push(
+            Container::new(Empty::new().finish())
+                .with_margin_top(12.)
+                .finish(),
+        );
+        labels.push(render_section_header(
+            "PRICING BREAKDOWN".to_string(),
+            appearance,
+        ));
+        values.push(render_section_header("".to_string(), appearance));
+
+        let rows: [(&str, f32); 4] = [
+            ("Input", breakdown.input_cost_in_cents),
+            ("Cache read", breakdown.input_cache_read_cost_in_cents),
+            ("Cache write", breakdown.input_cache_write_cost_in_cents),
+            ("Output", breakdown.output_cost_in_cents),
+        ];
+        for (label, cost_in_cents) in rows {
+            labels.push(render_label_text(label, appearance));
+            values.push(render_value_text(
+                format!("${:.2}", cost_in_cents / 100.0),
+                appearance,
+            ));
         }
     }
 

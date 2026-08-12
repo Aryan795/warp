@@ -1,6 +1,6 @@
 use warp::appearance::Appearance;
 use warp::settings::TuiUsageDisplayMode;
-use warp::tui_export::ConversationUsageTotals;
+use warp::tui_export::{ConversationUsageTotals, InferenceCostBreakdown};
 use warp_core::features::FeatureFlag;
 use warpui_core::App;
 use warpui_core::elements::tui::{TuiBufferExt, TuiRect};
@@ -13,6 +13,8 @@ fn totals(credits_spent: f32, cost_in_cents: f32) -> ConversationUsageTotals {
         credits_spent,
         cost_in_cents: Some(cost_in_cents),
         has_usage: true,
+        total_tokens: 0,
+        inference_cost_breakdown: None,
     }
 }
 
@@ -38,12 +40,14 @@ fn entry_text_matches_the_gui_credits_formatting() {
 #[test]
 fn entry_text_follows_the_persisted_display_mode() {
     let usage = totals(2.5, 3.2);
-    // Credits is the default mode; a click toggles to cost and back.
+    // Credits is the default mode; a click cycles credits -> cost -> detail
+    // -> back to credits.
     let credits = TuiUsageDisplayMode::default();
     assert_eq!(entry_text(credits, usage), "2.5 credits");
     assert_eq!(entry_text(credits.toggled(), usage), "$0.03");
+    assert_eq!(entry_text(credits.toggled().toggled(), usage), "$0.03");
     assert_eq!(
-        entry_text(credits.toggled().toggled(), usage),
+        entry_text(credits.toggled().toggled().toggled(), usage),
         "2.5 credits"
     );
 }
@@ -57,9 +61,61 @@ fn cost_mode_explicitly_marks_unknown_historical_cost() {
                 credits_spent: 0.0,
                 cost_in_cents: None,
                 has_usage: true,
+                total_tokens: 0,
+                inference_cost_breakdown: None,
             },
         ),
         "Cost unavailable"
+    );
+}
+
+#[test]
+fn detail_mode_condenses_tokens_and_breakdown_onto_one_line() {
+    let usage = ConversationUsageTotals {
+        credits_spent: 2.5,
+        cost_in_cents: Some(3.2),
+        has_usage: true,
+        total_tokens: 1234,
+        inference_cost_breakdown: Some(InferenceCostBreakdown {
+            input_cost_in_cents: 1.0,
+            input_cache_read_cost_in_cents: 0.5,
+            input_cache_write_cost_in_cents: 0.5,
+            output_cost_in_cents: 1.2,
+        }),
+    };
+    let text = entry_text(TuiUsageDisplayMode::Detail, usage);
+    assert!(text.starts_with("$0.03"), "got: {text:?}");
+    assert!(text.contains("1234 tok"), "got: {text:?}");
+    assert!(text.contains("in $0.01"), "got: {text:?}");
+    assert!(text.contains("cr $0.00"), "got: {text:?}");
+    assert!(text.contains("cw $0.00"), "got: {text:?}");
+    assert!(text.contains("out $0.01"), "got: {text:?}");
+}
+
+#[test]
+fn detail_mode_falls_back_gracefully_when_cost_is_unavailable() {
+    let usage = ConversationUsageTotals {
+        credits_spent: 0.0,
+        cost_in_cents: None,
+        has_usage: true,
+        total_tokens: 100,
+        inference_cost_breakdown: None,
+    };
+    assert_eq!(
+        entry_text(TuiUsageDisplayMode::Detail, usage),
+        "Cost unavailable"
+    );
+}
+
+#[test]
+fn toggle_cycles_through_credits_cost_and_detail() {
+    let mode = TuiUsageDisplayMode::default();
+    assert_eq!(mode, TuiUsageDisplayMode::Credits);
+    assert_eq!(mode.toggled(), TuiUsageDisplayMode::Cost);
+    assert_eq!(mode.toggled().toggled(), TuiUsageDisplayMode::Detail);
+    assert_eq!(
+        mode.toggled().toggled().toggled(),
+        TuiUsageDisplayMode::Credits
     );
 }
 

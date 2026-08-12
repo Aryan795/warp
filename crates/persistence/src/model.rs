@@ -1286,6 +1286,7 @@ impl ModelTokenUsage {
                     .iter()
                     .map(|(cat, tokens)| (cat.clone(), *tokens))
                     .collect(),
+                inference_cost: None,
             },
         ))
     }
@@ -1314,6 +1315,7 @@ impl ModelTokenUsage {
                     .iter()
                     .map(|(cat, tokens)| (cat.clone(), *tokens))
                     .collect(),
+                inference_cost: None,
             },
         ))
     }
@@ -1332,6 +1334,7 @@ impl ModelTokenUsage {
                     *acc.entry(cat.clone()).or_insert(0) += tokens;
                     acc
                 }),
+            inference_cost: None,
         }
     }
 }
@@ -1605,6 +1608,39 @@ impl From<&ContextWindowSegment> for stream_finished::ContextWindowSegment {
     }
 }
 
+/// A breakdown of LLM inference cost by token category, in US cents. Reused
+/// wherever a pricing-transparency detail surface needs the full breakdown
+/// (gated by `FeatureFlag::PricingTransparency`), regardless of whether the
+/// underlying data came from the streaming protocol (`ConversationUsageMetadata`)
+/// or the REST API (`RequestUsage`).
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, Default, PartialEq)]
+pub struct InferenceCostBreakdown {
+    pub input_cost_in_cents: f32,
+    pub input_cache_read_cost_in_cents: f32,
+    pub input_cache_write_cost_in_cents: f32,
+    pub output_cost_in_cents: f32,
+}
+
+impl InferenceCostBreakdown {
+    pub fn total_cost_in_cents(&self) -> f32 {
+        self.input_cost_in_cents
+            + self.input_cache_read_cost_in_cents
+            + self.input_cache_write_cost_in_cents
+            + self.output_cost_in_cents
+    }
+}
+
+impl From<&stream_finished::InferenceCostBreakdown> for InferenceCostBreakdown {
+    fn from(proto: &stream_finished::InferenceCostBreakdown) -> Self {
+        Self {
+            input_cost_in_cents: proto.input_cost_in_cents,
+            input_cache_read_cost_in_cents: proto.input_cache_read_cost_in_cents,
+            input_cache_write_cost_in_cents: proto.input_cache_write_cost_in_cents,
+            output_cost_in_cents: proto.output_cost_in_cents,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ConversationUsageMetadata {
     pub was_summarized: bool,
@@ -1625,6 +1661,12 @@ pub struct ConversationUsageMetadata {
     pub tool_usage_metadata: ToolUsageMetadata,
     #[serde(default)]
     pub context_window_segments: Vec<ContextWindowSegment>,
+    /// Cumulative real dollar cost of LLM inference so far in the
+    /// conversation, broken down by token category. `None` when the server
+    /// did not provide it (flag disabled or legacy conversation) — must not
+    /// be treated as a numeric-zero breakdown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_cost_breakdown: Option<InferenceCostBreakdown>,
 }
 
 impl ConversationUsageMetadata {

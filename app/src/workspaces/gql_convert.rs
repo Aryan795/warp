@@ -326,6 +326,7 @@ impl From<&gql_usage::ConversationUsage> for ConversationUsageInfo {
         let persistence::model::ConversationUsageMetadata {
             credits_spent,
             platform_credits_spent,
+            total_provider_cost_in_cents,
             token_usage: models,
             tool_usage_metadata: tool,
             context_window_usage,
@@ -344,6 +345,15 @@ impl From<&gql_usage::ConversationUsage> for ConversationUsageInfo {
             lines_added: tool.apply_file_diff_stats.lines_added,
             lines_removed: tool.apply_file_diff_stats.lines_removed,
             commands_executed: tool.run_command_stats.commands_executed,
+            cost_in_cents: total_provider_cost_in_cents,
+            // GAP: the `conversationUsage` GraphQL query backing the settings
+            // usage-history surface does not expose a `totalInferenceCost`
+            // field (input/cache-read/cache-write/output breakdown) yet —
+            // that only exists on the streaming protocol's
+            // `ConversationUsageMetadata` proto message (M1 U11/U12). Adding
+            // it would require a warp-server GraphQL schema change, which is
+            // out of scope for this (client-only) unit.
+            inference_cost_breakdown: None,
         }
     }
 }

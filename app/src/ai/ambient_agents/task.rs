@@ -16,6 +16,7 @@ use warpui::{SingletonEntity, View, ViewContext};
 
 use super::AmbientAgentTaskId;
 use crate::ai::artifacts::{Artifact, deserialize_artifacts};
+use crate::persistence;
 use crate::server::server_api::ServerApiProvider;
 use crate::ui_components::icons::Icon;
 use crate::view_components::DismissibleToast;
@@ -362,6 +363,51 @@ impl AmbientAgentTask {
         })
     }
 
+    /// Total real dollar cost (inference + compute + platform), in US cents,
+    /// gated by `FeatureFlag::PricingTransparency` server-side. `None` when
+    /// the server did not provide any of the three `_usd` fields (flag
+    /// disabled, or a legacy run) — must not be rendered as `$0.00`.
+    pub fn cost_in_cents(&self) -> Option<f32> {
+        let usage = self.active_run_execution().request_usage?;
+        if usage.inference_cost_usd.is_none()
+            && usage.compute_cost_usd.is_none()
+            && usage.platform_cost_usd.is_none()
+        {
+            return None;
+        }
+        let total_usd = usage.inference_cost_usd.unwrap_or(0.0)
+            + usage.compute_cost_usd.unwrap_or(0.0)
+            + usage.platform_cost_usd.unwrap_or(0.0);
+        Some((total_usd * 100.0) as f32)
+    }
+
+    /// Total token count (Warp-key plus BYOK, summed across every model)
+    /// for the run's conversation. `None` when the server did not provide
+    /// it (flag disabled, or the server has not yet shipped this field —
+    /// see M1 U11).
+    pub fn total_tokens(&self) -> Option<u32> {
+        self.active_run_execution()
+            .request_usage
+            .and_then(|u| u.total_tokens)
+            .and_then(|tokens| u32::try_from(tokens).ok())
+    }
+
+    /// Cumulative LLM inference cost broken down by token category, in US
+    /// cents (converted from the REST API's USD units). `None` when the
+    /// server did not provide it.
+    pub fn inference_cost_breakdown(&self) -> Option<persistence::model::InferenceCostBreakdown> {
+        let usd = self
+            .active_run_execution()
+            .request_usage?
+            .inference_cost_breakdown_usd?;
+        Some(persistence::model::InferenceCostBreakdown {
+            input_cost_in_cents: (usd.input_cost_usd * 100.0) as f32,
+            input_cache_read_cost_in_cents: (usd.input_cache_read_cost_usd * 100.0) as f32,
+            input_cache_write_cost_in_cents: (usd.input_cache_write_cost_usd * 100.0) as f32,
+            output_cost_in_cents: (usd.output_cost_usd * 100.0) as f32,
+        })
+    }
+
     /// Server-reported run duration.
     pub fn run_time(&self) -> Option<ChronoDuration> {
         self.run_time.and_then(|run_time| run_time.to_chrono())
@@ -556,6 +602,34 @@ pub struct RequestUsage {
     pub inference_cost: Option<f64>,
     pub compute_cost: Option<f64>,
     pub platform_cost: Option<f64>,
+    /// Real dollar cost of LLM inference for this run, in USD. Present
+    /// once `features.PricingTransparencyEnabled()` is true server-side.
+    #[serde(default)]
+    pub inference_cost_usd: Option<f64>,
+    #[serde(default)]
+    pub compute_cost_usd: Option<f64>,
+    #[serde(default)]
+    pub platform_cost_usd: Option<f64>,
+    /// Total token count (Warp-key plus BYOK, summed across every model) for
+    /// the run's conversation. Added server-side by M1 U11; `None` until
+    /// that server change ships (or the flag is disabled).
+    #[serde(default)]
+    pub total_tokens: Option<i64>,
+    /// Per-token-category real dollar cost breakdown for LLM inference.
+    /// Added server-side by M1 U11; `None` until that server change ships
+    /// (or the flag is disabled).
+    #[serde(default)]
+    pub inference_cost_breakdown_usd: Option<InferenceCostBreakdownUsd>,
+}
+
+/// Mirrors warp-server's `InferenceCostBreakdownUSD` REST shape (all values
+/// in USD, unlike the streaming protocol's cents-denominated breakdown).
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Default)]
+pub struct InferenceCostBreakdownUsd {
+    pub input_cost_usd: f64,
+    pub input_cache_read_cost_usd: f64,
+    pub input_cache_write_cost_usd: f64,
+    pub output_cost_usd: f64,
 }
 
 /// Cancel an ambient agent task and show a toast with the result.

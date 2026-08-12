@@ -345,7 +345,11 @@ version-compare = "0.1"
 vte = { git = "https://github.com/warpdotdev/vte.git", rev = "4b399c87b63ba88f45709edaa6383fc519f6c900", default-features = false }
 walkdir = "2"
 warp-workflows = { git = "https://github.com/warpdotdev/workflows", rev = "793a98ddda6ef19682aed66364faebd2829f0e01" }
-warp_multi_agent_api = { git = "https://github.com/warpdotdev/warp-proto-apis.git", rev = "b0886a9523e2e05d102f61bd0a212dc15ade4835" }
+# Pinned to the tip of the (as of writing, still-open) pricing-transparency proto PR
+# (warpdotdev/warp-proto-apis#355), which adds InferenceCostBreakdown and the
+# platform/inference cost fields on RequestCost/ConversationUsageMetadata that
+# M1 U12 consumes. Bump to a `develop`/main commit once that PR merges.
+warp_multi_agent_api = { git = "https://github.com/warpdotdev/warp-proto-apis.git", rev = "f43b7b9a898512674641124fc853d2c5294cd90d" }
 wasm-bindgen = "0.2.89"
 wasm-bindgen-futures = "0.4.42"
 web-sys = { version = "0.3.69", features = [

@@ -201,6 +201,9 @@ impl From<&ConversationUsageMetadata> for persistence::model::ConversationUsageM
             token_usage: convert_token_usage(&gql.warp_token_usage, &gql.byok_token_usage),
             tool_usage_metadata: (&gql.tool_usage_metadata).into(),
             context_window_segments: gql.context_window_segments.iter().map(Into::into).collect(),
+            // GAP: this GraphQL query does not expose a totalInferenceCost
+            // breakdown field yet (see M1 U12).
+            inference_cost_breakdown: None,
         }
     }
 }

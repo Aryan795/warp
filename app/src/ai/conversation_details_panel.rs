@@ -12,6 +12,7 @@ use pathfinder_geometry::vector::vec2f;
 use warp_cli::agent::Harness;
 use warp_cli::skill::SkillSpec;
 use warp_core::channel::ChannelState;
+use warp_core::features::FeatureFlag;
 use warp_core::ui::color::coloru_with_opacity;
 use warp_graphql::queries::get_runners::Runner;
 use warpui::clipboard::ClipboardContent;
@@ -57,6 +58,7 @@ use crate::appearance::Appearance;
 use crate::auth::UserUid;
 use crate::cloud_object::CloudObjectLookup as _;
 use crate::notebooks::NotebookId;
+use crate::persistence::model::InferenceCostBreakdown;
 use crate::send_telemetry_from_ctx;
 use crate::server::ids::{ServerId, SyncId};
 use crate::server::server_api::ServerApiProvider;
@@ -239,6 +241,14 @@ pub struct ConversationDetailsData {
     created_at: Option<DateTime<Local>>,
     /// Total credits spent on the conversation/task.
     credits: Option<f32>,
+    /// Total real dollar cost of the conversation/task, in US cents, gated
+    /// by `FeatureFlag::PricingTransparency`. `None` means the source has
+    /// no cost baseline available (documented per-source gaps below).
+    cost_in_cents: Option<f32>,
+    /// Total token count used, when the source provides it.
+    total_tokens: Option<u32>,
+    /// Cumulative LLM inference cost broken down by token category.
+    inference_cost_breakdown: Option<InferenceCostBreakdown>,
     /// Total duration of the conversation.
     run_time: Option<Duration>,
     /// Artifacts created during the conversation (plans, PRs, branches).
@@ -345,6 +355,8 @@ impl ConversationDetailsData {
             .map(|m| Harness::from(m.harness))
             .or(Some(Harness::Oz));
 
+        let usage_totals = conversation.usage_totals();
+
         ConversationDetailsData {
             mode: PanelMode::Conversation {
                 directory,
@@ -359,6 +371,9 @@ impl ConversationDetailsData {
             executor: None,
             created_at,
             credits: Some(conversation.credits_spent()),
+            cost_in_cents: usage_totals.cost_in_cents,
+            total_tokens: Some(usage_totals.total_tokens).filter(|&tokens| tokens > 0),
+            inference_cost_breakdown: usage_totals.inference_cost_breakdown,
             run_time,
             artifacts: conversation.artifacts().to_vec(),
             open_action: None,
@@ -424,6 +439,9 @@ impl ConversationDetailsData {
             created_at: Some(task.created_at.with_timezone(&Local)),
             artifacts: task.artifacts.clone(),
             credits,
+            cost_in_cents: task.cost_in_cents(),
+            total_tokens: task.total_tokens(),
+            inference_cost_breakdown: task.inference_cost_breakdown(),
             run_time: task.run_time(),
             open_action,
             creator: task
@@ -478,6 +496,13 @@ impl ConversationDetailsData {
             let credits = task
                 .and_then(AmbientAgentTask::credits_used)
                 .or(entry.display.request_usage);
+            // Only the task record (fetched REST `AmbientAgentTask`) carries the
+            // dollar/token/breakdown fields; the entry's denormalized fallback
+            // (`entry.display.request_usage`) only ever has a credits total.
+            let cost_in_cents = task.and_then(AmbientAgentTask::cost_in_cents);
+            let total_tokens = task.and_then(AmbientAgentTask::total_tokens);
+            let inference_cost_breakdown =
+                task.and_then(AmbientAgentTask::inference_cost_breakdown);
             let skill_spec = task
                 .and_then(|task| task.agent_config_snapshot.as_ref())
                 .and_then(|config| config.skill_spec.as_ref())
@@ -504,6 +529,9 @@ impl ConversationDetailsData {
                 executor,
                 created_at,
                 credits,
+                cost_in_cents,
+                total_tokens,
+                inference_cost_breakdown,
                 run_time: task.and_then(AmbientAgentTask::run_time),
                 artifacts: entry.display.artifacts.clone(),
                 open_action,
@@ -531,6 +559,13 @@ impl ConversationDetailsData {
             executor: None,
             created_at,
             credits: entry.display.request_usage,
+            // GAP: this branch has no linked `AmbientAgentTask` (no ambient
+            // agent task id on the entry), and `entry.display.request_usage`
+            // is a bare credits total with no dollar/token/breakdown
+            // counterpart.
+            cost_in_cents: None,
+            total_tokens: None,
+            inference_cost_breakdown: None,
             run_time: None,
             artifacts: entry.display.artifacts.clone(),
             open_action,
@@ -563,6 +598,9 @@ impl ConversationDetailsData {
             executor: None,
             created_at: None,
             credits: None,
+            cost_in_cents: None,
+            total_tokens: None,
+            inference_cost_breakdown: None,
             run_time: None,
             artifacts: vec![],
             open_action: None,
@@ -605,6 +643,12 @@ impl ConversationDetailsData {
             executor: None,
             created_at: Some(created_at),
             credits: credits_used,
+            // GAP: this constructor is a legacy management-view helper whose
+            // signature only accepts a bare credits total; no dollar/token/
+            // breakdown source is threaded through it.
+            cost_in_cents: None,
+            total_tokens: None,
+            inference_cost_breakdown: None,
             run_time: None,
             open_action,
             artifacts,
@@ -2232,6 +2276,49 @@ impl View for ConversationDetailsPanel {
                     .with_margin_bottom(FIELD_SPACING)
                     .finish(),
             );
+        }
+
+        if FeatureFlag::PricingTransparency.is_enabled() {
+            if let Some(cost_in_cents) = self.data.cost_in_cents {
+                let formatted = format!("${:.2}", cost_in_cents / 100.0);
+                content.add_child(
+                    Container::new(self.render_simple_field("Cost", &formatted, appearance))
+                        .with_margin_bottom(FIELD_SPACING)
+                        .finish(),
+                );
+            }
+
+            if let Some(total_tokens) = self.data.total_tokens {
+                content.add_child(
+                    Container::new(self.render_simple_field(
+                        "Tokens used",
+                        &total_tokens.to_string(),
+                        appearance,
+                    ))
+                    .with_margin_bottom(FIELD_SPACING)
+                    .finish(),
+                );
+            }
+
+            if let Some(breakdown) = self.data.inference_cost_breakdown {
+                let rows: [(&str, f32); 4] = [
+                    ("Input cost", breakdown.input_cost_in_cents),
+                    ("Cache read cost", breakdown.input_cache_read_cost_in_cents),
+                    (
+                        "Cache write cost",
+                        breakdown.input_cache_write_cost_in_cents,
+                    ),
+                    ("Output cost", breakdown.output_cost_in_cents),
+                ];
+                for (label, cost_in_cents) in rows {
+                    let formatted = format!("${:.2}", cost_in_cents / 100.0);
+                    content.add_child(
+                        Container::new(self.render_simple_field(label, &formatted, appearance))
+                            .with_margin_bottom(FIELD_SPACING)
+                            .finish(),
+                    );
+                }
+            }
         }
 
         if let Some(duration) = self.data.run_time {

@@ -66,8 +66,8 @@ use crate::code_review::CodeReviewTelemetryEvent;
 use crate::notebooks::NotebookId;
 use crate::persistence::ModelEvent;
 use crate::persistence::model::{
-    AgentConversationData, ContextWindowSegment, ConversationUsageMetadata, ModelTokenUsage,
-    PersistedAutoexecuteMode, ToolUsageMetadata,
+    AgentConversationData, ContextWindowSegment, ConversationUsageMetadata, InferenceCostBreakdown,
+    ModelTokenUsage, PersistedAutoexecuteMode, ToolUsageMetadata,
 };
 use crate::server::ids::ServerId;
 use crate::terminal::general_settings::GeneralSettings;
@@ -193,6 +193,13 @@ pub struct ConversationUsageTotals {
     /// while a restored legacy conversation with real usage but an unknown
     /// historical cost still shows it.
     pub has_usage: bool,
+    /// Total token count (Warp-key plus BYOK plus custom-endpoint, summed
+    /// across every model) used so far in the conversation.
+    pub total_tokens: u32,
+    /// Cumulative LLM inference cost broken down by token category. `None`
+    /// when the server did not provide it (flag disabled or legacy
+    /// conversation).
+    pub inference_cost_breakdown: Option<InferenceCostBreakdown>,
 }
 
 /// Whether persisted or server usage metadata carries evidence that the
@@ -949,6 +956,23 @@ impl AIConversation {
 
     pub fn token_usage(&self) -> &[ModelTokenUsage] {
         &self.conversation_usage_metadata.token_usage
+    }
+
+    /// Cumulative LLM inference cost broken down by token category (input,
+    /// cache-read, cache-write, output). `None` when the server did not
+    /// provide it (`FeatureFlag::PricingTransparency` disabled, or a legacy
+    /// conversation).
+    pub fn inference_cost_breakdown(&self) -> Option<InferenceCostBreakdown> {
+        self.conversation_usage_metadata.inference_cost_breakdown
+    }
+
+    /// Total token count (Warp-key plus BYOK plus custom-endpoint, summed
+    /// across every model) used so far in the conversation.
+    pub fn total_tokens(&self) -> u32 {
+        self.token_usage()
+            .iter()
+            .map(|model| model.warp_tokens + model.byok_tokens + model.custom_endpoint_tokens)
+            .sum()
     }
 
     pub fn tool_usage_metadata(&self) -> &ToolUsageMetadata {
@@ -2219,6 +2243,7 @@ impl AIConversation {
                     input_cache_read: 0,
                     input_cache_write: 0,
                     cost_in_cents: 0.0,
+                    inference_cost: None,
                 });
 
             entry.total_input += usage.total_input;
@@ -2266,6 +2291,9 @@ impl AIConversation {
                 .iter()
                 .map(Into::into)
                 .collect();
+
+            self.conversation_usage_metadata.inference_cost_breakdown =
+                usage_metadata.total_inference_cost.as_ref().map(Into::into);
 
             // A conversation can never go from summarized to un-summarized,
             // so we only update the summarized flag if it's going from false to true.
@@ -3758,6 +3786,8 @@ impl AIConversation {
             credits_spent: self.inference_credits_spent() + self.platform_credits_spent(),
             cost_in_cents: self.total_provider_cost_in_cents,
             has_usage: self.has_usage_metadata,
+            total_tokens: self.total_tokens(),
+            inference_cost_breakdown: self.inference_cost_breakdown(),
         }
     }
 

@@ -313,8 +313,11 @@ fn custom_endpoint_usage_metadata(
                 model_id: config_key.to_string(),
                 total_tokens,
                 token_usage_by_category: HashMap::from([(category, total_tokens)]),
+                inference_cost: None,
             },
         )]),
+        total_platform_cost_in_cents: 0.0,
+        total_inference_cost: None,
     }
 }
 
@@ -851,6 +854,7 @@ fn stream_token_usage(
         input_cache_read: 0,
         input_cache_write: 0,
         cost_in_cents,
+        inference_cost: None,
     }
 }
 
@@ -871,6 +875,8 @@ fn credits_usage_metadata(
         byok_token_usage: HashMap::new(),
         context_window_segments: Vec::new(),
         custom_endpoint_token_usage: HashMap::new(),
+        total_platform_cost_in_cents: 0.0,
+        total_inference_cost: None,
     }
 }
 
@@ -887,6 +893,8 @@ fn usage_totals_reads_gui_credits_and_accumulates_provider_cost() {
                 credits_spent: 0.0,
                 cost_in_cents: Some(0.0),
                 has_usage: false,
+                total_tokens: 0,
+                inference_cost_breakdown: None,
             }
         );
 
@@ -967,6 +975,7 @@ fn footer_model_token_usage_keeps_custom_endpoint_usage_distinct_from_same_label
                     model_id: "Resolved custom".to_string(),
                     total_tokens: 4,
                     token_usage_by_category: HashMap::from([(category.clone(), 4)]),
+                    inference_cost: None,
                 },
             )]),
             custom_endpoint_token_usage: HashMap::from([(
@@ -975,9 +984,12 @@ fn footer_model_token_usage_keeps_custom_endpoint_usage_distinct_from_same_label
                     model_id: "config-key".to_string(),
                     total_tokens: 6,
                     token_usage_by_category: HashMap::from([(category.clone(), 6)]),
+                    inference_cost: None,
                 },
             )]),
             context_window_segments: Vec::new(),
+            total_platform_cost_in_cents: 0.0,
+            total_inference_cost: None,
         };
 
         let model_usage =
@@ -1033,9 +1045,12 @@ fn footer_model_token_usage_preserves_unresolved_custom_endpoint_usage_with_fall
                     model_id: "missing-config-key".to_string(),
                     total_tokens: 9,
                     token_usage_by_category: HashMap::from([(category.clone(), 9)]),
+                    inference_cost: None,
                 },
             )]),
             context_window_segments: Vec::new(),
+            total_platform_cost_in_cents: 0.0,
+            total_inference_cost: None,
         };
 
         let model_usage =

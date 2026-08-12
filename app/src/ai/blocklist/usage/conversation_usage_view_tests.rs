@@ -24,12 +24,13 @@
 
 use std::collections::HashMap;
 
+use warp_core::features::FeatureFlag;
 use warp_core::ui::appearance::Appearance;
 use warpui::App;
 use warpui::platform::WindowStyle;
 
 use super::*;
-use crate::persistence::model::{ModelTokenUsage, PRIMARY_AGENT_CATEGORY};
+use crate::persistence::model::{InferenceCostBreakdown, ModelTokenUsage, PRIMARY_AGENT_CATEGORY};
 
 fn placeholder_usage_info() -> ConversationUsageInfo {
     ConversationUsageInfo {
@@ -44,6 +45,8 @@ fn placeholder_usage_info() -> ConversationUsageInfo {
         lines_added: 0,
         lines_removed: 0,
         commands_executed: 0,
+        cost_in_cents: None,
+        inference_cost_breakdown: None,
     }
 }
 
@@ -150,6 +153,81 @@ fn custom_endpoint_models_use_the_external_key_icon_bucket() {
             .get(PRIMARY_AGENT_CATEGORY),
         Some(&vec![("Friendly alias".to_string(), true)])
     );
+}
+
+#[test]
+fn inference_cost_breakdown_section_hidden_when_flag_disabled() {
+    let _guard = FeatureFlag::PricingTransparency.override_enabled(false);
+    let view = ConversationUsageView::new(
+        ConversationUsageInfo {
+            inference_cost_breakdown: Some(InferenceCostBreakdown {
+                input_cost_in_cents: 1.0,
+                input_cache_read_cost_in_cents: 2.0,
+                input_cache_write_cost_in_cents: 3.0,
+                output_cost_in_cents: 4.0,
+            }),
+            ..placeholder_usage_info()
+        },
+        DisplayMode::Footer,
+        None,
+        MouseStateHandle::default(),
+    );
+    let mut labels = Vec::new();
+    let mut values = Vec::new();
+    let appearance = Appearance::mock();
+    view.append_inference_cost_breakdown_section(&mut labels, &mut values, &appearance);
+    assert!(
+        labels.is_empty() && values.is_empty(),
+        "flag-off must render no breakdown rows at all"
+    );
+}
+
+#[test]
+fn inference_cost_breakdown_section_absent_when_unavailable() {
+    let _guard = FeatureFlag::PricingTransparency.override_enabled(true);
+    let view = ConversationUsageView::new(
+        ConversationUsageInfo {
+            inference_cost_breakdown: None,
+            ..placeholder_usage_info()
+        },
+        DisplayMode::Footer,
+        None,
+        MouseStateHandle::default(),
+    );
+    let mut labels = Vec::new();
+    let mut values = Vec::new();
+    let appearance = Appearance::mock();
+    view.append_inference_cost_breakdown_section(&mut labels, &mut values, &appearance);
+    assert!(
+        labels.is_empty() && values.is_empty(),
+        "no breakdown data available (e.g. GraphQL-sourced usage-history entry) must render nothing"
+    );
+}
+
+#[test]
+fn inference_cost_breakdown_section_renders_four_category_rows_when_flag_enabled() {
+    let _guard = FeatureFlag::PricingTransparency.override_enabled(true);
+    let view = ConversationUsageView::new(
+        ConversationUsageInfo {
+            inference_cost_breakdown: Some(InferenceCostBreakdown {
+                input_cost_in_cents: 1.0,
+                input_cache_read_cost_in_cents: 2.0,
+                input_cache_write_cost_in_cents: 3.0,
+                output_cost_in_cents: 450.0,
+            }),
+            ..placeholder_usage_info()
+        },
+        DisplayMode::Footer,
+        None,
+        MouseStateHandle::default(),
+    );
+    let mut labels = Vec::new();
+    let mut values = Vec::new();
+    let appearance = Appearance::mock();
+    view.append_inference_cost_breakdown_section(&mut labels, &mut values, &appearance);
+    // 2 header rows (spacer + "PRICING BREAKDOWN") + 4 category rows.
+    assert_eq!(labels.len(), 6);
+    assert_eq!(values.len(), 6);
 }
 
 #[test]

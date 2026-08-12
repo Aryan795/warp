@@ -1345,6 +1345,7 @@ fn create_server_metadata(
         token_usage: vec![],
         tool_usage_metadata: Default::default(),
         context_window_segments: Vec::new(),
+        inference_cost_breakdown: None,
     };
 
     ServerAIConversationMetadata {

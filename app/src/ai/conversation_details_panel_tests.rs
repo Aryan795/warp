@@ -11,7 +11,9 @@ use crate::ai::agent::api::ServerConversationToken;
 use crate::ai::agent::conversation::{
     AIAgentHarness, AIConversation, AIConversationId, ServerAIConversationMetadata,
 };
-use crate::ai::ambient_agents::task::{AgentConfigSnapshot, HarnessConfig, TaskPrincipalInfo};
+use crate::ai::ambient_agents::task::{
+    AgentConfigSnapshot, HarnessConfig, InferenceCostBreakdownUsd, RequestUsage, TaskPrincipalInfo,
+};
 use crate::ai::ambient_agents::{AmbientAgentTask, AmbientAgentTaskState};
 use crate::ai::blocklist::history_model::BlocklistAIHistoryModel;
 use crate::auth::UserUid;
@@ -190,6 +192,7 @@ fn create_test_server_metadata(
             token_usage: vec![],
             tool_usage_metadata: Default::default(),
             context_window_segments: Vec::new(),
+            inference_cost_breakdown: None,
         },
         metadata: ServerMetadata {
             uid: ServerId::default(),
@@ -568,6 +571,75 @@ fn test_from_task_leaves_the_runner_absent_when_the_run_names_none() {
                     ..
                 }
             ));
+        });
+    });
+}
+
+#[test]
+fn test_from_task_populates_cost_tokens_and_breakdown_from_request_usage() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
+
+        let mut task = create_test_task("550e8400-e29b-41d4-a716-000000006001");
+        task.request_usage = Some(RequestUsage {
+            inference_cost: Some(1.0),
+            compute_cost: Some(0.5),
+            platform_cost: Some(0.25),
+            inference_cost_usd: Some(0.02),
+            compute_cost_usd: Some(0.01),
+            platform_cost_usd: Some(0.005),
+            total_tokens: Some(1234),
+            inference_cost_breakdown_usd: Some(InferenceCostBreakdownUsd {
+                input_cost_usd: 0.01,
+                input_cache_read_cost_usd: 0.002,
+                input_cache_write_cost_usd: 0.003,
+                output_cost_usd: 0.005,
+            }),
+        });
+
+        app.update(|ctx| {
+            let data = ConversationDetailsData::from_task(&task, None, None, ctx);
+            // (0.02 + 0.01 + 0.005) USD * 100 = 3.5 cents.
+            assert!((data.cost_in_cents.unwrap() - 3.5).abs() < 1e-3);
+            assert_eq!(data.total_tokens, Some(1234));
+            let breakdown = data
+                .inference_cost_breakdown
+                .expect("breakdown should be populated");
+            assert!((breakdown.input_cost_in_cents - 1.0).abs() < 1e-3);
+            assert!((breakdown.input_cache_read_cost_in_cents - 0.2).abs() < 1e-3);
+            assert!((breakdown.input_cache_write_cost_in_cents - 0.3).abs() < 1e-3);
+            assert!((breakdown.output_cost_in_cents - 0.5).abs() < 1e-3);
+        });
+    });
+}
+
+#[test]
+fn test_from_task_leaves_cost_tokens_and_breakdown_absent_when_unavailable() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
+
+        // A legacy/flag-disabled run: request_usage is present (with credits)
+        // but has none of the `_usd`/token/breakdown fields set.
+        let mut task = create_test_task("550e8400-e29b-41d4-a716-000000006002");
+        task.request_usage = Some(RequestUsage {
+            inference_cost: Some(1.0),
+            compute_cost: None,
+            platform_cost: None,
+            inference_cost_usd: None,
+            compute_cost_usd: None,
+            platform_cost_usd: None,
+            total_tokens: None,
+            inference_cost_breakdown_usd: None,
+        });
+
+        app.update(|ctx| {
+            let data = ConversationDetailsData::from_task(&task, None, None, ctx);
+            assert_eq!(
+                data.cost_in_cents, None,
+                "absent _usd fields must not be rendered as a numeric-zero cost"
+            );
+            assert_eq!(data.total_tokens, None);
+            assert!(data.inference_cost_breakdown.is_none());
         });
     });
 }

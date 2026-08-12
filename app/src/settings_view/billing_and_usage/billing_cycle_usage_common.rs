@@ -288,6 +288,17 @@ pub fn render_section_subheader(label: &str, appearance: &Appearance) -> Box<dyn
 
 /// Per-cost-type breakdown card. Parameterized by raw segments and totals so
 /// it can back team-totals card hovers as well as per-member row hovers.
+///
+/// GAP (M1 U12): this surface already shows credits + real dollar cost per
+/// bucket (AI/Compute/Platform), but cannot add a token count or an
+/// input/cache-read/cache-write/output inference cost breakdown like the
+/// other pricing-transparency detail surfaces. The underlying GraphQL data
+/// (`BillingCycleUsageEntry`) is a monthly-cycle rollup keyed by
+/// `(cost_type, usage_bucket)` with no per-run token or per-category
+/// inference cost fields — that granularity only exists on the streaming
+/// protocol's per-conversation `ConversationUsageMetadata`. Adding it here
+/// would require a new, differently-shaped warp-server GraphQL query, which
+/// is out of scope for this (client-only) unit.
 pub fn render_breakdown_tooltip(
     segments: &[BarSegment],
     total_credits: i64,

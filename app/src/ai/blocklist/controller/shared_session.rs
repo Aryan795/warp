@@ -547,6 +547,11 @@ impl BlocklistAIController {
                         .iter()
                         .map(Into::into)
                         .collect(),
+                    // Shared-session replay does not yet propagate the
+                    // pricing-transparency platform-cost/inference-breakdown
+                    // fields to viewers; safe zero/absent defaults.
+                    total_platform_cost_in_cents: 0.0,
+                    total_inference_cost: None,
                 })
         });
 

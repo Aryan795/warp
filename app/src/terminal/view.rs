@@ -6947,6 +6947,8 @@ impl TerminalView {
             lines_added: tool_usage.apply_file_diff_stats.lines_added,
             lines_removed: tool_usage.apply_file_diff_stats.lines_removed,
             commands_executed: tool_usage.run_command_stats.commands_executed,
+            cost_in_cents: conversation.usage_totals().cost_in_cents,
+            inference_cost_breakdown: conversation.inference_cost_breakdown(),
         };
 
         let timing_info = TimingInfo {

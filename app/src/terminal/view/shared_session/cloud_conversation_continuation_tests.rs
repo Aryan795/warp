@@ -283,6 +283,7 @@ fn server_conversation_metadata(
             token_usage: vec![],
             tool_usage_metadata: Default::default(),
             context_window_segments: Vec::new(),
+            inference_cost_breakdown: None,
         },
         metadata: server_metadata(creator_uid),
         creator: None,
