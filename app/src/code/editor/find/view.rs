@@ -81,6 +81,7 @@ pub struct CodeEditorFind {
     replace_editor: ViewHandle<EditorView>,
     searcher: ModelHandle<Searcher>,
     button_mouse_states: ButtonMouseStates,
+    query_field_mouse_state: MouseStateHandle,
     preserve_case_enabled: bool,
     is_open: bool,
     is_replace_open: bool,
@@ -101,6 +102,10 @@ pub enum FindAction {
     ToggleReplaceOpen,
     ReplaceAll,
     TogglePreserveCase,
+    /// The query field was clicked. Reclaims focus (and re-enables editing) if the field is
+    /// currently disabled, e.g. after Vim's Enter handling or `search_word_at_cursor` moved
+    /// focus away while leaving the find bar open as a status indicator.
+    FocusQueryField,
 }
 
 pub fn init(app: &mut AppContext) {
@@ -229,6 +234,7 @@ impl CodeEditorFind {
             replace_editor,
             searcher,
             button_mouse_states: Default::default(),
+            query_field_mouse_state: Default::default(),
             preserve_case_enabled: false,
             is_open: false,
             is_replace_open: false,
@@ -409,6 +415,17 @@ impl CodeEditorFind {
 
     fn close_find_bar(&mut self, ctx: &mut ViewContext<Self>) {
         ctx.emit(Event::CloseFindBar);
+    }
+
+    /// Reclaims focus for the find bar if the query field is currently disabled. Vim's Enter
+    /// handling and `search_word_at_cursor` both disable the query field while leaving the find
+    /// bar open as a status indicator; clicking the field should recover it the same way Cmd-F
+    /// does. This is a no-op when the field is already editable, so clicking to reposition the
+    /// cursor in an active field isn't disrupted by an unwanted re-select-all.
+    fn reclaim_query_focus(&mut self, ctx: &mut ViewContext<Self>) {
+        if !self.is_find_input_editable(ctx) {
+            ctx.focus_self();
+        }
     }
 
     fn toggle_case_sensitivity(&mut self, ctx: &mut ViewContext<Self>) {
@@ -771,7 +788,16 @@ impl CodeEditorFind {
                 Shrinkable::new(
                     1.,
                     ConstrainedBox::new(
-                        Clipped::new(ChildView::new(&self.find_editor).finish()).finish(),
+                        // Wrapped in a `Hoverable` so that clicking the query field while it's
+                        // disabled (see `reclaim_query_focus`) reclaims focus, even though the
+                        // disabled editor itself won't handle the click.
+                        Hoverable::new(self.query_field_mouse_state.clone(), |_state| {
+                            Clipped::new(ChildView::new(&self.find_editor).finish()).finish()
+                        })
+                        .on_mouse_down(move |ctx, _app, _position| {
+                            ctx.dispatch_typed_action(FindAction::FocusQueryField);
+                        })
+                        .finish(),
                     )
                     .with_height(editor_height)
                     .finish(),
@@ -894,6 +920,13 @@ impl Entity for CodeEditorFind {
     type Event = Event;
 }
 
+#[cfg(test)]
+impl CodeEditorFind {
+    pub(crate) fn find_editor_for_test(&self) -> ViewHandle<EditorView> {
+        self.find_editor.clone()
+    }
+}
+
 impl TypedActionView for CodeEditorFind {
     type Action = FindAction;
 
@@ -914,6 +947,7 @@ impl TypedActionView for CodeEditorFind {
                 self.preserve_case_enabled = !self.preserve_case_enabled;
                 ctx.notify();
             }
+            FindAction::FocusQueryField => self.reclaim_query_focus(ctx),
         }
     }
 }
