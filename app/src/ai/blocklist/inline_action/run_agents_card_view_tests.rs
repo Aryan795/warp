@@ -324,6 +324,65 @@ fn to_request_round_trips_request_fields() {
     assert_eq!(round_tripped.plan_id, req.plan_id);
 }
 
+mod resolve_pending_card_state_tests {
+    use super::super::{PendingCardState, resolve_pending_card_state};
+
+    #[test]
+    fn blocked_status_renders_confirmation_regardless_of_streaming() {
+        assert_eq!(
+            resolve_pending_card_state(true, false, true),
+            PendingCardState::Confirmation
+        );
+        assert_eq!(
+            resolve_pending_card_state(true, false, false),
+            PendingCardState::Confirmation
+        );
+    }
+
+    #[test]
+    fn no_status_while_owner_still_streaming_renders_configuring() {
+        // The action hasn't reached the action model yet, but the owner
+        // block is still streaming the tool call: show the transient
+        // "Configuring agents..." placeholder, not a cancelled card.
+        assert_eq!(
+            resolve_pending_card_state(false, true, true),
+            PendingCardState::Configuring
+        );
+    }
+
+    #[test]
+    fn no_status_after_owner_stops_streaming_renders_cancelled_mid_stream() {
+        // Mid-tool-call cancellation: the action never made it into
+        // BlocklistAIActionModel, so status stays None forever, and the
+        // owner block has left the streaming state. This must resolve to
+        // the cancelled presentation instead of getting stuck Configuring.
+        assert_eq!(
+            resolve_pending_card_state(false, true, false),
+            PendingCardState::CancelledMidStream
+        );
+    }
+
+    #[test]
+    fn non_blocked_status_while_streaming_renders_configuring() {
+        // e.g. Preprocessing/Queued while still streaming.
+        assert_eq!(
+            resolve_pending_card_state(false, false, true),
+            PendingCardState::Configuring
+        );
+    }
+
+    #[test]
+    fn non_blocked_status_after_streaming_stops_renders_configuring() {
+        // A concrete (non-`Blocked`) action status takes precedence over
+        // the mid-stream-cancellation heuristic, which only applies when
+        // there is no action status at all.
+        assert_eq!(
+            resolve_pending_card_state(false, false, false),
+            PendingCardState::Configuring
+        );
+    }
+}
+
 mod format_terminal_state_tests {
     use super::super::{StatusKind, format_terminal_state};
     use super::*;
