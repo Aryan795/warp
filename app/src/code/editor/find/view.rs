@@ -420,8 +420,12 @@ impl CodeEditorFind {
 
     /// Makes the find input editable and focuses it. Vim mode leaves the input disabled once the
     /// query has been submitted, so this is how a click on the field resumes editing the query.
+    /// Does nothing when the input is already focused and editable, so that a click near the edge
+    /// of the field does not reset the caret the editor just placed.
     fn focus_find_input(&mut self, ctx: &mut ViewContext<Self>) {
-        if self.find_editor.as_ref(ctx).is_focused() {
+        let is_focused = self.find_editor.as_ref(ctx).is_focused();
+        let is_editable = self.find_editor.as_ref(ctx).can_edit(ctx);
+        if is_focused && is_editable {
             return;
         }
 
