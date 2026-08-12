@@ -1,13 +1,18 @@
 use super::{
-    BarSegment, aggregate_segments, filter_legacy_buckets, has_non_viewer_data, legend_cost_types,
+    BarSegment, aggregate_segments, filter_entries_by_attributed_team, filter_legacy_buckets,
+    has_non_viewer_data, legend_cost_types, scope_members_to_team,
 };
+use crate::auth::UserUid;
+use crate::workspaces::team::{MembershipRole, TeamMember};
 use crate::workspaces::workspace::{
     AiCreditsUsageAndCostSubjectType, AiCreditsUsageAndCostType, AiCreditsUsageBucket,
-    AiCreditsUsageSource, BillingCycleUsageEntry,
+    AiCreditsUsageSource, BillingCycleUsageEntry, WorkspaceMember, WorkspaceMemberUsageInfo,
 };
 
 const VIEWER_UID: &str = "viewer-uid";
 const OTHER_UID: &str = "other-uid";
+const CURRENT_TEAM_UID: &str = "team-a-uid";
+const OTHER_TEAM_UID: &str = "team-b-uid";
 
 fn entry(
     subject_type: AiCreditsUsageAndCostSubjectType,
@@ -27,6 +32,49 @@ fn entry(
         usage_source,
         credits_used,
         cost_cents,
+        attributed_team_uid: None,
+    }
+}
+
+/// Boilerplate User entry attributed to `attributed_team_uid`.
+fn entry_for_team(
+    subject_uid: &str,
+    attributed_team_uid: Option<&str>,
+    credits_used: i32,
+) -> BillingCycleUsageEntry {
+    BillingCycleUsageEntry {
+        attributed_team_uid: attributed_team_uid.map(|s| s.to_string()),
+        ..entry(
+            AiCreditsUsageAndCostSubjectType::User,
+            Some(subject_uid),
+            AiCreditsUsageAndCostType::BaseLimit,
+            AiCreditsUsageBucket::Ai,
+            AiCreditsUsageSource::Local,
+            credits_used,
+            0,
+        )
+    }
+}
+
+fn workspace_member(uid: &str) -> WorkspaceMember {
+    WorkspaceMember {
+        uid: UserUid::new(uid),
+        email: format!("{uid}@warp.dev"),
+        role: MembershipRole::User,
+        usage_info: WorkspaceMemberUsageInfo {
+            is_unlimited: false,
+            request_limit: 100,
+            requests_used_since_last_refresh: 0,
+            is_request_limit_prorated: false,
+        },
+    }
+}
+
+fn team_member(uid: &str) -> TeamMember {
+    TeamMember {
+        uid: UserUid::new(uid),
+        email: format!("{uid}@warp.dev"),
+        role: MembershipRole::User,
     }
 }
 
@@ -342,6 +390,78 @@ fn legend_cost_types_includes_used_buckets_in_display_order() {
         ],
         "used buckets should render in canonical order, not input order"
     );
+}
+
+#[test]
+fn filter_entries_by_attributed_team_keeps_only_the_team_in_view() {
+    // The regression this guards: a team-A admin was shown team B's usage
+    // because the workspace-wide history was rendered unfiltered.
+    let entries = vec![
+        entry_for_team(VIEWER_UID, Some(CURRENT_TEAM_UID), 10),
+        entry_for_team(OTHER_UID, Some(OTHER_TEAM_UID), 999),
+    ];
+
+    let filtered = filter_entries_by_attributed_team(&entries, CURRENT_TEAM_UID);
+
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].subject_uid.as_deref(), Some(VIEWER_UID));
+    assert_eq!(filtered[0].credits_used, 10);
+}
+
+#[test]
+fn filter_entries_by_attributed_team_drops_unattributed_entries() {
+    // Strict equality, matching the web's `filterEntriesByAttributedTeam`:
+    // usage the server left unattributed belongs to no team in particular,
+    // so it must not be billed to the team in view — the viewer's own rows
+    // included.
+    let entries = vec![
+        entry_for_team(VIEWER_UID, None, 10),
+        entry_for_team(OTHER_UID, None, 20),
+    ];
+
+    assert!(filter_entries_by_attributed_team(&entries, CURRENT_TEAM_UID).is_empty());
+}
+
+#[test]
+fn filter_entries_by_attributed_team_keeps_viewers_own_entry() {
+    let entries = vec![
+        entry_for_team(VIEWER_UID, Some(CURRENT_TEAM_UID), 10),
+        entry_for_team(VIEWER_UID, Some(OTHER_TEAM_UID), 20),
+    ];
+
+    let filtered = filter_entries_by_attributed_team(&entries, CURRENT_TEAM_UID);
+
+    assert_eq!(
+        filtered.len(),
+        1,
+        "the viewer's other-team usage is not ours"
+    );
+    assert_eq!(filtered[0].credits_used, 10);
+}
+
+#[test]
+fn scope_members_to_team_restricts_roster_to_team_members() {
+    // Without this the workspace roster seeds zero-usage rows for members of
+    // every other team in the workspace.
+    let members = vec![
+        workspace_member(VIEWER_UID),
+        workspace_member(OTHER_UID),
+        workspace_member("third-uid"),
+    ];
+    let team_members = vec![team_member(VIEWER_UID), team_member("third-uid")];
+
+    let scoped = scope_members_to_team(&members, Some(&team_members));
+
+    let uids: Vec<_> = scoped.iter().map(|m| m.uid.as_string()).collect();
+    assert_eq!(uids, vec![VIEWER_UID.to_string(), "third-uid".to_string()]);
+}
+
+#[test]
+fn scope_members_to_team_passes_roster_through_without_a_team() {
+    // Personal / no-team viewers have nothing to scope against.
+    let members = vec![workspace_member(VIEWER_UID), workspace_member(OTHER_UID)];
+
+    assert_eq!(scope_members_to_team(&members, None), members);
 }
 
 #[test]

@@ -18,9 +18,10 @@ use crate::settings_view::billing_and_usage_page_v2::{
     BONUS_CREDITS_DOT_COLOR, PAYG_CREDITS_DOT_COLOR,
 };
 use crate::ui_components::blended_colors;
+use crate::workspaces::team::TeamMember;
 use crate::workspaces::workspace::{
     AiCreditsUsageAndCostSubjectType, AiCreditsUsageAndCostType, AiCreditsUsageBucket,
-    BillingCycleUsageEntry,
+    BillingCycleUsageEntry, WorkspaceMember,
 };
 
 // for a bunch of this (min fill ratio, cost type order, ... )
@@ -193,6 +194,46 @@ pub fn filter_legacy_buckets(entries: &[BillingCycleUsageEntry]) -> Vec<BillingC
             e.usage_bucket != AiCreditsUsageBucket::Voice
                 && e.usage_bucket != AiCreditsUsageBucket::SuggestedCodeDiffs
         })
+        .cloned()
+        .collect()
+}
+
+/// Restricts `entries` to the usage attributed to `team_uid`.
+///
+/// `Workspace.billingCycleUsageHistory` covers every team in the workspace,
+/// while this page only ever renders one of them, so a page-level admin check
+/// against a single team would otherwise expose its sibling teams' usage.
+/// Mirrors `filterEntriesByAttributedTeam` in the web admin panel, including
+/// the strict match: entries the server left unattributed belong to no team
+/// in particular and are dropped rather than billed to the team in view.
+pub fn filter_entries_by_attributed_team(
+    entries: &[BillingCycleUsageEntry],
+    team_uid: &str,
+) -> Vec<BillingCycleUsageEntry> {
+    entries
+        .iter()
+        .filter(|e| e.attributed_team_uid.as_deref() == Some(team_uid))
+        .cloned()
+        .collect()
+}
+
+/// Restricts the workspace roster to the members of the team in view.
+///
+/// Per-member rows are seeded from the roster so that members with no usage
+/// still appear; the roster spans the whole workspace, so without this the
+/// other teams' members surface as zero-usage rows. Mirrors
+/// `individualUsageMembers` in the web admin panel, which likewise leaves the
+/// roster untouched when there is no team in view.
+pub fn scope_members_to_team(
+    members: &[WorkspaceMember],
+    team_members: Option<&[TeamMember]>,
+) -> Vec<WorkspaceMember> {
+    let Some(team_members) = team_members else {
+        return members.to_vec();
+    };
+    members
+        .iter()
+        .filter(|member| team_members.iter().any(|m| m.uid == member.uid))
         .cloned()
         .collect()
 }
