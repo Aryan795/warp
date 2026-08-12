@@ -390,9 +390,15 @@ impl RequestParams {
 
         // Send the team active in this request's window, so the server can attribute
         // the request to it instead of guessing (e.g. for a user on more than one team).
-        let window_id = terminal_view_id.and_then(|id| app.window_id_for_view(id));
-        let team_uid = user_workspaces
-            .inherited_or_default_team_uid(window_id)
+        // Only derive this from an actual mapped window and its window-scoped
+        // assignment: unlike `inherited_or_default_team_uid`, we do NOT fall
+        // back to the workspace's first team when there's no window, since a
+        // viewless/personal-context request isn't necessarily on that team,
+        // and its ordering need not match the server's own teams[0] fallback.
+        // Omitting the field lets the server apply that fallback itself.
+        let team_uid = terminal_view_id
+            .and_then(|id| app.window_id_for_view(id))
+            .and_then(|window_id| user_workspaces.team_uid_for_window(window_id))
             .map(|team_uid| team_uid.to_string());
 
         Self {
