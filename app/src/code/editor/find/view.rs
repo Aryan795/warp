@@ -53,6 +53,9 @@ pub const CASE_SENSITIVE_TOOLTIP: &str = "Case sensitive search";
 pub const PRESERVE_CASE_TOOLTIP: &str = "Preserve case";
 pub const FIND_PLACEHOLDER_TEXT: &str = "Find";
 pub const REPLACE_PLACEHOLDER_TEXT: &str = "Replace";
+/// Position id used to save the query field's clickable bounds, so tests can dispatch a real
+/// mouse click at its rendered position rather than only at the resulting action.
+pub const FIND_QUERY_FIELD_POSITION_ID: &str = "find_query_field";
 
 #[derive(Default)]
 struct ButtonMouseStates {
@@ -807,14 +810,18 @@ impl CodeEditorFind {
                 Shrinkable::new(
                     1.,
                     ConstrainedBox::new(
-                        Clipped::new(
-                            Hoverable::new(self.find_editor_click_state.clone(), |_| {
-                                ChildView::new(&self.find_editor).finish()
-                            })
-                            .on_click(move |ctx, _, _| {
-                                ctx.dispatch_typed_action(FindAction::ClickQueryField);
-                            })
+                        SavePosition::new(
+                            Clipped::new(
+                                Hoverable::new(self.find_editor_click_state.clone(), |_| {
+                                    ChildView::new(&self.find_editor).finish()
+                                })
+                                .on_click(move |ctx, _, _| {
+                                    ctx.dispatch_typed_action(FindAction::ClickQueryField);
+                                })
+                                .finish(),
+                            )
                             .finish(),
+                            FIND_QUERY_FIELD_POSITION_ID,
                         )
                         .finish(),
                     )
