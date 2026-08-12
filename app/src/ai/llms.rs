@@ -176,12 +176,16 @@ pub struct ModelIconFlags {
 /// Returns whether an LLM is a Kimi (Moonshot AI) model, e.g. `kimi-k26-fireworks`.
 ///
 /// The server has no dedicated `LLMProvider` variant for Kimi — these models
-/// arrive with `LLMProvider::Unknown` — so it is matched by id/base name
-/// instead, similarly to how `is_auto` (in `execution_profiles::model_menu_items`)
-/// matches auto models.
+/// arrive with `LLMProvider::Unknown` — so it is matched by id instead.
+///
+/// This deliberately checks only the canonical server-assigned `id`, never
+/// `base_model_name`: for custom endpoint models, `base_model_name` is a
+/// user-controlled alias/display label (see `custom_llm_info_from`) while
+/// `id` is an opaque config-key UUID, so matching on the display label would
+/// let a user brand any custom endpoint model with the Kimi logo just by
+/// naming it "Kimi ...".
 fn is_kimi_model(llm: &LLMInfo) -> bool {
-    let is_kimi_name = |name: &str| name.trim().to_lowercase().starts_with("kimi");
-    is_kimi_name(llm.id.as_str()) || is_kimi_name(&llm.base_model_name)
+    llm.id.as_str().trim().to_lowercase().starts_with("kimi")
 }
 
 /// The leading icon shown next to a model in the model picker and model menus.

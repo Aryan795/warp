@@ -307,12 +307,17 @@ fn kimi_models_show_the_kimi_logo() {
 }
 
 #[test]
-fn kimi_models_are_matched_by_base_model_name_when_id_differs() {
-    let mut llm = server_llm("custom-config-key", None);
-    llm.base_model_name = "kimi-k3-fireworks".to_string();
+fn kimi_matching_ignores_base_model_name_to_avoid_custom_endpoint_false_positives() {
+    // `base_model_name` is a user-controlled alias/display label for custom
+    // endpoint models (see `custom_llm_info_from`), while `id` is an opaque
+    // config-key UUID. A user naming their own custom endpoint model "Kimi ..."
+    // must not get branded with the Moonshot logo — only the canonical `id`
+    // is trusted.
+    let mut llm = server_llm("52941f14-1b74-4afa-8f02-cdd5243b5aa9", None);
+    llm.base_model_name = "Kimi K3 (my custom endpoint)".to_string();
     assert_eq!(
         model_leading_icon(&llm, ModelIconFlags::default()),
-        Icon::KimiLogo
+        Icon::Agent
     );
 }
 
