@@ -504,12 +504,22 @@ impl TryFrom<api::message::tool_call::StartRecording> for AIAgentActionType {
 
     fn try_from(value: api::message::tool_call::StartRecording) -> Result<Self, Self::Error> {
         let limits = value.limits;
-        // Read the fractional playback_speed field; the legacy integer
+        // Read the fractional playback_speed field, preserving true wire
+        // presence: `None` means the server never set the field at all (an
+        // old server, or a bug), while `Some(raw)` is an explicit server
+        // request that may still be <= 1.0 (explicit real-time) or
+        // non-finite/out-of-range (validated downstream by
+        // `computer_use::sanitize_playback_speed_multiplier`, applied by the
+        // executor and defensively again by each platform's command
+        // builder). The field is wrapped in a one-member oneof rather than a
+        // plain scalar specifically so this presence distinction survives
+        // the wire -- see task.proto for why. The legacy integer
         // playback_speed_multiplier field is deprecated and no longer
-        // populated by the server (see task.proto). Only carry values > 1.0
-        // (0.0 means unset; <= 1.0 means real-time).
-        let playback_speed_multiplier =
-            (value.playback_speed > 1.0).then_some(value.playback_speed);
+        // populated by the server.
+        use api::message::tool_call::start_recording::PlaybackSpeedKind;
+        let playback_speed_multiplier = value
+            .playback_speed_kind
+            .map(|PlaybackSpeedKind::PlaybackSpeed(speed)| speed);
         let window = match convert_recording_target(value.target)? {
             Some(target @ computer_use::Target::Window { .. }) => Some(target),
             Some(computer_use::Target::Screen) | None => None,

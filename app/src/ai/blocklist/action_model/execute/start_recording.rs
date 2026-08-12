@@ -81,12 +81,10 @@ impl StartRecordingExecutor {
                 // frame rate 0 means unspecified, and absent limits would otherwise
                 // leave the capture unbounded.
                 let defaults = computer_use::RecordingConfig::default();
-                // Use the server-provided fractional speed multiplier (> 1.0
-                // means faster playback); fall back to the client default
-                // (1.5x) when absent.
-                let playback_speed_multiplier = playback_speed_multiplier
-                    .filter(|&s| s > 1.0)
-                    .unwrap_or(defaults.playback_speed_multiplier);
+                let playback_speed_multiplier = resolve_playback_speed_multiplier(
+                    playback_speed_multiplier,
+                    defaults.playback_speed_multiplier,
+                );
                 let resolved_frame_rate = if frame_rate > 0 {
                     frame_rate
                 } else {
@@ -178,3 +176,26 @@ impl StartRecordingExecutor {
 impl Entity for StartRecordingExecutor {
     type Event = ();
 }
+
+/// Resolves the playback speed multiplier to actually pass to the recorder
+/// from the wire-presence-preserving value carried on the action.
+///
+/// `None` means the server never specified a value at all (e.g. an old
+/// server build), so the client's own `default` applies. `Some(raw)` is an
+/// explicit server request -- including a value <= 1.0, which explicitly
+/// asks for real-time -- and is validated through
+/// `computer_use::sanitize_playback_speed_multiplier` rather than being
+/// coerced back to `default`. Collapsing an explicit real-time request to
+/// `default` was a real regression: a server configured for real-time
+/// (`playback_speed_multiplier <= 1.0` in warp-server) would otherwise still
+/// produce a sped-up recording.
+fn resolve_playback_speed_multiplier(playback_speed_multiplier: Option<f32>, default: f32) -> f32 {
+    match playback_speed_multiplier {
+        None => default,
+        Some(raw) => computer_use::sanitize_playback_speed_multiplier(raw),
+    }
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+#[path = "start_recording_tests.rs"]
+mod tests;

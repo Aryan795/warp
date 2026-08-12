@@ -440,8 +440,15 @@ fn new_playback_speed_command(
     playback_speed_multiplier: f32,
 ) -> Command {
     let mut command = Command::new("ffmpeg");
-    // Mirrors macOS's live setpts filter (see `mac::recording`), applied here
-    // as a final pass instead of during capture.
+    // Sanitize defensively here (the actual command-building site) even
+    // though callers are expected to have already resolved a valid value:
+    // this is what prevents a non-finite or absurdly large
+    // `playback_speed_multiplier` from producing a corrupt or zero-duration
+    // `setpts` filter. Mirrors macOS's live setpts filter (see
+    // `mac::recording`), applied here as a final pass instead of during
+    // capture.
+    let playback_speed_multiplier =
+        crate::sanitize_playback_speed_multiplier(playback_speed_multiplier);
     let setpts = format!("{:.6}*PTS", 1.0 / playback_speed_multiplier);
     command
         .arg("-y")
@@ -599,15 +606,36 @@ pub async fn post_process_recording(
     let overlay_path = overlay_result?;
 
     // Step 3: apply the universal playback speed as a final pass, strictly
-    // after the cut and overlay burn-in (see `apply_playback_speed`). Values
-    // <= 1.0 mean real-time, so the cut/overlay output is returned as-is.
+    // after the cut and overlay burn-in.
+    finalize_playback_speed(overlay_path, frame_rate, playback_speed_multiplier).await
+}
+
+/// Applies [`apply_playback_speed`] to `overlay_path` (the cut- and
+/// overlay-burned output of the prior two steps) and removes it once the
+/// pass is attempted, on both success and failure -- so a failed pass never
+/// strands the (potentially large) burned-overlay MP4 in the OS temp
+/// directory. On success the caller uploads the returned sped-up file; on
+/// failure it falls back to uploading the original 1x source, so
+/// `overlay_path` is unusable either way once this returns.
+///
+/// `sanitize_playback_speed_multiplier` treats non-finite/<= 1.0 values as
+/// real-time and clamps absurdly large ones. When the sanitized value is
+/// real-time, `overlay_path` is returned unchanged and is NOT removed, since
+/// it is then the caller's final output.
+async fn finalize_playback_speed(
+    overlay_path: PathBuf,
+    frame_rate: u32,
+    playback_speed_multiplier: f32,
+) -> Result<PathBuf, RecordingError> {
+    let playback_speed_multiplier =
+        crate::sanitize_playback_speed_multiplier(playback_speed_multiplier);
     if playback_speed_multiplier <= 1.0 {
         return Ok(overlay_path);
     }
-    let sped_path =
-        apply_playback_speed(&overlay_path, frame_rate, playback_speed_multiplier).await?;
+    let speed_result =
+        apply_playback_speed(&overlay_path, frame_rate, playback_speed_multiplier).await;
     let _ = std::fs::remove_file(&overlay_path);
-    Ok(sped_path)
+    speed_result
 }
 
 /// Builds the ffmpeg `filter_complex` for the segment-cut step only (no

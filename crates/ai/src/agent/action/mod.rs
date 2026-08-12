@@ -150,9 +150,13 @@ pub enum AIAgentActionType {
     /// arrives on the tool call; the client applies it. `frame_rate` of 0 means
     /// unset. `summary` is a short agent-authored title shown in badges.
     /// `description` is an optional longer description shown in detail views.
-    /// `playback_speed_multiplier` is the fractional speed factor from the
-    /// proto's `playback_speed` field (e.g. 1.5 = 1.5×). `None` or a value ≤ 1
-    /// means real-time (use client default).
+    /// `playback_speed_multiplier` preserves true wire presence from the
+    /// proto's `playback_speed` field: `None` means the server did not
+    /// specify a value at all (use the client's own default), while
+    /// `Some(raw)` is an explicit server request that may be <= 1.0
+    /// (explicit real-time) or an invalid/out-of-range value -- callers must
+    /// resolve `raw` through `computer_use::sanitize_playback_speed_multiplier`
+    /// before using it.
     StartRecording {
         frame_rate: u32,
         max_duration: Option<Duration>,
