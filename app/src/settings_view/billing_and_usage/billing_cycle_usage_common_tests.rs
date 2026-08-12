@@ -1,10 +1,12 @@
 use super::{
     BarSegment, aggregate_segments, filter_entries_for_team, filter_legacy_buckets,
-    has_non_viewer_data, legend_cost_types,
+    filter_members_for_team, has_non_viewer_data, legend_cost_types,
 };
+use crate::auth::UserUid;
+use crate::workspaces::team::{MembershipRole, TeamMember};
 use crate::workspaces::workspace::{
     AiCreditsUsageAndCostSubjectType, AiCreditsUsageAndCostType, AiCreditsUsageBucket,
-    AiCreditsUsageSource, BillingCycleUsageEntry,
+    AiCreditsUsageSource, BillingCycleUsageEntry, WorkspaceMember, WorkspaceMemberUsageInfo,
 };
 
 const VIEWER_UID: &str = "viewer-uid";
@@ -99,6 +101,40 @@ fn filter_entries_for_team_keeps_team_subject_rows_for_that_team() {
 
     assert_eq!(filter_entries_for_team(&entries, TEAM_A_UID).len(), 1);
     assert!(filter_entries_for_team(&entries, TEAM_B_UID).is_empty());
+}
+
+fn workspace_member(uid: &str) -> WorkspaceMember {
+    WorkspaceMember {
+        uid: UserUid::new(uid),
+        email: format!("{uid}@warp.dev"),
+        role: MembershipRole::User,
+        usage_info: WorkspaceMemberUsageInfo {
+            is_unlimited: false,
+            request_limit: 0,
+            requests_used_since_last_refresh: 0,
+            is_request_limit_prorated: false,
+        },
+    }
+}
+
+fn team_member(uid: &str) -> TeamMember {
+    TeamMember {
+        uid: UserUid::new(uid),
+        email: format!("{uid}@warp.dev"),
+        role: MembershipRole::User,
+    }
+}
+
+#[test]
+fn filter_members_for_team_keeps_only_that_teams_roster() {
+    // Per-member rows are seeded from the roster, so a sibling team's member
+    // would otherwise get a row on this team's page even with zero usage.
+    let workspace_members = vec![workspace_member(VIEWER_UID), workspace_member(OTHER_UID)];
+
+    let scoped = filter_members_for_team(&workspace_members, &[team_member(VIEWER_UID)]);
+
+    let uids: Vec<_> = scoped.iter().map(|m| m.uid.as_string()).collect();
+    assert_eq!(uids, vec![VIEWER_UID.to_string()]);
 }
 
 /// Boilerplate viewer-owned User row for predicate tests.

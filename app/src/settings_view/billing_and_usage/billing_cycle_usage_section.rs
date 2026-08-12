@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use chrono::{DateTime, Datelike, Local, Utc};
 use markdown_parser::{FormattedText, FormattedTextFragment, FormattedTextLine};
 use pathfinder_color::ColorU;
@@ -19,12 +17,12 @@ use warpui::{
 };
 
 use crate::ai::AIRequestUsageModel;
-use crate::auth::{AuthManager, AuthStateProvider, UserUid};
+use crate::auth::{AuthManager, AuthStateProvider};
 use crate::menu::{self, Menu, MenuItem, MenuItemFields};
 use crate::settings_view::admin_actions::AdminActions;
 use crate::settings_view::billing_and_usage::billing_cycle_usage_common::{
-    BillingUsageMouseStates, filter_entries_for_team, filter_legacy_buckets, has_non_viewer_data,
-    legend_cost_types,
+    BillingUsageMouseStates, filter_entries_for_team, filter_legacy_buckets,
+    filter_members_for_team, has_non_viewer_data, legend_cost_types,
 };
 use crate::settings_view::billing_and_usage::billing_cycle_usage_rows::{
     SourceFilter, has_cloud_usage, render_own_usage_solo_row, render_own_usage_with_workspace_row,
@@ -162,18 +160,10 @@ impl BillingCycleUsageSectionView {
     /// rows list only that team's roster. Falls back to the full workspace
     /// roster when no team is resolvable for this window.
     fn scoped_members(&self, workspace: &Workspace, app: &AppContext) -> Vec<WorkspaceMember> {
-        let Some(team) = UserWorkspaces::as_ref(app).team_for_view_handle(&self.self_handle, app)
-        else {
-            return workspace.members.clone();
-        };
-        let team_member_uids: HashSet<UserUid> =
-            team.members.iter().map(|member| member.uid).collect();
-        workspace
-            .members
-            .iter()
-            .filter(|member| team_member_uids.contains(&member.uid))
-            .cloned()
-            .collect()
+        match UserWorkspaces::as_ref(app).team_for_view_handle(&self.self_handle, app) {
+            Some(team) => filter_members_for_team(&workspace.members, &team.members),
+            None => workspace.members.clone(),
+        }
     }
 
     fn current_summary<'a>(
