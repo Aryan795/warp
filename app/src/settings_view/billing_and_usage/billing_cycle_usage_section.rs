@@ -21,8 +21,7 @@ use crate::auth::{AuthManager, AuthStateProvider};
 use crate::menu::{self, Menu, MenuItem, MenuItemFields};
 use crate::settings_view::admin_actions::AdminActions;
 use crate::settings_view::billing_and_usage::billing_cycle_usage_common::{
-    BillingUsageMouseStates, filter_entries_by_attributed_team, filter_legacy_buckets,
-    has_non_viewer_data, legend_cost_types, scope_members_to_team,
+    BillingUsageMouseStates, TeamScopedUsage, has_non_viewer_data, legend_cost_types,
 };
 use crate::settings_view::billing_and_usage::billing_cycle_usage_rows::{
     SourceFilter, has_cloud_usage, render_own_usage_solo_row, render_own_usage_with_workspace_row,
@@ -122,6 +121,13 @@ impl BillingCycleUsageSectionView {
         AuthStateProvider::as_ref(app).get().user_email()
     }
 
+    fn resolved_viewer_uid(app: &AppContext) -> Option<String> {
+        AuthStateProvider::as_ref(app)
+            .get()
+            .user_id()
+            .map(|uid| uid.as_string())
+    }
+
     /// The team the settings window is currently pointed at, if any. Both the
     /// viewer's authority and the data they are shown are scoped to it.
     fn current_team<'a>(&self, app: &'a AppContext) -> Option<&'a Team> {
@@ -137,41 +143,22 @@ impl BillingCycleUsageSectionView {
             .is_some_and(|email| team.has_admin_permissions(email))
     }
 
-    /// Entries for the selected cycle, narrowed to what the team in view is
-    /// allowed to show.
+    /// The selected cycle's entries and the workspace roster, both narrowed to
+    /// the team in view.
     ///
     /// The server hands back the usage history for the whole workspace, but
     /// this page has no workspace-level mode: it is always looking at one
     /// team, and admin rights are resolved against that same team. Scoping
     /// here keeps the data and the authority aligned. A workspace owner
-    /// therefore sees a per-team breakdown rather than an org-wide total,
-    /// matching the web admin panel's team page.
-    ///
-    /// Personal / no-team viewers have nothing to scope against, so the
-    /// history passes through and the own-usage paths keep attributing
-    /// positively to the viewer.
-    fn scoped_entries(
-        &self,
-        workspace: &Workspace,
-        app: &AppContext,
-    ) -> Vec<BillingCycleUsageEntry> {
-        let entries = filter_legacy_buckets(
+    /// therefore sees a per-team breakdown rather than an org-wide total.
+    fn scoped_usage(&self, workspace: &Workspace, app: &AppContext) -> TeamScopedUsage {
+        TeamScopedUsage::new(
             self.current_summary(workspace)
                 .map(|summary| summary.entries.as_slice())
                 .unwrap_or_default(),
-        );
-        match self.current_team(app) {
-            Some(team) => filter_entries_by_attributed_team(&entries, &team.uid.uid()),
-            None => entries,
-        }
-    }
-
-    /// The workspace roster narrowed to the team in view, matching
-    /// [`Self::scoped_entries`].
-    fn scoped_members(&self, workspace: &Workspace, app: &AppContext) -> Vec<WorkspaceMember> {
-        scope_members_to_team(
             &workspace.members,
-            self.current_team(app).map(|team| team.members.as_slice()),
+            self.current_team(app),
+            Self::resolved_viewer_uid(app).as_deref(),
         )
     }
 
@@ -216,19 +203,15 @@ impl BillingCycleUsageSectionView {
     fn shows_team_section(
         &self,
         workspace: &Workspace,
-        entries: &[BillingCycleUsageEntry],
+        scoped: &TeamScopedUsage,
         app: &AppContext,
     ) -> bool {
         let visibility = workspace.resolve_usage_visibility(self.viewer_is_team_admin(app));
         if visibility.granularity == UsageVisibilityGranularity::OwnOnly {
             return false;
         }
-        let viewer_uid = AuthStateProvider::as_ref(app)
-            .get()
-            .user_id()
-            .map(|uid| uid.as_string());
-        self.scoped_members(workspace, app).len() > 1
-            || has_non_viewer_data(entries, viewer_uid.as_deref())
+        let viewer_uid = Self::resolved_viewer_uid(app);
+        scoped.members.len() > 1 || has_non_viewer_data(&scoped.entries, viewer_uid.as_deref())
     }
 }
 
@@ -306,11 +289,11 @@ impl View for BillingCycleUsageSectionView {
         let Some(workspace) = workspace.as_ref() else {
             return self.render_own_usage_solo(appearance, app);
         };
-        let entries = self.scoped_entries(workspace, app);
-        if self.shows_team_section(workspace, &entries, app) {
-            self.render_team_usage(workspace, &entries, appearance, app)
+        let scoped = self.scoped_usage(workspace, app);
+        if self.shows_team_section(workspace, &scoped, app) {
+            self.render_team_usage(workspace, &scoped, appearance, app)
         } else {
-            self.render_own_usage_with_workspace(workspace, &entries, appearance, app)
+            self.render_own_usage_with_workspace(workspace, &scoped, appearance, app)
         }
     }
 }
@@ -319,12 +302,13 @@ impl BillingCycleUsageSectionView {
     fn render_team_usage(
         &self,
         workspace: &Workspace,
-        entries: &[BillingCycleUsageEntry],
+        scoped: &TeamScopedUsage,
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
         let is_admin = self.viewer_is_team_admin(app);
         let visibility = workspace.resolve_usage_visibility(is_admin);
+        let entries = scoped.entries.as_slice();
 
         let mut column = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
         column.add_child(self.render_header(
@@ -355,13 +339,15 @@ impl BillingCycleUsageSectionView {
             .finish(),
         );
 
-        if is_admin && let Some(banner) = self.render_visibility_cta_banner(workspace, app) {
+        if is_admin
+            && let Some(banner) = self.render_visibility_cta_banner(workspace, &scoped.members, app)
+        {
             column.add_child(Container::new(banner).with_margin_top(16.).finish());
         }
 
         column.add_child(
             Container::new(render_rows(
-                &self.scoped_members(workspace, app),
+                &scoped.members,
                 entries,
                 &visibility,
                 source_filter,
@@ -382,11 +368,12 @@ impl BillingCycleUsageSectionView {
     fn render_own_usage_with_workspace(
         &self,
         workspace: &Workspace,
-        entries: &[BillingCycleUsageEntry],
+        scoped: &TeamScopedUsage,
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
         let visibility = workspace.resolve_usage_visibility(self.viewer_is_team_admin(app));
+        let entries = scoped.entries.as_slice();
 
         let mut column = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
         column.add_child(self.render_header(
@@ -407,7 +394,7 @@ impl BillingCycleUsageSectionView {
             .finish(),
         );
         if self.viewer_is_native_workspaces_admin(workspace, app)
-            && let Some(banner) = self.render_visibility_cta_banner(workspace, app)
+            && let Some(banner) = self.render_visibility_cta_banner(workspace, &scoped.members, app)
         {
             column.add_child(Container::new(banner).with_margin_top(16.).finish());
         }
@@ -728,6 +715,7 @@ impl BillingCycleUsageSectionView {
     fn render_visibility_cta_banner(
         &self,
         workspace: &Workspace,
+        members: &[WorkspaceMember],
         app: &AppContext,
     ) -> Option<Box<dyn Element>> {
         let appearance = Appearance::as_ref(app);
@@ -735,9 +723,11 @@ impl BillingCycleUsageSectionView {
             if self.viewer_is_native_workspaces_admin(workspace, app) {
                 NATIVE_WORKSPACES_CTA
             } else {
-                // Only show when there are teammates -- a single-member workspace
-                // doesn't benefit from any of the team-level visibility CTAs.
-                if workspace.members.len() <= 1 {
+                // Only show when there are teammates -- a solo team doesn't
+                // benefit from any of the team-level visibility CTAs. Counted
+                // on the team-scoped roster, like the sibling gate in
+                // `shows_team_section`.
+                if members.len() <= 1 {
                     return None;
                 }
                 let admin_granularity = workspace

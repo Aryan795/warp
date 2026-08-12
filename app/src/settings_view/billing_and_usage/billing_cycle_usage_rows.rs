@@ -285,30 +285,32 @@ impl MemberUsageRow {
     }
 }
 
+/// Builds the member rows for one already-team-scoped `members` roster and
+/// `entries` list. Pure: the viewer's identity is passed in rather than read
+/// from the app so the roster contract stays unit-testable.
 fn build_rows(
     members: &[WorkspaceMember],
     entries: &[BillingCycleUsageEntry],
     visibility: &UsageVisibility,
     source_filter: SourceFilter,
-    app: &AppContext,
+    viewer: &(Option<String>, String),
 ) -> Vec<MemberUsageRow> {
+    let (viewer_uid, viewer_display_name) = viewer;
     let mut rows: Vec<MemberUsageRow> = match visibility.granularity {
         UsageVisibilityGranularity::OwnOnly => {
-            let (viewer_uid, display_name) = viewer_identity(app);
             vec![MemberUsageRow::for_viewer(
                 entries,
                 viewer_uid.as_deref(),
-                display_name,
+                viewer_display_name.clone(),
                 source_filter,
             )]
         }
         UsageVisibilityGranularity::TeamAggregate => {
             // Force SourceFilter::All — TeamAggregate has no toggle.
-            let (viewer_uid, display_name) = viewer_identity(app);
             let mut rows = vec![MemberUsageRow::for_viewer(
                 entries,
                 viewer_uid.as_deref(),
-                display_name,
+                viewer_display_name.clone(),
                 SourceFilter::All,
             )];
             rows.push(MemberUsageRow::for_other_members(entries));
@@ -766,7 +768,13 @@ pub fn render_rows(
     app: &AppContext,
     on_filter_change: FilterChangeFn,
 ) -> Box<dyn Element> {
-    let rows = build_rows(members, entries, visibility, source_filter, app);
+    let rows = build_rows(
+        members,
+        entries,
+        visibility,
+        source_filter,
+        &viewer_identity(app),
+    );
 
     let mut column = Flex::column()
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
