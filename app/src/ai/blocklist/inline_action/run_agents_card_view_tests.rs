@@ -329,34 +329,40 @@ mod is_cancelled_before_action_registered_tests {
     use crate::ai::blocklist::action_model::AIActionStatus;
 
     #[test]
-    fn no_status_after_stream_ends_is_cancelled() {
+    fn no_status_with_cancelled_block_output_is_cancelled() {
         // Mid-stream cancel: the action was never registered with the
-        // action model, so `status` is `None`; once the stream is no
-        // longer active this must be treated as cancelled rather than
-        // spinning forever.
-        assert!(is_cancelled_before_action_registered(None, false));
+        // action model, so `status` is `None`; once the block's output
+        // status is actually `Cancelled`, this must be treated as
+        // cancelled rather than spinning forever.
+        assert!(is_cancelled_before_action_registered(None, true));
     }
 
     #[test]
-    fn no_status_while_still_streaming_is_not_cancelled() {
-        // The tool call is still being streamed in; `status` is `None`
-        // simply because the action hasn't been registered yet.
-        assert!(!is_cancelled_before_action_registered(None, true));
+    fn no_status_with_non_cancelled_block_output_is_not_cancelled() {
+        // False-positive regression: `status` is `None` both while the
+        // tool call is still streaming in AND during the transient window
+        // after a normal completed exchange finishes streaming but before
+        // the action is queued into the action model. Neither case is a
+        // cancellation, so as long as the block's output status isn't
+        // actually `Cancelled`, this must NOT be treated as cancelled --
+        // otherwise the card would flash "Spawn agents cancelled" before
+        // flipping to the real confirmation/running/success card.
+        assert!(!is_cancelled_before_action_registered(None, false));
     }
 
     #[test]
     fn registered_status_is_never_treated_as_cancelled_here() {
         // Once the action has a status of its own (Preprocessing, Queued,
         // Blocked, etc.), this fallback must not kick in regardless of the
-        // streaming state -- those statuses are handled by their own
-        // render branches.
+        // block's cancelled state -- those statuses are handled by their
+        // own render branches.
         assert!(!is_cancelled_before_action_registered(
             Some(&AIActionStatus::Preprocessing),
-            false
+            true
         ));
         assert!(!is_cancelled_before_action_registered(
             Some(&AIActionStatus::Blocked),
-            false
+            true
         ));
     }
 }

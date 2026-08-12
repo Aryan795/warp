@@ -1265,15 +1265,20 @@ impl View for RunAgentsCardView {
 
         // Still streaming: show "Configuring agents..." placeholder until
         // the action reaches Blocked status (i.e., streaming is complete
-        // and the action is queued for user confirmation). If the stream
-        // ended (or was cancelled) before the action was ever registered
+        // and the action is queued for user confirmation). If the
+        // conversation was cancelled before the action was ever registered
         // with the action model, `status` stays `None` forever rather than
-        // advancing to `Blocked` -- mirror `action_icon`'s fallback and
-        // treat that as cancelled instead of spinning indefinitely.
+        // advancing to `Blocked` -- treat that as cancelled instead of
+        // spinning indefinitely. This must key off the block's actual
+        // cancelled output status rather than merely "not streaming":
+        // a normal completed exchange also has a transient `None` window
+        // between the stream finishing and the action being queued, and
+        // treating that window as cancelled would flash a false "Spawn
+        // agents cancelled" card before flipping to the real card.
         if !matches!(status, Some(AIActionStatus::Blocked)) {
             if is_cancelled_before_action_registered(
                 status.as_ref(),
-                self.block_model.status(app).is_streaming(),
+                self.block_model.status(app).is_cancelled(),
             ) {
                 return render_status_only_card(
                     "Spawn agents cancelled".to_string(),
@@ -1616,17 +1621,25 @@ fn render_terminal_state(
     render_status_only_card(label, appearance, kind, app)
 }
 
-/// Returns `true` when the `RunAgents` tool call's stream ended (or was
-/// cancelled) without the action ever being registered with the action
-/// model, e.g. because the user cancelled the conversation mid-stream. In
-/// that case `get_action_status` never advances past `None`, so the render
-/// path must fall back to a cancelled state instead of showing the
-/// "Configuring agents..." placeholder forever.
+/// Returns `true` when the `RunAgents` tool call's action was never
+/// registered with the action model (`status` is `None`) because the user
+/// cancelled the conversation mid-stream. In that case `get_action_status`
+/// never advances past `None`, so the render path must fall back to a
+/// cancelled state instead of showing the "Configuring agents..."
+/// placeholder forever.
+///
+/// `block_output_is_cancelled` must reflect the block's actual cancelled
+/// output status (e.g. `AIBlockOutputStatus::is_cancelled`), not merely
+/// "not streaming": a normal completed exchange also has a transient
+/// `None` status window between the stream finishing and the action being
+/// queued, and a failed/errored exchange can retain a partial action too.
+/// Neither of those is a cancellation, so gating on anything looser would
+/// flash a false "Spawn agents cancelled" card during that window.
 pub(crate) fn is_cancelled_before_action_registered(
     status: Option<&AIActionStatus>,
-    is_streaming: bool,
+    block_output_is_cancelled: bool,
 ) -> bool {
-    status.is_none() && !is_streaming
+    status.is_none() && block_output_is_cancelled
 }
 
 pub(crate) fn format_terminal_state(result: &RunAgentsResult) -> (String, StatusKind) {
