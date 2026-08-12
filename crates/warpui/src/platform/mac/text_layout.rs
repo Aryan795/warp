@@ -450,19 +450,14 @@ fn apply_paragraph_style_settings(
 /// Merges adjacent style runs that are contiguous (no gap between them) and share an identical
 /// [`StyleAndFont`] into a single run.
 ///
-/// Some callers (for example, character-by-character diff or syntax highlighting) can produce a
-/// very large number of small, contiguous runs that all resolve to the same style. Feeding each
-/// of those runs to Core Text individually means one (or several) `set_attribute` calls per run.
-/// Core Text's own attribute-range bookkeeping can become extremely costly, in both time and
-/// memory, when a single attributed string carries a very large number of distinct ranges, even
-/// when those ranges are stylistically identical. Coalescing identical, adjacent runs up front
-/// keeps the visual output identical while bounding the number of ranges we ask Core Text to
-/// track.
+/// Core Text's attribute-range bookkeeping gets costly, in both time and memory, as the number
+/// of distinct ranges in an attributed string grows, even when many of them are stylistically
+/// identical. Coalescing adjacent identical runs up front bounds that range count without
+/// changing the visual output.
 fn merge_adjacent_identical_runs(
     style_runs: &[(Range<usize>, StyleAndFont)],
 ) -> Cow<'_, [(Range<usize>, StyleAndFont)]> {
-    // Fast path: bail out at the first opportunity to merge, so that the common case (already
-    // maximally-coalesced runs) doesn't need to allocate a new Vec at all.
+    // Avoid allocating when the runs are already maximally coalesced, the common case.
     let first_mergeable = style_runs
         .windows(2)
         .position(|pair| pair[0].0.end == pair[1].0.start && pair[0].1 == pair[1].1);

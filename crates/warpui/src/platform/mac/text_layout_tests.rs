@@ -31,8 +31,6 @@ fn test_merge_adjacent_identical_runs_noop_when_already_distinct() {
 fn test_merge_adjacent_identical_runs_combines_contiguous_identical_styles() {
     let style_a = StyleAndFont::new(FamilyId(0), Properties::default(), TextStyle::new());
     let style_b = StyleAndFont::new(FamilyId(1), Properties::default(), TextStyle::new());
-    // Many small, contiguous runs sharing the same style, as could be produced by
-    // character-by-character diff or syntax highlighting.
     let runs = vec![
         (0..1, style_a),
         (1..2, style_a),
@@ -53,8 +51,8 @@ fn test_merge_adjacent_identical_runs_combines_contiguous_identical_styles() {
 #[test]
 fn test_merge_adjacent_identical_runs_does_not_merge_across_gaps() {
     let style_a = StyleAndFont::new(FamilyId(0), Properties::default(), TextStyle::new());
-    // A gap between the two runs (2..3 is unstyled) should prevent merging even though the
-    // styles are identical, since merging would silently apply styling to the gap.
+    // The unstyled gap (2..3) must block merging even though both runs share a style, since
+    // merging would silently apply the style across the gap.
     let runs = vec![(0..2, style_a), (3..5, style_a)];
 
     let merged = merge_adjacent_identical_runs(&runs);
