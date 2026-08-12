@@ -124,7 +124,10 @@ use crate::ui_components::icons;
 use crate::util::bindings::{CustomAction, cmd_or_ctrl_shift, keybinding_name_to_keystroke};
 use crate::util::clipboard::clipboard_content_with_escaped_paths;
 use crate::util::color::{ContrastingColor, MinimumAllowedContrast};
-use crate::util::image::{MAX_IMAGE_COUNT_FOR_QUERY, MAX_IMAGE_SIZE_BYTES, resize_image};
+use crate::util::image::{
+    MAX_IMAGE_COUNT_FOR_QUERY, MAX_IMAGE_PAYLOAD_BYTES_PER_CONVERSATION, MAX_IMAGE_SIZE_BYTES,
+    resize_image,
+};
 use crate::util::merge_ranges;
 use crate::view_components::DismissibleToast;
 #[cfg(feature = "voice_input")]
@@ -139,15 +142,7 @@ pub const ACCEPT_AUTOSUGGESTION_KEYBINDING_NAME: &str = "editor_view:insert_auto
 pub const VOICE_LIMIT_HIT_TOAST_TEXT: &str = "You have hit the limit for Voice requests. Your limit will be refreshed as a part of your next cycle.";
 pub const VOICE_ERROR_TOAST_TEXT: &str = "An error occurred while processing your voice input.";
 
-/// Raised from 200 to 300 (APP-5324), a smaller proportional increase than the per-query cap
-/// (`MAX_IMAGE_COUNT_FOR_QUERY`). Unlike the per-query cap, images attached earlier in a
-/// conversation persist and are resent in full on every subsequent turn (per how these APIs
-/// accumulate context), so this number compounds: a conversation that has accumulated close to
-/// this many images will keep resending all of them, turn after turn. Raising it in lockstep with
-/// the per-query cap would make hitting a provider's context-window limit on a *later* turn far
-/// more likely for image-heavy conversations. A more conservative bump keeps that risk in check;
-/// summarization/compaction, not a higher static ceiling, is the real long-term fix for very
-/// image-heavy conversations.
+/// Maximum number of images that may accumulate in a single conversation.
 pub const MAX_IMAGES_PER_CONVERSATION: usize = 300;
 
 use warpui::clipboard_utils::CLIPBOARD_IMAGE_MIME_TYPES;
@@ -5324,11 +5319,28 @@ impl EditorView {
             ctx
         );
 
+        // Images already attached (and any already-sent conversation history) count against the
+        // aggregate payload budget too, since the server resends all of it on every turn.
+        let existing_payload_bytes: usize = self
+            .context_model
+            .as_ref()
+            .map(|context_model| {
+                context_model
+                    .as_ref(ctx)
+                    .pending_images()
+                    .iter()
+                    .map(|image| image.data.len())
+                    .sum()
+            })
+            .unwrap_or(0);
+
         self.process_attached_images_future_handle = Some(ctx.spawn(
             async move {
                 let mut processed_pending_images = vec![];
                 let mut num_oversized_images: usize = 0;
                 let mut num_unprocessed_images: usize = 0;
+                let mut num_over_payload_budget: usize = 0;
+                let mut payload_bytes = existing_payload_bytes;
 
                 for image in pending_images {
                     let is_figma = is_figma_png(&image.data);
@@ -5349,6 +5361,12 @@ impl EditorView {
 
                     let base64_str = general_purpose::STANDARD.encode(&resized_image_bytes);
 
+                    if payload_bytes + base64_str.len() > MAX_IMAGE_PAYLOAD_BYTES_PER_CONVERSATION {
+                        num_over_payload_budget += 1;
+                        continue;
+                    }
+                    payload_bytes += base64_str.len();
+
                     processed_pending_images.push(ImageContext {
                         data: base64_str,
                         mime_type: image.mime_type,
@@ -5360,10 +5378,18 @@ impl EditorView {
                 (
                     num_oversized_images,
                     num_unprocessed_images,
+                    num_over_payload_budget,
                     processed_pending_images,
                 )
             },
-            move |this, (num_oversized_images, num_unprocessed_images, pending_images), ctx| {
+            move |this,
+                  (
+                num_oversized_images,
+                num_unprocessed_images,
+                num_over_payload_budget,
+                pending_images,
+            ),
+                  ctx| {
                 // Future was aborted
                 if this.process_attached_images_future_handle.is_none() {
                     return;
@@ -5399,6 +5425,27 @@ impl EditorView {
                     } else {
                         format!(
                             "{num_unprocessed_images} images weren't attached - error processing."
+                        )
+                    };
+
+                    ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                        toast_stack.add_persistent_toast(
+                            DismissibleToast::error(message),
+                            window_id,
+                            ctx,
+                        );
+                    });
+                }
+
+                if num_over_payload_budget > 0 {
+                    let message = if num_over_payload_budget == 1 && num_images_user_attached == 1
+                    {
+                        "Image cannot be attached - it would exceed the total image size limit for this conversation.".into()
+                    } else if num_over_payload_budget == 1 {
+                        "1 image wasn't attached - it would exceed the total image size limit for this conversation.".into()
+                    } else {
+                        format!(
+                            "{num_over_payload_budget} images weren't attached - they would exceed the total image size limit for this conversation."
                         )
                     };
 

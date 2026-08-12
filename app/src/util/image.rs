@@ -43,17 +43,11 @@ pub const MAX_IMAGE_PIXELS: f64 = 1150. * 1000.;
 pub const MAX_IMAGE_DIMENSION: f64 = 2000.;
 
 /// Maximum number of images that can be attached per query/task.
-///
-/// Raised from 20 to 40 (APP-5324): Anthropic documents a 100-image-per-request ceiling for
-/// its 200k-context-window models (up to 600 for 1M-context models), and OpenAI/xAI document no
-/// per-request count limit at all, so 100 is the effective floor across the vision-capable
-/// providers we route to. We deliberately stop well short of that documented ceiling: at
-/// Anthropic's own per-image token cost (~1600 tokens/image on its standard resolution tier), 100
-/// images alone would consume ~160k tokens — nearly the entire 200k-token context window some of
-/// our routed models have, before the user's own text, tool output, or conversation history. 40
-/// images (~64k tokens) leaves ample room for the rest of a typical agent turn while still
-/// meaningfully raising the previous cap.
 pub const MAX_IMAGE_COUNT_FOR_QUERY: usize = 40;
+
+/// Caps the combined base64-encoded size of every image in a conversation (historical images
+/// plus the current query's), since these are resent to the provider in full on every turn.
+pub const MAX_IMAGE_PAYLOAD_BYTES_PER_CONVERSATION: usize = 18_000_000;
 
 /// Minimum bytes needed for image format detection using magic number signatures.
 pub const MIN_IMAGE_HEADER_SIZE: usize = 8;
