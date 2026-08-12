@@ -794,6 +794,8 @@ impl View for CustomEndpointModal {
 
         let is_valid = self.is_valid(app);
         let is_editing = self.editing_index.is_some();
+        let show_reasoning_effort =
+            self.selected_schema(app) == CustomEndpointSchema::OpenaiResponses;
 
         let label_font_family = appearance.ui_font_family();
         let label_text_color = theme.active_ui_text_color().into();
@@ -819,7 +821,11 @@ impl View for CustomEndpointModal {
         column.add_child(
             Container::new(
                 Text::new(
-                    "Provide your endpoint details below. You can add as many models from the endpoint as you'd like and can also provide aliases for the model picker in your input. If providing a reasoning level, be sure to check that your model supports that reasoning level.",
+                    if show_reasoning_effort {
+                        "Provide your endpoint details below. You can add as many models from the endpoint as you'd like and can also provide aliases for the model picker in your input. If providing a reasoning level, be sure to check that your model supports that reasoning level."
+                    } else {
+                        "Provide your endpoint details below. You can add as many models from the endpoint as you'd like and can also provide aliases for the model picker in your input."
+                    },
                     appearance.ui_font_family(),
                     LABEL_FONT_SIZE,
                 )
@@ -919,8 +925,6 @@ impl View for CustomEndpointModal {
         );
 
         // Model rows
-        let show_reasoning_effort =
-            self.selected_schema(app) == CustomEndpointSchema::OpenaiResponses;
         let model_input_width = if show_reasoning_effort {
             MODEL_INPUT_WIDTH_WITH_REASONING
         } else {
