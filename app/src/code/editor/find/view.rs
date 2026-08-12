@@ -86,6 +86,7 @@ pub struct CodeEditorFind {
     is_replace_open: bool,
     select_all_button: ViewHandle<ActionButton>,
     replace_all_button: ViewHandle<ActionButton>,
+    find_query_mouse_state: MouseStateHandle,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -101,6 +102,9 @@ pub enum FindAction {
     ToggleReplaceOpen,
     ReplaceAll,
     TogglePreserveCase,
+    /// Re-enables and focuses the find query field. Dispatched when the user clicks the field
+    /// while it is disabled, e.g. after Vim Enter or a `*`/`#` word-search commits the query.
+    ActivateFindInput,
 }
 
 pub fn init(app: &mut AppContext) {
@@ -234,6 +238,7 @@ impl CodeEditorFind {
             is_replace_open: false,
             select_all_button,
             replace_all_button,
+            find_query_mouse_state: Default::default(),
         }
     }
 
@@ -279,6 +284,22 @@ impl CodeEditorFind {
             editor.set_interaction_state(state, ctx);
         });
     }
+
+    /// Re-enables the find query field for editing, selects its contents, and focuses it.
+    ///
+    /// Used both when the find bar itself gains focus (e.g. via Cmd/Ctrl-F), and when the user
+    /// clicks the query field after it was disabled by Vim Enter or a `*`/`#` word-search (see
+    /// `handle_find_editor_event` and `set_find_input_editable`). A disabled editor ignores mouse
+    /// clicks entirely (`EditorElement::mouse_down` bails out when `!can_select`), so without this
+    /// re-activation the field would be visible but permanently unclickable.
+    fn activate_find_input(&mut self, ctx: &mut ViewContext<Self>) {
+        self.find_editor.update(ctx, |editor, ctx| {
+            editor.set_interaction_state(InteractionState::Editable, ctx);
+            editor.select_all(ctx);
+        });
+        ctx.focus(&self.find_editor);
+    }
+
     fn handle_find_editor_event(&mut self, event: &EditorEvent, ctx: &mut ViewContext<Self>) {
         match event {
             EditorEvent::Edited(_) => {
@@ -765,16 +786,32 @@ impl CodeEditorFind {
         )
         .finish();
 
+        let find_editor_handle = self.find_editor.clone();
+        let find_query_field = Hoverable::new(self.find_query_mouse_state.clone(), |_state| {
+            Clipped::new(ChildView::new(&self.find_editor).finish()).finish()
+        })
+        .on_mouse_down(move |ctx, app, _| {
+            // The find input is disabled after Vim Enter or a `*`/`#` word-search commits the
+            // query (see `handle_find_editor_event` / `set_find_input_editable`). A disabled
+            // editor's element ignores mouse-down (it early-returns before dispatching
+            // `EditorAction::Focus`), so the click would otherwise be a complete no-op. Only
+            // reactivate here; a normal click on an already-editable field is handled by the
+            // editor itself and should not be disturbed (e.g. it would reset the cursor via
+            // `select_all`).
+            if !find_editor_handle.as_ref(app).can_edit(app) {
+                ctx.dispatch_typed_action(FindAction::ActivateFindInput);
+            }
+        })
+        .finish();
+
         let mut query_editor_row = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_child(
                 Shrinkable::new(
                     1.,
-                    ConstrainedBox::new(
-                        Clipped::new(ChildView::new(&self.find_editor).finish()).finish(),
-                    )
-                    .with_height(editor_height)
-                    .finish(),
+                    ConstrainedBox::new(find_query_field)
+                        .with_height(editor_height)
+                        .finish(),
                 )
                 .finish(),
             );
@@ -914,6 +951,7 @@ impl TypedActionView for CodeEditorFind {
                 self.preserve_case_enabled = !self.preserve_case_enabled;
                 ctx.notify();
             }
+            FindAction::ActivateFindInput => self.activate_find_input(ctx),
         }
     }
 }
@@ -955,11 +993,7 @@ impl View for CodeEditorFind {
             searcher.set_auto_select(true);
         });
         if focus_ctx.is_self_focused() {
-            self.find_editor.update(ctx, |editor, ctx| {
-                editor.set_interaction_state(InteractionState::Editable, ctx);
-                editor.select_all(ctx);
-            });
-            ctx.focus(&self.find_editor);
+            self.activate_find_input(ctx);
             ctx.notify();
         }
     }
@@ -1043,5 +1077,20 @@ impl View for CodeEditorFind {
         )
         .top_right()
         .finish()
+    }
+}
+
+#[cfg(test)]
+impl CodeEditorFind {
+    /// Simulates pressing Enter in the find query field, for tests that exercise this behavior
+    /// from `CodeEditorView` (where the surrounding editor and Vim state live).
+    pub(crate) fn simulate_query_enter_for_test(&mut self, ctx: &mut ViewContext<Self>) {
+        self.handle_find_editor_event(&EditorEvent::Enter, ctx);
+    }
+
+    /// Test-only accessor for the find query editor, used to assert on its focus/interaction
+    /// state from outside this module.
+    pub(crate) fn find_editor_for_test(&self) -> &ViewHandle<EditorView> {
+        &self.find_editor
     }
 }

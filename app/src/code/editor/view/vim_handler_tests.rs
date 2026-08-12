@@ -19,6 +19,7 @@ use warpui::{App, SingletonEntity, TypedActionView, UpdateModel, ViewHandle};
 
 use crate::auth::AuthStateProvider;
 use crate::cloud_object::model::persistence::CloudModel;
+use crate::code::editor::find::view::FindAction;
 use crate::code::editor::view::{CodeEditorRenderOptions, CodeEditorView, CodeEditorViewAction};
 use crate::notebooks::editor::keys::NotebookKeybindings;
 use crate::server::server_api::team::MockTeamClient;
@@ -2123,5 +2124,97 @@ fn test_vim_indent_dot_repeat_repeats_last_indent() {
         vim_user_insert(&editor, ".", &mut app);
         assert_eq!(buffer_text(&editor, &app), "    line 1\nline 2\n    line 3");
         assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
+    });
+}
+
+// Regression tests for the find-in-file query field becoming permanently unclickable once Vim
+// Enter (or the `*`/`#` word-search) disables it. See `CodeEditorFind::activate_find_input` and
+// its `FindAction::ActivateFindInput` dispatch (from a mouse-down on the query field) in
+// `code/editor/find/view.rs`.
+
+#[test]
+fn test_vim_enter_in_find_bar_disables_input_then_mouse_down_reactivates() {
+    let _feature_flag_guard = FeatureFlag::VimCodeEditor.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_code_editor_app(&mut app);
+
+        let editor = add_code_editor("hello world\nhello there", &mut app);
+        let find_bar = editor.read(&app, |view, _ctx| {
+            view.find_bar.clone().expect("find bar should exist")
+        });
+
+        // Open the find bar (mirrors Cmd/Ctrl-F): this focuses the bar, which activates the
+        // query field (editable + focused).
+        editor.update(&mut app, |view, ctx| {
+            view.show_find_bar(ctx);
+        });
+        find_bar.update(&mut app, |find_bar, ctx| {
+            find_bar.set_find_query(ctx, "hello");
+        });
+
+        app.read(|ctx| {
+            assert!(find_bar.as_ref(ctx).is_find_input_editable(ctx));
+            assert!(find_bar.as_ref(ctx).find_editor_for_test().is_focused(ctx));
+        });
+
+        // Pressing Enter while Vim mode is enabled commits the query, disables the field, and
+        // shifts focus back to the code editor -- but the find bar stays open.
+        find_bar.update(&mut app, |find_bar, ctx| {
+            find_bar.simulate_query_enter_for_test(ctx);
+        });
+
+        app.read(|ctx| {
+            assert!(find_bar.as_ref(ctx).is_open());
+            assert!(!find_bar.as_ref(ctx).is_find_input_editable(ctx));
+            assert!(!find_bar.as_ref(ctx).find_editor_for_test().is_focused(ctx));
+            assert!(editor.is_focused(ctx));
+        });
+
+        // A mouse-down on the (disabled) query field should reactivate it: editable again, and
+        // focused. Before the fix, `EditorElement::mouse_down` bailed out on a disabled editor,
+        // so the field was visible but permanently unclickable.
+        find_bar.update(&mut app, |find_bar, ctx| {
+            find_bar.handle_action(&FindAction::ActivateFindInput, ctx);
+        });
+
+        app.read(|ctx| {
+            assert!(find_bar.as_ref(ctx).is_find_input_editable(ctx));
+            assert!(find_bar.as_ref(ctx).find_editor_for_test().is_focused(ctx));
+        });
+    });
+}
+
+#[test]
+fn test_vim_word_search_disables_input_then_mouse_down_reactivates() {
+    let _feature_flag_guard = FeatureFlag::VimCodeEditor.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_code_editor_app(&mut app);
+
+        // Cursor starts at the buffer start (on "hello"), so `*` searches for that word.
+        let editor = add_code_editor("hello world\nhello there", &mut app);
+        let find_bar = editor.read(&app, |view, _ctx| {
+            view.find_bar.clone().expect("find bar should exist")
+        });
+
+        // `*` opens the find bar pre-populated with the word under the cursor, and disables the
+        // query field immediately since the search is already fully specified.
+        vim_user_insert(&editor, "*", &mut app);
+
+        app.read(|ctx| {
+            assert!(find_bar.as_ref(ctx).is_open());
+            assert!(!find_bar.as_ref(ctx).is_find_input_editable(ctx));
+        });
+
+        // A mouse-down on the (disabled) query field should reactivate it.
+        find_bar.update(&mut app, |find_bar, ctx| {
+            find_bar.handle_action(&FindAction::ActivateFindInput, ctx);
+        });
+
+        app.read(|ctx| {
+            assert!(find_bar.as_ref(ctx).is_find_input_editable(ctx));
+            assert!(find_bar.as_ref(ctx).find_editor_for_test().is_focused(ctx));
+        });
     });
 }
