@@ -326,28 +326,83 @@ fn to_request_round_trips_request_fields() {
 
 mod should_render_no_status_as_cancelled_tests {
     use super::super::should_render_no_status_as_cancelled;
+    use crate::ai::agent::conversation::ConversationStatus;
 
     #[test]
-    fn conversation_still_in_progress_stays_configuring() {
-        // Still streaming: conversation is in progress, so the card should
-        // keep showing "Configuring agents…" rather than jump to cancelled.
-        assert!(!should_render_no_status_as_cancelled(Some(true), false));
-    }
-
-    #[test]
-    fn conversation_stopped_with_no_unfinished_actions_is_cancelled() {
+    fn cancelled_conversation_with_no_unfinished_actions_is_cancelled() {
         // The conversation was cancelled while this tool call was still
         // streaming, so it never reached the action model. Nothing else is
         // pending/running for the conversation either.
-        assert!(should_render_no_status_as_cancelled(Some(false), false));
+        assert!(should_render_no_status_as_cancelled(
+            Some(&ConversationStatus::Cancelled),
+            false
+        ));
     }
 
     #[test]
-    fn conversation_stopped_but_other_actions_still_unfinished_stays_configuring() {
+    fn cancelled_conversation_but_other_actions_still_unfinished_stays_configuring() {
         // Guard against a race where the conversation status has already
         // flipped but another action for the same conversation is still
         // pending/running; don't jump to cancelled prematurely.
-        assert!(!should_render_no_status_as_cancelled(Some(false), true));
+        assert!(!should_render_no_status_as_cancelled(
+            Some(&ConversationStatus::Cancelled),
+            true
+        ));
+    }
+
+    #[test]
+    fn in_progress_conversation_stays_configuring() {
+        assert!(!should_render_no_status_as_cancelled(
+            Some(&ConversationStatus::InProgress),
+            false
+        ));
+    }
+
+    #[test]
+    fn transient_error_with_recovery_pending_stays_configuring() {
+        // A transient network error with an automatic recovery in flight is
+        // not a cancellation; the run may still complete successfully, so it
+        // must not be misreported as cancelled.
+        assert!(!should_render_no_status_as_cancelled(
+            Some(&ConversationStatus::TransientError),
+            false
+        ));
+    }
+
+    #[test]
+    fn waiting_for_events_stays_configuring() {
+        // The agent yielded via wait_for_events; it's quiescent and healthy,
+        // not cancelled.
+        assert!(!should_render_no_status_as_cancelled(
+            Some(&ConversationStatus::WaitingForEvents),
+            false
+        ));
+    }
+
+    #[test]
+    fn blocked_on_another_action_stays_configuring() {
+        assert!(!should_render_no_status_as_cancelled(
+            Some(&ConversationStatus::Blocked {
+                blocked_action: "some_other_action".to_string()
+            }),
+            false
+        ));
+    }
+
+    #[test]
+    fn success_status_stays_configuring() {
+        assert!(!should_render_no_status_as_cancelled(
+            Some(&ConversationStatus::Success),
+            false
+        ));
+    }
+
+    #[test]
+    fn error_status_stays_configuring() {
+        assert!(!should_render_no_status_as_cancelled(
+            Some(&ConversationStatus::Error),
+            false
+        ));
     }
 
     #[test]

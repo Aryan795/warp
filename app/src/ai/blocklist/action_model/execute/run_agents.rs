@@ -369,10 +369,17 @@ impl RunAgentsExecutor {
                     execution_mode: launched_mode,
                     agents,
                 };
-                me.pending.remove(&action_id_for_aggr);
-                ctx.emit(RunAgentsExecutorEvent::SpawningFinished {
-                    action_id: action_id_for_aggr,
-                });
+                // `cancel_execution` may have already removed this entry (and
+                // emitted `SpawningFinished`) while this aggregation was still
+                // in flight — e.g. a late child result or the spawn timeout
+                // arriving after a cancel. Only emit here when this call is
+                // the one that actually cleared the pending marker, so a
+                // cancelled run never produces a second finish event.
+                if me.pending.remove(&action_id_for_aggr).is_some() {
+                    ctx.emit(RunAgentsExecutorEvent::SpawningFinished {
+                        action_id: action_id_for_aggr,
+                    });
+                }
                 let _ = sender.try_send(result);
             },
         );

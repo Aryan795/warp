@@ -11,6 +11,7 @@ use warpui::{App, Entity, EntityId, ModelHandle};
 
 use super::*;
 use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
+use crate::ai::agent::conversation::ConversationStatus;
 use crate::ai::agent::task::TaskId;
 use crate::ai::blocklist::{
     BlocklistAIHistoryModel, BlocklistAIPermissions, StartAgentExecutorEvent, StartAgentRequest,
@@ -611,17 +612,21 @@ fn cancel_during_plan_publication_does_not_dispatch_children() {
 /// and children have been dispatched. Cancelling while `Spawning` must still
 /// clear the pending marker and emit `SpawningFinished`, so dependent UI
 /// (e.g. the confirmation card's local spawning snapshot) does not get
-/// stuck showing an in-progress state forever.
+/// stuck showing an in-progress state forever. The already-dispatched child
+/// can still resolve afterward (it isn't actually aborted by the cancel);
+/// that late completion must not emit a second `SpawningFinished` for the
+/// same, already-cancelled action.
 #[test]
-fn cancel_during_spawning_clears_pending_and_emits_spawning_finished() {
+fn cancel_during_spawning_clears_pending_and_emits_spawning_finished_exactly_once() {
     App::test((), |mut app| async move {
         let state = initialize_run_agents_test(&mut app, ExecutionMode::Sdk);
+        let terminal_view_id = EntityId::new();
         BlocklistAIHistoryModel::handle(&app).update(&mut app, |model, ctx| {
             model.assign_run_id_for_conversation(
                 state.conversation_id,
                 "00000000-0000-0000-0000-000000000001".to_string(),
                 None,
-                EntityId::new(),
+                terminal_view_id,
                 ctx,
             );
         });
@@ -653,14 +658,23 @@ fn cancel_during_spawning_clears_pending_and_emits_spawning_finished() {
 
         // Let the (no-op) plan-publication wait resolve so dispatch moves
         // from `Publishing` into `Spawning` and children are dispatched.
-        for _ in 0..3 {
-            futures_lite::future::yield_now().await;
+        // Dispatch runs on a background thread (see `ModelContext::spawn`),
+        // so this needs a real-time poll rather than pure `yield_now` calls
+        // on the foreground executor, which never actually cede the CPU to
+        // let that thread get scheduled.
+        let dispatch_deadline = instant::Instant::now() + std::time::Duration::from_secs(2);
+        while !captured_requests.read(&app, |captured, _ctx| !captured.0.is_empty())
+            && instant::Instant::now() < dispatch_deadline
+        {
+            warpui::r#async::Timer::after(std::time::Duration::from_millis(5)).await;
         }
-        captured_requests.read(&app, |captured, _ctx| {
-            assert!(
-                !captured.0.is_empty(),
-                "expected child dispatch requests once Spawning started"
+        let request_id = captured_requests.read(&app, |captured, _ctx| {
+            assert_eq!(
+                captured.0.len(),
+                1,
+                "expected exactly one child dispatch request once Spawning started"
             );
+            captured.0[0].id
         });
 
         state.executor.update(&mut app, |executor, ctx| {
@@ -668,9 +682,50 @@ fn cancel_during_spawning_clears_pending_and_emits_spawning_finished() {
             executor.cancel_execution(&action_id, ctx);
             assert!(!executor.is_pending(&action_id));
         });
-
         captured_finished.read(&app, |captured, _ctx| {
             assert_eq!(captured.0, vec![action_id.clone()]);
+        });
+
+        // Drive the already-dispatched child through to a late completion,
+        // as if it resolved after the cancel raced ahead of it. Fail it
+        // (via a conversation status the launch path treats as terminal) so
+        // completion runs through `complete_pending_as_error`, without
+        // needing a real server-assigned run_id. The in-flight aggregation
+        // this resolves must not emit a second `SpawningFinished` for the
+        // already-cancelled action.
+        let child_conversation_id =
+            BlocklistAIHistoryModel::handle(&app).update(&mut app, |history, ctx| {
+                let child_conversation_id = history.start_new_child_conversation(
+                    terminal_view_id,
+                    "child".to_string(),
+                    state.conversation_id,
+                    None,
+                    ctx,
+                );
+                if let Some(conversation) = history.conversation_mut(&child_conversation_id) {
+                    conversation.update_status(ConversationStatus::Error, terminal_view_id, ctx);
+                }
+                child_conversation_id
+            });
+        BlocklistAIHistoryModel::handle(&app).update(&mut app, |history, ctx| {
+            history.record_new_conversation_request_complete(
+                request_id,
+                child_conversation_id,
+                ctx,
+            );
+        });
+        // The aggregation this resolves also completes on a background
+        // thread; give it a generous real-time window to finish before
+        // asserting on the (expected) absence of a second event.
+        warpui::r#async::Timer::after(std::time::Duration::from_millis(300)).await;
+
+        captured_finished.read(&app, |captured, _ctx| {
+            assert_eq!(
+                captured.0,
+                vec![action_id.clone()],
+                "cancelling during Spawning must emit SpawningFinished exactly once, \
+                 even after the in-flight aggregation later completes"
+            );
         });
     });
 }

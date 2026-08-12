@@ -23,7 +23,7 @@ use warpui::{
     ViewHandle,
 };
 
-use crate::ai::agent::conversation::AIConversationId;
+use crate::ai::agent::conversation::{AIConversationId, ConversationStatus};
 use crate::ai::agent::{AIAgentActionId, AIAgentActionResultType, icons};
 use crate::ai::blocklist::BlocklistAIHistoryModel;
 use crate::ai::blocklist::action_model::{
@@ -1276,20 +1276,14 @@ impl View for RunAgentsCardView {
         // restore-as-cancelled check).
         if !matches!(status, Some(AIActionStatus::Blocked)) {
             let conversation_id = self.block_model.conversation_id(app);
-            let conversation_in_progress = conversation_id.and_then(|id| {
-                BlocklistAIHistoryModel::as_ref(app)
-                    .conversation_status(&id)
-                    .map(|status| status.is_in_progress())
-            });
+            let conversation_status = conversation_id
+                .and_then(|id| BlocklistAIHistoryModel::as_ref(app).conversation_status(&id));
             let has_unfinished_actions = conversation_id.is_some_and(|id| {
                 self.action_model
                     .as_ref(app)
                     .has_unfinished_actions_for_conversation(id)
             });
-            if should_render_no_status_as_cancelled(
-                conversation_in_progress,
-                has_unfinished_actions,
-            ) {
+            if should_render_no_status_as_cancelled(conversation_status, has_unfinished_actions) {
                 return render_status_only_card(
                     "Spawn agents cancelled".to_string(),
                     appearance,
@@ -1633,23 +1627,32 @@ fn render_terminal_state(
 
 /// Decides whether the run_agents card's "no live action status" fallback
 /// should render the cancelled terminal state rather than the streaming
-/// "Configuring agents…" placeholder.
+/// "Configuring agents\u{2026}" placeholder.
 ///
 /// The action only enters the action model once its tool-call stream
 /// finishes successfully (`queue_actions` in `controller.rs`'s
 /// `AfterStreamFinished` handling), so a user cancel while the call is
 /// still streaming never queues an action and `get_action_status` stays
-/// `None` forever. Treat that as cancelled once the conversation itself is
-/// no longer in progress and nothing else is still pending/running for it
-/// — mirrors `ask_user_question_view::action_status`'s restore-as-cancelled
-/// check. `conversation_in_progress` is `None` when the conversation could
-/// not be resolved (e.g. no conversation ID yet), in which case we keep
-/// showing the streaming placeholder rather than guessing.
+/// `None` forever. Treat that as cancelled only once the conversation has
+/// reached the explicit `ConversationStatus::Cancelled` status and nothing
+/// else is still pending/running for it — mirrors
+/// `ask_user_question_view::action_status`'s restore-as-cancelled check.
+///
+/// This deliberately requires an *explicit* cancelled status rather than
+/// merely "not `InProgress`": non-terminal statuses like `TransientError`
+/// (an automatic recovery is in flight) or `WaitingForEvents` (the agent is
+/// quiescently waiting on `wait_for_events`) are healthy, still-live states
+/// that must keep showing the streaming placeholder, not a false
+/// "cancelled" terminal card. `conversation_status` is `None` when the
+/// conversation could not be resolved (e.g. no conversation ID yet), in
+/// which case we keep showing the streaming placeholder rather than
+/// guessing.
 pub(crate) fn should_render_no_status_as_cancelled(
-    conversation_in_progress: Option<bool>,
+    conversation_status: Option<&ConversationStatus>,
     has_unfinished_actions_for_conversation: bool,
 ) -> bool {
-    conversation_in_progress == Some(false) && !has_unfinished_actions_for_conversation
+    matches!(conversation_status, Some(ConversationStatus::Cancelled))
+        && !has_unfinished_actions_for_conversation
 }
 
 pub(crate) fn format_terminal_state(result: &RunAgentsResult) -> (String, StatusKind) {
