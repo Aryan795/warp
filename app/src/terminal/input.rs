@@ -1869,6 +1869,14 @@ async fn upload_pending_attachments_to_task(
                 .decode(&image.data)
                 .map(|bytes| (image.file_name.clone(), image.mime_type.clone(), bytes))
                 .map_err(|e| (image.file_name, format!("Failed to decode attachment: {e}"))),
+            // Not reachable in practice: callers of this function build `pending_attachments`
+            // directly from flat `ImageContext`/`PendingFile` slices rather than from a live
+            // context model, so a grouped video attachment never reaches here. Fail closed with
+            // a clear message rather than silently dropping or mis-splitting the frames.
+            PendingAttachment::Video(video) => Err((
+                video.file_name,
+                "Video attachments aren't supported for cloud follow-up uploads".to_string(),
+            )),
         };
         match decoded {
             Ok((file_name, mime_type, bytes)) => {
@@ -14100,6 +14108,7 @@ impl Input {
             {
                 match attachment {
                     PendingAttachment::Image(image) => images.push(image.clone()),
+                    PendingAttachment::Video(video) => images.extend(video.frames.iter().cloned()),
                     PendingAttachment::File(file) => files.push(file.clone()),
                 }
             }
@@ -15732,6 +15741,7 @@ impl Input {
         let icon = match chip.attachment_type {
             AttachmentType::Image => Icon::Image,
             AttachmentType::File => Icon::File,
+            AttachmentType::Video => Icon::Video,
         };
 
         let attachment_chip = Chip::new(
@@ -15761,7 +15771,10 @@ impl Input {
         .with_close_button(close_button)
         .build();
 
-        if matches!(chip.attachment_type, AttachmentType::Image) {
+        if matches!(
+            chip.attachment_type,
+            AttachmentType::Image | AttachmentType::Video
+        ) {
             let preview_chip_index = chip.index;
             EventHandler::new(attachment_chip.finish())
                 .on_left_mouse_down(move |ctx, _, _| {

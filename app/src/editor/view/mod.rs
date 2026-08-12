@@ -5591,43 +5591,98 @@ impl EditorView {
 
                 match result {
                     Ok(frames) => {
-                        let frame_count = frames.len();
-                        let attached_images: Vec<AttachedImage> = frames
+                        let requested_frame_count = frames.len();
+                        let mut num_oversized_frames = 0;
+                        let frame_contexts: Vec<ImageContext> = frames
                             .into_iter()
                             .enumerate()
-                            .map(|(index, frame)| AttachedImage {
-                                data: frame.data,
-                                mime_type: "image/jpeg".to_owned(),
-                                file_name: format!(
-                                    "{frames_file_name}-frame-{:02}.jpg",
-                                    index + 1
-                                ),
+                            .filter_map(|(index, frame)| {
+                                // Frames are already downscaled by ffmpeg (see `FRAME_MAX_EDGE_PX`
+                                // in `util::video`), so unlike raw user-picked images they don't
+                                // need a second client-side resize pass — just a defensive size
+                                // check before base64-encoding.
+                                if frame.data.len() > MAX_IMAGE_SIZE_BYTES {
+                                    num_oversized_frames += 1;
+                                    return None;
+                                }
+                                Some(ImageContext {
+                                    data: general_purpose::STANDARD.encode(&frame.data),
+                                    mime_type: "image/jpeg".to_owned(),
+                                    file_name: format!(
+                                        "{frames_file_name}-frame-{:02}.jpg",
+                                        index + 1
+                                    ),
+                                    is_figma: false,
+                                })
                             })
                             .collect();
+                        let frame_count = frame_contexts.len();
 
-                        this.video_pending_frame_file_names = Some(
-                            attached_images
-                                .iter()
-                                .map(|image| image.file_name.clone())
-                                .collect(),
-                        );
+                        this.video_pending_frame_file_names = if frame_contexts.is_empty() {
+                            None
+                        } else {
+                            Some(
+                                frame_contexts
+                                    .iter()
+                                    .map(|frame| frame.file_name.clone())
+                                    .collect(),
+                            )
+                        };
 
-                        this.process_and_attach_images_as_ai_context(
-                            frame_count,
-                            attached_images,
-                            ctx,
-                        );
+                        // Grouped into a single `PendingAttachment::Video` so the composer shows
+                        // one chip for the whole video rather than one per frame. The frames
+                        // themselves are unpacked back into individual `AIAgentContext::Image`
+                        // entries when the query is sent — only the composer's presentation
+                        // differs from a regular multi-image attachment.
+                        if let Some(context_model) = &this.context_model {
+                            context_model.update(ctx, |context_model, ctx| {
+                                context_model.append_pending_video(
+                                    frames_file_name.clone(),
+                                    frame_contexts,
+                                    ctx,
+                                );
+                            });
+                        }
 
-                        let frame_word = if frame_count == 1 { "frame" } else { "frames" };
-                        ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
-                            toast_stack.add_persistent_toast(
-                                DismissibleToast::default(format!(
-                                    "\u{201c}{frames_file_name}\u{201d} attached as {frame_count} still {frame_word} \u{2014} video isn't sent natively."
-                                )),
-                                window_id,
-                                ctx,
-                            );
-                        });
+                        if frame_count > 0 {
+                            let frame_word = if frame_count == 1 { "frame" } else { "frames" };
+                            ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                                toast_stack.add_persistent_toast(
+                                    DismissibleToast::default(format!(
+                                        "\u{201c}{frames_file_name}\u{201d} attached as {frame_count} still {frame_word} \u{2014} video isn't sent natively."
+                                    )),
+                                    window_id,
+                                    ctx,
+                                );
+                            });
+                        }
+                        if num_oversized_frames > 0 {
+                            let frame_word = if num_oversized_frames == 1 {
+                                "frame"
+                            } else {
+                                "frames"
+                            };
+                            ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                                toast_stack.add_persistent_toast(
+                                    DismissibleToast::error(format!(
+                                        "{num_oversized_frames} extracted {frame_word} weren't attached \u{2014} too large."
+                                    )),
+                                    window_id,
+                                    ctx,
+                                );
+                            });
+                        }
+                        if requested_frame_count > 0 && frame_count == 0 {
+                            ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                                toast_stack.add_persistent_toast(
+                                    DismissibleToast::error(format!(
+                                        "Couldn't attach \u{201c}{frames_file_name}\u{201d}: no frames could be attached."
+                                    )),
+                                    window_id,
+                                    ctx,
+                                );
+                            });
+                        }
                     }
                     Err(err) => {
                         this.video_pending_frame_file_names = None;

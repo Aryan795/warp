@@ -27268,15 +27268,25 @@ impl TypedActionView for TerminalView {
                 });
             }
             OpenAttachmentLightbox { index } => {
+                // A video attachment's frames all share its attachment index, since the
+                // composer shows them as a single chip; opening the lightbox on that chip
+                // shows every one of its frames.
                 let pending_images = self
                     .ai_context_model
                     .as_ref(ctx)
                     .pending_attachments()
                     .iter()
                     .enumerate()
-                    .filter_map(|(attachment_index, attachment)| match attachment {
-                        PendingAttachment::Image(image) => Some((attachment_index, image.clone())),
-                        PendingAttachment::File(_) => None,
+                    .flat_map(|(attachment_index, attachment)| match attachment {
+                        PendingAttachment::Image(image) => {
+                            vec![(attachment_index, image.clone())]
+                        }
+                        PendingAttachment::Video(video) => video
+                            .frames
+                            .iter()
+                            .map(|frame| (attachment_index, frame.clone()))
+                            .collect(),
+                        PendingAttachment::File(_) => vec![],
                     })
                     .collect::<Vec<_>>();
                 let mut images = Vec::new();

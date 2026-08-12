@@ -160,6 +160,10 @@ fn render_attachments(
         let icon = match attachment_type {
             AttachmentType::Image => Icon::Image,
             AttachmentType::File => Icon::File,
+            // Frames are unpacked back into individual `AttachmentType::Image` entries once a
+            // query is sent, so a submitted query's attachments never carry `Video` — this arm
+            // only exists to satisfy exhaustiveness.
+            AttachmentType::Video => Icon::Video,
         };
         let chip = Chip::new(
             file_name.clone(),

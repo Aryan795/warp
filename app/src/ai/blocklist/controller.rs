@@ -3459,6 +3459,9 @@ fn input_for_query(
     for attachment in prompt_attachments {
         match attachment {
             PendingAttachment::Image(image) => image_context.push(AIAgentContext::Image(image)),
+            PendingAttachment::Video(video) => {
+                image_context.extend(video.frames.into_iter().map(AIAgentContext::Image));
+            }
             PendingAttachment::File(file) => file_attachments.push(file),
         }
     }

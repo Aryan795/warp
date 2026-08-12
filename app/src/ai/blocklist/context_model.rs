@@ -48,6 +48,17 @@ pub struct PendingFile {
 pub enum AttachmentType {
     Image,
     File,
+    Video,
+}
+
+/// The frames extracted from a single video attachment (behind `FeatureFlag::VideoAsContext`),
+/// grouped so the composer shows one chip for the whole video instead of one per frame. The
+/// frames themselves are unpacked back into individual `AIAgentContext::Image` entries when a
+/// query is sent — grouping only changes how the attachment is presented before sending.
+#[derive(Clone, Debug)]
+pub struct VideoContext {
+    pub file_name: String,
+    pub frames: Vec<ImageContext>,
 }
 
 /// Lightweight metadata for rendering a pending attachment without cloning its payload.
@@ -58,11 +69,13 @@ pub struct PendingAttachmentSummary {
     pub file_name: String,
 }
 
-/// A pending attachment — either an image (base64 in memory) or a file (path reference).
+/// A pending attachment — an image (base64 in memory), a file (path reference), or a group of
+/// video frames presented as a single chip (see [`VideoContext`]).
 #[derive(Clone, Debug)]
 pub enum PendingAttachment {
     Image(ImageContext),
     File(PendingFile),
+    Video(VideoContext),
 }
 
 impl PendingAttachment {
@@ -70,6 +83,7 @@ impl PendingAttachment {
         match self {
             PendingAttachment::Image(img) => &img.file_name,
             PendingAttachment::File(file) => &file.file_name,
+            PendingAttachment::Video(video) => &video.file_name,
         }
     }
 
@@ -77,6 +91,7 @@ impl PendingAttachment {
         match self {
             PendingAttachment::Image(_) => AttachmentType::Image,
             PendingAttachment::File(_) => AttachmentType::File,
+            PendingAttachment::Video(_) => AttachmentType::Video,
         }
     }
 }
@@ -299,15 +314,19 @@ impl BlocklistAIContextModel {
             .collect()
     }
 
-    /// Returns only the pending images for the next query.
+    /// Returns only the pending images for the next query — both standalone image attachments
+    /// and the individual frames grouped under a video attachment (flattened), since both flow
+    /// through the same `InputContext.images[]` path when the query is sent.
     pub fn pending_images(&self) -> Vec<&ImageContext> {
-        self.pending_attachments
-            .iter()
-            .filter_map(|a| match a {
-                PendingAttachment::Image(img) => Some(img),
-                PendingAttachment::File(_) => None,
-            })
-            .collect()
+        let mut images = Vec::new();
+        for attachment in &self.pending_attachments {
+            match attachment {
+                PendingAttachment::Image(img) => images.push(img),
+                PendingAttachment::Video(video) => images.extend(video.frames.iter()),
+                PendingAttachment::File(_) => {}
+            }
+        }
+        images
     }
 
     /// Returns only the pending files for the next query.
@@ -316,7 +335,7 @@ impl BlocklistAIContextModel {
             .iter()
             .filter_map(|a| match a {
                 PendingAttachment::File(file) => Some(file),
-                PendingAttachment::Image(_) => None,
+                PendingAttachment::Image(_) | PendingAttachment::Video(_) => None,
             })
             .collect()
     }
@@ -584,7 +603,7 @@ impl BlocklistAIContextModel {
     pub fn clear_pending_images(&mut self, ctx: &mut ModelContext<Self>) {
         let original_attachment_count = self.pending_attachments.len();
         self.pending_attachments
-            .retain(|a| !matches!(a, PendingAttachment::Image(_)));
+            .retain(|a| !matches!(a, PendingAttachment::Image(_) | PendingAttachment::Video(_)));
         if self.pending_attachments.len() < original_attachment_count {
             ctx.emit(BlocklistAIContextEvent::UpdatedPendingContext {
                 previous_block_ids: self.pending_context_block_ids.clone(),
@@ -606,6 +625,22 @@ impl BlocklistAIContextModel {
         }
     }
 
+    /// Appends a video's extracted frames as a single grouped attachment, so the composer shows
+    /// one chip for the video rather than one per frame. No-ops when `frames` is empty.
+    pub fn append_pending_video(
+        &mut self,
+        file_name: String,
+        frames: Vec<ImageContext>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if !frames.is_empty() {
+            self.append_pending_attachments(
+                vec![PendingAttachment::Video(VideoContext { file_name, frames })],
+                ctx,
+            );
+        }
+    }
+
     pub fn remove_pending_image(&mut self, index: usize, ctx: &mut ModelContext<Self>) {
         // Find the nth image in the combined list and remove it.
         let position = self
@@ -620,38 +655,53 @@ impl BlocklistAIContextModel {
         }
     }
 
-    /// Returns the number of images removed
+    /// Returns the number of images removed. Walks from the end of the pending list, removing
+    /// whole image attachments and trimming frames off the tail of video attachments — a video
+    /// attachment's chip is only dropped once every one of its frames has been removed, so this
+    /// never removes more frames than requested and never leaves an orphaned chip with zero
+    /// frames behind it.
     pub fn remove_last_pending_images(
         &mut self,
         images_to_remove: usize,
         ctx: &mut ModelContext<Self>,
     ) -> usize {
-        let image_indices: Vec<usize> = self
-            .pending_attachments
-            .iter()
-            .enumerate()
-            .filter(|(_, a)| matches!(a, PendingAttachment::Image(_)))
-            .map(|(i, _)| i)
-            .collect();
-        let len = image_indices.len();
-
-        if images_to_remove == 0 || len == 0 {
+        if images_to_remove == 0 {
             return 0;
         }
 
-        let to_remove = images_to_remove.min(len);
-        // Remove from the end to avoid shifting indices.
-        for &idx in image_indices.iter().rev().take(to_remove) {
-            self.pending_attachments.remove(idx);
+        let mut remaining_to_remove = images_to_remove;
+        let mut removed = 0;
+        let mut index = self.pending_attachments.len();
+        while remaining_to_remove > 0 && index > 0 {
+            index -= 1;
+            match &mut self.pending_attachments[index] {
+                PendingAttachment::Image(_) => {
+                    self.pending_attachments.remove(index);
+                    removed += 1;
+                    remaining_to_remove -= 1;
+                }
+                PendingAttachment::Video(video) => {
+                    while remaining_to_remove > 0 && video.frames.pop().is_some() {
+                        removed += 1;
+                        remaining_to_remove -= 1;
+                    }
+                    if video.frames.is_empty() {
+                        self.pending_attachments.remove(index);
+                    }
+                }
+                PendingAttachment::File(_) => {}
+            }
         }
 
-        ctx.emit(BlocklistAIContextEvent::UpdatedPendingContext {
-            previous_block_ids: self.pending_context_block_ids.clone(),
-            requires_block_resync: false,
-            requires_text_resync: false,
-        });
+        if removed > 0 {
+            ctx.emit(BlocklistAIContextEvent::UpdatedPendingContext {
+                previous_block_ids: self.pending_context_block_ids.clone(),
+                requires_block_resync: false,
+                requires_text_resync: false,
+            });
+        }
 
-        to_remove
+        removed
     }
 
     /// Convenience function to set pending query state to continue an existing conversation by ID.
