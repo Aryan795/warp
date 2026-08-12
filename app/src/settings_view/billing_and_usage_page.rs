@@ -98,6 +98,17 @@ const ADDON_CREDITS_DESCRIPTION: &str = "Add-on credits are purchased in prepaid
 const ADDITIONAL_ADDON_CREDITS_DESCRIPTION_FOR_TEAM: &str =
     "Purchased add-on credits are shared across your team.";
 
+// `WorkspaceMemberUsageInfo.requests_used_since_last_refresh` has no per-team
+// attribution: it's a single workspace-wide counter per member, not broken
+// down by the team(s) they belong to. This page scopes the *roster* to the
+// current team, but the number next to each name (and the summed total
+// below) still reflects that member's usage across every team they're in.
+// The label and caption below say so plainly, rather than implying a
+// team-scoped figure this page can't actually produce.
+const TEAM_MEMBERS_USAGE_LABEL: &str = "Team members' usage";
+const TEAM_MEMBERS_USAGE_WORKSPACE_WIDE_CAPTION: &str =
+    "Includes each member's usage across every team they belong to, not just this one.";
+
 // Cloud agent trial widget constants.
 const AMBIENT_AGENT_TRIAL_TITLE: &str = "Cloud agent trial";
 /// The threshold below which we only show the "Buy more" button (not "New agent").
@@ -2417,6 +2428,25 @@ impl BillingAndUsagePageView {
         row.finish()
     }
 
+    /// Small caption clarifying that the workspace-wide usage row/roster
+    /// above is not scoped to this team (see `TEAM_MEMBERS_USAGE_LABEL`).
+    fn render_workspace_wide_usage_caption(&self, appearance: &Appearance) -> Box<dyn Element> {
+        Container::new(
+            Text::new_inline(
+                TEAM_MEMBERS_USAGE_WORKSPACE_WIDE_CAPTION,
+                appearance.ui_font_family(),
+                12.,
+            )
+            .with_color(blended_colors::text_sub(
+                appearance.theme(),
+                appearance.theme().surface_1(),
+            ))
+            .finish(),
+        )
+        .with_margin_bottom(12.)
+        .finish()
+    }
+
     /// Renders a row of what is being limited, along with the current used/limit.
     #[allow(clippy::too_many_arguments)]
     fn render_ai_usage_limit_row(
@@ -3042,7 +3072,11 @@ impl BillingAndUsagePageView {
             return usage.finish();
         }
 
-        // Show a summed "Team total" row first.
+        // Show a summed usage row first. This is *not* labeled "Team total":
+        // it sums each scoped member's workspace-wide request counter (see
+        // the comment on `TEAM_MEMBERS_USAGE_LABEL` above), so it can include
+        // usage a member incurred against a different team they also belong
+        // to. The label and caption below say so plainly.
         let num_team_members = workspace_team_members.len();
         let should_show_team_total = num_team_members > 1 && has_admin_permissions;
         if should_show_team_total {
@@ -3059,7 +3093,7 @@ impl BillingAndUsagePageView {
             };
 
             usage.add_child(self.render_ai_usage_limit_row(
-                "Team total".to_string(),
+                TEAM_MEMBERS_USAGE_LABEL.to_string(),
                 team_total_used,
                 team_divisor,
                 ai_request_usage_model.refresh_duration_to_string(),
@@ -3067,6 +3101,7 @@ impl BillingAndUsagePageView {
                 appearance,
                 None,
             ));
+            usage.add_child(self.render_workspace_wide_usage_caption(appearance));
             let divider = Container::new(
                 ConstrainedBox::new(Empty::new().finish())
                     .with_height(1.)

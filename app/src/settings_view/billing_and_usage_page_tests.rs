@@ -1,5 +1,6 @@
 use super::{
-    SortKey, SortOrder, UserSortingCriteria, resolve_team_scoped_members, sort_user_items_in_place,
+    SortKey, SortOrder, TEAM_MEMBERS_USAGE_LABEL, TEAM_MEMBERS_USAGE_WORKSPACE_WIDE_CAPTION,
+    UserSortingCriteria, resolve_team_scoped_members, sort_user_items_in_place,
 };
 use crate::auth::UserUid;
 use crate::server::ids::ServerId;
@@ -76,6 +77,23 @@ fn resolve_team_scoped_members_excludes_members_outside_the_team() {
 
     assert_eq!(scoped.len(), 1);
     assert_eq!(scoped[0].email, "a@warp.dev");
+}
+
+#[test]
+fn team_members_usage_label_and_caption_do_not_claim_team_scoping() {
+    // Regression: `WorkspaceMemberUsageInfo.requests_used_since_last_refresh`
+    // has no per-team attribution, so the summed row and per-member counters
+    // built from it are workspace-wide, not scoped to the team being viewed.
+    // The label must not claim otherwise, and the caption must disclose it.
+    assert_ne!(
+        TEAM_MEMBERS_USAGE_LABEL, "Team total",
+        "the label must not claim these workspace-wide counters are team-scoped"
+    );
+    let caption_lower = TEAM_MEMBERS_USAGE_WORKSPACE_WIDE_CAPTION.to_lowercase();
+    assert!(
+        caption_lower.contains("every team") || caption_lower.contains("workspace"),
+        "caption must plainly disclose that the figures span every team the member belongs to, got: {TEAM_MEMBERS_USAGE_WORKSPACE_WIDE_CAPTION}"
+    );
 }
 
 #[test]
