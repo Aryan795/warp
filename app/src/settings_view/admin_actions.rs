@@ -16,6 +16,13 @@ impl AdminActions {
         format!("{}/admin", ChannelState::server_root_url())
     }
 
+    /// Generate the admin panel URL for the workspace-wide teams surface
+    /// (`/admin/workspace/teams`), as opposed to `admin_panel_link_for_team`,
+    /// which always opens the legacy per-team admin panel.
+    pub fn admin_panel_link_for_workspace_teams() -> String {
+        format!("{}/admin/workspace/teams", ChannelState::server_root_url())
+    }
+
     /// Open the admin panel for a specific team
     pub fn open_admin_panel(team_uid: ServerId, ctx: &mut AppContext) {
         let url = Self::admin_panel_link_for_team(team_uid);
@@ -24,6 +31,12 @@ impl AdminActions {
 
     pub fn open_workspace_admin_panel(ctx: &mut AppContext) {
         let url = Self::admin_panel_link_for_workspace();
+        ctx.open_url(&url);
+    }
+
+    /// Open the workspace-wide teams surface of the admin panel.
+    pub fn open_workspace_admin_teams_panel(ctx: &mut AppContext) {
+        let url = Self::admin_panel_link_for_workspace_teams();
         ctx.open_url(&url);
     }
 

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use email_address::EmailAddress;
 use itertools::Itertools;
 use lazy_static::lazy_static;
+use markdown_parser::{FormattedText, FormattedTextFragment, FormattedTextLine};
 use pathfinder_color::ColorU;
 use pathfinder_geometry::vector::vec2f;
 use regex::Regex;
@@ -16,9 +17,10 @@ use warp_errors::report_error;
 use warpui::clipboard::ClipboardContent;
 use warpui::elements::{
     Align, Border, ChildAnchor, ClippedScrollStateHandle, ConstrainedBox, Container, CornerRadius,
-    CrossAxisAlignment, Element, Flex, Hoverable, MainAxisAlignment, MainAxisSize,
-    MouseStateHandle, OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds, Radius,
-    SavePosition, ScrollTarget, ScrollToPositionMode, Shrinkable, Stack, Text,
+    CrossAxisAlignment, Element, Flex, FormattedTextElement, HighlightedHyperlink, Hoverable,
+    HyperlinkLens, MainAxisAlignment, MainAxisSize, MouseStateHandle, OffsetPositioning,
+    ParentAnchor, ParentElement, ParentOffsetBounds, Radius, SavePosition, ScrollTarget,
+    ScrollToPositionMode, Shrinkable, Stack, Text,
 };
 use warpui::fonts::{Properties, Weight};
 use warpui::platform::Cursor;
@@ -78,7 +80,7 @@ use crate::workspaces::team::{DiscoverableTeam, MembershipRole, Team, TeamDelete
 use crate::workspaces::update_manager::{TeamUpdateManager, TeamUpdateManagerEvent};
 use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
 use crate::workspaces::workspace::{
-    BillingMetadata, CustomerType, DelinquencyStatus, WorkspaceSizePolicy,
+    BillingMetadata, CustomerType, DelinquencyStatus, Workspace, WorkspaceSizePolicy,
 };
 
 const TEAM_MEMBERS_HEADER_POSITION_ID: &str = "team_settings:team_members_header";
@@ -122,6 +124,13 @@ const INVALID_EMAILS_INSTRUCTIONS: &str =
 const OFFLINE_TEXT: &str = "You are offline.";
 
 const MAX_CHIP_WIDTH: f32 = 280.;
+
+// Copy for the CTA that nudges native-workspace admins toward the web admin
+// panel for org-level team/member management, instead of relying solely on
+// the current-team controls on this page. See REV-2079.
+const WORKSPACE_ADMIN_CTA_LEAD_IN: &str = "These controls apply to your current team.";
+const WORKSPACE_ADMIN_CTA_LINK_TEXT: &str =
+    "Manage all teams and workspace members in the admin panel.";
 
 lazy_static! {
     static ref DOMAIN_NAME_REGEX: Regex =
@@ -183,6 +192,7 @@ pub enum TeamsPageAction {
     OpenAdminPanel {
         team_uid: ServerId,
     },
+    OpenWorkspaceAdminTeamsPanel,
     ContactSupport,
     ContactSales,
     /// This action is for toggling the discoverability checkbox before a team is created.
@@ -228,6 +238,7 @@ impl TeamsPageAction {
                 | GenerateUpgradeLink { .. }
                 | GenerateStripeBillingPortalLink { .. }
                 | OpenAdminPanel { .. }
+                | OpenWorkspaceAdminTeamsPanel
                 | ContactSupport
                 | ContactSales
                 | ToggleTeamDiscoverabilityBeforeCreation
@@ -252,6 +263,7 @@ impl From<&TeamsPageAction> for LoginGatedFeature {
             GenerateUpgradeLink { .. } => "Generate Upgrade Link",
             GenerateStripeBillingPortalLink { .. } => "Generate Stripe Billing Portal Link",
             OpenAdminPanel { .. } => "Open Admin Panel",
+            OpenWorkspaceAdminTeamsPanel => "Open Workspace Admin Panel",
             ContactSupport => "Contact Support",
             ContactSales => "Contact Sales",
             ToggleTeamDiscoverability { .. } | ToggleTeamDiscoverabilityBeforeCreation => {
@@ -586,6 +598,9 @@ impl TypedActionView for TeamsPageView {
             }
             TeamsPageAction::OpenAdminPanel { team_uid } => {
                 AdminActions::open_admin_panel(*team_uid, ctx);
+            }
+            TeamsPageAction::OpenWorkspaceAdminTeamsPanel => {
+                AdminActions::open_workspace_admin_teams_panel(ctx);
             }
             TeamsPageAction::ContactSupport => {
                 AdminActions::contact_support(ctx);
@@ -1912,6 +1927,64 @@ impl TeamsWidget {
         Some((monthly_cost, yearly_cost))
     }
 
+    /// Whether the workspace-admin CTA banner should be shown to the given
+    /// viewer on the Teams page. Only workspace admins on a native-workspaces
+    /// plan see the nudge toward the org-wide admin panel; this leaves the
+    /// existing team-scoped controls untouched for everyone else. See
+    /// REV-2079.
+    fn should_show_workspace_admin_cta(workspace: &Workspace, viewer_email: &str) -> bool {
+        workspace.is_native_workspaces_enabled() && workspace.is_workspace_admin(viewer_email)
+    }
+
+    /// Renders the banner nudging native-workspace admins toward the
+    /// org-wide admin panel, matching the visual treatment of the
+    /// `NATIVE_WORKSPACES_CTA` banner on the Billing & Usage page.
+    fn render_workspace_admin_cta(&self, appearance: &Appearance) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let sub_text = theme.sub_text_color(theme.background());
+        let body = FormattedTextElement::new(
+            FormattedText::new([FormattedTextLine::Line(vec![
+                FormattedTextFragment::plain_text(format!("{WORKSPACE_ADMIN_CTA_LEAD_IN} ")),
+                FormattedTextFragment::hyperlink_action(
+                    WORKSPACE_ADMIN_CTA_LINK_TEXT,
+                    TeamsPageAction::OpenWorkspaceAdminTeamsPanel,
+                ),
+            ])]),
+            appearance.ui_font_size(),
+            appearance.ui_font_family(),
+            appearance.ui_font_family(),
+            sub_text.into(),
+            HighlightedHyperlink::default(),
+        )
+        .with_hyperlink_font_color(theme.accent().into_solid())
+        .register_default_click_handlers_with_action_support(|lens, event, ctx| match lens {
+            HyperlinkLens::Url(u) => ctx.open_url(u),
+            HyperlinkLens::Action(a) => {
+                if let Some(act) = a.as_any().downcast_ref::<TeamsPageAction>() {
+                    event.dispatch_typed_action(act.clone());
+                }
+            }
+        })
+        .finish();
+
+        let icon = ConstrainedBox::new(Icon::Users.to_warpui_icon(sub_text).finish())
+            .with_width(14.)
+            .with_height(14.)
+            .finish();
+
+        let row = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(Container::new(icon).with_margin_right(8.).finish())
+            .with_child(body)
+            .finish();
+
+        Container::new(row)
+            .with_background_color(theme.surface_1().into_solid())
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
+            .with_uniform_padding(12.)
+            .finish()
+    }
+
     fn grow_team_warning(team: &Team) -> Option<GrowTeamWarning> {
         match team.billing_metadata.delinquency_status {
             DelinquencyStatus::PastDue => return Some(GrowTeamWarning::PaymentPastDue),
@@ -2257,6 +2330,19 @@ impl TeamsWidget {
             view,
             appearance,
         ));
+
+        // 1.5) Workspace admin CTA. Only shown to workspace admins on a
+        // native-workspaces plan, nudging them toward the org-wide admin
+        // panel instead of this team-scoped page. See REV-2079.
+        if let Some(workspace) = UserWorkspaces::as_ref(app).current_workspace()
+            && Self::should_show_workspace_admin_cta(workspace, &current_user_email)
+        {
+            main_content.add_child(
+                Container::new(self.render_workspace_admin_cta(appearance))
+                    .with_padding_top(CONTENT_SEPARATION_PADDING)
+                    .finish(),
+            );
+        }
 
         // has_plan_limit will be true if the team has any shared object policy that
         // is not unlimited.
@@ -4492,4 +4578,82 @@ pub fn test_owner_state_chip_text_contrasts_with_accent_overlay() {
             "{theme_kind} owner chip text should contrast with its accent overlay"
         );
     }
+}
+
+#[cfg(test)]
+fn make_test_workspace_with_member(
+    is_native_workspaces_enabled: bool,
+    role: MembershipRole,
+    email: &str,
+) -> Workspace {
+    use crate::workspaces::workspace::{
+        NativeWorkspacesPolicy, WorkspaceMember, WorkspaceMemberUsageInfo,
+    };
+
+    // `ServerId::from_string_lossy` requires exactly 22 characters.
+    let mut workspace = Workspace::from_local_cache(
+        ServerId::from_string_lossy("workspace_uid123456789").into(),
+        "Test Workspace".to_string(),
+        None,
+    );
+    workspace.billing_metadata.tier.native_workspaces_policy = Some(NativeWorkspacesPolicy {
+        enabled: is_native_workspaces_enabled,
+    });
+    workspace.members.push(WorkspaceMember {
+        uid: UserUid::new("test_uid"),
+        email: email.to_string(),
+        role,
+        usage_info: WorkspaceMemberUsageInfo {
+            is_unlimited: false,
+            request_limit: 0,
+            requests_used_since_last_refresh: 0,
+            is_request_limit_prorated: false,
+        },
+    });
+    workspace
+}
+
+#[cfg(test)]
+#[test]
+fn test_should_show_workspace_admin_cta_for_native_workspace_admin() {
+    let email = "admin@warp.dev";
+    let workspace = make_test_workspace_with_member(true, MembershipRole::Admin, email);
+    assert!(TeamsWidget::should_show_workspace_admin_cta(
+        &workspace, email
+    ));
+
+    let workspace = make_test_workspace_with_member(true, MembershipRole::Owner, email);
+    assert!(TeamsWidget::should_show_workspace_admin_cta(
+        &workspace, email
+    ));
+}
+
+#[cfg(test)]
+#[test]
+fn test_should_not_show_workspace_admin_cta_when_native_workspaces_disabled() {
+    let email = "admin@warp.dev";
+    let workspace = make_test_workspace_with_member(false, MembershipRole::Admin, email);
+    assert!(!TeamsWidget::should_show_workspace_admin_cta(
+        &workspace, email
+    ));
+}
+
+#[cfg(test)]
+#[test]
+fn test_should_not_show_workspace_admin_cta_for_non_admin_member() {
+    let email = "member@warp.dev";
+    let workspace = make_test_workspace_with_member(true, MembershipRole::User, email);
+    assert!(!TeamsWidget::should_show_workspace_admin_cta(
+        &workspace, email
+    ));
+}
+
+#[cfg(test)]
+#[test]
+fn test_should_not_show_workspace_admin_cta_for_unrecognized_viewer() {
+    let workspace = make_test_workspace_with_member(true, MembershipRole::Admin, "admin@warp.dev");
+    assert!(!TeamsWidget::should_show_workspace_admin_cta(
+        &workspace,
+        "someone-else@warp.dev"
+    ));
 }
