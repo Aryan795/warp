@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use pathfinder_color::ColorU;
 use pathfinder_geometry::vector::vec2f;
@@ -224,48 +224,43 @@ pub fn legend_cost_types(entries: &[BillingCycleUsageEntry]) -> Vec<AiCreditsUsa
     .collect()
 }
 
-/// Scopes usage entries to the given team's *current* roster.
+/// Filters usage entries down to those attributed to the given team.
 ///
-/// LIMITATION: the Rust GraphQL schema doesn't expose a per-entry team
-/// attribution field (`UsageEntry.attributedTeamUid` is present in the
-/// warp-server schema but absent from the checked-in client snapshot at
-/// `crates/warp_graphql_schema/api/schema.graphql`), so
-/// `Workspace.billingCycleUsageHistory` is fetched and redacted at the
-/// *workspace* level rather than the team level. This falls back to
-/// matching each entry's `subject_uid` against the selected team's current
-/// member roster, which has known gaps versus true per-entry attribution:
-/// - A member who has since left the team retains no visible entries under
-///   this filter, even for periods when they were still on the team, since
-///   there is no way to tell which team their old usage belonged to.
-/// - The synthetic `Team`-subject aggregate row (used at `TeamAggregate`
-///   visibility to summarize "everyone else"'s usage) carries no
-///   `subject_uid` to check at all, so it is dropped whenever a team is
-///   selected rather than risk leaking another team's rolled-up usage.
-/// - A `ServiceAccount` entry is dropped too: service accounts aren't part
-///   of `Team.members`, so there's no roster to match them against. This is
-///   a real regression versus the (unfiltered) status quo for that one
-///   subject type, traded off against the alternative of leaking every
-///   service account's usage across every team.
+/// Each entry carries a server-computed `attributed_team_uid` (see
+/// `UsageEntry.attributedTeamUid` in the GraphQL schema) identifying which
+/// team the underlying usage event actually belongs to. This is the
+/// authoritative, per-entry signal for scoping a workspace-wide usage
+/// history down to one team's slice, and it is the reason this filter is
+/// correct where a roster-membership check is not: a member on more than
+/// one team has their usage split by which team it was actually attributed
+/// to (not duplicated into every team they belong to), a member who has
+/// since left the team keeps their historical entries that were attributed
+/// to it while they were still a member, and a service account's entries
+/// are attributed directly, independent of `Team.members` (which never
+/// lists service accounts). Entries with no attribution at all
+/// (`attributed_team_uid: None`) are dropped once a team is selected,
+/// mirroring the web client's `filterEntriesByAttributedTeam`
+/// (`warp-server/client/src/components/admin/team/billing/utils.ts`).
 ///
 /// When `team` is `None` (no team context, e.g. a solo user) entries pass
 /// through unfiltered, preserving existing behavior for that case.
-pub fn scope_entries_to_team(
+///
+/// This is the entry-level counterpart to `Workspace::members_for_team`,
+/// which scopes the *roster* used to decide which identities/zero-usage
+/// rows exist; the two are complementary and both are required, mirroring
+/// the web client's `filterEntriesByAttributedTeam` (entry filter) and
+/// `selectedTeamMemberUids` (roster filter).
+pub fn filter_entries_by_attributed_team(
     entries: &[BillingCycleUsageEntry],
     team: Option<&Team>,
 ) -> Vec<BillingCycleUsageEntry> {
     let Some(team) = team else {
         return entries.to_vec();
     };
-    let team_member_uids: HashSet<&str> = team.members.iter().map(|m| m.uid.as_str()).collect();
+    let team_uid = team.uid.to_string();
     entries
         .iter()
-        .filter(|entry| {
-            entry.subject_type != AiCreditsUsageAndCostSubjectType::Team
-                && entry
-                    .subject_uid
-                    .as_deref()
-                    .is_some_and(|uid| team_member_uids.contains(uid))
-        })
+        .filter(|entry| entry.attributed_team_uid.as_deref() == Some(team_uid.as_str()))
         .cloned()
         .collect()
 }

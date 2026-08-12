@@ -21,8 +21,8 @@ use crate::auth::{AuthManager, AuthStateProvider};
 use crate::menu::{self, Menu, MenuItem, MenuItemFields};
 use crate::settings_view::admin_actions::AdminActions;
 use crate::settings_view::billing_and_usage::billing_cycle_usage_common::{
-    BillingUsageMouseStates, filter_legacy_buckets, has_non_viewer_data, legend_cost_types,
-    scope_entries_to_team,
+    BillingUsageMouseStates, filter_entries_by_attributed_team, filter_legacy_buckets,
+    has_non_viewer_data, legend_cost_types,
 };
 use crate::settings_view::billing_and_usage::billing_cycle_usage_rows::{
     SourceFilter, has_cloud_usage, render_own_usage_solo_row, render_own_usage_with_workspace_row,
@@ -178,7 +178,7 @@ impl BillingCycleUsageSectionView {
             .current_summary(workspace)
             .map(|s| s.entries.as_slice())
             .unwrap_or_default();
-        let entries = filter_legacy_buckets(&scope_entries_to_team(raw_entries, team));
+        let entries = filter_legacy_buckets(&filter_entries_by_attributed_team(raw_entries, team));
         let viewer_uid = AuthStateProvider::as_ref(app)
             .get()
             .user_id()
@@ -291,7 +291,7 @@ impl BillingCycleUsageSectionView {
             .current_summary(workspace)
             .map(|summary| summary.entries.as_slice())
             .unwrap_or_default();
-        let entries = filter_legacy_buckets(&scope_entries_to_team(raw_entries, team));
+        let entries = filter_legacy_buckets(&filter_entries_by_attributed_team(raw_entries, team));
 
         let is_source_filter_shown = visibility.granularity
             == UsageVisibilityGranularity::FullBreakdown
@@ -578,7 +578,7 @@ impl BillingCycleUsageSectionView {
     ) -> Option<Box<dyn Element>> {
         let summary = self.current_summary(workspace)?;
         let team = UserWorkspaces::as_ref(app).team_for_view_handle(&self.self_handle, app);
-        let scoped_entries = scope_entries_to_team(&summary.entries, team);
+        let scoped_entries = filter_entries_by_attributed_team(&summary.entries, team);
         // Only list buckets that actually contribute to the stacked bars: drop
         // legacy buckets and cost types with no usage, so the legend never
         // shows a bucket (e.g. "Base") that has zero credits in the data.

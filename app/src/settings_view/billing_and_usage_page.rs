@@ -2863,8 +2863,6 @@ impl BillingAndUsagePageView {
         let billing_metadata = workspaces.current_workspace_billing_metadata();
         let has_admin_permissions =
             team.is_some_and(|team| team.has_admin_permissions(&current_user_email));
-        // Scope the roster to the selected team so an admin sees usage for
-        // only that team's members, not every member across the workspace.
         // Check if we should show the sort button (admin with team size > 1)
         let workspace_team_members: Vec<WorkspaceMember> = workspace
             .map(|workspace| {

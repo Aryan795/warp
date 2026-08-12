@@ -614,11 +614,18 @@ pub struct AiOverages {
 ///   `(subject, cost_type, bucket, source)` tuple. Categorical fields always
 ///   carry real values — the server does **not** synthesize an aggregate team
 ///   total at this granularity. Compute team-wide sums client-side if needed.
+///
+/// `attributed_team_uid` identifies which team the entry belongs to (the
+/// server-authoritative signal for scoping a workspace-wide usage history
+/// down to one team, independent of the viewer's current team roster — see
+/// `billing_cycle_usage_common::filter_entries_by_attributed_team`). It is
+/// `None` for entries the server has no attribution for.
 #[derive(Clone, Debug)]
 pub struct BillingCycleUsageEntry {
     pub subject_type: AiCreditsUsageAndCostSubjectType,
     pub subject_uid: Option<String>,
     pub subject_display_name: Option<String>,
+    pub attributed_team_uid: Option<String>,
     pub cost_type: AiCreditsUsageAndCostType,
     pub usage_bucket: AiCreditsUsageBucket,
     pub usage_source: AiCreditsUsageSource,

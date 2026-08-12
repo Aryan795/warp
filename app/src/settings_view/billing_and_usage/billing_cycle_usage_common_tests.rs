@@ -1,9 +1,8 @@
 use super::{
-    BarSegment, aggregate_segments, filter_legacy_buckets, has_non_viewer_data, legend_cost_types,
-    scope_entries_to_team,
+    BarSegment, aggregate_segments, filter_entries_by_attributed_team, filter_legacy_buckets,
+    has_non_viewer_data, legend_cost_types,
 };
-use crate::auth::UserUid;
-use crate::workspaces::team::{MembershipRole, Team, TeamMember};
+use crate::workspaces::team::Team;
 use crate::workspaces::workspace::{
     AiCreditsUsageAndCostSubjectType, AiCreditsUsageAndCostType, AiCreditsUsageBucket,
     AiCreditsUsageSource, BillingCycleUsageEntry,
@@ -11,8 +10,7 @@ use crate::workspaces::workspace::{
 
 const VIEWER_UID: &str = "viewer-uid";
 const OTHER_UID: &str = "other-uid";
-const A_ONLY_UID: &str = "a-only-uid";
-const B_ONLY_UID: &str = "b-only-uid";
+const SHARED_UID: &str = "shared-uid";
 
 fn entry(
     subject_type: AiCreditsUsageAndCostSubjectType,
@@ -27,12 +25,52 @@ fn entry(
         subject_type,
         subject_uid: subject_uid.map(|s| s.to_string()),
         subject_display_name: None,
+        attributed_team_uid: None,
         cost_type,
         usage_bucket,
         usage_source,
         credits_used,
         cost_cents,
     }
+}
+
+/// An entry with an explicit attribution, for
+/// `filter_entries_by_attributed_team` tests. Deriving the attribution
+/// string from the `Team` itself (rather than a hand-typed string) avoids
+/// any mismatch with the padded `ServerId` `team_with_uid` builds. Other
+/// fields are given arbitrary but valid defaults, since these tests only
+/// care about attribution.
+fn attributed_entry(
+    subject_type: AiCreditsUsageAndCostSubjectType,
+    subject_uid: Option<&str>,
+    attributed_team: Option<&Team>,
+    credits_used: i32,
+) -> BillingCycleUsageEntry {
+    BillingCycleUsageEntry {
+        attributed_team_uid: attributed_team.map(|team| team.uid.to_string()),
+        ..entry(
+            subject_type,
+            subject_uid,
+            AiCreditsUsageAndCostType::BaseLimit,
+            AiCreditsUsageBucket::Ai,
+            AiCreditsUsageSource::Local,
+            credits_used,
+            0,
+        )
+    }
+}
+
+/// `Team::uid` is a fixed-width `ServerId` (exactly 22 characters); pad an
+/// arbitrary short label out to that width so tests can use readable names.
+fn team_with_uid(label: &str) -> Team {
+    let uid = format!("{label:0>22}");
+    Team::from_local_cache(
+        crate::server::ids::ServerId::from_string_lossy(&uid),
+        "Team".to_string(),
+        None,
+        None,
+        None,
+    )
 }
 
 /// Boilerplate viewer-owned User row for predicate tests.
@@ -349,126 +387,187 @@ fn legend_cost_types_includes_used_buckets_in_display_order() {
     );
 }
 
-fn team_member(uid: &str) -> TeamMember {
-    TeamMember {
-        uid: UserUid::new(uid),
-        email: format!("{uid}@example.com"),
-        role: MembershipRole::User,
-    }
-}
-
-fn team_with_members(uids: &[&str]) -> Team {
-    Team::from_local_cache(
-        crate::server::ids::ServerId::from_string_lossy("team_uid_1234567890123"),
-        "Team".to_string(),
-        None,
-        None,
-        Some(uids.iter().map(|uid| team_member(uid)).collect()),
-    )
-}
-
 #[test]
-fn scope_entries_to_team_passes_through_unfiltered_with_no_team_context() {
+fn filter_entries_by_attributed_team_passes_through_unfiltered_with_no_team_context() {
+    let team_a = team_with_uid("team-a");
+    let team_b = team_with_uid("team-b");
     let entries = vec![
-        entry(
+        attributed_entry(
             AiCreditsUsageAndCostSubjectType::User,
-            Some(A_ONLY_UID),
-            AiCreditsUsageAndCostType::BaseLimit,
-            AiCreditsUsageBucket::Ai,
-            AiCreditsUsageSource::Local,
+            Some("a-only-uid"),
+            Some(&team_a),
             10,
-            0,
         ),
-        entry(
+        attributed_entry(
             AiCreditsUsageAndCostSubjectType::User,
-            Some(B_ONLY_UID),
-            AiCreditsUsageAndCostType::BaseLimit,
-            AiCreditsUsageBucket::Ai,
-            AiCreditsUsageSource::Local,
+            Some("b-only-uid"),
+            Some(&team_b),
             20,
-            0,
         ),
     ];
 
-    let scoped = scope_entries_to_team(&entries, None);
+    let filtered = filter_entries_by_attributed_team(&entries, None);
 
-    assert_eq!(scoped.len(), 2, "no team context means no filtering");
+    assert_eq!(filtered.len(), 2, "no team context means no filtering");
 }
 
 #[test]
-fn scope_entries_to_team_keeps_only_entries_attributed_to_current_roster() {
-    let team_a = team_with_members(&[VIEWER_UID, A_ONLY_UID]);
+fn filter_entries_by_attributed_team_keeps_only_entries_matching_the_selected_team() {
+    let team_a = team_with_uid("team-a");
+    let team_b = team_with_uid("team-b");
     let entries = vec![
-        entry(
+        attributed_entry(
             AiCreditsUsageAndCostSubjectType::User,
-            Some(A_ONLY_UID),
-            AiCreditsUsageAndCostType::BaseLimit,
-            AiCreditsUsageBucket::Ai,
-            AiCreditsUsageSource::Local,
+            Some("a-only-uid"),
+            Some(&team_a),
             10,
-            0,
         ),
-        entry(
+        attributed_entry(
             AiCreditsUsageAndCostSubjectType::User,
-            Some(B_ONLY_UID),
-            AiCreditsUsageAndCostType::BaseLimit,
-            AiCreditsUsageBucket::Ai,
-            AiCreditsUsageSource::Local,
+            Some("b-only-uid"),
+            Some(&team_b),
             999,
-            0,
         ),
-        entry(
+        attributed_entry(
             AiCreditsUsageAndCostSubjectType::User,
+            Some("nobody"),
             None,
-            AiCreditsUsageAndCostType::BaseLimit,
-            AiCreditsUsageBucket::Ai,
-            AiCreditsUsageSource::Local,
             999,
-            0,
         ),
     ];
 
-    let scoped = scope_entries_to_team(&entries, Some(&team_a));
+    let filtered = filter_entries_by_attributed_team(&entries, Some(&team_a));
 
-    assert_eq!(scoped.len(), 1);
-    assert_eq!(scoped[0].subject_uid.as_deref(), Some(A_ONLY_UID));
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].subject_uid.as_deref(), Some("a-only-uid"));
 }
 
 #[test]
-fn scope_entries_to_team_keeps_a_shared_member_visible_in_both_teams() {
-    let team_a = team_with_members(&[VIEWER_UID, A_ONLY_UID]);
-    let team_b = team_with_members(&[VIEWER_UID, B_ONLY_UID]);
-    let entries = vec![entry(
+fn filter_entries_by_attributed_team_splits_a_shared_members_usage_by_attribution() {
+    // CRITICAL regression case: a member who belongs to both team A and team
+    // B has *two* entries, one attributed to each team. Roster membership
+    // alone can't tell these apart (the member is in both rosters), which is
+    // exactly the leak this filter must close: selecting team A must show
+    // only the A-attributed entry, never the B-attributed one, and vice
+    // versa.
+    let team_a = team_with_uid("team-a");
+    let team_b = team_with_uid("team-b");
+    let entries = vec![
+        attributed_entry(
+            AiCreditsUsageAndCostSubjectType::User,
+            Some(SHARED_UID),
+            Some(&team_a),
+            10,
+        ),
+        attributed_entry(
+            AiCreditsUsageAndCostSubjectType::User,
+            Some(SHARED_UID),
+            Some(&team_b),
+            20,
+        ),
+    ];
+
+    let under_a = filter_entries_by_attributed_team(&entries, Some(&team_a));
+    assert_eq!(
+        under_a.len(),
+        1,
+        "only the A-attributed entry should survive"
+    );
+    assert_eq!(under_a[0].credits_used, 10);
+
+    let under_b = filter_entries_by_attributed_team(&entries, Some(&team_b));
+    assert_eq!(
+        under_b.len(),
+        1,
+        "only the B-attributed entry should survive"
+    );
+    assert_eq!(under_b[0].credits_used, 20);
+}
+
+#[test]
+fn filter_entries_by_attributed_team_drops_unattributed_entries_when_team_selected() {
+    let team_a = team_with_uid("team-a");
+    let entries = vec![attributed_entry(
         AiCreditsUsageAndCostSubjectType::User,
-        Some(VIEWER_UID),
-        AiCreditsUsageAndCostType::BaseLimit,
-        AiCreditsUsageBucket::Ai,
-        AiCreditsUsageSource::Local,
+        Some("legacy-uid"),
+        None,
         10,
-        0,
     )];
 
-    assert_eq!(scope_entries_to_team(&entries, Some(&team_a)).len(), 1);
-    assert_eq!(scope_entries_to_team(&entries, Some(&team_b)).len(), 1);
+    assert!(filter_entries_by_attributed_team(&entries, Some(&team_a)).is_empty());
 }
 
 #[test]
-fn scope_entries_to_team_drops_the_synthetic_team_aggregate_row() {
-    // The workspace-wide "other members" rollup has no subject_uid to check,
-    // so it can't be safely attributed to the selected team; drop it rather
-    // than risk leaking another team's rolled-up usage.
-    let team_a = team_with_members(&[VIEWER_UID]);
-    let entries = vec![entry(
+fn filter_entries_by_attributed_team_keeps_the_synthetic_team_row_when_attributed_to_the_selected_team()
+ {
+    // The TeamAggregate "other members" rollup is scoped correctly as long
+    // as the server attributes it to a specific team; unlike roster
+    // membership, attribution can express this even though the row has no
+    // subject_uid.
+    let team_a = team_with_uid("team-a");
+    let entries = vec![attributed_entry(
         AiCreditsUsageAndCostSubjectType::Team,
         None,
-        AiCreditsUsageAndCostType::Aggregate,
-        AiCreditsUsageBucket::Aggregate,
-        AiCreditsUsageSource::Aggregate,
+        Some(&team_a),
         500,
-        300,
     )];
 
-    assert!(scope_entries_to_team(&entries, Some(&team_a)).is_empty());
+    assert_eq!(
+        filter_entries_by_attributed_team(&entries, Some(&team_a)).len(),
+        1
+    );
+}
+
+#[test]
+fn filter_entries_by_attributed_team_drops_the_synthetic_team_row_attributed_elsewhere() {
+    let team_a = team_with_uid("team-a");
+    let team_b = team_with_uid("team-b");
+    let entries = vec![attributed_entry(
+        AiCreditsUsageAndCostSubjectType::Team,
+        None,
+        Some(&team_b),
+        500,
+    )];
+
+    assert!(filter_entries_by_attributed_team(&entries, Some(&team_a)).is_empty());
+}
+
+#[test]
+fn filter_entries_by_attributed_team_keeps_a_departed_members_historical_entry() {
+    // A former team member no longer appears in `Team.members`, but their
+    // historical usage while they were on the team is still attributed to
+    // it, so it must remain visible — attribution, not current roster
+    // membership, is what decides this.
+    let team_a = team_with_uid("team-a");
+    let entries = vec![attributed_entry(
+        AiCreditsUsageAndCostSubjectType::User,
+        Some("departed-uid"),
+        Some(&team_a),
+        10,
+    )];
+
+    assert_eq!(
+        filter_entries_by_attributed_team(&entries, Some(&team_a)).len(),
+        1
+    );
+}
+
+#[test]
+fn filter_entries_by_attributed_team_keeps_a_service_accounts_attributed_entry() {
+    // Service accounts are never listed in `Team.members`, but their entries
+    // still carry real attribution and must not be dropped.
+    let team_a = team_with_uid("team-a");
+    let entries = vec![attributed_entry(
+        AiCreditsUsageAndCostSubjectType::ServiceAccount,
+        Some("agent-uid"),
+        Some(&team_a),
+        10,
+    )];
+
+    assert_eq!(
+        filter_entries_by_attributed_team(&entries, Some(&team_a)).len(),
+        1
+    );
 }
 
 #[test]
