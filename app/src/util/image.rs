@@ -45,9 +45,12 @@ pub const MAX_IMAGE_DIMENSION: f64 = 2000.;
 /// Maximum number of images that can be attached per query/task.
 pub const MAX_IMAGE_COUNT_FOR_QUERY: usize = 40;
 
-/// Caps the combined base64-encoded size of every image in a conversation (historical images
-/// plus the current query's), since these are resent to the provider in full on every turn.
-pub const MAX_IMAGE_PAYLOAD_BYTES_PER_CONVERSATION: usize = 18_000_000;
+/// Caps the combined base64-encoded size of every media attachment (images, video, or any other
+/// kind) in a conversation — historical attachments plus the current query's — since these are
+/// resent to the provider in full on every turn. This is the single authority for aggregate media
+/// payload size; new media types should add their own byte totals to the check against this
+/// constant rather than introducing a second budget.
+pub const MAX_MEDIA_PAYLOAD_BYTES_PER_CONVERSATION: usize = 18_000_000;
 
 /// Minimum bytes needed for image format detection using magic number signatures.
 pub const MIN_IMAGE_HEADER_SIZE: usize = 8;

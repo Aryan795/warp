@@ -125,7 +125,7 @@ use crate::util::bindings::{CustomAction, cmd_or_ctrl_shift, keybinding_name_to_
 use crate::util::clipboard::clipboard_content_with_escaped_paths;
 use crate::util::color::{ContrastingColor, MinimumAllowedContrast};
 use crate::util::image::{
-    MAX_IMAGE_COUNT_FOR_QUERY, MAX_IMAGE_PAYLOAD_BYTES_PER_CONVERSATION, MAX_IMAGE_SIZE_BYTES,
+    MAX_IMAGE_COUNT_FOR_QUERY, MAX_IMAGE_SIZE_BYTES, MAX_MEDIA_PAYLOAD_BYTES_PER_CONVERSATION,
     resize_image,
 };
 use crate::util::merge_ranges;
@@ -5320,8 +5320,8 @@ impl EditorView {
         );
 
         // Images already attached (and any already-sent conversation history) count against the
-        // aggregate payload budget too, since the server resends all of it on every turn.
-        let existing_payload_bytes: usize = self
+        // aggregate media payload budget too, since the server resends all of it on every turn.
+        let existing_media_payload_bytes: usize = self
             .context_model
             .as_ref()
             .map(|context_model| {
@@ -5340,7 +5340,7 @@ impl EditorView {
                 let mut num_oversized_images: usize = 0;
                 let mut num_unprocessed_images: usize = 0;
                 let mut num_over_payload_budget: usize = 0;
-                let mut payload_bytes = existing_payload_bytes;
+                let mut media_payload_bytes = existing_media_payload_bytes;
 
                 for image in pending_images {
                     let is_figma = is_figma_png(&image.data);
@@ -5361,11 +5361,13 @@ impl EditorView {
 
                     let base64_str = general_purpose::STANDARD.encode(&resized_image_bytes);
 
-                    if payload_bytes + base64_str.len() > MAX_IMAGE_PAYLOAD_BYTES_PER_CONVERSATION {
+                    if media_payload_bytes + base64_str.len()
+                        > MAX_MEDIA_PAYLOAD_BYTES_PER_CONVERSATION
+                    {
                         num_over_payload_budget += 1;
                         continue;
                     }
-                    payload_bytes += base64_str.len();
+                    media_payload_bytes += base64_str.len();
 
                     processed_pending_images.push(ImageContext {
                         data: base64_str,
@@ -5440,12 +5442,12 @@ impl EditorView {
                 if num_over_payload_budget > 0 {
                     let message = if num_over_payload_budget == 1 && num_images_user_attached == 1
                     {
-                        "Image cannot be attached - it would exceed the total image size limit for this conversation.".into()
+                        "Image cannot be attached - it would exceed the total media size limit for this conversation.".into()
                     } else if num_over_payload_budget == 1 {
-                        "1 image wasn't attached - it would exceed the total image size limit for this conversation.".into()
+                        "1 image wasn't attached - it would exceed the total media size limit for this conversation.".into()
                     } else {
                         format!(
-                            "{num_over_payload_budget} images weren't attached - they would exceed the total image size limit for this conversation."
+                            "{num_over_payload_budget} images weren't attached - they would exceed the total media size limit for this conversation."
                         )
                     };
 
