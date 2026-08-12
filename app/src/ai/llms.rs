@@ -210,7 +210,12 @@ pub fn model_provider_logo(llm: &LLMInfo) -> Icon {
 /// id, and users pick these rows by brand, so match on the family rather than
 /// dropping every one of them onto the generic agent glyph.
 fn model_family_logo(llm: &LLMInfo) -> Option<Icon> {
-    let is_kimi = |name: &str| name.trim_start().to_lowercase().starts_with("kimi");
+    const KIMI: &str = "kimi";
+    let is_kimi = |name: &str| {
+        name.trim_start()
+            .get(..KIMI.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(KIMI))
+    };
     (is_kimi(llm.id.as_str()) || is_kimi(&llm.base_model_name)).then_some(Icon::KimiLogo)
 }
 
