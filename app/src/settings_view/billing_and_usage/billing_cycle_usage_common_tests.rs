@@ -1,6 +1,9 @@
 use super::{
     BarSegment, aggregate_segments, filter_legacy_buckets, has_non_viewer_data, legend_cost_types,
+    scope_entries_to_team,
 };
+use crate::auth::UserUid;
+use crate::workspaces::team::{MembershipRole, Team, TeamMember};
 use crate::workspaces::workspace::{
     AiCreditsUsageAndCostSubjectType, AiCreditsUsageAndCostType, AiCreditsUsageBucket,
     AiCreditsUsageSource, BillingCycleUsageEntry,
@@ -8,6 +11,8 @@ use crate::workspaces::workspace::{
 
 const VIEWER_UID: &str = "viewer-uid";
 const OTHER_UID: &str = "other-uid";
+const A_ONLY_UID: &str = "a-only-uid";
+const B_ONLY_UID: &str = "b-only-uid";
 
 fn entry(
     subject_type: AiCreditsUsageAndCostSubjectType,
@@ -342,6 +347,128 @@ fn legend_cost_types_includes_used_buckets_in_display_order() {
         ],
         "used buckets should render in canonical order, not input order"
     );
+}
+
+fn team_member(uid: &str) -> TeamMember {
+    TeamMember {
+        uid: UserUid::new(uid),
+        email: format!("{uid}@example.com"),
+        role: MembershipRole::User,
+    }
+}
+
+fn team_with_members(uids: &[&str]) -> Team {
+    Team::from_local_cache(
+        crate::server::ids::ServerId::from_string_lossy("team_uid_1234567890123"),
+        "Team".to_string(),
+        None,
+        None,
+        Some(uids.iter().map(|uid| team_member(uid)).collect()),
+    )
+}
+
+#[test]
+fn scope_entries_to_team_passes_through_unfiltered_with_no_team_context() {
+    let entries = vec![
+        entry(
+            AiCreditsUsageAndCostSubjectType::User,
+            Some(A_ONLY_UID),
+            AiCreditsUsageAndCostType::BaseLimit,
+            AiCreditsUsageBucket::Ai,
+            AiCreditsUsageSource::Local,
+            10,
+            0,
+        ),
+        entry(
+            AiCreditsUsageAndCostSubjectType::User,
+            Some(B_ONLY_UID),
+            AiCreditsUsageAndCostType::BaseLimit,
+            AiCreditsUsageBucket::Ai,
+            AiCreditsUsageSource::Local,
+            20,
+            0,
+        ),
+    ];
+
+    let scoped = scope_entries_to_team(&entries, None);
+
+    assert_eq!(scoped.len(), 2, "no team context means no filtering");
+}
+
+#[test]
+fn scope_entries_to_team_keeps_only_entries_attributed_to_current_roster() {
+    let team_a = team_with_members(&[VIEWER_UID, A_ONLY_UID]);
+    let entries = vec![
+        entry(
+            AiCreditsUsageAndCostSubjectType::User,
+            Some(A_ONLY_UID),
+            AiCreditsUsageAndCostType::BaseLimit,
+            AiCreditsUsageBucket::Ai,
+            AiCreditsUsageSource::Local,
+            10,
+            0,
+        ),
+        entry(
+            AiCreditsUsageAndCostSubjectType::User,
+            Some(B_ONLY_UID),
+            AiCreditsUsageAndCostType::BaseLimit,
+            AiCreditsUsageBucket::Ai,
+            AiCreditsUsageSource::Local,
+            999,
+            0,
+        ),
+        entry(
+            AiCreditsUsageAndCostSubjectType::User,
+            None,
+            AiCreditsUsageAndCostType::BaseLimit,
+            AiCreditsUsageBucket::Ai,
+            AiCreditsUsageSource::Local,
+            999,
+            0,
+        ),
+    ];
+
+    let scoped = scope_entries_to_team(&entries, Some(&team_a));
+
+    assert_eq!(scoped.len(), 1);
+    assert_eq!(scoped[0].subject_uid.as_deref(), Some(A_ONLY_UID));
+}
+
+#[test]
+fn scope_entries_to_team_keeps_a_shared_member_visible_in_both_teams() {
+    let team_a = team_with_members(&[VIEWER_UID, A_ONLY_UID]);
+    let team_b = team_with_members(&[VIEWER_UID, B_ONLY_UID]);
+    let entries = vec![entry(
+        AiCreditsUsageAndCostSubjectType::User,
+        Some(VIEWER_UID),
+        AiCreditsUsageAndCostType::BaseLimit,
+        AiCreditsUsageBucket::Ai,
+        AiCreditsUsageSource::Local,
+        10,
+        0,
+    )];
+
+    assert_eq!(scope_entries_to_team(&entries, Some(&team_a)).len(), 1);
+    assert_eq!(scope_entries_to_team(&entries, Some(&team_b)).len(), 1);
+}
+
+#[test]
+fn scope_entries_to_team_drops_the_synthetic_team_aggregate_row() {
+    // The workspace-wide "other members" rollup has no subject_uid to check,
+    // so it can't be safely attributed to the selected team; drop it rather
+    // than risk leaking another team's rolled-up usage.
+    let team_a = team_with_members(&[VIEWER_UID]);
+    let entries = vec![entry(
+        AiCreditsUsageAndCostSubjectType::Team,
+        None,
+        AiCreditsUsageAndCostType::Aggregate,
+        AiCreditsUsageBucket::Aggregate,
+        AiCreditsUsageSource::Aggregate,
+        500,
+        300,
+    )];
+
+    assert!(scope_entries_to_team(&entries, Some(&team_a)).is_empty());
 }
 
 #[test]
