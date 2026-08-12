@@ -374,10 +374,17 @@ impl RunAgentsExecutor {
                     execution_mode: launched_mode,
                     agents,
                 };
-                me.pending.remove(&action_id_for_aggr);
-                ctx.emit(RunAgentsExecutorEvent::SpawningFinished {
-                    action_id: action_id_for_aggr,
-                });
+                // A `cancel_execution` call in the meantime already removed
+                // the pending marker and emitted its own terminal
+                // `SpawningFinished` for this action_id; don't emit a
+                // second one for a completion that arrives afterward.
+                // Bookkeeping (`record_launched_agents` above) and the
+                // result channel send below still run either way.
+                if me.pending.remove(&action_id_for_aggr).is_some() {
+                    ctx.emit(RunAgentsExecutorEvent::SpawningFinished {
+                        action_id: action_id_for_aggr,
+                    });
+                }
                 let _ = sender.try_send(result);
             },
         );

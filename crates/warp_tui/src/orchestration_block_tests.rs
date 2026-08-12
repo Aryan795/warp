@@ -6,17 +6,17 @@ use ai::agent::orchestration_config::{
 };
 use warp::tui_export::{
     AIActionStatus, AIAgentAction, AIAgentActionId, AIAgentActionType, AIConversationId,
-    Appearance, AuthSecretSelection, BlocklistAIHistoryModel, OptionRow, OptionSnapshot,
-    OptionSourceStatus, OrchestrationConfigState, OrchestrationEditState, RunAgentsAgentRunConfig,
+    Appearance, AuthSecretSelection, OptionRow, OptionSnapshot, OptionSourceStatus,
+    OrchestrationConfigState, OrchestrationEditState, RunAgentsAgentRunConfig,
     RunAgentsExecutionMode, RunAgentsRequest, TaskId, register_tui_session_view_test_singletons,
 };
 use warp_core::features::FeatureFlag;
 use warpui::platform::WindowStyle;
-use warpui::{AddWindowOptions, App, SingletonEntity, ViewHandle};
+use warpui::{AddWindowOptions, App, AppContext, ViewHandle};
 use warpui_core::elements::tui::{TuiBufferExt, TuiRect};
 use warpui_core::keymap::Keystroke;
 use warpui_core::presenter::tui::TuiPresenter;
-use warpui_core::{EntityId, TuiView as _, TypedActionView as _, WindowInvalidation};
+use warpui_core::{TuiView as _, TypedActionView as _, WindowInvalidation};
 
 use super::{
     CardMode, ConfigPage, OrchestrationBlockController, TuiOrchestrationBlock,
@@ -364,6 +364,13 @@ fn row(id: &str, label: &str) -> OptionRow {
     }
 }
 
+/// A stand-in for "the exchange's response stream is still streaming",
+/// used by tests that don't exercise the streaming-vs-cancelled fallback
+/// and so just need a stable, always-true signal.
+fn always_streaming() -> Rc<dyn Fn(&AppContext) -> bool> {
+    Rc::new(|_: &AppContext| true)
+}
+
 /// Constructs an interactive block with the local fake controller.
 fn test_block(
     app: &mut App,
@@ -398,6 +405,7 @@ fn test_block(
                 Some("auto".to_string()),
                 false,
                 Vec::new(),
+                always_streaming(),
                 ctx,
             )
         })
@@ -444,6 +452,7 @@ fn renderable_test_block(app: &mut App) -> ViewHandle<TuiOrchestrationBlock> {
                 Some("auto".to_string()),
                 false,
                 Vec::new(),
+                always_streaming(),
                 ctx,
             )
         })
@@ -463,13 +472,13 @@ fn rendered_block_lines(block: &ViewHandle<TuiOrchestrationBlock>, app: &App) ->
     })
 }
 
-/// Builds a block for the given conversation with a custom controller
+/// Builds a block with a custom controller and streaming signal
 /// (bypassing `TuiOrchestrationBlock::new`'s model subscriptions, like
 /// `test_block`/`renderable_test_block`).
-fn test_block_with_controller_and_conversation(
+fn test_block_with_controller_and_streaming(
     app: &mut App,
-    conversation_id: AIConversationId,
     controller: Rc<dyn OrchestrationBlockController>,
+    is_output_streaming: Rc<dyn Fn(&AppContext) -> bool>,
 ) -> ViewHandle<TuiOrchestrationBlock> {
     let request = request("oz", RunAgentsExecutionMode::Local);
     let action = AIAgentAction {
@@ -488,7 +497,7 @@ fn test_block_with_controller_and_conversation(
         );
         ctx.add_typed_action_tui_view(window_id, move |ctx| {
             TuiOrchestrationBlock::from_parts(
-                conversation_id,
+                AIConversationId::new(),
                 action,
                 &request,
                 None,
@@ -496,29 +505,26 @@ fn test_block_with_controller_and_conversation(
                 Some("auto".to_string()),
                 false,
                 Vec::new(),
+                is_output_streaming,
                 ctx,
             )
         })
     })
 }
 
-/// A `run_agents` tool call with no action status is normally still being
-/// streamed. Lightweight test harnesses that never register the history
-/// model (like `test_block`) can't tell the difference, so the fallback
-/// must default to the "still streaming" placeholder rather than guessing
-/// cancelled or panicking on a missing singleton.
+/// A `run_agents` tool call with no action status is genuinely still being
+/// streamed while its exchange's own response stream is still streaming
+/// (the same signal the GUI card reads from its `AIBlockModel`) — the
+/// fallback must keep showing the "still constructing" placeholder.
 #[test]
-fn no_status_with_unregistered_history_model_keeps_configuring_placeholder() {
+fn no_status_while_output_is_streaming_keeps_configuring_placeholder() {
     App::test((), |mut app| async move {
         app.add_singleton_model(|_| Appearance::mock());
         app.update(warp_core::telemetry::testing::MockTelemetryContextProvider::register);
         let controller: Rc<dyn OrchestrationBlockController> =
             Rc::new(TestController::with_status(None));
-        let block = test_block_with_controller_and_conversation(
-            &mut app,
-            AIConversationId::new(),
-            controller,
-        );
+        let block =
+            test_block_with_controller_and_streaming(&mut app, controller, always_streaming());
         let lines = rendered_block_lines(&block, &app);
         assert!(
             lines.iter().any(|line| line.contains("Configuring agents")),
@@ -527,52 +533,24 @@ fn no_status_with_unregistered_history_model_keeps_configuring_placeholder() {
     });
 }
 
-/// Once the history model is available but the block's conversation was
-/// never added to it — mirroring a response stream cancelled before the
-/// `run_agents` tool call finished streaming, so the action never reached
-/// the action model — the block must not hang on the "Configuring
-/// agents…" placeholder forever.
+/// Once the exchange's own response stream has stopped streaming —
+/// mirroring a stream cancelled before the `run_agents` tool call finished
+/// streaming, so the action never reached the action model — the block
+/// must not hang on the "Configuring agents…" placeholder forever.
 #[test]
-fn no_status_after_conversation_leaves_history_shows_cancelled() {
+fn no_status_after_output_stops_streaming_shows_cancelled() {
     App::test((), |mut app| async move {
-        register_tui_session_view_test_singletons(&mut app);
+        app.add_singleton_model(|_| Appearance::mock());
+        app.update(warp_core::telemetry::testing::MockTelemetryContextProvider::register);
         let controller: Rc<dyn OrchestrationBlockController> =
             Rc::new(TestController::with_status(None));
-        let block = test_block_with_controller_and_conversation(
-            &mut app,
-            AIConversationId::new(),
-            controller,
-        );
+        let not_streaming: Rc<dyn Fn(&AppContext) -> bool> = Rc::new(|_: &AppContext| false);
+        let block = test_block_with_controller_and_streaming(&mut app, controller, not_streaming);
         let lines = rendered_block_lines(&block, &app);
         assert!(
             lines
                 .iter()
                 .any(|line| line.contains("Spawn agents cancelled")),
-            "{lines:?}"
-        );
-    });
-}
-
-/// A `run_agents` tool call with no status whose conversation is still
-/// genuinely in progress must keep showing the "still streaming"
-/// placeholder, not the cancelled fallback.
-#[test]
-fn no_status_while_conversation_still_in_progress_keeps_configuring_placeholder() {
-    App::test((), |mut app| async move {
-        register_tui_session_view_test_singletons(&mut app);
-        let conversation_id = app.update(|ctx| {
-            let terminal_view_id = EntityId::new();
-            BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
-                history.start_new_conversation(terminal_view_id, false, false, false, ctx)
-            })
-        });
-        let controller: Rc<dyn OrchestrationBlockController> =
-            Rc::new(TestController::with_status(None));
-        let block =
-            test_block_with_controller_and_conversation(&mut app, conversation_id, controller);
-        let lines = rendered_block_lines(&block, &app);
-        assert!(
-            lines.iter().any(|line| line.contains("Configuring agents")),
             "{lines:?}"
         );
     });

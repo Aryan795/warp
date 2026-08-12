@@ -1,9 +1,9 @@
 //! Element construction for the orchestration card.
 
 use warp::tui_export::{
-    AIActionStatus, AuthSecretSelection, BlocklistAIHistoryModel, Harness,
-    HarnessAvailabilityModel, ORCHESTRATION_WARP_WORKER_HOST, OptionSnapshot,
-    RunAgentsExecutionMode, empty_env_recommendation_message, environment_snapshot, model_snapshot,
+    AIActionStatus, AuthSecretSelection, Harness, HarnessAvailabilityModel,
+    ORCHESTRATION_WARP_WORKER_HOST, OptionSnapshot, RunAgentsExecutionMode,
+    empty_env_recommendation_message, environment_snapshot, model_snapshot,
     should_show_auth_secret_picker,
 };
 use warp_core::features::FeatureFlag;
@@ -243,22 +243,6 @@ impl TuiOrchestrationBlock {
     }
 }
 
-/// Whether the block's owning conversation is still actively producing
-/// output. Used to distinguish a `run_agents` tool call that is genuinely
-/// still being constructed from one that will never reach the action model
-/// at all because the response stream was cancelled before it finished
-/// streaming (see `render` below). Some lightweight test harnesses don't
-/// register the history model; treat that as "still in progress" rather
-/// than risk an incorrect cancelled render.
-fn conversation_in_progress(block: &TuiOrchestrationBlock, app: &AppContext) -> bool {
-    if !app.has_singleton_model::<BlocklistAIHistoryModel>() {
-        return true;
-    }
-    BlocklistAIHistoryModel::as_ref(app)
-        .conversation(&block.conversation_id)
-        .is_some_and(|conversation| conversation.status().is_in_progress())
-}
-
 /// Renders the terminal "cancelled" row for a `run_agents` tool call whose
 /// arguments never finished streaming: the action never reached the action
 /// model (`status` stays `None` forever), so it can never become `Blocked`
@@ -291,13 +275,14 @@ pub(super) fn render(block: &TuiOrchestrationBlock, app: &AppContext) -> Box<dyn
         && matches!(status, Some(AIActionStatus::Blocked));
     if !interactive {
         // A `run_agents` tool call with no status at all is normally still
-        // being constructed. But if the owning conversation has already
-        // stopped producing output (e.g. the response stream was cancelled
+        // being constructed. But if the owning exchange's own response
+        // stream has already stopped streaming (e.g. it was cancelled
         // mid-construction), the action will never be queued and `status`
         // stays `None` forever — the shared fallback would otherwise show
         // "Configuring agents…" indefinitely. Render the terminal cancelled
-        // row instead, mirroring the GUI card's equivalent fix.
-        if status.is_none() && !conversation_in_progress(block, app) {
+        // row instead, mirroring the GUI card's equivalent fix (both read
+        // the same underlying `AIBlockOutputStatus::is_streaming` signal).
+        if status.is_none() && !(block.is_output_streaming)(app) {
             return render_cancelled_before_construction(app);
         }
         return render_fallback_tool_call_section(&block.action, status.as_ref(), false, None, app);
