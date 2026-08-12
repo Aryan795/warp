@@ -1267,12 +1267,8 @@ impl View for RunAgentsCardView {
         // Cancelled. Must be checked before the streaming gate below,
         // because restored blocks have no pending action status.
         if self.block_model.is_restored() {
-            return render_status_only_card(
-                "Spawn agents cancelled".to_string(),
-                appearance,
-                StatusKind::Cancelled,
-                app,
-            );
+            let (label, kind) = format_terminal_state(&RunAgentsResult::Cancelled);
+            return render_status_only_card(label, appearance, kind, app);
         }
 
         // Still streaming: show "Configuring agents..." placeholder until
