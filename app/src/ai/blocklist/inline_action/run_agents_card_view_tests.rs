@@ -324,6 +324,28 @@ fn to_request_round_trips_request_fields() {
     assert_eq!(round_tripped.plan_id, req.plan_id);
 }
 
+mod pending_confirmation_status_tests {
+    use super::super::{StatusKind, pending_confirmation_status};
+
+    // Regression test for the bug where cancelling the conversation while a
+    // `run_agents` tool call is still streaming (i.e. before the action is
+    // ever queued into the action model) left the card spinning on
+    // "Configuring agents..." forever, with no cancelled state ever shown.
+    #[test]
+    fn block_cancelled_while_awaiting_confirmation_renders_cancelled() {
+        let (label, kind) = pending_confirmation_status(true);
+        assert_eq!(label, "Spawn agents cancelled");
+        assert!(matches!(kind, StatusKind::Cancelled));
+    }
+
+    #[test]
+    fn block_not_cancelled_while_awaiting_confirmation_renders_spawning_placeholder() {
+        let (label, kind) = pending_confirmation_status(false);
+        assert_eq!(label, "Configuring agents\u{2026}");
+        assert!(matches!(kind, StatusKind::Spawning));
+    }
+}
+
 mod format_terminal_state_tests {
     use super::super::{StatusKind, format_terminal_state};
     use super::*;
