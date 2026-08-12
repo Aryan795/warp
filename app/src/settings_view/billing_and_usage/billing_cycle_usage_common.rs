@@ -197,6 +197,23 @@ pub fn filter_legacy_buckets(entries: &[BillingCycleUsageEntry]) -> Vec<BillingC
         .collect()
 }
 
+/// Restricts `entries` to the usage billed against `team_uid`.
+///
+/// A workspace's `billing_cycle_usage` history spans every team the viewer can
+/// see, so an admin of team A would otherwise find team B's members listed on
+/// this page. Entries the server couldn't attribute to a team are dropped too,
+/// matching `filterEntriesByAttributedTeam` in the web billing settings.
+pub fn filter_entries_for_team(
+    entries: &[BillingCycleUsageEntry],
+    team_uid: &str,
+) -> Vec<BillingCycleUsageEntry> {
+    entries
+        .iter()
+        .filter(|entry| entry.attributed_team_uid.as_deref() == Some(team_uid))
+        .cloned()
+        .collect()
+}
+
 /// Cost-type buckets to surface in the usage legend, in display order.
 ///
 /// Mirrors the buckets the stacked bars actually render: legacy buckets are
