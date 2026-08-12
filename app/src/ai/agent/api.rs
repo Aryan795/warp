@@ -162,6 +162,10 @@ pub struct RequestParams {
     pub parent_agent_id: Option<String>,
     /// The display name for this agent (e.g. "Agent 1"), assigned by the orchestrator.
     pub agent_name: Option<String>,
+    /// The UID of the team active in the request's window, if the user belongs to one.
+    /// Sent so the server can attribute the request to this team instead of guessing
+    /// (e.g. for a user who belongs to more than one team).
+    pub team_uid: Option<String>,
 }
 
 pub type Event = Result<warp_multi_agent_api::ResponseEvent, Arc<AIApiError>>;
@@ -221,6 +225,7 @@ impl RequestParams {
             supported_tools_override: None,
             parent_agent_id: None,
             agent_name: None,
+            team_uid: None,
         }
     }
 
@@ -383,6 +388,13 @@ impl RequestParams {
             .data()
             .context_window_limit_for_request(app);
 
+        // Send the team active in this request's window, so the server can attribute
+        // the request to it instead of guessing (e.g. for a user on more than one team).
+        let window_id = terminal_view_id.and_then(|id| app.window_id_for_view(id));
+        let team_uid = user_workspaces
+            .inherited_or_default_team_uid(window_id)
+            .map(|team_uid| team_uid.to_string());
+
         Self {
             input: request_input.all_inputs().cloned().collect(),
             conversation_token: conversation.server_conversation_token,
@@ -416,6 +428,7 @@ impl RequestParams {
             supported_tools_override: request_input.supported_tools_override.clone(),
             parent_agent_id: None,
             agent_name: None,
+            team_uid,
         }
     }
 }
