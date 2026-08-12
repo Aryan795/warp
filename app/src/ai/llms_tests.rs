@@ -376,6 +376,34 @@ fn precedence_branches_win_over_kimi_detection() {
     );
 }
 
+#[test]
+fn custom_endpoint_aliased_kimi_keeps_generic_presentation() {
+    // A custom endpoint's display label / alias is entirely user-controlled (see
+    // `custom_llm_info_from`), so it must never be eligible for the Kimi heuristic —
+    // otherwise a user could alias a proxy model "Kimi Proxy" and have it impersonate
+    // Moonshot AI's mark.
+    let mut llm = server_llm("kimi-proxy", None);
+    llm.base_model_name = "Kimi Proxy".to_string();
+
+    assert_eq!(
+        model_leading_icon(
+            &llm,
+            ModelIconFlags {
+                is_custom_endpoint: true,
+                ..Default::default()
+            }
+        ),
+        Icon::Agent
+    );
+
+    // Sanity check: without the custom-endpoint flag, this exact id/name would
+    // otherwise resolve to the Kimi logo, confirming the flag is what's suppressing it.
+    assert_eq!(
+        model_leading_icon(&llm, ModelIconFlags::default()),
+        Icon::KimiLogo
+    );
+}
+
 // -- build_custom_llm_infos / display label tests --
 
 fn endpoint(
