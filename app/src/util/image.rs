@@ -42,14 +42,15 @@ pub const MAX_IMAGE_PIXELS: f64 = 1150. * 1000.;
 /// Maximum dimension (width or height) for images.
 pub const MAX_IMAGE_DIMENSION: f64 = 2000.;
 
-/// Maximum number of images that can be attached per query/task.
+/// Fast, attach-time feedback only — not a correctness guarantee. The server's model-aware
+/// media pruning (run once the resolved model for a request is known) is what actually keeps a
+/// request within what that model can accept; this constant exists purely so the user gets
+/// immediate feedback in the composer rather than waiting for a round trip.
 pub const MAX_IMAGE_COUNT_FOR_QUERY: usize = 40;
 
-/// Caps the combined base64-encoded size of every media attachment (images, video, or any other
-/// kind) in a conversation — historical attachments plus the current query's — since these are
-/// resent to the provider in full on every turn. This is the single authority for aggregate media
-/// payload size; new media types should add their own byte totals to the check against this
-/// constant rather than introducing a second budget.
+/// Fast, attach-time feedback only — not a correctness guarantee. See
+/// `MAX_IMAGE_COUNT_FOR_QUERY`'s doc comment: the server's model-aware media pruning is the real
+/// enforcement mechanism for aggregate media payload size across a conversation.
 pub const MAX_MEDIA_PAYLOAD_BYTES_PER_CONVERSATION: usize = 18_000_000;
 
 /// Minimum bytes needed for image format detection using magic number signatures.

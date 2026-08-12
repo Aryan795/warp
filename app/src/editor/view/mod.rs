@@ -142,7 +142,9 @@ pub const ACCEPT_AUTOSUGGESTION_KEYBINDING_NAME: &str = "editor_view:insert_auto
 pub const VOICE_LIMIT_HIT_TOAST_TEXT: &str = "You have hit the limit for Voice requests. Your limit will be refreshed as a part of your next cycle.";
 pub const VOICE_ERROR_TOAST_TEXT: &str = "An error occurred while processing your voice input.";
 
-/// Maximum number of images that may accumulate in a single conversation.
+/// Fast, attach-time feedback only — not a correctness guarantee. See
+/// `crate::util::image::MAX_IMAGE_COUNT_FOR_QUERY`'s doc comment: the server's model-aware media
+/// pruning is the real enforcement mechanism for how many images can accumulate in a conversation.
 pub const MAX_IMAGES_PER_CONVERSATION: usize = 300;
 
 use warpui::clipboard_utils::CLIPBOARD_IMAGE_MIME_TYPES;
