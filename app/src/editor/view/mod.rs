@@ -12,7 +12,7 @@ use std::cmp::{self, Ordering};
 use std::collections::HashMap;
 use std::fmt;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -93,7 +93,7 @@ use self::model::{LocalSelections, Selection, UpdateBufferOption};
 use super::Point;
 use super::soft_wrap::{ClampDirection, DisplayPointAndClampDirection};
 use crate::BlocklistAIHistoryModel;
-use crate::ai::agent::ImageContext;
+use crate::ai::agent::{ImageContext, NativeVideoAttachment};
 use crate::ai::blocklist::{BlocklistAIContextModel, InputType, PendingAttachment, PendingFile};
 use crate::ai::predict::next_command_model::{NextCommandModel, NextCommandSuggestionState};
 use crate::appearance::Appearance;
@@ -116,7 +116,9 @@ use crate::settings::{
 use crate::settings_view::flags;
 use crate::suggestions::ignored_suggestions_model::{IgnoredSuggestionsModel, SuggestionType};
 use crate::terminal::grid_size_util::grid_cell_dimensions;
+use crate::terminal::input::video_attach_banner::VideoAttachBannerAction;
 use crate::terminal::model::block::BlockId;
+use crate::terminal::view::TerminalAction;
 use crate::themes::theme::Fill;
 use crate::ui_components::avatar::{Avatar, AvatarContent};
 use crate::ui_components::buttons::icon_button;
@@ -1109,6 +1111,13 @@ pub enum EditorAction {
     ProcessNonImageFiles {
         file_paths: Vec<String>,
     },
+    /// Extracts frames (and optionally an audio transcript) from a video the user confirmed
+    /// attaching via the video-attach banner, then attaches the frames as image context.
+    ReadAndProcessVideoAsync {
+        file_path: PathBuf,
+        file_name: String,
+        include_audio: bool,
+    },
 }
 
 impl EditorAction {
@@ -1925,6 +1934,24 @@ pub struct EditorView {
     drag_drop_path_transformer: Option<PathTransformerFn>,
 
     process_attached_images_future_handle: Option<SpawnedFutureHandle>,
+
+    /// Handle for the in-flight frame-extraction task started by
+    /// [`Self::read_and_process_video_async`]. Kept alive here so the task isn't dropped/aborted
+    /// before it completes.
+    process_attached_video_future_handle: Option<SpawnedFutureHandle>,
+
+    /// Handle for the in-flight audio-transcription task started by
+    /// [`Self::read_and_process_video_async`] when the "include audio transcript" checkbox is
+    /// checked.
+    video_audio_transcript_future_handle: Option<SpawnedFutureHandle>,
+
+    /// File names of the image-context frames most recently attached by
+    /// [`Self::read_and_process_video_async`], if any are still pending. Used to verify, when an
+    /// in-flight audio transcript resolves, that its video's frames are still pending (i.e. the
+    /// query hasn't already been sent) before inserting the transcript text — frame extraction
+    /// and transcription run as independent async tasks, so this is the only way to avoid a
+    /// transcript landing in an unrelated later query.
+    video_pending_frame_file_names: Option<Vec<String>>,
 
     is_password: bool,
 
@@ -3263,6 +3290,9 @@ impl EditorView {
             delegate_paste_handling: options.delegate_paste_handling,
             drag_drop_path_transformer: options.drag_drop_path_transformer,
             process_attached_images_future_handle: None,
+            process_attached_video_future_handle: None,
+            video_audio_transcript_future_handle: None,
+            video_pending_frame_file_names: None,
             is_password: options.is_password,
             keymap_context_modifier: options.keymap_context_modifier,
         }
@@ -5061,8 +5091,11 @@ impl EditorView {
             move |result, ctx| {
                 match result {
                     Ok(paths) => {
-                        // Split picked paths into image and non-image files by MIME type.
+                        // Split picked paths into image, video, and other (non-image) files by
+                        // MIME type. Video is handled separately from the generic non-image
+                        // file path since it needs a confirmation banner before processing.
                         let mut image_paths = Vec::new();
+                        let mut video_paths = Vec::new();
                         let mut non_image_paths = Vec::new();
                         for path in &paths {
                             let mime = mime_guess::from_path(path)
@@ -5070,8 +5103,41 @@ impl EditorView {
                                 .to_string();
                             if CLIPBOARD_IMAGE_MIME_TYPES.contains(&mime.as_str()) {
                                 image_paths.push(path.clone());
+                            } else if FeatureFlag::VideoAsContext.is_enabled()
+                                && crate::util::video::is_supported_video_mime_type(&mime)
+                            {
+                                video_paths.push(path.clone());
                             } else {
                                 non_image_paths.push(path.clone());
+                            }
+                        }
+
+                        // This prototype only supports attaching one video at a time; show the
+                        // confirmation banner for the first one and drop the rest with a toast.
+                        if let Some(video_path) = video_paths.first().cloned() {
+                            let file_name = Path::new(&video_path)
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or(&video_path)
+                                .to_string();
+                            ctx.dispatch_typed_action(&TerminalAction::VideoAttachBanner(
+                                VideoAttachBannerAction::Show {
+                                    file_path: PathBuf::from(video_path),
+                                    file_name,
+                                },
+                            ));
+
+                            if video_paths.len() > 1 {
+                                ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                                    toast_stack.add_persistent_toast(
+                                        DismissibleToast::error(
+                                            "Only one video can be attached at a time - the rest weren't attached."
+                                                .to_string(),
+                                        ),
+                                        window_id,
+                                        ctx,
+                                    );
+                                });
                             }
                         }
 
@@ -5376,6 +5442,7 @@ impl EditorView {
                         mime_type: image.mime_type,
                         file_name: image.file_name,
                         is_figma,
+                        source_video_file_name: None,
                     });
                 }
 
@@ -5498,6 +5565,398 @@ impl EditorView {
             context_model.update(ctx, |context_model, ctx| {
                 context_model.append_pending_attachments(attachments, ctx);
             });
+        }
+    }
+
+    /// Extracts frames from a video the user confirmed attaching via the video-attach banner, and
+    /// (when under the size cap) reads the video's raw bytes for native sending, then attaches
+    /// both as a single grouped attachment.
+    ///
+    /// Frames flow through the existing image-as-context path, since most providers we route to
+    /// don't accept video directly; the raw bytes are used instead when the request resolves to a
+    /// provider that does (currently Gemini) -- see `video::read_native_video` and
+    /// `AIAgentContext::Video`. Only one of the two representations is ever actually used for a
+    /// given request. When `include_audio` is set, the video's audio track is also separately
+    /// transcribed (via the same transcription endpoint used for voice input) and the transcript
+    /// is inserted as plain text into the query buffer, so a request that falls back to frames
+    /// still gets some signal from the audio; the native video's own audio track is preserved (or
+    /// stripped) client-side based on the same checkbox, so Gemini never needs the transcript.
+    pub fn read_and_process_video_async(
+        &mut self,
+        file_path: PathBuf,
+        file_name: String,
+        include_audio: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if !FeatureFlag::VideoAsContext.is_enabled() || !self.image_context_options.is_enabled() {
+            if self.image_context_options.is_unsupported_model() {
+                let window_id = ctx.window_id();
+                ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                    toast_stack.add_ephemeral_toast(
+                        DismissibleToast::error(
+                            "The selected model does not support images as context".to_owned(),
+                        ),
+                        window_id,
+                        ctx,
+                    );
+                });
+            }
+            return;
+        }
+
+        let window_id = ctx.window_id();
+        let frames_file_name = file_name.clone();
+
+        // Reserve room for these frames within the existing per-query and per-conversation image
+        // limits *before* extraction begins. Attaching up to `MAX_VIDEO_FRAMES` unconditionally
+        // would let a query silently exceed the server's per-query image limit (which then
+        // rejects the whole request) whenever images were already pending.
+        let num_images_attached = self.image_context_options.num_images_attached();
+        let num_images_in_conversation = self.image_context_options.num_images_in_conversation();
+        let max_frames = crate::util::video::capped_frame_count(
+            crate::util::video::MAX_VIDEO_FRAMES,
+            num_images_attached,
+            num_images_in_conversation,
+            MAX_IMAGE_COUNT_FOR_QUERY,
+            MAX_IMAGES_PER_CONVERSATION,
+        );
+        if max_frames == 0 {
+            let limit_reason = if MAX_IMAGE_COUNT_FOR_QUERY.saturating_sub(num_images_attached) == 0
+            {
+                format!("limit is {MAX_IMAGE_COUNT_FOR_QUERY} images per query")
+            } else {
+                format!("limit is {MAX_IMAGES_PER_CONVERSATION} images per conversation")
+            };
+            ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                toast_stack.add_persistent_toast(
+                    DismissibleToast::error(format!(
+                        "Couldn't attach \u{201c}{file_name}\u{201d} as frames \u{2014} {limit_reason}."
+                    )),
+                    window_id,
+                    ctx,
+                );
+            });
+            return;
+        }
+        let min_frames = crate::util::video::MIN_VIDEO_FRAMES.min(max_frames);
+        let source_video_mime_type = from_path(&file_path).first_or_octet_stream().to_string();
+
+        // Clear any stale association from a previous video attach so an in-flight transcript
+        // for that earlier video can't be mistaken for applying to this one.
+        self.video_pending_frame_file_names = None;
+
+        self.process_attached_video_future_handle = Some(ctx.spawn(
+            {
+                let file_path = file_path.clone();
+                let source_video_mime_type = source_video_mime_type.clone();
+                async move {
+                    // Native video bytes (used if the resolved model supports native video) and
+                    // the frame-extraction fallback (used otherwise) are computed together so a
+                    // single video attachment always carries both representations -- the server
+                    // decides which one a given request actually needs.
+                    let frames_result =
+                        crate::util::video::extract_frames(&file_path, max_frames, min_frames)
+                            .await;
+                    let native_video = crate::util::video::read_native_video(
+                        &file_path,
+                        &source_video_mime_type,
+                        include_audio,
+                    )
+                    .await;
+                    (frames_result, native_video)
+                }
+            },
+            move |this, (result, native_video), ctx| {
+                // Future was aborted.
+                if this.process_attached_video_future_handle.is_none() {
+                    return;
+                }
+
+                let native_video =
+                    native_video.map(|(data, mime_type)| NativeVideoAttachment { data, mime_type });
+
+                match result {
+                    Ok(frames) => {
+                        let requested_frame_count = frames.len();
+                        let mut num_oversized_frames = 0;
+                        let frame_contexts: Vec<ImageContext> = frames
+                            .into_iter()
+                            .enumerate()
+                            .filter_map(|(index, frame)| {
+                                // Frames are already downscaled by ffmpeg (see `FRAME_MAX_EDGE_PX`
+                                // in `util::video`), so unlike raw user-picked images they don't
+                                // need a second client-side resize pass — just a defensive size
+                                // check before base64-encoding.
+                                if frame.data.len() > MAX_IMAGE_SIZE_BYTES {
+                                    num_oversized_frames += 1;
+                                    return None;
+                                }
+                                Some(ImageContext {
+                                    data: general_purpose::STANDARD.encode(&frame.data),
+                                    mime_type: "image/jpeg".to_owned(),
+                                    file_name: format!(
+                                        "{frames_file_name}-frame-{:02}.jpg",
+                                        index + 1
+                                    ),
+                                    is_figma: false,
+                                    source_video_file_name: Some(frames_file_name.clone()),
+                                })
+                            })
+                            .collect();
+                        let frame_count = frame_contexts.len();
+
+                        this.video_pending_frame_file_names = if frame_contexts.is_empty() {
+                            None
+                        } else {
+                            Some(
+                                frame_contexts
+                                    .iter()
+                                    .map(|frame| frame.file_name.clone())
+                                    .collect(),
+                            )
+                        };
+
+                        // Grouped into a single `PendingAttachment::Video` so the composer shows
+                        // one chip for the whole video rather than one per frame. The frames
+                        // themselves are unpacked back into individual `AIAgentContext::Image`
+                        // entries when the query is sent — only the composer's presentation
+                        // differs from a regular multi-image attachment.
+                        let native_video_present = native_video.is_some();
+                        if let Some(context_model) = &this.context_model {
+                            context_model.update(ctx, |context_model, ctx| {
+                                context_model.append_pending_video(
+                                    frames_file_name.clone(),
+                                    frame_contexts,
+                                    native_video,
+                                    ctx,
+                                );
+                            });
+                        }
+
+                        if frame_count > 0 {
+                            let frame_word = if frame_count == 1 { "frame" } else { "frames" };
+                            let native_note = if native_video_present {
+                                "used natively for models that support it, or as still frames otherwise"
+                            } else {
+                                "attached as still frames \u{2014} too large to send natively"
+                            };
+                            ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                                toast_stack.add_persistent_toast(
+                                    DismissibleToast::default(format!(
+                                        "\u{201c}{frames_file_name}\u{201d} attached as {frame_count} still {frame_word} \u{2014} {native_note}."
+                                    )),
+                                    window_id,
+                                    ctx,
+                                );
+                            });
+                        }
+                        if num_oversized_frames > 0 {
+                            let frame_word = if num_oversized_frames == 1 {
+                                "frame"
+                            } else {
+                                "frames"
+                            };
+                            ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                                toast_stack.add_persistent_toast(
+                                    DismissibleToast::error(format!(
+                                        "{num_oversized_frames} extracted {frame_word} weren't attached \u{2014} too large."
+                                    )),
+                                    window_id,
+                                    ctx,
+                                );
+                            });
+                        }
+                        if requested_frame_count > 0 && frame_count == 0 {
+                            ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                                toast_stack.add_persistent_toast(
+                                    DismissibleToast::error(format!(
+                                        "Couldn't attach \u{201c}{frames_file_name}\u{201d}: no frames could be attached."
+                                    )),
+                                    window_id,
+                                    ctx,
+                                );
+                            });
+                        }
+                    }
+                    Err(err) => {
+                        this.video_pending_frame_file_names = None;
+                        ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                            toast_stack.add_persistent_toast(
+                                DismissibleToast::error(format!(
+                                    "Couldn't attach \u{201c}{frames_file_name}\u{201d}: {err}"
+                                )),
+                                window_id,
+                                ctx,
+                            );
+                        });
+                    }
+                }
+            },
+        ));
+
+        if include_audio {
+            let transcript_file_name = file_name.clone();
+            self.video_audio_transcript_future_handle = Some(ctx.spawn(
+                async move {
+                    let audio = crate::util::video::extract_audio_wav(&file_path).await?;
+                    Ok::<_, crate::util::video::VideoProcessingError>(audio)
+                },
+                move |this, result, ctx| {
+                    // Future was aborted.
+                    if this.video_audio_transcript_future_handle.is_none() {
+                        return;
+                    }
+
+                    let audio_bytes = match result {
+                        Ok(Some(audio_bytes)) => audio_bytes,
+                        Ok(None) => {
+                            ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                                toast_stack.add_persistent_toast(
+                                    DismissibleToast::default(format!(
+                                        "\u{201c}{transcript_file_name}\u{201d} has no audio track \u{2014} nothing to transcribe."
+                                    )),
+                                    window_id,
+                                    ctx,
+                                );
+                            });
+                            return;
+                        }
+                        Err(err) => {
+                            ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                                toast_stack.add_persistent_toast(
+                                    DismissibleToast::error(format!(
+                                        "Couldn't extract audio from \u{201c}{transcript_file_name}\u{201d}: {err}"
+                                    )),
+                                    window_id,
+                                    ctx,
+                                );
+                            });
+                            return;
+                        }
+                    };
+
+                    let Some(transcriber) = VoiceTranscriber::handle(ctx)
+                        .as_ref(ctx)
+                        .transcriber()
+                        .cloned()
+                    else {
+                        ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                            toast_stack.add_persistent_toast(
+                                DismissibleToast::error(
+                                    "Transcription isn't available - couldn't transcribe video audio."
+                                        .to_owned(),
+                                ),
+                                window_id,
+                                ctx,
+                            );
+                        });
+                        return;
+                    };
+
+                    let wav_base64 = general_purpose::STANDARD.encode(&audio_bytes);
+                    this.video_audio_transcript_future_handle = Some(ctx.spawn(
+                        async move { transcriber.transcribe(wav_base64, None).await },
+                        move |this, result, ctx| {
+                        match result {
+                                Ok(transcript) if !transcript.trim().is_empty() => {
+                                    // Frame extraction and audio transcription run as independent
+                                    // async tasks. If the user already sent this video's query (or
+                                    // removed its frames) before transcription resolved, the
+                                    // frames will no longer be pending — inserting the transcript
+                                    // now would silently land it in an unrelated buffer/query.
+                                    let frames_still_pending = this
+                                        .video_pending_frame_file_names
+                                        .as_ref()
+                                        .is_some_and(|expected| {
+                                            let pending_names: Vec<String> = this
+                                                .context_model
+                                                .as_ref()
+                                                .map(|context_model| {
+                                                    context_model
+                                                        .as_ref(ctx)
+                                                        .pending_images()
+                                                        .iter()
+                                                        .map(|image| image.file_name.clone())
+                                                        .collect()
+                                                })
+                                                .unwrap_or_default();
+                                            crate::util::video::transcript_still_applies(
+                                                expected,
+                                                &pending_names,
+                                            )
+                                        });
+
+                                    if !frames_still_pending {
+                                        ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                                            toast_stack.add_persistent_toast(
+                                                DismissibleToast::error(format!(
+"\u{201c}{transcript_file_name}\u{201d} audio transcript arrived after the video was sent (or its frames were removed) \u{2014} it wasn't included."
+                                                )),
+                                                window_id,
+                                                ctx,
+                                            );
+                                        });
+                                        return;
+                                    }
+
+                                    // Stored in the video's structured context (not inserted as
+                                    // query text) so the server can drop it when it resolves to a
+                                    // model that gets this video's native representation, which
+                                    // already carries the audio track -- inserting it into the
+                                    // query buffer unconditionally would deliver the same audio
+                                    // twice for that model.
+                                    let attached = this
+                                        .context_model
+                                        .as_ref()
+                                        .map(|context_model| {
+                                            context_model.update(ctx, |context_model, ctx| {
+                                                context_model.set_pending_video_audio_transcript(
+                                                    &transcript_file_name,
+                                                    transcript,
+                                                    ctx,
+                                                )
+                                            })
+                                        })
+                                        .unwrap_or(false);
+                                    if attached {
+                                        ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                                            toast_stack.add_persistent_toast(
+                                                DismissibleToast::default(format!(
+                                                    "\u{201c}{transcript_file_name}\u{201d} audio transcript attached."
+                                                )),
+                                                window_id,
+                                                ctx,
+                                            );
+                                        });
+                                    }
+                                }
+                                Ok(_) => {
+                                    ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                                        toast_stack.add_persistent_toast(
+                                            DismissibleToast::default(format!(
+                                                "\u{201c}{transcript_file_name}\u{201d} audio transcript was empty."
+                                            )),
+                                            window_id,
+                                            ctx,
+                                        );
+                                    });
+                                }
+                                Err(err) => {
+                                    ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                                        toast_stack.add_persistent_toast(
+                                            DismissibleToast::error(format!(
+                                                "Couldn't transcribe \u{201c}{transcript_file_name}\u{201d} audio: {err}"
+                                            )),
+                                            window_id,
+                                            ctx,
+                                        );
+                                    });
+                                }
+                            }
+                        },
+                    ));
+                },
+            ));
         }
     }
 
@@ -8633,6 +9092,16 @@ impl TypedActionView for EditorView {
             ProcessNonImageFiles { file_paths } => {
                 self.process_non_image_files(file_paths.clone(), ctx);
             }
+            ReadAndProcessVideoAsync {
+                file_path,
+                file_name,
+                include_audio,
+            } => self.read_and_process_video_async(
+                file_path.clone(),
+                file_name.clone(),
+                *include_audio,
+                ctx,
+            ),
             Tab => self.tab(ctx),
             ShiftTab => self.shift_tab(ctx),
             Copy => self.copy(ctx),
