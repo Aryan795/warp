@@ -25,6 +25,7 @@ mod terminal;
 mod terminal_message_bar;
 mod universal;
 pub mod user_query;
+pub(crate) mod video_attach_banner;
 
 use std::any::Any;
 use std::borrow::Cow;
@@ -1646,6 +1647,10 @@ pub struct Input {
     deferred_remote_operations: DeferredRemoteOperations,
 
     prompt_suggestions_banner_state: Option<PromptSuggestionBannerState>,
+    /// State for the video-attach confirmation banner (behind `FeatureFlag::VideoAsContext`),
+    /// shown after a video file is picked and before it's converted into image-as-context
+    /// frames. See `video_attach_banner`.
+    video_attach_banner_state: Option<video_attach_banner::VideoAttachBannerState>,
     /// Shared flag checked by the editor's keymap context modifier to determine whether
     /// to suppress the editor's ctrl-enter newline insertion when a prompt suggestion
     /// banner is pending.
@@ -3950,6 +3955,7 @@ impl Input {
             shared_session_input_state: None,
             shared_session_presence_manager: None,
             prompt_suggestions_banner_state: None,
+            video_attach_banner_state: None,
             has_prompt_suggestion_banner,
             was_intelligent_autosuggestion_accepted: false,
             last_intelligent_autosuggestion_result: None,

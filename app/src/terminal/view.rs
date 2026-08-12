@@ -26583,6 +26583,7 @@ impl TypedActionView for TerminalView {
             | LoadAgentModeConversation
             | DeleteAttachment { .. }
             | OpenAttachmentLightbox { .. }
+            | VideoAttachBanner(_)
             | WriteCodebaseIndex
             | ToggleAutoexecuteMode
             | ToggleQueueNextPrompt
@@ -27238,6 +27239,11 @@ impl TypedActionView for TerminalView {
             DeleteAttachment { index } => {
                 self.ai_context_model.update(ctx, |context_model, ctx| {
                     context_model.remove_pending_attachment(*index, ctx);
+                });
+            }
+            VideoAttachBanner(action) => {
+                self.input.update(ctx, |input, ctx| {
+                    input.handle_video_attach_banner_action(action.clone(), ctx);
                 });
             }
             OpenAttachmentLightbox { index } => {
