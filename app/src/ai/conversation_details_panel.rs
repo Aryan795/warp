@@ -12,6 +12,7 @@ use pathfinder_geometry::vector::vec2f;
 use warp_cli::agent::Harness;
 use warp_cli::skill::SkillSpec;
 use warp_core::channel::ChannelState;
+use warp_core::features::FeatureFlag;
 use warp_core::ui::color::coloru_with_opacity;
 use warp_graphql::queries::get_runners::Runner;
 use warpui::clipboard::ClipboardContent;
@@ -239,6 +240,17 @@ pub struct ConversationDetailsData {
     created_at: Option<DateTime<Local>>,
     /// Total credits spent on the conversation/task.
     credits: Option<f32>,
+    /// The server-assigned run identifier backing this conversation/task, used to
+    /// fetch Run-level dollar cost figures on demand (Requirement 2/3 of the
+    /// pricing-transparency tracer bullet) when they aren't already known.
+    run_id: Option<AmbientAgentTaskId>,
+    /// Real dollar cost of hosted compute for the Run, when known and the
+    /// `PricingTransparency` flag is enabled.
+    compute_cost_usd: Option<f64>,
+    /// Real dollar cost of the orchestration platform fee for the Run.
+    platform_cost_usd: Option<f64>,
+    /// Real dollar cost of LLM inference for the Run.
+    inference_cost_usd: Option<f64>,
     /// Total duration of the conversation.
     run_time: Option<Duration>,
     /// Artifacts created during the conversation (plans, PRs, branches).
@@ -359,6 +371,10 @@ impl ConversationDetailsData {
             executor: None,
             created_at,
             credits: Some(conversation.credits_spent()),
+            run_id: conversation.run_id().and_then(|id| id.parse().ok()),
+            compute_cost_usd: None,
+            platform_cost_usd: None,
+            inference_cost_usd: None,
             run_time,
             artifacts: conversation.artifacts().to_vec(),
             open_action: None,
@@ -424,6 +440,10 @@ impl ConversationDetailsData {
             created_at: Some(task.created_at.with_timezone(&Local)),
             artifacts: task.artifacts.clone(),
             credits,
+            run_id: Some(task.run_id()),
+            compute_cost_usd: task.compute_cost_usd(),
+            platform_cost_usd: task.platform_cost_usd(),
+            inference_cost_usd: task.inference_cost_usd(),
             run_time: task.run_time(),
             open_action,
             creator: task
@@ -445,6 +465,7 @@ impl ConversationDetailsData {
         task: Option<&AmbientAgentTask>,
         open_action: Option<WorkspaceAction>,
         copy_link_url: Option<String>,
+        local_run_id: Option<AmbientAgentTaskId>,
     ) -> Self {
         let creator = entry
             .display
@@ -504,6 +525,10 @@ impl ConversationDetailsData {
                 executor,
                 created_at,
                 credits,
+                run_id: Some(task_id),
+                compute_cost_usd: task.and_then(AmbientAgentTask::compute_cost_usd),
+                platform_cost_usd: task.and_then(AmbientAgentTask::platform_cost_usd),
+                inference_cost_usd: task.and_then(AmbientAgentTask::inference_cost_usd),
                 run_time: task.and_then(AmbientAgentTask::run_time),
                 artifacts: entry.display.artifacts.clone(),
                 open_action,
@@ -531,6 +556,10 @@ impl ConversationDetailsData {
             executor: None,
             created_at,
             credits: entry.display.request_usage,
+            run_id: local_run_id,
+            compute_cost_usd: None,
+            platform_cost_usd: None,
+            inference_cost_usd: None,
             run_time: None,
             artifacts: entry.display.artifacts.clone(),
             open_action,
@@ -563,6 +592,10 @@ impl ConversationDetailsData {
             executor: None,
             created_at: None,
             credits: None,
+            run_id: Some(task_id),
+            compute_cost_usd: None,
+            platform_cost_usd: None,
+            inference_cost_usd: None,
             run_time: None,
             artifacts: vec![],
             open_action: None,
@@ -605,6 +638,10 @@ impl ConversationDetailsData {
             executor: None,
             created_at: Some(created_at),
             credits: credits_used,
+            run_id: None,
+            compute_cost_usd: None,
+            platform_cost_usd: None,
+            inference_cost_usd: None,
             run_time: None,
             open_action,
             artifacts,
@@ -688,6 +725,11 @@ pub struct ConversationDetailsPanel {
     /// panel fetches them on demand to report the platform a run executes on.
     runner_platforms: HashMap<String, RunnerPlatform>,
     runners_loading: bool,
+    /// The run whose dollar cost figures are currently being fetched or were
+    /// last fetched, so we don't refetch for the same run repeatedly and so a
+    /// stale in-flight response for a since-replaced run is discarded.
+    run_cost_usd_fetch_target: Option<AmbientAgentTaskId>,
+    run_cost_usd_loading: bool,
 }
 
 impl ConversationDetailsPanel {
@@ -744,6 +786,8 @@ impl ConversationDetailsPanel {
             selected_text: Default::default(),
             runner_platforms: HashMap::new(),
             runners_loading: false,
+            run_cost_usd_fetch_target: None,
+            run_cost_usd_loading: false,
         }
     }
 
@@ -756,7 +800,58 @@ impl ConversationDetailsPanel {
         self.set_action_buttons(&data, ctx);
         self.data = data;
         self.ensure_runner_platforms(ctx);
+        self.ensure_run_cost_usd(ctx);
         ctx.notify();
+    }
+
+    /// Fetches Run-level dollar cost figures for the currently displayed
+    /// conversation/task when they aren't already known (Requirement 2 of the
+    /// pricing-transparency tracer bullet). Ambient tasks already carry these
+    /// figures from their initial fetch; local-interactive and restored/
+    /// cloud-synced conversations don't, so this fetches them via the same
+    /// `GET /agent/runs/{run_id}` endpoint keyed by the conversation's run id.
+    fn ensure_run_cost_usd(&mut self, ctx: &mut ViewContext<Self>) {
+        if !FeatureFlag::PricingTransparency.is_enabled() {
+            return;
+        }
+        if self.data.compute_cost_usd.is_some()
+            || self.data.platform_cost_usd.is_some()
+            || self.data.inference_cost_usd.is_some()
+        {
+            return;
+        }
+        let Some(run_id) = self.data.run_id else {
+            return;
+        };
+        if self.run_cost_usd_loading || self.run_cost_usd_fetch_target == Some(run_id) {
+            return;
+        }
+
+        self.run_cost_usd_loading = true;
+        self.run_cost_usd_fetch_target = Some(run_id);
+        let client = ServerApiProvider::as_ref(ctx).get_ai_client();
+        ctx.spawn(
+            async move { client.get_ambient_agent_task(&run_id).await },
+            move |me, result: anyhow::Result<AmbientAgentTask>, ctx| {
+                me.run_cost_usd_loading = false;
+                // Discard a stale response if the panel has since moved on to a
+                // different conversation/task.
+                if me.data.run_id != Some(run_id) {
+                    return;
+                }
+                match result {
+                    Ok(task) => {
+                        me.data.compute_cost_usd = task.compute_cost_usd();
+                        me.data.platform_cost_usd = task.platform_cost_usd();
+                        me.data.inference_cost_usd = task.inference_cost_usd();
+                    }
+                    Err(err) => {
+                        log::warn!("Failed to fetch run cost data for the details panel: {err}");
+                    }
+                }
+                ctx.notify();
+            },
+        );
     }
 
     /// The runner backing this run, by the precedence the server resolves with.
@@ -2232,6 +2327,23 @@ impl View for ConversationDetailsPanel {
                     .with_margin_bottom(FIELD_SPACING)
                     .finish(),
             );
+        }
+
+        if FeatureFlag::PricingTransparency.is_enabled() {
+            for (label, value) in [
+                ("Compute cost", self.data.compute_cost_usd),
+                ("Platform cost", self.data.platform_cost_usd),
+                ("Inference cost", self.data.inference_cost_usd),
+            ] {
+                if let Some(value) = value {
+                    let formatted = format!("${value:.2}");
+                    content.add_child(
+                        Container::new(self.render_simple_field(label, &formatted, appearance))
+                            .with_margin_bottom(FIELD_SPACING)
+                            .finish(),
+                    );
+                }
+            }
         }
 
         if let Some(duration) = self.data.run_time {

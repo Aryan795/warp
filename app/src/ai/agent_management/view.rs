@@ -55,7 +55,7 @@ use crate::ai::agent_management::telemetry::{
 };
 use crate::ai::ambient_agents::{AgentSource, cancel_task_with_toast};
 use crate::ai::artifacts::{Artifact, ArtifactButtonsRow, ArtifactButtonsRowEvent};
-use crate::ai::blocklist::format_credits;
+use crate::ai::blocklist::{BlocklistAIHistoryModel, format_credits};
 use crate::ai::conversation_details_panel::{
     ConversationDetailsData, ConversationDetailsPanel, ConversationDetailsPanelEvent,
 };
@@ -1346,11 +1346,22 @@ impl AgentManagementView {
             .identity
             .ambient_agent_task_id
             .and_then(|task_id| model.get_task_data(&task_id));
+        // Local-interactive and restored/cloud-synced entries don't carry an
+        // `AmbientAgentTask`, but every conversation has a server-assigned
+        // run id once loaded; resolve it so the panel can fetch Run-level
+        // dollar cost figures for these entries too.
+        let local_run_id = entry.identity.local_conversation_id.and_then(|id| {
+            BlocklistAIHistoryModel::as_ref(ctx)
+                .conversation(&id)
+                .and_then(|conversation| conversation.run_id())
+                .and_then(|run_id| run_id.parse().ok())
+        });
         let data = ConversationDetailsData::from_agent_conversation_entry(
             &entry,
             task.as_ref(),
             open_action,
             copy_link_url,
+            local_run_id,
         );
 
         self.details_panel.update(ctx, |p, ctx| {

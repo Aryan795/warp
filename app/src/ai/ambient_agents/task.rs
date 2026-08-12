@@ -362,6 +362,27 @@ impl AmbientAgentTask {
         })
     }
 
+    /// Real dollar cost of hosted compute for this run, when available.
+    pub fn compute_cost_usd(&self) -> Option<f64> {
+        self.active_run_execution()
+            .request_usage
+            .and_then(|u| u.compute_cost_usd)
+    }
+
+    /// Real dollar cost of the orchestration platform fee for this run, when available.
+    pub fn platform_cost_usd(&self) -> Option<f64> {
+        self.active_run_execution()
+            .request_usage
+            .and_then(|u| u.platform_cost_usd)
+    }
+
+    /// Real dollar cost of LLM inference for this run, when available.
+    pub fn inference_cost_usd(&self) -> Option<f64> {
+        self.active_run_execution()
+            .request_usage
+            .and_then(|u| u.inference_cost_usd)
+    }
+
     /// Server-reported run duration.
     pub fn run_time(&self) -> Option<ChronoDuration> {
         self.run_time.and_then(|run_time| run_time.to_chrono())
@@ -556,6 +577,15 @@ pub struct RequestUsage {
     pub inference_cost: Option<f64>,
     pub compute_cost: Option<f64>,
     pub platform_cost: Option<f64>,
+    /// `compute_cost` converted to real US dollars at a fixed rate, when the server provides it.
+    #[serde(default)]
+    pub compute_cost_usd: Option<f64>,
+    /// `inference_cost` converted to real US dollars at a fixed rate, when the server provides it.
+    #[serde(default)]
+    pub inference_cost_usd: Option<f64>,
+    /// `platform_cost` converted to real US dollars at a fixed rate, when the server provides it.
+    #[serde(default)]
+    pub platform_cost_usd: Option<f64>,
 }
 
 /// Cancel an ambient agent task and show a toast with the result.
