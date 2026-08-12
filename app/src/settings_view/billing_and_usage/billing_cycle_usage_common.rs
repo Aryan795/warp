@@ -218,6 +218,28 @@ pub fn filter_entries_by_attributed_team(
         .collect()
 }
 
+/// Prepares a period's raw usage entries for a team-scoped (or
+/// workspace-level) view: drops legacy Voice/SuggestedCodeDiffs buckets via
+/// [`filter_legacy_buckets`], then narrows to `team_uid`'s attributed
+/// entries via [`filter_entries_by_attributed_team`] when a team is being
+/// viewed. Pass `team_uid: None` for the workspace-level / own-usage paths
+/// that intentionally see the full unfiltered period.
+///
+/// This is the single pipeline every team-scoped consumer (legend,
+/// team-section gating, team totals, member rows) must derive its entries
+/// from, so a team-scoping regression in one call site can't silently
+/// diverge from the others.
+pub fn prepare_team_scoped_entries(
+    entries: &[BillingCycleUsageEntry],
+    team_uid: Option<&str>,
+) -> Vec<BillingCycleUsageEntry> {
+    let legacy_filtered = filter_legacy_buckets(entries);
+    match team_uid {
+        Some(team_uid) => filter_entries_by_attributed_team(&legacy_filtered, team_uid),
+        None => legacy_filtered,
+    }
+}
+
 /// Cost-type buckets to surface in the usage legend, in display order.
 ///
 /// Mirrors the buckets the stacked bars actually render: legacy buckets are

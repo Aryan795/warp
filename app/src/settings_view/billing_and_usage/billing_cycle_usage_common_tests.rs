@@ -1,6 +1,6 @@
 use super::{
     BarSegment, aggregate_segments, filter_entries_by_attributed_team, filter_legacy_buckets,
-    has_non_viewer_data, legend_cost_types,
+    has_non_viewer_data, legend_cost_types, prepare_team_scoped_entries,
 };
 use crate::workspaces::workspace::{
     AiCreditsUsageAndCostSubjectType, AiCreditsUsageAndCostType, AiCreditsUsageBucket,
@@ -239,6 +239,69 @@ fn filter_entries_by_attributed_team_excludes_unattributed_entries() {
     let filtered = filter_entries_by_attributed_team(&entries, "team-a");
 
     assert!(filtered.is_empty());
+}
+
+#[test]
+fn prepare_team_scoped_entries_combines_legacy_and_team_filtering() {
+    // The section-level pipeline applies both filters in sequence: an entry
+    // must be both current (not a legacy bucket) *and* attributed to the
+    // viewed team to survive.
+    let mut team_a_entry = viewer_user_entry();
+    team_a_entry.attributed_team_uid = Some("team-a".to_string());
+    let mut team_a_legacy_entry = entry(
+        AiCreditsUsageAndCostSubjectType::User,
+        Some(VIEWER_UID),
+        AiCreditsUsageAndCostType::BaseLimit,
+        AiCreditsUsageBucket::Voice,
+        AiCreditsUsageSource::Local,
+        3,
+        0,
+    );
+    team_a_legacy_entry.attributed_team_uid = Some("team-a".to_string());
+    let mut team_b_entry = entry(
+        AiCreditsUsageAndCostSubjectType::User,
+        Some(OTHER_UID),
+        AiCreditsUsageAndCostType::BaseLimit,
+        AiCreditsUsageBucket::Ai,
+        AiCreditsUsageSource::Local,
+        50,
+        0,
+    );
+    team_b_entry.attributed_team_uid = Some("team-b".to_string());
+    let entries = vec![team_a_entry, team_a_legacy_entry, team_b_entry];
+
+    let prepared = prepare_team_scoped_entries(&entries, Some("team-a"));
+
+    assert_eq!(
+        prepared.len(),
+        1,
+        "legacy-bucket and other-team entries must both be dropped"
+    );
+    assert_eq!(prepared[0].attributed_team_uid.as_deref(), Some("team-a"));
+    assert_eq!(prepared[0].usage_bucket, AiCreditsUsageBucket::Ai);
+}
+
+#[test]
+fn prepare_team_scoped_entries_stays_unfiltered_by_team_when_team_uid_is_none() {
+    // Workspace-level / own-usage views pass `team_uid: None`; legacy
+    // buckets are still dropped but no team-attribution filter applies.
+    let mut team_a_entry = viewer_user_entry();
+    team_a_entry.attributed_team_uid = Some("team-a".to_string());
+    let mut team_b_entry = entry(
+        AiCreditsUsageAndCostSubjectType::User,
+        Some(OTHER_UID),
+        AiCreditsUsageAndCostType::BaseLimit,
+        AiCreditsUsageBucket::Ai,
+        AiCreditsUsageSource::Local,
+        50,
+        0,
+    );
+    team_b_entry.attributed_team_uid = Some("team-b".to_string());
+    let entries = vec![team_a_entry, team_b_entry];
+
+    let prepared = prepare_team_scoped_entries(&entries, None);
+
+    assert_eq!(prepared.len(), 2);
 }
 
 #[test]

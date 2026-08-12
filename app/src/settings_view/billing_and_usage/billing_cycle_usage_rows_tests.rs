@@ -1,5 +1,6 @@
 use super::{MemberUsageRow, SourceFilter};
 use crate::auth::UserUid;
+use crate::settings_view::billing_and_usage::billing_cycle_usage_common::prepare_team_scoped_entries;
 use crate::workspaces::team::{MembershipRole, TeamMember};
 use crate::workspaces::workspace::{
     AiCreditsUsageAndCostSubjectType, AiCreditsUsageAndCostType, AiCreditsUsageBucket,
@@ -173,6 +174,68 @@ fn for_each_member_zero_fills_only_the_given_roster() {
         2,
         "sanity check: passing a wider roster does zero-fill more rows, which is exactly why \
          the call site must pass the team roster, not the workspace roster"
+    );
+}
+
+#[test]
+fn prepare_team_scoped_entries_then_for_each_member_excludes_other_team_usage() {
+    // End-to-end: raw workspace-scoped entries (mixed team A / team B /
+    // unattributed) go through the same `prepare_team_scoped_entries`
+    // pipeline the section uses, then into `for_each_member` with team A's
+    // roster. Team B's usage must not surface anywhere in the output — not
+    // as a row, and not folded into team A's numbers.
+    let team_a_roster = vec![
+        team_member(VIEWER_UID, "viewer@example.com"),
+        team_member("idle-uid", "idle@example.com"),
+    ];
+    let mut viewer_entry = entry(
+        AiCreditsUsageAndCostSubjectType::User,
+        Some(VIEWER_UID),
+        AiCreditsUsageSource::Local,
+        10,
+        5,
+    );
+    viewer_entry.attributed_team_uid = Some("team-a".to_string());
+    let mut other_team_entry = entry(
+        AiCreditsUsageAndCostSubjectType::User,
+        Some(OTHER_UID),
+        AiCreditsUsageSource::Local,
+        999,
+        999,
+    );
+    other_team_entry.attributed_team_uid = Some("team-b".to_string());
+    let mut unattributed_entry = entry(
+        AiCreditsUsageAndCostSubjectType::User,
+        Some("unattributed-uid"),
+        AiCreditsUsageSource::Local,
+        50,
+        50,
+    );
+    unattributed_entry.attributed_team_uid = None;
+    let raw_entries = vec![viewer_entry, other_team_entry, unattributed_entry];
+
+    let scoped = prepare_team_scoped_entries(&raw_entries, Some("team-a"));
+    let rows = MemberUsageRow::for_each_member(&scoped, &team_a_roster, SourceFilter::All);
+
+    assert_eq!(
+        rows.len(),
+        2,
+        "only team A's roster should get rows: the viewer (with usage) and the idle member (zero-filled)"
+    );
+    let viewer_row = rows
+        .iter()
+        .find(|row| row.subject_uid.as_deref() == Some(VIEWER_UID))
+        .expect("viewer should have a row");
+    assert_eq!(viewer_row.total_credits, 10);
+    let idle_row = rows
+        .iter()
+        .find(|row| row.subject_uid.as_deref() == Some("idle-uid"))
+        .expect("idle team member should still get a zero-usage row");
+    assert_eq!(idle_row.total_credits, 0);
+    assert!(
+        rows.iter()
+            .all(|row| row.subject_uid.as_deref() != Some(OTHER_UID)),
+        "team B's member must not appear as a row"
     );
 }
 
