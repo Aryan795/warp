@@ -288,16 +288,17 @@ fn models_without_a_host_fall_back_to_the_provider_icon() {
 
 #[test]
 fn is_kimi_model_id_requires_a_kimi_prefix_not_just_a_substring() {
+    assert!(is_kimi_model_id("kimi"));
+    assert!(is_kimi_model_id("KIMI"));
     assert!(is_kimi_model_id("kimi-k3-fireworks"));
     assert!(is_kimi_model_id("KIMI-K26-FIREWORKS"));
     assert!(!is_kimi_model_id("not-kimi-fireworks"));
     assert!(!is_kimi_model_id("asakimi-x"));
+    assert!(!is_kimi_model_id("kimichi"));
 }
 
 #[test]
 fn kimi_models_show_the_kimi_logo() {
-    // The server has no Kimi `LLMProvider` variant, so these arrive with
-    // `LLMProvider::Unknown`; the icon comes from the id instead.
     for id in [
         "kimi-k26-fireworks",
         "kimi-k27-code-fireworks",
@@ -313,25 +314,16 @@ fn kimi_models_show_the_kimi_logo() {
 }
 
 #[test]
-fn non_kimi_providers_keep_their_own_logo() {
-    let mut llm = server_llm("claude-test", None);
+fn kimi_model_id_wins_over_a_known_providers_logo() {
+    // The `kimi-` id check sits above the provider fallback in
+    // `model_leading_icon`, so it must win even if a Kimi row ever arrives
+    // tagged with a concrete (non-`Unknown`) provider.
+    let mut llm = server_llm("kimi-k3-fireworks", None);
+    llm.provider = LLMProvider::OpenAI;
 
-    llm.provider = LLMProvider::Anthropic;
     assert_eq!(
         model_leading_icon(&llm, ModelIconFlags::default()),
-        Icon::ClaudeLogo
-    );
-
-    llm.provider = LLMProvider::Google;
-    assert_eq!(
-        model_leading_icon(&llm, ModelIconFlags::default()),
-        Icon::GeminiLogo
-    );
-
-    llm.provider = LLMProvider::Xai;
-    assert_eq!(
-        model_leading_icon(&llm, ModelIconFlags::default()),
-        Icon::GrokLogo
+        Icon::KimiLogo
     );
 }
 

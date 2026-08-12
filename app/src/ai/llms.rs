@@ -177,11 +177,14 @@ pub struct ModelIconFlags {
 ///
 /// The server's `LlmProvider` enum has no Kimi variant, so Kimi models are
 /// reported with `LLMProvider::Unknown` — there is no provider signal to
-/// switch on. Match the id instead, anchored on the `kimi-` prefix rather than
-/// a substring, so an unrelated model whose display name happens to mention
-/// Kimi is not swept in.
-pub fn is_kimi_model_id(id: &str) -> bool {
-    id.to_ascii_lowercase().starts_with("kimi-")
+/// switch on. Match the id instead, anchored on a bare `kimi` id or a
+/// `kimi-` prefix rather than a substring, so an unrelated model whose id
+/// happens to contain "kimi" elsewhere is not swept in.
+fn is_kimi_model_id(id: &str) -> bool {
+    id.eq_ignore_ascii_case("kimi")
+        || id
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("kimi-"))
 }
 
 /// The leading icon shown next to a model in the model picker and model menus.
