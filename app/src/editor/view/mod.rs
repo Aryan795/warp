@@ -139,7 +139,16 @@ pub const ACCEPT_AUTOSUGGESTION_KEYBINDING_NAME: &str = "editor_view:insert_auto
 pub const VOICE_LIMIT_HIT_TOAST_TEXT: &str = "You have hit the limit for Voice requests. Your limit will be refreshed as a part of your next cycle.";
 pub const VOICE_ERROR_TOAST_TEXT: &str = "An error occurred while processing your voice input.";
 
-pub const MAX_IMAGES_PER_CONVERSATION: usize = 200;
+/// Raised from 200 to 300 (APP-5324), a smaller proportional increase than the per-query cap
+/// (`MAX_IMAGE_COUNT_FOR_QUERY`). Unlike the per-query cap, images attached earlier in a
+/// conversation persist and are resent in full on every subsequent turn (per how these APIs
+/// accumulate context), so this number compounds: a conversation that has accumulated close to
+/// this many images will keep resending all of them, turn after turn. Raising it in lockstep with
+/// the per-query cap would make hitting a provider's context-window limit on a *later* turn far
+/// more likely for image-heavy conversations. A more conservative bump keeps that risk in check;
+/// summarization/compaction, not a higher static ceiling, is the real long-term fix for very
+/// image-heavy conversations.
+pub const MAX_IMAGES_PER_CONVERSATION: usize = 300;
 
 use warpui::clipboard_utils::CLIPBOARD_IMAGE_MIME_TYPES;
 
