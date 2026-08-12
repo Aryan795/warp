@@ -65,6 +65,11 @@ pub struct VideoContext {
     /// `video::read_native_video`). `None` when the video exceeded the client-side size cap --
     /// in that case only `frames` is ever sent, even to a provider that supports native video.
     pub native_video: Option<NativeVideoAttachment>,
+    /// Transcript of the video's audio track, filled in later via
+    /// `set_pending_video_audio_transcript` once async transcription completes (it never exists
+    /// yet when the attachment is first created). See `AIAgentContext::Video::audio_transcript`
+    /// for why this is only meaningful on the frame-fallback path.
+    pub audio_transcript: Option<String>,
 }
 
 /// Lightweight metadata for rendering a pending attachment without cloning its payload.
@@ -647,10 +652,37 @@ impl BlocklistAIContextModel {
                     file_name,
                     frames,
                     native_video,
+                    audio_transcript: None,
                 })],
                 ctx,
             );
         }
+    }
+
+    /// Sets the audio transcript on the pending video attachment named `file_name`, if it is
+    /// still pending (the video may have already been sent, or removed, by the time async
+    /// transcription resolves -- see `video::transcript_still_applies` for the equivalent guard
+    /// this used before the transcript was moved into structured context). Returns `true` if a
+    /// matching pending video was found and updated.
+    pub fn set_pending_video_audio_transcript(
+        &mut self,
+        file_name: &str,
+        transcript: String,
+        ctx: &mut ModelContext<Self>,
+    ) -> bool {
+        let Some(video) = self.pending_attachments.iter_mut().find_map(|a| match a {
+            PendingAttachment::Video(video) if video.file_name == file_name => Some(video),
+            _ => None,
+        }) else {
+            return false;
+        };
+        video.audio_transcript = Some(transcript);
+        ctx.emit(BlocklistAIContextEvent::UpdatedPendingContext {
+            previous_block_ids: self.pending_context_block_ids.clone(),
+            requires_block_resync: false,
+            requires_text_resync: false,
+        });
+        true
     }
 
     pub fn remove_pending_image(&mut self, index: usize, ctx: &mut ModelContext<Self>) {

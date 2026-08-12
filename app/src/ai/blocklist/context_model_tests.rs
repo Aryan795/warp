@@ -368,6 +368,7 @@ fn make_video_attachment(file_name: &str, frame_names: &[&str]) -> PendingAttach
             })
             .collect(),
         native_video: None,
+        audio_transcript: None,
     })
 }
 
@@ -654,6 +655,51 @@ fn append_pending_video_with_no_frames_is_a_no_op() {
         });
 
         model.read(&app, |m, _| assert!(m.pending_attachments().is_empty()));
+    });
+}
+
+#[test]
+fn set_pending_video_audio_transcript_updates_the_matching_video() {
+    App::test((), |mut app| async move {
+        let model = build_test_context_model(&mut app);
+
+        model.update(&mut app, |m, _| {
+            m.append_pending_attachments_for_test(vec![make_video_attachment(
+                "clip.mp4",
+                &["clip.mp4-frame-01.jpg"],
+            )]);
+        });
+
+        let updated = model.update(&mut app, |m, ctx| {
+            m.set_pending_video_audio_transcript("clip.mp4", "hello world".to_owned(), ctx)
+        });
+        assert!(updated);
+
+        model.read(&app, |m, _| {
+            let PendingAttachment::Video(video) = &m.pending_attachments()[0] else {
+                panic!("expected a video attachment");
+            };
+            assert_eq!(video.audio_transcript.as_deref(), Some("hello world"));
+        });
+    });
+}
+
+#[test]
+fn set_pending_video_audio_transcript_is_a_no_op_when_the_video_is_no_longer_pending() {
+    // Regression test for the send-before-transcript race, now expressed on structured context
+    // instead of the query buffer: once a video's chip is gone (sent or removed), a
+    // late-arriving transcript must not silently attach itself to an unrelated attachment.
+    App::test((), |mut app| async move {
+        let model = build_test_context_model(&mut app);
+
+        model.update(&mut app, |m, _| {
+            m.append_pending_attachments_for_test(vec![make_image_attachment("a.png")]);
+        });
+
+        let updated = model.update(&mut app, |m, ctx| {
+            m.set_pending_video_audio_transcript("clip.mp4", "hello world".to_owned(), ctx)
+        });
+        assert!(!updated);
     });
 }
 

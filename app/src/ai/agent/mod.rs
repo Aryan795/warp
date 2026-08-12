@@ -2259,6 +2259,12 @@ pub enum AIAgentContext {
         file_name: String,
         frames: Vec<ImageContext>,
         native: Option<NativeVideoAttachment>,
+        /// Transcript of the video's audio track, when the user opted in to including audio and
+        /// transcription completed before the query was sent. Only meaningful on the
+        /// frame-fallback path: the server drops it for a model that receives `native` directly,
+        /// since that representation already carries the audio track (see the server's
+        /// `videoAudioTranscriptSuffix`).
+        audio_transcript: Option<String>,
     },
 
     /// Indexed codebase possibly relevant to the query.

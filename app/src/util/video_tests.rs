@@ -1,4 +1,5 @@
 use super::*;
+use std::path::PathBuf;
 
 #[test]
 fn parses_showinfo_pts_times_from_stderr() {
@@ -143,8 +144,14 @@ fn transcript_does_not_apply_with_no_expected_frames() {
 /// Generates a short synthetic video (with a tone on its audio track) via ffmpeg for tests that
 /// need a real video file on disk. Returns `None` (rather than panicking) when ffmpeg isn't
 /// available, so these tests degrade gracefully in environments without it -- consistent with the
-/// rest of this module's ffmpeg-availability handling.
-async fn make_test_video_with_audio(dir: &std::path::Path, name: &str) -> Option<PathBuf> {
+/// rest of this module's ffmpeg-availability handling. `video_codec`/`audio_codec` let callers
+/// generate fixtures in containers other than MP4 (e.g. `libvpx`/`libvorbis` for `.webm`).
+async fn make_test_video_with_audio_ext(
+    dir: &std::path::Path,
+    name: &str,
+    video_codec: &str,
+    audio_codec: &str,
+) -> Option<PathBuf> {
     if !ffmpeg_available().await {
         return None;
     }
@@ -161,9 +168,9 @@ async fn make_test_video_with_audio(dir: &std::path::Path, name: &str) -> Option
         .arg("-i")
         .arg("sine=frequency=440:duration=1")
         .arg("-c:v")
-        .arg("libx264")
+        .arg(video_codec)
         .arg("-c:a")
-        .arg("aac")
+        .arg(audio_codec)
         .arg(&out_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -172,6 +179,10 @@ async fn make_test_video_with_audio(dir: &std::path::Path, name: &str) -> Option
         .await
         .ok()?;
     status.success().then_some(out_path)
+}
+
+async fn make_test_video_with_audio(dir: &std::path::Path, name: &str) -> Option<PathBuf> {
+    make_test_video_with_audio_ext(dir, name, "libx264", "aac").await
 }
 
 #[tokio::test]
@@ -183,13 +194,17 @@ async fn read_native_video_returns_bytes_under_the_cap_with_audio_intact() {
         return;
     };
 
-    let with_audio = read_native_video(&video_path, true)
+    let (encoded, mime_type) = read_native_video(&video_path, "video/mp4", true)
         .await
         .expect("video is well under MAX_NATIVE_VIDEO_BYTES");
-    assert!(!with_audio.is_empty());
+    assert!(!encoded.is_empty());
+    assert_eq!(mime_type, "video/mp4");
 
     // Sanity check: ffprobe-free audio-stream detection via ffmpeg's own stderr banner, mirroring
     // `extract_audio_wav`'s approach elsewhere in this module.
+    let with_audio = general_purpose::STANDARD
+        .decode(&encoded)
+        .expect("valid base64");
     let with_audio_path = temp_dir.path().join("roundtrip_with_audio.mp4");
     tokio::fs::write(&with_audio_path, &with_audio)
         .await
@@ -212,11 +227,18 @@ async fn read_native_video_strips_audio_when_not_included() {
         return;
     };
 
-    let muted = read_native_video(&video_path, false)
+    let (encoded, mime_type) = read_native_video(&video_path, "video/mp4", false)
         .await
         .expect("video is well under MAX_NATIVE_VIDEO_BYTES");
-    assert!(!muted.is_empty());
+    assert!(!encoded.is_empty());
+    assert_eq!(
+        mime_type, "video/mp4",
+        "muting must preserve the source MIME type, not just always claim mp4"
+    );
 
+    let muted = general_purpose::STANDARD
+        .decode(&encoded)
+        .expect("valid base64");
     let muted_path = temp_dir.path().join("roundtrip_muted.mp4");
     tokio::fs::write(&muted_path, &muted)
         .await
@@ -231,6 +253,87 @@ async fn read_native_video_strips_audio_when_not_included() {
 }
 
 #[tokio::test]
+async fn read_native_video_preserves_a_non_mp4_container_when_muting() {
+    // Regression test: muting used to always remux into `muted.mp4` regardless of the source
+    // container, which could fail outright for some codec/container combinations and, even when
+    // it didn't, left the returned bytes mislabeled with the *original* (pre-mute) MIME type. A
+    // `.webm` source must stay a WEBM-compatible container after muting, not become MP4 bytes
+    // wearing a WEBM label or an incompatible MP4 remux.
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let Some(video_path) =
+        make_test_video_with_audio_ext(temp_dir.path(), "source.webm", "libvpx", "libvorbis").await
+    else {
+        eprintln!("skipping: ffmpeg not available");
+        return;
+    };
+
+    let (encoded, mime_type) = read_native_video(&video_path, "video/webm", false)
+        .await
+        .expect("video is well under MAX_NATIVE_VIDEO_BYTES");
+    assert_eq!(mime_type, "video/webm");
+
+    // Roundtrip the returned bytes back out with a `.webm` extension (matching the claimed MIME
+    // type) and confirm ffmpeg can actually demux it and sees no audio stream -- if muting had
+    // silently produced MP4 bytes instead, ffmpeg would either fail to open this file or need a
+    // format override, either way proving the mislabel.
+    let muted = general_purpose::STANDARD
+        .decode(&encoded)
+        .expect("valid base64");
+    let muted_path = temp_dir.path().join("roundtrip_muted.webm");
+    tokio::fs::write(&muted_path, &muted)
+        .await
+        .expect("write roundtrip file");
+    assert!(
+        extract_audio_wav(&muted_path)
+            .await
+            .expect("ffmpeg available -- and able to demux this file as its claimed container")
+            .is_none(),
+    );
+}
+
+#[tokio::test]
+async fn read_native_video_boundary_uses_encoded_not_raw_size() {
+    // Regression test: the cap must apply to the base64-*encoded* size (what the server actually
+    // sees, per the `bytes`-field quirk), not the raw file size -- otherwise a file just under the
+    // raw cap but over it once base64-inflated (~33%) would be reported as native-capable here and
+    // then rejected server-side instead of falling back to frames.
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+
+    // Pick a raw size whose base64 encoding lands exactly at the cap boundary, so this exercises
+    // the real encode-then-compare path rather than a size chosen to trivially pass either unit.
+    // base64 output length for n bytes is ceil(n/3)*4; MAX_NATIVE_VIDEO_BYTES (8_000_000) is a
+    // multiple of 4, so an input of `MAX_NATIVE_VIDEO_BYTES / 4 * 3` bytes encodes to exactly the
+    // cap, and one byte more encodes to one base64 block (4 bytes) more, comfortably over it.
+    let raw_at_boundary = MAX_NATIVE_VIDEO_BYTES / 4 * 3;
+    let boundary_path = temp_dir.path().join("at_cap.mp4");
+    tokio::fs::write(&boundary_path, vec![0u8; raw_at_boundary])
+        .await
+        .expect("write boundary fixture");
+    let (encoded, _) = read_native_video(&boundary_path, "video/mp4", true)
+        .await
+        .expect("encoded size lands exactly on the cap, which must still be accepted");
+    assert_eq!(encoded.len(), MAX_NATIVE_VIDEO_BYTES);
+
+    // Raw sizes that are individually under `MAX_NATIVE_VIDEO_BYTES`, but whose base64 encoding
+    // exceeds it (the exact failure mode this cap exists to prevent), must be rejected.
+    let raw_under_cap_but_over_once_encoded = MAX_NATIVE_VIDEO_BYTES - 100;
+    assert!(raw_under_cap_but_over_once_encoded < MAX_NATIVE_VIDEO_BYTES);
+    let over_once_encoded_path = temp_dir.path().join("raw_under_but_encoded_over.mp4");
+    tokio::fs::write(
+        &over_once_encoded_path,
+        vec![0u8; raw_under_cap_but_over_once_encoded],
+    )
+    .await
+    .expect("write fixture");
+    assert!(
+        read_native_video(&over_once_encoded_path, "video/mp4", true)
+            .await
+            .is_none(),
+        "a file under the raw cap must still be rejected once its base64 encoding exceeds it"
+    );
+}
+
+#[tokio::test]
 async fn read_native_video_returns_none_when_over_the_size_cap() {
     // `include_audio: true` skips the audio-muting ffmpeg pass and just reads+size-checks the
     // file directly, so an oversized dummy file (rather than a real multi-megabyte video fixture)
@@ -241,5 +344,41 @@ async fn read_native_video_returns_none_when_over_the_size_cap() {
         .await
         .expect("write oversized fixture");
 
-    assert!(read_native_video(&oversized_path, true).await.is_none());
+    assert!(
+        read_native_video(&oversized_path, "video/mp4", true)
+            .await
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn read_native_video_does_not_leak_the_muted_temp_file() {
+    // Regression test for a leaked-temp-file bug: muting used to `TempDir::keep()` the directory
+    // it wrote the muted copy into, permanently leaving a copy of the user's (muted) video on
+    // disk on every attach. Calls `mute_audio` directly (rather than scanning the shared system
+    // temp directory, which other tests write into concurrently and would make this racy) so the
+    // exact directory it creates can be checked for cleanup once its guard is dropped.
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let Some(video_path) = make_test_video_with_audio(temp_dir.path(), "leak_check.mp4").await
+    else {
+        eprintln!("skipping: ffmpeg not available");
+        return;
+    };
+
+    let muted_dir_path = {
+        let (muted_temp_dir, muted_path) = mute_audio(&video_path)
+            .await
+            .expect("ffmpeg available and able to mute this fixture");
+        assert!(
+            muted_path.exists(),
+            "muted file must exist while the guard is alive"
+        );
+        muted_temp_dir.path().to_path_buf()
+        // `muted_temp_dir` drops at the end of this block.
+    };
+
+    assert!(
+        !muted_dir_path.exists(),
+        "mute_audio's temp directory must not survive its TempDir guard being dropped"
+    );
 }

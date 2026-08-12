@@ -5579,7 +5579,7 @@ impl EditorView {
             return;
         }
         let min_frames = crate::util::video::MIN_VIDEO_FRAMES.min(max_frames);
-        let video_mime_type = from_path(&file_path).first_or_octet_stream().to_string();
+        let source_video_mime_type = from_path(&file_path).first_or_octet_stream().to_string();
 
         // Clear any stale association from a previous video attach so an in-flight transcript
         // for that earlier video can't be mistaken for applying to this one.
@@ -5588,6 +5588,7 @@ impl EditorView {
         self.process_attached_video_future_handle = Some(ctx.spawn(
             {
                 let file_path = file_path.clone();
+                let source_video_mime_type = source_video_mime_type.clone();
                 async move {
                     // Native video bytes (used if the resolved model supports native video) and
                     // the frame-extraction fallback (used otherwise) are computed together so a
@@ -5596,21 +5597,23 @@ impl EditorView {
                     let frames_result =
                         crate::util::video::extract_frames(&file_path, max_frames, min_frames)
                             .await;
-                    let native_video_bytes =
-                        crate::util::video::read_native_video(&file_path, include_audio).await;
-                    (frames_result, native_video_bytes)
+                    let native_video = crate::util::video::read_native_video(
+                        &file_path,
+                        &source_video_mime_type,
+                        include_audio,
+                    )
+                    .await;
+                    (frames_result, native_video)
                 }
             },
-            move |this, (result, native_video_bytes), ctx| {
+            move |this, (result, native_video), ctx| {
                 // Future was aborted.
                 if this.process_attached_video_future_handle.is_none() {
                     return;
                 }
 
-                let native_video = native_video_bytes.map(|data| NativeVideoAttachment {
-                    data: general_purpose::STANDARD.encode(&data),
-                    mime_type: video_mime_type.clone(),
-                });
+                let native_video =
+                    native_video.map(|(data, mime_type)| NativeVideoAttachment { data, mime_type });
 
                 match result {
                     Ok(frames) => {
@@ -5836,12 +5839,36 @@ impl EditorView {
                                         return;
                                     }
 
-                                    this.user_insert(
-                                        &format!(
-                                            "\n\n[Transcript of \u{201c}{transcript_file_name}\u{201d} audio]:\n{transcript}\n"
-                                        ),
-                                        ctx,
-                                    );
+                                    // Stored in the video's structured context (not inserted as
+                                    // query text) so the server can drop it when it resolves to a
+                                    // model that gets this video's native representation, which
+                                    // already carries the audio track -- inserting it into the
+                                    // query buffer unconditionally would deliver the same audio
+                                    // twice for that model.
+                                    let attached = this
+                                        .context_model
+                                        .as_ref()
+                                        .map(|context_model| {
+                                            context_model.update(ctx, |context_model, ctx| {
+                                                context_model.set_pending_video_audio_transcript(
+                                                    &transcript_file_name,
+                                                    transcript,
+                                                    ctx,
+                                                )
+                                            })
+                                        })
+                                        .unwrap_or(false);
+                                    if attached {
+                                        ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                                            toast_stack.add_persistent_toast(
+                                                DismissibleToast::default(format!(
+                                                    "\u{201c}{transcript_file_name}\u{201d} audio transcript attached."
+                                                )),
+                                                window_id,
+                                                ctx,
+                                            );
+                                        });
+                                    }
                                 }
                                 Ok(_) => {
                                     ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {

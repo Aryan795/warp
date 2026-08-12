@@ -23,9 +23,11 @@
 //! Frame count is hard-capped well under the existing 20-images-per-query limit shared with
 //! image-as-context.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 
+use base64::Engine as _;
+use base64::engine::general_purpose;
 use tokio::process::Command;
 
 /// Video MIME types accepted for video-as-context. Kept to containers `ffmpeg` reliably demuxes
@@ -89,12 +91,16 @@ pub fn transcript_still_applies(
         })
 }
 
-/// Hard cap on the raw (undecoded) bytes of a video sent natively to a provider that accepts
-/// video directly (currently Gemini) instead of frames. Chosen to stay comfortably under
-/// Gemini's own ~20MB-inline-request ceiling once base64 overhead and the rest of the prompt are
-/// accounted for. Kept in lockstep with the server's own
-/// `formattable.MaxVideoAttachmentSizeBytes` limit -- a video over this cap is sent as frames
-/// only, never natively, regardless of the resolved model.
+/// Hard cap on the base64-*encoded* size of a video sent natively to a provider that accepts
+/// video directly (currently Gemini) instead of frames. Deliberately measured post-encoding, not
+/// on the raw file size, to match the server's own `formattable.MaxVideoAttachmentSizeBytes`
+/// limit -- the server only ever sees the encoded string (see the `bytes`-field quirk documented
+/// on `InputContext.Video.data`), so capping on raw bytes here would let a ~6-8MB raw file (which
+/// inflates by ~33% once base64-encoded) pass this client-side check and still get rejected
+/// server-side, when the whole point of the cap is to fall back to frames *before* that happens.
+/// A video over this cap (after encoding) is sent as frames only, never natively, regardless of
+/// the resolved model. Also serves only as a guard on a single attachment, not the authority on
+/// total media payload for a conversation -- see APP-5324's aggregate media budget for that.
 ///
 /// Follow-up: for longer/larger videos, switch this path to Gemini's Files API (which supports
 /// up to 2GB/20GB) instead of raising this cap; inline bytes were chosen here for simplicity in
@@ -426,8 +432,13 @@ pub async fn extract_audio_wav(video_path: &Path) -> Result<Option<Vec<u8>>, Vid
     Ok(Some(data))
 }
 
-/// Reads a video's raw bytes for the native-video representation (sent to a provider that
-/// accepts video directly, currently Gemini), honoring [`MAX_NATIVE_VIDEO_BYTES`].
+/// Reads a video's bytes for the native-video representation (sent to a provider that accepts
+/// video directly, currently Gemini), base64-encodes them, and returns `(encoded_data,
+/// mime_type)` when the *encoded* size is within [`MAX_NATIVE_VIDEO_BYTES`] (see that constant's
+/// doc comment for why encoded, not raw, size is what's capped). `source_mime_type` should be the
+/// original attachment's MIME type; it is echoed back unchanged when `include_audio` is `true`
+/// (the source bytes are sent as-is), and also when `false` since muting preserves the source
+/// container (see [`mute_audio`]) rather than re-muxing into a different one.
 ///
 /// When `include_audio` is `false`, the audio track is stripped first (a fast stream copy, no
 /// re-encode) so a provider that ingests video natively never receives audio the user explicitly
@@ -441,20 +452,38 @@ pub async fn extract_audio_wav(video_path: &Path) -> Result<Option<Vec<u8>>, Vid
 /// Returns `None` (never an error) when the video exceeds the cap or the audio strip step fails,
 /// so callers fall back to sending only frames for this attachment -- exactly as if the model
 /// resolved to a provider without native video support.
-pub async fn read_native_video(video_path: &Path, include_audio: bool) -> Option<Vec<u8>> {
-    if include_audio {
-        let data = tokio::fs::read(video_path).await.ok()?;
-        return (data.len() <= MAX_NATIVE_VIDEO_BYTES).then_some(data);
-    }
+pub async fn read_native_video(
+    video_path: &Path,
+    source_mime_type: &str,
+    include_audio: bool,
+) -> Option<(String, String)> {
+    let data = if include_audio {
+        tokio::fs::read(video_path).await.ok()?
+    } else {
+        // `_muted_temp_dir` must outlive the read below -- it owns the directory `muted_path`
+        // points into, and dropping it deletes that directory (and the muted file with it). It
+        // is dropped automatically at the end of this block, once the bytes have been read.
+        let (_muted_temp_dir, muted_path) = mute_audio(video_path).await.ok()?;
+        tokio::fs::read(&muted_path).await.ok()?
+    };
 
-    let muted_path = mute_audio(video_path).await.ok()?;
-    let data = tokio::fs::read(&muted_path).await.ok()?;
-    (data.len() <= MAX_NATIVE_VIDEO_BYTES).then_some(data)
+    let encoded = general_purpose::STANDARD.encode(&data);
+    (encoded.len() <= MAX_NATIVE_VIDEO_BYTES).then_some((encoded, source_mime_type.to_owned()))
 }
 
 /// Writes a copy of `video_path` with its audio track removed (video stream copied, not
-/// re-encoded, so this is fast and lossless) to a temp file, and returns that file's path.
-async fn mute_audio(video_path: &Path) -> Result<PathBuf, VideoProcessingError> {
+/// re-encoded, so this is fast and lossless) to a temp file, and returns that file's path
+/// alongside the [`tempfile::TempDir`] guard that owns it -- the caller must keep the guard alive
+/// for as long as the path needs to be readable; dropping it deletes the directory and the file.
+///
+/// The muted copy preserves `video_path`'s original container (falling back to `mp4` only when
+/// the path has no extension) rather than always re-muxing into MP4: stream-copying a codec into
+/// a different container can fail outright for some combinations, and even when it doesn't, the
+/// caller still reports the *original* MIME type alongside these bytes, which would be wrong for
+/// the muted output if the container actually changed underneath it.
+async fn mute_audio(
+    video_path: &Path,
+) -> Result<(tempfile::TempDir, std::path::PathBuf), VideoProcessingError> {
     if !ffmpeg_available().await {
         return Err(VideoProcessingError::FfmpegUnavailable);
     }
@@ -463,10 +492,11 @@ async fn mute_audio(video_path: &Path) -> Result<PathBuf, VideoProcessingError> 
         .prefix("warp-video-muted-")
         .tempdir()
         .map_err(|e| VideoProcessingError::Io(format!("failed to create temp directory: {e}")))?;
-    // Keep the temp dir alive for the caller by leaking it into the returned path's ancestry;
-    // `tempfile` deletes the directory (and this file) once the `TempDir` value drops, so we must
-    // not let it drop here.
-    let out_path = temp_dir.keep().join("muted.mp4");
+    let extension = video_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("mp4");
+    let out_path = temp_dir.path().join(format!("muted.{extension}"));
 
     let output = Command::new("ffmpeg")
         .arg("-y")
@@ -489,7 +519,7 @@ async fn mute_audio(video_path: &Path) -> Result<PathBuf, VideoProcessingError> 
         return Err(VideoProcessingError::Ffmpeg(stderr.trim_end().to_string()));
     }
 
-    Ok(out_path)
+    Ok((temp_dir, out_path))
 }
 
 #[cfg(test)]

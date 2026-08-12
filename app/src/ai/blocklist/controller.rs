@@ -3464,6 +3464,7 @@ fn input_for_query(
                     file_name: video.file_name,
                     frames: video.frames,
                     native: video.native_video,
+                    audio_transcript: video.audio_transcript,
                 });
             }
             PendingAttachment::File(file) => file_attachments.push(file),
