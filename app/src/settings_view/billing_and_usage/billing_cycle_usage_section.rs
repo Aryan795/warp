@@ -21,7 +21,8 @@ use crate::auth::{AuthManager, AuthStateProvider};
 use crate::menu::{self, Menu, MenuItem, MenuItemFields};
 use crate::settings_view::admin_actions::AdminActions;
 use crate::settings_view::billing_and_usage::billing_cycle_usage_common::{
-    BillingUsageMouseStates, filter_legacy_buckets, has_non_viewer_data, legend_cost_types,
+    BillingUsageMouseStates, filter_entries_by_attributed_team, filter_legacy_buckets,
+    has_non_viewer_data, legend_cost_types, scope_members_to_team,
 };
 use crate::settings_view::billing_and_usage::billing_cycle_usage_rows::{
     SourceFilter, has_cloud_usage, render_own_usage_solo_row, render_own_usage_with_workspace_row,
@@ -33,11 +34,12 @@ use crate::settings_view::billing_and_usage_page_v2::{
     BONUS_CREDITS_DOT_COLOR, PAYG_CREDITS_DOT_COLOR,
 };
 use crate::ui_components::icons::Icon;
+use crate::workspaces::team::Team;
 use crate::workspaces::update_manager::TeamUpdateManager;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::workspaces::workspace::{
-    AiCreditsUsageAndCostType, BillingCycleUsageSummary, MaxPriorCycles, UsageVisibility,
-    UsageVisibilityGranularity, Workspace,
+    AiCreditsUsageAndCostType, BillingCycleUsageEntry, BillingCycleUsageSummary, MaxPriorCycles,
+    UsageVisibility, UsageVisibilityGranularity, Workspace, WorkspaceMember,
 };
 
 const HEADER_FONT_SIZE: f32 = 16.;
@@ -277,11 +279,23 @@ impl BillingCycleUsageSectionView {
         let mut column = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
         column.add_child(self.render_header(Some(workspace), &visibility, appearance, app));
 
-        let entries = filter_legacy_buckets(
+        // The billing usage feed and member roster are workspace-wide, not
+        // team-scoped, so we must resolve the team this window belongs to
+        // and filter down to it ourselves. Without a resolved team we fail
+        // closed (render nothing further) rather than fall back to the
+        // unfiltered workspace-wide feed, which would leak every other
+        // team's usage and roster to this admin.
+        let team = UserWorkspaces::as_ref(app).team_for_view_handle(&self.self_handle, app);
+        let legacy_filtered_entries = filter_legacy_buckets(
             self.current_summary(workspace)
                 .map(|summary| summary.entries.as_slice())
                 .unwrap_or_default(),
         );
+        let Some((entries, scoped_members)) =
+            resolve_team_scoped_usage(team, workspace, &legacy_filtered_entries)
+        else {
+            return column.finish();
+        };
 
         let is_source_filter_shown = visibility.granularity
             == UsageVisibilityGranularity::FullBreakdown
@@ -309,7 +323,7 @@ impl BillingCycleUsageSectionView {
 
         column.add_child(
             Container::new(render_rows(
-                workspace,
+                &scoped_members,
                 &entries,
                 &visibility,
                 source_filter,
@@ -853,6 +867,22 @@ fn selected_period_index(
         Some(end) => summaries.iter().position(|s| s.period_end == end),
         None => Some(0),
     }
+}
+
+/// Resolves the team-scoped entries and member roster for a team-scoped
+/// view given the (already resolved from the window) `team`. Returns `None`
+/// when `team` is unresolved, signaling the caller to fail closed instead of
+/// falling back to the unfiltered workspace-wide feed.
+fn resolve_team_scoped_usage(
+    team: Option<&Team>,
+    workspace: &Workspace,
+    entries: &[BillingCycleUsageEntry],
+) -> Option<(Vec<BillingCycleUsageEntry>, Vec<WorkspaceMember>)> {
+    let team = team?;
+    Some((
+        filter_entries_by_attributed_team(entries, team.uid),
+        scope_members_to_team(&workspace.members, &team.members),
+    ))
 }
 
 #[cfg(test)]

@@ -32,6 +32,7 @@ use warpui::{
 
 use super::SettingsSection;
 use super::admin_actions::AdminActions;
+use super::billing_and_usage::billing_cycle_usage_common::scope_members_to_team;
 use super::billing_and_usage::overage_limit_modal::{SpendingLimitModal, SpendingLimitModalEvent};
 use super::billing_and_usage::usage_history_entry::UsageHistoryEntry;
 use super::billing_and_usage::usage_history_model::UsageHistoryModel;
@@ -58,10 +59,11 @@ use crate::ui_components::menu_button::{MenuDirection, icon_button_with_context_
 use crate::ui_components::tab_selector::{self, SettingsTab};
 use crate::view_components::ToastFlavor;
 use crate::view_components::action_button::{ActionButton, PrimaryTheme, SecondaryTheme};
+use crate::workspaces::team::Team;
 use crate::workspaces::update_manager::TeamUpdateManager;
 use crate::workspaces::user_profiles::UserProfiles;
 use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
-use crate::workspaces::workspace::{BillingMetadata, CustomerType, Workspace};
+use crate::workspaces::workspace::{BillingMetadata, CustomerType, Workspace, WorkspaceMember};
 use crate::{WorkspaceAction, send_telemetry_from_ctx};
 
 const HEADER_FONT_SIZE: f32 = 16.;
@@ -2852,10 +2854,6 @@ impl BillingAndUsagePageView {
         let mut usage = Flex::column();
 
         let workspace = UserWorkspaces::as_ref(app).current_workspace();
-        // Check if we should show the sort button (admin with team size > 1)
-        let workspace_team_members = workspace
-            .map(|workspace| workspace.members.clone())
-            .unwrap_or_default();
         let current_user_email = AuthStateProvider::as_ref(app)
             .get()
             .user_email()
@@ -2865,6 +2863,18 @@ impl BillingAndUsagePageView {
         let billing_metadata = workspaces.current_workspace_billing_metadata();
         let has_admin_permissions =
             team.is_some_and(|team| team.has_admin_permissions(&current_user_email));
+
+        // `workspace.members` is the full workspace roster across every team,
+        // not just the team this window belongs to. Scope it down so an
+        // admin of one team doesn't see every other team's members here.
+        //
+        // Residual limitation: `WorkspaceMemberUsageInfo.requests_used_since_last_refresh`
+        // carries no per-team attribution, so a scoped member's displayed
+        // request count (and the "Team total" derived from it below) may
+        // still include usage incurred against a *different* team they also
+        // belong to. A faithful per-team count isn't possible with this
+        // legacy counter; only the roster itself is scoped here.
+        let workspace_team_members = resolve_team_scoped_members(workspace, team);
 
         let mut usage_header_right_side = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
@@ -3357,6 +3367,20 @@ impl BillingAndUsagePageView {
         }
 
         usage.finish()
+    }
+}
+
+/// Scopes the workspace-wide member roster down to `team`'s members. Fails
+/// closed to an empty roster when `team` is unresolved, rather than falling
+/// back to the full workspace-wide roster, which would leak every other
+/// team's members into this admin's team page.
+fn resolve_team_scoped_members(
+    workspace: Option<&Workspace>,
+    team: Option<&Team>,
+) -> Vec<WorkspaceMember> {
+    match (workspace, team) {
+        (Some(workspace), Some(team)) => scope_members_to_team(&workspace.members, &team.members),
+        _ => Vec::new(),
     }
 }
 
