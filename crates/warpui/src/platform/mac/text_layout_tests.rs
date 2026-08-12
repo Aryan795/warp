@@ -3,7 +3,7 @@ use rand::random;
 
 use super::*;
 use crate::fonts::{
-    Properties, collect_glyph_indices, collect_line_caret_position_starts, init_fonts,
+    FamilyId, Properties, collect_glyph_indices, collect_line_caret_position_starts, init_fonts,
 };
 use crate::platform::FontDB as _;
 use crate::text_layout::DEFAULT_TOP_BOTTOM_RATIO;
@@ -13,6 +13,53 @@ pub(crate) fn collect_line_caret_position_pairs(line: &Line) -> Vec<(usize, usiz
         .iter()
         .map(|pos| (pos.start_offset, pos.last_offset))
         .collect_vec()
+}
+
+#[test]
+fn test_merge_adjacent_identical_runs_noop_when_already_distinct() {
+    let style_a = StyleAndFont::new(FamilyId(0), Properties::default(), TextStyle::new());
+    let style_b = StyleAndFont::new(FamilyId(1), Properties::default(), TextStyle::new());
+    let runs = vec![(0..5, style_a), (5..10, style_b)];
+
+    let merged = merge_adjacent_identical_runs(&runs);
+
+    assert!(matches!(merged, std::borrow::Cow::Borrowed(_)));
+    assert_eq!(merged.as_ref(), runs.as_slice());
+}
+
+#[test]
+fn test_merge_adjacent_identical_runs_combines_contiguous_identical_styles() {
+    let style_a = StyleAndFont::new(FamilyId(0), Properties::default(), TextStyle::new());
+    let style_b = StyleAndFont::new(FamilyId(1), Properties::default(), TextStyle::new());
+    // Many small, contiguous runs sharing the same style, as could be produced by
+    // character-by-character diff or syntax highlighting.
+    let runs = vec![
+        (0..1, style_a),
+        (1..2, style_a),
+        (2..3, style_a),
+        (3..5, style_b),
+        (5..6, style_a),
+        (6..7, style_a),
+    ];
+
+    let merged = merge_adjacent_identical_runs(&runs);
+
+    assert_eq!(
+        merged.as_ref(),
+        &[(0..3, style_a), (3..5, style_b), (5..7, style_a)]
+    );
+}
+
+#[test]
+fn test_merge_adjacent_identical_runs_does_not_merge_across_gaps() {
+    let style_a = StyleAndFont::new(FamilyId(0), Properties::default(), TextStyle::new());
+    // A gap between the two runs (2..3 is unstyled) should prevent merging even though the
+    // styles are identical, since merging would silently apply styling to the gap.
+    let runs = vec![(0..2, style_a), (3..5, style_a)];
+
+    let merged = merge_adjacent_identical_runs(&runs);
+
+    assert_eq!(merged.as_ref(), runs.as_slice());
 }
 
 #[test]
