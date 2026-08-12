@@ -5411,3 +5411,171 @@ fn test_ai_fact_pane_transfer_into_window_with_existing_pane_discards_duplicate(
         });
     });
 }
+
+/// Regression for the crash found by adversarial verification of APP-5311:
+/// `Workspace.settings_pane` is not a private per-workspace view -- it is the
+/// exact same per-window singleton `SettingsPane::new` fetches from
+/// `SettingsPaneManager`, so a cross-window transfer physically relocates it
+/// along with the pane. Once the destination window later closes, `ViewHandle::
+/// window_id` falls back to the *original* creation window (the window-
+/// removal path clears the live `view_to_window` mapping -- see
+/// `ViewHandle::window_id`'s doc comment), so `open_settings_pane`'s fallback
+/// path unconditionally dereferencing `self.settings_pane` would panic with
+/// "Circular view update": the source window's own `views` map never held
+/// that (now long gone) view. Fixed by having the source workspace build
+/// itself a brand new native `SettingsView` the moment the old one transfers
+/// out, rather than waiting until reopen time to discover the handle is
+/// stale. This test verifies that replacement happens and that the freshly
+/// opened tab after the transfer uses it, not the transferred view.
+#[test]
+fn test_settings_pane_native_view_is_replaced_after_transferring_out() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace_a = mock_workspace(&mut app);
+        let window_a = workspace_a.update(&mut app, |_, ctx| ctx.window_id());
+        let workspace_b = mock_workspace(&mut app);
+        let window_b = workspace_b.update(&mut app, |_, ctx| ctx.window_id());
+
+        let native_view_before_transfer = workspace_a.read(&app, |ws, _| ws.settings_pane.clone());
+
+        workspace_a.update(&mut app, |ws, ctx| {
+            ws.open_settings_pane(None, None, ctx);
+        });
+        // The tab we just opened must be backed by window A's (pre-transfer)
+        // native view, confirming the premise of this test.
+        assert_eq!(
+            app.read(|ctx| SettingsPaneManager::as_ref(ctx).settings_view(window_a)),
+            native_view_before_transfer,
+            "a freshly opened Settings tab should use this window's native view"
+        );
+        let settings_tab_index = workspace_a.read(&app, |ws, _| ws.tab_count() - 1);
+
+        transfer_tab_to_new_window(
+            &mut app,
+            &workspace_a,
+            window_a,
+            &workspace_b,
+            window_b,
+            settings_tab_index,
+        );
+
+        // Window A must have replaced its native view with a fresh one --
+        // the pre-transfer instance now lives in window B, so window A's own
+        // field/registration must not still reference it.
+        let native_view_after_transfer = workspace_a.read(&app, |ws, _| ws.settings_pane.clone());
+        assert_ne!(
+            native_view_after_transfer, native_view_before_transfer,
+            "window A's native settings view should be replaced once the old one transfers out"
+        );
+        assert_eq!(
+            app.read(|ctx| SettingsPaneManager::as_ref(ctx).settings_view(window_a)),
+            native_view_after_transfer,
+            "SettingsPaneManager's registration for window A must match the replacement"
+        );
+
+        // Reopening Settings in window A must create a new tab backed by the
+        // replacement view, not the transferred one.
+        let tab_count_before_reopen = workspace_a.read(&app, |ws, _| ws.tab_count());
+        workspace_a.update(&mut app, |ws, ctx| {
+            ws.open_settings_pane(None, None, ctx);
+        });
+        assert_eq!(
+            workspace_a.read(&app, |ws, _| ws.tab_count()),
+            tab_count_before_reopen + 1
+        );
+        let reopened_settings_view = workspace_a.read(&app, |ws, ctx| {
+            ws.active_tab_pane_group()
+                .as_ref(ctx)
+                .downcast_pane_by_id::<crate::pane_group::SettingsPane>(
+                    SettingsPaneManager::as_ref(ctx)
+                        .find_pane(window_a)
+                        .expect("settings pane should be registered for window A")
+                        .pane_id,
+                )
+                .expect("active pane should be the reopened SettingsPane")
+                .settings_view(ctx)
+        });
+        assert_eq!(
+            reopened_settings_view, native_view_after_transfer,
+            "reopened Settings tab should use window A's replacement view"
+        );
+        assert_ne!(
+            reopened_settings_view, native_view_before_transfer,
+            "reopened Settings tab must not reference the transferred (relocated) view"
+        );
+    });
+}
+
+/// Same replacement-on-transfer regression as above, for the AI fact (Rules)
+/// pane's `Workspace.ai_fact_view` singleton.
+#[test]
+fn test_ai_fact_native_view_is_replaced_after_transferring_out() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace_a = mock_workspace(&mut app);
+        let window_a = workspace_a.update(&mut app, |_, ctx| ctx.window_id());
+        let workspace_b = mock_workspace(&mut app);
+        let window_b = workspace_b.update(&mut app, |_, ctx| ctx.window_id());
+
+        let native_view_before_transfer = workspace_a.read(&app, |ws, _| ws.ai_fact_view.clone());
+
+        // Give window A a second tab so `transfer_tab_to_new_window` (which
+        // requires more than one tab, mirroring the production drag-and-drop
+        // path) can transfer the Rules tab out from under it.
+        workspace_a.update(&mut app, |ws, ctx| {
+            ws.add_terminal_tab(false, ctx);
+        });
+        workspace_a.update(&mut app, |ws, ctx| {
+            ws.open_ai_fact_collection_pane(Some(Direction::Right), None, ctx);
+        });
+        let settings_tab_index = workspace_a.read(&app, |ws, _| ws.tab_count() - 1);
+
+        transfer_tab_to_new_window(
+            &mut app,
+            &workspace_a,
+            window_a,
+            &workspace_b,
+            window_b,
+            settings_tab_index,
+        );
+
+        let native_view_after_transfer = workspace_a.read(&app, |ws, _| ws.ai_fact_view.clone());
+        assert_ne!(
+            native_view_after_transfer, native_view_before_transfer,
+            "window A's native Rules view should be replaced once the old one transfers out"
+        );
+        assert_eq!(
+            app.read(|ctx| AIFactManager::as_ref(ctx).ai_fact_view(window_a)),
+            native_view_after_transfer,
+            "AIFactManager's registration for window A must match the replacement"
+        );
+
+        // Reopening Rules in window A must create a new pane backed by the
+        // replacement view, not the transferred one.
+        workspace_a.update(&mut app, |ws, ctx| {
+            ws.open_ai_fact_collection_pane(Some(Direction::Right), None, ctx);
+        });
+        let reopened_ai_fact_view = workspace_a.read(&app, |ws, ctx| {
+            ws.active_tab_pane_group()
+                .as_ref(ctx)
+                .downcast_pane_by_id::<crate::pane_group::AIFactPane>(
+                    AIFactManager::as_ref(ctx)
+                        .find_pane(window_a)
+                        .expect("AI fact pane should be registered for window A")
+                        .pane_id,
+                )
+                .expect("active pane should be the reopened AIFactPane")
+                .ai_fact_view(ctx)
+        });
+        assert_eq!(
+            reopened_ai_fact_view, native_view_after_transfer,
+            "reopened Rules pane should use window A's replacement view"
+        );
+        assert_ne!(
+            reopened_ai_fact_view, native_view_before_transfer,
+            "reopened Rules pane must not reference the transferred (relocated) view"
+        );
+    });
+}

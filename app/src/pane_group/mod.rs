@@ -8416,8 +8416,22 @@ impl PaneGroup {
                 if let Some(old_workspace) =
                     workspace::WorkspaceRegistry::as_ref(ctx).get(*old_window_id, ctx)
                 {
-                    old_workspace.update(ctx, |_, ctx| {
+                    old_workspace.update(ctx, |old_workspace, ctx| {
                         ctx.unsubscribe_to_view(settings_view);
+                        // `settings_view` is the source window's native,
+                        // per-window singleton Settings view (see
+                        // `Workspace::settings_pane`), not a view created
+                        // just for this one pane -- `SettingsPane::new`
+                        // always fetches it from `SettingsPaneManager`. The
+                        // low-level view-tree transfer that already ran
+                        // physically relocated it to `new_window_id`
+                        // regardless of the collision outcome above, so the
+                        // source window's own field/registration are now
+                        // dangling handles unless replaced here. Without
+                        // this, the next `open_settings_pane` in this
+                        // window panics dereferencing the relocated (or by
+                        // then torn-down) view. See APP-5311.
+                        old_workspace.replace_native_settings_view(ctx);
                     });
                 }
                 if let Some(new_workspace) =
@@ -8450,8 +8464,14 @@ impl PaneGroup {
                 if let Some(old_workspace) =
                     workspace::WorkspaceRegistry::as_ref(ctx).get(*old_window_id, ctx)
                 {
-                    old_workspace.update(ctx, |_, ctx| {
+                    old_workspace.update(ctx, |old_workspace, ctx| {
                         ctx.unsubscribe_to_view(ai_fact_view);
+                        // Same reasoning as the Settings case above:
+                        // `ai_fact_view` is this window's native, per-window
+                        // singleton Rules view, and it just physically
+                        // relocated to `new_window_id` along with the
+                        // transferred pane. See APP-5311.
+                        old_workspace.replace_native_ai_fact_view(ctx);
                     });
                 }
                 if let Some(new_workspace) =

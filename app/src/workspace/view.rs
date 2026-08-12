@@ -1774,6 +1774,16 @@ impl Workspace {
             me.handle_theme_chooser_event(event, ctx);
         });
 
+        let settings_pane = Self::build_native_settings_view(ctx);
+
+        (settings_pane, theme_chooser_view)
+    }
+
+    /// Creates a new native `SettingsView` for this window and registers it
+    /// with `SettingsPaneManager`. Factored out of `build_settings_views` so
+    /// `replace_native_settings_view` can create a replacement using the
+    /// exact same setup.
+    fn build_native_settings_view(ctx: &mut ViewContext<Self>) -> ViewHandle<SettingsView> {
         let settings_pane = ctx.add_typed_action_view(move |ctx| SettingsView::new(None, ctx));
         ctx.subscribe_to_view(&settings_pane, move |me, _, event, ctx| {
             me.handle_settings_pane_event(event, ctx);
@@ -1784,7 +1794,49 @@ impl Workspace {
             manager.register_view(window_id, settings_pane.clone());
         });
 
-        (settings_pane, theme_chooser_view)
+        settings_pane
+    }
+
+    /// Replaces this window's native Settings view (`self.settings_pane`)
+    /// and its `SettingsPaneManager` registration with a freshly created
+    /// one. `SettingsPane::new` always fetches this window's registered
+    /// native view rather than owning a dedicated one, so when a Settings
+    /// pane is dragged into another window, `AppContext::
+    /// transfer_view_tree_to_window` physically relocates that same native
+    /// view along with it -- leaving this window's field/registration
+    /// dangling. Called from `PaneGroup::rehome_pane_event_subscription`
+    /// whenever that happens, so `self.settings_pane` and the manager
+    /// always point at a view that actually lives in this window. See
+    /// APP-5311.
+    pub(crate) fn replace_native_settings_view(&mut self, ctx: &mut ViewContext<Self>) {
+        self.settings_pane = Self::build_native_settings_view(ctx);
+    }
+
+    /// Creates a new native `AIFactView` (Rules) for this window and
+    /// registers it with `AIFactManager`. Factored out so
+    /// `replace_native_ai_fact_view` can create a replacement using the
+    /// exact same setup.
+    fn build_native_ai_fact_view(ctx: &mut ViewContext<Self>) -> ViewHandle<AIFactView> {
+        let ai_fact_view = ctx.add_typed_action_view(AIFactView::new);
+        ctx.subscribe_to_view(&ai_fact_view, move |me, _, event, ctx| {
+            me.handle_ai_fact_view_event(event, ctx);
+        });
+
+        let window_id = ctx.window_id();
+        AIFactManager::handle(ctx).update(ctx, |manager, _| {
+            manager.register_view(window_id, ai_fact_view.clone());
+        });
+
+        ai_fact_view
+    }
+
+    /// Replaces this window's native AI-fact (Rules) view
+    /// (`self.ai_fact_view`) and its `AIFactManager` registration with a
+    /// freshly created one. Same reasoning as
+    /// `replace_native_settings_view`, for the Rules pane's per-window
+    /// singleton view. See APP-5311.
+    pub(crate) fn replace_native_ai_fact_view(&mut self, ctx: &mut ViewContext<Self>) {
+        self.ai_fact_view = Self::build_native_ai_fact_view(ctx);
     }
 
     fn build_require_login_modal(ctx: &mut ViewContext<Self>) -> ViewHandle<AuthView> {
@@ -3047,14 +3099,7 @@ impl Workspace {
             me.handle_command_search_event(event, ctx);
         });
 
-        let ai_fact_view = ctx.add_typed_action_view(AIFactView::new);
-        ctx.subscribe_to_view(&ai_fact_view, move |me, _, event, ctx| {
-            me.handle_ai_fact_view_event(event, ctx);
-        });
-
-        AIFactManager::handle(ctx).update(ctx, |manager, _| {
-            manager.register_view(window_id, ai_fact_view.clone());
-        });
+        let ai_fact_view = Self::build_native_ai_fact_view(ctx);
 
         let working_directories_model =
             ctx.add_model(|_| pane_group::WorkingDirectoriesModel::new());
