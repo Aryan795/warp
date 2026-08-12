@@ -81,6 +81,7 @@ pub struct CodeEditorFind {
     replace_editor: ViewHandle<EditorView>,
     searcher: ModelHandle<Searcher>,
     button_mouse_states: ButtonMouseStates,
+    find_editor_click_state: MouseStateHandle,
     preserve_case_enabled: bool,
     is_open: bool,
     is_replace_open: bool,
@@ -101,6 +102,10 @@ pub enum FindAction {
     ToggleReplaceOpen,
     ReplaceAll,
     TogglePreserveCase,
+    // Clicking the query field: restores it to an editable state if something (e.g. Vim's
+    // Enter/`*`/`#` handling) disabled it, since a disabled field can no longer be clicked
+    // into via the normal editor click handling. No-ops if the field is already editable.
+    ClickQueryField,
 }
 
 pub fn init(app: &mut AppContext) {
@@ -229,6 +234,7 @@ impl CodeEditorFind {
             replace_editor,
             searcher,
             button_mouse_states: Default::default(),
+            find_editor_click_state: Default::default(),
             preserve_case_enabled: false,
             is_open: false,
             is_replace_open: false,
@@ -268,6 +274,13 @@ impl CodeEditorFind {
         self.find_editor.as_ref(app).can_edit(app)
     }
 
+    /// Returns a handle to the query field's underlying editor, for tests that need to drive or
+    /// observe it directly (e.g. simulating an Enter keypress, or checking whether it's focused).
+    #[cfg(test)]
+    pub fn find_editor_handle_for_test(&self) -> ViewHandle<EditorView> {
+        self.find_editor.clone()
+    }
+
     /// Enable or disable the find input editor's interactivity.
     pub fn set_find_input_editable(&self, ctx: &mut ViewContext<Self>, is_editable: bool) {
         self.find_editor.update(ctx, |editor, ctx| {
@@ -279,6 +292,29 @@ impl CodeEditorFind {
             editor.set_interaction_state(state, ctx);
         });
     }
+
+    /// Makes the query field editable, selects its contents, and focuses it. This is the
+    /// recovery path for a query field that was disabled (e.g. by Vim's Enter/`*`/`#`
+    /// handling), and mirrors what happens when the find bar itself receives focus.
+    fn enable_query_editing(&mut self, ctx: &mut ViewContext<Self>) {
+        self.find_editor.update(ctx, |editor, ctx| {
+            editor.set_interaction_state(InteractionState::Editable, ctx);
+            editor.select_all(ctx);
+        });
+        ctx.focus(&self.find_editor);
+        ctx.notify();
+    }
+
+    /// Handles a click on the query field. Only takes effect if the field is currently
+    /// disabled, so it doesn't interfere with normal click-to-position-cursor behavior
+    /// while the field is already editable.
+    fn handle_query_field_clicked(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.find_editor.as_ref(ctx).can_edit(ctx) {
+            return;
+        }
+        self.enable_query_editing(ctx);
+    }
+
     fn handle_find_editor_event(&mut self, event: &EditorEvent, ctx: &mut ViewContext<Self>) {
         match event {
             EditorEvent::Edited(_) => {
@@ -771,7 +807,16 @@ impl CodeEditorFind {
                 Shrinkable::new(
                     1.,
                     ConstrainedBox::new(
-                        Clipped::new(ChildView::new(&self.find_editor).finish()).finish(),
+                        Clipped::new(
+                            Hoverable::new(self.find_editor_click_state.clone(), |_| {
+                                ChildView::new(&self.find_editor).finish()
+                            })
+                            .on_click(move |ctx, _, _| {
+                                ctx.dispatch_typed_action(FindAction::ClickQueryField);
+                            })
+                            .finish(),
+                        )
+                        .finish(),
                     )
                     .with_height(editor_height)
                     .finish(),
@@ -914,6 +959,7 @@ impl TypedActionView for CodeEditorFind {
                 self.preserve_case_enabled = !self.preserve_case_enabled;
                 ctx.notify();
             }
+            FindAction::ClickQueryField => self.handle_query_field_clicked(ctx),
         }
     }
 }
@@ -955,12 +1001,7 @@ impl View for CodeEditorFind {
             searcher.set_auto_select(true);
         });
         if focus_ctx.is_self_focused() {
-            self.find_editor.update(ctx, |editor, ctx| {
-                editor.set_interaction_state(InteractionState::Editable, ctx);
-                editor.select_all(ctx);
-            });
-            ctx.focus(&self.find_editor);
-            ctx.notify();
+            self.enable_query_editing(ctx);
         }
     }
 
