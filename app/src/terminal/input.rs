@@ -6131,9 +6131,13 @@ impl Input {
             let window_id = ctx.window_id();
 
             let message = if images_removed == 1 {
-                "1 image was removed - limit is 20 per conversation.".into()
+                format!(
+                    "1 image was removed - limit is {MAX_IMAGES_PER_CONVERSATION} per conversation."
+                )
             } else {
-                format!("{images_removed} images were removed - limit is 20 per conversation.")
+                format!(
+                    "{images_removed} images were removed - limit is {MAX_IMAGES_PER_CONVERSATION} per conversation."
+                )
             };
 
             ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
