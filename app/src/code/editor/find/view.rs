@@ -53,6 +53,10 @@ pub const CASE_SENSITIVE_TOOLTIP: &str = "Case sensitive search";
 pub const PRESERVE_CASE_TOOLTIP: &str = "Preserve case";
 pub const FIND_PLACEHOLDER_TEXT: &str = "Find";
 pub const REPLACE_PLACEHOLDER_TEXT: &str = "Replace";
+/// Position-cache id for the find query field's `Hoverable` wrapper (see `SavePosition`), used
+/// by tests to locate its real on-screen bounds and dispatch a raw pointer event through the
+/// actual presenter/mouse-event pipeline, rather than only exercising the resulting action.
+pub(crate) const FIND_QUERY_FIELD_POSITION_ID: &str = "find_query_field";
 
 #[derive(Default)]
 struct ButtonMouseStates {
@@ -787,21 +791,25 @@ impl CodeEditorFind {
         .finish();
 
         let find_editor_handle = self.find_editor.clone();
-        let find_query_field = Hoverable::new(self.find_query_mouse_state.clone(), |_state| {
-            Clipped::new(ChildView::new(&self.find_editor).finish()).finish()
-        })
-        .on_mouse_down(move |ctx, app, _| {
-            // The find input is disabled after Vim Enter or a `*`/`#` word-search commits the
-            // query (see `handle_find_editor_event` / `set_find_input_editable`). A disabled
-            // editor's element ignores mouse-down (it early-returns before dispatching
-            // `EditorAction::Focus`), so the click would otherwise be a complete no-op. Only
-            // reactivate here; a normal click on an already-editable field is handled by the
-            // editor itself and should not be disturbed (e.g. it would reset the cursor via
-            // `select_all`).
-            if !find_editor_handle.as_ref(app).can_edit(app) {
-                ctx.dispatch_typed_action(FindAction::ActivateFindInput);
-            }
-        })
+        let find_query_field = SavePosition::new(
+            Hoverable::new(self.find_query_mouse_state.clone(), |_state| {
+                Clipped::new(ChildView::new(&self.find_editor).finish()).finish()
+            })
+            .on_mouse_down(move |ctx, app, _| {
+                // The find input is disabled after Vim Enter or a `*`/`#` word-search commits
+                // the query (see `handle_find_editor_event` / `set_find_input_editable`). A
+                // disabled editor's element ignores mouse-down (it early-returns before
+                // dispatching `EditorAction::Focus`), so the click would otherwise be a complete
+                // no-op. Only reactivate here; a normal click on an already-editable field is
+                // handled by the editor itself and should not be disturbed (e.g. it would reset
+                // the cursor via `select_all`).
+                if !find_editor_handle.as_ref(app).can_edit(app) {
+                    ctx.dispatch_typed_action(FindAction::ActivateFindInput);
+                }
+            })
+            .finish(),
+            FIND_QUERY_FIELD_POSITION_ID,
+        )
         .finish();
 
         let mut query_editor_row = Flex::row()
