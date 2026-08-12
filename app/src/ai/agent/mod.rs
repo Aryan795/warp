@@ -2248,6 +2248,19 @@ pub enum AIAgentContext {
     /// An image attached to the query.
     Image(ImageContext),
 
+    /// A video attached to the query (behind `FeatureFlag::VideoAsContext`). Carries both
+    /// representations so the server can pick the one that suits the resolved model: `native`
+    /// (when present) for a provider that accepts video directly (currently Gemini), or `frames`
+    /// for every other provider. The two representations are never both used for the same model,
+    /// but both are sent so a stored attachment replays correctly even if a later request in the
+    /// same conversation resolves to a different model. See `video::read_native_video` for how
+    /// `native` is produced (and capped/audio-filtered) client-side.
+    Video {
+        file_name: String,
+        frames: Vec<ImageContext>,
+        native: Option<NativeVideoAttachment>,
+    },
+
     /// Indexed codebase possibly relevant to the query.
     Codebase {
         /// Absolute path to the indexed codebase.
@@ -2371,6 +2384,27 @@ impl std::fmt::Debug for ImageContext {
             .field("mime_type", &self.mime_type)
             .field("file_name", &"REDACTED_FILE_NAME_UGC")
             .field("source_video_file_name", &"REDACTED_FILE_NAME_UGC")
+            .finish()
+    }
+}
+
+/// The native (unextracted) representation of a video attachment, sent to providers that accept
+/// video directly (currently Gemini). See `AIAgentContext::Video`.
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct NativeVideoAttachment {
+    /// Base64-encoded video data, capped client-side (see `video::MAX_NATIVE_VIDEO_BYTES`) and
+    /// with its audio track stripped when the user didn't opt in to sending audio.
+    pub data: String,
+
+    /// MIME type of the video container (e.g., "video/mp4").
+    pub mime_type: String,
+}
+
+impl std::fmt::Debug for NativeVideoAttachment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeVideoAttachment")
+            .field("data", &"REDACTED_B64_VIDEO_DATA_UGC")
+            .field("mime_type", &self.mime_type)
             .finish()
     }
 }

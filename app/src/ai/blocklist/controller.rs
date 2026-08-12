@@ -3460,7 +3460,11 @@ fn input_for_query(
         match attachment {
             PendingAttachment::Image(image) => image_context.push(AIAgentContext::Image(image)),
             PendingAttachment::Video(video) => {
-                image_context.extend(video.frames.into_iter().map(AIAgentContext::Image));
+                image_context.push(AIAgentContext::Video {
+                    file_name: video.file_name,
+                    frames: video.frames,
+                    native: video.native_video,
+                });
             }
             PendingAttachment::File(file) => file_attachments.push(file),
         }

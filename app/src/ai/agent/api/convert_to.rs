@@ -762,6 +762,26 @@ fn convert_context(context: &[AIAgentContext]) -> api::InputContext {
                     mime_type: image_context.mime_type,
                 });
             }
+            AIAgentContext::Video {
+                file_name: _,
+                frames,
+                native,
+            } => {
+                api_context.videos.push(api::input_context::Video {
+                    data: native
+                        .as_ref()
+                        .map(|n| n.data.clone().into())
+                        .unwrap_or_default(),
+                    mime_type: native.map(|n| n.mime_type).unwrap_or_default(),
+                    frames: frames
+                        .into_iter()
+                        .map(|frame| api::input_context::Image {
+                            data: frame.data.into(),
+                            mime_type: frame.mime_type,
+                        })
+                        .collect(),
+                });
+            }
             AIAgentContext::Codebase { path, name } => {
                 api_context
                     .codebases

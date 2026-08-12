@@ -23,7 +23,7 @@
 //! Frame count is hard-capped well under the existing 20-images-per-query limit shared with
 //! image-as-context.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use tokio::process::Command;
@@ -88,6 +88,18 @@ pub fn transcript_still_applies(
                 .any(|other| other == name)
         })
 }
+
+/// Hard cap on the raw (undecoded) bytes of a video sent natively to a provider that accepts
+/// video directly (currently Gemini) instead of frames. Chosen to stay comfortably under
+/// Gemini's own ~20MB-inline-request ceiling once base64 overhead and the rest of the prompt are
+/// accounted for. Kept in lockstep with the server's own
+/// `formattable.MaxVideoAttachmentSizeBytes` limit -- a video over this cap is sent as frames
+/// only, never natively, regardless of the resolved model.
+///
+/// Follow-up: for longer/larger videos, switch this path to Gemini's Files API (which supports
+/// up to 2GB/20GB) instead of raising this cap; inline bytes were chosen here for simplicity in
+/// this first native-video pass. See APP-5323.
+pub const MAX_NATIVE_VIDEO_BYTES: usize = 8 * 1000 * 1000;
 
 /// Hard cap on frames extracted from a single video. Keeps us comfortably under the existing
 /// `MAX_IMAGE_COUNT_FOR_QUERY` (20) limit that image-as-context already enforces per query.
@@ -412,6 +424,72 @@ pub async fn extract_audio_wav(video_path: &Path) -> Result<Option<Vec<u8>>, Vid
         return Ok(None);
     }
     Ok(Some(data))
+}
+
+/// Reads a video's raw bytes for the native-video representation (sent to a provider that
+/// accepts video directly, currently Gemini), honoring [`MAX_NATIVE_VIDEO_BYTES`].
+///
+/// When `include_audio` is `false`, the audio track is stripped first (a fast stream copy, no
+/// re-encode) so a provider that ingests video natively never receives audio the user explicitly
+/// excluded via the "include audio" checkbox -- unlike the frame-extraction fallback, which never
+/// includes audio unless the checkbox instead routes it through [`extract_audio_wav`] as a text
+/// transcript. When `include_audio` is `true`, the file's audio (if any) is left intact so it
+/// rides natively to Gemini; this checkbox path does *not* also produce a transcript for Gemini's
+/// benefit (that would be redundant), but the caller may still want a transcript for providers
+/// that fall back to frames-only (which never see the native audio at all).
+///
+/// Returns `None` (never an error) when the video exceeds the cap or the audio strip step fails,
+/// so callers fall back to sending only frames for this attachment -- exactly as if the model
+/// resolved to a provider without native video support.
+pub async fn read_native_video(video_path: &Path, include_audio: bool) -> Option<Vec<u8>> {
+    if include_audio {
+        let data = tokio::fs::read(video_path).await.ok()?;
+        return (data.len() <= MAX_NATIVE_VIDEO_BYTES).then_some(data);
+    }
+
+    let muted_path = mute_audio(video_path).await.ok()?;
+    let data = tokio::fs::read(&muted_path).await.ok()?;
+    (data.len() <= MAX_NATIVE_VIDEO_BYTES).then_some(data)
+}
+
+/// Writes a copy of `video_path` with its audio track removed (video stream copied, not
+/// re-encoded, so this is fast and lossless) to a temp file, and returns that file's path.
+async fn mute_audio(video_path: &Path) -> Result<PathBuf, VideoProcessingError> {
+    if !ffmpeg_available().await {
+        return Err(VideoProcessingError::FfmpegUnavailable);
+    }
+
+    let temp_dir = tempfile::Builder::new()
+        .prefix("warp-video-muted-")
+        .tempdir()
+        .map_err(|e| VideoProcessingError::Io(format!("failed to create temp directory: {e}")))?;
+    // Keep the temp dir alive for the caller by leaking it into the returned path's ancestry;
+    // `tempfile` deletes the directory (and this file) once the `TempDir` value drops, so we must
+    // not let it drop here.
+    let out_path = temp_dir.keep().join("muted.mp4");
+
+    let output = Command::new("ffmpeg")
+        .arg("-y")
+        .arg("-hide_banner")
+        .arg("-i")
+        .arg(video_path)
+        .arg("-an")
+        .arg("-c:v")
+        .arg("copy")
+        .arg(&out_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| VideoProcessingError::Ffmpeg(format!("failed to spawn ffmpeg: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(VideoProcessingError::Ffmpeg(stderr.trim_end().to_string()));
+    }
+
+    Ok(out_path)
 }
 
 #[cfg(test)]

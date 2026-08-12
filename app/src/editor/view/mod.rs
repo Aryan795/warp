@@ -93,7 +93,7 @@ use self::model::{LocalSelections, Selection, UpdateBufferOption};
 use super::Point;
 use super::soft_wrap::{ClampDirection, DisplayPointAndClampDirection};
 use crate::BlocklistAIHistoryModel;
-use crate::ai::agent::ImageContext;
+use crate::ai::agent::{ImageContext, NativeVideoAttachment};
 use crate::ai::blocklist::{BlocklistAIContextModel, InputType, PendingAttachment, PendingFile};
 use crate::ai::predict::next_command_model::{NextCommandModel, NextCommandSuggestionState};
 use crate::appearance::Appearance;
@@ -5508,14 +5508,19 @@ impl EditorView {
         }
     }
 
-    /// Extracts frames (and optionally an audio transcript) from a video the user confirmed
-    /// attaching via the video-attach banner, and attaches the frames as image context.
+    /// Extracts frames from a video the user confirmed attaching via the video-attach banner, and
+    /// (when under the size cap) reads the video's raw bytes for native sending, then attaches
+    /// both as a single grouped attachment.
     ///
-    /// Frames are sent through the same [`Self::process_and_attach_images_as_ai_context`] path
-    /// used for user-attached images, since none of the LLM providers we use accept native video
-    /// attachments. When `include_audio` is set, the video's audio track is separately
+    /// Frames flow through the existing image-as-context path, since most providers we route to
+    /// don't accept video directly; the raw bytes are used instead when the request resolves to a
+    /// provider that does (currently Gemini) -- see `video::read_native_video` and
+    /// `AIAgentContext::Video`. Only one of the two representations is ever actually used for a
+    /// given request. When `include_audio` is set, the video's audio track is also separately
     /// transcribed (via the same transcription endpoint used for voice input) and the transcript
-    /// is inserted as plain text into the query buffer.
+    /// is inserted as plain text into the query buffer, so a request that falls back to frames
+    /// still gets some signal from the audio; the native video's own audio track is preserved (or
+    /// stripped) client-side based on the same checkbox, so Gemini never needs the transcript.
     pub fn read_and_process_video_async(
         &mut self,
         file_path: PathBuf,
@@ -5574,6 +5579,7 @@ impl EditorView {
             return;
         }
         let min_frames = crate::util::video::MIN_VIDEO_FRAMES.min(max_frames);
+        let video_mime_type = from_path(&file_path).first_or_octet_stream().to_string();
 
         // Clear any stale association from a previous video attach so an in-flight transcript
         // for that earlier video can't be mistaken for applying to this one.
@@ -5582,13 +5588,29 @@ impl EditorView {
         self.process_attached_video_future_handle = Some(ctx.spawn(
             {
                 let file_path = file_path.clone();
-                async move { crate::util::video::extract_frames(&file_path, max_frames, min_frames).await }
+                async move {
+                    // Native video bytes (used if the resolved model supports native video) and
+                    // the frame-extraction fallback (used otherwise) are computed together so a
+                    // single video attachment always carries both representations -- the server
+                    // decides which one a given request actually needs.
+                    let frames_result =
+                        crate::util::video::extract_frames(&file_path, max_frames, min_frames)
+                            .await;
+                    let native_video_bytes =
+                        crate::util::video::read_native_video(&file_path, include_audio).await;
+                    (frames_result, native_video_bytes)
+                }
             },
-            move |this, result, ctx| {
+            move |this, (result, native_video_bytes), ctx| {
                 // Future was aborted.
                 if this.process_attached_video_future_handle.is_none() {
                     return;
                 }
+
+                let native_video = native_video_bytes.map(|data| NativeVideoAttachment {
+                    data: general_purpose::STANDARD.encode(&data),
+                    mime_type: video_mime_type.clone(),
+                });
 
                 match result {
                     Ok(frames) => {
@@ -5636,11 +5658,13 @@ impl EditorView {
                         // themselves are unpacked back into individual `AIAgentContext::Image`
                         // entries when the query is sent — only the composer's presentation
                         // differs from a regular multi-image attachment.
+                        let native_video_present = native_video.is_some();
                         if let Some(context_model) = &this.context_model {
                             context_model.update(ctx, |context_model, ctx| {
                                 context_model.append_pending_video(
                                     frames_file_name.clone(),
                                     frame_contexts,
+                                    native_video,
                                     ctx,
                                 );
                             });
@@ -5648,10 +5672,15 @@ impl EditorView {
 
                         if frame_count > 0 {
                             let frame_word = if frame_count == 1 { "frame" } else { "frames" };
+                            let native_note = if native_video_present {
+                                "used natively for models that support it, or as still frames otherwise"
+                            } else {
+                                "attached as still frames \u{2014} too large to send natively"
+                            };
                             ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
                                 toast_stack.add_persistent_toast(
                                     DismissibleToast::default(format!(
-                                        "\u{201c}{frames_file_name}\u{201d} attached as {frame_count} still {frame_word} \u{2014} video isn't sent natively."
+                                        "\u{201c}{frames_file_name}\u{201d} attached as {frame_count} still {frame_word} \u{2014} {native_note}."
                                     )),
                                     window_id,
                                     ctx,

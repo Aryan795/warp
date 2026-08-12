@@ -22,6 +22,7 @@ use crate::ai::agent::conversation::{
 use crate::ai::agent::todos::AIAgentTodoList;
 use crate::ai::agent::{
     AIAgentAttachment, AIAgentContext, AnyFileContent, FileContext, ImageContext,
+    NativeVideoAttachment,
 };
 use crate::ai::block_context::BlockContext;
 use crate::ai::document::ai_document_model::AIDocumentId;
@@ -52,13 +53,18 @@ pub enum AttachmentType {
 }
 
 /// The frames extracted from a single video attachment (behind `FeatureFlag::VideoAsContext`),
-/// grouped so the composer shows one chip for the whole video instead of one per frame. The
-/// frames themselves are unpacked back into individual `AIAgentContext::Image` entries when a
-/// query is sent — grouping only changes how the attachment is presented before sending.
+/// grouped so the composer shows one chip for the whole video instead of one per frame. Frames
+/// and (when under the size cap) the original video's bytes are both carried through to a single
+/// `AIAgentContext::Video` entry when a query is sent, so the server can pick native video for a
+/// provider that supports it (currently Gemini) or the frames for everyone else.
 #[derive(Clone, Debug)]
 pub struct VideoContext {
     pub file_name: String,
     pub frames: Vec<ImageContext>,
+    /// The original video's bytes and MIME type, when small enough to send natively (see
+    /// `video::read_native_video`). `None` when the video exceeded the client-side size cap --
+    /// in that case only `frames` is ever sent, even to a provider that supports native video.
+    pub native_video: Option<NativeVideoAttachment>,
 }
 
 /// Lightweight metadata for rendering a pending attachment without cloning its payload.
@@ -625,17 +631,23 @@ impl BlocklistAIContextModel {
         }
     }
 
-    /// Appends a video's extracted frames as a single grouped attachment, so the composer shows
-    /// one chip for the video rather than one per frame. No-ops when `frames` is empty.
+    /// Appends a video's extracted frames (and, when under the size cap, its native bytes) as a
+    /// single grouped attachment, so the composer shows one chip for the video rather than one
+    /// per frame. No-ops when `frames` is empty.
     pub fn append_pending_video(
         &mut self,
         file_name: String,
         frames: Vec<ImageContext>,
+        native_video: Option<NativeVideoAttachment>,
         ctx: &mut ModelContext<Self>,
     ) {
         if !frames.is_empty() {
             self.append_pending_attachments(
-                vec![PendingAttachment::Video(VideoContext { file_name, frames })],
+                vec![PendingAttachment::Video(VideoContext {
+                    file_name,
+                    frames,
+                    native_video,
+                })],
                 ctx,
             );
         }

@@ -367,6 +367,7 @@ fn make_video_attachment(file_name: &str, frame_names: &[&str]) -> PendingAttach
                 source_video_file_name: Some(file_name.to_owned()),
             })
             .collect(),
+        native_video: None,
     })
 }
 
@@ -623,6 +624,7 @@ fn append_pending_video_groups_frames_into_a_single_chip() {
                         source_video_file_name: Some("clip.mp4".to_owned()),
                     },
                 ],
+                None,
                 ctx,
             );
         });
@@ -648,7 +650,7 @@ fn append_pending_video_with_no_frames_is_a_no_op() {
         let model = build_test_context_model(&mut app);
 
         model.update(&mut app, |m, ctx| {
-            m.append_pending_video("clip.mp4".to_owned(), vec![], ctx);
+            m.append_pending_video("clip.mp4".to_owned(), vec![], None, ctx);
         });
 
         model.read(&app, |m, _| assert!(m.pending_attachments().is_empty()));
