@@ -1,8 +1,8 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use ::ai::api_keys::{
-    CUSTOM_ENDPOINT_REASONING_EFFORTS, CustomEndpoint, CustomEndpointModelParams,
-    CustomEndpointSchema,
+    CustomEndpoint, CustomEndpointModelParams, CustomEndpointSchema,
+    OPENAI_RESPONSES_REASONING_EFFORTS,
 };
 use url::Url;
 use warp_editor::editor::NavigationKey;
@@ -338,7 +338,7 @@ impl CustomEndpointModal {
             editor
         });
         let selected_reasoning_effort = reasoning_effort
-            .filter(|effort| CUSTOM_ENDPOINT_REASONING_EFFORTS.contains(effort))
+            .filter(|effort| OPENAI_RESPONSES_REASONING_EFFORTS.contains(effort))
             .unwrap_or(REASONING_EFFORT_DEFAULT_LABEL)
             .to_string();
         let reasoning_effort_dropdown = ctx.add_typed_action_view(move |ctx| {
@@ -348,7 +348,7 @@ impl CustomEndpointModal {
                 REASONING_EFFORT_DEFAULT_LABEL,
                 CustomEndpointModalAction::SetReasoningEffort(None),
             )];
-            items.extend(CUSTOM_ENDPOINT_REASONING_EFFORTS.iter().map(|effort| {
+            items.extend(OPENAI_RESPONSES_REASONING_EFFORTS.iter().map(|effort| {
                 DropdownItem::new(
                     *effort,
                     CustomEndpointModalAction::SetReasoningEffort(Some(*effort)),

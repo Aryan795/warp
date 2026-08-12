@@ -26,7 +26,7 @@ use crate::telemetry::{
 const SECURE_STORAGE_KEY: &str = "AiApiKeys";
 
 /// Reasoning effort values supported by OpenAI Responses models.
-pub const CUSTOM_ENDPOINT_REASONING_EFFORTS: &[&str] =
+pub const OPENAI_RESPONSES_REASONING_EFFORTS: &[&str] =
     &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /// Secure-storage key for the connected xAI/Grok subscription's OAuth tokens.
