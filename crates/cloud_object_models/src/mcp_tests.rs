@@ -120,9 +120,25 @@ fn test_sse_server_serialization() {
 }
 
 #[test]
-fn test_templatable_mcp_server_deserialization_without_uuid_defaults() {
+fn test_templatable_mcp_server_deserialization_without_uuid_succeeds() {
     // Stored/legacy JSON predating the `uuid` field should still deserialize
     // successfully, rather than failing with a missing field error.
+    let json = r#"{
+        "name": "test-server",
+        "description": null,
+        "template": {"json": "{}", "variables": []},
+        "gallery_data": null
+    }"#;
+
+    serde_json::from_str::<TemplatableMCPServer>(json)
+        .expect("Failed to deserialize TemplatableMCPServer without uuid");
+}
+
+#[test]
+fn test_templatable_mcp_server_missing_uuid_fallback_is_stable_across_reloads() {
+    // The same uuid-less record should derive the same fallback uuid every time it's
+    // deserialized, so that TemplatableMCPServerManager's orphan-installation matching
+    // settles instead of repeating forever.
     let json = r#"{
         "name": "test-server",
         "description": null,
@@ -135,13 +151,57 @@ fn test_templatable_mcp_server_deserialization_without_uuid_defaults() {
     let server_b: TemplatableMCPServer = serde_json::from_str(json)
         .expect("Failed to deserialize TemplatableMCPServer without uuid");
 
-    assert_ne!(
-        server_a.uuid,
-        uuid::Uuid::nil(),
-        "uuid should default to a freshly generated UUID, not the nil UUID"
+    assert_eq!(
+        server_a.uuid, server_b.uuid,
+        "the same uuid-less record should derive the same fallback uuid on every reload"
     );
+}
+
+#[test]
+fn test_templatable_mcp_server_missing_uuid_fallback_differs_by_content() {
+    // Two distinct uuid-less records should derive different fallback uuids, so they
+    // don't collide onto the same identifier.
+    let json_a = r#"{
+        "name": "server-a",
+        "description": null,
+        "template": {"json": "{}", "variables": []},
+        "gallery_data": null
+    }"#;
+    let json_b = r#"{
+        "name": "server-b",
+        "description": null,
+        "template": {"json": "{}", "variables": []},
+        "gallery_data": null
+    }"#;
+
+    let server_a: TemplatableMCPServer = serde_json::from_str(json_a)
+        .expect("Failed to deserialize TemplatableMCPServer without uuid");
+    let server_b: TemplatableMCPServer = serde_json::from_str(json_b)
+        .expect("Failed to deserialize TemplatableMCPServer without uuid");
+
     assert_ne!(
         server_a.uuid, server_b.uuid,
-        "separately-deserialized instances missing uuid should not collide on the same identifier"
+        "distinct uuid-less records should not collide on the same fallback uuid"
     );
+}
+
+#[test]
+fn test_templatable_mcp_server_deserialization_preserves_provided_uuid() {
+    // When `uuid` is present, it must be used as-is rather than being overridden by the
+    // content-hash fallback.
+    let expected_uuid = uuid::Uuid::new_v4();
+    let json = format!(
+        r#"{{
+        "uuid": "{expected_uuid}",
+        "name": "test-server",
+        "description": null,
+        "template": {{"json": "{{}}", "variables": []}},
+        "gallery_data": null
+    }}"#
+    );
+
+    let server: TemplatableMCPServer =
+        serde_json::from_str(&json).expect("Failed to deserialize TemplatableMCPServer");
+
+    assert_eq!(server.uuid, expected_uuid);
 }
