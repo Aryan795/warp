@@ -456,6 +456,70 @@ mod format_terminal_state_tests {
     }
 }
 
+mod abandoned_before_dispatch_tests {
+    use super::super::is_abandoned_before_dispatch;
+    use crate::ai::agent::{AIAgentOutput, CancellationReason, Shared};
+    use crate::ai::blocklist::block::model::AIBlockOutputStatus;
+
+    fn cancelled(reason: CancellationReason) -> AIBlockOutputStatus {
+        AIBlockOutputStatus::Cancelled {
+            partial_output: Some(Shared::new(AIAgentOutput::default())),
+            reason,
+        }
+    }
+
+    #[test]
+    fn streaming_call_is_not_abandoned() {
+        assert!(!is_abandoned_before_dispatch(
+            false,
+            &AIBlockOutputStatus::Pending
+        ));
+        assert!(!is_abandoned_before_dispatch(
+            false,
+            &AIBlockOutputStatus::PartiallyReceived {
+                output: Shared::new(AIAgentOutput::default()),
+            }
+        ));
+    }
+
+    #[test]
+    fn fully_streamed_call_is_not_abandoned() {
+        assert!(!is_abandoned_before_dispatch(
+            false,
+            &AIBlockOutputStatus::Complete {
+                output: Shared::new(AIAgentOutput::default()),
+            }
+        ));
+    }
+
+    #[test]
+    fn call_cancelled_mid_stream_is_abandoned() {
+        // The streamed actions of a cancelled response are never queued, whatever
+        // ended the stream, so every cancellation reason strands the call.
+        for reason in [
+            CancellationReason::ManuallyCancelled,
+            CancellationReason::UserCommandExecuted,
+            CancellationReason::FollowUpSubmitted {
+                is_for_same_conversation: true,
+            },
+            CancellationReason::CLISubagentUserTakeover,
+        ] {
+            assert!(
+                is_abandoned_before_dispatch(false, &cancelled(reason)),
+                "{reason} should strand the call"
+            );
+        }
+    }
+
+    #[test]
+    fn restored_call_is_abandoned_even_while_pending() {
+        assert!(is_abandoned_before_dispatch(
+            true,
+            &AIBlockOutputStatus::Pending
+        ));
+    }
+}
+
 mod override_from_approved_config_tests {
     use ai::agent::orchestration_config::{OrchestrationConfig, OrchestrationExecutionMode};
 

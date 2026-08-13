@@ -228,6 +228,46 @@ pub fn test_restored_ai_block_renders_mermaid_and_local_images() -> Builder {
         )
 }
 
+/// Cancelling a conversation while a `run_agents` tool call is still streaming
+/// leaves the call without an action result of its own, so the card has to fall
+/// back to a cancelled state rather than its "Configuring agents…" placeholder.
+pub fn test_cancelled_run_agents_tool_call_renders_cancelled_card() -> Builder {
+    new_builder()
+        .with_real_display()
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(0))
+        .with_step(clear_blocklist_to_remove_bootstrapped_blocks())
+        .with_step(
+            new_step_with_default_assertions("Cancel a streaming run_agents tool call")
+                .with_action(|app, window_id, _| {
+                    let terminal_view = single_terminal_view_for_tab(app, window_id, 0);
+                    terminal_view.update(app, |view, ctx| {
+                        view.insert_dummy_cancelled_run_agents_ai_block(
+                            "Add a canceled UI for the run_agents tool call".to_owned(),
+                            "Split the fix and its verification across two agents.".to_owned(),
+                            vec!["card-fix".to_owned(), "verification".to_owned()],
+                            ctx,
+                        );
+                    });
+                }),
+        )
+        .with_step(
+            TestStep::new("Wait for the cancelled card and capture screenshot")
+                .set_timeout(Duration::from_secs(20))
+                .set_post_step_pause(Duration::from_secs(3))
+                .with_take_screenshot("cancelled_run_agents_tool_call.png")
+                .add_assertion(|app, window_id| {
+                    let terminal_view = single_terminal_view_for_tab(app, window_id, 0);
+                    terminal_view.read(app, |view, ctx| {
+                        let is_any_block_visible = view
+                            .ai_blocks()
+                            .iter()
+                            .any(|block| block.read(ctx, |block, ctx| !block.is_hidden(ctx)));
+                        async_assert!(is_any_block_visible, "Cancelled AI block should be visible")
+                    })
+                }),
+        )
+}
+
 fn select_first_to_last_through_ai_simple(is_copy_on_select: bool) -> Builder {
     let mut builder = builder_with_setup();
     // TODO(INT-339): There should be a "T" to the left of the query "Can you produce some dummy output for me?"

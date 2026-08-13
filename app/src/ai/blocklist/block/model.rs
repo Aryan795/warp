@@ -222,7 +222,9 @@ pub mod testing {
 
     use super::{AIBlockModel, AIBlockOutputStatus, OutputStatusUpdateCallback};
     use crate::ai::agent::conversation::AIConversationId;
-    use crate::ai::agent::{AIAgentInput, AIAgentOutput, ServerOutputId, Shared};
+    use crate::ai::agent::{
+        AIAgentInput, AIAgentOutput, CancellationReason, ServerOutputId, Shared,
+    };
     use crate::ai::blocklist::AIBlock;
     use crate::ai::blocklist::model::{
         AIRequestType, PassiveRequestType, PassiveSuggestionTriggerType,
@@ -234,6 +236,9 @@ pub mod testing {
         /// `None` models a block that is still streaming output, so its status
         /// stays [`AIBlockOutputStatus::Pending`].
         output: Option<Shared<AIAgentOutput>>,
+        /// Reports `output` as the partial output of a cancelled response
+        /// stream instead of a completed one.
+        is_cancelled: bool,
         model_id: LLMId,
     }
 
@@ -242,6 +247,7 @@ pub mod testing {
             Self {
                 input,
                 output: Some(Shared::new(output)),
+                is_cancelled: false,
                 model_id: "fake-llm".to_owned().into(),
             }
         }
@@ -252,6 +258,19 @@ pub mod testing {
             Self {
                 input,
                 output: None,
+                is_cancelled: false,
+                model_id: "fake-llm".to_owned().into(),
+            }
+        }
+
+        /// Builds a fake model for a block whose response stream was cancelled
+        /// mid-flight, with `partial_output` standing in for everything that
+        /// streamed in before the cancellation.
+        pub fn new_cancelled(input: Vec<AIAgentInput>, partial_output: AIAgentOutput) -> Self {
+            Self {
+                input,
+                output: Some(Shared::new(partial_output)),
+                is_cancelled: true,
                 model_id: "fake-llm".to_owned().into(),
             }
         }
@@ -261,6 +280,12 @@ pub mod testing {
         type View = AIBlock;
 
         fn status(&self, _app: &AppContext) -> AIBlockOutputStatus {
+            if self.is_cancelled {
+                return AIBlockOutputStatus::Cancelled {
+                    partial_output: self.output.clone(),
+                    reason: CancellationReason::ManuallyCancelled,
+                };
+            }
             match &self.output {
                 Some(output) => AIBlockOutputStatus::Complete {
                     output: output.clone(),

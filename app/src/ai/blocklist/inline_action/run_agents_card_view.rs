@@ -31,7 +31,7 @@ use crate::ai::blocklist::action_model::{
 };
 use crate::ai::blocklist::agent_view::orchestration_pill_bar::render_static_agent_pill;
 use crate::ai::blocklist::block::AIBlock;
-use crate::ai::blocklist::block::model::AIBlockModel;
+use crate::ai::blocklist::block::model::{AIBlockModel, AIBlockOutputStatus};
 use crate::ai::blocklist::block::view_impl::WithContentItemSpacing;
 use crate::ai::blocklist::inline_action::create_environment_modal::{
     CreateEnvironmentModal, CreateEnvironmentModalEvent,
@@ -73,6 +73,7 @@ use crate::view_components::dropdown::DropdownEvent;
 use crate::view_components::{FilterableDropdownEvent, FilterableDropdownOrientation};
 
 const RUN_AGENTS_CARD_TITLE: &str = "Can I start additional agents for this task?";
+const RUN_AGENTS_CANCELLED_LABEL: &str = "Spawn agents cancelled";
 
 pub fn init(app: &mut AppContext) {
     use warpui::keymap::macros::*;
@@ -1251,12 +1252,16 @@ impl View for RunAgentsCardView {
             return render_spawning_card(&snapshot, appearance, app);
         }
 
-        // Restored-from-history: dispatch state is lost, render as
-        // Cancelled. Must be checked before the streaming gate below,
-        // because restored blocks have no pending action status.
-        if self.block_model.is_restored() {
+        // A call the action model never saw can't reach a result of its own, so
+        // it renders the terminal cancelled state directly. Must be checked
+        // before the streaming gate below, because such a call has no action
+        // status at all.
+        if is_abandoned_before_dispatch(
+            self.block_model.is_restored(),
+            &self.block_model.status(app),
+        ) {
             return render_status_only_card(
-                "Spawn agents cancelled".to_string(),
+                RUN_AGENTS_CANCELLED_LABEL.to_string(),
                 appearance,
                 StatusKind::Cancelled,
                 app,
@@ -1651,8 +1656,26 @@ pub(crate) fn format_terminal_state(result: &RunAgentsResult) -> (String, Status
             };
             (label, StatusKind::Failure)
         }
-        RunAgentsResult::Cancelled => ("Spawn agents cancelled".to_string(), StatusKind::Cancelled),
+        RunAgentsResult::Cancelled => (
+            RUN_AGENTS_CANCELLED_LABEL.to_string(),
+            StatusKind::Cancelled,
+        ),
     }
+}
+
+/// `true` when a `RunAgents` call can never produce a dispatch result, because
+/// it never reached the action model.
+///
+/// Two things strand a call that way: restoring the block from history drops
+/// the dispatch state, and cancelling the response stream mid-tool-call skips
+/// queueing the streamed actions altogether. Neither leaves an action status
+/// behind to drive the card, so without this the card would sit on its
+/// in-progress placeholder forever.
+pub(crate) fn is_abandoned_before_dispatch(
+    is_restored: bool,
+    block_status: &AIBlockOutputStatus,
+) -> bool {
+    is_restored || block_status.is_cancelled()
 }
 
 #[derive(Clone, Copy)]

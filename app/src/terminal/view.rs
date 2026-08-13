@@ -23017,6 +23017,85 @@ impl TerminalView {
         self.insert_dummy_ai_block_internal(query, None, ctx)
     }
 
+    /// Inserts a dummy AI block whose response stream was cancelled while a
+    /// `run_agents` tool call was still streaming, with one child agent slot per
+    /// entry in `agent_names`.
+    #[cfg(any(test, feature = "integration_tests"))]
+    pub fn insert_dummy_cancelled_run_agents_ai_block(
+        &mut self,
+        query: String,
+        summary: String,
+        agent_names: Vec<String>,
+        ctx: &mut ViewContext<Self>,
+    ) -> ViewHandle<AIBlock> {
+        use crate::ai::agent::task::TaskId;
+        use crate::ai::agent::{
+            AIAgentAction, AIAgentActionType, AIAgentOutput, AIAgentOutputMessage, MessageId,
+            RunAgentsAgentRunConfig, RunAgentsExecutionMode, RunAgentsRequest,
+        };
+        use crate::ai::blocklist::FakeAIBlockModel;
+
+        let request = RunAgentsRequest {
+            summary,
+            base_prompt: "Work the assigned slice of the task.".to_owned(),
+            skills: Vec::new(),
+            model_id: "auto".to_owned(),
+            harness_type: "oz".to_owned(),
+            execution_mode: RunAgentsExecutionMode::Local,
+            agent_run_configs: agent_names
+                .into_iter()
+                .map(|name| RunAgentsAgentRunConfig {
+                    name,
+                    prompt: String::new(),
+                    title: String::new(),
+                    agent_identity_uid: String::new(),
+                    model_id: String::new(),
+                })
+                .collect(),
+            plan_id: String::new(),
+            harness_auth_secret_name: None,
+        };
+        let partial_output = AIAgentOutput {
+            messages: vec![AIAgentOutputMessage::action(
+                MessageId::new("fake-run-agents-message-id".to_owned()),
+                AIAgentAction {
+                    id: "fake-run-agents-action-id".to_owned().into(),
+                    task_id: TaskId::new("fake-task-id".to_owned()),
+                    action: AIAgentActionType::RunAgents(request),
+                    requires_result: true,
+                },
+            )],
+            ..Default::default()
+        };
+
+        self.insert_dummy_ai_block_with_model(
+            FakeAIBlockModel::new_cancelled(Self::dummy_ai_block_inputs(query), partial_output),
+            /* show_in_agent_view */ true,
+            ctx,
+        )
+    }
+
+    /// The user query inputs rendered by the dummy AI block helpers.
+    #[cfg(any(test, feature = "integration_tests"))]
+    fn dummy_ai_block_inputs(query: String) -> Vec<crate::ai::agent::AIAgentInput> {
+        use crate::ai::agent::AIAgentInput;
+
+        vec![AIAgentInput::UserQuery {
+            query,
+            context: vec![AIAgentContext::Directory {
+                pwd: Some("~".to_owned()),
+                home_dir: None,
+                are_file_symbols_indexed: false,
+            }]
+            .into(),
+            static_query_type: None,
+            referenced_attachments: Default::default(),
+            user_query_mode: UserQueryMode::default(),
+            running_command: None,
+            intended_agent: None,
+        }]
+    }
+
     /// Shared body for the dummy AI block insertion helpers. Creates a fresh
     /// conversation for the block; a `None` output models a block that is
     /// still streaming (unfinished).
@@ -23030,25 +23109,12 @@ impl TerminalView {
         use rand::distributions::{Alphanumeric, DistString};
 
         use crate::ai::agent::{
-            AIAgentInput, AIAgentOutput, AIAgentOutputMessage, AIAgentText, AIAgentTextSection,
-            MessageId, ServerOutputId,
+            AIAgentOutput, AIAgentOutputMessage, AIAgentText, AIAgentTextSection, MessageId,
+            ServerOutputId,
         };
         use crate::ai::blocklist::FakeAIBlockModel;
 
-        let inputs = vec![AIAgentInput::UserQuery {
-            query,
-            context: vec![AIAgentContext::Directory {
-                pwd: Some("~".to_owned()),
-                home_dir: None,
-                are_file_symbols_indexed: false,
-            }]
-            .into(),
-            static_query_type: None,
-            referenced_attachments: Default::default(),
-            user_query_mode: UserQueryMode::default(),
-            running_command: None,
-            intended_agent: None,
-        }];
+        let inputs = Self::dummy_ai_block_inputs(query);
 
         let output = output.map(|output| AIAgentOutput {
             messages: vec![AIAgentOutputMessage::text(
@@ -23066,6 +23132,26 @@ impl TerminalView {
             ..Default::default()
         });
 
+        let model = match output {
+            Some(output) => FakeAIBlockModel::new(inputs, output),
+            None => FakeAIBlockModel::new_streaming(inputs),
+        };
+        self.insert_dummy_ai_block_with_model(model, /* show_in_agent_view */ false, ctx)
+    }
+
+    /// Inserts an AI block backed by `model` into the blocklist, wired up the
+    /// way the production insertion path wires a real one.
+    ///
+    /// Agent view hides every AI block that doesn't belong to the active
+    /// conversation, so `show_in_agent_view` opens the block's conversation
+    /// there first, the way a live conversation would be.
+    #[cfg(any(test, feature = "integration_tests"))]
+    fn insert_dummy_ai_block_with_model(
+        &mut self,
+        model: crate::ai::blocklist::FakeAIBlockModel,
+        show_in_agent_view: bool,
+        ctx: &mut ViewContext<Self>,
+    ) -> ViewHandle<AIBlock> {
         // Create a real conversation in the history model for this dummy block so it renders.
         let terminal_view_id = ctx.view_id();
         let mut new_conversation_id = None;
@@ -23078,10 +23164,16 @@ impl TerminalView {
         });
         let conversation_id = new_conversation_id.expect("conversation created for dummy AI block");
 
-        let ai_block_model = Rc::new(match output {
-            Some(output) => FakeAIBlockModel::new(inputs, output),
-            None => FakeAIBlockModel::new_streaming(inputs),
-        });
+        if show_in_agent_view && FeatureFlag::AgentView.is_enabled() {
+            self.enter_agent_view_for_conversation(
+                None,
+                AgentViewEntryOrigin::RestoreExistingConversation,
+                conversation_id,
+                ctx,
+            );
+        }
+
+        let ai_block_model = Rc::new(model);
         let ai_block = ctx.add_typed_action_view(|ctx| {
             AIBlock::new(
                 ai_block_model,
@@ -23135,6 +23227,16 @@ impl TerminalView {
             ctx,
         );
         ai_block
+    }
+
+    /// Every AI block rendered in this view, in blocklist order.
+    #[cfg(any(test, feature = "integration_tests"))]
+    pub fn ai_blocks(&self) -> Vec<ViewHandle<AIBlock>> {
+        self.rich_content_views
+            .iter()
+            .filter_map(|rich_content| rich_content.ai_block_metadata())
+            .map(|ai_metadata| ai_metadata.ai_block_handle.clone())
+            .collect()
     }
 
     pub fn last_ai_block(&self) -> Option<ViewHandle<AIBlock>> {
