@@ -163,6 +163,23 @@ pub fn refresh_warp_drive(
         .map_err(|_| anyhow::anyhow!("Timed out waiting for Warp Drive to sync"))
 }
 
+/// Classifies a failed environment catalog lookup, distinguishing "the Drive catalog does not
+/// contain this ID" from "the Drive catalog is empty" (e.g. because the object sync that
+/// populates it hasn't completed yet or failed silently, as opposed to genuinely lacking a row
+/// for this ID). Only the former is a real `EnvironmentNotFound`; the latter means we can't yet
+/// tell whether the ID is valid, so it's misleading to say it doesn't exist or to point the user
+/// at their team settings.
+pub(super) fn classify_environment_lookup_failure(
+    environment_id: String,
+    catalog_is_empty: bool,
+) -> AgentDriverError {
+    if catalog_is_empty {
+        AgentDriverError::EnvironmentCatalogUnavailable(environment_id)
+    } else {
+        AgentDriverError::EnvironmentNotFound(environment_id)
+    }
+}
+
 /// Fetch the conversation's server metadata and validate that its harness matches the caller's
 /// `--harness` choice. Returns the metadata on success so the caller can reuse it (e.g. for the
 /// server conversation token).

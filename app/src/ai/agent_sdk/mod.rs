@@ -1466,12 +1466,22 @@ impl AgentDriverRunner {
 
                 CloudAmbientAgentEnvironment::get_by_id(&sync_id, ctx)
                     .ok_or_else(|| {
-                        report_error!(
-                            "Environment not found with ID",
-                            extra: { "environment_id" => %environment_id }
-                        );
-                        AgentDriver::log_valid_environments(ctx);
-                        AgentDriverError::EnvironmentNotFound(environment_id)
+                        let catalog_is_empty = AgentDriver::log_valid_environments(ctx);
+                        if catalog_is_empty {
+                            report_error!(
+                                "Environment catalog is empty while resolving environment",
+                                extra: { "environment_id" => %environment_id }
+                            );
+                        } else {
+                            report_error!(
+                                "Environment not found with ID",
+                                extra: { "environment_id" => %environment_id }
+                            );
+                        }
+                        common::classify_environment_lookup_failure(
+                            environment_id,
+                            catalog_is_empty,
+                        )
                     })
                     .map(|env| env.model().string_model.clone())
             })
