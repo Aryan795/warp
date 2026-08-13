@@ -1,7 +1,7 @@
 use regex::Regex;
 use warp::cmd_or_ctrl_shift;
 use warp::integration_testing::code_editor_find::{
-    assert_find_query_editor_is_editable_and_focused,
+    assert_find_query_editor_buffer_contains, assert_find_query_editor_is_editable_and_focused,
     assert_find_query_editor_is_selectable_not_editable, enable_vim_mode,
     find_query_editor_position_id, focus_code_editor_for_test,
 };
@@ -105,6 +105,17 @@ pub fn test_vim_enter_leaves_find_query_editor_clickable() -> Builder {
                 .with_click_on_saved_position_fn(find_query_editor_position_id)
                 .add_assertion(assert_find_query_editor_is_editable_and_focused()),
         )
+        .with_step(
+            new_step_with_default_assertions(
+                // The find editor selects all text on focus (`select_all_on_focus: true`),
+                // mirroring the keyboard shortcut, so typing here replaces the query rather
+                // than appending to it. Either way, the buffer changing proves the field is
+                // genuinely editable, not just reporting itself as such.
+                "Type again to prove the field actually accepts input after the click",
+            )
+            .with_typed_characters(&["!"])
+            .add_assertion(assert_find_query_editor_buffer_contains("!")),
+        )
 }
 
 /// Regression test (Find in File click-to-focus, Vim word search): a `*` word search populates
@@ -123,5 +134,12 @@ pub fn test_vim_word_search_leaves_find_query_editor_clickable() -> Builder {
             new_step_with_default_assertions("Click the find query field")
                 .with_click_on_saved_position_fn(find_query_editor_position_id)
                 .add_assertion(assert_find_query_editor_is_editable_and_focused()),
+        )
+        .with_step(
+            new_step_with_default_assertions(
+                "Type again to prove the field actually accepts input after the click",
+            )
+            .with_typed_characters(&["!"])
+            .add_assertion(assert_find_query_editor_buffer_contains("!")),
         )
 }

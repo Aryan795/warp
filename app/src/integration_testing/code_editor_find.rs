@@ -98,3 +98,20 @@ pub fn assert_find_query_editor_is_selectable_not_editable() -> AssertionCallbac
         )
     })
 }
+
+/// Asserts that the find query editor's buffer contains the given substring, proving that typed
+/// input actually reaches the field (not just that it reports itself as editable/focused).
+pub fn assert_find_query_editor_buffer_contains(
+    expected_substring: &'static str,
+) -> AssertionCallback {
+    Box::new(move |app, window_id| {
+        let editor = find_query_editor_view(app, window_id);
+        let text = editor.read(app, |editor, ctx| editor.buffer_text(ctx));
+        async_assert!(
+            text.contains(expected_substring),
+            "Expected find query editor buffer to contain {:?}, got {:?}",
+            expected_substring,
+            text
+        )
+    })
+}
