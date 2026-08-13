@@ -286,6 +286,30 @@ fn models_without_a_host_fall_back_to_the_provider_icon() {
     );
 }
 
+#[test]
+fn kimi_models_show_the_kimi_logo_despite_an_unknown_provider() {
+    // Kimi is Fireworks-hosted, so the server reports LLMProvider::Unknown for
+    // it. The id prefix is matched directly so the picker still shows a Kimi
+    // logo instead of falling back to the generic agent glyph.
+    let llm = server_llm("kimi-k27-code-fireworks", None);
+    assert_eq!(
+        model_leading_icon(&llm, ModelIconFlags::default()),
+        Icon::KimiLogo
+    );
+}
+
+#[test]
+fn kimi_models_are_also_matched_by_base_model_name() {
+    // Defensive fallback: match on the server's human-readable base name
+    // (e.g. "kimi k2.7 code") in case an id ever doesn't carry the prefix.
+    let mut llm = server_llm("some-opaque-id", None);
+    llm.base_model_name = "Kimi K2.7 Code".to_string();
+    assert_eq!(
+        model_leading_icon(&llm, ModelIconFlags::default()),
+        Icon::KimiLogo
+    );
+}
+
 // -- build_custom_llm_infos / display label tests --
 
 fn endpoint(

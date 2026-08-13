@@ -187,6 +187,19 @@ pub fn model_leading_icon(llm: &LLMInfo, flags: ModelIconFlags) -> Icon {
     } else if flags.is_using_gemini_enterprise {
         Icon::GeminiEnterpriseAgentPlatform
     } else {
+        model_provider_icon(llm)
+    }
+}
+
+/// The icon representing a model's provider, independent of routing/host flags.
+///
+/// Kimi models are Fireworks-hosted and arrive from the server as
+/// [`LLMProvider::Unknown`], so they're matched here by id/name instead of by
+/// provider.
+pub fn model_provider_icon(llm: &LLMInfo) -> Icon {
+    if llm.id.as_str().starts_with("kimi-") || llm.base_model_name.to_lowercase().contains("kimi") {
+        Icon::KimiLogo
+    } else {
         llm.provider.icon().unwrap_or(Icon::Agent)
     }
 }
