@@ -288,12 +288,8 @@ fn fake_stderr(data: impl Into<Vec<u8>>) -> tokio::io::BufReader<std::io::Cursor
     tokio::io::BufReader::new(std::io::Cursor::new(data.into()))
 }
 
-/// **Regression test for APP-5349.** Before the fix, the accumulation buffer
-/// was never cleared, so `log` was called with the *entire* cumulative stderr
-/// history on every line (`"first"`, then `"first\nsecond"`, then
-/// `"first\nsecond\nthird"`, ...), causing unbounded heap growth for a
-/// long-running or verbose child process. Each logged entry must contain only
-/// its own line.
+/// Each logged entry must contain only its own line, not the cumulative
+/// stderr history (APP-5349).
 #[tokio::test]
 async fn forward_stderr_to_logger_does_not_accumulate_across_lines() {
     let reader = fake_stderr(*b"first\nsecond\nthird\n");
@@ -315,8 +311,7 @@ async fn forward_stderr_to_logger_does_not_accumulate_across_lines() {
     );
 }
 
-/// A trailing chunk that was never newline-terminated is still flushed once
-/// EOF is reached, so output isn't silently dropped.
+/// A trailing, non-newline-terminated chunk is still flushed at EOF.
 #[tokio::test]
 async fn forward_stderr_to_logger_flushes_trailing_content_without_newline_at_eof() {
     let reader = fake_stderr(*b"no newline at end");
@@ -334,10 +329,8 @@ async fn forward_stderr_to_logger_flushes_trailing_content_without_newline_at_eo
     );
 }
 
-/// Across many lines, every logged entry should stay roughly the size of a
-/// single line rather than growing with the number of lines seen so far --
-/// this is exactly the property that was violated before the buffer was
-/// cleared on each iteration.
+/// Every logged entry stays roughly the size of a single line, regardless of
+/// how many lines have already been forwarded.
 #[tokio::test]
 async fn forward_stderr_to_logger_many_lines_does_not_grow_each_log_call() {
     let num_lines = 500;
@@ -369,10 +362,8 @@ async fn forward_stderr_to_logger_many_lines_does_not_grow_each_log_call() {
     );
 }
 
-/// A single line that never terminates in a newline (e.g. a misbehaving
-/// child) must still be bounded: once it accumulates `MAX_STDERR_LINE_BYTES`,
-/// it's force-flushed and the buffer is reset, rather than growing without
-/// bound for as long as the child keeps writing.
+/// A line that never terminates in a newline is still bounded: once it
+/// accumulates `MAX_STDERR_LINE_BYTES`, it's force-flushed and reset.
 #[tokio::test]
 async fn forward_stderr_to_logger_bounds_a_single_unterminated_line() {
     let total_len = MAX_STDERR_LINE_BYTES * 3;
@@ -411,4 +402,39 @@ async fn forward_stderr_to_logger_bounds_a_single_unterminated_line() {
         .map(|msg| msg.strip_prefix(prefix).unwrap())
         .collect();
     assert_eq!(reconstructed, String::from_utf8(input).unwrap());
+}
+
+/// Force-flushing at `MAX_STDERR_LINE_BYTES` must not split a multi-byte
+/// UTF-8 character across two chunks; the incomplete trailing bytes are
+/// carried over and combined with the rest before decoding.
+#[tokio::test]
+async fn forward_stderr_to_logger_does_not_split_utf8_scalar_at_cap() {
+    let text = format!("{}\u{20ac}", "a".repeat(MAX_STDERR_LINE_BYTES - 1));
+    let mut input = text.clone().into_bytes();
+    input.push(b'\n');
+
+    let reader = fake_stderr(input);
+    let logged: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let logged_clone = logged.clone();
+
+    forward_stderr_to_logger(reader, "1", move |msg| {
+        logged_clone.lock().unwrap().push(msg);
+    })
+    .await;
+
+    let logged = logged.lock().unwrap();
+    let prefix = "[info] MCP [pid: 1] stderr: ";
+
+    for msg in logged.iter() {
+        assert!(
+            !msg.contains('\u{fffd}'),
+            "logged chunk contains a UTF-8 replacement character: {msg:?}"
+        );
+    }
+
+    let reconstructed: String = logged
+        .iter()
+        .map(|msg| msg.strip_prefix(prefix).unwrap())
+        .collect();
+    assert_eq!(reconstructed, text);
 }

@@ -77,22 +77,17 @@ fn build_header_map(headers: &HashMap<String, String>) -> reqwest::header::Heade
     headers.try_into().unwrap_or_default()
 }
 
-/// Maximum number of bytes accumulated for a single stderr "line" before it's
-/// force-flushed to the logger even without a trailing newline. Bounds memory
-/// growth if a child process writes an extremely long (or endless,
-/// newline-free) line to stderr.
+/// Maximum bytes buffered for a single stderr line before it's flushed to the
+/// logger even without a trailing newline, bounding memory if a child writes
+/// an extremely long or endless line.
 const MAX_STDERR_LINE_BYTES: usize = 64 * 1024;
 
 /// Forwards a CLI-based MCP server's stderr to `log`, one line at a time.
 ///
-/// Runs until EOF or a read error. Unlike a naive `read_line` loop, the
-/// accumulation buffer is cleared after every flush, so a long-running or
-/// verbose child process can't cause `log` to be called with the entire
-/// cumulative stderr history on every line (APP-5349: this previously caused
-/// multi-GB heap growth for chatty, long-lived MCP servers). A single line
-/// longer than `MAX_STDERR_LINE_BYTES` — including one that never terminates
-/// in a newline — is flushed and reset once it hits that cap, so a
-/// pathological child can't grow the buffer without bound either.
+/// Runs until EOF or a read error. The accumulation buffer is cleared after
+/// every flush so `log` only ever sees one line's content (APP-5349), and a
+/// line exceeding `MAX_STDERR_LINE_BYTES` without a newline is flushed and
+/// reset anyway.
 async fn forward_stderr_to_logger<R>(mut reader: R, pid: &str, log: impl Fn(String))
 where
     R: tokio::io::AsyncBufRead + Unpin,
@@ -108,7 +103,7 @@ where
         };
 
         if available.is_empty() {
-            // EOF: flush a trailing chunk that wasn't newline-terminated, then stop.
+            // EOF: still flush a trailing, non-newline-terminated chunk.
             if !buf.is_empty() {
                 log(format_stderr_chunk(pid, &buf));
             }
@@ -120,16 +115,34 @@ where
         buf.extend_from_slice(&available[..consumed]);
         reader.consume(consumed);
 
-        if newline_pos.is_some() || buf.len() >= MAX_STDERR_LINE_BYTES {
+        if newline_pos.is_some() {
             log(format_stderr_chunk(pid, &buf));
             buf.clear();
+        } else if buf.len() >= MAX_STDERR_LINE_BYTES {
+            // Flush only the longest valid UTF-8 prefix; an incomplete trailing
+            // sequence is carried into the next chunk instead of being decoded
+            // as replacement characters.
+            let boundary = utf8_valid_boundary(&buf);
+            log(format_stderr_chunk(pid, &buf[..boundary]));
+            buf.drain(..boundary);
         }
     }
 }
 
-/// Formats one forwarded stderr line/chunk for the logger. Strips a trailing
-/// newline (and preceding `\r`, for CRLF-terminated output) so each log
-/// entry contains only its own line's text.
+/// Length of the longest prefix of `bytes` that is valid, complete UTF-8.
+/// Genuinely invalid bytes (as opposed to a truncated trailing sequence)
+/// aren't held back, so they still surface via lossy decoding.
+fn utf8_valid_boundary(bytes: &[u8]) -> usize {
+    match std::str::from_utf8(bytes) {
+        Ok(_) => bytes.len(),
+        Err(e) => match e.error_len() {
+            None => e.valid_up_to(),
+            Some(_) => bytes.len(),
+        },
+    }
+}
+
+/// Formats one forwarded stderr chunk, stripping a trailing newline/`\r`.
 fn format_stderr_chunk(pid: &str, chunk: &[u8]) -> String {
     let text = String::from_utf8_lossy(chunk);
     let text = text.trim_end_matches(['\n', '\r']);
