@@ -173,6 +173,18 @@ pub struct ModelIconFlags {
     pub is_using_gemini_enterprise: bool,
 }
 
+/// Kimi models are hosted through Fireworks, and the server's provider mapping
+/// (`LLMProviderForModelId`) doesn't have a Fireworks/Moonshot case, so every Kimi
+/// model reaches the client as `LLMProvider::Unknown` — see `LLMProvider::icon` in
+/// `crates/ai/src/llm_provider.rs`. Keying off the model id here (rather than the
+/// provider enum, which can't distinguish Kimi from any other unknown-provider model)
+/// lets the picker show the Kimi mark without a server/GraphQL enum change. Matching
+/// by prefix, rather than an exact-id allowlist, means newly added Kimi variants (e.g.
+/// a future `kimi-k4-fireworks`) automatically pick up the logo.
+pub(crate) fn is_kimi_model_id(id: &str) -> bool {
+    id.starts_with("kimi-")
+}
+
 /// The leading icon shown next to a model in the model picker and model menus.
 ///
 /// Auto models deliberately get the generic agent glyph rather than a host or
@@ -186,6 +198,8 @@ pub fn model_leading_icon(llm: &LLMInfo, flags: ModelIconFlags) -> Icon {
         Icon::Aws
     } else if flags.is_using_gemini_enterprise {
         Icon::GeminiEnterpriseAgentPlatform
+    } else if is_kimi_model_id(llm.id.as_str()) {
+        Icon::KimiLogo
     } else {
         llm.provider.icon().unwrap_or(Icon::Agent)
     }

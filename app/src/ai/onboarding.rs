@@ -6,17 +6,24 @@ use onboarding::{CreditPackOption, OnboardingAuthState};
 use warp_core::ui::icons::Icon;
 use warpui::{AppContext, SingletonEntity};
 
-use super::llms::{LLMInfo, LLMPreferences};
+use super::llms::{LLMInfo, LLMPreferences, is_kimi_model_id};
 use crate::auth::AuthStateProvider;
 use crate::pricing::{PricingInfoModel, onboarding_credit_pack_options};
 use crate::workspaces::user_workspaces::UserWorkspaces;
 
 impl From<&LLMInfo> for OnboardingModelInfo {
     fn from(llm: &LLMInfo) -> Self {
+        // Kimi models arrive as `LLMProvider::Unknown` (see `llms::is_kimi_model_id`),
+        // so key off the model id to still show the Kimi mark here.
+        let icon = if is_kimi_model_id(llm.id.as_str()) {
+            Icon::KimiLogo
+        } else {
+            llm.provider.icon().unwrap_or(Icon::Agent)
+        };
         Self {
             id: llm.id.clone(),
             title: llm.display_name.clone(),
-            icon: llm.provider.icon().unwrap_or(Icon::Agent),
+            icon,
             is_default: false,
         }
     }
