@@ -116,8 +116,8 @@ pub enum CursorUpdate {
     Reset,
 }
 
-/// Number of frames a committed position survives without being re-cached before it is
-/// expired.
+/// Number of scene builds a committed position survives without being re-cached before it
+/// is expired.
 ///
 /// Position ids are unique per UI entity (a block index, a view id, a per-instance random
 /// prefix), so retaining every position ever committed grows the cache for the lifetime of
@@ -125,13 +125,17 @@ pub enum CursorUpdate {
 /// layout pass that precedes the next paint, and an element that is only transiently
 /// unpainted keeps its position, while an element that is gone for good stops costing
 /// memory.
-const COMMITTED_POSITION_FRAME_LIFETIME: u64 = 600;
+///
+/// The clock counts scene builds rather than presented redraws because
+/// `AppContext::build_scene` can run the invalidate/layout/paint pass up to three times per
+/// redraw while synthesizing hover events. The budget assumes that worst case, so this
+/// guarantees a margin of at least `COMMITTED_POSITION_SCENE_BUILD_LIFETIME / 3` redraws.
+const COMMITTED_POSITION_SCENE_BUILD_LIFETIME: u64 = 1800;
 
-/// A committed element rect along with the frame it was last cached in.
 #[derive(Clone, Copy)]
 struct CommittedPosition {
     bounds: RectF,
-    cached_at_frame: u64,
+    cached_at_scene_build: u64,
 }
 
 /// A set of element rects that are cached across frames
@@ -155,9 +159,9 @@ pub struct PositionCache {
     /// Positions for a drop target. These positions are always cleared on every frame.
     drop_target_positions: Vec<DropTargetPosition>,
 
-    /// Frames elapsed since this cache was created, advanced once per frame by
+    /// Scene builds elapsed since this cache was created, advanced once per build by
     /// [`Self::clear_single_frame_positions`].
-    frame: u64,
+    scene_builds: u64,
 }
 
 impl PositionCache {
@@ -167,7 +171,7 @@ impl PositionCache {
             committed_positions: Default::default(),
             single_frame_positions: Default::default(),
             drop_target_positions: Default::default(),
-            frame: 0,
+            scene_builds: 0,
         }
     }
 
@@ -183,14 +187,14 @@ impl PositionCache {
             .pending_positions
             .pop()
             .expect("mismatched stack start/end");
-        let cached_at_frame = self.frame;
+        let cached_at_scene_build = self.scene_builds;
         self.committed_positions
             .extend(last.into_iter().map(|(position_id, bounds)| {
                 (
                     position_id,
                     CommittedPosition {
                         bounds,
-                        cached_at_frame,
+                        cached_at_scene_build,
                     },
                 )
             }));
@@ -198,7 +202,7 @@ impl PositionCache {
 
     /// Caches a position in the current namespace.  This position will remain
     /// cached until it's explicitly cleared, or until the element that saved it
-    /// stops painting for [`COMMITTED_POSITION_FRAME_LIFETIME`] frames.
+    /// stops painting for [`COMMITTED_POSITION_SCENE_BUILD_LIFETIME`] scene builds.
     pub fn cache_position_indefinitely(&mut self, position_id: String, bounds: RectF) {
         if let Some(last) = self.pending_positions.last_mut() {
             last.insert(position_id.clone(), bounds);
@@ -227,19 +231,20 @@ impl PositionCache {
         self.single_frame_positions.remove(position_id.as_ref());
     }
 
-    /// Clears any positions that should be cached for a single frame, advances the frame
-    /// counter, and expires any committed positions that have not been re-cached for
-    /// [`COMMITTED_POSITION_FRAME_LIFETIME`] frames. This always clears any cached drop
-    /// target positions--we don't permit them to be cached for multiple frames.
+    /// Clears any positions that should be cached for a single frame, advances the scene
+    /// build counter, and expires any committed positions that have not been re-cached for
+    /// [`COMMITTED_POSITION_SCENE_BUILD_LIFETIME`] scene builds. This always clears any
+    /// cached drop target positions--we don't permit them to be cached for multiple frames.
     pub fn clear_single_frame_positions(&mut self) {
         for position_id in self.single_frame_positions.drain() {
             self.committed_positions.remove(&position_id);
         }
         self.drop_target_positions.clear();
-        self.frame = self.frame.saturating_add(1);
-        let frame = self.frame;
+        self.scene_builds = self.scene_builds.saturating_add(1);
+        let scene_builds = self.scene_builds;
         self.committed_positions.retain(|_, position| {
-            frame.saturating_sub(position.cached_at_frame) < COMMITTED_POSITION_FRAME_LIFETIME
+            scene_builds.saturating_sub(position.cached_at_scene_build)
+                < COMMITTED_POSITION_SCENE_BUILD_LIFETIME
         });
     }
 
