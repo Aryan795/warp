@@ -332,6 +332,32 @@ fn test_truncate_text_for_layout_truncates_on_character_boundaries() {
     assert_eq!(truncated_text.len(), MAX_LAYOUT_CHARS * 'é'.len_utf8());
 }
 
+/// Cutting at a character boundary is not enough: landing inside a grapheme cluster would strip
+/// the combining marks off the last visible character.
+#[test]
+fn test_truncate_text_for_layout_does_not_split_grapheme_clusters() {
+    // "e" plus a combining acute accent - two characters, one cluster. The leading "x" offsets
+    // the clusters so that the cap lands in the middle of one.
+    let cluster = "e\u{0301}";
+    let text = format!("x{}", cluster.repeat(MAX_LAYOUT_CHARS));
+    let style = StyleAndFont::new(FamilyId(0), Properties::default(), TextStyle::default());
+
+    let (truncated_text, truncated_style_runs) =
+        truncate_text_for_layout(&text, &[(0..text.chars().count(), style)]);
+
+    let truncated_char_count = truncated_text.chars().count();
+    assert!(truncated_char_count <= MAX_LAYOUT_CHARS);
+    assert!(
+        truncated_text.ends_with(cluster),
+        "truncation split a grapheme cluster"
+    );
+    // The style run follows the text to wherever the cluster boundary put it, not to the cap.
+    assert_eq!(
+        truncated_style_runs,
+        Some(vec![(0..truncated_char_count, style)])
+    );
+}
+
 /// Build a synthetic `Line` for paint tests. The platform test `FontDB` stubs
 /// out real text layout so we cannot exercise the paint path through
 /// `layout_line`; instead we hand-roll a single run of fixed-width glyphs.

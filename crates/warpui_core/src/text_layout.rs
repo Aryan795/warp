@@ -11,6 +11,7 @@ use pathfinder_color::ColorU;
 use pathfinder_geometry::vector::Vector2F;
 use rangemap::RangeMap;
 use smallvec::SmallVec;
+use unicode_segmentation::UnicodeSegmentation;
 use vec1::{Vec1, vec1};
 
 use crate::Scene;
@@ -62,6 +63,12 @@ const STRIKETHROUGH_FONT_OFFSET: f32 = 2.5;
 /// blocks are laid out in parallel, so without a cap a handful of degenerate lines - minified
 /// JavaScript, a base64 blob - can exhaust memory. At this cap one line costs roughly 6 MB of
 /// retained layout state instead of growing without bound.
+///
+/// Two things this cap is not. It is applied by [`LayoutCache`], not by the backends, so a caller
+/// reaching [`crate::platform::TextLayoutSystem`] directly is still unbounded. And it is not what
+/// limits a long line everywhere: the winit backend's shaper independently returns no glyphs at
+/// all for an unbroken run longer than 16,384 characters, so for a single very long line this cap
+/// is only ever reached on Core Text, while winit renders that line blank rather than truncated.
 pub const MAX_LAYOUT_CHARS: usize = 100_000;
 
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -320,15 +327,15 @@ fn strip_leading_unicode_bom<'a>(
 
 static LAYOUT_TRUNCATION_ONCE: Once = Once::new();
 
-/// Truncates `text` to at most [`MAX_LAYOUT_CHARS`] characters, clamping the character ranges of
-/// `style_runs` to the truncated text. Returns `None` for the style runs when the text already
-/// fits, which is the overwhelmingly common case.
+/// Truncates `text` to at most [`MAX_LAYOUT_CHARS`] characters, without splitting a grapheme
+/// cluster, and clamps the character ranges of `style_runs` to the truncated text. Returns `None`
+/// for the style runs when the text already fits, which is the overwhelmingly common case.
 fn truncate_text_for_layout<'a>(
     text: &'a str,
     style_runs: &[StyleRun],
 ) -> (&'a str, Option<Vec<StyleRun>>) {
     // Stops after MAX_LAYOUT_CHARS characters, so this does not walk a pathologically long string.
-    let Some((truncate_at, _)) = text.char_indices().nth(MAX_LAYOUT_CHARS) else {
+    let Some((cap_byte_index, _)) = text.char_indices().nth(MAX_LAYOUT_CHARS) else {
         return (text, None);
     };
 
@@ -342,13 +349,27 @@ fn truncate_text_for_layout<'a>(
         );
     });
 
+    // Cutting mid-cluster would strip a base character's combining marks or split a ZWJ emoji
+    // sequence, leaving a mangled cluster at the visible end of the content, so back up to the
+    // last cluster boundary at or before the cap. This is also lazy, so it stops at the cap
+    // rather than walking the whole string.
+    let truncate_at = text
+        .grapheme_indices(true)
+        .find_map(|(start, grapheme)| (start + grapheme.len() > cap_byte_index).then_some(start))
+        // A single cluster longer than the entire cap would leave nothing at all to render, so
+        // for that absurd input prefer splitting it over dropping the line.
+        .filter(|&boundary| boundary > 0)
+        .unwrap_or(cap_byte_index);
+    let text = &text[..truncate_at];
+    let truncated_char_count = text.chars().count();
+
     let style_runs = style_runs
         .iter()
-        .filter(|(range, _)| range.start < MAX_LAYOUT_CHARS)
-        .map(|(range, style)| (range.start..range.end.min(MAX_LAYOUT_CHARS), *style))
+        .filter(|(range, _)| range.start < truncated_char_count)
+        .map(|(range, style)| (range.start..range.end.min(truncated_char_count), *style))
         .collect();
 
-    (&text[..truncate_at], Some(style_runs))
+    (text, Some(style_runs))
 }
 
 pub trait CacheKey {

@@ -1,4 +1,6 @@
 //! Platform-independent text layout tests.
+use std::sync::Arc;
+
 use anyhow::Result;
 use itertools::Itertools;
 use pathfinder_color::ColorU;
@@ -74,6 +76,11 @@ const UNWRAPPED_WIDTH: f32 = 10_000_000.;
 /// A character count comfortably under [`MAX_LAYOUT_CHARS`]. It also leaves plenty of room under
 /// the 16,384 characters at which the winit backend's shaper starts returning no glyphs at all for
 /// an unbroken run, so this is a size both backends really lay out.
+///
+/// That leaves 16,384..[`MAX_LAYOUT_CHARS`] uncovered here: in that band an unbroken line is
+/// already blank on winit, so only Core Text can say anything about it, and a lone macOS-only
+/// assertion in this platform-independent module would buy little over the tests that do run
+/// everywhere.
 const UNCAPPED_CHAR_COUNT: usize = 8_000;
 
 fn layout_test_line_style() -> LineStyle {
@@ -170,6 +177,39 @@ fn test_degenerate_line_layout_is_capped() -> Result<()> {
     assert!(frame_caret_count <= MAX_LAYOUT_CHARS);
     assert!(frame.lines().iter().map(glyph_count).sum::<usize>() <= MAX_LAYOUT_CHARS);
 
+    Ok(())
+}
+
+/// Two over-cap lines that share the capped prefix must resolve to the same cached layout, which
+/// only holds if the input really reached the backend truncated. Unlike the glyph-count
+/// assertions this says nothing about what the backend produced, so it is the one check of the
+/// wiring that fails on every platform if the cap stops being applied. See APP-5360.
+#[test]
+fn test_over_cap_lines_sharing_a_prefix_share_a_layout() -> Result<()> {
+    let (font_db, font_family) = init_fonts();
+    let font_cache = FontCache::new(Box::new(font_db));
+    let text_layout_system = font_cache.text_layout_system();
+    let layout_cache = LayoutCache::new();
+
+    let layout = |char_count: usize| {
+        let text = "a".repeat(char_count);
+        layout_cache.layout_line(
+            &text,
+            layout_test_line_style(),
+            &[(
+                0..char_count,
+                StyleAndFont::new(font_family, Properties::default(), TextStyle::new()),
+            )],
+            UNWRAPPED_WIDTH,
+            ClipConfig::default(),
+            &text_layout_system,
+        )
+    };
+
+    let shorter = layout(MAX_LAYOUT_CHARS + 1);
+    let longer = layout(MAX_LAYOUT_CHARS + 1_000);
+
+    assert!(Arc::ptr_eq(&shorter, &longer));
     Ok(())
 }
 
