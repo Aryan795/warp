@@ -2,6 +2,7 @@ use std::ops::Range;
 
 use ai::diff_validation::DiffDelta;
 use chrono::Local;
+use warp_editor::model::CoreEditorModel;
 use warpui::{App, SingletonEntity};
 
 use super::*;
@@ -710,6 +711,80 @@ fn test_restore_document_edit_creates_version_with_isolated_editors() {
                 .expect("Should have versions");
             let first_version = &versions[0];
             assert_eq!(first_version.get_content(ctx), "# Original Content\n");
+        });
+    });
+}
+
+#[test]
+fn test_restore_document_edit_wires_up_editor_subscription() {
+    App::test((), |mut app| async move {
+        initialize_app_for_ai_document_tests(&mut app);
+        let model_handle = app.add_model(|_ctx| AIDocumentModel::new_for_test());
+
+        let doc_id = AIDocumentId::new();
+        let conversation_id = AIConversationId::new();
+        let initial_created_at = Local::now();
+
+        model_handle.update(&mut app, |model, ctx| {
+            model.restore_document(
+                doc_id,
+                conversation_id,
+                "Restored Title",
+                "# Original Content",
+                initial_created_at,
+                ctx,
+            );
+        });
+
+        model_handle.update(&mut app, |model, ctx| {
+            model.restore_document_edit(
+                &doc_id,
+                "# Edited Content",
+                initial_created_at + chrono::Duration::seconds(1),
+                ctx,
+            );
+        });
+
+        // The restored document shouldn't be dirty yet (no user edit has happened), but the
+        // restoration content itself should have been enqueued for a save.
+        model_handle.update(&mut app, |model, _ctx| {
+            let doc = model
+                .get_current_document(&doc_id)
+                .expect("Document should exist");
+            assert!(!doc.user_edit_status.is_dirty());
+            assert_eq!(model.content_dirty_flags.get(&doc_id), Some(&true));
+            // Clear the flag so the next assertion below can only be satisfied by a fresh
+            // save triggered by the edit below, not by this leftover restoration save.
+            model.content_dirty_flags.insert(doc_id, false);
+        });
+
+        // Editing the *replacement* editor returned by `restore_document_edit` must still mark
+        // the document dirty and enqueue a save -- regression test for the replacement editor
+        // losing the `handle_editor_event` subscription that `create_document_internal` wires
+        // up for a normally-created document.
+        model_handle.update(&mut app, |model, ctx| {
+            let doc = model
+                .get_current_document(&doc_id)
+                .expect("Document should exist");
+            let editor = doc.editor.clone();
+            editor.update(ctx, |editor, editor_ctx| {
+                editor.user_insert(" more", editor_ctx);
+            });
+        });
+
+        model_handle.update(&mut app, |model, _ctx| {
+            let doc = model
+                .get_current_document(&doc_id)
+                .expect("Document should exist");
+            assert!(
+                doc.user_edit_status.is_dirty(),
+                "editing the restored document's current editor should mark it dirty"
+            );
+            assert_eq!(
+                model.content_dirty_flags.get(&doc_id),
+                Some(&true),
+                "editing the restored document's current editor should enqueue a save"
+            );
         });
     });
 }

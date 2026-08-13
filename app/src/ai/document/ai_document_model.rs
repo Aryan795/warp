@@ -1151,6 +1151,16 @@ impl AIDocumentModel {
             .cloned();
         let new_editor =
             Self::create_editor_model(new_content.into(), file_link_resolution_context, ctx);
+
+        // The replacement editor needs the same content-change subscription that
+        // `create_document_internal` installs for a brand-new document; otherwise a
+        // subsequent user edit to the restored document silently stops marking it dirty
+        // and enqueuing persistence.
+        let document_id = *id;
+        ctx.subscribe_to_model(&new_editor, move |me, _, event, ctx| {
+            me.handle_editor_event(&document_id, event, ctx);
+        });
+
         let previous_editor = std::mem::replace(&mut doc.editor, new_editor);
 
         let earlier_version = AIDocumentEarlierVersion {
@@ -1175,6 +1185,10 @@ impl AIDocumentModel {
             version,
             source: AIDocumentUpdateSource::Restoration,
         });
+        // The subscription above misses the ContentChanged event for the restoration
+        // content itself (it fires during `create_editor_model`, before the subscription
+        // is wired up), so enqueue a save explicitly, matching `create_document_internal`.
+        self.enqueue_save(id);
         Some(version)
     }
 

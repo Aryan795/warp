@@ -15218,6 +15218,9 @@ impl TerminalView {
     /// this pass is in the `Failed` state.
     fn drop_hidden_passive_ai_blocks(&mut self, ctx: &mut ViewContext<Self>) {
         if self.rich_content_views.is_empty() {
+            // The old helper always notified regardless of whether there was anything to
+            // scan, so preserve that invalidation here too.
+            ctx.notify();
             return;
         }
 
