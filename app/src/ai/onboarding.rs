@@ -13,17 +13,10 @@ use crate::workspaces::user_workspaces::UserWorkspaces;
 
 impl From<&LLMInfo> for OnboardingModelInfo {
     fn from(llm: &LLMInfo) -> Self {
-        // Kimi models arrive as `LLMProvider::Unknown` (see `llms::is_kimi_model_id`),
-        // so key off the model id to still show the Kimi mark here.
-        let icon = if is_kimi_model_id(llm.id.as_str()) {
-            Icon::KimiLogo
-        } else {
-            llm.provider.icon().unwrap_or(Icon::Agent)
-        };
         Self {
             id: llm.id.clone(),
             title: llm.display_name.clone(),
-            icon,
+            icon: llm.provider.icon().unwrap_or(Icon::Agent),
             is_default: false,
         }
     }
@@ -39,6 +32,14 @@ pub fn build_onboarding_models(
         .map(|llm| {
             let mut info = OnboardingModelInfo::from(llm);
             info.is_default = info.id == default_id;
+            // Kimi models arrive as `LLMProvider::Unknown` (see `llms::is_kimi_model_id`),
+            // so key off the model id to still show the Kimi mark here. Skip this for a
+            // custom-endpoint model, whose id is a user-chosen `config_key` string that
+            // must never be mis-branded by this heuristic.
+            if is_kimi_model_id(llm.id.as_str()) && prefs.custom_llm_info_for_id(&llm.id).is_none()
+            {
+                info.icon = Icon::KimiLogo;
+            }
             info
         })
         .collect();

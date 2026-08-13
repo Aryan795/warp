@@ -307,6 +307,10 @@ fn kimi_model_ids_show_the_kimi_logo_despite_unknown_provider() {
 
 #[test]
 fn kimi_model_ids_still_defer_to_custom_router_and_host_precedence() {
+    // A Kimi-prefixed id must still yield to every other icon flag, in the same
+    // order as non-Kimi models (see `auto_models_show_the_agent_glyph_instead_of_a_host_logo`
+    // and `non_auto_models_keep_their_host_logo`), so a future reordering of the
+    // Kimi branch can't silently change these precedences.
     let llm = server_llm("kimi-k3-fireworks", None);
     assert_eq!(
         model_leading_icon(
@@ -322,11 +326,56 @@ fn kimi_model_ids_still_defer_to_custom_router_and_host_precedence() {
         model_leading_icon(
             &llm,
             ModelIconFlags {
+                is_auto: true,
+                ..Default::default()
+            }
+        ),
+        Icon::Agent
+    );
+    assert_eq!(
+        model_leading_icon(
+            &llm,
+            ModelIconFlags {
                 is_using_bedrock: true,
                 ..Default::default()
             }
         ),
         Icon::Aws
+    );
+    assert_eq!(
+        model_leading_icon(
+            &llm,
+            ModelIconFlags {
+                is_using_gemini_enterprise: true,
+                ..Default::default()
+            }
+        ),
+        Icon::GeminiEnterpriseAgentPlatform
+    );
+    // Bedrock wins when both hosts are available, matching the non-Kimi
+    // AWS_BEDROCK -> GEMINI_ENTERPRISE fallback priority.
+    assert_eq!(
+        model_leading_icon(
+            &llm,
+            ModelIconFlags {
+                is_using_bedrock: true,
+                is_using_gemini_enterprise: true,
+                ..Default::default()
+            }
+        ),
+        Icon::Aws
+    );
+    // Auto wins over a host flag too, matching non-Kimi auto models.
+    assert_eq!(
+        model_leading_icon(
+            &llm,
+            ModelIconFlags {
+                is_auto: true,
+                is_using_bedrock: true,
+                ..Default::default()
+            }
+        ),
+        Icon::Agent
     );
 }
 
@@ -337,6 +386,24 @@ fn ids_that_merely_start_with_kimi_do_not_match_the_kimi_prefix() {
     let llm = server_llm("kimichat-fireworks", None);
     assert_eq!(
         model_leading_icon(&llm, ModelIconFlags::default()),
+        Icon::Agent
+    );
+}
+
+#[test]
+fn custom_endpoint_models_with_kimi_prefixed_ids_are_not_mis_branded() {
+    // A user can name their own BYO custom-endpoint model's config_key however
+    // they like. If it happens to start with "kimi-", the id-based heuristic
+    // must not brand it with the (first-party) Kimi logo.
+    let llm = server_llm("kimi-private", None);
+    assert_eq!(
+        model_leading_icon(
+            &llm,
+            ModelIconFlags {
+                is_custom_endpoint: true,
+                ..Default::default()
+            }
+        ),
         Icon::Agent
     );
 }
