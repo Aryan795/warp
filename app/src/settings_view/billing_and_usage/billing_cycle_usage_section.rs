@@ -21,7 +21,8 @@ use crate::auth::{AuthManager, AuthStateProvider};
 use crate::menu::{self, Menu, MenuItem, MenuItemFields};
 use crate::settings_view::admin_actions::AdminActions;
 use crate::settings_view::billing_and_usage::billing_cycle_usage_common::{
-    BillingUsageMouseStates, filter_legacy_buckets, has_non_viewer_data, legend_cost_types,
+    BillingUsageMouseStates, filter_entries_by_attributed_team, filter_legacy_buckets,
+    has_non_viewer_data, legend_cost_types,
 };
 use crate::settings_view::billing_and_usage::billing_cycle_usage_rows::{
     SourceFilter, has_cloud_usage, render_own_usage_solo_row, render_own_usage_with_workspace_row,
@@ -33,6 +34,7 @@ use crate::settings_view::billing_and_usage_page_v2::{
     BONUS_CREDITS_DOT_COLOR, PAYG_CREDITS_DOT_COLOR,
 };
 use crate::ui_components::icons::Icon;
+use crate::workspaces::team::TeamMember;
 use crate::workspaces::update_manager::TeamUpdateManager;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::workspaces::workspace::{
@@ -283,6 +285,18 @@ impl BillingCycleUsageSectionView {
                 .unwrap_or_default(),
         );
 
+        // `billingCycleUsageHistory` is workspace-scoped: it carries usage for
+        // every team in the workspace, tagged with `attributed_team_uid`. An
+        // admin of multiple teams must only see the team they're currently
+        // viewing, so filter entries — and the zero-usage member roster below
+        // — to that team before computing totals or rows.
+        let team = UserWorkspaces::as_ref(app).team_for_view_handle(&self.self_handle, app);
+        let entries = match team {
+            Some(team) => filter_entries_by_attributed_team(&entries, &team.uid.to_string()),
+            None => entries,
+        };
+        let team_members: &[TeamMember] = team.map(|t| t.members.as_slice()).unwrap_or_default();
+
         let is_source_filter_shown = visibility.granularity
             == UsageVisibilityGranularity::FullBreakdown
             && has_cloud_usage(&entries);
@@ -309,7 +323,7 @@ impl BillingCycleUsageSectionView {
 
         column.add_child(
             Container::new(render_rows(
-                workspace,
+                team_members,
                 &entries,
                 &visibility,
                 source_filter,
