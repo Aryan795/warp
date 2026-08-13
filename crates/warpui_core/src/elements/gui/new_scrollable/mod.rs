@@ -10,6 +10,7 @@ use pathfinder_geometry::rect::RectF;
 use pathfinder_geometry::vector::{Vector2F, vec2f};
 pub use single_axis_config::*;
 
+use instant::Instant;
 use warp_features::FeatureFlag;
 
 use self::util::adjust_scroll_delta_with_sensitivity_config;
@@ -866,6 +867,57 @@ impl ScrollableState {
         true
     }
 
+    /// Applies any pending smooth-scroll increment for a `Manual` axis to its child. A no-op for
+    /// `Clipped` axes, which apply their increment directly during paint instead. Called on
+    /// every event dispatched to this element so the animation keeps advancing as the app's
+    /// existing redraw machinery replays a synthetic `MouseMoved` event after each repaint (see
+    /// `PaintContext::repaint_after` / `AppContext::build_scene`).
+    fn advance_manual_smooth_scroll(&mut self, ctx: &mut EventContext) {
+        let now = Instant::now();
+        match self {
+            Self::SingleAxis {
+                axis,
+                config: SingleAxisConfig::Manual { handle, child },
+                ..
+            } => {
+                let increment = handle.lock().unwrap().take_smooth_scroll_increment(now);
+                if increment.abs() > f32::EPSILON {
+                    child.scroll(increment.into_pixels(), *axis, ctx);
+                }
+            }
+            Self::SingleAxis {
+                config: SingleAxisConfig::Clipped { .. },
+                ..
+            } => {}
+            Self::BothAxes {
+                config:
+                    DualAxisConfig::Manual {
+                        horizontal,
+                        vertical,
+                        child,
+                    },
+                ..
+            } => {
+                if let AxisConfiguration::Manual(handle) = horizontal {
+                    let increment = handle.lock().unwrap().take_smooth_scroll_increment(now);
+                    if increment.abs() > f32::EPSILON {
+                        child.scroll(increment.into_pixels(), Axis::Horizontal, ctx);
+                    }
+                }
+                if let AxisConfiguration::Manual(handle) = vertical {
+                    let increment = handle.lock().unwrap().take_smooth_scroll_increment(now);
+                    if increment.abs() > f32::EPSILON {
+                        child.scroll(increment.into_pixels(), Axis::Vertical, ctx);
+                    }
+                }
+            }
+            Self::BothAxes {
+                config: DualAxisConfig::Clipped { .. },
+                ..
+            } => {}
+        }
+    }
+
     /// Scroll the child element to match the delta scrolled from the previous to current scrollbar thumb position.
     fn jump_to_position(
         &mut self,
@@ -1506,6 +1558,8 @@ impl Element for NewScrollable {
             log::warn!("Tried to handle event in scrollable before the element is painted");
             return false;
         };
+
+        self.state.advance_manual_smooth_scroll(ctx);
 
         if self.always_handle_events_first {
             // Different from other elements, scrollable always tries to handle the event first. It only

@@ -1,3 +1,4 @@
+use instant::Instant;
 use pathfinder_geometry::rect::RectF;
 use pathfinder_geometry::vector::Vector2F;
 
@@ -95,13 +96,16 @@ impl SingleAxisConfig {
                     Axis::Vertical => constraint.max.y(),
                 };
 
-                if axis_size < handle.scroll_start().as_f32() || viewport_size >= axis_size {
+                // Reclamp against the target (not the lagging displayed position): a reflow
+                // that shrinks the content mid-animation must not let the tween keep easing
+                // toward a now-out-of-bounds target.
+                if axis_size < handle.scroll_target().as_f32() || viewport_size >= axis_size {
                     handle.scroll_to(Pixels::zero());
                 } else {
                     // If viewport is still smaller than child but would cause unnecessary clipping,
                     // adjust scroll position to show rightmost/bottommost content
                     let max_scroll = (axis_size - viewport_size).max(0.0);
-                    if handle.scroll_start().as_f32() > max_scroll {
+                    if handle.scroll_target().as_f32() > max_scroll {
                         handle.scroll_to(max_scroll.into_pixels());
                     }
                 }
@@ -176,8 +180,11 @@ impl SingleAxisConfig {
                     paint_clipped_internal(child, axis, origin, handle, ctx, app);
                 }
             }
-            Self::Manual { child, .. } => {
+            Self::Manual { child, handle } => {
                 child.paint(origin, ctx, app);
+                if handle.lock().unwrap().is_animating_smooth_scroll() {
+                    ctx.repaint_after(SMOOTH_SCROLL_FRAME_INTERVAL);
+                }
             }
         }
     }
@@ -303,7 +310,10 @@ impl SingleAxisConfig {
         }
 
         match self {
-            Self::Manual { child, .. } => child.scroll(delta, axis, ctx),
+            Self::Manual { handle, child } => {
+                handle.lock().unwrap().cancel_smooth_scroll(Instant::now());
+                child.scroll(delta, axis, ctx)
+            }
             Self::Clipped { handle, child } => {
                 let child_size = child.size().expect("Size should exist");
                 scroll_clipped_scrollable_handle_with_delta(
@@ -319,8 +329,9 @@ impl SingleAxisConfig {
 
     /// Scroll child on the given axis with an eligible discrete (non-precise) wheel delta,
     /// composing with or reversing any smooth-scroll animation already in flight rather than
-    /// applying immediately. A manually-managed child does not support smooth scrolling in
-    /// this phase, so it falls back to the immediate path.
+    /// applying immediately. For a manually-managed child, the delta is accumulated into a
+    /// controller on the shared handle; the incremental amount is applied to the child lazily,
+    /// as further events are dispatched to this element (see `ScrollableState::dispatch_event`).
     pub(super) fn scroll_to_animated(
         &mut self,
         viewport_size: Vector2F,
@@ -333,7 +344,13 @@ impl SingleAxisConfig {
         }
 
         match self {
-            Self::Manual { child, .. } => child.scroll(delta, axis, ctx),
+            Self::Manual { handle, .. } => {
+                handle
+                    .lock()
+                    .unwrap()
+                    .animate_scroll_by(delta.as_f32(), Instant::now());
+                ctx.notify();
+            }
             Self::Clipped { handle, child } => {
                 let child_size = child.size().expect("Size should exist");
                 animate_clipped_scrollable_handle_with_delta(
@@ -364,7 +381,22 @@ impl SingleAxisConfig {
         delta: Vector2F,
         app: &AppContext,
     ) -> bool {
-        let scroll_data = self.scroll_data(axis, viewport_size, app);
+        // For a clipped axis, use the controller's target rather than its displayed (possibly
+        // lagging) position: once a rapid sequence of notches has already targeted the
+        // boundary, checking the lagging displayed position would keep reporting the axis as
+        // scrollable, so further same-direction notches would never propagate to a parent.
+        let scroll_data = match self {
+            Self::Clipped { handle, child } => ScrollData {
+                scroll_start: handle.scroll_target(),
+                visible_px: viewport_size.along(axis).into_pixels(),
+                total_size: child
+                    .size()
+                    .expect("Size should exist")
+                    .along(axis)
+                    .into_pixels(),
+            },
+            Self::Manual { .. } => self.scroll_data(axis, viewport_size, app),
+        };
         let delta = delta.along(axis);
 
         Self::can_scroll_delta_dimension(&scroll_data, delta)

@@ -1,7 +1,9 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Duration;
 
+use instant::Instant;
 use pathfinder_color::ColorU;
 use pathfinder_geometry::vector::{Vector2F, vec2f};
 use warp_features::FeatureFlag;
@@ -19,7 +21,7 @@ use crate::event::{DispatchedEvent, ModifiersState};
 use crate::platform::{TerminationMode, WindowStyle};
 use crate::text::word_boundaries::WordBoundariesPolicy;
 use crate::text::{IsRect, SelectionDirection, SelectionType};
-use crate::units::Pixels;
+use crate::units::{IntoPixels, Pixels};
 use crate::{
     AfterLayoutContext, App, AppContext, Element, Entity, EntityId, EntityIdSet, Event,
     EventContext, LayoutContext, PaintContext, Presenter, SizeConstraint, TypedActionView, View,
@@ -274,6 +276,10 @@ impl Element for ScrollableElement {
 impl NewScrollableElement for ScrollableElement {
     fn axis(&self) -> ScrollableAxis {
         ScrollableAxis::Both
+    }
+
+    fn axis_should_handle_scroll_wheel(&self, _axis: Axis) -> bool {
+        true
     }
 
     fn scroll_data(&self, axis: Axis, _app: &AppContext) -> Option<ScrollData> {
@@ -1399,6 +1405,25 @@ fn vertical_handle(view: &BasicScrollableView) -> &ClippedScrollStateHandle {
     handle
 }
 
+/// Sets up a single, vertically Manual-scrolling [`BasicScrollableView`] and returns its window
+/// id, view handle, and presenter, having already rendered once.
+fn setup_vertical_manual_scrollable(
+    app: &mut App,
+) -> (
+    crate::WindowId,
+    crate::ViewHandle<BasicScrollableView>,
+    Rc<RefCell<Presenter>>,
+) {
+    app.update(init);
+    let (window_id, view) = app.add_window(WindowStyle::NotStealFocus, |_| {
+        BasicScrollableView::new(None, Some(ScrollBehavior::Manual(Default::default())))
+    });
+    let presenter = Rc::new(RefCell::new(Presenter::new(window_id)));
+    let view_id = app.root_view_id(window_id).unwrap();
+    app.update(|ctx| render(&mut presenter.borrow_mut(), view_id, ctx));
+    (window_id, view, presenter)
+}
+
 #[test]
 fn non_precise_wheel_scroll_animates_toward_target_when_smooth_scrolling_enabled() {
     let _flag = FeatureFlag::SmoothScrolling.override_enabled(true);
@@ -1549,6 +1574,328 @@ fn same_direction_wheel_notches_compose_into_a_larger_target() {
                 target_after_first_notch * 2.
             );
             assert!(handle.is_animating());
+        });
+
+        app.update(|ctx| {
+            ctx.windows()
+                .close_window(window_id, TerminationMode::ForceTerminate)
+        });
+    })
+}
+
+#[test]
+fn manual_axis_wheel_scroll_eventually_matches_immediate_scroll_distance() {
+    let _flag = FeatureFlag::SmoothScrolling.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        let app = &mut app;
+        let (window_id, view, presenter) = setup_vertical_manual_scrollable(app);
+
+        app.update(|ctx| dispatch_non_precise_wheel_down(ctx, window_id, presenter.clone()));
+
+        // No increment has been emitted to the child yet: the manual child's own scroll state
+        // is only advanced lazily, as further events are dispatched to the scrollable.
+        view.read(app, |view, _| assert_eq!(view.scroll_top, 0.));
+
+        // Wait past the animation's duration, then dispatch another event (standing in for the
+        // synthetic MouseMoved the app replays after each scheduled repaint) to drain it.
+        std::thread::sleep(Duration::from_millis(150));
+        app.update(|ctx| {
+            ctx.simulate_window_event(
+                Event::MouseMoved {
+                    position: vec2f(100., 100.),
+                    cmd: false,
+                    shift: false,
+                    is_synthetic: true,
+                },
+                window_id,
+                presenter.clone(),
+            );
+        });
+
+        // The final position matches exactly what an immediate (non-animated) scroll of the
+        // same notch would have produced: 1 line * 40px-per-line.
+        view.read(app, |view, _| assert_eq!(view.scroll_top, 40.));
+
+        app.update(|ctx| {
+            ctx.windows()
+                .close_window(window_id, TerminationMode::ForceTerminate)
+        });
+    })
+}
+
+#[test]
+fn precise_input_interrupts_an_already_active_clipped_tween() {
+    let _flag = FeatureFlag::SmoothScrolling.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        let app = &mut app;
+        let (window_id, view, presenter) = setup_vertical_clipped_scrollable(app);
+
+        app.update(|ctx| dispatch_non_precise_wheel_down(ctx, window_id, presenter.clone()));
+        let displayed_at_interrupt = view.read(app, |view, _| {
+            let handle = vertical_handle(view);
+            assert!(handle.is_animating());
+            handle.scroll_start().as_f32()
+        });
+
+        // A precise (trackpad) event arrives mid-flight: it must cancel the tween at its
+        // currently displayed position, then apply its own delta immediately and exactly once.
+        app.update(|ctx| dispatch_precise_wheel_down(ctx, window_id, presenter.clone(), 10.));
+
+        view.read(app, |view, _| {
+            let handle = vertical_handle(view);
+            assert!(!handle.is_animating());
+            // The tween keeps easing in the (small) real time between sampling
+            // `displayed_at_interrupt` above and the precise event actually cancelling it, so
+            // allow a small tolerance rather than expecting bit-for-bit equality.
+            let expected = displayed_at_interrupt + 10.;
+            assert!(
+                (handle.scroll_start().as_f32() - expected).abs() < 5.,
+                "expected ~{expected}, got {}",
+                handle.scroll_start().as_f32()
+            );
+            assert_eq!(
+                handle.scroll_start().as_f32(),
+                handle.scroll_target().as_f32()
+            );
+        });
+
+        app.update(|ctx| {
+            ctx.windows()
+                .close_window(window_id, TerminationMode::ForceTerminate)
+        });
+    })
+}
+
+#[test]
+fn can_scroll_delta_uses_target_not_lagging_displayed_position_for_clipped_axis() {
+    let _flag = FeatureFlag::SmoothScrolling.override_enabled(true);
+
+    App::test((), |app| async move {
+        app.read(|ctx| {
+            let handle = ClippedScrollStateHandle::default();
+            let child: Box<dyn Element> =
+                Box::new(SelectableProbeElement::new(SelectableProbeState::default()));
+            let config = SingleAxisConfig::Clipped {
+                handle: handle.clone(),
+                child,
+            };
+            // The probe child is 120px tall; constrain the viewport to 60px so the max scroll
+            // position (target boundary) is exactly 60px.
+            let viewport_size = vec2f(400., 60.);
+            let start = Instant::now();
+
+            handle.animate_scroll_by(60_f32.into_pixels(), start);
+            // The tween has barely started: the displayed position lags the target, which has
+            // already reached the boundary.
+            assert!(handle.scroll_start().as_f32() < handle.scroll_target().as_f32());
+            assert_eq!(handle.scroll_target().as_f32(), 60.);
+
+            // A further same-direction notch must be reported as unable to scroll further (so
+            // it propagates to a parent scrollable), even though the displayed position hasn't
+            // caught up to the boundary yet.
+            assert!(!config.can_scroll_delta(Axis::Vertical, viewport_size, vec2f(0., -1.), ctx));
+        });
+    })
+}
+
+#[test]
+fn dual_axis_notches_animate_each_axis_independently_to_completion() {
+    let _flag = FeatureFlag::SmoothScrolling.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        let app = &mut app;
+        app.update(init);
+        let (window_id, view) = app.add_window(WindowStyle::NotStealFocus, |_| {
+            BasicScrollableView::new(
+                Some(ScrollBehavior::Clipped(Default::default())),
+                Some(ScrollBehavior::Clipped(Default::default())),
+            )
+        });
+        let presenter = Rc::new(RefCell::new(Presenter::new(window_id)));
+        let view_id = app.root_view_id(window_id).unwrap();
+        app.update(|ctx| render(&mut presenter.borrow_mut(), view_id, ctx));
+
+        // A single dual-axis notch starts an independent animation on each axis.
+        app.update(|ctx| {
+            ctx.simulate_window_event(
+                Event::ScrollWheel {
+                    position: vec2f(100., 100.),
+                    delta: vec2f(-1., -1.),
+                    precise: false,
+                    modifiers: ModifiersState::default(),
+                },
+                window_id,
+                presenter.clone(),
+            );
+        });
+
+        view.read(app, |view, _| {
+            let (horizontal, vertical) = get_scroll_handles(view);
+            assert!(horizontal.is_animating());
+            assert!(vertical.is_animating());
+            assert_eq!(horizontal.scroll_target().as_f32(), 40.);
+            assert_eq!(vertical.scroll_target().as_f32(), 40.);
+        });
+
+        // Once both tweens finish, each axis lands exactly on its own target, independent of
+        // the other.
+        std::thread::sleep(Duration::from_millis(150));
+        app.update(|ctx| render(&mut presenter.borrow_mut(), view_id, ctx));
+
+        view.read(app, |view, _| {
+            let (horizontal, vertical) = get_scroll_handles(view);
+            assert!(!horizontal.is_animating());
+            assert!(!vertical.is_animating());
+            assert_eq!(horizontal.scroll_start().as_f32(), 40.);
+            assert_eq!(vertical.scroll_start().as_f32(), 40.);
+        });
+
+        app.update(|ctx| {
+            ctx.windows()
+                .close_window(window_id, TerminationMode::ForceTerminate)
+        });
+    })
+}
+
+/// A single-axis element whose size can be changed between layout passes, used to exercise
+/// content shrinking mid-animation.
+struct ResizableElement {
+    size: Rc<Cell<Vector2F>>,
+    laid_out_size: Option<Vector2F>,
+}
+
+impl Element for ResizableElement {
+    fn layout(
+        &mut self,
+        _constraint: SizeConstraint,
+        _ctx: &mut LayoutContext,
+        _app: &AppContext,
+    ) -> Vector2F {
+        let size = self.size.get();
+        self.laid_out_size = Some(size);
+        size
+    }
+
+    fn after_layout(&mut self, _ctx: &mut AfterLayoutContext, _app: &AppContext) {}
+
+    fn paint(&mut self, _origin: Vector2F, _ctx: &mut PaintContext, _app: &AppContext) {}
+
+    fn size(&self) -> Option<Vector2F> {
+        self.laid_out_size
+    }
+
+    fn origin(&self) -> Option<Point> {
+        Some(Point::new(0., 0., ZIndex::new(0)))
+    }
+
+    fn dispatch_event(
+        &mut self,
+        _event: &DispatchedEvent,
+        _ctx: &mut EventContext,
+        _app: &AppContext,
+    ) -> bool {
+        false
+    }
+}
+
+#[derive(Default)]
+struct ResizableScrollView {
+    handle: ClippedScrollStateHandle,
+    content_size: Rc<Cell<Vector2F>>,
+}
+
+impl Entity for ResizableScrollView {
+    type Event = ();
+}
+
+impl View for ResizableScrollView {
+    fn render(&self, _: &AppContext) -> Box<dyn Element> {
+        let axis_config = SingleAxisConfig::Clipped {
+            handle: self.handle.clone(),
+            child: Box::new(ResizableElement {
+                size: self.content_size.clone(),
+                laid_out_size: None,
+            })
+            .finish(),
+        };
+        let scrollable = NewScrollable::vertical(axis_config, Fill::None, Fill::None, Fill::None);
+        ConstrainedBox::new(scrollable.finish())
+            .with_height(SCROLLABLE_VIEWPORT_SIZE)
+            .with_width(SCROLLABLE_VIEWPORT_SIZE)
+            .finish()
+    }
+
+    fn ui_name() -> &'static str {
+        "ResizableScrollView"
+    }
+}
+
+impl TypedActionView for ResizableScrollView {
+    type Action = ();
+}
+
+#[test]
+fn content_shrink_mid_animation_reclamps_and_cancels_the_active_tween() {
+    let _flag = FeatureFlag::SmoothScrolling.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        let app = &mut app;
+        let content_size = Rc::new(Cell::new(vec2f(SCROLLABLE_VIEWPORT_SIZE, 500.)));
+        let (window_id, view) = app.add_window(WindowStyle::NotStealFocus, {
+            let content_size = content_size.clone();
+            move |_| ResizableScrollView {
+                handle: Default::default(),
+                content_size,
+            }
+        });
+
+        let presenter = Rc::new(RefCell::new(Presenter::new(window_id)));
+        let view_id = app.root_view_id(window_id).unwrap();
+        app.update(|ctx| render(&mut presenter.borrow_mut(), view_id, ctx));
+
+        // Animate close to the boundary: max scroll for a 500px-tall child in a 250px viewport
+        // is 250px. Six notches of 40px each target 240px.
+        for _ in 0..6 {
+            app.update(|ctx| {
+                ctx.simulate_window_event(
+                    Event::ScrollWheel {
+                        position: vec2f(100., 100.),
+                        delta: vec2f(0., -1.),
+                        precise: false,
+                        modifiers: ModifiersState::default(),
+                    },
+                    window_id,
+                    presenter.clone(),
+                );
+            });
+        }
+
+        let (target_before_shrink, displayed_before_shrink) = view.read(app, |view, _| {
+            (
+                view.handle.scroll_target().as_f32(),
+                view.handle.scroll_start().as_f32(),
+            )
+        });
+        assert_eq!(target_before_shrink, 240.);
+        assert!(
+            displayed_before_shrink < target_before_shrink,
+            "animation should still be in flight"
+        );
+
+        // Shrink the content so the new max scroll (300 - 250 = 50) is well below both the
+        // in-flight target and the currently displayed position.
+        content_size.set(vec2f(SCROLLABLE_VIEWPORT_SIZE, 300.));
+        app.update(|ctx| render(&mut presenter.borrow_mut(), view_id, ctx));
+
+        view.read(app, |view, _| {
+            assert!(
+                !view.handle.is_animating(),
+                "shrink should cancel the tween"
+            );
+            assert_eq!(view.handle.scroll_target().as_f32(), 50.);
+            assert_eq!(view.handle.scroll_start().as_f32(), 50.);
         });
 
         app.update(|ctx| {
