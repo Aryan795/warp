@@ -1905,6 +1905,50 @@ fn content_shrink_mid_animation_reclamps_and_cancels_the_active_tween() {
     })
 }
 
+/// Regression test for a rapid burst of clicky-wheel notches through the real wheel-dispatch
+/// path (not just the controller in isolation): many overlapping contributions must sum exactly
+/// and clamp to the scrollable's bounds, never cancel, saturate, or drop to zero net movement.
+#[test]
+fn long_rapid_same_direction_burst_through_wheel_dispatch_clamps_without_losing_movement() {
+    let _flag = FeatureFlag::SmoothScrolling.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        let app = &mut app;
+        let (window_id, view, presenter) = setup_vertical_clipped_scrollable(app);
+
+        // 25 rapid same-direction notches, a few milliseconds apart -- the input pattern a
+        // clicky trackball wheel produces during a fast spin. All 25 land inside the 120ms
+        // window (75ms total), so every contribution is simultaneously active at once.
+        for _ in 0..25 {
+            app.update(|ctx| dispatch_non_precise_wheel_down(ctx, window_id, presenter.clone()));
+            std::thread::sleep(Duration::from_millis(3));
+        }
+
+        // The target must be clamped to the scrollable's max extent (500 - 250 = 250px), not
+        // stuck at zero or some intermediate value from a dropped or cancelled contribution.
+        view.read(app, |view, _| {
+            let handle = vertical_handle(view);
+            assert_eq!(handle.scroll_target().as_f32(), 250.);
+        });
+
+        // Once every tween fully settles, the displayed position matches the clamped target
+        // exactly -- no movement was silently swallowed by the burst. Read `scroll_start()`
+        // first: it's what settles any expired contribution into the committed baseline (as it
+        // would be during a real paint), so `is_animating()` reflects the post-settle state.
+        std::thread::sleep(Duration::from_millis(150));
+        view.read(app, |view, _| {
+            let handle = vertical_handle(view);
+            assert_eq!(handle.scroll_start().as_f32(), 250.);
+            assert!(!handle.is_animating());
+        });
+
+        app.update(|ctx| {
+            ctx.windows()
+                .close_window(window_id, TerminationMode::ForceTerminate)
+        });
+    })
+}
+
 /// Validates that `scroll_position_top_into_view` stabilizes after one scroll:
 /// scrolling to a child whose full bounds extend past the viewport should bring
 /// the child's top edge into view and not oscillate on repeated calls.

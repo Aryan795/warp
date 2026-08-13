@@ -108,8 +108,12 @@ impl SmoothScrollController {
             .fold(self.committed, |pos, c| pos + c.delta)
     }
 
-    /// Whether a contribution is still easing in.
-    pub fn is_animating(&self) -> bool {
+    /// Whether a contribution is still easing in. Settles any contribution that has fully
+    /// eased in as a side effect (like [`Self::displayed_position`]), so this reports the
+    /// current state even if nothing else has read the controller since the contribution
+    /// expired.
+    pub fn is_animating(&mut self, now: Instant) -> bool {
+        self.settle_expired(now);
         !self.contributions.is_empty()
     }
 

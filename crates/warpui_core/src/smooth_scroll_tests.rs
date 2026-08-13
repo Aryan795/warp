@@ -22,7 +22,7 @@ fn ease_out_cubic_reaches_exact_target_without_overshoot() {
     // Reaches the exact target once the duration elapses, and stops animating.
     let displayed = controller.displayed_position(start + SMOOTH_SCROLL_DURATION);
     assert_eq!(displayed, 100.0);
-    assert!(!controller.is_animating());
+    assert!(!controller.is_animating(start + SMOOTH_SCROLL_DURATION));
 }
 
 #[test]
@@ -84,7 +84,7 @@ fn late_frame_emits_exact_remaining_distance() {
     // suspended). The exact remaining distance is still applied, with no error accumulation.
     let displayed = controller.displayed_position(start + Duration::from_secs(5));
     assert_eq!(displayed, 60.0);
-    assert!(!controller.is_animating());
+    assert!(!controller.is_animating(start + Duration::from_secs(5)));
 }
 
 #[test]
@@ -98,7 +98,7 @@ fn cancel_settles_at_displayed_position_and_stops_animation() {
     let returned = controller.cancel(cancel_time);
 
     assert_eq!(returned, displayed_at_cancel);
-    assert!(!controller.is_animating());
+    assert!(!controller.is_animating(cancel_time));
     assert_eq!(controller.target(), displayed_at_cancel);
 
     // No further motion happens once cancelled, even much later.
@@ -114,7 +114,7 @@ fn set_position_immediately_overrides_in_flight_animation() {
 
     controller.set_position_immediately(250.0);
 
-    assert!(!controller.is_animating());
+    assert!(!controller.is_animating(start));
     assert_eq!(controller.target(), 250.0);
     assert_eq!(
         controller.displayed_position(start + Duration::from_millis(60)),
@@ -128,6 +128,45 @@ fn zero_delta_is_a_no_op() {
     let mut controller = SmoothScrollController::new(5.0);
     controller.add_delta(0.0, start);
 
-    assert!(!controller.is_animating());
+    assert!(!controller.is_animating(start));
     assert_eq!(controller.displayed_position(start), 5.0);
+}
+
+/// Regression test for a rapid burst of clicky-wheel notches (the reported input pattern is a
+/// trackball spun fast, producing dozens of same-direction notches within the 120ms window).
+/// Many overlapping active contributions must sum exactly, never cancel, saturate, or drop to
+/// zero net movement.
+#[test]
+fn long_rapid_same_direction_burst_reaches_exact_sum_of_deltas() {
+    let start = Instant::now();
+    let mut controller = SmoothScrollController::new(0.0);
+    let per_notch = 40.0;
+    let notch_count = 25_u32;
+    let spacing = Duration::from_millis(3);
+
+    // All 25 notches land inside the 120ms window (the last one starts 72ms after the first),
+    // so every contribution is simultaneously active at once -- the stress case in question.
+    for i in 0..notch_count {
+        controller.add_delta(per_notch, start + spacing * i);
+    }
+
+    let expected_total = per_notch * notch_count as f32;
+    let burst_end = start + spacing * (notch_count - 1);
+    assert_eq!(controller.target(), expected_total);
+    assert!(controller.is_animating(burst_end));
+
+    // Sampling mid-burst never regresses or exceeds the running target: no cancellation or
+    // saturation from having many contributions active at once.
+    let mid_burst = start + spacing * (notch_count / 2);
+    let displayed_mid_burst = controller.displayed_position(mid_burst);
+    assert!(displayed_mid_burst > 0.0);
+    assert!(displayed_mid_burst <= controller.target());
+
+    // Once every contribution has fully eased in (settling any that expired mid-burst along the
+    // way), the displayed position lands on the exact total, with no accumulated error and no
+    // lost movement.
+    let long_after =
+        start + spacing * (notch_count - 1) + SMOOTH_SCROLL_DURATION + Duration::from_millis(50);
+    assert_eq!(controller.displayed_position(long_after), expected_total);
+    assert!(!controller.is_animating(long_after));
 }

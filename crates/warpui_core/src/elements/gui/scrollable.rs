@@ -74,8 +74,8 @@ impl ScrollState {
         self.smooth_scroll_emitted = self.smooth_scroll.target();
     }
 
-    pub fn is_animating_smooth_scroll(&self) -> bool {
-        self.smooth_scroll.is_animating()
+    pub fn is_animating_smooth_scroll(&mut self) -> bool {
+        self.smooth_scroll.is_animating(Instant::now())
     }
 
     /// Returns the incremental delta that hasn't yet been applied to the child, advancing the

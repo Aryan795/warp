@@ -117,7 +117,10 @@ impl ClippedScrollStateHandle {
     /// Whether a smooth-scroll contribution added via [`Self::animate_scroll_by`] is still
     /// easing in.
     pub fn is_animating(&self) -> bool {
-        self.clipped_scroll_data.lock().smooth_scroll.is_animating()
+        self.clipped_scroll_data
+            .lock()
+            .smooth_scroll
+            .is_animating(Instant::now())
     }
 
     pub fn scroll_by(&self, delta: Pixels) {
