@@ -88,6 +88,10 @@ impl SettingsPaneManager {
             pane_id: pane.id(),
         };
         let Some(data) = self.panes.get_mut(&window_id) else {
+            debug_assert!(
+                false,
+                "SettingsPaneManager::register_transferred_pane: destination window {window_id:?} has no tracked SettingsPaneData; every window is expected to call `register_view` before any pane can transfer into it. Silently dropping this pane's registration would corrupt the one-pane-per-window invariant."
+            );
             log::warn!("Settings view should already exist for settings pane");
             return None;
         };

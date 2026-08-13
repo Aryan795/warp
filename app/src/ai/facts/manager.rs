@@ -88,6 +88,10 @@ impl AIFactManager {
             pane_id: pane.id(),
         };
         let Some(data) = self.panes.get_mut(&window_id) else {
+            debug_assert!(
+                false,
+                "AIFactManager::register_transferred_pane: destination window {window_id:?} has no tracked AIFactPaneData; every window is expected to call `register_view` before any pane can transfer into it. Silently dropping this pane's registration would corrupt the one-pane-per-window invariant."
+            );
             log::warn!("AI fact view should already exist for AI fact pane");
             return None;
         };

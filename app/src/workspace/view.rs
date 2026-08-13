@@ -12192,7 +12192,13 @@ impl Workspace {
             .find(|(_, tab)| tab.pane_group.id() == discard.pane_group_id)
             .map(|(index, tab)| (index, tab.pane_group.clone()));
         if let Some((index, pane_group)) = discard_tab {
-            if pane_group.as_ref(ctx).pane_count() <= 1 {
+            if !pane_group.as_ref(ctx).has_pane_id(discard.pane_id) {
+                log::warn!(
+                    "discard_duplicate_transferred_pane: pane group {:?} no longer contains discard pane {:?}; skipping removal",
+                    discard.pane_group_id,
+                    discard.pane_id
+                );
+            } else if pane_group.as_ref(ctx).pane_count() <= 1 {
                 self.remove_tab(index, false, true, ctx);
             } else {
                 pane_group.update(ctx, |pane_group, ctx| {
