@@ -10,6 +10,7 @@ use chrono::{DateTime, Local, NaiveDateTime};
 #[cfg(feature = "local_fs")]
 use diesel::SqliteConnection;
 use itertools::Itertools as _;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use warp_cli::agent::Harness;
@@ -264,7 +265,12 @@ pub struct BlocklistAIHistoryModel {
     /// A [`HashMap`] mapping a [`AIConversationId`] to the [`AIConversation`] itself.
     /// Conversations may or may not be live in any open session. They will exist in this map if they
     /// have ever been loaded into memory.
-    conversations_by_id: HashMap<AIConversationId, AIConversation>,
+    ///
+    /// We use an `FxHashMap` here because `AIConversationId` wraps a `Uuid` generated locally
+    /// (never attacker-controlled), and this map is looked up frequently (e.g. once per AI
+    /// block per event while restoring a long conversation), so a faster non-cryptographic
+    /// hasher is a safe win.
+    conversations_by_id: FxHashMap<AIConversationId, AIConversation>,
 
     /// The active conversation ID for a given terminal surface.
     ///

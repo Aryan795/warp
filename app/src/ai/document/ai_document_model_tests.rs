@@ -642,6 +642,79 @@ fn test_restored_version_editor_isolation() {
 }
 
 #[test]
+fn test_restore_document_edit_creates_version_with_isolated_editors() {
+    App::test((), |mut app| async move {
+        initialize_app_for_ai_document_tests(&mut app);
+        let model_handle = app.add_model(|_ctx| AIDocumentModel::new_for_test());
+
+        let doc_id = AIDocumentId::new();
+        let conversation_id = AIConversationId::new();
+        let initial_created_at = Local::now();
+
+        model_handle.update(&mut app, |model, ctx| {
+            model.restore_document(
+                doc_id,
+                conversation_id,
+                "Restored Title",
+                "# Original Content",
+                initial_created_at,
+                ctx,
+            );
+        });
+
+        let edit_created_at = initial_created_at + chrono::Duration::seconds(1);
+        let new_version = model_handle.update(&mut app, |model, ctx| {
+            model.restore_document_edit(&doc_id, "# Edited Content", edit_created_at, ctx)
+        });
+
+        model_handle.update(&mut app, |model, ctx| {
+            assert_eq!(new_version, Some(AIDocumentVersion::new_for_test(2)));
+
+            let doc = model
+                .get_current_document(&doc_id)
+                .expect("Document should exist");
+            assert_eq!(doc.version, AIDocumentVersion::new_for_test(2));
+            assert_eq!(doc.created_at, edit_created_at);
+            assert!(doc.restored_from.is_none());
+
+            let content = model
+                .get_document_content(&doc_id, ctx)
+                .expect("Should have content");
+            assert_eq!(content, "# Edited Content\n");
+
+            // The earlier version should retain the pre-edit content.
+            let versions = model
+                .get_earlier_document_versions(&doc_id)
+                .expect("Should have versions");
+            assert_eq!(versions.len(), 1);
+            let first_version = &versions[0];
+            assert_eq!(first_version.version, AIDocumentVersion::new_for_test(1));
+            assert_eq!(first_version.title, "Restored Title");
+            assert_eq!(first_version.get_content(ctx), "# Original Content\n");
+        });
+
+        // Editing the live (current) editor further shouldn't retroactively change the
+        // archived earlier version's editor -- they must be fully isolated instances.
+        model_handle.update(&mut app, |model, ctx| {
+            let doc = model
+                .get_current_document(&doc_id)
+                .expect("Document should exist");
+            doc.editor.update(ctx, |editor, editor_ctx| {
+                editor.reset_with_markdown("# Further Edited", editor_ctx);
+            });
+        });
+
+        model_handle.update(&mut app, |model, ctx| {
+            let versions = model
+                .get_earlier_document_versions(&doc_id)
+                .expect("Should have versions");
+            let first_version = &versions[0];
+            assert_eq!(first_version.get_content(ctx), "# Original Content\n");
+        });
+    });
+}
+
+#[test]
 fn test_version_string_formatting() {
     let v1 = AIDocumentVersion::new_for_test(1);
     let v42 = AIDocumentVersion::new_for_test(42);

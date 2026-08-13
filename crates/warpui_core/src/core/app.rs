@@ -601,7 +601,9 @@ pub struct AppContext {
     /// Last cursor position observed after scene layout, used to notify platform IME code only
     /// when layout moves the active cursor.
     last_observed_active_cursor_positions: HashMap<WindowId, Option<CursorInfo>>,
-    pub(super) windows: HashMap<WindowId, Window>,
+    // We use an FxHashMap here because `WindowId` is a `Copy` usize newtype that is hashed on
+    // every `emit_event`, and FxHasher is the fastest commonly-used hasher for such small keys.
+    pub(super) windows: FxHashMap<WindowId, Window>,
     pub(super) ref_counts: Arc<Mutex<RefCounts>>,
     pub(super) platform_delegate: Box<dyn platform::Delegate>,
 

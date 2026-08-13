@@ -1126,6 +1126,15 @@ impl AIDocumentModel {
     /// This is used for restoring EditDocuments results where we already have the final content.
     /// Creates a new version of the document with directly-provided content.
     /// This expects `restore_document` to have already been called.
+    ///
+    /// Unlike [`Self::create_new_version_and_apply_diffs`], the new content here fully replaces
+    /// the document rather than incrementally patching it, so this doesn't go through
+    /// [`Self::create_new_document_version`]. That helper archives the *current* editor by
+    /// serializing it back to markdown and re-parsing that into a new model, which is wasted
+    /// work here since we're about to discard the current editor's content entirely: the
+    /// existing (already-parsed) editor is archived as-is, and only the new content needs to be
+    /// parsed, once, into a freshly created editor. This avoids parsing the document twice while
+    /// producing the same resulting document version state.
     pub fn restore_document_edit(
         &mut self,
         id: &AIDocumentId,
@@ -1133,21 +1142,40 @@ impl AIDocumentModel {
         created_at: DateTime<Local>,
         ctx: &mut ModelContext<Self>,
     ) -> Option<AIDocumentVersion> {
-        if let Some(doc) = self.create_new_document_version(id, ctx) {
-            let content = new_content.into();
-            doc.editor.update(ctx, |editor, editor_ctx| {
-                editor.reset_with_markdown(&content, editor_ctx);
-            });
-            doc.created_at = created_at;
-            ctx.emit(AIDocumentModelEvent::DocumentUpdated {
-                document_id: *id,
-                version: doc.version,
-                source: AIDocumentUpdateSource::Restoration,
-            });
-            Some(doc.version)
-        } else {
-            None
-        }
+        let doc = self.documents.get_mut(id)?;
+
+        let file_link_resolution_context = doc
+            .editor
+            .as_ref(ctx)
+            .file_link_resolution_context()
+            .cloned();
+        let new_editor =
+            Self::create_editor_model(new_content.into(), file_link_resolution_context, ctx);
+        let previous_editor = std::mem::replace(&mut doc.editor, new_editor);
+
+        let earlier_version = AIDocumentEarlierVersion {
+            title: doc.title.clone(),
+            version: doc.version,
+            editor: previous_editor,
+            created_at: doc.created_at,
+            restored_from: doc.restored_from,
+        };
+        self.earlier_versions
+            .entry(*id)
+            .or_insert_with(Vec::new)
+            .push(earlier_version);
+
+        doc.version = doc.version.next();
+        doc.created_at = created_at;
+        doc.restored_from = None;
+
+        let version = doc.version;
+        ctx.emit(AIDocumentModelEvent::DocumentUpdated {
+            document_id: *id,
+            version,
+            source: AIDocumentUpdateSource::Restoration,
+        });
+        Some(version)
     }
 
     /// Handle editor model events and enqueue saves for content changes.

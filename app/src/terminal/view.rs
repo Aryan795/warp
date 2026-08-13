@@ -15181,27 +15181,24 @@ impl TerminalView {
     }
 
     fn update_input_prompt_suggestions_banner_state(&mut self, ctx: &mut ViewContext<Self>) {
-        for rich_content in &self.rich_content_views {
-            if let Some(ai_metadata) = rich_content.ai_block_metadata() {
+        let should_show_prompt_suggestions_banner =
+            self.rich_content_views.iter().any(|rich_content| {
+                let Some(ai_metadata) = rich_content.ai_block_metadata() else {
+                    return false;
+                };
                 // If the passive code gen fails, show the prompt suggestion banner as a fallback
-                if ai_metadata
-                    .ai_block_handle
-                    .as_ref(ctx)
-                    .is_passive_conversation(ctx)
-                    && matches!(
-                        ai_metadata.ai_block_handle.as_ref(ctx).status(ctx),
-                        AIBlockOutputStatus::Failed { .. }
-                    )
-                {
-                    // Try to update the state of the prompt suggestions banner
-                    self.input.update(ctx, |input, ctx| {
-                        input.maybe_set_prompt_suggestions_banner_state_should_hide(false);
-                        input.notify_and_notify_children(ctx);
-                    });
+                ai_metadata.ai_block_handle.read(ctx, |ai_block, ctx| {
+                    ai_block.is_passive_conversation(ctx)
+                        && matches!(ai_block.status(ctx), AIBlockOutputStatus::Failed { .. })
+                })
+            });
 
-                    break;
-                }
-            }
+        if should_show_prompt_suggestions_banner {
+            // Try to update the state of the prompt suggestions banner
+            self.input.update(ctx, |input, ctx| {
+                input.maybe_set_prompt_suggestions_banner_state_should_hide(false);
+                input.notify_and_notify_children(ctx);
+            });
         }
     }
 
@@ -15209,20 +15206,52 @@ impl TerminalView {
     ///
     /// Hidden AI blocks are only generated when generating passive codegen suggestions after a
     /// compiler error.
+    ///
+    /// This is a hot path: it runs on every `AppendedExchange`/`AfterBlockStarted` event, so for
+    /// long conversations `rich_content_views` can be large. To keep it cheap, this early-outs
+    /// when there are no AI blocks to inspect at all, and otherwise does a single retain pass
+    /// that both decides removals and (for blocks that are kept) determines whether the prompt
+    /// suggestions banner should be shown, reading each AI block's state exactly once. This
+    /// avoids the previous unconditional second full scan (which re-read every AI block again
+    /// via `update_input_prompt_suggestions_banner_state`) while preserving the exact same
+    /// behavior: the banner still appears whenever a passive conversation block that survives
+    /// this pass is in the `Failed` state.
     fn drop_hidden_passive_ai_blocks(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.rich_content_views.is_empty() {
+            return;
+        }
+
         let mut ai_block_ids_to_remove = vec![];
+        let mut should_show_prompt_suggestions_banner = false;
         self.rich_content_views.retain(|rich_content| {
-            if let Some(ai_metadata) = rich_content.ai_block_metadata() {
-                let is_hidden = ai_metadata.ai_block_handle.read(ctx, |ai_block, ctx| {
-                    ai_block.is_hidden(ctx) && ai_block.is_passive_conversation(ctx)
+            let Some(ai_metadata) = rich_content.ai_block_metadata() else {
+                return true;
+            };
+
+            let (should_remove, is_failed_passive_conversation) =
+                ai_metadata.ai_block_handle.read(ctx, |ai_block, ctx| {
+                    let is_hidden = ai_block.is_hidden(ctx);
+                    let is_passive = ai_block.is_passive_conversation(ctx);
+                    let should_remove = is_hidden && is_passive;
+                    // No need to check the failed/passive status of a block we're about to drop,
+                    // or once we've already found a block that should show the banner.
+                    let is_failed_passive_conversation = !should_remove
+                        && !should_show_prompt_suggestions_banner
+                        && is_passive
+                        && matches!(ai_block.status(ctx), AIBlockOutputStatus::Failed { .. });
+                    (should_remove, is_failed_passive_conversation)
                 });
-                if is_hidden {
-                    ai_block_ids_to_remove.push(ai_metadata.ai_block_handle.id());
-                }
-                !is_hidden
-            } else {
-                true
+
+            if should_remove {
+                ai_block_ids_to_remove.push(ai_metadata.ai_block_handle.id());
+                return false;
             }
+
+            if is_failed_passive_conversation {
+                should_show_prompt_suggestions_banner = true;
+            }
+
+            true
         });
 
         for view_id in ai_block_ids_to_remove {
@@ -15232,7 +15261,14 @@ impl TerminalView {
                 .remove_rich_content(view_id);
         }
 
-        self.update_input_prompt_suggestions_banner_state(ctx);
+        if should_show_prompt_suggestions_banner {
+            // Try to update the state of the prompt suggestions banner
+            self.input.update(ctx, |input, ctx| {
+                input.maybe_set_prompt_suggestions_banner_state_should_hide(false);
+                input.notify_and_notify_children(ctx);
+            });
+        }
+
         ctx.notify();
     }
 
