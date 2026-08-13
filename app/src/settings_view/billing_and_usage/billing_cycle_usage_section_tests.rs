@@ -1,8 +1,12 @@
 use chrono::TimeZone;
 
 use super::*;
+use crate::auth::UserUid;
+use crate::server::ids::ServerId;
+use crate::workspaces::team::{MembershipRole, TeamMember};
 use crate::workspaces::workspace::{
     AiCreditsUsageAndCostSubjectType, AiCreditsUsageBucket, AiCreditsUsageSource,
+    WorkspaceMemberUsageInfo,
 };
 
 fn utc(year: i32, month: u32, day: u32) -> DateTime<Utc> {
@@ -128,4 +132,107 @@ fn filter_entries_by_attributed_team_keeps_service_accounts_attributed_to_team()
         filtered[0].subject_uid.as_deref(),
         Some("service-account-a")
     );
+}
+
+fn team_member(uid: &str) -> TeamMember {
+    TeamMember {
+        uid: UserUid::new(uid),
+        email: format!("{uid}@example.com"),
+        role: MembershipRole::User,
+    }
+}
+
+fn workspace_member(uid: &str) -> WorkspaceMember {
+    WorkspaceMember {
+        uid: UserUid::new(uid),
+        email: format!("{uid}@example.com"),
+        role: MembershipRole::User,
+        usage_info: WorkspaceMemberUsageInfo {
+            is_unlimited: false,
+            request_limit: 1000,
+            requests_used_since_last_refresh: 0,
+            is_request_limit_prorated: false,
+        },
+    }
+}
+
+fn server_id(seed: &str) -> ServerId {
+    ServerId::from_string_lossy(format!("{seed:0>22}"))
+}
+
+fn team(uid: &str, members: Vec<TeamMember>) -> Team {
+    Team::from_local_cache(
+        server_id(uid),
+        format!("team-{uid}"),
+        None,
+        None,
+        Some(members),
+    )
+}
+
+/// This is the raw-to-scoped boundary every v2 rendering path reads
+/// through (see [`ActiveTeamUsageScope`]). Starting from raw, mixed-team
+/// data -- exactly what `workspace.billing_cycle_usage` /
+/// `workspace.members` actually contain -- so this fails if the
+/// production entry or roster filtering is ever removed or miswired.
+#[test]
+fn resolve_active_team_scope_keeps_only_active_teams_entries_and_roster() {
+    let team_a = team("team-a", vec![team_member("a-only"), team_member("shared")]);
+    let team_a_uid = team_a.uid.uid();
+    let team_b_uid = server_id("team-b").uid();
+    let workspace_members = vec![
+        workspace_member("a-only"),
+        workspace_member("b-only"),
+        workspace_member("shared"),
+    ];
+    let mut service_account_b = usage_entry("service-account-b", Some(team_b_uid.as_str()));
+    service_account_b.subject_type = AiCreditsUsageAndCostSubjectType::ServiceAccount;
+    let raw_entries = vec![
+        usage_entry("a-only", Some(team_a_uid.as_str())),
+        usage_entry("shared", Some(team_a_uid.as_str())),
+        usage_entry("b-only", Some(team_b_uid.as_str())),
+        usage_entry("unassigned", None),
+        service_account_b,
+    ];
+
+    let scope = resolve_active_team_scope(&raw_entries, &workspace_members, Some(&team_a));
+
+    let entry_uids: Vec<&str> = scope
+        .entries
+        .iter()
+        .map(|e| e.subject_uid.as_deref().unwrap())
+        .collect();
+    assert_eq!(entry_uids, ["a-only", "shared"]);
+
+    let member_uids: Vec<&str> = scope.members.iter().map(|m| m.uid.as_str()).collect();
+    assert_eq!(member_uids, ["a-only", "shared"]);
+}
+
+#[test]
+fn resolve_active_team_scope_with_no_active_team_yields_empty_scope() {
+    // Fail closed: no resolved active team must never fall back to the
+    // whole workspace's entries or roster.
+    let workspace_members = vec![workspace_member("a-only")];
+    let team_a_uid = server_id("team-a").uid();
+    let raw_entries = vec![usage_entry("a-only", Some(team_a_uid.as_str()))];
+
+    let scope = resolve_active_team_scope(&raw_entries, &workspace_members, None);
+
+    assert!(scope.entries.is_empty());
+    assert!(scope.members.is_empty());
+}
+
+#[test]
+fn resolve_active_team_scope_with_only_other_team_entries_yields_empty_entries() {
+    // A member whose only usage in the cycle is attributed to a different
+    // team must never surface that other team's data on this page.
+    let team_a = team("team-a", vec![team_member("a-only")]);
+    let team_b_uid = server_id("team-b").uid();
+    let workspace_members = vec![workspace_member("a-only")];
+    let raw_entries = vec![usage_entry("a-only", Some(team_b_uid.as_str()))];
+
+    let scope = resolve_active_team_scope(&raw_entries, &workspace_members, Some(&team_a));
+
+    assert!(scope.entries.is_empty());
+    assert_eq!(scope.members.len(), 1);
 }
