@@ -326,11 +326,14 @@ struct GitRepoInfo {
     git_dir_path: PathBuf,
 }
 
-/// A `.git` gitfile (used by worktrees and submodules) holds a single short "gitdir: <path>"
-/// line and is realistically well under a kilobyte; this leaves generous headroom while still
-/// rejecting the pathological on-disk sizes that motivated APP-4801.
+/// A `.git` gitfile (used by worktrees and submodules) holds a single "gitdir: <path>" line.
+/// That's normally well under a kilobyte, but a Windows long-path installation can produce a
+/// `gitdir:` path well beyond a few KiB; a cap tight enough to reject those would make
+/// `find_git_repo` silently treat a valid worktree/submodule as "not a gitfile" and walk past
+/// the real repository. 1 MiB is still utterly negligible against the multi-GiB spike that
+/// motivated APP-4801, so it costs nothing to leave this generous.
 #[cfg(feature = "local_fs")]
-const MAX_GITFILE_BYTES: u64 = 4096;
+const MAX_GITFILE_BYTES: u64 = 1024 * 1024;
 
 /// Finds the Git repository containing the given path, if any.
 ///
