@@ -7,6 +7,10 @@ use warp_util::standardized_path::StandardizedPath;
 use warpui_core::ModelHandle;
 
 use crate::file_tree_store::file_tree_state::FileTreeMapStore;
+#[cfg(test)]
+pub(crate) use crate::file_tree_store::file_tree_state::{
+    deep_clone_count, deep_clone_count_test_lock, reset_deep_clone_count,
+};
 use crate::{BuildTreeError, Entry, FileId, FileMetadata, Repository};
 
 #[derive(Debug, Clone)]
@@ -199,23 +203,36 @@ impl FileTreeEntry {
     ///
     /// Removals are processed first, then subtree patches are applied.
     /// This is the core mutation path used by the remote client to apply
-    /// incremental updates received from the server.
+    /// incremental updates received from the server, and by consumers (e.g.
+    /// [`FileTreeView`]) that maintain their own tree instead of sharing the
+    /// model's `Arc` (see APP-5355).
+    ///
+    /// Returns `false` if any node in the update could not be placed because
+    /// its expected parent directory was missing or was not actually a
+    /// directory — a sign that this entry has drifted out of sync with the
+    /// update's source and should be resynced from a fresh snapshot instead
+    /// of continuing to apply deltas to it.
     pub fn apply_repo_metadata_update(
         &mut self,
         update: &crate::file_tree_update::RepoMetadataUpdate,
-    ) {
+    ) -> bool {
         // 1. Process removals
         for path in &update.remove_entries {
             self.remove(path);
         }
 
         // 2. Process subtree patches
+        let mut applied_cleanly = true;
         for entry_update in &update.update_entries {
-            self.apply_entry_update(entry_update);
+            applied_cleanly &= self.apply_entry_update(entry_update);
         }
+        applied_cleanly
     }
 
-    fn apply_entry_update(&mut self, update: &crate::file_tree_update::FileTreeEntryUpdate) {
+    fn apply_entry_update(
+        &mut self,
+        update: &crate::file_tree_update::FileTreeEntryUpdate,
+    ) -> bool {
         use crate::file_tree_update::RepoNodeMetadata;
 
         // Ensure parent directories exist up to parent_path_to_replace
@@ -226,6 +243,7 @@ impl FileTreeEntry {
         // by the time we encounter a file, its parent directory has already
         // been inserted.  `insert_child_state` also registers the child in
         // `parent_to_child_map`, so no separate wiring step is needed.
+        let mut applied_cleanly = true;
         for node in &update.subtree_metadata {
             match node {
                 RepoNodeMetadata::Directory(dir) => {
@@ -241,6 +259,7 @@ impl FileTreeEntry {
                             "Could not find parent directory for node during incremental update: {:?}",
                             dir.path
                         );
+                        applied_cleanly = false;
                     }
                 }
                 RepoNodeMetadata::File(file) => {
@@ -262,11 +281,13 @@ impl FileTreeEntry {
                                 "Could not find parent directory for node during incremental update: {:?}",
                                 file.path
                             );
+                            applied_cleanly = false;
                         }
                     }
                 }
             }
         }
+        applied_cleanly
     }
 }
 

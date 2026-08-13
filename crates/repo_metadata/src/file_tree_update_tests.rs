@@ -478,6 +478,65 @@ fn apply_incomplete_update_missing_parent_from_undelivered_page() {
     );
 }
 
+// ── apply_repo_metadata_update success-signal tests (APP-5355) ────────
+
+#[test]
+fn apply_update_reports_success_when_every_node_is_placed() {
+    let initial = dir("/repo", vec![dir("/repo/src", vec![])]);
+    let mut tree = build_tree_from_entry(initial);
+
+    let update = RepoMetadataUpdate {
+        repo_path: std_path("/repo"),
+        remove_entries: vec![],
+        update_entries: vec![FileTreeEntryUpdate {
+            parent_path_to_replace: std_path("/repo/src"),
+            subtree_metadata: vec![RepoNodeMetadata::File(FileNodeMetadata {
+                path: std_path("/repo/src/main.rs"),
+                extension: Some("rs".to_string()),
+                ignored: false,
+            })],
+        }],
+        standing_results_delta: Default::default(),
+    };
+
+    assert!(
+        tree.apply_repo_metadata_update(&update),
+        "an update whose nodes all resolve their parent should report success"
+    );
+}
+
+#[test]
+fn apply_update_reports_failure_when_target_parent_is_not_a_directory() {
+    // "/repo/src" is a FILE, not a directory, so a node whose parent should
+    // be "/repo/src" cannot be placed — a sign the receiver's tree has
+    // drifted out of sync with the sender.
+    let initial = dir("/repo", vec![file("/repo/src")]);
+    let mut tree = build_tree_from_entry(initial);
+
+    let update = RepoMetadataUpdate {
+        repo_path: std_path("/repo"),
+        remove_entries: vec![],
+        update_entries: vec![FileTreeEntryUpdate {
+            parent_path_to_replace: std_path("/repo"),
+            subtree_metadata: vec![RepoNodeMetadata::File(FileNodeMetadata {
+                path: std_path("/repo/src/nested.rs"),
+                extension: Some("rs".to_string()),
+                ignored: false,
+            })],
+        }],
+        standing_results_delta: Default::default(),
+    };
+
+    assert!(
+        !tree.apply_repo_metadata_update(&update),
+        "an update targeting a non-directory parent should report failure"
+    );
+    assert!(
+        tree.get(&std_path("/repo/src/nested.rs")).is_none(),
+        "the node should not be inserted when its parent could not be resolved"
+    );
+}
+
 // ── Round-trip test: apply mutations on server, then apply update on client ───
 
 #[test]
