@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use pathfinder_geometry::vector::Vector2F;
@@ -15,11 +17,14 @@ use warpui::keymap::Keystroke;
 use warpui::platform::WindowStyle;
 use warpui::text::point::Point;
 use warpui::units::IntoPixels;
-use warpui::{App, SingletonEntity, TypedActionView, UpdateModel, ViewHandle};
+use warpui::{
+    App, EntityIdSet, Event, Presenter, SingletonEntity, TypedActionView, UpdateModel, ViewHandle,
+    WindowId, WindowInvalidation,
+};
 
 use crate::auth::AuthStateProvider;
 use crate::cloud_object::model::persistence::CloudModel;
-use crate::code::editor::find::view::{CodeEditorFind, FindAction};
+use crate::code::editor::find::view::{CodeEditorFind, FIND_QUERY_FIELD_POSITION_ID};
 use crate::code::editor::view::{CodeEditorRenderOptions, CodeEditorView, CodeEditorViewAction};
 use crate::editor::EditorAction;
 use crate::notebooks::editor::keys::NotebookKeybindings;
@@ -81,9 +86,13 @@ fn initialize_code_editor_app(app: &mut App) {
     );
 }
 
-/// Helper function for creating a code editor with buffer text.
-fn add_code_editor(buffer_content: &str, app: &mut App) -> ViewHandle<CodeEditorView> {
-    let (_, editor) = app.add_window(WindowStyle::NotStealFocus, move |ctx| {
+/// Helper function for creating a code editor with buffer text, and the id of the window it was
+/// created in.
+fn add_code_editor_with_window(
+    buffer_content: &str,
+    app: &mut App,
+) -> (WindowId, ViewHandle<CodeEditorView>) {
+    app.add_window(WindowStyle::NotStealFocus, move |ctx| {
         let mut editor = CodeEditorView::new(
             None,
             None,
@@ -97,8 +106,99 @@ fn add_code_editor(buffer_content: &str, app: &mut App) -> ViewHandle<CodeEditor
         editor.handle_action(&CodeEditorViewAction::CursorAtBufferStart, ctx);
 
         editor
+    })
+}
+
+/// Helper function for creating a code editor with buffer text.
+fn add_code_editor(buffer_content: &str, app: &mut App) -> ViewHandle<CodeEditorView> {
+    add_code_editor_with_window(buffer_content, app).1
+}
+
+/// Renders a full frame for `window_id` into `presenter`, so that every view in the window
+/// (including ones inside conditionally-rendered overlays, like the find bar) gets real,
+/// queryable on-screen bounds. Needed before delivering simulated pointer events, since layout
+/// silently treats any view not already present in the presenter's rendered-view cache as
+/// zero-sized.
+fn render_frame(
+    app: &mut App,
+    presenter: &Rc<RefCell<Presenter>>,
+    window_id: WindowId,
+    size: Vector2F,
+) {
+    let updated: EntityIdSet = app
+        .read(|ctx| ctx.view_ids_for_window(window_id))
+        .into_iter()
+        .collect();
+    let invalidation = WindowInvalidation {
+        updated,
+        ..Default::default()
+    };
+    app.update(|ctx| {
+        presenter.borrow_mut().invalidate(invalidation, ctx);
+        presenter.borrow_mut().build_scene(size, 1., None, ctx);
     });
-    editor
+}
+
+/// Delivers a real, pointer-driven left click (mouse down followed by mouse up) at `position`
+/// within `window_id`, going through the same event-dispatch path (`Hoverable`, `EventContext`,
+/// queued `DispatchedAction`) a physical click would, rather than calling `handle_action`
+/// directly.
+fn click_at(
+    app: &mut App,
+    presenter: &Rc<RefCell<Presenter>>,
+    window_id: WindowId,
+    position: Vector2F,
+) {
+    app.update(|ctx| {
+        ctx.simulate_window_event(
+            Event::LeftMouseDown {
+                position,
+                modifiers: Default::default(),
+                click_count: 1,
+                is_first_mouse: false,
+            },
+            window_id,
+            presenter.clone(),
+        );
+    });
+    app.update(|ctx| {
+        ctx.simulate_window_event(
+            Event::LeftMouseUp {
+                position,
+                modifiers: Default::default(),
+            },
+            window_id,
+            presenter.clone(),
+        );
+    });
+}
+
+/// Renders a frame, locates the on-screen bounds of the find query field, and delivers a real
+/// pointer click within it via [`click_at`].
+///
+/// Note: this deliberately clicks the field's cached midpoint rather than a coordinate offset
+/// into its padding specifically. Without a real font/asset provider, this headless unit-test
+/// harness cannot load the row's icon glyphs or measure real text metrics, which measurably
+/// distorts the Flex row's computed geometry (confirmed by inspecting the cached rect directly).
+/// That makes a padding-vs-editor coordinate distinction unreliable to assert on in-process.
+/// Full coverage of the field's padding/border chrome (not just the inner text editor) is
+/// verified instead by the element-structure change itself (the whole bordered field, not just
+/// the child editor, is wrapped in the click target -- see `render_find_row`) and by interactive
+/// verification in a real, fully-rendered build (see the PR description).
+fn click_find_query_field(
+    app: &mut App,
+    presenter: &Rc<RefCell<Presenter>>,
+    window_id: WindowId,
+    window_size: Vector2F,
+) {
+    render_frame(app, presenter, window_id, window_size);
+    let field_rect = app
+        .read(|ctx| {
+            ctx.element_position_by_id_at_last_frame(window_id, FIND_QUERY_FIELD_POSITION_ID)
+        })
+        .expect("find query field should have a cached position after rendering");
+    let click_position = field_rect.origin() + field_rect.size() * 0.5;
+    click_at(app, presenter, window_id, click_position);
 }
 
 /// Helper function for simulating vim user input.
@@ -2128,6 +2228,39 @@ fn test_vim_indent_dot_repeat_repeats_last_indent() {
     });
 }
 
+/// Asserts that, given a `find_bar` whose query field is currently disabled (e.g. after vim
+/// Enter or a `*`/`#` word search) with `existing_query` already typed in, a real pointer click
+/// on the field -- landing in its padding/border chrome, not just over the inner text editor --
+/// re-enables and focuses it, and that typing afterwards appends to the existing query rather
+/// than replacing it (since a click is "let me edit this," not "replace it").
+fn assert_click_recovers_disabled_query_field(
+    app: &mut App,
+    presenter: &Rc<RefCell<Presenter>>,
+    window_id: WindowId,
+    window_size: Vector2F,
+    find_bar: &ViewHandle<CodeEditorFind>,
+    existing_query: &str,
+) {
+    assert!(!find_bar.read(app, |find_bar, ctx| find_bar.is_find_input_editable(ctx)));
+    let find_editor = find_bar.read(app, |find_bar, _ctx| {
+        find_bar.find_editor_for_test().clone()
+    });
+    assert!(!find_editor.read(app, |editor, _ctx| editor.is_focused()));
+
+    click_find_query_field(app, presenter, window_id, window_size);
+
+    assert!(find_bar.read(app, |find_bar, ctx| find_bar.is_find_input_editable(ctx)));
+    assert!(find_editor.read(app, |editor, _ctx| editor.is_focused()));
+
+    find_editor.update(app, |editor, ctx| {
+        editor.handle_action(&EditorAction::UserInsert(UserInput::new("!")), ctx);
+    });
+    assert_eq!(
+        find_editor.read(app, |editor, ctx| editor.buffer_text(ctx)),
+        format!("{existing_query}!")
+    );
+}
+
 #[test]
 fn test_vim_find_query_editor_click_to_edit_after_enter() {
     let _feature_flag_guard = FeatureFlag::VimCodeEditor.override_enabled(true);
@@ -2135,7 +2268,9 @@ fn test_vim_find_query_editor_click_to_edit_after_enter() {
     App::test((), |mut app| async move {
         initialize_code_editor_app(&mut app);
 
-        let editor = add_code_editor("hello world\nhello again", &mut app);
+        let (window_id, editor) = add_code_editor_with_window("hello world\nhello again", &mut app);
+        let presenter = Rc::new(RefCell::new(Presenter::new(window_id)));
+        let window_size = Vector2F::new(1200., 800.);
 
         // Open the find bar; this enables and focuses the query editor.
         editor.update(&mut app, |view, ctx| {
@@ -2153,7 +2288,6 @@ fn test_vim_find_query_editor_click_to_edit_after_enter() {
         let find_editor = find_bar.read(&app, |find_bar, _ctx| {
             find_bar.find_editor_for_test().clone()
         });
-
         assert!(find_bar.read(&app, |find_bar, ctx| find_bar.is_find_input_editable(ctx)));
         assert!(find_editor.read(&app, |editor, _ctx| editor.is_focused()));
 
@@ -2164,27 +2298,45 @@ fn test_vim_find_query_editor_click_to_edit_after_enter() {
             editor.handle_action(&EditorAction::Enter, ctx);
         });
 
-        assert!(!find_bar.read(&app, |find_bar, ctx| find_bar.is_find_input_editable(ctx)));
-        assert!(!find_editor.read(&app, |editor, _ctx| editor.is_focused()));
+        assert_click_recovers_disabled_query_field(
+            &mut app,
+            &presenter,
+            window_id,
+            window_size,
+            &find_bar,
+            "hello",
+        );
+    });
+}
 
-        // Before the fix, there was no way to recover other than reopening the find bar (e.g.
-        // Cmd/Ctrl+Shift+F). Clicking the query editor now dispatches this action, which should
-        // re-enable and focus it, without clobbering the existing query text.
-        find_bar.update(&mut app, |find_bar, ctx| {
-            find_bar.handle_action(&FindAction::FocusQueryEditor, ctx);
-        });
+#[test]
+fn test_vim_find_query_editor_click_to_edit_after_word_search() {
+    let _feature_flag_guard = FeatureFlag::VimCodeEditor.override_enabled(true);
 
-        assert!(find_bar.read(&app, |find_bar, ctx| find_bar.is_find_input_editable(ctx)));
-        assert!(find_editor.read(&app, |editor, _ctx| editor.is_focused()));
+    App::test((), |mut app| async move {
+        initialize_code_editor_app(&mut app);
 
-        // Typing after the click should append to the existing query rather than replace it,
-        // proving the reactivation didn't select-all like the keyboard-shortcut reopen path does.
-        find_editor.update(&mut app, |editor, ctx| {
-            editor.handle_action(&EditorAction::UserInsert(UserInput::new("!")), ctx);
-        });
-        assert_eq!(
-            find_editor.read(&app, |editor, ctx| editor.buffer_text(ctx)),
-            "hello!"
+        let (window_id, editor) = add_code_editor_with_window("hello world\nhello again", &mut app);
+        let presenter = Rc::new(RefCell::new(Presenter::new(window_id)));
+        let window_size = Vector2F::new(1200., 800.);
+
+        // `*` searches for the word under the cursor ("hello", at the buffer-start cursor
+        // position) and opens the find bar with the query field already disabled, since the
+        // search term is fully determined by the cursor -- the same disabled state Enter
+        // produces, reached via a different vim entry point.
+        vim_user_insert(&editor, "*", &mut app);
+
+        let find_bar: ViewHandle<CodeEditorFind> = editor
+            .read(&app, |view, _ctx| view.find_bar.clone())
+            .expect("find bar should exist");
+
+        assert_click_recovers_disabled_query_field(
+            &mut app,
+            &presenter,
+            window_id,
+            window_size,
+            &find_bar,
+            "hello",
         );
     });
 }
