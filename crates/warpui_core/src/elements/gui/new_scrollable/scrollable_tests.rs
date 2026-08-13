@@ -4,6 +4,7 @@ use std::rc::Rc;
 
 use pathfinder_color::ColorU;
 use pathfinder_geometry::vector::{Vector2F, vec2f};
+use warp_features::FeatureFlag;
 
 use super::{
     AxisConfiguration, ClippedAxisConfiguration, DualAxisConfig, NewScrollable,
@@ -14,7 +15,7 @@ use crate::elements::{
     ParentElement, Point, Rect, SavePosition, ScrollData, ScrollStateHandle, ScrollTarget,
     ScrollToPositionMode, ScrollbarWidth, SelectableElement, SelectionFragment, Stack, ZIndex,
 };
-use crate::event::DispatchedEvent;
+use crate::event::{DispatchedEvent, ModifiersState};
 use crate::platform::{TerminationMode, WindowStyle};
 use crate::text::word_boundaries::WordBoundariesPolicy;
 use crate::text::{IsRect, SelectionDirection, SelectionType};
@@ -1334,6 +1335,227 @@ fn position_for_child(i: usize, boundary: Boundary) -> f32 {
         pos -= SCROLLABLE_VIEWPORT_SIZE - CHILD_EVENT_HANDLER_DIMENSION;
     }
     pos.clamp(0., SCROLLABLE_VIEWPORT_SIZE)
+}
+
+fn dispatch_non_precise_wheel_down(
+    ctx: &mut AppContext,
+    window_id: crate::WindowId,
+    presenter: Rc<RefCell<Presenter>>,
+) {
+    ctx.simulate_window_event(
+        Event::ScrollWheel {
+            position: vec2f(100., 100.),
+            delta: vec2f(0., -1.),
+            precise: false,
+            modifiers: ModifiersState::default(),
+        },
+        window_id,
+        presenter,
+    );
+}
+
+fn dispatch_precise_wheel_down(
+    ctx: &mut AppContext,
+    window_id: crate::WindowId,
+    presenter: Rc<RefCell<Presenter>>,
+    delta_px: f32,
+) {
+    ctx.simulate_window_event(
+        Event::ScrollWheel {
+            position: vec2f(100., 100.),
+            delta: vec2f(0., -delta_px),
+            precise: true,
+            modifiers: ModifiersState::default(),
+        },
+        window_id,
+        presenter,
+    );
+}
+
+/// Sets up a single, vertically Clipped-scrolling [`BasicScrollableView`] and returns its window
+/// id, view handle, and presenter, having already rendered once (required before the scrollable
+/// will handle any dispatched event).
+fn setup_vertical_clipped_scrollable(
+    app: &mut App,
+) -> (
+    crate::WindowId,
+    crate::ViewHandle<BasicScrollableView>,
+    Rc<RefCell<Presenter>>,
+) {
+    app.update(init);
+    let (window_id, view) = app.add_window(WindowStyle::NotStealFocus, |_| {
+        BasicScrollableView::new(None, Some(ScrollBehavior::Clipped(Default::default())))
+    });
+    let presenter = Rc::new(RefCell::new(Presenter::new(window_id)));
+    let view_id = app.root_view_id(window_id).unwrap();
+    app.update(|ctx| render(&mut presenter.borrow_mut(), view_id, ctx));
+    (window_id, view, presenter)
+}
+
+fn vertical_handle(view: &BasicScrollableView) -> &ClippedScrollStateHandle {
+    let Some(ScrollBehavior::Clipped(handle)) = view.vertical_axis.as_ref() else {
+        panic!("invalid test config");
+    };
+    handle
+}
+
+#[test]
+fn non_precise_wheel_scroll_animates_toward_target_when_smooth_scrolling_enabled() {
+    let _flag = FeatureFlag::SmoothScrolling.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        let app = &mut app;
+        let (window_id, view, presenter) = setup_vertical_clipped_scrollable(app);
+
+        app.update(|ctx| dispatch_non_precise_wheel_down(ctx, window_id, presenter.clone()));
+
+        view.read(app, |view, _| {
+            let handle = vertical_handle(view);
+            let target = handle.scroll_target().as_f32();
+            assert!(target > 0., "wheel notch should have set a positive target");
+            // The animation has barely started, so the displayed position lags the target.
+            assert!(handle.scroll_start().as_f32() < target);
+            assert!(handle.is_animating());
+        });
+
+        app.update(|ctx| {
+            ctx.windows()
+                .close_window(window_id, TerminationMode::ForceTerminate)
+        });
+    })
+}
+
+#[test]
+fn non_precise_wheel_scroll_applies_immediately_when_smooth_scrolling_disabled() {
+    let _flag = FeatureFlag::SmoothScrolling.override_enabled(false);
+
+    App::test((), |mut app| async move {
+        let app = &mut app;
+        let (window_id, view, presenter) = setup_vertical_clipped_scrollable(app);
+
+        app.update(|ctx| dispatch_non_precise_wheel_down(ctx, window_id, presenter.clone()));
+
+        view.read(app, |view, _| {
+            let handle = vertical_handle(view);
+            assert!(handle.scroll_start().as_f32() > 0.);
+            assert_eq!(
+                handle.scroll_start().as_f32(),
+                handle.scroll_target().as_f32()
+            );
+            assert!(!handle.is_animating());
+        });
+
+        app.update(|ctx| {
+            ctx.windows()
+                .close_window(window_id, TerminationMode::ForceTerminate)
+        });
+    })
+}
+
+#[test]
+fn precise_wheel_scroll_applies_immediately_even_when_smooth_scrolling_enabled() {
+    let _flag = FeatureFlag::SmoothScrolling.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        let app = &mut app;
+        let (window_id, view, presenter) = setup_vertical_clipped_scrollable(app);
+
+        app.update(|ctx| dispatch_precise_wheel_down(ctx, window_id, presenter.clone(), 40.));
+
+        view.read(app, |view, _| {
+            let handle = vertical_handle(view);
+            assert!(handle.scroll_start().as_f32() > 0.);
+            assert_eq!(
+                handle.scroll_start().as_f32(),
+                handle.scroll_target().as_f32()
+            );
+            assert!(!handle.is_animating());
+        });
+
+        app.update(|ctx| {
+            ctx.windows()
+                .close_window(window_id, TerminationMode::ForceTerminate)
+        });
+    })
+}
+
+#[test]
+fn scrollbar_drag_cancels_in_flight_smooth_scroll_animation() {
+    let _flag = FeatureFlag::SmoothScrolling.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        let app = &mut app;
+        let (window_id, view, presenter) = setup_vertical_clipped_scrollable(app);
+
+        app.update(|ctx| dispatch_non_precise_wheel_down(ctx, window_id, presenter.clone()));
+        view.read(app, |view, _| {
+            assert!(vertical_handle(view).is_animating());
+        });
+
+        // Click on the vertical scrollbar track: a direct scroll operation that should cancel
+        // the in-flight animation and apply immediately at the currently displayed position.
+        app.update(|ctx| {
+            ctx.simulate_window_event(
+                Event::LeftMouseDown {
+                    position: vec2f(
+                        CHILD_EVENT_HANDLER_DIMENSION * 5.0 - ScrollbarWidth::Auto.as_f32(),
+                        CHILD_EVENT_HANDLER_DIMENSION * 4.5,
+                    ),
+                    modifiers: Default::default(),
+                    click_count: 1,
+                    is_first_mouse: false,
+                },
+                window_id,
+                presenter.clone(),
+            );
+        });
+
+        view.read(app, |view, _| {
+            let handle = vertical_handle(view);
+            assert!(!handle.is_animating());
+            assert_eq!(
+                handle.scroll_start().as_f32(),
+                handle.scroll_target().as_f32()
+            );
+        });
+
+        app.update(|ctx| {
+            ctx.windows()
+                .close_window(window_id, TerminationMode::ForceTerminate)
+        });
+    })
+}
+
+#[test]
+fn same_direction_wheel_notches_compose_into_a_larger_target() {
+    let _flag = FeatureFlag::SmoothScrolling.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        let app = &mut app;
+        let (window_id, view, presenter) = setup_vertical_clipped_scrollable(app);
+
+        app.update(|ctx| dispatch_non_precise_wheel_down(ctx, window_id, presenter.clone()));
+        let target_after_first_notch = view.read(app, |view, _| {
+            vertical_handle(view).scroll_target().as_f32()
+        });
+
+        app.update(|ctx| dispatch_non_precise_wheel_down(ctx, window_id, presenter.clone()));
+        view.read(app, |view, _| {
+            let handle = vertical_handle(view);
+            // The second notch composes with the first rather than restarting it: the target
+            // grows by another notch's worth of distance.
+            assert_eq!(
+                handle.scroll_target().as_f32(),
+                target_after_first_notch * 2.
+            );
+            assert!(handle.is_animating());
+        });
+
+        app.update(|ctx| {
+            ctx.windows()
+                .close_window(window_id, TerminationMode::ForceTerminate)
+        });
+    })
 }
 
 /// Validates that `scroll_position_top_into_view` stabilizes after one scroll:

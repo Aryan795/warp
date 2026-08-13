@@ -10,6 +10,8 @@ use pathfinder_geometry::rect::RectF;
 use pathfinder_geometry::vector::{Vector2F, vec2f};
 pub use single_axis_config::*;
 
+use warp_features::FeatureFlag;
+
 use self::util::adjust_scroll_delta_with_sensitivity_config;
 use super::{
     Axis, ClippedScrollStateHandle, CornerRadius, F32Ext, Fill, Point, Radius, ScrollData,
@@ -784,19 +786,38 @@ impl ScrollableState {
                     return false;
                 }
 
+                // A non-precise (discrete wheel) delta animates toward its target when the
+                // rollout flag is enabled; precise/trackpad input always applies immediately.
+                let animate = !precise && FeatureFlag::SmoothScrolling.is_enabled();
+
                 // Dispatch scroll event on each axis.
-                config.scroll_to(
-                    viewport_size,
-                    delta.along(Axis::Horizontal).into_pixels(),
-                    Axis::Horizontal,
-                    ctx,
-                );
-                config.scroll_to(
-                    viewport_size,
-                    delta.along(Axis::Vertical).into_pixels(),
-                    Axis::Vertical,
-                    ctx,
-                );
+                if animate {
+                    config.scroll_to_animated(
+                        viewport_size,
+                        delta.along(Axis::Horizontal).into_pixels(),
+                        Axis::Horizontal,
+                        ctx,
+                    );
+                    config.scroll_to_animated(
+                        viewport_size,
+                        delta.along(Axis::Vertical).into_pixels(),
+                        Axis::Vertical,
+                        ctx,
+                    );
+                } else {
+                    config.scroll_to(
+                        viewport_size,
+                        delta.along(Axis::Horizontal).into_pixels(),
+                        Axis::Horizontal,
+                        ctx,
+                    );
+                    config.scroll_to(
+                        viewport_size,
+                        delta.along(Axis::Vertical).into_pixels(),
+                        Axis::Vertical,
+                        ctx,
+                    );
+                }
             }
             Self::SingleAxis {
                 axis,
@@ -828,7 +849,18 @@ impl ScrollableState {
                     return false;
                 }
 
-                config.scroll_to(viewport_size, delta.along(*axis).into_pixels(), *axis, ctx);
+                // A non-precise (discrete wheel) delta animates toward its target when the
+                // rollout flag is enabled; precise/trackpad input always applies immediately.
+                if !precise && FeatureFlag::SmoothScrolling.is_enabled() {
+                    config.scroll_to_animated(
+                        viewport_size,
+                        delta.along(*axis).into_pixels(),
+                        *axis,
+                        ctx,
+                    );
+                } else {
+                    config.scroll_to(viewport_size, delta.along(*axis).into_pixels(), *axis, ctx);
+                }
             }
         }
         true

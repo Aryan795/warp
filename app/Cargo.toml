@@ -707,6 +707,7 @@ default = [
     "cloud_runners",
     "cloud_agent_runners",
     "file_backed_execution_profiles",
+    "smooth_scrolling",
 ]
 # Enable this feature to automatically perform heap profiling.  NOTE: This will
 # substantially slow down program execution.
@@ -848,6 +849,7 @@ settings_file = []
 sequential_storage = []
 session_sharing = []
 session_sharing_acls = []
+smooth_scrolling = []
 skip_login = ["warp_server_client/skip_login"]
 # This feature should only be enabled when building a self-contained binary with the bundle script.
 standalone = ["warp_assets/standalone", "warp_core/standalone"]

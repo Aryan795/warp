@@ -960,6 +960,12 @@ pub enum FeatureFlag {
     /// Requires `OzHandoff` to also be enabled; a no-op for local runs and when
     /// `--no-snapshot` is set. Off by default while the coordinator rolls out.
     PeriodicHandoffCheckpoints,
+
+    /// Rollout gate for animating discrete (non-precise) mouse-wheel scroll input with a short
+    /// ease-out tween instead of applying it immediately. Not a user preference; see
+    /// `specs/CSAT-6046/PRODUCT.md` for the full behavior. Phase 1 covers generic WarpUI
+    /// scrollables only.
+    SmoothScrolling,
 }
 
 static FLAG_STATES: [AtomicBool; cardinality::<FeatureFlag>()] =
@@ -1061,7 +1067,10 @@ pub const RELEASE_FLAGS: &[FeatureFlag] = &[
 ];
 
 /// Flags that we want to allow to switch at runtime (assuming RuntimeFeatureFlags is set)
-pub const RUNTIME_FEATURE_FLAGS: &[FeatureFlag] = &[FeatureFlag::LocalClaudeCodexChildHarnesses];
+pub const RUNTIME_FEATURE_FLAGS: &[FeatureFlag] = &[
+    FeatureFlag::LocalClaudeCodexChildHarnesses,
+    FeatureFlag::SmoothScrolling,
+];
 
 impl FeatureFlag {
     pub fn is_enabled(&self) -> bool {

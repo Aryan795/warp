@@ -1,7 +1,10 @@
 use pathfinder_geometry::rect::RectF;
 use pathfinder_geometry::vector::Vector2F;
 
-use super::util::{scroll_clipped_scrollable_handle_with_delta, scroll_delta_for_axis};
+use super::util::{
+    animate_clipped_scrollable_handle_with_delta, scroll_clipped_scrollable_handle_with_delta,
+    scroll_delta_for_axis,
+};
 use super::{NewScrollableElement, ScrollableAxis};
 use crate::elements::new_scrollable::util::child_constraint_for_axis;
 use crate::elements::{
@@ -9,6 +12,7 @@ use crate::elements::{
     ScrollToPositionMode, SelectableElement, Vector2FExt,
 };
 use crate::event::DispatchedEvent;
+use crate::smooth_scroll::SMOOTH_SCROLL_FRAME_INTERVAL;
 use crate::units::{IntoPixels, Pixels};
 use crate::{
     AfterLayoutContext, AppContext, Element, EventContext, LayoutContext, PaintContext,
@@ -284,7 +288,8 @@ impl SingleAxisConfig {
         }
     }
 
-    /// Scroll child on the given axis with delta.
+    /// Scroll child on the given axis with delta. Cancels any in-flight smooth-scroll animation
+    /// and applies the delta immediately.
     pub(super) fn scroll_to(
         &mut self,
         viewport_size: Vector2F,
@@ -302,6 +307,36 @@ impl SingleAxisConfig {
             Self::Clipped { handle, child } => {
                 let child_size = child.size().expect("Size should exist");
                 scroll_clipped_scrollable_handle_with_delta(
+                    handle,
+                    child_size.along(axis).into_pixels(),
+                    viewport_size.along(axis).into_pixels(),
+                    delta,
+                    ctx,
+                )
+            }
+        }
+    }
+
+    /// Scroll child on the given axis with an eligible discrete (non-precise) wheel delta,
+    /// composing with or reversing any smooth-scroll animation already in flight rather than
+    /// applying immediately. A manually-managed child does not support smooth scrolling in
+    /// this phase, so it falls back to the immediate path.
+    pub(super) fn scroll_to_animated(
+        &mut self,
+        viewport_size: Vector2F,
+        delta: Pixels,
+        axis: Axis,
+        ctx: &mut EventContext,
+    ) {
+        if delta.as_f32().abs() < f32::EPSILON {
+            return;
+        }
+
+        match self {
+            Self::Manual { child, .. } => child.scroll(delta, axis, ctx),
+            Self::Clipped { handle, child } => {
+                let child_size = child.size().expect("Size should exist");
+                animate_clipped_scrollable_handle_with_delta(
                     handle,
                     child_size.along(axis).into_pixels(),
                     viewport_size.along(axis).into_pixels(),
@@ -369,6 +404,12 @@ fn paint_clipped_internal(
     ctx.position_cache.start();
     child.paint(child_origin, ctx, app);
     ctx.position_cache.end();
+
+    // Keep repainting while a smooth-scroll animation is easing in, so the displayed position
+    // keeps advancing without further input.
+    if scroll_state.is_animating() {
+        ctx.repaint_after(SMOOTH_SCROLL_FRAME_INTERVAL);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
