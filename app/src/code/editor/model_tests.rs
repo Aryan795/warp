@@ -1084,6 +1084,137 @@ fn test_hidden_lines_window_is_symmetric_around_changes() {
     })
 }
 
+/// Regression test for APP-5353 (memory retention from diff-triggered
+/// full-buffer layout rebuilds): recalculating hidden lines to the exact same
+/// result as before must not trigger another layout rebuild. Before this fix,
+/// `handle_diff_model_event` unconditionally issued a full-buffer
+/// `rebuild_layout` whenever hidden lines were recalculated, even when
+/// nothing about them had actually changed — repeatedly re-materializing
+/// styled content for the whole buffer (including its text) on every diff
+/// update.
+#[test]
+fn test_unchanged_hidden_lines_do_not_trigger_relayout() {
+    App::test((), |mut app| async move {
+        use futures::StreamExt;
+
+        initialize_deps(&mut app);
+        let line = |i: usize| format!("l{i:02}");
+        let base = (0..20).map(line).join("\n");
+        let current = (0..20)
+            .map(|i| if i == 8 { "XXX".to_string() } else { line(i) })
+            .join("\n");
+
+        let editor = mock_model_with_diff(&mut app, &base, &current, ContentVersion::new());
+        layout_model(&mut app, &editor).await;
+
+        let (diff_tx, mut diff_rx) = futures::channel::mpsc::unbounded();
+        let (layout_tx, mut layout_rx) = futures::channel::mpsc::unbounded();
+        app.update(|ctx| {
+            ctx.subscribe_to_model(&editor, move |_, event, _| {
+                if let CodeEditorModelEvent::DiffUpdated = event {
+                    let _ = diff_tx.unbounded_send(());
+                }
+                if let CodeEditorModelEvent::LayoutInvalidated = event {
+                    let _ = layout_tx.unbounded_send(());
+                }
+            });
+        });
+
+        // First activation: hidden ranges go from "none" to a real set, so a
+        // relayout is expected.
+        editor.update(&mut app, |editor, ctx| {
+            editor.hide_lines_outside_of_active_diff(3, ctx);
+            let new = editor.content.as_ref(ctx).text();
+            editor.diff().update(ctx, |diff, ctx| {
+                diff.compute_diff(new, BufferVersion::new(), ctx);
+            });
+        });
+        diff_rx.next().await.expect("DiffUpdated should be emitted");
+        layout_model(&mut app, &editor).await;
+        // The initial activation can relay out several disjoint ranges (one
+        // per newly-hidden run), so drain every event it produced before
+        // checking that the next (no-op) recalculation produces none.
+        let mut relayouts_on_activation = 0;
+        while layout_rx.try_next().is_ok() {
+            relayouts_on_activation += 1;
+        }
+        assert!(
+            relayouts_on_activation > 0,
+            "first activation should relayout"
+        );
+
+        // Recompute against the exact same content: the resulting hidden
+        // ranges are identical, so no relayout should be triggered.
+        editor.update(&mut app, |editor, ctx| {
+            editor.hide_lines_outside_of_active_diff(3, ctx);
+            let new = editor.content.as_ref(ctx).text();
+            editor.diff().update(ctx, |diff, ctx| {
+                diff.compute_diff(new, BufferVersion::new(), ctx);
+            });
+        });
+        diff_rx.next().await.expect("DiffUpdated should be emitted");
+        layout_model(&mut app, &editor).await;
+        assert!(
+            layout_rx.try_next().is_err(),
+            "recomputing identical hidden ranges should not trigger another relayout"
+        );
+    })
+}
+
+/// Pure-logic coverage for the range-diffing helper that
+/// `calculate_hidden_lines` uses to scope diff-triggered layout rebuilds
+/// (APP-5353): only the characters whose hidden/visible membership changed
+/// should be returned, not the full extent of either side.
+#[test]
+fn hidden_ranges_diff_is_empty_for_identical_sets() {
+    let mut ranges = RangeSet::new();
+    ranges.insert(CharOffset::from(1)..CharOffset::from(5));
+    ranges.insert(CharOffset::from(10)..CharOffset::from(20));
+
+    assert!(hidden_ranges_diff(&ranges, &ranges).is_empty());
+}
+
+#[test]
+fn hidden_ranges_diff_returns_full_ranges_for_disjoint_sets() {
+    let mut a = RangeSet::new();
+    a.insert(CharOffset::from(1)..CharOffset::from(5));
+
+    let mut b = RangeSet::new();
+    b.insert(CharOffset::from(10)..CharOffset::from(15));
+
+    assert_eq!(
+        hidden_ranges_diff(&a, &b).iter().cloned().collect_vec(),
+        vec![
+            CharOffset::from(1)..CharOffset::from(5),
+            CharOffset::from(10)..CharOffset::from(15)
+        ]
+    );
+}
+
+#[test]
+fn hidden_ranges_diff_returns_only_the_shifted_boundary() {
+    // A hunk moving so the hidden region shrinks by one edge and grows by
+    // another: only those two small boundaries changed, not the large shared
+    // middle both sets have in common.
+    let mut before = RangeSet::new();
+    before.insert(CharOffset::from(1)..CharOffset::from(100));
+
+    let mut after = RangeSet::new();
+    after.insert(CharOffset::from(1)..CharOffset::from(90));
+    after.insert(CharOffset::from(95)..CharOffset::from(105));
+
+    assert_eq!(
+        hidden_ranges_diff(&before, &after)
+            .iter()
+            .cloned()
+            .collect_vec(),
+        vec![
+            CharOffset::from(90)..CharOffset::from(95),
+            CharOffset::from(100)..CharOffset::from(105)
+        ]
+    );
+}
+
 /// The TUI diff pipeline: `new_tui` + seed + `apply_diffs` +
 /// `hide_lines_outside_of_active_diff` + `expand_diffs` must land removed-line
 /// ghosts in `CharCellState` and hidden line ranges in the render state, even

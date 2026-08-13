@@ -272,14 +272,15 @@ impl DelayRendering {
 
         ctx.emit(CodeEditorModelEvent::DelayedRenderingFlushed);
     }
+}
 
-    /// Consume the delay rendering state without flushing edits to the render state.
-    /// Use when a full layout rebuild will follow that supersedes the pending edits.
-    /// Still emits `DelayedRenderingFlushed` so downstream listeners (e.g. CodeReviewView)
-    /// are notified.
-    fn skip(self, ctx: &mut ModelContext<CodeEditorModel>) {
-        ctx.emit(CodeEditorModelEvent::DelayedRenderingFlushed);
-    }
+/// The character ranges present in exactly one of `a` or `b` — the regions whose
+/// hidden/visible membership changed between two hidden-range snapshots.
+fn hidden_ranges_diff(a: &RangeSet<CharOffset>, b: &RangeSet<CharOffset>) -> RangeSet<CharOffset> {
+    let mut changed = RangeSet::new();
+    changed.extend(a.iter().flat_map(|range| b.gaps(range)));
+    changed.extend(b.iter().flat_map(|range| a.gaps(range)));
+    changed
 }
 
 pub struct CodeEditorModel {
@@ -1399,6 +1400,39 @@ impl CodeEditorModel {
         }
     }
 
+    /// Like [`Self::rebuild_layout_and_refresh_diff`], but only relays out the given character
+    /// ranges instead of the entire buffer. Range invalidation only recomputes styling — it never
+    /// changes the buffer's character length — so applying several of them for the same event is
+    /// safe and doesn't shift the others.
+    ///
+    /// Used for the diff-triggered hidden-line recalculation path, where hidden ranges typically
+    /// cover most of a large file. A full-buffer rebuild there would re-materialize styled content
+    /// (including the underlying text) for the whole buffer on every diff update, which can retain
+    /// many gigabytes when the editor element isn't actively laid out to drain the pending edit
+    /// (APP-5353).
+    fn rebuild_layout_for_ranges_and_refresh_diff(
+        &self,
+        ranges: RangeSet<CharOffset>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let content = self.content.as_ref(ctx);
+        let buffer_version = content.buffer_version();
+        let deltas: Vec<EditDelta> = ranges
+            .iter()
+            .map(|range| content.invalidate_layout_for_range(range.clone()))
+            .collect();
+        self.render_state.update(ctx, move |render_state, _ctx| {
+            let scroll_position = render_state.snapshot_scroll_position();
+            for delta in deltas {
+                render_state.add_pending_edit(delta, buffer_version);
+            }
+            render_state.scroll_to(scroll_position);
+        });
+        if self.diff_nav_is_active() {
+            self.refresh_diff_state(ctx);
+        }
+    }
+
     fn syntax_highlighting_color_map(ctx: &mut ModelContext<Self>) -> ColorMap {
         let appearance = Appearance::as_ref(ctx);
         let terminal_color = appearance.theme().terminal_colors().normal;
@@ -1460,37 +1494,45 @@ impl CodeEditorModel {
 
     /// Re-calculate the hidden line ranges given the active diff state. No-op
     /// unless [`Self::hide_lines_outside_of_active_diff`] enabled hiding.
-    fn calculate_hidden_lines(&mut self, ctx: &mut ModelContext<Self>) {
-        if let Some(context_line) = self.hide_lines_outside_of_active_diff {
-            let line_count = self.line_count(ctx);
+    ///
+    /// Returns the character ranges whose hidden/visible state changed as a result, so
+    /// callers can relayout just those ranges instead of the whole buffer. Empty when
+    /// hiding is disabled, or when recalculating produced the same hidden ranges as before.
+    fn calculate_hidden_lines(&mut self, ctx: &mut ModelContext<Self>) -> RangeSet<CharOffset> {
+        let Some(context_line) = self.hide_lines_outside_of_active_diff else {
+            return RangeSet::new();
+        };
+        let line_count = self.line_count(ctx);
 
-            // Calculate the visible line ranges (with context)
-            let mut visible_ranges: RangeSet<warp_editor::content::text::LineCount> =
-                RangeSet::new();
+        // Calculate the visible line ranges (with context)
+        let mut visible_ranges: RangeSet<warp_editor::content::text::LineCount> = RangeSet::new();
 
-            // Add ranges for diffs. `modified_lines` yields 0-based line
-            // ranges, matching the hidden-range convention.
-            for range in self.diff().as_ref(ctx).modified_lines() {
-                let context_start = range.start.saturating_sub(context_line);
-                let context_end = range.end + context_line;
+        // Add ranges for diffs. `modified_lines` yields 0-based line
+        // ranges, matching the hidden-range convention.
+        for range in self.diff().as_ref(ctx).modified_lines() {
+            let context_start = range.start.saturating_sub(context_line);
+            let context_end = range.end + context_line;
 
-                if context_start < context_end {
-                    visible_ranges.insert(context_start.into()..context_end.into());
-                }
+            if context_start < context_end {
+                visible_ranges.insert(context_start.into()..context_end.into());
             }
-
-            // Calculate hidden ranges as the complement of visible ranges
-            let all_lines: Range<warp_editor::content::text::LineCount> =
-                warp_editor::content::text::LineCount::from(0)
-                    ..warp_editor::content::text::LineCount::from(line_count);
-
-            // Find gaps in the visible ranges
-            let hidden_ranges = visible_ranges
-                .gaps(&all_lines)
-                .collect::<RangeSet<warp_editor::content::text::LineCount>>();
-
-            self.set_hidden_lines(hidden_ranges, ctx);
         }
+
+        // Calculate hidden ranges as the complement of visible ranges
+        let all_lines: Range<warp_editor::content::text::LineCount> =
+            warp_editor::content::text::LineCount::from(0)
+                ..warp_editor::content::text::LineCount::from(line_count);
+
+        // Find gaps in the visible ranges
+        let hidden_ranges = visible_ranges
+            .gaps(&all_lines)
+            .collect::<RangeSet<warp_editor::content::text::LineCount>>();
+
+        let previous_hidden_offsets = self.hidden_ranges(ctx);
+        self.set_hidden_lines(hidden_ranges, ctx);
+        let new_hidden_offsets = self.hidden_ranges(ctx);
+
+        hidden_ranges_diff(&previous_hidden_offsets, &new_hidden_offsets)
     }
 
     fn handle_diff_model_event(&mut self, event: &DiffModelEvent, ctx: &mut ModelContext<Self>) {
@@ -1499,14 +1541,17 @@ impl CodeEditorModel {
                 // If we are hiding lines based on active diffs, there are 3 steps here once the diff is computed:
                 // 1) If we should, recalculate hidden lines based on the updated diff state.
                 // 2) Flush any delayed rendering based on diff update trigger.
-                // 3) If hidden lines are recalculated, rebuild the current layout.
+                // 3) If the hidden ranges changed, rebuild layout for just the affected ranges.
                 let should_recalculate_hidden_lines = self
                     .recalculate_hidden_lines_after_diff
                     .is_some_and(|pending_version| *version >= pending_version);
-                if should_recalculate_hidden_lines {
-                    self.calculate_hidden_lines(ctx);
+                let changed_hidden_ranges = if should_recalculate_hidden_lines {
+                    let changed = self.calculate_hidden_lines(ctx);
                     self.recalculate_hidden_lines_after_diff = None;
-                }
+                    changed
+                } else {
+                    RangeSet::new()
+                };
 
                 // Do not refresh diff state if there is an active delayed rendering. We should wait until the delayed rendering
                 // is flushed so we could insert temporary blocks based on the accurate line ranges.
@@ -1514,8 +1559,7 @@ impl CodeEditorModel {
                     self.refresh_diff_state(ctx);
                 }
 
-                let will_rebuild_layout = should_recalculate_hidden_lines
-                    && self.hide_lines_outside_of_active_diff.is_some();
+                let will_rebuild_layout = !changed_hidden_ranges.is_empty();
 
                 if self
                     .delay_rendering
@@ -1524,21 +1568,15 @@ impl CodeEditorModel {
                     .unwrap_or(false)
                 {
                     let delay_rendering = self.delay_rendering.take().expect("Checked above");
-                    if will_rebuild_layout {
-                        // Full rebuild will supersede pending edits — skip the expensive render state update.
-                        delay_rendering.skip(ctx);
-                    } else {
-                        delay_rendering.flush_render(self, ctx);
-                    }
+                    delay_rendering.flush_render(self, ctx);
                 }
 
-                // This could be optimized to not rebuild the entire layout and only the part of the hidden ranges that are changed.
-                // It is challenging tho because we will need to somehow expand and calculate style blocks based on past buffer versions.
-                //
-                // Realistically, the impact of rebuilding layout should be minimal given 1) it is only triggered on the first edit within
-                // the hidden range 2) we are not re-rendering hidden sections.
+                // Only relay out the character ranges whose hidden/visible state actually changed,
+                // instead of invalidating the entire buffer. Hidden ranges typically cover most of a
+                // large file, so a full rebuild here would re-materialize styled content (including
+                // the underlying text) for the whole buffer on every diff update (APP-5353).
                 if will_rebuild_layout {
-                    self.rebuild_layout_and_refresh_diff(ctx);
+                    self.rebuild_layout_for_ranges_and_refresh_diff(changed_hidden_ranges, ctx);
                 }
 
                 ctx.emit(CodeEditorModelEvent::DiffUpdated);
