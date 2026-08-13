@@ -740,38 +740,51 @@ fn test_full_text_drive_data_source_rebuilds_when_the_windows_team_changes() {
 }
 
 /// Autonomous execution modes (the SDK/agent driver, and the remote server daemon) have no
-/// user to present the command palette to, so the Warp Drive data source falls back to a
-/// no-op search backend regardless of the tantivy feature flag: it always reports zero
-/// results instead of paying to build a full-text search index that nothing will ever query.
+/// user to present the command palette to, so the Warp Drive data source must select the
+/// no-op search backend regardless of the tantivy feature flag, rather than paying to build a
+/// full-text search index that nothing will ever query.
+///
+/// This asserts the backend selection directly (via `is_no_op_searcher`), rather than
+/// asserting an empty search result: the full-text backend indexes asynchronously, so an
+/// empty-result assertion taken immediately after construction would also pass against the
+/// *old*, pre-fix behavior (see `assert_workflow_labels_eventually`, which exists precisely
+/// because results are not immediately available after indexing).
 #[test]
-fn test_drive_data_source_returns_no_results_in_autonomous_execution_mode() {
+fn test_drive_data_source_selects_no_op_searcher_in_autonomous_execution_mode() {
     let _flag = FeatureFlag::UseTantivySearch.override_enabled(true);
 
     App::test((), |mut app| async move {
         initialize_app_with_execution_mode(&mut app, vec![], ExecutionMode::Sdk);
-        CloudModel::handle(&app).update(&mut app, |model, ctx| {
-            model.upsert_from_server_workflow(
-                mock_named_server_workflow(
-                    1.into(),
-                    Owner::mock_current_user(),
-                    "autonomous workflow",
-                    "echo autonomous",
-                ),
-                ctx,
-            );
-        });
 
-        let mixer = app.add_model(|_| CommandPaletteMixer::new());
         let data_source_handle =
             app.add_model(|ctx| warp_drive::DataSource::new(WindowId::new(), ctx));
-        mixer.update(&mut app, |mixer, _| {
-            mixer.add_sync_source(data_source_handle, [QueryFilter::Workflows]);
-        });
 
-        assert_eq!(
-            workflow_labels(&mixer, "autonomous", &mut app),
-            Vec::<String>::new()
-        );
+        app.read(|app| {
+            assert!(
+                data_source_handle.as_ref(app).is_no_op_searcher(),
+                "autonomous execution mode must select the no-op search backend, even when \
+                 the tantivy feature flag is enabled"
+            );
+        });
+    })
+}
+
+/// Sanity check for the assertion above: with the same tantivy flag enabled, an interactive
+/// execution mode must *not* select the no-op backend, so the check above is actually
+/// exercising the autonomous-mode branch rather than a backend that is unconditionally no-op.
+#[test]
+fn test_drive_data_source_does_not_select_no_op_searcher_in_interactive_execution_mode() {
+    let _flag = FeatureFlag::UseTantivySearch.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app, vec![]);
+
+        let data_source_handle =
+            app.add_model(|ctx| warp_drive::DataSource::new(WindowId::new(), ctx));
+
+        app.read(|app| {
+            assert!(!data_source_handle.as_ref(app).is_no_op_searcher());
+        });
     })
 }
 

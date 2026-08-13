@@ -351,6 +351,15 @@ impl crate::search::mixer::SyncDataSource for DataSource {
 }
 
 impl DataSource {
+    /// Returns whether this data source is using the no-op search backend (i.e. the
+    /// autonomous-execution-mode branch of [`Self::new`] was taken). Used by tests to prove
+    /// that construction actually selected the no-op backend, rather than merely observing an
+    /// empty result that could also occur before an async full-text index finishes building.
+    #[cfg(test)]
+    pub(crate) fn is_no_op_searcher(&self) -> bool {
+        self.searcher.is_no_op()
+    }
+
     /// If we are using the drive filter, or there are no filters,
     /// then we want to include all searchable drive objects
     fn include_all_drive_objects_in_result(query: &Query) -> bool {
@@ -445,6 +454,12 @@ trait WarpDriveSearcher {
         query: &str,
         app: &AppContext,
     ) -> anyhow::Result<Vec<NotebookSearchItem>>;
+
+    /// Returns whether this is [`NoOpWarpDriveSearcher`]. See [`DataSource::is_no_op_searcher`].
+    #[cfg(test)]
+    fn is_no_op(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Default)]
@@ -737,6 +752,11 @@ impl WarpDriveSearcher for NoOpWarpDriveSearcher {
         _app: &AppContext,
     ) -> anyhow::Result<Vec<NotebookSearchItem>> {
         Ok(Vec::new())
+    }
+
+    #[cfg(test)]
+    fn is_no_op(&self) -> bool {
+        true
     }
 }
 
