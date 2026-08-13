@@ -263,13 +263,16 @@ impl CodeEditorFind {
         });
     }
 
-    /// Returns true if the find input currently has keyboard focus.
+    /// Returns true if either the find input or the replace input currently has keyboard focus.
     ///
-    /// Used to decide whether vim keystrokes should be routed to the find input or the
-    /// underlying buffer, since the find input may remain unfocused-but-open (e.g. after
-    /// vim Enter) without being disabled.
-    pub fn is_find_input_focused(&self, app: &AppContext) -> bool {
-        self.find_editor.is_focused(app)
+    /// Used to decide whether vim keystrokes should be routed to one of the find bar's text
+    /// inputs or the underlying buffer, since the find bar can be open with neither input
+    /// focused (e.g. after vim Enter, or via the `*`/`#` search-word-at-cursor flow) without
+    /// either input being disabled. Both inputs must be checked: e.g. when Replace is expanded
+    /// and the user tabs/clicks into the replace field, the find input becomes unfocused while
+    /// the find bar still owns keyboard input.
+    pub fn is_find_bar_text_input_focused(&self, app: &AppContext) -> bool {
+        self.find_editor.is_focused(app) || self.replace_editor.is_focused(app)
     }
 
     /// Test-only helper mirroring what happens when the user presses Enter in the find input,
@@ -284,6 +287,12 @@ impl CodeEditorFind {
     #[cfg(test)]
     pub fn find_input_can_be_focused_for_test(&self, app: &AppContext) -> bool {
         self.find_editor.as_ref(app).can_select(app)
+    }
+
+    /// Test-only helper to focus the replace input directly.
+    #[cfg(test)]
+    pub fn focus_replace_input_for_test(&mut self, ctx: &mut ViewContext<Self>) {
+        ctx.focus(&self.replace_editor);
     }
 
     fn handle_find_editor_event(&mut self, event: &EditorEvent, ctx: &mut ViewContext<Self>) {
