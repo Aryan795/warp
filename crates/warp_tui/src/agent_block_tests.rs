@@ -128,6 +128,79 @@ fn cancelled_run_agents_call_leaves_the_placeholder_for_a_cancelled_state() {
     });
 }
 
+/// End-to-end repro of the reported sequence: the card is created while the
+/// `run_agents` call is still streaming (no status of its own yet), and the
+/// exchange resolves cancelled only afterwards. This exercises the
+/// "existing view" branch of `sync_action_views` (via a real
+/// `on_updated_output` re-invocation), unlike
+/// `cancelled_run_agents_call_leaves_the_placeholder_for_a_cancelled_state`
+/// above, which only exercises the newly-created-view branch by starting
+/// from an already-cancelled status.
+#[test]
+fn cancelled_after_streaming_flips_the_existing_card_via_the_nudge() {
+    App::test((), |mut app| async move {
+        let action = run_agents_action("run-agents-1");
+        let model = MutableFakeAgentBlockModel::new(
+            vec![query_input("start some agents")],
+            AIBlockOutputStatus::PartiallyReceived {
+                output: Shared::new(AIAgentOutput {
+                    messages: vec![action_message("action-1", action.clone())],
+                    ..Default::default()
+                }),
+            },
+        );
+        let block = test_agent_block_with_model(&mut app, model.clone(), false);
+
+        let lines = render_block_lines_with_child_views(&mut app, &block, 80, 12);
+        assert!(
+            lines.iter().any(|line| line.contains("Configuring agents")),
+            "expected the streaming placeholder before cancellation: {lines:?}"
+        );
+
+        model.transition(
+            cancelled_output_messages(vec![action_message("action-1", action)]),
+            &block,
+            &mut app,
+        );
+
+        let lines = render_block_lines_with_child_views(&mut app, &block, 80, 12);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Spawn agents cancelled")),
+            "expected the cancelled state once the exchange resolves after streaming: {lines:?}"
+        );
+    });
+}
+
+/// End-to-end repro of the restored case: a conversation the user quit while
+/// the card was still awaiting approval restores with a `Complete` output
+/// (the response itself finished) and no action status, since the action
+/// never reached the queue. The card must render cancelled instead of the
+/// streaming placeholder forever.
+#[test]
+fn restored_run_agents_call_with_no_status_renders_cancelled() {
+    App::test((), |mut app| async move {
+        let action = run_agents_action("run-agents-1");
+        let block = test_agent_block_with_model(
+            &mut app,
+            Rc::new(FakeAgentBlockModel {
+                inputs: vec![query_input("start some agents")],
+                status: complete_output_messages(vec![action_message("action-1", action)]),
+            }),
+            true, // is_restored
+        );
+
+        let lines = render_block_lines_with_child_views(&mut app, &block, 80, 12);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Spawn agents cancelled")),
+            "expected the cancelled state for a restored call with no status: {lines:?}"
+        );
+    });
+}
+
 #[test]
 fn restored_out_of_credits_exchange_does_not_consume_first_credit_gate() {
     let presentation = FailedOutputPresentation::OutOfCredits {
@@ -2595,11 +2668,13 @@ fn run_agents_action(id: &str) -> AIAgentAction {
 }
 
 /// Builds an agent block with the full session-view singleton set (needed by
-/// the orchestration card's harness/model catalog subscriptions) and a real
-/// action model, so a `run_agents` tool call renders its interactive card.
-fn test_agent_block_with_run_agents_singletons(
+/// the orchestration card's harness/model catalog subscriptions), a real
+/// action model, and the given block model, so a `run_agents` tool call
+/// renders its interactive card.
+fn test_agent_block_with_model(
     app: &mut App,
-    model: FakeAgentBlockModel,
+    model: Rc<dyn AIBlockModel<View = TuiAIBlock>>,
+    is_restored: bool,
 ) -> ViewHandle<TuiAIBlock> {
     register_tui_session_view_test_singletons(app);
     let (action_model, model_events) = add_test_action_model_and_events(app);
@@ -2615,15 +2690,106 @@ fn test_agent_block_with_run_agents_singletons(
         ctx.add_typed_action_tui_view(window_id, move |ctx| {
             TuiAIBlock::new(
                 (AIConversationId::new(), AIAgentExchangeId::new()),
-                Rc::new(model),
+                model,
                 action_model,
                 &model_events,
                 terminal_model,
-                false,
+                is_restored,
                 ctx,
             )
         })
     })
+}
+
+/// Builds an agent block with the full session-view singleton set (needed by
+/// the orchestration card's harness/model catalog subscriptions) and a real
+/// action model, so a `run_agents` tool call renders its interactive card.
+fn test_agent_block_with_run_agents_singletons(
+    app: &mut App,
+    model: FakeAgentBlockModel,
+) -> ViewHandle<TuiAIBlock> {
+    test_agent_block_with_model(app, Rc::new(model), false)
+}
+
+/// A block model whose status can be mutated after construction and whose
+/// `on_updated_output` callback is retained and re-invoked by `transition`,
+/// mirroring how the real model notifies the block after a status change.
+/// Unlike `FakeAgentBlockModel` (whose `on_updated_output` is a no-op), this
+/// exercises the real `sync_action_views` "existing view" re-sync path, so a
+/// test built on it actually fails if that path's re-render nudge is removed.
+struct MutableFakeAgentBlockModel {
+    inputs: Vec<AIAgentInput>,
+    status: RefCell<AIBlockOutputStatus>,
+    callback: RefCell<Option<OutputStatusUpdateCallback<TuiAIBlock>>>,
+}
+
+impl MutableFakeAgentBlockModel {
+    fn new(inputs: Vec<AIAgentInput>, status: AIBlockOutputStatus) -> Rc<Self> {
+        Rc::new(Self {
+            inputs,
+            status: RefCell::new(status),
+            callback: RefCell::new(None),
+        })
+    }
+
+    /// Updates the status and re-invokes the retained `on_updated_output`
+    /// callback against `view`, mirroring how the real model notifies the
+    /// block of a status transition.
+    fn transition(
+        &self,
+        status: AIBlockOutputStatus,
+        view: &ViewHandle<TuiAIBlock>,
+        app: &mut App,
+    ) {
+        *self.status.borrow_mut() = status;
+        let mut callback = self
+            .callback
+            .borrow_mut()
+            .take()
+            .expect("on_updated_output callback registered at construction");
+        view.update(app, |view, ctx| callback(view, ctx));
+        *self.callback.borrow_mut() = Some(callback);
+    }
+}
+
+impl AIBlockModel for MutableFakeAgentBlockModel {
+    type View = TuiAIBlock;
+
+    fn status(&self, _app: &AppContext) -> AIBlockOutputStatus {
+        self.status.borrow().clone()
+    }
+
+    fn server_output_id(&self, _app: &AppContext) -> Option<ServerOutputId> {
+        None
+    }
+
+    fn model_id(&self, _app: &AppContext) -> Option<LLMId> {
+        None
+    }
+
+    fn base_model<'a>(&'a self, _app: &'a AppContext) -> Option<&'a LLMId> {
+        None
+    }
+
+    fn inputs_to_render<'a>(&'a self, _app: &'a AppContext) -> &'a [AIAgentInput] {
+        &self.inputs
+    }
+
+    fn conversation_id(&self, _app: &AppContext) -> Option<AIConversationId> {
+        None
+    }
+
+    fn on_updated_output(
+        &self,
+        callback: OutputStatusUpdateCallback<Self::View>,
+        _ctx: &mut ViewContext<Self::View>,
+    ) {
+        *self.callback.borrow_mut() = Some(callback);
+    }
+
+    fn request_type(&self, _app: &AppContext) -> AIRequestType {
+        AIRequestType::Active
+    }
 }
 /// Builds a text output message from plain-text sections.
 fn text_message(id: &str, sections: Vec<AIAgentTextSection>) -> AIAgentOutputMessage {

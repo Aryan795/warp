@@ -455,6 +455,48 @@ fn rendered_block_lines(block: &ViewHandle<TuiOrchestrationBlock>, app: &App) ->
     })
 }
 
+/// Constructs a restored block (dispatch state lost from history) with the
+/// local fake controller.
+fn test_restored_block(
+    app: &mut App,
+    request: &RunAgentsRequest,
+) -> (ViewHandle<TuiOrchestrationBlock>, Rc<TestController>) {
+    app.add_singleton_model(|_| Appearance::mock());
+    app.update(warp_core::telemetry::testing::MockTelemetryContextProvider::register);
+    let action = AIAgentAction {
+        id: AIAgentActionId::from("run-agents-1".to_string()),
+        task_id: TaskId::new("task-1".to_string()),
+        action: AIAgentActionType::RunAgents(request.clone()),
+        requires_result: true,
+    };
+    let controller = Rc::new(TestController::default());
+    let controller_for_view: Rc<dyn OrchestrationBlockController> = controller.clone();
+    let request = request.clone();
+    let view = app.update(|ctx| {
+        let (window_id, _) = ctx.add_tui_window(
+            AddWindowOptions {
+                window_style: WindowStyle::NotStealFocus,
+                ..Default::default()
+            },
+            |_| TestHostView,
+        );
+        ctx.add_typed_action_tui_view(window_id, move |ctx| {
+            TuiOrchestrationBlock::from_parts(
+                AIConversationId::new(),
+                action,
+                &request,
+                None,
+                controller_for_view,
+                Some("auto".to_string()),
+                true, // is_restored
+                Vec::new(),
+                ctx,
+            )
+        })
+    });
+    (view, controller)
+}
+
 #[test]
 fn acceptance_card_discloses_nested_children_only_with_multi_level_enabled() {
     let disclosure = "These agents may start their own child agents.";
@@ -909,6 +951,52 @@ mod orphaned_by_finished_output_tests {
                     .iter()
                     .any(|line| line.contains("Spawn agents cancelled")),
                 "a call with a real status must not be treated as orphaned: {lines:?}"
+            );
+        });
+    }
+}
+
+mod restored_call_tests {
+    use super::*;
+
+    /// Restored-from-history: dispatch state is lost, so a restored call
+    /// with no status of its own must render cancelled instead of the
+    /// streaming placeholder forever. Mirrors the GUI `RunAgentsCardView`'s
+    /// `is_restored()` branch.
+    #[test]
+    fn restored_call_with_no_status_renders_cancelled() {
+        App::test((), |mut app| async move {
+            let (block, controller) =
+                test_restored_block(&mut app, &request("oz", RunAgentsExecutionMode::Local));
+            controller.set_action_status(None);
+
+            let lines = rendered_block_lines(&block, &app);
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.contains("Spawn agents cancelled")),
+                "a restored call with no status must render cancelled: {lines:?}"
+            );
+        });
+    }
+
+    /// A restored call that has a real status (e.g. it did produce a
+    /// result before restoration) must still render it, not the
+    /// restored-cancelled fallback — mirrors the GUI checking `is_restored()`
+    /// only after the `Finished` branch, so a real terminal result wins.
+    #[test]
+    fn restored_call_with_a_real_status_is_not_overridden() {
+        App::test((), |mut app| async move {
+            // The default `TestController` status is `Blocked`.
+            let (block, _controller) =
+                test_restored_block(&mut app, &request("oz", RunAgentsExecutionMode::Local));
+
+            let lines = rendered_block_lines(&block, &app);
+            assert!(
+                !lines
+                    .iter()
+                    .any(|line| line.contains("Spawn agents cancelled")),
+                "a restored call with a real status must not render as cancelled: {lines:?}"
             );
         });
     }
