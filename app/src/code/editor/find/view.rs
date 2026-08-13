@@ -269,12 +269,17 @@ impl CodeEditorFind {
     }
 
     /// Enable or disable the find input editor's interactivity.
+    ///
+    /// When disabling, the input is set to [`InteractionState::Selectable`] rather than
+    /// [`InteractionState::Disabled`] so that it remains clickable: a click still dispatches
+    /// `EditorAction::Focus` (see [`Self::handle_find_editor_event`]'s handling of
+    /// [`EditorEvent::Focused`]), which restores [`InteractionState::Editable`].
     pub fn set_find_input_editable(&self, ctx: &mut ViewContext<Self>, is_editable: bool) {
         self.find_editor.update(ctx, |editor, ctx| {
             let state = if is_editable {
                 InteractionState::Editable
             } else {
-                InteractionState::Disabled
+                InteractionState::Selectable
             };
             editor.set_interaction_state(state, ctx);
         });
@@ -300,10 +305,12 @@ impl CodeEditorFind {
                 if !vim_enabled {
                     self.focus_next_match(FindDirection::Down, ctx);
                 } else {
-                    // Vim: treat "enter" as ending the search query entry and shift focus back to the editor
+                    // Vim: treat "enter" as ending the search query entry and shift focus back to the editor.
+                    // Use `Selectable` (not `Disabled`) so the field stays clickable; see
+                    // `set_find_input_editable`.
                     self.find_editor.update(ctx, |editor, ctx| {
                         editor.clear_selections(ctx);
-                        editor.set_interaction_state(InteractionState::Disabled, ctx);
+                        editor.set_interaction_state(InteractionState::Selectable, ctx);
                     });
                     ctx.emit(Event::VimEnterAndFocusEditor);
                 }
@@ -322,6 +329,15 @@ impl CodeEditorFind {
                 // If replace editor is currently open and the user presses 'tab', focus on the find editor
                 if self.is_replace_open {
                     ctx.focus(&self.replace_editor);
+                }
+            }
+            EditorEvent::Focused => {
+                // The find input was clicked while `Selectable` (but not `Editable`), e.g. after
+                // vim Enter committed the query or a vim word search populated it. A click still
+                // reaches us here because `Selectable` allows `EditorAction::Focus` to dispatch
+                // (unlike `Disabled`). Restore editability so the user can keep typing.
+                if !self.is_find_input_editable(ctx) {
+                    self.set_find_input_editable(ctx, true);
                 }
             }
             _ => {}
@@ -1043,5 +1059,14 @@ impl View for CodeEditorFind {
         )
         .top_right()
         .finish()
+    }
+}
+
+#[cfg(test)]
+impl CodeEditorFind {
+    /// Returns a handle to the find query editor, for tests that need to inspect or drive its
+    /// interaction state (e.g. simulating a click via `EditorAction::Focus`).
+    pub fn find_editor_for_test(&self) -> ViewHandle<EditorView> {
+        self.find_editor.clone()
     }
 }
