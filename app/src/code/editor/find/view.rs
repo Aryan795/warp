@@ -53,6 +53,9 @@ pub const CASE_SENSITIVE_TOOLTIP: &str = "Case sensitive search";
 pub const PRESERVE_CASE_TOOLTIP: &str = "Preserve case";
 pub const FIND_PLACEHOLDER_TEXT: &str = "Find";
 pub const REPLACE_PLACEHOLDER_TEXT: &str = "Replace";
+/// `SavePosition` id for the find query field, so tests can look up its rendered screen position
+/// and drive a real mouse click through it (see `EditorElement::mouse_down`).
+pub const FIND_QUERY_FIELD_POSITION_ID: &str = "find_editor_query_field";
 
 #[derive(Default)]
 struct ButtonMouseStates {
@@ -351,18 +354,11 @@ impl CodeEditorFind {
         });
     }
 
-    /// Test-only helper that simulates a mouse click on the find query field. Mirrors
-    /// `EditorElement::mouse_down`, which gates focusing the editor on `can_select`. Returns
-    /// whether the click was accepted (i.e. whether the field could be focused).
+    /// Returns the current text of the find query field. Test-only: production code reads the
+    /// query via `Event::Update`/`Event::Edited` instead of polling this directly.
     #[cfg(test)]
-    pub(crate) fn simulate_find_editor_click(&self, ctx: &mut ViewContext<Self>) -> bool {
-        if !self.find_editor.as_ref(ctx).can_select(ctx) {
-            return false;
-        }
-        self.find_editor.update(ctx, |editor, ctx| {
-            editor.handle_action(&crate::editor::EditorAction::Focus, ctx);
-        });
-        true
+    pub(crate) fn find_query(&self, ctx: &AppContext) -> String {
+        self.find_editor.as_ref(ctx).buffer_text(ctx)
     }
 
     fn handle_replace_editor_event(&mut self, event: &EditorEvent, ctx: &mut ViewContext<Self>) {
@@ -808,7 +804,14 @@ impl CodeEditorFind {
                 Shrinkable::new(
                     1.,
                     ConstrainedBox::new(
-                        Clipped::new(ChildView::new(&self.find_editor).finish()).finish(),
+                        Clipped::new(
+                            SavePosition::new(
+                                ChildView::new(&self.find_editor).finish(),
+                                FIND_QUERY_FIELD_POSITION_ID,
+                            )
+                            .finish(),
+                        )
+                        .finish(),
                     )
                     .with_height(editor_height)
                     .finish(),
