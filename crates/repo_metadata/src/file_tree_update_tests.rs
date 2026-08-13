@@ -200,7 +200,12 @@ fn apply_mutations_generates_update_for_add_directory_subtree() {
         LocalRepoMetadataModel::apply_file_tree_mutations(&mut tree, mutations, false, true)
             .expect("update should be produced");
 
-    assert!(update.remove_entries.is_empty());
+    // The mutation replaces whatever previously existed at the subtree's
+    // root, so the delta carries a matching removal (see
+    // `round_trip_directory_subtree_replacement_drops_stale_descendants`
+    // for the case where that root already had descendants).
+    assert_eq!(update.remove_entries.len(), 1);
+    assert_eq!(update.remove_entries[0], std_path("/repo/src/components"));
     assert_eq!(update.update_entries.len(), 1);
     let entry_update = &update.update_entries[0];
     assert_eq!(entry_update.parent_path_to_replace, std_path("/repo/src"));
@@ -535,6 +540,54 @@ fn apply_update_reports_failure_when_target_parent_is_not_a_directory() {
         tree.get(&std_path("/repo/src/nested.rs")).is_none(),
         "the node should not be inserted when its parent could not be resolved"
     );
+}
+
+// ── Directory-subtree replacement (APP-5355 revision) ─────────────────
+
+/// A watcher-driven rebuild of an existing directory (e.g. after a gitignore
+/// change) replaces the whole subtree at the same path. The emitted delta
+/// must carry replacement semantics: a receiver applying just the delta to
+/// an independent copy of the pre-update tree must drop stale descendants
+/// that are no longer part of the rebuilt subtree, not merge the new nodes
+/// on top of the old ones.
+#[test]
+fn round_trip_directory_subtree_replacement_drops_stale_descendants() {
+    use crate::local_model::FileTreeMutation;
+
+    let server_tree_entry = dir(
+        "/repo",
+        vec![dir("/repo/src", vec![file("/repo/src/old.rs")])],
+    );
+    let mut server_tree = build_tree_from_entry(server_tree_entry);
+
+    let rebuilt_subtree = dir("/repo/src", vec![file("/repo/src/new.rs")]);
+    let mutations = vec![FileTreeMutation::AddDirectorySubtree {
+        dir_path: mutation_path("/repo/src"),
+        subtree: rebuilt_subtree,
+    }];
+
+    let update =
+        LocalRepoMetadataModel::apply_file_tree_mutations(&mut server_tree, mutations, false, true)
+            .expect("update should be produced");
+
+    // The model's own tree drops the stale file.
+    assert!(server_tree.get(&std_path("/repo/src/old.rs")).is_none());
+    assert!(server_tree.get(&std_path("/repo/src/new.rs")).is_some());
+
+    // A receiver applying only the emitted delta to an independent copy of
+    // the pre-update tree must reach the same result.
+    let client_tree_entry = dir(
+        "/repo",
+        vec![dir("/repo/src", vec![file("/repo/src/old.rs")])],
+    );
+    let mut client_tree = build_tree_from_entry(client_tree_entry);
+    assert!(client_tree.apply_repo_metadata_update(&update));
+
+    assert!(
+        client_tree.get(&std_path("/repo/src/old.rs")).is_none(),
+        "stale descendant must be dropped by the delta, not merged with the rebuilt subtree"
+    );
+    assert!(client_tree.get(&std_path("/repo/src/new.rs")).is_some());
 }
 
 // ── Round-trip test: apply mutations on server, then apply update on client ───

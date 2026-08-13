@@ -201,17 +201,15 @@ impl FileTreeEntry {
 
     /// Applies a [`RepoMetadataUpdate`] to this file tree entry.
     ///
-    /// Removals are processed first, then subtree patches are applied.
-    /// This is the core mutation path used by the remote client to apply
-    /// incremental updates received from the server, and by consumers (e.g.
-    /// [`FileTreeView`]) that maintain their own tree instead of sharing the
-    /// model's `Arc` (see APP-5355).
+    /// Removals are processed first, then subtree patches are applied, so
+    /// "move" semantics (remove old + add new) and subtree replacement (remove
+    /// the old root + add the rebuilt one) apply correctly.
     ///
     /// Returns `false` if any node in the update could not be placed because
     /// its expected parent directory was missing or was not actually a
-    /// directory — a sign that this entry has drifted out of sync with the
-    /// update's source and should be resynced from a fresh snapshot instead
-    /// of continuing to apply deltas to it.
+    /// directory. That means this entry has drifted out of sync with the
+    /// update's source and callers should resync from a fresh snapshot
+    /// instead of continuing to apply deltas to it.
     pub fn apply_repo_metadata_update(
         &mut self,
         update: &crate::file_tree_update::RepoMetadataUpdate,

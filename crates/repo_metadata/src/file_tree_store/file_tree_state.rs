@@ -12,7 +12,7 @@ use crate::{BuildTreeError, DirectoryEntry, Entry};
 
 // Counts full-map deep clones triggered by `Arc::make_mut` so tests can assert that a batch
 // of mutations against a tree shared with another `Arc` holder (e.g. a UI view snapshot)
-// clones at most once per batch, not once per mutation (see APP-5355).
+// clones at most once per batch, not once per mutation.
 #[cfg(test)]
 static DEEP_CLONE_COUNT: AtomicUsize = AtomicUsize::new(0);
 

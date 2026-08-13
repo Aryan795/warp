@@ -550,10 +550,10 @@ impl FileTreeView {
                     // re-cloning its tree: cloning would keep the model's
                     // `Arc` shared with this view and force a full
                     // copy-on-write clone of the whole tree on every
-                    // subsequent watcher-driven update (see APP-5355). Fall
-                    // back to a full clone for a `FullReplace` update, or if
-                    // delta application detects this view's tree has
-                    // drifted out of sync.
+                    // subsequent watcher-driven update. Fall back to a full
+                    // clone for a `FullReplace` update, or if delta
+                    // application detects this view's tree has drifted out
+                    // of sync.
                     let mut needs_resync = matches!(update_type, MetadataUpdateType::FullReplace);
                     if let MetadataUpdateType::IncrementalUpdate(update) = update_type {
                         for root_path in &root_paths {
