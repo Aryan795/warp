@@ -90,10 +90,12 @@ pub async fn dump_heap_profile_to_disk() -> anyhow::Result<std::path::PathBuf> {
 /// by the release process (matched by build-id).  On other platforms it spawns
 /// the bundled `pprof` binary to fetch the heap profile from the local HTTP
 /// server; on macOS that server has already resolved addresses to function
-/// names/lines in-process (see the `symbolize` feature on `jemalloc_pprof` in
+/// *names* in-process (see the `symbolize` feature on `jemalloc_pprof` in
 /// `app/Cargo.toml`), since offline, build-id-based symbolization isn't
-/// available there.  Either way, the resulting profile is attached to a
-/// Sentry event.
+/// available there.  File/line info stays empty there, since the shipped
+/// `.app` doesn't ship a co-located dSYM for `backtrace` to find (see
+/// `dump_jemalloc_heap_profile_inner`).  Either way, the resulting profile is
+/// attached to a Sentry event.
 #[cfg(feature = "heap_usage_tracking")]
 pub async fn dump_jemalloc_heap_profile(memory_breakdown: serde_json::Value) {
     use sentry::protocol::{Attachment, AttachmentType};
@@ -160,13 +162,19 @@ async fn dump_jemalloc_heap_profile_inner() -> anyhow::Result<Vec<u8>> {
 
             // On macOS, `jemalloc_pprof` is built WITH the `symbolize` feature
             // (see `app/Cargo.toml`), so `handle_get_heap` has already
-            // resolved addresses to function names/lines in-process, via
+            // resolved addresses to function *names* in-process, via
             // `backtrace::resolve` against the running binary, before this
-            // ever runs.  `--symbolize=local` is a no-op safety net for
-            // anything left unresolved: unlike on Linux, there is no
-            // mapping/build-id for it to symbolize offline against, since the
-            // `mappings` crate `jemalloc_pprof` depends on only populates that
-            // table on Linux (see `dump_jemalloc_pprof_bytes`).
+            // ever runs.  `backtrace` only recovers file/line info from a
+            // dSYM sitting next to the executable; `script/macos/bundle`
+            // stages the dSYM outside `Contents/MacOS`, and the shipped
+            // `.app`/DMG doesn't include it at all, so in the shipped app
+            // file/line stay empty -- only function names come through.
+            // `--symbolize=local` cannot make up the difference: unlike on
+            // Linux, the profile carries no mapping/build-id for it to
+            // symbolize offline against (the `mappings` crate `jemalloc_pprof`
+            // depends on only populates that table on Linux -- see
+            // `dump_jemalloc_pprof_bytes`), so any frame `backtrace::resolve`
+            // didn't already name stays unresolved.
             let pprof_path = pprof_binary_path()?;
             let output = command::r#async::Command::new(pprof_path)
                 .args(["--proto", "--symbolize=local", "-output"])
@@ -197,11 +205,12 @@ async fn dump_jemalloc_heap_profile_inner() -> anyhow::Result<Vec<u8>> {
 ///
 /// This is the same dump that [`handle_get_heap`] serves over HTTP, but
 /// invoked directly so callers don't need to reach the local HTTP server.
-/// Linux-only: on macOS, `dump_jemalloc_heap_profile_inner` instead fetches
-/// an already-symbolized profile from [`handle_get_heap`] over HTTP, because
-/// the raw dump there carries no mapping/build-id to symbolize offline
-/// against outside Linux (see the macOS-only `symbolize` feature on
-/// `jemalloc_pprof` in `app/Cargo.toml`).
+/// Linux-only: on macOS, `dump_jemalloc_heap_profile_inner` instead fetches a
+/// profile from [`handle_get_heap`] over HTTP that has already had function
+/// *names* (but not file/line info) resolved in-process, because the raw dump
+/// there carries no mapping/build-id to symbolize offline against outside
+/// Linux (see the macOS-only `symbolize` feature on `jemalloc_pprof` in
+/// `app/Cargo.toml`).
 #[cfg(all(feature = "jemalloc_pprof", target_os = "linux"))]
 async fn dump_jemalloc_pprof_bytes() -> anyhow::Result<Vec<u8>> {
     let Some(prof_ctl) = jemalloc_pprof::PROF_CTL.as_ref() else {
@@ -298,9 +307,11 @@ pub fn make_router() -> axum::Router {
 }
 
 /// Serves the current jemalloc heap profile in pprof format.  On macOS this
-/// is where a profile actually gets symbolized: the `symbolize` feature
-/// enabled for `jemalloc_pprof` there (see `app/Cargo.toml`) makes
-/// `dump_pprof()` resolve addresses to function names/lines in-process.
+/// is where a profile actually gets partially symbolized: the `symbolize`
+/// feature enabled for `jemalloc_pprof` there (see `app/Cargo.toml`) makes
+/// `dump_pprof()` resolve addresses to function *names* in-process.  File/line
+/// info stays empty unless a dSYM happens to sit next to the executable,
+/// which the shipped `.app` doesn't (see `dump_jemalloc_heap_profile_inner`).
 #[cfg(feature = "jemalloc_pprof")]
 pub async fn handle_get_heap()
 -> Result<impl axum::response::IntoResponse, (axum::http::StatusCode, String)> {
