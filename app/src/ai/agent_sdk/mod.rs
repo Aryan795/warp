@@ -70,6 +70,7 @@ use crate::auth::auth_manager::{AuthManager, AuthManagerEvent};
 use crate::cloud_object::CloudObjectLookup as _;
 use crate::cloud_object::model::persistence::CloudModel;
 use crate::send_telemetry_sync_from_app_ctx;
+use crate::server::cloud_objects::update_manager::UpdateManager;
 use crate::server::ids::{ServerId, SyncId};
 use crate::server::server_api::ServerApiProvider;
 use crate::server::server_api::ai::{AIClient, AgentConfigSnapshot, GitCredential};
@@ -1466,10 +1467,11 @@ impl AgentDriverRunner {
 
                 CloudAmbientAgentEnvironment::get_by_id(&sync_id, ctx)
                     .ok_or_else(|| {
-                        let catalog_is_empty = AgentDriver::log_valid_environments(ctx);
-                        if catalog_is_empty {
+                        AgentDriver::log_valid_environments(ctx);
+                        let sync_had_errors = UpdateManager::as_ref(ctx).last_sync_had_errors();
+                        if sync_had_errors {
                             report_error!(
-                                "Environment catalog is empty while resolving environment",
+                                "Environment catalog sync had errors while resolving environment",
                                 extra: { "environment_id" => %environment_id }
                             );
                         } else {
@@ -1478,10 +1480,7 @@ impl AgentDriverRunner {
                                 extra: { "environment_id" => %environment_id }
                             );
                         }
-                        common::classify_environment_lookup_failure(
-                            environment_id,
-                            catalog_is_empty,
-                        )
+                        common::classify_environment_lookup_failure(environment_id, sync_had_errors)
                     })
                     .map(|env| env.model().string_model.clone())
             })

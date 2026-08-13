@@ -732,6 +732,7 @@ fn test_load_cloud_objects_on_initial_load_with_empty_cache() {
                     deleted_generic_string_objects: Default::default(),
                     action_histories: Default::default(),
                     mcp_gallery: Default::default(),
+                    had_errors: false,
                 })
             });
 
@@ -809,6 +810,7 @@ fn test_loading_all_cloud_objects_after_switching_from_offline() {
                     deleted_generic_string_objects: Default::default(),
                     action_histories: Default::default(),
                     mcp_gallery: Default::default(),
+                    had_errors: false,
                 })
             });
 
@@ -838,6 +840,7 @@ fn test_loading_all_cloud_objects_after_switching_from_offline() {
                     deleted_generic_string_objects: Default::default(),
                     action_histories: Default::default(),
                     mcp_gallery: Default::default(),
+                    had_errors: false,
                 })
             });
 
@@ -909,6 +912,7 @@ fn test_force_refresh_only_happens_once() {
                     deleted_generic_string_objects: Default::default(),
                     action_histories: Default::default(),
                     mcp_gallery: Default::default(),
+                    had_errors: false,
                 })
             });
 
@@ -958,6 +962,7 @@ fn test_force_refresh_correctly_resets_timestamp() {
                     deleted_generic_string_objects: Default::default(),
                     action_histories: Default::default(),
                     mcp_gallery: Default::default(),
+                    had_errors: false,
                 })
             });
 
