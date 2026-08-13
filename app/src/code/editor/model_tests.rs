@@ -1084,14 +1084,10 @@ fn test_hidden_lines_window_is_symmetric_around_changes() {
     })
 }
 
-/// Regression test for APP-5353 (memory retention from diff-triggered
-/// full-buffer layout rebuilds): recalculating hidden lines to the exact same
-/// result as before must not trigger another layout rebuild. Before this fix,
-/// `handle_diff_model_event` unconditionally issued a full-buffer
-/// `rebuild_layout` whenever hidden lines were recalculated, even when
-/// nothing about them had actually changed — repeatedly re-materializing
-/// styled content for the whole buffer (including its text) on every diff
-/// update.
+/// Recomputing identical hidden ranges must not enqueue another layout
+/// rebuild (APP-5353): `handle_diff_model_event` only relays out the ranges
+/// whose hidden/visible membership actually changed, so a recalculation that
+/// reproduces the same hidden ranges as before should be a no-op.
 #[test]
 fn test_unchanged_hidden_lines_do_not_trigger_relayout() {
     App::test((), |mut app| async move {
@@ -1215,11 +1211,161 @@ fn hidden_ranges_diff_returns_only_the_shifted_boundary() {
     );
 }
 
+/// Pins the bug the end-to-end test below exercises through the full render
+/// pipeline: a naive symmetric difference can land strictly inside a range
+/// that's already collapsed into a single `Hidden` block (e.g. only the
+/// trailing part of a hidden region became visible), which is unsafe to
+/// invalidate partially. `hidden_ranges_diff_expanded_to_blocks` must expand
+/// the changed sub-range to the full extent of the pre-existing block.
+#[test]
+fn hidden_ranges_diff_expanded_to_blocks_covers_full_overlapping_ranges() {
+    // Old: one block 1..21 (e.g. lines 0..5 collapsed together). New: that
+    // same leading line is still hidden (1..5) but the rest of the old block
+    // became visible, and a distant, previously-visible block becomes
+    // hidden instead (33..77, partially overlapping the old 49..77 block).
+    let mut before = RangeSet::new();
+    before.insert(CharOffset::from(1)..CharOffset::from(21));
+    before.insert(CharOffset::from(49)..CharOffset::from(77));
+
+    let mut after = RangeSet::new();
+    after.insert(CharOffset::from(1)..CharOffset::from(5));
+    after.insert(CharOffset::from(33)..CharOffset::from(77));
+
+    // The raw symmetric difference lands inside the old 1..21 block (5..21),
+    // which would slice into it rather than covering it fully.
+    assert_eq!(
+        hidden_ranges_diff(&before, &after)
+            .iter()
+            .cloned()
+            .collect_vec(),
+        vec![
+            CharOffset::from(5)..CharOffset::from(21),
+            CharOffset::from(33)..CharOffset::from(49)
+        ]
+    );
+
+    // The expanded version instead invalidates each overlapping range in
+    // full: the entire old 1..21 block, and the entire new 33..77 block.
+    assert_eq!(
+        hidden_ranges_diff_expanded_to_blocks(&before, &after)
+            .iter()
+            .cloned()
+            .collect_vec(),
+        vec![
+            CharOffset::from(1)..CharOffset::from(21),
+            CharOffset::from(33)..CharOffset::from(77)
+        ]
+    );
+}
+
+/// End-to-end regression test for APP-5353's scoped invalidation: when the
+/// diff hunk moves so an existing hidden region shrinks, the *rendered*
+/// hidden section must reflect the new (smaller) range rather than staying at
+/// its earlier extent. This drives the full path `calculate_hidden_lines` ->
+/// `Buffer::invalidate_layout_for_range` -> `RenderState::layout_pending_edit`,
+/// rather than only the pure `hidden_ranges_diff` helper: an under-invalidation
+/// bug here would leave a stale `Hidden` block on screen while every
+/// helper-only test above still passes.
+#[test]
+fn test_shrinking_hidden_region_updates_rendered_hidden_section() {
+    App::test((), |mut app| async move {
+        use futures::StreamExt;
+
+        initialize_deps(&mut app);
+        // 20 fixed-width lines "l00".."l19". The initial diff modifies line 8.
+        let line = |i: usize| format!("l{i:02}");
+        let base = (0..20).map(line).join("\n");
+        let current = (0..20)
+            .map(|i| if i == 8 { "XXX".to_string() } else { line(i) })
+            .join("\n");
+
+        let editor = mock_model_with_diff(&mut app, &base, &current, ContentVersion::new());
+        layout_model(&mut app, &editor).await;
+
+        let (diff_tx, mut diff_rx) = futures::channel::mpsc::unbounded();
+        app.update(|ctx| {
+            ctx.subscribe_to_model(&editor, move |_, event, _| {
+                if let CodeEditorModelEvent::DiffUpdated = event {
+                    let _ = diff_tx.unbounded_send(());
+                }
+            });
+        });
+
+        editor.update(&mut app, |editor, ctx| {
+            editor.hide_lines_outside_of_active_diff(3, ctx);
+            let new = editor.content.as_ref(ctx).text();
+            editor.diff().update(ctx, |diff, ctx| {
+                diff.compute_diff(new, BufferVersion::new(), ctx);
+            });
+        });
+        diff_rx.next().await.expect("DiffUpdated should be emitted");
+        layout_model(&mut app, &editor).await;
+
+        // Leading hidden run before the visible window around line 8 (3 lines
+        // of context on each side): matches the model-level assertion in
+        // `test_hidden_lines_window_is_symmetric_around_changes`, but read
+        // directly off the rendered `Hidden` block this time.
+        let initial_hidden = app.read(|ctx| {
+            editor
+                .as_ref(ctx)
+                .render_state()
+                .as_ref(ctx)
+                .content()
+                .first_hidden_section_line_range()
+        });
+        assert_eq!(initial_hidden, Some(LineCount::from(0)..LineCount::from(5)));
+
+        // Move the hunk from 0-based line 8 to 0-based line 4: revert line 8
+        // and edit line 4 instead. `replacement_line_range` is 1-indexed
+        // (matching `modified_lines`'s 0-based line + 1), so 5..6 and 9..10
+        // below target 0-based lines 4 and 8 respectively. The leading hidden
+        // run should shrink to match.
+        editor.update(&mut app, |editor, ctx| {
+            editor.apply_diffs(
+                vec![
+                    DiffDelta {
+                        replacement_line_range: 5..6,
+                        insertion: "XXX".to_string(),
+                    },
+                    DiffDelta {
+                        replacement_line_range: 9..10,
+                        insertion: "l08".to_string(),
+                    },
+                ],
+                ctx,
+            );
+            editor.hide_lines_outside_of_active_diff(3, ctx);
+            let new = editor.content.as_ref(ctx).text();
+            editor.diff().update(ctx, |diff, ctx| {
+                diff.compute_diff(new, BufferVersion::new(), ctx);
+            });
+        });
+        diff_rx.next().await.expect("DiffUpdated should be emitted");
+        layout_model(&mut app, &editor).await;
+
+        let shrunk_hidden = app.read(|ctx| {
+            editor
+                .as_ref(ctx)
+                .render_state()
+                .as_ref(ctx)
+                .content()
+                .first_hidden_section_line_range()
+        });
+        assert_eq!(
+            shrunk_hidden,
+            Some(LineCount::from(0)..LineCount::from(1)),
+            "the rendered hidden section should shrink to match the moved hunk, not stay stale"
+        );
+    })
+}
+
 /// The TUI diff pipeline: `new_tui` + seed + `apply_diffs` +
 /// `hide_lines_outside_of_active_diff` + `expand_diffs` must land removed-line
 /// ghosts in `CharCellState` and hidden line ranges in the render state, even
 /// though `hide_lines_outside_of_active_diff` arms `delay_rendering` and the
-/// resulting `rebuild_layout` is a version-stamp no-op in char-cell mode.
+/// queued range-invalidation edits are version-stamp no-ops in char-cell mode
+/// (their delta content is discarded; see `RenderState::handle_layout_action`'s
+/// `CharCell` arm).
 #[test]
 fn test_char_cell_diff_pipeline_populates_ghosts_and_hidden_ranges() {
     App::test((), |mut app| async move {
