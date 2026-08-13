@@ -19,7 +19,9 @@ use warpui::{App, SingletonEntity, TypedActionView, UpdateModel, ViewHandle};
 
 use crate::auth::AuthStateProvider;
 use crate::cloud_object::model::persistence::CloudModel;
+use crate::code::editor::find::view::{CodeEditorFind, FindAction};
 use crate::code::editor::view::{CodeEditorRenderOptions, CodeEditorView, CodeEditorViewAction};
+use crate::editor::EditorAction;
 use crate::notebooks::editor::keys::NotebookKeybindings;
 use crate::server::server_api::team::MockTeamClient;
 use crate::server::server_api::workspace::MockWorkspaceClient;
@@ -2123,5 +2125,66 @@ fn test_vim_indent_dot_repeat_repeats_last_indent() {
         vim_user_insert(&editor, ".", &mut app);
         assert_eq!(buffer_text(&editor, &app), "    line 1\nline 2\n    line 3");
         assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
+    });
+}
+
+#[test]
+fn test_vim_find_query_editor_click_to_edit_after_enter() {
+    let _feature_flag_guard = FeatureFlag::VimCodeEditor.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_code_editor_app(&mut app);
+
+        let editor = add_code_editor("hello world\nhello again", &mut app);
+
+        // Open the find bar; this enables and focuses the query editor.
+        editor.update(&mut app, |view, ctx| {
+            view.show_find_bar(ctx);
+        });
+
+        let find_bar: ViewHandle<CodeEditorFind> = editor
+            .read(&app, |view, _ctx| view.find_bar.clone())
+            .expect("find bar should exist");
+
+        find_bar.update(&mut app, |find_bar, ctx| {
+            find_bar.set_find_query(ctx, "hello");
+        });
+
+        let find_editor = find_bar.read(&app, |find_bar, _ctx| {
+            find_bar.find_editor_for_test().clone()
+        });
+
+        assert!(find_bar.read(&app, |find_bar, ctx| find_bar.is_find_input_editable(ctx)));
+        assert!(find_editor.read(&app, |editor, _ctx| editor.is_focused()));
+
+        // Simulate the user pressing Enter in the find editor with vim mode enabled. This should
+        // disable the query editor and shift focus back to the main editor -- existing,
+        // intentional vim behavior so that n/N and other normal-mode keys reach the buffer.
+        find_editor.update(&mut app, |editor, ctx| {
+            editor.handle_action(&EditorAction::Enter, ctx);
+        });
+
+        assert!(!find_bar.read(&app, |find_bar, ctx| find_bar.is_find_input_editable(ctx)));
+        assert!(!find_editor.read(&app, |editor, _ctx| editor.is_focused()));
+
+        // Before the fix, there was no way to recover other than reopening the find bar (e.g.
+        // Cmd/Ctrl+Shift+F). Clicking the query editor now dispatches this action, which should
+        // re-enable and focus it, without clobbering the existing query text.
+        find_bar.update(&mut app, |find_bar, ctx| {
+            find_bar.handle_action(&FindAction::FocusQueryEditor, ctx);
+        });
+
+        assert!(find_bar.read(&app, |find_bar, ctx| find_bar.is_find_input_editable(ctx)));
+        assert!(find_editor.read(&app, |editor, _ctx| editor.is_focused()));
+
+        // Typing after the click should append to the existing query rather than replace it,
+        // proving the reactivation didn't select-all like the keyboard-shortcut reopen path does.
+        find_editor.update(&mut app, |editor, ctx| {
+            editor.handle_action(&EditorAction::UserInsert(UserInput::new("!")), ctx);
+        });
+        assert_eq!(
+            find_editor.read(&app, |editor, ctx| editor.buffer_text(ctx)),
+            "hello!"
+        );
     });
 }

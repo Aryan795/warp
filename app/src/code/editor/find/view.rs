@@ -63,6 +63,7 @@ struct ButtonMouseStates {
     toggle_regex_search: MouseStateHandle,
     toggle_replace_open: MouseStateHandle,
     toggle_preserve_case: MouseStateHandle,
+    reactivate_query_editor: MouseStateHandle,
 }
 
 #[derive(Debug)]
@@ -101,6 +102,9 @@ pub enum FindAction {
     ToggleReplaceOpen,
     ReplaceAll,
     TogglePreserveCase,
+    /// Re-enables and focuses the (currently disabled) query editor in response to a click,
+    /// e.g. after vim mode disabled it following an Enter keypress.
+    FocusQueryEditor,
 }
 
 pub fn init(app: &mut AppContext) {
@@ -268,6 +272,13 @@ impl CodeEditorFind {
         self.find_editor.as_ref(app).can_edit(app)
     }
 
+    /// Returns a handle to the underlying query editor, for tests that need to simulate real
+    /// action dispatch on it directly (e.g. pressing Enter).
+    #[cfg(test)]
+    pub(crate) fn find_editor_for_test(&self) -> &ViewHandle<EditorView> {
+        &self.find_editor
+    }
+
     /// Enable or disable the find input editor's interactivity.
     pub fn set_find_input_editable(&self, ctx: &mut ViewContext<Self>, is_editable: bool) {
         self.find_editor.update(ctx, |editor, ctx| {
@@ -278,6 +289,18 @@ impl CodeEditorFind {
             };
             editor.set_interaction_state(state, ctx);
         });
+    }
+
+    /// Re-enables and focuses the query editor in response to a click on it while it was
+    /// disabled (e.g. after vim mode disabled it following an Enter keypress, or after a `*`/`#`
+    /// word search). Unlike reopening the find bar via keyboard shortcut, a click leaves the
+    /// existing query and caret position intact instead of selecting all of the query text.
+    fn focus_query_editor(&mut self, ctx: &mut ViewContext<Self>) {
+        self.find_editor.update(ctx, |editor, ctx| {
+            editor.set_interaction_state(InteractionState::Editable, ctx);
+            editor.suppress_next_focus_select_all();
+        });
+        ctx.focus(&self.find_editor);
     }
     fn handle_find_editor_event(&mut self, event: &EditorEvent, ctx: &mut ViewContext<Self>) {
         match event {
@@ -765,19 +788,30 @@ impl CodeEditorFind {
         )
         .finish();
 
+        let query_editor: Box<dyn Element> =
+            ConstrainedBox::new(Clipped::new(ChildView::new(&self.find_editor).finish()).finish())
+                .with_height(editor_height)
+                .finish();
+        // When the query editor is disabled (e.g. vim mode disabled it after Enter, or a `*`/`#`
+        // word search left it non-editable), wrap it in a click target that re-enables and
+        // focuses it. When it's already editable, render it unwrapped so normal click-to-place-
+        // cursor and drag-select behavior inside the editor is untouched.
+        let query_editor = if self.is_find_input_editable(app) {
+            query_editor
+        } else {
+            Hoverable::new(
+                self.button_mouse_states.reactivate_query_editor.clone(),
+                |_state| query_editor,
+            )
+            .on_click(move |ctx, _, _| {
+                ctx.dispatch_typed_action(FindAction::FocusQueryEditor);
+            })
+            .finish()
+        };
+
         let mut query_editor_row = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_child(
-                Shrinkable::new(
-                    1.,
-                    ConstrainedBox::new(
-                        Clipped::new(ChildView::new(&self.find_editor).finish()).finish(),
-                    )
-                    .with_height(editor_height)
-                    .finish(),
-                )
-                .finish(),
-            );
+            .with_child(Shrinkable::new(1., query_editor).finish());
         query_editor_row.add_child(regex_icon);
         query_editor_row.add_child(case_sensitive_icon);
 
@@ -914,6 +948,7 @@ impl TypedActionView for CodeEditorFind {
                 self.preserve_case_enabled = !self.preserve_case_enabled;
                 ctx.notify();
             }
+            FindAction::FocusQueryEditor => self.focus_query_editor(ctx),
         }
     }
 }
