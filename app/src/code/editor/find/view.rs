@@ -269,12 +269,16 @@ impl CodeEditorFind {
     }
 
     /// Enable or disable the find input editor's interactivity.
+    ///
+    /// When disabled, the field is set to `Selectable` rather than `Disabled` so that it remains
+    /// clickable: a click still focuses it (see the `EditorEvent::Focused` handling below), which
+    /// restores `Editable` and lets the user resume editing the query.
     pub fn set_find_input_editable(&self, ctx: &mut ViewContext<Self>, is_editable: bool) {
         self.find_editor.update(ctx, |editor, ctx| {
             let state = if is_editable {
                 InteractionState::Editable
             } else {
-                InteractionState::Disabled
+                InteractionState::Selectable
             };
             editor.set_interaction_state(state, ctx);
         });
@@ -293,6 +297,14 @@ impl CodeEditorFind {
                 self.emit_result_a11y_content(ctx);
                 ctx.notify();
             }
+            EditorEvent::Focused => {
+                // A click focuses the query editor even while it's `Selectable` (e.g. after Vim
+                // Enter moved focus to the main editor). Restore `Editable` so the click can
+                // resume editing the query, instead of requiring the user to reopen Find.
+                self.find_editor.update(ctx, |editor, ctx| {
+                    editor.set_interaction_state(InteractionState::Editable, ctx);
+                });
+            }
             EditorEvent::Enter => {
                 let vim_enabled = FeatureFlag::VimCodeEditor.is_enabled()
                     && AppEditorSettings::as_ref(ctx).vim_mode_enabled();
@@ -300,10 +312,12 @@ impl CodeEditorFind {
                 if !vim_enabled {
                     self.focus_next_match(FindDirection::Down, ctx);
                 } else {
-                    // Vim: treat "enter" as ending the search query entry and shift focus back to the editor
+                    // Vim: treat "enter" as ending the search query entry and shift focus back to
+                    // the editor. Use `Selectable` rather than `Disabled` so the field stays
+                    // clickable; see `EditorEvent::Focused` above.
                     self.find_editor.update(ctx, |editor, ctx| {
                         editor.clear_selections(ctx);
-                        editor.set_interaction_state(InteractionState::Disabled, ctx);
+                        editor.set_interaction_state(InteractionState::Selectable, ctx);
                     });
                     ctx.emit(Event::VimEnterAndFocusEditor);
                 }
@@ -326,6 +340,29 @@ impl CodeEditorFind {
             }
             _ => {}
         }
+    }
+
+    /// Test-only helper that simulates pressing Enter in the find query field, exactly as the
+    /// real `EditorElement` keyboard handling would dispatch it.
+    #[cfg(test)]
+    pub(crate) fn simulate_find_editor_enter(&self, ctx: &mut ViewContext<Self>) {
+        self.find_editor.update(ctx, |editor, ctx| {
+            editor.handle_action(&crate::editor::EditorAction::Enter, ctx);
+        });
+    }
+
+    /// Test-only helper that simulates a mouse click on the find query field. Mirrors
+    /// `EditorElement::mouse_down`, which gates focusing the editor on `can_select`. Returns
+    /// whether the click was accepted (i.e. whether the field could be focused).
+    #[cfg(test)]
+    pub(crate) fn simulate_find_editor_click(&self, ctx: &mut ViewContext<Self>) -> bool {
+        if !self.find_editor.as_ref(ctx).can_select(ctx) {
+            return false;
+        }
+        self.find_editor.update(ctx, |editor, ctx| {
+            editor.handle_action(&crate::editor::EditorAction::Focus, ctx);
+        });
+        true
     }
 
     fn handle_replace_editor_event(&mut self, event: &EditorEvent, ctx: &mut ViewContext<Self>) {

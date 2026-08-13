@@ -2125,3 +2125,54 @@ fn test_vim_indent_dot_repeat_repeats_last_indent() {
         assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
     });
 }
+
+#[test]
+fn test_vim_enter_in_find_bar_returns_focus_and_click_reenables_editing() {
+    let _feature_flag_guard = FeatureFlag::VimCodeEditor.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_code_editor_app(&mut app);
+
+        let editor = add_code_editor("hello world", &mut app);
+        let find_bar = editor
+            .read(&app, |view, _ctx| view.find_bar.clone())
+            .expect("code editor should have a find bar");
+
+        editor.update(&mut app, |view, ctx| {
+            view.handle_action(&CodeEditorViewAction::ShowFindBar, ctx);
+        });
+
+        find_bar.update(&mut app, |find_bar, ctx| {
+            find_bar.set_find_query(ctx, "hello");
+        });
+        assert!(find_bar.read(&app, |find_bar, ctx| find_bar.is_find_input_editable(ctx)));
+
+        // Pressing Enter in Vim mode should move focus to the main editor, and leave the query
+        // field non-editable but still clickable (regression test for the Find in File focus bug).
+        find_bar.update(&mut app, |find_bar, ctx| {
+            find_bar.simulate_find_editor_enter(ctx);
+        });
+
+        assert!(
+            !find_bar.read(&app, |find_bar, ctx| find_bar.is_find_input_editable(ctx)),
+            "query field should no longer be directly editable after Vim Enter"
+        );
+        assert!(
+            app.read(|ctx| editor.is_focused(ctx)),
+            "focus should move to the main editor after Vim Enter"
+        );
+
+        // A single click on the query field should re-focus and re-enable it for editing.
+        let clicked = find_bar.update(&mut app, |find_bar, ctx| {
+            find_bar.simulate_find_editor_click(ctx)
+        });
+        assert!(
+            clicked,
+            "the query field should still accept a click while inactive"
+        );
+        assert!(
+            find_bar.read(&app, |find_bar, ctx| find_bar.is_find_input_editable(ctx)),
+            "clicking the query field should make it editable again"
+        );
+    });
+}
