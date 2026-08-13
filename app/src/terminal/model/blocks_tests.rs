@@ -2287,7 +2287,7 @@ fn test_in_band_command_blocks_are_retained_when_shown() {
         .filter(|block| block.is_for_in_band_command)
         .collect();
     assert_eq!(in_band_blocks.len(), 1);
-    assert!(!in_band_blocks[0].should_hide_block(&AgentViewState::Inactive));
+    assert!(!in_band_blocks[0].should_hide_block(&TranscriptScope::Terminal));
 }
 
 #[test]
