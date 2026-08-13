@@ -925,11 +925,8 @@ impl AIConversation {
             }
         }
 
-        // Each per-exchange `duration()` is already clamped to non-negative
-        // (see `AIAgentExchange::duration`), so this sum can't go negative
-        // in practice. Clamp anyway so this total can never regress into a
-        // negative display value even if that per-exchange invariant
-        // changes later.
+        // Defense in depth: each summand is already clamped, but clamp the
+        // total too so it can never go negative.
         total_ms.max(0)
     }
 
@@ -948,12 +945,8 @@ impl AIConversation {
             }
         })?;
 
-        // `start_time` comes from the client clock while `finish_time` is
-        // derived from server message timestamps, so clock skew between the
-        // two can make this delta negative (see `AIAgentExchange::duration`
-        // for the same phenomenon on a per-exchange basis). Clamp so the
-        // "Total time (including tool calls)" figure can never render
-        // negative.
+        // `start_time` and `finish_time` come from different clocks that may
+        // be skewed, so clamp to non-negative.
         let duration = finish_time.signed_duration_since(start_time);
         Some(duration.num_milliseconds().max(0))
     }
