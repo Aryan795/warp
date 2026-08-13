@@ -210,3 +210,29 @@ fn test_find_git_repo_with_worktree() {
         });
     });
 }
+
+#[test]
+#[cfg(feature = "local_fs")]
+fn test_find_git_repo_skips_oversized_gitfile() {
+    // Regression for APP-4801: an oversized `.git` file must be treated the same as an
+    // unreadable one (not a valid gitfile), not read wholesale into memory.
+    VirtualFS::test("find_git_repo_oversized_gitfile", |dirs, mut vfs| {
+        vfs.mkdir("checkout/src");
+        let oversized_gitdir_line =
+            format!("gitdir: {}", "a".repeat(super::MAX_GITFILE_BYTES as usize));
+        vfs.with_files(vec![Stub::FileWithContent(
+            "checkout/.git",
+            oversized_gitdir_line.as_str(),
+        )]);
+
+        let checkout_root = dirs.tests().join("checkout");
+
+        App::test((), |mut _app| async move {
+            let result = super::find_git_repo(checkout_root.as_path()).await;
+            assert!(
+                result.is_none(),
+                "an oversized .git file should not be treated as a valid gitfile"
+            );
+        });
+    });
+}

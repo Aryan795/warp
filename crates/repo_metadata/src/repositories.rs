@@ -326,6 +326,12 @@ struct GitRepoInfo {
     git_dir_path: PathBuf,
 }
 
+/// A `.git` gitfile (used by worktrees and submodules) holds a single short "gitdir: <path>"
+/// line and is realistically well under a kilobyte; this leaves generous headroom while still
+/// rejecting the pathological on-disk sizes that motivated APP-4801.
+#[cfg(feature = "local_fs")]
+const MAX_GITFILE_BYTES: u64 = 4096;
+
 /// Finds the Git repository containing the given path, if any.
 ///
 /// Supports:
@@ -370,8 +376,11 @@ async fn find_git_repo(path: &Path) -> Option<GitRepoInfo> {
                     });
                 }
             } else if dot_git_type.is_file() {
-                // A potential gitfile, used by worktrees and submodules.
-                if let Ok(contents) = async_fs::read_to_string(&dot_git_path).await {
+                // A potential gitfile, used by worktrees and submodules. An oversized file is
+                // treated the same as a read failure: not a valid gitfile, keep walking up.
+                if let Ok(contents) =
+                    warp_util::file::read_to_string_capped(&dot_git_path, MAX_GITFILE_BYTES).await
+                {
                     // Typical format: "gitdir: <path>\n"
                     if let Some(rest) = contents.trim().strip_prefix("gitdir:") {
                         let gitdir_path = PathBuf::from(rest.trim());
