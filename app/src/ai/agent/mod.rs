@@ -3301,9 +3301,23 @@ impl AIAgentExchange {
             .find_map(|input| input.passive_suggestion_trigger())
     }
 
+    /// Duration of this exchange, clamped to non-negative.
+    ///
+    /// `start_time` is stamped from the client's local clock while
+    /// `finish_time` is derived from server message timestamps (see
+    /// `finish_time_from_exchange_messages`), so the two can come from
+    /// clocks that drift relative to each other. When the client clock runs
+    /// ahead of the server, the raw signed duration can be negative; clamp
+    /// it here so no caller (e.g. the usage footer's timing totals) can
+    /// ever surface a negative duration, mirroring how
+    /// `compute_time_to_first_token_ms_from_messages` clamps its own
+    /// client/server timestamp comparison.
     pub fn duration(&self) -> Option<TimeDelta> {
-        self.finish_time
-            .map(|finish_time| finish_time.signed_duration_since(self.start_time))
+        self.finish_time.map(|finish_time| {
+            finish_time
+                .signed_duration_since(self.start_time)
+                .max(TimeDelta::zero())
+        })
     }
 
     /// The elapsed wall-clock time since this exchange started. `None` when

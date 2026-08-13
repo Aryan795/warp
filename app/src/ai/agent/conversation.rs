@@ -925,7 +925,12 @@ impl AIConversation {
             }
         }
 
-        total_ms
+        // Each per-exchange `duration()` is already clamped to non-negative
+        // (see `AIAgentExchange::duration`), so this sum can't go negative
+        // in practice. Clamp anyway so this total can never regress into a
+        // negative display value even if that per-exchange invariant
+        // changes later.
+        total_ms.max(0)
     }
 
     /// Wall-to-wall response time for the last completed set of agent responses.
@@ -943,8 +948,14 @@ impl AIConversation {
             }
         })?;
 
+        // `start_time` comes from the client clock while `finish_time` is
+        // derived from server message timestamps, so clock skew between the
+        // two can make this delta negative (see `AIAgentExchange::duration`
+        // for the same phenomenon on a per-exchange basis). Clamp so the
+        // "Total time (including tool calls)" figure can never render
+        // negative.
         let duration = finish_time.signed_duration_since(start_time);
-        Some(duration.num_milliseconds())
+        Some(duration.num_milliseconds().max(0))
     }
 
     pub fn token_usage(&self) -> &[ModelTokenUsage] {
