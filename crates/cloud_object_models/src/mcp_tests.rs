@@ -1,4 +1,6 @@
-use super::{CLIServer, MCPServer, ServerSentEvents, StaticEnvVar, TransportType};
+use super::{
+    CLIServer, MCPServer, ServerSentEvents, StaticEnvVar, TemplatableMCPServer, TransportType,
+};
 
 #[test]
 fn test_mcp_server_config_serialization_excludes_secret_env_values() {
@@ -114,5 +116,32 @@ fn test_sse_server_serialization() {
     assert!(
         serialized.contains("sse-server"),
         "Serialized SSE server should contain name: {serialized}",
+    );
+}
+
+#[test]
+fn test_templatable_mcp_server_deserialization_without_uuid_defaults() {
+    // Stored/legacy JSON predating the `uuid` field should still deserialize
+    // successfully, rather than failing with a missing field error.
+    let json = r#"{
+        "name": "test-server",
+        "description": null,
+        "template": {"json": "{}", "variables": []},
+        "gallery_data": null
+    }"#;
+
+    let server_a: TemplatableMCPServer = serde_json::from_str(json)
+        .expect("Failed to deserialize TemplatableMCPServer without uuid");
+    let server_b: TemplatableMCPServer = serde_json::from_str(json)
+        .expect("Failed to deserialize TemplatableMCPServer without uuid");
+
+    assert_ne!(
+        server_a.uuid,
+        uuid::Uuid::nil(),
+        "uuid should default to a freshly generated UUID, not the nil UUID"
+    );
+    assert_ne!(
+        server_a.uuid, server_b.uuid,
+        "separately-deserialized instances missing uuid should not collide on the same identifier"
     );
 }

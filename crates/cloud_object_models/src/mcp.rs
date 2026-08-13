@@ -131,6 +131,10 @@ pub struct GalleryData {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TemplatableMCPServer {
+    // Defaults to a freshly generated UUID (rather than the all-zero nil UUID) so that
+    // multiple stored records missing this field in the same load don't collide on the
+    // same identifier. This tolerates stored/legacy JSON that predates this field.
+    #[serde(default = "uuid::Uuid::new_v4")]
     pub uuid: uuid::Uuid,
     pub name: String,
     pub description: Option<String>,
