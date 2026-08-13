@@ -1242,6 +1242,19 @@ impl RunAgentsCardView {
     fn get_position_id_for_accept_split_button(prefix: &str) -> String {
         format!("RunAgentsCardView-{prefix}-accept-split")
     }
+
+    /// Test-only: simulates the executor reporting that this action is
+    /// actively spawning children, without going through
+    /// `RunAgentsExecutorEvent::SpawningStarted`.
+    #[cfg(test)]
+    pub(crate) fn simulate_spawning_for_test(
+        &mut self,
+        agent_count: usize,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.spawning = Some(RunAgentsSpawningSnapshot { agent_count });
+        ctx.notify();
+    }
 }
 
 impl Entity for RunAgentsCardView {

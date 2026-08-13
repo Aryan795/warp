@@ -1871,6 +1871,18 @@ impl AIBlock {
         })
     }
 
+    /// Test-only: returns the lazily-created `RunAgentsCardView` for the
+    /// given action, if one exists. Used by tests that need to inspect the
+    /// real card's rendered output after driving the block through a
+    /// streaming/cancellation sequence.
+    #[cfg(test)]
+    pub fn run_agents_card_view_for_test(
+        &self,
+        action_id: &AIAgentActionId,
+    ) -> Option<ViewHandle<RunAgentsCardView>> {
+        self.run_agents_card_views.get(action_id).cloned()
+    }
+
     fn on_output_status_update(&mut self, ctx: &mut ViewContext<Self>) {
         if let Some(latency) = self.model.time_since_request_start(ctx) {
             // Since this is a OnceCell, we'll only set time_to_first_token to the

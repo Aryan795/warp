@@ -218,9 +218,13 @@ pub trait AIBlockModel {
 
 #[cfg(any(test, feature = "integration_tests"))]
 pub mod testing {
+    use std::cell::RefCell;
+
     use warpui::{AppContext, ViewContext};
 
     use super::{AIBlockModel, AIBlockOutputStatus, OutputStatusUpdateCallback};
+    #[cfg(test)]
+    use crate::ai::agent::CancellationReason;
     use crate::ai::agent::conversation::AIConversationId;
     use crate::ai::agent::{AIAgentInput, AIAgentOutput, ServerOutputId, Shared};
     use crate::ai::blocklist::AIBlock;
@@ -231,18 +235,24 @@ pub mod testing {
 
     pub struct FakeAIBlockModel {
         input: Vec<AIAgentInput>,
-        /// `None` models a block that is still streaming output, so its status
-        /// stays [`AIBlockOutputStatus::Pending`].
-        output: Option<Shared<AIAgentOutput>>,
+        status: RefCell<AIBlockOutputStatus>,
         model_id: LLMId,
+        /// The callback registered via [`AIBlockModel::on_updated_output`], if
+        /// any. Test-only hooks (`notify_for_test` / `cancel_for_test`) invoke
+        /// this to simulate the block receiving a new streamed update,
+        /// exercising the real `AIBlock::on_output_status_update` path.
+        update_callback: RefCell<Option<OutputStatusUpdateCallback<AIBlock>>>,
     }
 
     impl FakeAIBlockModel {
         pub fn new(input: Vec<AIAgentInput>, output: AIAgentOutput) -> Self {
             Self {
                 input,
-                output: Some(Shared::new(output)),
+                status: RefCell::new(AIBlockOutputStatus::Complete {
+                    output: Shared::new(output),
+                }),
                 model_id: "fake-llm".to_owned().into(),
+                update_callback: RefCell::new(None),
             }
         }
 
@@ -251,9 +261,58 @@ pub mod testing {
         pub fn new_streaming(input: Vec<AIAgentInput>) -> Self {
             Self {
                 input,
-                output: None,
+                status: RefCell::new(AIBlockOutputStatus::Pending),
                 model_id: "fake-llm".to_owned().into(),
+                update_callback: RefCell::new(None),
             }
+        }
+
+        /// Builds a fake model whose status starts as
+        /// [`AIBlockOutputStatus::PartiallyReceived`] with the given output
+        /// (e.g. one containing an in-progress tool-call action), for tests
+        /// that need to simulate a mid-stream cancellation.
+        #[cfg(test)]
+        pub fn new_partially_received(input: Vec<AIAgentInput>, output: AIAgentOutput) -> Self {
+            Self {
+                input,
+                status: RefCell::new(AIBlockOutputStatus::PartiallyReceived {
+                    output: Shared::new(output),
+                }),
+                model_id: "fake-llm".to_owned().into(),
+                update_callback: RefCell::new(None),
+            }
+        }
+
+        /// Test-only: re-delivers the current [`Self::status`] as an
+        /// "updated output" notification to the owning [`AIBlock`],
+        /// mirroring how a live response stream drives
+        /// `AIBlock::on_output_status_update` on each server event. Must be
+        /// called after `AIBlock::new` has registered its callback via
+        /// [`AIBlockModel::on_updated_output`].
+        #[cfg(test)]
+        pub fn notify_for_test(&self, view: &mut AIBlock, ctx: &mut ViewContext<AIBlock>) {
+            if let Some(callback) = self.update_callback.borrow_mut().as_mut() {
+                callback(view, ctx);
+            }
+        }
+
+        /// Test-only: transitions this fake model's status to
+        /// [`AIBlockOutputStatus::Cancelled`] (retaining the current partial
+        /// output, if any) and re-delivers it, simulating a mid-stream
+        /// cancellation of the response stream.
+        #[cfg(test)]
+        pub fn cancel_for_test(
+            &self,
+            reason: CancellationReason,
+            view: &mut AIBlock,
+            ctx: &mut ViewContext<AIBlock>,
+        ) {
+            let partial_output = self.status.borrow().output_to_render();
+            *self.status.borrow_mut() = AIBlockOutputStatus::Cancelled {
+                partial_output,
+                reason,
+            };
+            self.notify_for_test(view, ctx);
         }
     }
 
@@ -261,12 +320,7 @@ pub mod testing {
         type View = AIBlock;
 
         fn status(&self, _app: &AppContext) -> AIBlockOutputStatus {
-            match &self.output {
-                Some(output) => AIBlockOutputStatus::Complete {
-                    output: output.clone(),
-                },
-                None => AIBlockOutputStatus::Pending,
-            }
+            self.status.borrow().clone()
         }
 
         fn server_output_id(&self, _app: &AppContext) -> Option<ServerOutputId> {
@@ -291,9 +345,10 @@ pub mod testing {
 
         fn on_updated_output(
             &self,
-            _callback: OutputStatusUpdateCallback<AIBlock>,
+            callback: OutputStatusUpdateCallback<AIBlock>,
             _ctx: &mut ViewContext<AIBlock>,
         ) {
+            *self.update_callback.borrow_mut() = Some(callback);
         }
 
         fn request_type(&self, app: &AppContext) -> AIRequestType {

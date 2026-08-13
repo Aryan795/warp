@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 
-use ai::agent::action::{RunAgentsAgentRunConfig, RunAgentsExecutionMode};
+use ai::agent::action::{RunAgentsAgentRunConfig, RunAgentsExecutionMode, RunAgentsRequest};
 use ai::skills::SkillReference;
 use settings::Setting;
 use warp_core::channel::ChannelState;
 use warp_util::local_or_remote_path::LocalOrRemotePath;
 #[cfg(feature = "local_fs")]
 use warp_util::path::LineAndColumnArg;
-use warpui::{App, SingletonEntity};
+use warpui::{App, SingletonEntity, View};
 
 #[cfg(feature = "local_fs")]
 use super::{AIBlockEvent, open_code_action_event};
@@ -17,7 +17,9 @@ use super::{
     default_collapsible_state_for_orchestration_message, received_message_collapsible_id,
     recording_artifact_view_url, user_avatar_info_for_conversation_creator,
 };
-use crate::ai::agent::{AIAgentActionType, StartAgentExecutionMode};
+use crate::ai::agent::{
+    AIAgentActionId, AIAgentActionType, CancellationReason, StartAgentExecutionMode,
+};
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::blocklist::action_model::{
     compose_run_agents_child_prompt, run_agents_to_start_agent_mode,
@@ -27,6 +29,7 @@ use crate::auth::UserUid;
 use crate::code::editor_management::CodeSource;
 use crate::settings::{AISettings, OrchestrationMessageDisplayMode};
 use crate::test_util::settings::initialize_settings_for_tests;
+use crate::test_util::terminal::{add_window_with_terminal, initialize_app_for_terminal_view};
 use crate::workspaces::user_profiles::{UserProfileWithUID, UserProfiles};
 
 #[test]
@@ -681,6 +684,169 @@ fn should_show_agent_mode_ask_user_question_speedbump_round_trips_to_false() {
         });
         AISettings::handle(&app).read(&app, |settings, _ctx| {
             assert!(!*settings.should_show_agent_mode_ask_user_question_speedbump);
+        });
+    });
+}
+
+fn dummy_run_agents_request() -> RunAgentsRequest {
+    RunAgentsRequest {
+        summary: "Investigate the bug".to_string(),
+        base_prompt: "Find the root cause".to_string(),
+        skills: vec![],
+        model_id: "auto".to_string(),
+        harness_type: "oz".to_string(),
+        execution_mode: RunAgentsExecutionMode::Local,
+        agent_run_configs: vec![RunAgentsAgentRunConfig {
+            name: "child".to_string(),
+            prompt: "help".to_string(),
+            title: "Child agent".to_string(),
+            agent_identity_uid: String::new(),
+            model_id: String::new(),
+        }],
+        plan_id: String::new(),
+        harness_auth_secret_name: None,
+    }
+}
+
+/// Regression test for a `run_agents` tool call that is cancelled while it is
+/// still streaming, before it is ever queued into `BlocklistAIActionModel`.
+/// Drives the real `AIBlock` / `RunAgentsCardView` / `BlocklistAIActionModel`
+/// stack (only the block's `AIBlockModel` is faked) through the exact
+/// `on_output_status_update` code path that a live response stream would
+/// exercise, so a regression in either the notify wiring in `block.rs` or
+/// the `block_model.status()` fallback in `render()` would fail this test.
+#[test]
+fn run_agents_card_shows_cancelled_when_stream_cancels_before_action_is_queued() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        app.add_singleton_model(|ctx| {
+            crate::server::experiments::ServerExperiments::new_from_cache(vec![], ctx)
+        });
+        let terminal = add_window_with_terminal(&mut app, None);
+
+        let action_id = AIAgentActionId::from("run-agents-cancel-test".to_string());
+
+        let (ai_block, fake_model) = terminal.update(&mut app, |view, ctx| {
+            view.insert_dummy_run_agents_ai_block(
+                "Please run some agents".to_string(),
+                action_id.clone(),
+                dummy_run_agents_request(),
+                ctx,
+            )
+        });
+
+        // Deliver the initial partial output so the card view gets created,
+        // mirroring the first streamed chunk carrying the tool call.
+        ai_block.update(&mut app, |view, ctx| {
+            fake_model.notify_for_test(view, ctx);
+        });
+
+        let card = ai_block
+            .read(&app, |view, _ctx| {
+                view.run_agents_card_view_for_test(&action_id)
+            })
+            .expect("RunAgentsCardView should be created for the partial run_agents action");
+
+        // Before cancellation: still streaming, no action-model status yet.
+        terminal.read(&app, |view, ctx| {
+            assert!(
+                view.ai_action_model()
+                    .as_ref(ctx)
+                    .get_action_status(&action_id)
+                    .is_none(),
+                "partially-streamed action should have no action-model status yet"
+            );
+        });
+        card.read(&app, |view, ctx| {
+            let text = view.render(ctx).debug_text_content().unwrap_or_default();
+            assert!(
+                text.contains("Configuring agents"),
+                "expected the streaming placeholder before cancellation, got: {text}"
+            );
+        });
+
+        // Cancel mid-stream, before the action is ever queued.
+        ai_block.update(&mut app, |view, ctx| {
+            fake_model.cancel_for_test(CancellationReason::ManuallyCancelled, view, ctx);
+        });
+
+        // The action model never saw this action queued, even after cancellation.
+        terminal.read(&app, |view, ctx| {
+            assert!(
+                view.ai_action_model()
+                    .as_ref(ctx)
+                    .get_action_status(&action_id)
+                    .is_none(),
+                "a cancelled, never-queued action must not gain an action-model status"
+            );
+        });
+
+        // The real card, driven through the real notify/render path, now
+        // shows the terminal cancelled state instead of the placeholder.
+        card.read(&app, |view, ctx| {
+            let text = view.render(ctx).debug_text_content().unwrap_or_default();
+            assert!(
+                text.contains("Spawn agents cancelled"),
+                "expected the terminal cancelled state after mid-stream cancellation, got: {text}"
+            );
+            assert!(
+                !text.contains("Configuring agents"),
+                "placeholder text should no longer be shown once cancelled, got: {text}"
+            );
+        });
+    });
+}
+
+/// Ordering guard: a `RunningAsync` action status must still show the
+/// spawning presentation even if the containing block is (implausibly)
+/// reported as cancelled, since `render()` checks `RunningAsync` before
+/// falling back to the block's cancellation status.
+#[test]
+fn run_agents_card_running_async_takes_priority_over_cancelled_block() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        app.add_singleton_model(|ctx| {
+            crate::server::experiments::ServerExperiments::new_from_cache(vec![], ctx)
+        });
+        let terminal = add_window_with_terminal(&mut app, None);
+
+        let action_id = AIAgentActionId::from("run-agents-running-test".to_string());
+
+        let (ai_block, fake_model) = terminal.update(&mut app, |view, ctx| {
+            view.insert_dummy_run_agents_ai_block(
+                "Please run some agents".to_string(),
+                action_id.clone(),
+                dummy_run_agents_request(),
+                ctx,
+            )
+        });
+
+        ai_block.update(&mut app, |view, ctx| {
+            fake_model.notify_for_test(view, ctx);
+        });
+
+        let card = ai_block
+            .read(&app, |view, _ctx| {
+                view.run_agents_card_view_for_test(&action_id)
+            })
+            .expect("RunAgentsCardView should be created for the partial run_agents action");
+
+        // The block reports cancelled, but the executor still reports the
+        // action as actively spawning children.
+        ai_block.update(&mut app, |view, ctx| {
+            fake_model.cancel_for_test(CancellationReason::ManuallyCancelled, view, ctx);
+        });
+        card.update(&mut app, |view, ctx| {
+            view.simulate_spawning_for_test(2, ctx);
+        });
+
+        card.read(&app, |view, ctx| {
+            let text = view.render(ctx).debug_text_content().unwrap_or_default();
+            assert!(
+                text.contains("Spawning"),
+                "expected the spawning presentation to take priority, got: {text}"
+            );
+            assert!(!text.contains("Spawn agents cancelled"));
         });
     });
 }
