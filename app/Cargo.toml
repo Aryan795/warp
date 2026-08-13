@@ -124,11 +124,14 @@ image.workspace = true
 infer = "0.19.0"
 jaq-json.workspace = true
 jaq-all.workspace = true
-# Built WITHOUT the `symbolize` feature: `dump_pprof()` then returns a raw
-# pprof (sample addresses + mappings + GNU build-id), which is symbolized
-# offline against the debug-info file uploaded to Sentry by the release
-# process (matched by build-id). This keeps the shipped binary fully
-# strippable.
+# On Linux, built WITHOUT the `symbolize` feature: `dump_pprof()` then returns
+# a raw pprof (sample addresses + mappings + GNU build-id), which is
+# symbolized offline against the debug-info file uploaded to Sentry by the
+# release process (matched by build-id). This keeps the shipped Linux binary
+# fully strippable. `mappings`, the crate `jemalloc_pprof` relies on to
+# populate that mapping/build-id table, only supports Linux, so this offline
+# scheme doesn't carry over to macOS -- see the macOS-only `symbolize`
+# override under `target.'cfg(target_os = "macos")'.dependencies` below.
 jemalloc_pprof = { version = "0.8.1", optional = true }
 lsp-types = "0.97.0"
 indexmap = { version = "2.0.2", features = ["serde"] }
@@ -278,6 +281,17 @@ local_control.workspace = true
 block.workspace = true
 cocoa.workspace = true
 core-foundation.workspace = true
+# Re-enables `symbolize` (dropped for every platform in #12265) for macOS
+# only. `jemalloc_pprof`'s offline, build-id-based symbolization (see the
+# base `jemalloc_pprof` entry above) never applies here because `mappings`
+# doesn't populate a mapping table outside Linux, so without `symbolize` a
+# macOS heap profile has no way -- online or offline -- to resolve addresses
+# to symbols. This restores the in-process symbolication (via
+# `backtrace::resolve` against the running process) macOS heap profiles had
+# before #12265. It relies on the running binary being able to resolve its
+# own symbols, which the `release-lto` profile (root `Cargo.toml`) keeps
+# possible by not stripping it.
+jemalloc_pprof = { version = "0.8.1", optional = true, features = ["symbolize"] }
 mach2 = "0.5"
 objc.workspace = true
 objc2.workspace = true

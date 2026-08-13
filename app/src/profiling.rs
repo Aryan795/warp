@@ -88,8 +88,11 @@ pub async fn dump_heap_profile_to_disk() -> anyhow::Result<std::path::PathBuf> {
 /// as a raw (unsymbolized) pprof -- sample addresses + mappings + GNU build-id
 /// -- and is symbolized offline against the debug-info file uploaded to Sentry
 /// by the release process (matched by build-id).  On other platforms it spawns
-/// the bundled `pprof` binary to fetch and symbolicate the heap profile from
-/// the local HTTP server.  Either way, the resulting profile is attached to a
+/// the bundled `pprof` binary to fetch the heap profile from the local HTTP
+/// server; on macOS that server has already resolved addresses to function
+/// names/lines in-process (see the `symbolize` feature on `jemalloc_pprof` in
+/// `app/Cargo.toml`), since offline, build-id-based symbolization isn't
+/// available there.  Either way, the resulting profile is attached to a
 /// Sentry event.
 #[cfg(feature = "heap_usage_tracking")]
 pub async fn dump_jemalloc_heap_profile(memory_breakdown: serde_json::Value) {
@@ -140,14 +143,13 @@ pub async fn dump_jemalloc_heap_profile(memory_breakdown: serde_json::Value) {
 async fn dump_jemalloc_heap_profile_inner() -> anyhow::Result<Vec<u8>> {
     cfg_if::cfg_if! {
         if #[cfg(target_os = "linux")] {
-            // `jemalloc_pprof` only supports Linux. We build it WITHOUT the
-            // `symbolize` feature, so `dump_pprof()` returns a raw, gzipped
-            // pprof (sample addresses + mappings + GNU build-id) that is
-            // symbolized offline against the debug-info file by build-id.  Dump
-            // it directly in-process -- no external `pprof`/Go binary, HTTP
-            // round-trip, or port dependency required (the latter matter for
-            // the headless remote server daemon, which has no bundled helpers
-            // next to it).
+            // On Linux, `jemalloc_pprof` is built WITHOUT the `symbolize`
+            // feature, so `dump_pprof()` returns a raw, gzipped pprof (sample
+            // addresses + mappings + GNU build-id) that is symbolized offline
+            // against the debug-info file by build-id.  Dump it directly
+            // in-process -- no external `pprof`/Go binary, HTTP round-trip, or
+            // port dependency required (the latter matter for the headless
+            // remote server daemon, which has no bundled helpers next to it).
             dump_jemalloc_pprof_bytes().await
         } else {
             use anyhow::Context as _;
@@ -156,7 +158,15 @@ async fn dump_jemalloc_heap_profile_inner() -> anyhow::Result<Vec<u8>> {
             let temp_dir = tempfile::tempdir().context("Failed to create temporary directory")?;
             let profile_path = temp_dir.path().join("heap-profile.pb");
 
-            // Run pprof to fetch and symbolicate the heap profile.
+            // On macOS, `jemalloc_pprof` is built WITH the `symbolize` feature
+            // (see `app/Cargo.toml`), so `handle_get_heap` has already
+            // resolved addresses to function names/lines in-process, via
+            // `backtrace::resolve` against the running binary, before this
+            // ever runs.  `--symbolize=local` is a no-op safety net for
+            // anything left unresolved: unlike on Linux, there is no
+            // mapping/build-id for it to symbolize offline against, since the
+            // `mappings` crate `jemalloc_pprof` depends on only populates that
+            // table on Linux (see `dump_jemalloc_pprof_bytes`).
             let pprof_path = pprof_binary_path()?;
             let output = command::r#async::Command::new(pprof_path)
                 .args(["--proto", "--symbolize=local", "-output"])
@@ -187,7 +197,11 @@ async fn dump_jemalloc_heap_profile_inner() -> anyhow::Result<Vec<u8>> {
 ///
 /// This is the same dump that [`handle_get_heap`] serves over HTTP, but
 /// invoked directly so callers don't need to reach the local HTTP server.
-/// Requires the `jemalloc_pprof` feature, which is Linux-only.
+/// Linux-only: on macOS, `dump_jemalloc_heap_profile_inner` instead fetches
+/// an already-symbolized profile from [`handle_get_heap`] over HTTP, because
+/// the raw dump there carries no mapping/build-id to symbolize offline
+/// against outside Linux (see the macOS-only `symbolize` feature on
+/// `jemalloc_pprof` in `app/Cargo.toml`).
 #[cfg(all(feature = "jemalloc_pprof", target_os = "linux"))]
 async fn dump_jemalloc_pprof_bytes() -> anyhow::Result<Vec<u8>> {
     let Some(prof_ctl) = jemalloc_pprof::PROF_CTL.as_ref() else {
@@ -283,6 +297,10 @@ pub fn make_router() -> axum::Router {
     router
 }
 
+/// Serves the current jemalloc heap profile in pprof format.  On macOS this
+/// is where a profile actually gets symbolized: the `symbolize` feature
+/// enabled for `jemalloc_pprof` there (see `app/Cargo.toml`) makes
+/// `dump_pprof()` resolve addresses to function names/lines in-process.
 #[cfg(feature = "jemalloc_pprof")]
 pub async fn handle_get_heap()
 -> Result<impl axum::response::IntoResponse, (axum::http::StatusCode, String)> {
