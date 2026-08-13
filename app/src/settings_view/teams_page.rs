@@ -125,13 +125,6 @@ const OFFLINE_TEXT: &str = "You are offline.";
 
 const MAX_CHIP_WIDTH: f32 = 280.;
 
-// Copy for the CTA that nudges native-workspace admins toward the web admin
-// panel for org-level team/member management, instead of relying solely on
-// the current-team controls on this page. See REV-2079.
-const WORKSPACE_ADMIN_CTA_LEAD_IN: &str = "These controls apply to your current team.";
-const WORKSPACE_ADMIN_CTA_LINK_TEXT: &str =
-    "Manage all teams and workspace members in the admin panel.";
-
 lazy_static! {
     static ref DOMAIN_NAME_REGEX: Regex =
         Regex::new(r"^([a-zA-Z0-9]+(-[a-zA-Z0-9]+)*\.)+[a-zA-Z0-9]{2,}$")
@@ -1944,9 +1937,11 @@ impl TeamsWidget {
         let sub_text = theme.sub_text_color(theme.background());
         let body = FormattedTextElement::new(
             FormattedText::new([FormattedTextLine::Line(vec![
-                FormattedTextFragment::plain_text(format!("{WORKSPACE_ADMIN_CTA_LEAD_IN} ")),
+                FormattedTextFragment::plain_text(
+                    "To create additional teams and manage workspace members, visit the ",
+                ),
                 FormattedTextFragment::hyperlink_action(
-                    WORKSPACE_ADMIN_CTA_LINK_TEXT,
+                    "admin panel.",
                     TeamsPageAction::OpenWorkspaceAdminTeamsPanel,
                 ),
             ])]),
@@ -1973,6 +1968,7 @@ impl TeamsWidget {
             .finish();
 
         let row = Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_child(Container::new(icon).with_margin_right(8.).finish())
             .with_child(body)
