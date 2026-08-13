@@ -2233,14 +2233,16 @@ pub fn test_emits_after_block_completed_event() {
     ));
 }
 
+// Retaining hidden in-band generator command blocks caused unbounded memory growth in long
+// sessions (issue #12694), so they must not accumulate in the block list.
 #[test]
 fn test_in_band_command_blocks_are_not_retained_when_hidden() {
     let mut block_list =
         new_bootstrapped_block_list(None, None, ChannelEventListener::new_for_test());
-
     assert!(!block_list.show_in_band_command_blocks);
 
     let baseline_block_count = block_list.blocks().len();
+
     for _ in 0..50 {
         block_list.start_active_block_for_in_band_command();
         block_list.preexec(PreexecValue {
@@ -2265,6 +2267,7 @@ fn test_in_band_command_blocks_are_not_retained_when_hidden() {
     );
 }
 
+// In-band command blocks are only retained when the user opts into showing them for debugging.
 #[test]
 fn test_in_band_command_blocks_are_retained_when_shown() {
     let mut block_list =
@@ -2280,6 +2283,7 @@ fn test_in_band_command_blocks_are_retained_when_shown() {
     });
     command_finished_and_precmd(&mut block_list);
 
+    // The baseline already counted an active block, so the retained in-band block adds one.
     assert_eq!(block_list.blocks().len(), baseline_block_count + 1);
     let in_band_blocks: Vec<_> = block_list
         .blocks()
@@ -2290,6 +2294,8 @@ fn test_in_band_command_blocks_are_retained_when_shown() {
     assert!(!in_band_blocks[0].should_hide_block(&TranscriptScope::Terminal));
 }
 
+// Dropping the hidden in-band block shifts the active block's index down by one, so any
+// `BlockMetadataReceived` emitted for the active block must carry its post-removal index.
 #[test]
 fn test_active_block_metadata_index_valid_after_in_band_removal() {
     let (events_tx, events_rx) = async_channel::unbounded();
@@ -2300,6 +2306,7 @@ fn test_active_block_metadata_index_valid_after_in_band_removal() {
             .with_terminal_events_tx(events_tx)
             .build(),
     );
+    // Drain events from bootstrapping.
     while events_rx.try_recv().is_ok() {}
 
     block_list.start_active_block_for_in_band_command();
@@ -2311,6 +2318,7 @@ fn test_active_block_metadata_index_valid_after_in_band_removal() {
 
     let active_block_index = block_list.active_block_index();
     let block_count = block_list.blocks().len();
+
     let mut saw_active_metadata = false;
     while let Ok(event) = events_rx.try_recv() {
         if let Event::BlockMetadataReceived(event) = event {
@@ -2389,6 +2397,12 @@ fn test_background_blocks_finished() {
             block_completed_events.push(event_content);
         }
     }
+    // There's now a completion event for the first user block, one for the
+    // background block, and one for the second user block. Likewise, the block
+    // list now contains the bootstrap blocks, the first user block, the background
+    // block, the second user block, and the active block. The in-band generator block
+    // isn't in the list because hidden in-band blocks are dropped once their completion
+    // event has fired.
     assert_eq!(block_completed_events.len(), 3);
     assert_eq!(block_list.blocks().len(), 7);
 
