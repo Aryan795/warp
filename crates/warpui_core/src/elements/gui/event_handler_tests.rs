@@ -1,12 +1,15 @@
 use std::collections::HashMap;
+use std::ops::Range;
 use std::rc::Rc;
 
+use pathfinder_geometry::rect::RectF;
 use pathfinder_geometry::vector::vec2f;
+use string_offset::ByteOffset;
 
 use super::*;
 use crate::elements::{
     ChildAnchor, ConstrainedBox, OffsetPositioning, ParentAnchor, ParentElement,
-    ParentOffsetBounds, Rect, Stack,
+    ParentOffsetBounds, Rect, SmartSelectFn, Stack,
 };
 use crate::platform::WindowStyle;
 use crate::{
@@ -619,4 +622,145 @@ fn test_event_propagation() {
             assert_eq!(1, *view.mouse_downs.get(&ElementIdentifier::Base).unwrap());
         });
     })
+}
+
+/// A minimal [`SelectableElement`] test double used to verify that wrapper elements
+/// (like [`EventHandler`]) correctly forward selection calls to their child rather
+/// than severing the selection chain (see APP-5361).
+struct SelectionProbe {
+    get_selection_calls: Rc<RefCell<Vec<(Vector2F, Vector2F, IsRect)>>>,
+}
+
+impl Element for SelectionProbe {
+    fn layout(
+        &mut self,
+        constraint: SizeConstraint,
+        _ctx: &mut LayoutContext,
+        _app: &AppContext,
+    ) -> Vector2F {
+        constraint.min
+    }
+
+    fn after_layout(&mut self, _ctx: &mut AfterLayoutContext, _app: &AppContext) {}
+
+    fn paint(&mut self, _origin: Vector2F, _ctx: &mut PaintContext, _app: &AppContext) {}
+
+    fn size(&self) -> Option<Vector2F> {
+        Some(Vector2F::zero())
+    }
+
+    fn origin(&self) -> Option<Point> {
+        None
+    }
+
+    fn dispatch_event(
+        &mut self,
+        _event: &DispatchedEvent,
+        _ctx: &mut EventContext,
+        _app: &AppContext,
+    ) -> bool {
+        false
+    }
+
+    fn as_selectable_element(&self) -> Option<&dyn SelectableElement> {
+        Some(self)
+    }
+}
+
+impl SelectableElement for SelectionProbe {
+    fn get_selection(
+        &self,
+        selection_start: Vector2F,
+        selection_end: Vector2F,
+        is_rect: IsRect,
+    ) -> Option<Vec<SelectionFragment>> {
+        self.get_selection_calls
+            .borrow_mut()
+            .push((selection_start, selection_end, is_rect));
+        Some(vec![SelectionFragment {
+            text: "selected".to_string(),
+            origin: Point::new(0., 0., ZIndex::new(0)),
+        }])
+    }
+
+    fn expand_selection(
+        &self,
+        point: Vector2F,
+        _direction: SelectionDirection,
+        _unit: SelectionType,
+        _word_boundaries_policy: &WordBoundariesPolicy,
+    ) -> Option<Vector2F> {
+        Some(point)
+    }
+
+    fn is_point_semantically_before(
+        &self,
+        absolute_point: Vector2F,
+        absolute_point_other: Vector2F,
+    ) -> Option<bool> {
+        Some(absolute_point.x() < absolute_point_other.x())
+    }
+
+    fn smart_select(
+        &self,
+        absolute_point: Vector2F,
+        _smart_select_fn: SmartSelectFn,
+    ) -> Option<(Vector2F, Vector2F)> {
+        Some((absolute_point, absolute_point))
+    }
+
+    fn calculate_clickable_bounds(&self, _current_selection: Option<Selection>) -> Vec<RectF> {
+        vec![RectF::new(Vector2F::zero(), vec2f(10., 10.))]
+    }
+}
+
+fn noop_smart_select(_text: &str, _click_offset: ByteOffset) -> Option<Range<ByteOffset>> {
+    None
+}
+
+/// Regression test for APP-5361: `EventHandler` must forward `as_selectable_element`
+/// (and every `SelectableElement` method) to its child so that a `SelectableArea`
+/// higher up the tree can still select through it, instead of the selection chain
+/// silently breaking at the `EventHandler` boundary.
+#[test]
+fn test_event_handler_forwards_selection_to_child() {
+    let get_selection_calls = Rc::new(RefCell::new(Vec::new()));
+    let probe = SelectionProbe {
+        get_selection_calls: get_selection_calls.clone(),
+    };
+    let event_handler = EventHandler::new(Box::new(probe));
+
+    let selectable = event_handler
+        .as_selectable_element()
+        .expect("EventHandler should forward as_selectable_element to a selectable child");
+
+    let start = vec2f(1., 2.);
+    let end = vec2f(3., 4.);
+    let fragments = selectable
+        .get_selection(start, end, IsRect::False)
+        .expect("get_selection should be forwarded to the child");
+    assert_eq!(fragments[0].text, "selected");
+    assert_eq!(
+        get_selection_calls.borrow().as_slice(),
+        &[(start, end, IsRect::False)]
+    );
+
+    assert_eq!(
+        selectable.expand_selection(
+            start,
+            SelectionDirection::Forward,
+            SelectionType::Semantic,
+            &WordBoundariesPolicy::Default,
+        ),
+        Some(start)
+    );
+    assert_eq!(
+        selectable.is_point_semantically_before(start, end),
+        Some(true)
+    );
+    assert_eq!(
+        selectable.smart_select(start, noop_smart_select),
+        Some((start, start))
+    );
+    assert_eq!(selectable.calculate_clickable_bounds(None).len(), 1);
 }
