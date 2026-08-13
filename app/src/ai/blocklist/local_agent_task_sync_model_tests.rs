@@ -12,9 +12,13 @@ use super::{
     map_conversation_status,
 };
 use crate::ai::agent::conversation::{AIConversation, AIConversationId, ConversationStatus};
+use crate::ai::agent::task::TaskId;
 use crate::ai::agent::{
-    AIAgentExchange, AIAgentExchangeId, AIAgentOutputStatus, FinishedAIAgentOutput,
-    RenderableAIError, TransientNetworkErrorKind,
+    AIAgentActionId, AIAgentActionResult, AIAgentActionResultType, AIAgentExchange,
+    AIAgentExchangeId, AIAgentInput, AIAgentOutput, AIAgentOutputMessage, AIAgentOutputStatus,
+    AIAgentText, AIAgentTextSection, FinishedAIAgentOutput, MessageId, RenderableAIError,
+    RunAgentsAgentOutcome, RunAgentsAgentOutcomeKind, RunAgentsLaunchedExecutionMode,
+    RunAgentsResult, Shared, TransientNetworkErrorKind,
 };
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::llms::LLMId;
@@ -245,6 +249,186 @@ fn transient_error_status_maps_to_in_progress_with_no_message() {
     assert_update(
         map_conversation_status(&conversation),
         AgentTaskState::InProgress,
+        None,
+        None,
+    );
+}
+
+// --- map_conversation_status (Success path / REMOTE-2745) ---
+
+/// Builds a root exchange whose `input` carries the given `AIAgentActionResultType`
+/// as an `ActionResult`, and whose output is finished with `output`. Mirrors the
+/// exchange the client creates for the follow-up turn that relays a tool result
+/// back to the model (see `AIConversation::update_for_new_request_input`).
+fn action_result_exchange(
+    result: AIAgentActionResultType,
+    output: Option<AIAgentOutput>,
+) -> AIAgentExchange {
+    let output_status = match output {
+        Some(output) => AIAgentOutputStatus::Finished {
+            finished_output: FinishedAIAgentOutput::Success {
+                output: Shared::new(output),
+            },
+        },
+        None => AIAgentOutputStatus::Finished {
+            finished_output: FinishedAIAgentOutput::Cancelled {
+                output: None,
+                reason: crate::ai::agent::CancellationReason::ManuallyCancelled,
+            },
+        },
+    };
+    AIAgentExchange {
+        id: AIAgentExchangeId::new(),
+        input: vec![AIAgentInput::ActionResult {
+            result: AIAgentActionResult {
+                id: AIAgentActionId::from("action-1".to_string()),
+                task_id: TaskId::new("task-1".to_string()),
+                result,
+            },
+            context: Arc::from(Vec::new()),
+        }],
+        output_status,
+        added_message_ids: Default::default(),
+        start_time: chrono::Local::now(),
+        finish_time: None,
+        time_to_first_token_ms: None,
+        working_directory: None,
+        model_id: LLMId::from("test-model"),
+        request_cost: None,
+        coding_model_id: LLMId::from("test-model"),
+        cli_agent_model_id: LLMId::from("test-model"),
+        computer_use_model_id: LLMId::from("test-model"),
+        response_initiator: None,
+    }
+}
+
+/// A minimal non-empty `AIAgentOutput` carrying a single plain-text message.
+fn text_output(text: &str) -> AIAgentOutput {
+    AIAgentOutput {
+        messages: vec![AIAgentOutputMessage::text(
+            MessageId::new("msg-1".to_string()),
+            AIAgentText {
+                sections: vec![AIAgentTextSection::PlainText {
+                    text: text.to_string().into(),
+                }],
+            },
+        )],
+        ..Default::default()
+    }
+}
+
+/// REMOTE-2745: a `run_agents` validation failure relayed back to the model, with
+/// no follow-up response at all (the swallowed-error signature), must downgrade
+/// SUCCEEDED to FAILED rather than trusting the "no actions => success" heuristic.
+#[test]
+fn map_conversation_status_success_downgrades_unresolved_run_agents_failure_to_failed() {
+    let mut conversation = AIConversation::new(false, false);
+    conversation.append_root_exchange_for_test(action_result_exchange(
+        AIAgentActionResultType::RunAgents(RunAgentsResult::Failure {
+            error: "agent_run_configs[0].agent_identity_uid requires remote execution".into(),
+        }),
+        Some(AIAgentOutput::default()),
+    ));
+    conversation.set_status_for_test(ConversationStatus::Success);
+    assert_update(
+        map_conversation_status(&conversation),
+        AgentTaskState::Failed,
+        Some(PlatformErrorCode::InvalidRequest),
+        Some("agent_identity_uid requires remote execution"),
+    );
+}
+
+/// The same swallowed-error signature when every launched child agent failed
+/// (rather than a hard `Failure`) must also downgrade to FAILED.
+#[test]
+fn map_conversation_status_success_downgrades_all_children_failed_to_failed() {
+    let mut conversation = AIConversation::new(false, false);
+    conversation.append_root_exchange_for_test(action_result_exchange(
+        AIAgentActionResultType::RunAgents(RunAgentsResult::Launched {
+            model_id: "claude".into(),
+            harness_type: "oz".into(),
+            execution_mode: RunAgentsLaunchedExecutionMode::Local,
+            agents: vec![RunAgentsAgentOutcome {
+                name: "child-a".into(),
+                kind: RunAgentsAgentOutcomeKind::Failed {
+                    error: "spawn failed".into(),
+                },
+                resolved_model_id: String::new(),
+            }],
+        }),
+        Some(AIAgentOutput::default()),
+    ));
+    conversation.set_status_for_test(ConversationStatus::Success);
+    assert_update(
+        map_conversation_status(&conversation),
+        AgentTaskState::Failed,
+        Some(PlatformErrorCode::InvalidRequest),
+        Some("0/1 agents started"),
+    );
+}
+
+/// When the model produces a real response after the failed `run_agents` result
+/// (even just text, with no further actions), the completion is legitimate and
+/// must stay SUCCEEDED.
+#[test]
+fn map_conversation_status_success_trusts_real_response_after_run_agents_failure() {
+    let mut conversation = AIConversation::new(false, false);
+    conversation.append_root_exchange_for_test(action_result_exchange(
+        AIAgentActionResultType::RunAgents(RunAgentsResult::Failure {
+            error: "boom".into(),
+        }),
+        Some(text_output("The orchestration failed, so I stopped here.")),
+    ));
+    conversation.set_status_for_test(ConversationStatus::Success);
+    assert_update(
+        map_conversation_status(&conversation),
+        AgentTaskState::Succeeded,
+        None,
+        None,
+    );
+}
+
+/// A successful `run_agents` launch must never trigger the downgrade, regardless
+/// of whether the follow-up response was empty.
+#[test]
+fn map_conversation_status_success_ignores_successful_run_agents_launch() {
+    let mut conversation = AIConversation::new(false, false);
+    conversation.append_root_exchange_for_test(action_result_exchange(
+        AIAgentActionResultType::RunAgents(RunAgentsResult::Launched {
+            model_id: "claude".into(),
+            harness_type: "oz".into(),
+            execution_mode: RunAgentsLaunchedExecutionMode::Local,
+            agents: vec![RunAgentsAgentOutcome {
+                name: "child-a".into(),
+                kind: RunAgentsAgentOutcomeKind::Launched {
+                    agent_id: "agent-1".into(),
+                },
+                resolved_model_id: String::new(),
+            }],
+        }),
+        Some(AIAgentOutput::default()),
+    ));
+    conversation.set_status_for_test(ConversationStatus::Success);
+    assert_update(
+        map_conversation_status(&conversation),
+        AgentTaskState::Succeeded,
+        None,
+        None,
+    );
+}
+
+/// A plain Success status with no `run_agents` result in the last exchange must
+/// be unaffected by the downgrade logic.
+#[test]
+fn map_conversation_status_success_without_run_agents_result_stays_succeeded() {
+    let conversation = AIConversation::new(false, false);
+    assert_update(
+        map_conversation_status(&{
+            let mut conversation = conversation;
+            conversation.set_status_for_test(ConversationStatus::Success);
+            conversation
+        }),
+        AgentTaskState::Succeeded,
         None,
         None,
     );

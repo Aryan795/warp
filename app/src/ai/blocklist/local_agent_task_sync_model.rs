@@ -12,7 +12,10 @@ use super::history_model::{
     BlocklistAIHistoryEvent, BlocklistAIHistoryModel, ConversationStatusUpdate,
 };
 use crate::ai::agent::conversation::{AIConversation, AIConversationId, ConversationStatus};
-use crate::ai::agent::{AIAgentOutputStatus, FinishedAIAgentOutput, RenderableAIError};
+use crate::ai::agent::{
+    AIAgentActionResultType, AIAgentInput, AIAgentOutputStatus, FinishedAIAgentOutput,
+    RenderableAIError,
+};
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::server::server_api::ServerApiProvider;
 use crate::server::server_api::ai::{AIClient, TaskStatusUpdate};
@@ -391,7 +394,15 @@ fn map_conversation_status(
         // Report WaitingForEvents as IN_PROGRESS so the server task state
         // matches the local view.
         ConversationStatus::WaitingForEvents => (AgentTaskState::InProgress, None),
-        ConversationStatus::Success => (AgentTaskState::Succeeded, None),
+        // REMOTE-2745: a hard early `run_agents` orchestration failure can
+        // leave the conversation with nothing left to do — the "no actions
+        // => success" heuristic in `AIConversation::mark_request_completed`
+        // then reports Success even though the failure was never resolved by
+        // a real follow-up turn (e.g. `finish_task`). Downgrade that specific
+        // case to FAILED instead of trusting the conversation-level status
+        // blindly.
+        ConversationStatus::Success => unresolved_run_agents_failure_status(conversation)
+            .unwrap_or((AgentTaskState::Succeeded, None)),
         // Recovery pending: stay IN_PROGRESS, no message — `update_agent_task`
         // can't clear it later, so a "reconnecting" note would linger after resume.
         ConversationStatus::TransientError => (AgentTaskState::InProgress, None),
@@ -426,6 +437,74 @@ fn map_conversation_status(
                 "The agent got stuck waiting for user confirmation on the action: {blocked_action}"
             ))),
         ),
+    }
+}
+
+/// Detects the client-side signature of REMOTE-2745: a `run_agents` tool call
+/// failed (server-side validation rejection, launch failure, or every child
+/// agent failing) and its `RunAgentsResult` was relayed back to the model as
+/// a tool result, but the follow-up turn produced no output at all — no text
+/// and no further actions. `AIConversation::mark_request_completed` treats
+/// "no actions" as a successful completion, so this case would otherwise be
+/// reported as SUCCEEDED even though `finish_task` never ran and nothing
+/// ever addressed the failure.
+///
+/// Returns `None` when the last root exchange shows real forward progress
+/// after the failed result (any text or further action) — that is a
+/// legitimate completion, whether or not the agent chose to stop after
+/// acknowledging the failure.
+fn unresolved_run_agents_failure_status(
+    conversation: &AIConversation,
+) -> Option<(AgentTaskState, Option<TaskStatusUpdate>)> {
+    let last_exchange = conversation.root_task_exchanges().last()?;
+
+    let run_agents_result = last_exchange.input.iter().find_map(|input| {
+        let AIAgentInput::ActionResult { result, .. } = input else {
+            return None;
+        };
+        let AIAgentActionResultType::RunAgents(run_agents_result) = &result.result else {
+            return None;
+        };
+        result.result.is_failed().then_some(run_agents_result)
+    })?;
+
+    if !exchange_output_is_empty(&last_exchange.output_status) {
+        // The model produced real output after the failure (text and/or
+        // further actions) — trust that as a legitimate completion rather
+        // than second-guessing the model's judgment call.
+        return None;
+    }
+
+    Some((
+        AgentTaskState::Failed,
+        Some(TaskStatusUpdate::with_error_code(
+            format!("Agent stopped after an unresolved orchestration failure: {run_agents_result}"),
+            PlatformErrorCode::InvalidRequest,
+        )),
+    ))
+}
+
+/// Returns `true` when a finished exchange's output carries no text and no
+/// actions — the signature of a swallowed/no-op turn rather than a real (if
+/// unhappy) response from the model. Non-finished and errored exchanges are
+/// conservatively treated as non-empty so this never fires on a status other
+/// than the `Success` it was written for.
+fn exchange_output_is_empty(output_status: &AIAgentOutputStatus) -> bool {
+    let output = match output_status {
+        AIAgentOutputStatus::Finished {
+            finished_output: FinishedAIAgentOutput::Success { output },
+        } => Some(output),
+        AIAgentOutputStatus::Finished {
+            finished_output: FinishedAIAgentOutput::Cancelled { output, .. },
+        } => output.as_ref(),
+        _ => None,
+    };
+    match output {
+        Some(output) => {
+            let output = output.get();
+            output.all_text().next().is_none() && output.actions().next().is_none()
+        }
+        None => false,
     }
 }
 
