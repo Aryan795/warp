@@ -15,12 +15,14 @@ use warp::tui_export::{
     AIAgentOutputMessageType, AIAgentText, AIAgentTextSection, AIAgentTodo, AIAgentTodoList,
     AIBlockModel, AIBlockOutputStatus, AIConversationId, AIRequestType, ActiveSession,
     AgentOutputImage, AgentOutputImageLayout, AgentOutputMermaidDiagram, AgentOutputTable,
-    Appearance, AuthStateProvider, BlocklistAIActionModel, FailedOutputPresentation,
-    GetRelevantFilesController, LLMId, MessageId, ModelEventDispatcher, OutputStatusUpdateCallback,
-    ReceivedMessageDisplay, RenderableAIError, RequestCommandOutputResult, ServerOutputId,
-    Sessions, Shared, SummarizationType, TaskId, TerminalModel, TodoOperation, TodoStatus,
-    TuiOnboardingMarker, TuiOnboardingMarkers, UserQueryMode, queue_tui_permission_action,
-    register_tui_session_view_test_singletons, should_show_failed_output_usage_notice,
+    Appearance, AuthStateProvider, BlocklistAIActionModel, CancellationReason,
+    FailedOutputPresentation, GetRelevantFilesController, LLMId, MessageId, ModelEventDispatcher,
+    OutputStatusUpdateCallback, ReceivedMessageDisplay, RenderableAIError,
+    RequestCommandOutputResult, RunAgentsAgentRunConfig, RunAgentsExecutionMode, RunAgentsRequest,
+    ServerOutputId, Sessions, Shared, SummarizationType, TaskId, TerminalModel, TodoOperation,
+    TodoStatus, TuiOnboardingMarker, TuiOnboardingMarkers, UserQueryMode,
+    queue_tui_permission_action, register_tui_session_view_test_singletons,
+    should_show_failed_output_usage_notice,
 };
 use warp_core::ui::color::blend::Blend;
 use warp_core::ui::theme::Fill as ThemeFill;
@@ -34,7 +36,9 @@ use warpui_core::elements::tui::{
 use warpui_core::elements::{Fill as CoreFill, MouseStateHandle};
 use warpui_core::event::ModifiersState;
 use warpui_core::presenter::tui::TuiPresenter;
-use warpui_core::{App, AppContext, EntityId, EntityIdMap, TuiView, ViewContext, ViewHandle};
+use warpui_core::{
+    App, AppContext, EntityId, EntityIdMap, TuiView, ViewContext, ViewHandle, WindowInvalidation,
+};
 
 use super::{
     CollapsibleSectionStates, TuiAIBlock, TuiAIBlockAction, TuiAIBlockEvent, TuiAIBlockSection,
@@ -94,6 +98,33 @@ fn agent_block_renders_generic_failure_after_partial_output() {
             .into();
             assert_eq!(frame.buffer[(0, failure_row as u16)].fg, red);
         });
+    });
+}
+
+/// End-to-end repro of the orphaned-by-finished-output nudge: a
+/// `run_agents` tool call whose arguments were still streaming when the
+/// conversation was cancelled never reaches the action queue, so it must
+/// leave the "Configuring agents…" placeholder for a terminal cancelled
+/// state once the block observes the exchange resolve as cancelled.
+#[test]
+fn cancelled_run_agents_call_leaves_the_placeholder_for_a_cancelled_state() {
+    App::test((), |mut app| async move {
+        let action = run_agents_action("run-agents-1");
+        let block = test_agent_block_with_run_agents_singletons(
+            &mut app,
+            FakeAgentBlockModel {
+                inputs: vec![query_input("start some agents")],
+                status: cancelled_output_messages(vec![action_message("action-1", action)]),
+            },
+        );
+
+        let lines = render_block_lines_with_child_views(&mut app, &block, 80, 12);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Spawn agents cancelled")),
+            "expected the cancelled state, not the streaming placeholder: {lines:?}"
+        );
     });
 }
 
@@ -2525,6 +2556,75 @@ fn failed_output(
         error,
     }
 }
+
+/// Builds a cancelled output status from explicit output messages.
+fn cancelled_output_messages(messages: Vec<AIAgentOutputMessage>) -> AIBlockOutputStatus {
+    AIBlockOutputStatus::Cancelled {
+        partial_output: Some(Shared::new(AIAgentOutput {
+            messages,
+            ..Default::default()
+        })),
+        reason: CancellationReason::ManuallyCancelled,
+    }
+}
+
+/// Builds a `RunAgents` tool-call action for cancellation tests.
+fn run_agents_action(id: &str) -> AIAgentAction {
+    AIAgentAction {
+        id: AIAgentActionId::from(id.to_owned()),
+        task_id: TaskId::new("task-1".to_owned()),
+        action: AIAgentActionType::RunAgents(RunAgentsRequest {
+            summary: "Parallelize the task.".to_owned(),
+            base_prompt: "base".to_owned(),
+            skills: Vec::new(),
+            model_id: "auto".to_owned(),
+            harness_type: "oz".to_owned(),
+            execution_mode: RunAgentsExecutionMode::Local,
+            agent_run_configs: vec![RunAgentsAgentRunConfig {
+                name: "researcher".to_owned(),
+                prompt: "research".to_owned(),
+                title: "Researcher".to_owned(),
+                agent_identity_uid: String::new(),
+                model_id: String::new(),
+            }],
+            plan_id: String::new(),
+            harness_auth_secret_name: None,
+        }),
+        requires_result: true,
+    }
+}
+
+/// Builds an agent block with the full session-view singleton set (needed by
+/// the orchestration card's harness/model catalog subscriptions) and a real
+/// action model, so a `run_agents` tool call renders its interactive card.
+fn test_agent_block_with_run_agents_singletons(
+    app: &mut App,
+    model: FakeAgentBlockModel,
+) -> ViewHandle<TuiAIBlock> {
+    register_tui_session_view_test_singletons(app);
+    let (action_model, model_events) = add_test_action_model_and_events(app);
+    let terminal_model = Arc::new(FairMutex::new(TerminalModel::mock(None, None)));
+    app.update(|ctx| {
+        let (window_id, _) = ctx.add_tui_window(
+            AddWindowOptions {
+                window_style: WindowStyle::NotStealFocus,
+                ..Default::default()
+            },
+            |_| TestHostView,
+        );
+        ctx.add_typed_action_tui_view(window_id, move |ctx| {
+            TuiAIBlock::new(
+                (AIConversationId::new(), AIAgentExchangeId::new()),
+                Rc::new(model),
+                action_model,
+                &model_events,
+                terminal_model,
+                false,
+                ctx,
+            )
+        })
+    })
+}
 /// Builds a text output message from plain-text sections.
 fn text_message(id: &str, sections: Vec<AIAgentTextSection>) -> AIAgentOutputMessage {
     AIAgentOutputMessage {
@@ -2742,6 +2842,35 @@ fn desired_height(block: &TuiAIBlock, width: u16, app: &AppContext) -> usize {
             )
             .height,
     )
+}
+
+/// Renders `block` at `width`x`height` through the presenter's view-registry
+/// path, resolving any registered child views (e.g. a `run_agents` action's
+/// orchestration card) instead of leaving them blank. Use this over
+/// `render_block_lines` whenever the exchange includes a stateful tool call.
+fn render_block_lines_with_child_views(
+    app: &mut App,
+    block: &ViewHandle<TuiAIBlock>,
+    width: u16,
+    height: u16,
+) -> Vec<String> {
+    let mut presenter = TuiPresenter::new();
+    let frame = app.update(|ctx| {
+        let mut invalidation = WindowInvalidation::default();
+        invalidation.updated.insert(block.id());
+        invalidation
+            .updated
+            .extend(block.as_ref(ctx).child_view_ids(ctx));
+        presenter.invalidate(&invalidation, ctx, block.window_id(ctx));
+        presenter.present(ctx, block, TuiRect::new(0, 0, width, height))
+    });
+    frame
+        .buffer
+        .to_lines()
+        .into_iter()
+        .map(|line| line.trim_end().to_owned())
+        .filter(|line| !line.is_empty())
+        .collect()
 }
 
 /// Renders the block at `width` and returns its non-empty rows, trimmed of
