@@ -67,9 +67,63 @@ fn test_fixed_width_tab_size_matches_spaces_width() -> Result<()> {
     Ok(())
 }
 
+/// Wide enough that a long line is never wrapped, which keeps it in a single run of glyphs - the
+/// shape whose per-character allocations grew without bound in APP-5360.
+const UNWRAPPED_WIDTH: f32 = 10_000_000.;
+
+/// A character count comfortably under [`MAX_LAYOUT_CHARS`]. Also stays under the point at which
+/// the winit backend's shaper gives up on a single line, so this is a size both backends really
+/// lay out.
+const UNCAPPED_CHAR_COUNT: usize = 16_000;
+
+fn layout_test_line_style() -> LineStyle {
+    LineStyle {
+        font_size: FONT_SIZE,
+        line_height_ratio: DEFAULT_UI_LINE_HEIGHT_RATIO,
+        baseline_ratio: DEFAULT_TOP_BOTTOM_RATIO,
+        fixed_width_tab_size: None,
+    }
+}
+
+fn glyph_count(line: &Line) -> usize {
+    line.runs.iter().map(|run| run.glyphs.len()).sum()
+}
+
+/// A line long enough to be worth guarding but under the cap must be laid out in full. This is the
+/// guard against the cap silently eating merely-large lines. See APP-5360.
+#[test]
+fn test_line_under_cap_is_laid_out_in_full() -> Result<()> {
+    let (font_db, font_family) = init_fonts();
+    let font_cache = FontCache::new(Box::new(font_db));
+    let text_layout_system = font_cache.text_layout_system();
+    let layout_cache = LayoutCache::new();
+
+    let text = "a".repeat(UNCAPPED_CHAR_COUNT);
+    let line = layout_cache.layout_line(
+        &text,
+        layout_test_line_style(),
+        &[(
+            0..UNCAPPED_CHAR_COUNT,
+            StyleAndFont::new(font_family, Properties::default(), TextStyle::new()),
+        )],
+        UNWRAPPED_WIDTH,
+        ClipConfig::default(),
+        &text_layout_system,
+    );
+
+    assert_eq!(line.caret_positions.len(), UNCAPPED_CHAR_COUNT);
+    assert_eq!(glyph_count(&line), UNCAPPED_CHAR_COUNT);
+    Ok(())
+}
+
 /// Laying out a line allocates per-character state (caret positions, glyphs) that nothing else
 /// bounds, so a single degenerate line - a minified bundle, a base64 blob - used to allocate
 /// without limit. See APP-5360.
+///
+/// Note that this only really bites on Core Text. The winit backend's shaper independently gives
+/// up somewhere above 32,000 characters and returns no glyphs at all, so on that platform these
+/// assertions hold whether or not the cap is applied; `test_line_under_cap_is_laid_out_in_full`
+/// and the `truncate_text_for_layout` unit tests carry the cross-platform weight.
 #[test]
 fn test_degenerate_line_layout_is_capped() -> Result<()> {
     let (font_db, font_family) = init_fonts();
@@ -79,54 +133,65 @@ fn test_degenerate_line_layout_is_capped() -> Result<()> {
 
     let char_count = MAX_LAYOUT_CHARS + 1_000;
     let text = "a".repeat(char_count);
-    let line_style = LineStyle {
-        font_size: FONT_SIZE,
-        line_height_ratio: DEFAULT_UI_LINE_HEIGHT_RATIO,
-        baseline_ratio: DEFAULT_TOP_BOTTOM_RATIO,
-        fixed_width_tab_size: None,
-    };
+    let line_style = layout_test_line_style();
     let style_runs = [(
         0..char_count,
         StyleAndFont::new(font_family, Properties::default(), TextStyle::new()),
     )];
-    // Wide enough that the text is not wrapped, which keeps the whole line in a single run of
-    // glyphs - the shape that grew without bound.
-    let max_width = 10_000_000.;
 
     let line = layout_cache.layout_line(
         &text,
         line_style,
         &style_runs,
-        max_width,
+        UNWRAPPED_WIDTH,
         ClipConfig::default(),
         &text_layout_system,
     );
-    assert!(line.caret_positions.len() <= MAX_LAYOUT_CHARS);
-    assert!(glyph_count(&line) <= MAX_LAYOUT_CHARS);
+    assert_line_within_cap(&line);
 
     let frame = layout_cache.layout_text(
         &text,
         line_style,
         &style_runs,
-        max_width,
+        UNWRAPPED_WIDTH,
         FRAME_HEIGHT,
         TextAlignment::Left,
         None,
         &text_layout_system,
     );
-    let frame_caret_positions: usize = frame
+    for line in frame.lines() {
+        assert_line_within_cap(line);
+    }
+    let frame_caret_count: usize = frame
         .lines()
         .iter()
         .map(|line| line.caret_positions.len())
         .sum();
-    assert!(frame_caret_positions <= MAX_LAYOUT_CHARS);
+    assert!(frame_caret_count <= MAX_LAYOUT_CHARS);
     assert!(frame.lines().iter().map(glyph_count).sum::<usize>() <= MAX_LAYOUT_CHARS);
 
     Ok(())
 }
 
-fn glyph_count(line: &Line) -> usize {
-    line.runs.iter().map(|run| run.glyphs.len()).sum()
+/// Asserts that nothing the backend produced for `line` refers to a character at or past the cap,
+/// which is the property truncating the input buys us.
+fn assert_line_within_cap(line: &Line) {
+    assert!(line.caret_positions.len() <= MAX_LAYOUT_CHARS);
+    assert!(glyph_count(line) <= MAX_LAYOUT_CHARS);
+    for caret in &line.caret_positions {
+        assert!(
+            caret.last_offset < MAX_LAYOUT_CHARS,
+            "caret refers to character {} past the cap",
+            caret.last_offset
+        );
+    }
+    for glyph in line.runs.iter().flat_map(|run| run.glyphs.iter()) {
+        assert!(
+            glyph.index < MAX_LAYOUT_CHARS,
+            "glyph refers to character {} past the cap",
+            glyph.index
+        );
+    }
 }
 
 /// Read the bundled Roboto font's bytes from the filesystem.
