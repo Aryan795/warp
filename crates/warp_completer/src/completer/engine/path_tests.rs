@@ -26,6 +26,7 @@ fn test_split_path() {
         path.to_path(),
         "~/Warp.app",
         Some("/Users/warpuser"),
+        None,
         &['/'],
     );
 
@@ -42,6 +43,7 @@ fn test_split_path() {
         path.to_path(),
         "Warp.app/Contents",
         Some("/Users/warpuser"),
+        None,
         &['/'],
     );
     assert_eq!(
@@ -57,6 +59,7 @@ fn test_split_path() {
         path.to_path(),
         "Warp.app/macOS/bin/warp.o",
         Some("/Users/warpuser"),
+        None,
         &['/'],
     );
     assert_eq!(
@@ -478,6 +481,68 @@ pub fn test_path_completions_home_env_var_special_characters() {
             .with_file_type(EngineFileType::Directory),
         ]
     );
+}
+
+/// Check that a `$VAR` prefix referencing a known environment variable expands to that
+/// variable's value when generating filesystem completions.
+#[cfg(unix)]
+#[test]
+pub fn test_path_completions_expands_generic_env_var() {
+    let ctx = MockPathCompletionContext::new(TypedPathBuf::from("/work/proj"))
+        .with_entries_in_pwd([dir_entry("local-only")])
+        .with_entries(TypedPathBuf::from("/System"), [dir_entry("Applications")])
+        .with_environment_variable("s", "/System");
+
+    let displays: Vec<String> = warpui_core::r#async::block_on(sorted_directories_relative_to(
+        &ParsedToken::new("$s/App"),
+        MatchStrategy::CaseInsensitive,
+        &ctx,
+    ))
+    .into_iter()
+    .map(|m| m.suggestion.display.to_string())
+    .collect();
+    assert_eq!(displays, vec!["Applications/"]);
+}
+
+/// Check that a braced `${VAR}` prefix referencing a known environment variable expands the
+/// same way an unbraced `$VAR` prefix does.
+#[cfg(unix)]
+#[test]
+pub fn test_path_completions_expands_braced_env_var() {
+    let ctx = MockPathCompletionContext::new(TypedPathBuf::from("/work/proj"))
+        .with_entries_in_pwd([dir_entry("local-only")])
+        .with_entries(TypedPathBuf::from("/System"), [dir_entry("Applications")])
+        .with_environment_variable("s", "/System");
+
+    let displays: Vec<String> = warpui_core::r#async::block_on(sorted_directories_relative_to(
+        &ParsedToken::new("${s}/App"),
+        MatchStrategy::CaseInsensitive,
+        &ctx,
+    ))
+    .into_iter()
+    .map(|m| m.suggestion.display.to_string())
+    .collect();
+    assert_eq!(displays, vec!["Applications/"]);
+}
+
+/// A `$VAR` prefix referencing a variable whose value Warp does not know should be treated as
+/// a literal, cwd-relative path segment rather than being dropped or causing a crash.
+#[cfg(unix)]
+#[test]
+pub fn test_path_completions_unknown_env_var_falls_back_to_literal_path() {
+    let ctx = MockPathCompletionContext::new(TypedPathBuf::from("/work/proj"))
+        .with_entries_in_pwd([dir_entry("local-only")])
+        .with_environment_variable("s", "/System");
+
+    let displays: Vec<String> = warpui_core::r#async::block_on(sorted_directories_relative_to(
+        &ParsedToken::new("$unknown/App"),
+        MatchStrategy::CaseInsensitive,
+        &ctx,
+    ))
+    .into_iter()
+    .map(|m| m.suggestion.display.to_string())
+    .collect();
+    assert!(displays.is_empty());
 }
 
 #[cfg(unix)]

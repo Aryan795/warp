@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::fs::DirEntry;
 use std::sync::Arc;
@@ -244,6 +244,10 @@ impl<'a> PathCompletionContext for CdpathOverrideContext<'a> {
         None
     }
 
+    fn environment_variables(&self) -> Option<&HashMap<String, String>> {
+        self.inner.environment_variables()
+    }
+
     fn shell_family(&self) -> ShellFamily {
         self.inner.shell_family()
     }
@@ -293,6 +297,7 @@ async fn list_directory_contents(
         ctx.pwd(),
         relative_to.as_str(),
         home_dir,
+        ctx.environment_variables(),
         path_separators.all,
     );
 
@@ -387,14 +392,17 @@ impl SplitPath {
     /// `current_directory` is the directory to which `relative_path` is relative.
     /// `relative_path` may contain '~' or '$HOME'. If `relative_path` begins with one of those
     /// strings, we expand that part of the path to the given `home_directory` value, if it is
-    /// `Some()`. Note that `relative_path` comes directly from a user-specified path token. This
-    /// may contain escaped tildes (for example if the user is completing on a path that contains
-    /// literal tildes), which need to be unescaped before using the path to generate path
-    /// suggestions.
+    /// `Some()`. Otherwise, if `relative_path` begins with a `$VAR` or `${VAR}` reference to a
+    /// variable present in `environment_variables`, that part of the path is expanded to the
+    /// variable's value. Note that `relative_path` comes directly from a user-specified path
+    /// token. This may contain escaped tildes (for example if the user is completing on a path
+    /// that contains literal tildes), which need to be unescaped before using the path to
+    /// generate path suggestions.
     fn new(
         current_directory: TypedPath,
         relative_path: &str,
         home_directory: Option<&str>,
+        environment_variables: Option<&HashMap<String, String>>,
         path_separators: &[char],
     ) -> Self {
         let (directory_relative_path_name, file_name) = match relative_path.rfind(path_separators) {
@@ -412,6 +420,18 @@ impl SplitPath {
             let mut home_directory = TypedPathBuf::from(home_directory.unwrap_or_default());
             home_directory.push(rest.replace(r"\~", "~"));
             home_directory
+        } else if let Some((value, rest)) =
+            environment_variables.and_then(|environment_variables| {
+                strip_env_var_prefix(
+                    directory_relative_path_name,
+                    environment_variables,
+                    path_separators,
+                )
+            })
+        {
+            let mut expanded_directory = TypedPathBuf::from(value.as_str());
+            expanded_directory.push(rest.replace(r"\~", "~"));
+            expanded_directory
         } else {
             current_directory.join(directory_relative_path_name.replace(r"\~", "~"))
         };
@@ -425,6 +445,21 @@ impl SplitPath {
             file_name,
         }
     }
+}
+
+/// If `path` begins with a `$VAR` or `${VAR}` reference to a variable present in `env_vars`
+/// (immediately followed by a path separator), returns the variable's value along with the
+/// remainder of `path` following the separator.
+fn strip_env_var_prefix<'a>(
+    path: &'a str,
+    env_vars: &HashMap<String, String>,
+    path_separators: &[char],
+) -> Option<(String, &'a str)> {
+    iproduct!(env_vars.iter(), path_separators).find_map(|((name, value), sep)| {
+        path.strip_prefix(&format!("${name}{sep}"))
+            .or_else(|| path.strip_prefix(&format!("${{{name}}}{sep}")))
+            .map(|rest| (value.clone(), rest))
+    })
 }
 
 #[cfg(test)]

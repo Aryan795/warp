@@ -1360,6 +1360,13 @@ esac
     function warp_bootstrapped () {
         local aliases="`alias`"
         local env_var_names="`compgen -e`"
+        # `NAME=VALUE` pairs (one per line) for every currently exported variable, used to expand
+        # `$VAR`/`${VAR}` prefixes during path completion.
+        local env_vars=""
+        while IFS= read -r _warp_env_var_name; do
+          env_vars+="${_warp_env_var_name}=${!_warp_env_var_name}"$'\n'
+        done <<< "$env_var_names"
+        unset _warp_env_var_name
         local function_names="`compgen -A function`"
         local builtins="`compgen -b`"
         local keywords="`compgen -k`"
@@ -1369,6 +1376,7 @@ esac
           local escaped_abbrs=""
           local escaped_aliases="$(warp_escape_json "$aliases")"
           local escaped_env_var_names="$(warp_escape_json "$env_var_names")"
+          local escaped_env_vars="$(warp_escape_json "$env_vars")"
           local escaped_function_names="$(warp_escape_json "$function_names")"
           local escaped_builtins="$(warp_escape_json "$builtins")"
           local escaped_keywords="$(warp_escape_json "$keywords")"
@@ -1407,6 +1415,7 @@ esac
           warp_send_hook_kv_pair "path" "$PATH"
           warp_send_hook_kv_pair "cdpath" "$CDPATH"
           warp_send_hook_kv_pair_escaped "env_var_names" "$env_var_names"
+          warp_send_hook_kv_pair_escaped "env_vars" "$env_vars"
           warp_send_hook_kv_pair "abbreviations" ""
           warp_send_hook_kv_pair_escaped "aliases" "$aliases"
           warp_send_hook_kv_pair_escaped "function_names" "$function_names"
@@ -1427,7 +1436,7 @@ esac
           local escaped_editor="$(warp_escape_json "$EDITOR")"
           local escaped_shell_path="$(warp_escape_json "$BASH")"
           local escaped_cdpath="$(warp_escape_json "$CDPATH")"
-          local escaped_json="{\"hook\": \"Bootstrapped\", \"value\": {\"histfile\": \"$escaped_histfile\", \"session_id\": $WARP_SESSION_ID, \"shell\": \"bash\",  \"home_dir\": \"$HOME\", \"user\":\"$_user\", \"host\":\"$_hostname\", \"path\": \"$escaped_path\", \"cdpath\": \"$escaped_cdpath\", \"editor\": \"$escaped_editor\", \"env_var_names\": \"$escaped_env_var_names\", \"abbreviations\": \"$escaped_abbrs\", \"aliases\": \"$escaped_aliases\", \"function_names\": \"$escaped_function_names\", \"builtins\": \"$escaped_builtins\", \"keywords\": \"$escaped_keywords\", \"shell_version\": \"$BASH_VERSION\", \"shell_options\": \"$escaped_shell_options\", \"rcfiles_start_time\": \"$rcfiles_start_time\", \"rcfiles_end_time\": \"$rcfiles_end_time\", \"vi_mode_enabled\": \"$vi_mode_enabled\", \"os_category\": \"$os_category\", \"linux_distribution\": \"$linux_distribution\", \"wsl_name\": \"$WSL_DISTRO_NAME\", \"shell_path\": \"$escaped_shell_path\"}}"
+          local escaped_json="{\"hook\": \"Bootstrapped\", \"value\": {\"histfile\": \"$escaped_histfile\", \"session_id\": $WARP_SESSION_ID, \"shell\": \"bash\",  \"home_dir\": \"$HOME\", \"user\":\"$_user\", \"host\":\"$_hostname\", \"path\": \"$escaped_path\", \"cdpath\": \"$escaped_cdpath\", \"editor\": \"$escaped_editor\", \"env_var_names\": \"$escaped_env_var_names\", \"env_vars\": \"$escaped_env_vars\", \"abbreviations\": \"$escaped_abbrs\", \"aliases\": \"$escaped_aliases\", \"function_names\": \"$escaped_function_names\", \"builtins\": \"$escaped_builtins\", \"keywords\": \"$escaped_keywords\", \"shell_version\": \"$BASH_VERSION\", \"shell_options\": \"$escaped_shell_options\", \"rcfiles_start_time\": \"$rcfiles_start_time\", \"rcfiles_end_time\": \"$rcfiles_end_time\", \"vi_mode_enabled\": \"$vi_mode_enabled\", \"os_category\": \"$os_category\", \"linux_distribution\": \"$linux_distribution\", \"wsl_name\": \"$WSL_DISTRO_NAME\", \"shell_path\": \"$escaped_shell_path\"}}"
           warp_send_json_message "$escaped_json"
         fi
     }

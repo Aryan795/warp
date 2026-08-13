@@ -373,6 +373,7 @@ fn ssh_bootstraps_if_blocklist_empty_and_reconciles_parent_return() {
         cdpath: None,
         editor: None,
         env_var_names: None,
+        env_vars: None,
         aliases: None,
         abbreviations: None,
         function_names: None,

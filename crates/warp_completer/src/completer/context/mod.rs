@@ -169,6 +169,16 @@ pub trait PathCompletionContext: Send + Sync {
         None
     }
 
+    /// Known environment variable values for the session, used to expand a `$VAR` or `${VAR}`
+    /// prefix (other than `$HOME`, which is handled separately via [`Self::home_directory`]) when
+    /// generating filesystem completions.
+    ///
+    /// Implementations are not required to know the value of every environment variable set in
+    /// the shell; only variables present in this map are eligible for expansion.
+    fn environment_variables(&self) -> Option<&HashMap<String, String>> {
+        None
+    }
+
     fn shell_family(&self) -> ShellFamily;
 
     /// The current working directory, which is used to determine how relative path suggestions

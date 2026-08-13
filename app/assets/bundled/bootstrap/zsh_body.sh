@@ -1533,6 +1533,11 @@ esac
     local escaped_aliases="$(warp_escape_json "`alias`")"
     local escaped_abbrs=""
     local env_var_names="$(warp_escape_json "`echo ${(k)parameters[(R)*export*]}`")"
+    # `NAME=VALUE` pairs (one per line) for every currently exported variable, used to expand
+    # `$VAR`/`${VAR}` prefixes during path completion. We use `$(...)` rather than backticks here
+    # since the loop body needs its own (unescaped) double quotes.
+    local env_vars="$(warp_escape_json "$(for _warp_env_var_name in ${(k)parameters[(R)*export*]}; do print -r -- "${_warp_env_var_name}=${(P)_warp_env_var_name}"; done)")"
+    unset _warp_env_var_name
     local function_names="$(warp_escape_json "`builtin print -l -- ${(ok)functions}`")"
     local escaped_builtins="$(warp_escape_json "`builtin print -l -- ${(ok)builtins}`")"
     local escaped_keywords="$(warp_escape_json "`builtin print -l -- ${(ok)reswords}`")"
@@ -1547,7 +1552,7 @@ esac
     local escaped_editor="$(warp_escape_json "$EDITOR")"
     local escaped_shell_path="$(warp_escape_json "${commands[zsh]}")"
     local escaped_cdpath="$(warp_escape_json "$CDPATH")"
-    local escaped_json="{\"hook\": \"Bootstrapped\", \"value\": {\"histfile\": \"$escaped_histfile\", \"session_id\": $WARP_SESSION_ID, \"shell\": \"zsh\", \"home_dir\": \"$HOME\", \"path\": \"$escaped_path\", \"cdpath\": \"$escaped_cdpath\", \"editor\": \"$escaped_editor\", \"env_var_names\":  \"$env_var_names\", \"abbreviations\": \"$escaped_abbrs\", \"aliases\": \"$escaped_aliases\", \"function_names\": \"$function_names\",  \"builtins\": \"$escaped_builtins\",  \"keywords\": \"$escaped_keywords\", \"shell_version\": \"$ZSH_VERSION\", \"shell_options\": \"$shell_options\", \"rcfiles_start_time\": \"$rcfiles_start_time\", \"rcfiles_end_time\": \"$rcfiles_end_time\", \"shell_plugins\": \"$escaped_shell_plugins\", \"os_category\": \"$os_category\", \"linux_distribution\": \"$linux_distribution\", \"wsl_name\": \"${WSL_DISTRO_NAME:-}\", \"shell_path\": \"$escaped_shell_path\"}}"
+    local escaped_json="{\"hook\": \"Bootstrapped\", \"value\": {\"histfile\": \"$escaped_histfile\", \"session_id\": $WARP_SESSION_ID, \"shell\": \"zsh\", \"home_dir\": \"$HOME\", \"path\": \"$escaped_path\", \"cdpath\": \"$escaped_cdpath\", \"editor\": \"$escaped_editor\", \"env_var_names\":  \"$env_var_names\", \"env_vars\": \"$env_vars\", \"abbreviations\": \"$escaped_abbrs\", \"aliases\": \"$escaped_aliases\", \"function_names\": \"$function_names\",  \"builtins\": \"$escaped_builtins\",  \"keywords\": \"$escaped_keywords\", \"shell_version\": \"$ZSH_VERSION\", \"shell_options\": \"$shell_options\", \"rcfiles_start_time\": \"$rcfiles_start_time\", \"rcfiles_end_time\": \"$rcfiles_end_time\", \"shell_plugins\": \"$escaped_shell_plugins\", \"os_category\": \"$os_category\", \"linux_distribution\": \"$linux_distribution\", \"wsl_name\": \"${WSL_DISTRO_NAME:-}\", \"shell_path\": \"$escaped_shell_path\"}}"
     warp_send_json_message "$escaped_json"
   }
   warp_bootstrapped

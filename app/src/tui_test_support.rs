@@ -167,6 +167,7 @@ pub fn add_tui_history_test_models(
             subshell_info: None,
             path: None,
             environment_variable_names: HashSet::new(),
+            environment_variables: HashMap::new(),
             aliases: HashMap::new(),
             abbreviations: HashMap::new(),
             function_names: HashSet::new(),

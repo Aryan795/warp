@@ -6,7 +6,35 @@ use warpui::platform::WindowStyle;
 use warpui::{App, AppContext, Element, Entity, ModelHandle, TypedActionView, View, ViewContext};
 
 use super::command_executor::testing::TestCommandExecutor;
-use super::{BootstrapSessionType, Session, SessionId, SessionInfo, Sessions, SessionsEvent};
+use super::{
+    BootstrapSessionType, BootstrappedValue, InitShellValue, Session, SessionId, SessionInfo,
+    Sessions, SessionsEvent,
+};
+use crate::terminal::shell::ShellType;
+
+#[test]
+fn merge_from_bootstrapped_value_parses_environment_variable_values() {
+    let init_shell_value = InitShellValue {
+        shell: "zsh".to_owned(),
+        ..Default::default()
+    };
+    let bootstrapped_value = BootstrappedValue {
+        shell: "zsh".to_owned(),
+        env_vars: Some("s=/System\nFOO=bar=baz".to_owned()),
+        ..Default::default()
+    };
+    let session_info =
+        SessionInfo::create_pending(ShellType::Zsh, init_shell_value, None, None, None, None)
+            .merge_from_bootstrapped_value(bootstrapped_value);
+
+    assert_eq!(
+        session_info.environment_variables,
+        HashMap::from_iter([
+            ("s".to_owned(), "/System".to_owned()),
+            ("FOO".to_owned(), "bar=baz".to_owned()),
+        ])
+    );
+}
 
 struct TestView {
     events: Vec<SessionsEvent>,

@@ -139,6 +139,7 @@ pub struct MockPathCompletionContext {
     cdpath: Option<String>,
     pwd: TypedPathBuf,
     directory_to_entries: HashMap<PathBuf, Vec<EngineDirEntry>>,
+    environment_variables: HashMap<String, String>,
 }
 
 impl MockPathCompletionContext {
@@ -148,6 +149,7 @@ impl MockPathCompletionContext {
             cdpath: None,
             pwd,
             directory_to_entries: HashMap::new(),
+            environment_variables: HashMap::new(),
         }
     }
 
@@ -158,6 +160,15 @@ impl MockPathCompletionContext {
 
     pub fn with_cdpath(mut self, cdpath: String) -> Self {
         self.cdpath = Some(cdpath);
+        self
+    }
+
+    pub fn with_environment_variable(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.environment_variables.insert(name.into(), value.into());
         self
     }
 
@@ -237,6 +248,10 @@ impl PathCompletionContext for MockPathCompletionContext {
 
     fn cdpath(&self) -> Option<&str> {
         self.cdpath.as_deref()
+    }
+
+    fn environment_variables(&self) -> Option<&HashMap<String, String>> {
+        Some(&self.environment_variables)
     }
 
     fn pwd(&self) -> TypedPath<'_> {

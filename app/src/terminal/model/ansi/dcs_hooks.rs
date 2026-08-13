@@ -263,6 +263,9 @@ impl DProtoHook {
                 "env_var_names" => {
                     value.env_var_names = map_empty_to_none(v);
                 }
+                "env_vars" => {
+                    value.env_vars = map_empty_to_none(v);
+                }
                 "builtins" => {
                     value.builtins = map_empty_to_none(v);
                 }
@@ -631,6 +634,12 @@ pub struct BootstrappedValue {
 
     #[serde(deserialize_with = "empty_string_is_none")]
     pub env_var_names: Option<String>,
+
+    /// `NAME=VALUE` pairs (one per line) for every environment variable exported at bootstrap
+    /// time. Used to expand `$VAR`/`${VAR}` prefixes during path completion. Note this is a
+    /// one-time snapshot: it does not reflect variables `export`ed later in the session.
+    #[serde(deserialize_with = "empty_string_is_none", default)]
+    pub env_vars: Option<String>,
 
     #[serde(deserialize_with = "empty_string_is_none")]
     pub builtins: Option<String>,

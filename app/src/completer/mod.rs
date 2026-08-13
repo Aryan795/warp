@@ -201,6 +201,10 @@ impl PathCompletionContext for SessionContext {
         self.session.cdpath()
     }
 
+    fn environment_variables(&self) -> Option<&HashMap<String, String>> {
+        Some(self.session.environment_variables())
+    }
+
     fn pwd(&self) -> TypedPath<'_> {
         self.current_working_directory.to_path()
     }

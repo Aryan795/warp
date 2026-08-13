@@ -839,6 +839,7 @@ fn parse_dcs_bootstrapped() {
                 aliases: Some("vi=nvim\nvim=nvim".to_string()),
                 abbreviations: Some("abbr -a -- vi nvim\nabbr -a -- gc 'git checkout'".to_string()),
                 env_var_names: Some("LOGNAME CARGO_HOME".to_string()),
+                env_vars: None,
                 function_names: Some("cd\nextract".to_string()),
                 builtins: Some("alias\nhistory".to_string()),
                 keywords: Some("for\nif".to_string()),

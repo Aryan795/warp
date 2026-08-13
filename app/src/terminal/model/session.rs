@@ -634,6 +634,10 @@ pub struct SessionInfo {
     pub subshell_info: Option<SubshellInitializationInfo>,
     pub path: Option<String>,
     pub environment_variable_names: HashSet<SmolStr>,
+    /// Values of currently-exported environment variables, captured once at bootstrap time (i.e.
+    /// this does not reflect variables `export`ed later in the interactive session). Used to
+    /// expand `$VAR`/`${VAR}` prefixes during path completion.
+    pub environment_variables: HashMap<String, String>,
     pub aliases: HashMap<SmolStr, String>,
     pub abbreviations: HashMap<SmolStr, String>,
     // A Vec is sufficient here because function_names are guaranteed to be unique.
@@ -703,6 +707,7 @@ impl SessionInfo {
             subshell_info,
             is_ssh_wrapper_session,
             environment_variable_names: Default::default(),
+            environment_variables: Default::default(),
             path: None,
             home_dir: None,
             cdpath: None,
@@ -807,6 +812,20 @@ impl SessionInfo {
             split.map(Into::into).collect::<HashSet<_>>()
         });
 
+        // `NAME=VALUE` pairs, one per line, for every exported environment variable known at
+        // bootstrap time. Unlike `env_var_names` above, this is shell-agnostic since Warp controls
+        // the exact format emitted by the bootstrap script for this field.
+        let environment_variables = bootstrapped_value
+            .env_vars
+            .map(|env_vars| {
+                env_vars
+                    .lines()
+                    .filter_map(|line| line.split_once('='))
+                    .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
+
         let options = if bootstrapped_value
             .vi_mode_enabled
             .is_some_and(|vi_mode| vi_mode.eq("1"))
@@ -834,6 +853,7 @@ impl SessionInfo {
             session_type: self.session_type,
             path: bootstrapped_value.path,
             environment_variable_names: env_var_names.unwrap_or_default(),
+            environment_variables,
             aliases: aliases.unwrap_or_default(),
             abbreviations: abbreviations.unwrap_or_default(),
             function_names: function_names.unwrap_or_default(),
@@ -1577,6 +1597,12 @@ impl Session {
         &self.info.environment_variable_names
     }
 
+    /// Values of currently-exported environment variables, captured once at bootstrap time. See
+    /// [`SessionInfo::environment_variables`] for the coverage caveat.
+    pub fn environment_variables(&self) -> &HashMap<String, String> {
+        &self.info.environment_variables
+    }
+
     #[cfg(feature = "integration_tests")]
     pub fn external_commands(&self) -> &OnceCell<HashSet<SmolStr>> {
         &self.external_commands
@@ -1753,6 +1779,7 @@ pub mod testing {
                 path,
                 editor: None,
                 environment_variable_names: HashSet::new(),
+                environment_variables: HashMap::new(),
                 aliases: HashMap::new(),
                 abbreviations: HashMap::new(),
                 function_names: HashSet::new(),
@@ -1848,6 +1875,14 @@ pub mod testing {
             environment_variable_names: HashSet<SmolStr>,
         ) -> Self {
             self.environment_variable_names = environment_variable_names;
+            self
+        }
+
+        pub fn with_environment_variables(
+            mut self,
+            environment_variables: HashMap<String, String>,
+        ) -> Self {
+            self.environment_variables = environment_variables;
             self
         }
 
