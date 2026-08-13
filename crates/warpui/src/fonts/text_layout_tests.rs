@@ -71,10 +71,10 @@ fn test_fixed_width_tab_size_matches_spaces_width() -> Result<()> {
 /// shape whose per-character allocations grew without bound in APP-5360.
 const UNWRAPPED_WIDTH: f32 = 10_000_000.;
 
-/// A character count comfortably under [`MAX_LAYOUT_CHARS`]. Also stays under the point at which
-/// the winit backend's shaper gives up on a single line, so this is a size both backends really
-/// lay out.
-const UNCAPPED_CHAR_COUNT: usize = 16_000;
+/// A character count comfortably under [`MAX_LAYOUT_CHARS`]. It also leaves plenty of room under
+/// the 16,384 characters at which the winit backend's shaper starts returning no glyphs at all for
+/// an unbroken run, so this is a size both backends really lay out.
+const UNCAPPED_CHAR_COUNT: usize = 8_000;
 
 fn layout_test_line_style() -> LineStyle {
     LineStyle {
@@ -120,8 +120,8 @@ fn test_line_under_cap_is_laid_out_in_full() -> Result<()> {
 /// bounds, so a single degenerate line - a minified bundle, a base64 blob - used to allocate
 /// without limit. See APP-5360.
 ///
-/// Note that this only really bites on Core Text. The winit backend's shaper independently gives
-/// up somewhere above 32,000 characters and returns no glyphs at all, so on that platform these
+/// Note that this only really bites on Core Text. The winit backend's shaper independently returns
+/// no glyphs at all for an unbroken run longer than 16,384 characters, so on that platform these
 /// assertions hold whether or not the cap is applied; `test_line_under_cap_is_laid_out_in_full`
 /// and the `truncate_text_for_layout` unit tests carry the cross-platform weight.
 #[test]
