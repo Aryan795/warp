@@ -51,6 +51,19 @@ const DEFAULT_FONT_SIZE: f32 = 13.;
 // The offset for where on the text glyph the strikethrough should be drawn.
 const STRIKETHROUGH_FONT_OFFSET: f32 = 2.5;
 
+/// The maximum number of characters laid out by a single [`LayoutCache::layout_line`] or
+/// [`LayoutCache::layout_text`] call. Text past this point never reaches the platform text
+/// layout backend, and so is not rendered and has no caret positions.
+///
+/// Laying out a line costs memory linear in its character count on every backend: each cluster
+/// contributes a retained [`CaretPosition`] and [`Glyph`] (~56 bytes together) plus transient
+/// per-cluster bookkeeping of a comparable size (Core Text, for instance, enumerates a leading
+/// and a trailing caret edge for every cluster). None of that is bounded by the viewport, and
+/// blocks are laid out in parallel, so without a cap a handful of degenerate lines - minified
+/// JavaScript, a base64 blob - can exhaust memory. At this cap one line costs roughly 6 MB of
+/// retained layout state instead of growing without bound.
+pub const MAX_LAYOUT_CHARS: usize = 100_000;
+
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum TextAlignment {
     #[default]
@@ -153,6 +166,10 @@ impl LayoutCache {
         let styles = adjusted_styles
             .as_ref()
             .map_or(styles, |adjusted_styles| adjusted_styles.as_slice());
+        let (text, truncated_styles) = truncate_text_for_layout(text, styles);
+        let styles = truncated_styles
+            .as_ref()
+            .map_or(styles, |truncated_styles| truncated_styles.as_slice());
         let key = &CacheKeyRef {
             text,
             font_size: OrderedFloat(line_style.font_size),
@@ -218,6 +235,12 @@ impl LayoutCache {
             .as_ref()
             .map_or(style_runs, |adjusted_style_runs| {
                 adjusted_style_runs.as_slice()
+            });
+        let (text, truncated_style_runs) = truncate_text_for_layout(text, style_runs);
+        let style_runs = truncated_style_runs
+            .as_ref()
+            .map_or(style_runs, |truncated_style_runs| {
+                truncated_style_runs.as_slice()
             });
         let key = &CacheKeyRef {
             text,
@@ -293,6 +316,33 @@ fn strip_leading_unicode_bom<'a>(
         text
     });
     (text, Some(style_runs))
+}
+
+/// Truncates `text` to at most [`MAX_LAYOUT_CHARS`] characters, clamping the character ranges of
+/// `style_runs` to the truncated text. Returns `None` for the style runs when the text already
+/// fits, which is the overwhelmingly common case.
+fn truncate_text_for_layout<'a>(
+    text: &'a str,
+    style_runs: &[StyleRun],
+) -> (&'a str, Option<Vec<StyleRun>>) {
+    // Stops after MAX_LAYOUT_CHARS characters, so this does not walk a pathologically long string.
+    let Some((truncate_at, _)) = text.char_indices().nth(MAX_LAYOUT_CHARS) else {
+        return (text, None);
+    };
+
+    let text_bytes = text.len();
+    log::warn!(
+        "[Text layout] Truncating text longer than {MAX_LAYOUT_CHARS} characters; the remainder \
+         will not be rendered. text_bytes={text_bytes}"
+    );
+
+    let style_runs = style_runs
+        .iter()
+        .filter(|(range, _)| range.start < MAX_LAYOUT_CHARS)
+        .map(|(range, style)| (range.start..range.end.min(MAX_LAYOUT_CHARS), *style))
+        .collect();
+
+    (&text[..truncate_at], Some(style_runs))
 }
 
 pub trait CacheKey {

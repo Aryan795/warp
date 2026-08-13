@@ -4,12 +4,13 @@ use itertools::Itertools;
 use pathfinder_color::ColorU;
 
 use crate::elements::DEFAULT_UI_LINE_HEIGHT_RATIO;
-use crate::fonts::{FamilyId, Properties, Style, Weight};
+use crate::fonts::{Cache as FontCache, FamilyId, Properties, Style, Weight};
 #[cfg(target_os = "macos")]
 use crate::platform::mac::fonts::FontDB;
 use crate::platform::{FontDB as _, LineStyle};
 use crate::text_layout::{
-    ClipConfig, DEFAULT_TOP_BOTTOM_RATIO, Line, StyleAndFont, TextAlignment, TextFrame, TextStyle,
+    ClipConfig, DEFAULT_TOP_BOTTOM_RATIO, LayoutCache, Line, MAX_LAYOUT_CHARS, StyleAndFont,
+    TextAlignment, TextFrame, TextStyle,
 };
 #[cfg(not(target_os = "macos"))]
 use crate::windowing::winit::fonts::FontDB;
@@ -64,6 +65,68 @@ fn test_fixed_width_tab_size_matches_spaces_width() -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Laying out a line allocates per-character state (caret positions, glyphs) that nothing else
+/// bounds, so a single degenerate line - a minified bundle, a base64 blob - used to allocate
+/// without limit. See APP-5360.
+#[test]
+fn test_degenerate_line_layout_is_capped() -> Result<()> {
+    let (font_db, font_family) = init_fonts();
+    let font_cache = FontCache::new(Box::new(font_db));
+    let text_layout_system = font_cache.text_layout_system();
+    let layout_cache = LayoutCache::new();
+
+    let char_count = MAX_LAYOUT_CHARS + 1_000;
+    let text = "a".repeat(char_count);
+    let line_style = LineStyle {
+        font_size: FONT_SIZE,
+        line_height_ratio: DEFAULT_UI_LINE_HEIGHT_RATIO,
+        baseline_ratio: DEFAULT_TOP_BOTTOM_RATIO,
+        fixed_width_tab_size: None,
+    };
+    let style_runs = [(
+        0..char_count,
+        StyleAndFont::new(font_family, Properties::default(), TextStyle::new()),
+    )];
+    // Wide enough that the text is not wrapped, which keeps the whole line in a single run of
+    // glyphs - the shape that grew without bound.
+    let max_width = 10_000_000.;
+
+    let line = layout_cache.layout_line(
+        &text,
+        line_style,
+        &style_runs,
+        max_width,
+        ClipConfig::default(),
+        &text_layout_system,
+    );
+    assert!(line.caret_positions.len() <= MAX_LAYOUT_CHARS);
+    assert!(glyph_count(&line) <= MAX_LAYOUT_CHARS);
+
+    let frame = layout_cache.layout_text(
+        &text,
+        line_style,
+        &style_runs,
+        max_width,
+        FRAME_HEIGHT,
+        TextAlignment::Left,
+        None,
+        &text_layout_system,
+    );
+    let frame_caret_positions: usize = frame
+        .lines()
+        .iter()
+        .map(|line| line.caret_positions.len())
+        .sum();
+    assert!(frame_caret_positions <= MAX_LAYOUT_CHARS);
+    assert!(frame.lines().iter().map(glyph_count).sum::<usize>() <= MAX_LAYOUT_CHARS);
+
+    Ok(())
+}
+
+fn glyph_count(line: &Line) -> usize {
+    line.runs.iter().map(|run| run.glyphs.len()).sum()
 }
 
 /// Read the bundled Roboto font's bytes from the filesystem.

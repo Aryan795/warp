@@ -285,6 +285,53 @@ fn test_strip_leading_unicode_bom_with_single_style_run() {
     assert_eq!(adjusted_style_runs, Some(expected_style_runs));
 }
 
+#[test]
+fn test_truncate_text_for_layout_leaves_short_text_alone() {
+    let text = "Hello world";
+    let style_runs = vec![(
+        0..11,
+        StyleAndFont::new(FamilyId(0), Properties::default(), TextStyle::default()),
+    )];
+
+    let (truncated_text, truncated_style_runs) = truncate_text_for_layout(text, &style_runs);
+
+    assert_eq!(truncated_text, text);
+    assert_eq!(truncated_style_runs, None);
+}
+
+#[test]
+fn test_truncate_text_for_layout_caps_degenerate_lines() {
+    let char_count = MAX_LAYOUT_CHARS + 500;
+    let text = "a".repeat(char_count);
+    let style = StyleAndFont::new(FamilyId(0), Properties::default(), TextStyle::default());
+    let style_runs = vec![
+        (0..10, style),
+        // Straddles the cap, so it should be clamped to it.
+        (10..char_count - 100, style),
+        // Starts past the cap, so it should be dropped entirely.
+        (char_count - 100..char_count, style),
+    ];
+
+    let (truncated_text, truncated_style_runs) = truncate_text_for_layout(&text, &style_runs);
+
+    assert_eq!(truncated_text.chars().count(), MAX_LAYOUT_CHARS);
+    assert_eq!(
+        truncated_style_runs,
+        Some(vec![(0..10, style), (10..MAX_LAYOUT_CHARS, style)])
+    );
+}
+
+/// The cap counts characters, not bytes; slicing a multi-byte character in half would panic.
+#[test]
+fn test_truncate_text_for_layout_truncates_on_character_boundaries() {
+    let text = "é".repeat(MAX_LAYOUT_CHARS + 1);
+
+    let (truncated_text, _) = truncate_text_for_layout(&text, &[]);
+
+    assert_eq!(truncated_text.chars().count(), MAX_LAYOUT_CHARS);
+    assert_eq!(truncated_text.len(), MAX_LAYOUT_CHARS * 'é'.len_utf8());
+}
+
 /// Build a synthetic `Line` for paint tests. The platform test `FontDB` stubs
 /// out real text layout so we cannot exercise the paint path through
 /// `layout_line`; instead we hand-roll a single run of fixed-width glyphs.
