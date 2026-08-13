@@ -2,7 +2,7 @@ use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 
 use itertools::Itertools;
 use ordered_float::OrderedFloat;
@@ -318,6 +318,8 @@ fn strip_leading_unicode_bom<'a>(
     (text, Some(style_runs))
 }
 
+static LAYOUT_TRUNCATION_ONCE: Once = Once::new();
+
 /// Truncates `text` to at most [`MAX_LAYOUT_CHARS`] characters, clamping the character ranges of
 /// `style_runs` to the truncated text. Returns `None` for the style runs when the text already
 /// fits, which is the overwhelmingly common case.
@@ -330,11 +332,15 @@ fn truncate_text_for_layout<'a>(
         return (text, None);
     };
 
-    let text_bytes = text.len();
-    log::warn!(
-        "[Text layout] Truncating text longer than {MAX_LAYOUT_CHARS} characters; the remainder \
-         will not be rendered. text_bytes={text_bytes}"
-    );
+    // This runs ahead of the layout cache lookup, so a single degenerate line on screen reaches
+    // it every frame. Warn once per run rather than flooding the log and the breadcrumb buffer.
+    LAYOUT_TRUNCATION_ONCE.call_once(|| {
+        let text_bytes = text.len();
+        log::warn!(
+            "[Text layout] Truncating text longer than {MAX_LAYOUT_CHARS} characters; the \
+             remainder will not be rendered. text_bytes={text_bytes}"
+        );
+    });
 
     let style_runs = style_runs
         .iter()
