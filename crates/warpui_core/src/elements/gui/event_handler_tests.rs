@@ -1,15 +1,13 @@
 use std::collections::HashMap;
-use std::ops::Range;
 use std::rc::Rc;
 
 use pathfinder_geometry::rect::RectF;
 use pathfinder_geometry::vector::vec2f;
-use string_offset::ByteOffset;
 
 use super::*;
 use crate::elements::{
     ChildAnchor, ConstrainedBox, OffsetPositioning, ParentAnchor, ParentElement,
-    ParentOffsetBounds, Rect, SmartSelectFn, Stack,
+    ParentOffsetBounds, Rect, SelectableArea, SelectionHandle, SmartSelectFn, Stack,
 };
 use crate::platform::WindowStyle;
 use crate::{
@@ -624,33 +622,39 @@ fn test_event_propagation() {
     })
 }
 
-/// A minimal [`SelectableElement`] test double used to verify that wrapper elements
-/// (like [`EventHandler`]) correctly forward selection calls to their child rather
-/// than severing the selection chain (see APP-5361).
-struct SelectionProbe {
-    get_selection_calls: Rc<RefCell<Vec<(Vector2F, Vector2F, IsRect)>>>,
+/// A fixed-size leaf that implements [`SelectableElement`] by reporting the
+/// absolute x-coordinates it was asked to select, so a drag-selection test can
+/// assert on them without depending on real font/glyph layout.
+#[derive(Default)]
+struct RealPathSelectableLeaf {
+    size: Option<Vector2F>,
+    origin: Option<Point>,
 }
 
-impl Element for SelectionProbe {
+impl Element for RealPathSelectableLeaf {
     fn layout(
         &mut self,
-        constraint: SizeConstraint,
+        _constraint: SizeConstraint,
         _ctx: &mut LayoutContext,
         _app: &AppContext,
     ) -> Vector2F {
-        constraint.min
+        let size = vec2f(200., 50.);
+        self.size = Some(size);
+        size
     }
 
     fn after_layout(&mut self, _ctx: &mut AfterLayoutContext, _app: &AppContext) {}
 
-    fn paint(&mut self, _origin: Vector2F, _ctx: &mut PaintContext, _app: &AppContext) {}
+    fn paint(&mut self, origin: Vector2F, ctx: &mut PaintContext, _app: &AppContext) {
+        self.origin = Some(Point::from_vec2f(origin, ctx.scene.z_index()));
+    }
 
     fn size(&self) -> Option<Vector2F> {
-        Some(Vector2F::zero())
+        self.size
     }
 
     fn origin(&self) -> Option<Point> {
-        None
+        self.origin
     }
 
     fn dispatch_event(
@@ -667,30 +671,29 @@ impl Element for SelectionProbe {
     }
 }
 
-impl SelectableElement for SelectionProbe {
+impl SelectableElement for RealPathSelectableLeaf {
     fn get_selection(
         &self,
         selection_start: Vector2F,
         selection_end: Vector2F,
-        is_rect: IsRect,
+        _is_rect: IsRect,
     ) -> Option<Vec<SelectionFragment>> {
-        self.get_selection_calls
-            .borrow_mut()
-            .push((selection_start, selection_end, is_rect));
         Some(vec![SelectionFragment {
-            text: "selected".to_string(),
-            origin: Point::new(0., 0., ZIndex::new(0)),
+            text: format!("{:.0}..{:.0}", selection_start.x(), selection_end.x()),
+            origin: self
+                .origin
+                .expect("origin should be set by paint before selection"),
         }])
     }
 
     fn expand_selection(
         &self,
-        point: Vector2F,
+        _point: Vector2F,
         _direction: SelectionDirection,
         _unit: SelectionType,
         _word_boundaries_policy: &WordBoundariesPolicy,
     ) -> Option<Vector2F> {
-        Some(point)
+        None
     }
 
     fn is_point_semantically_before(
@@ -703,64 +706,209 @@ impl SelectableElement for SelectionProbe {
 
     fn smart_select(
         &self,
-        absolute_point: Vector2F,
+        _absolute_point: Vector2F,
         _smart_select_fn: SmartSelectFn,
     ) -> Option<(Vector2F, Vector2F)> {
-        Some((absolute_point, absolute_point))
+        None
     }
 
     fn calculate_clickable_bounds(&self, _current_selection: Option<Selection>) -> Vec<RectF> {
-        vec![RectF::new(Vector2F::zero(), vec2f(10., 10.))]
+        Vec::new()
     }
 }
 
-fn noop_smart_select(_text: &str, _click_offset: ByteOffset) -> Option<Range<ByteOffset>> {
-    None
+#[derive(Default)]
+struct SelectionResultView {
+    last_selection: Option<String>,
 }
 
-/// Regression test for APP-5361: `EventHandler` must forward `as_selectable_element`
-/// (and every `SelectableElement` method) to its child so that a `SelectableArea`
-/// higher up the tree can still select through it, instead of the selection chain
-/// silently breaking at the `EventHandler` boundary.
+fn init_selection_result(app: &mut AppContext) {
+    app.add_action(
+        "event_handler_test:selection_updated",
+        SelectionResultView::store_selection,
+    );
+}
+
+impl SelectionResultView {
+    fn store_selection(&mut self, selection: &Option<String>, _: &mut ViewContext<Self>) -> bool {
+        self.last_selection = selection.clone();
+        true
+    }
+}
+
+impl Entity for SelectionResultView {
+    type Event = ();
+}
+
+impl crate::core::View for SelectionResultView {
+    fn ui_name() -> &'static str {
+        "event_handler_test_selection_result_view"
+    }
+
+    fn render(&self, _: &AppContext) -> Box<dyn Element> {
+        SelectableArea::new(
+            SelectionHandle::default(),
+            |args, evt, _| {
+                evt.dispatch_action(
+                    "event_handler_test:selection_updated",
+                    args.selection.clone(),
+                );
+            },
+            EventHandler::new(Box::new(RealPathSelectableLeaf::default())).finish(),
+        )
+        .finish()
+    }
+}
+
+impl TypedActionView for SelectionResultView {
+    type Action = ();
+}
+
+/// Regression test for APP-5361. Drives the real `SelectableArea -> EventHandler ->
+/// <leaf>` tree through actual mouse-event dispatch. Fails on the parent revision,
+/// since `SelectableArea::on_mouse_down` bails out as soon as
+/// `self.child.as_selectable_element()` returns `None`.
 #[test]
-fn test_event_handler_forwards_selection_to_child() {
-    let get_selection_calls = Rc::new(RefCell::new(Vec::new()));
-    let probe = SelectionProbe {
-        get_selection_calls: get_selection_calls.clone(),
-    };
-    let event_handler = EventHandler::new(Box::new(probe));
+fn test_drag_selection_through_event_handler_selects_leaf_text() {
+    App::test((), |mut app| async move {
+        let app = &mut app;
+        app.update(init_selection_result);
+        let (window_id, view) = app.add_window(WindowStyle::NotStealFocus, |_| {
+            SelectionResultView::default()
+        });
 
-    let selectable = event_handler
-        .as_selectable_element()
-        .expect("EventHandler should forward as_selectable_element to a selectable child");
+        let mut presenter = Presenter::new(window_id);
+        let mut updated = EntityIdSet::default();
+        updated.insert(app.root_view_id(window_id).unwrap());
+        let invalidation = WindowInvalidation {
+            updated,
+            ..Default::default()
+        };
 
-    let start = vec2f(1., 2.);
-    let end = vec2f(3., 4.);
-    let fragments = selectable
-        .get_selection(start, end, IsRect::False)
-        .expect("get_selection should be forwarded to the child");
-    assert_eq!(fragments[0].text, "selected");
-    assert_eq!(
-        get_selection_calls.borrow().as_slice(),
-        &[(start, end, IsRect::False)]
-    );
+        app.update(move |ctx| {
+            presenter.invalidate(invalidation, ctx);
+            presenter.build_scene(vec2f(300., 300.), 1., None, ctx);
+            let presenter = Rc::new(RefCell::new(presenter));
 
-    assert_eq!(
-        selectable.expand_selection(
-            start,
-            SelectionDirection::Forward,
-            SelectionType::Semantic,
-            &WordBoundariesPolicy::Default,
-        ),
-        Some(start)
+            ctx.simulate_window_event(
+                Event::LeftMouseDown {
+                    position: vec2f(10., 10.),
+                    modifiers: Default::default(),
+                    click_count: 1,
+                    is_first_mouse: false,
+                },
+                window_id,
+                presenter.clone(),
+            );
+            ctx.simulate_window_event(
+                Event::LeftMouseDragged {
+                    position: vec2f(150., 10.),
+                    modifiers: Default::default(),
+                },
+                window_id,
+                presenter.clone(),
+            );
+            ctx.simulate_window_event(
+                Event::LeftMouseUp {
+                    position: vec2f(150., 10.),
+                    modifiers: Default::default(),
+                },
+                window_id,
+                presenter,
+            );
+        });
+
+        view.read(app, |view, _| {
+            assert_eq!(view.last_selection.as_deref(), Some("10..150"));
+        });
+    });
+}
+
+#[derive(Default)]
+struct ScrollWheelView {
+    scroll_wheel_fired: usize,
+}
+
+fn init_scroll_wheel_view(app: &mut AppContext) {
+    app.add_action(
+        "event_handler_test:scroll_wheel",
+        ScrollWheelView::on_scroll_wheel,
     );
-    assert_eq!(
-        selectable.is_point_semantically_before(start, end),
-        Some(true)
-    );
-    assert_eq!(
-        selectable.smart_select(start, noop_smart_select),
-        Some((start, start))
-    );
-    assert_eq!(selectable.calculate_clickable_bounds(None).len(), 1);
+}
+
+impl ScrollWheelView {
+    fn on_scroll_wheel(&mut self, _: &(), _: &mut ViewContext<Self>) -> bool {
+        self.scroll_wheel_fired += 1;
+        true
+    }
+}
+
+impl Entity for ScrollWheelView {
+    type Event = ();
+}
+
+impl crate::core::View for ScrollWheelView {
+    fn ui_name() -> &'static str {
+        "event_handler_test_scroll_wheel_view"
+    }
+
+    fn render(&self, _: &AppContext) -> Box<dyn Element> {
+        EventHandler::new(
+            ConstrainedBox::new(Rect::new().finish())
+                .with_height(100.)
+                .with_width(100.)
+                .finish(),
+        )
+        .on_scroll_wheel(|evt, _, _, _| {
+            evt.dispatch_action("event_handler_test:scroll_wheel", ());
+            DispatchEventResult::PropagateToParent
+        })
+        .finish()
+    }
+}
+
+impl TypedActionView for ScrollWheelView {
+    type Action = ();
+}
+
+/// Regression test for the `render_scrollable_collapsible_content` auto-scroll-unpin
+/// behavior: `EventHandler::on_scroll_wheel` must still fire on a `ScrollWheel` event,
+/// unaffected by adding the `SelectableElement` forwarding in this PR.
+#[test]
+fn test_scroll_wheel_handler_still_dispatches() {
+    App::test((), |mut app| async move {
+        let app = &mut app;
+        app.update(init_scroll_wheel_view);
+        let (window_id, view) =
+            app.add_window(WindowStyle::NotStealFocus, |_| ScrollWheelView::default());
+
+        let mut presenter = Presenter::new(window_id);
+        let mut updated = EntityIdSet::default();
+        updated.insert(app.root_view_id(window_id).unwrap());
+        let invalidation = WindowInvalidation {
+            updated,
+            ..Default::default()
+        };
+
+        app.update(move |ctx| {
+            presenter.invalidate(invalidation, ctx);
+            presenter.build_scene(vec2f(100., 100.), 1., None, ctx);
+            let presenter = Rc::new(RefCell::new(presenter));
+
+            ctx.simulate_window_event(
+                Event::ScrollWheel {
+                    position: vec2f(10., 10.),
+                    delta: vec2f(0., -5.),
+                    precise: false,
+                    modifiers: Default::default(),
+                },
+                window_id,
+                presenter,
+            );
+        });
+
+        view.read(app, |view, _| {
+            assert_eq!(view.scroll_wheel_fired, 1);
+        });
+    });
 }
