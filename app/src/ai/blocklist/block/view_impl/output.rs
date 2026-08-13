@@ -60,8 +60,9 @@ use crate::ai::agent::icons::{self, gray_stop_icon, yellow_stop_icon};
 use crate::ai::agent::task::TaskId;
 use crate::ai::agent::{
     AIAgentAction, AIAgentActionId, AIAgentActionResult, AIAgentActionResultType,
-    AIAgentActionType, AIAgentCitation, AIAgentInput, AIAgentOutputMessage,
-    AIAgentOutputMessageType, AIAgentText, AIAgentTextSection, CancellationOutcome, MessageId,
+    AIAgentActionType, AIAgentCitation, AIAgentExchange, AIAgentInput, AIAgentOutputMessage,
+    AIAgentOutputMessageType, AIAgentOutputStatus, AIAgentText, AIAgentTextSection,
+    CancellationOutcome, FinishedAIAgentOutput, MarkdownTextSection, MessageId,
     ReadFilesFailedFile, ReadFilesRequest, ReadFilesResult, RequestCommandOutputResult,
     SearchCodebaseFailureReason, SearchCodebaseResult, StartRecordingResult, StopRecordingResult,
     SubagentCall, SubagentType, SuggestNewConversationResult, SummarizationType, TodoOperation,
@@ -1153,8 +1154,7 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
                         }) => {
                             // Computer-use subtasks are excluded from the blocklist (see
                             // `should_show_task_in_blocklist`), so their tool calls are rendered
-                            // here, inline on the exchange that spawned them, instead of in a
-                            // separate trailing AI block that used to render below this
+                            // here, inline on the exchange that spawned them, directly above this
                             // exchange's response footer/toolbelt (APP-5371).
                             if let Some((rows, is_done)) = render_computer_use_subtask(
                                 props,
@@ -3334,23 +3334,76 @@ fn render_request_computer_use(
     renderable_action.render(app).finish()
 }
 
+/// Builds the raw markdown text for a text/reasoning message's sections, for use with
+/// [`render_requested_action_body_text`]. This is a lighter-weight substitute for the full
+/// `render_text_sections` pipeline (which is wired to this exchange's own text/code/table/image
+/// section counters and link detection) since computer-use subtask text is foreign to those
+/// counters.
+fn computer_use_subtask_text_markdown(sections: &[AIAgentTextSection]) -> String {
+    sections
+        .iter()
+        .map(|section| format!("{}", MarkdownTextSection(section)))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Renders a small banner for a computer-use subtask exchange that finished as a whole-exchange
+/// failure or cancellation with no corresponding action-level row (e.g. the task errored before
+/// any tool call could be attributed to it). Returns `None` for any other exchange status,
+/// including the common case where an in-progress action was individually cancelled by the user
+/// (that state is already reflected by that action's own icon; see `action_icon`).
+fn render_computer_use_exchange_status_banner(
+    exchange: &AIAgentExchange,
+    appearance: &Appearance,
+    app: &AppContext,
+) -> Option<Box<dyn Element>> {
+    match &exchange.output_status {
+        AIAgentOutputStatus::Finished {
+            finished_output: FinishedAIAgentOutput::Error { error, .. },
+        } => {
+            let formatted = render_requested_action_body_text(
+                error.to_string().into(),
+                appearance.ui_font_family(),
+                app,
+            );
+            let action = RenderableAction::new_with_formatted_text(formatted, app)
+                .with_icon(inline_action_icons::red_x_icon(appearance).finish());
+            Some(action.render(app).finish())
+        }
+        AIAgentOutputStatus::Finished {
+            finished_output: FinishedAIAgentOutput::Cancelled { .. },
+        } => {
+            let action = RenderableAction::new("Computer use cancelled", app)
+                .with_icon(inline_action_icons::cancelled_icon(appearance).finish());
+            Some(action.render(app).finish())
+        }
+        _ => None,
+    }
+}
+
 /// Renders the tool-call rows for a computer-use subagent task, so they appear inline as part of
 /// the exchange that spawned the subagent (see `should_show_task_in_blocklist`), rather than in a
 /// separate trailing AI block.
 ///
-/// Returns the rendered rows along with whether the subagent task has finished (either its result
-/// was returned to the parent exchange, or one of its own exchanges was cancelled). `None` is
-/// returned if the subagent task can no longer be found (e.g. it hasn't streamed in yet).
+/// Returns the rendered rows along with whether the subagent task should be treated as finished
+/// for the purposes of the parent exchange's response footer. `None` is returned if the subagent
+/// task can no longer be found (e.g. it hasn't streamed in yet).
 fn render_computer_use_subtask(
     props: Props,
     subagent_task_id: &str,
     recording_spans_by_action_id: &HashMap<AIAgentActionId, RecordingSpanInfo>,
     app: &AppContext,
 ) -> Option<(Vec<Box<dyn Element>>, bool)> {
+    let appearance = Appearance::as_ref(app);
     let conversation = props.model.conversation(app)?;
     let task_id = TaskId::new(subagent_task_id.to_owned());
     let task = conversation.get_task(&task_id)?;
 
+    // The task/exchange-level signals below only become true once the subagent's result has
+    // made its way back to the parent exchange, or one of its own exchanges was itself marked
+    // cancelled. Cancelling an individual pending computer-use action (the common path; see
+    // `AIBlock::cancel_action`) does neither of those — it only marks that action's own status
+    // as a cancelled `Finished` result — so `all_displayed_actions_done` below covers that case.
     let is_finished = conversation
         .is_subagent_task_finished(&task_id)
         .unwrap_or(false);
@@ -3358,43 +3411,81 @@ fn render_computer_use_subtask(
         .exchanges()
         .any(|exchange| exchange.output_status.is_cancelled());
 
-    let rows = task
-        .exchanges()
-        .filter_map(|exchange| exchange.output_status.output())
-        .flat_map(|output| {
-            output
-                .get()
-                .messages
-                .iter()
-                .filter_map(|message| {
-                    let AIAgentOutputMessageType::Action(action) = &message.message else {
-                        return None;
-                    };
-                    match &action.action {
-                        AIAgentActionType::RequestComputerUse(request) => {
-                            Some(render_request_computer_use(props, &action.id, request, app))
-                        }
-                        AIAgentActionType::UseComputer(request) => Some(render_use_computer(
-                            props,
-                            &action.id,
-                            request,
-                            recording_spans_by_action_id.get(&action.id),
-                            app,
-                        )),
-                        AIAgentActionType::StartRecording { summary, .. } => Some(
-                            render_start_recording(props, &action.id, summary.as_deref(), app),
-                        ),
-                        AIAgentActionType::StopRecording { .. } => {
-                            Some(render_stop_recording(props, &action.id, app))
-                        }
-                        _ => None,
-                    }
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    let mut rows: Vec<Box<dyn Element>> = Vec::new();
+    let mut action_ids: Vec<AIAgentActionId> = Vec::new();
 
-    Some((rows, is_finished || is_cancelled))
+    for exchange in task.exchanges() {
+        if let Some(output) = exchange.output_status.output() {
+            let output = output.get();
+            for message in &output.messages {
+                match &message.message {
+                    AIAgentOutputMessageType::Action(action) => {
+                        let row = match &action.action {
+                            AIAgentActionType::RequestComputerUse(request) => {
+                                Some(render_request_computer_use(props, &action.id, request, app))
+                            }
+                            AIAgentActionType::UseComputer(request) => Some(render_use_computer(
+                                props,
+                                &action.id,
+                                request,
+                                recording_spans_by_action_id.get(&action.id),
+                                app,
+                            )),
+                            AIAgentActionType::StartRecording { summary, .. } => Some(
+                                render_start_recording(props, &action.id, summary.as_deref(), app),
+                            ),
+                            AIAgentActionType::StopRecording { .. } => {
+                                Some(render_stop_recording(props, &action.id, app))
+                            }
+                            _ => None,
+                        };
+                        if let Some(row) = row {
+                            action_ids.push(action.id.clone());
+                            rows.push(row);
+                        }
+                    }
+                    AIAgentOutputMessageType::Text(AIAgentText { sections })
+                    | AIAgentOutputMessageType::Reasoning {
+                        text: AIAgentText { sections },
+                        ..
+                    } if !are_all_text_sections_empty(sections) => {
+                        let markdown = computer_use_subtask_text_markdown(sections);
+                        let formatted = render_requested_action_body_text(
+                            markdown.into(),
+                            appearance.ui_font_family(),
+                            app,
+                        );
+                        rows.push(
+                            RenderableAction::new_with_formatted_text(formatted, app)
+                                .render(app)
+                                .finish(),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if let Some(banner) = render_computer_use_exchange_status_banner(exchange, appearance, app)
+        {
+            rows.push(banner);
+        }
+    }
+
+    let all_displayed_actions_done = !action_ids.is_empty()
+        && action_ids.iter().all(|id| {
+            props
+                .action_model
+                .as_ref(app)
+                .get_action_status(id)
+                .as_ref()
+                .is_some_and(|status| status.is_done())
+        });
+
+    Some((
+        rows,
+        is_finished || is_cancelled || all_displayed_actions_done,
+    ))
 }
 
 /// Renders the collapsible references footer

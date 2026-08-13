@@ -11,8 +11,7 @@ pub fn should_show_task_in_blocklist(task: &Task) -> bool {
     //
     // Computer-use subtasks are excluded so their tool calls render inline as part of the
     // exchange that spawned them (see the `SubagentType::ComputerUse` handling in
-    // `view_impl/output.rs`) instead of in a separate trailing AI block, which used to render
-    // below that exchange's response footer/toolbelt (APP-5371).
+    // `view_impl/output.rs`), directly above that exchange's response footer/toolbelt.
     !task.is_cli_subagent()
         && !task.is_warp_documentation_search_subagent()
         && !task.is_conversation_search_subagent()
