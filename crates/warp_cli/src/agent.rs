@@ -697,8 +697,9 @@ pub struct AgentListArgs {
 /// Arguments for getting a named agent.
 #[derive(Debug, Clone, Args)]
 pub struct AgentGetArgs {
-    /// UID of the agent to get.
-    pub uid: String,
+    /// UID or name of the agent to get.
+    #[arg(value_name = "UID|NAME")]
+    pub identifier: String,
 
     /// JSON formatting configuration.
     #[command(flatten)]
@@ -744,8 +745,9 @@ pub struct AgentCreateArgs {
 /// Arguments for updating a named agent.
 #[derive(Debug, Clone, Args)]
 pub struct AgentUpdateArgs {
-    /// UID of the agent to update.
-    pub uid: String,
+    /// UID or name of the agent to update.
+    #[arg(value_name = "UID|NAME")]
+    pub identifier: String,
 
     /// New name for the agent.
     #[arg(long = "name", short = 'n')]
@@ -846,8 +848,9 @@ pub struct AgentUpdateArgs {
 /// Arguments for deleting a named agent.
 #[derive(Debug, Clone, Args)]
 pub struct AgentDeleteArgs {
-    /// UID of the agent to delete.
-    pub uid: String,
+    /// UID or name of the agent to delete.
+    #[arg(value_name = "UID|NAME")]
+    pub identifier: String,
 }
 
 /// Arguments for listing available agent skills.

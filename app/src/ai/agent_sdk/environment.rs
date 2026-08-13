@@ -90,12 +90,12 @@ pub fn run(
             });
             Ok(())
         }
-        EnvironmentCommand::Delete { id, force } => {
-            runner.update(ctx, |runner, ctx| runner.delete(id, force, ctx));
+        EnvironmentCommand::Delete { identifier, force } => {
+            runner.update(ctx, |runner, ctx| runner.delete(identifier, force, ctx));
             Ok(())
         }
         EnvironmentCommand::Update {
-            id,
+            identifier,
             name,
             description,
             remove_description,
@@ -111,7 +111,7 @@ pub fn run(
 
             runner.update(ctx, |runner, ctx| {
                 runner.update_environment(
-                    id,
+                    identifier,
                     name,
                     description,
                     remove_description,
@@ -126,8 +126,8 @@ pub fn run(
             });
             Ok(())
         }
-        EnvironmentCommand::Get { id } => {
-            runner.update(ctx, |runner, ctx| runner.get(id, ctx));
+        EnvironmentCommand::Get { identifier } => {
+            runner.update(ctx, |runner, ctx| runner.get(identifier, ctx));
             Ok(())
         }
         EnvironmentCommand::Image(image_cmd) => match image_cmd {

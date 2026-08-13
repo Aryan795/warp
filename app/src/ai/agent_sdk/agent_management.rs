@@ -117,10 +117,10 @@ impl AgentManagementRunner {
         let ai_client = ServerApiProvider::as_ref(ctx).get_ai_client();
         let future = async move {
             if matches!(output_format, OutputFormat::Json) || args.json_output.force_json_output() {
-                let response = ai_client.get_agent_raw(&args.uid).await?;
+                let response = ai_client.get_agent_raw(&args.identifier).await?;
                 super::output::print_raw_json(response, &args.json_output)?;
             } else {
-                let agent = ai_client.get_agent(&args.uid).await?;
+                let agent = ai_client.get_agent(&args.identifier).await?;
                 print_single_agent(&agent, output_format)?;
             }
             Ok(())
@@ -160,7 +160,7 @@ impl AgentManagementRunner {
     ) -> anyhow::Result<()> {
         let ai_client = ServerApiProvider::as_ref(ctx).get_ai_client();
         let future = async move {
-            let uid = args.uid.clone();
+            let uid = args.identifier.clone();
             let json_output = args.json_output.clone();
             let needs_current_agent = !args.add_secrets.is_empty()
                 || !args.remove_secrets.is_empty()
@@ -197,8 +197,8 @@ impl AgentManagementRunner {
     ) -> anyhow::Result<()> {
         let ai_client = ServerApiProvider::as_ref(ctx).get_ai_client();
         let future = async move {
-            ai_client.delete_agent(&args.uid).await?;
-            print_delete_result(&args.uid, output_format)?;
+            ai_client.delete_agent(&args.identifier).await?;
+            print_delete_result(&args.identifier, output_format)?;
             Ok(())
         };
         self.spawn_command(future, ctx);

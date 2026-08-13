@@ -146,7 +146,8 @@ impl RunnerCommandRunner {
                 // full runner config).
                 let runners = factory.get_runners(None).await?;
 
-                let existing = resolve_runner(&runners, args.id.as_deref(), args.name.as_deref())?;
+                let existing =
+                    resolve_runner(&runners, args.identifier.as_deref(), args.name.as_deref())?;
                 let uid = existing.uid.inner().to_string();
 
                 let runner = build_update_input(&args, &existing.config)?;
@@ -168,7 +169,7 @@ impl RunnerCommandRunner {
         use std::io::IsTerminal as _;
 
         if !args.force {
-            match confirm_delete(&args.id, std::io::stdin().is_terminal()) {
+            match confirm_delete(&args.identifier, std::io::stdin().is_terminal()) {
                 Ok(true) => {}
                 Ok(false) => {
                     // Interactive decline: not an error, exit cleanly.
@@ -185,7 +186,7 @@ impl RunnerCommandRunner {
         }
 
         let factory = ServerApiProvider::as_ref(ctx).get_factory_client();
-        let uid = args.id;
+        let uid = args.identifier;
 
         ctx.spawn(
             async move {
@@ -350,7 +351,11 @@ fn build_update_input(args: &UpdateRunnerArgs, existing: &RunnerConfig) -> Resul
         .or_else(|| existing.description.clone());
 
     Ok(RunnerInput {
-        name: resolve_updated_name(args.id.is_some(), args.name.as_deref(), &existing.name),
+        name: resolve_updated_name(
+            args.identifier.is_some(),
+            args.name.as_deref(),
+            &existing.name,
+        ),
         description,
         setup_commands,
         instance_shape,

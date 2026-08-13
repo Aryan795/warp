@@ -218,9 +218,9 @@ fn create_args(name: &str) -> AgentCreateArgs {
     }
 }
 
-fn update_args(uid: &str) -> AgentUpdateArgs {
+fn update_args(identifier: &str) -> AgentUpdateArgs {
     AgentUpdateArgs {
-        uid: uid.to_string(),
+        identifier: identifier.to_string(),
         name: None,
         description: None,
         remove_description: false,
