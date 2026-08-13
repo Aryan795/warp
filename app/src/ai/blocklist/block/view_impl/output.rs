@@ -776,7 +776,21 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
                             id,
                             ..
                         }) => {
-                            should_render_footer = false;
+                            // Only suppress the footer while this action is still pending, so a
+                            // computer-use action appearing earlier in the output doesn't
+                            // permanently hide the footer for the rest of a completed exchange
+                            // (this matters once computer-use subtask actions are embedded here
+                            // via the `SubagentType::ComputerUse` case below; see APP-5371).
+                            let is_action_done = props
+                                .action_model
+                                .as_ref(app)
+                                .get_action_status(id)
+                                .as_ref()
+                                .is_some_and(|status| status.is_done());
+                            if !is_action_done {
+                                should_render_footer = false;
+                                should_render_suggestions = false;
+                            }
                             output_items.add_child(render_use_computer(
                                 props,
                                 id,
@@ -832,7 +846,17 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
                             id,
                             ..
                         }) => {
-                            should_render_footer = false;
+                            // See the matching comment on the `UseComputer` arm above.
+                            let is_action_done = props
+                                .action_model
+                                .as_ref(app)
+                                .get_action_status(id)
+                                .as_ref()
+                                .is_some_and(|status| status.is_done());
+                            if !is_action_done {
+                                should_render_footer = false;
+                                should_render_suggestions = false;
+                            }
                             output_items
                                 .add_child(render_request_computer_use(props, id, request, app));
                         }
@@ -1122,6 +1146,30 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
                             }
 
                             output_items.add_child(action.render(app).finish());
+                        }
+                        AIAgentOutputMessageType::Subagent(SubagentCall {
+                            subagent_type: SubagentType::ComputerUse,
+                            task_id: subagent_task_id,
+                        }) => {
+                            // Computer-use subtasks are excluded from the blocklist (see
+                            // `should_show_task_in_blocklist`), so their tool calls are rendered
+                            // here, inline on the exchange that spawned them, instead of in a
+                            // separate trailing AI block that used to render below this
+                            // exchange's response footer/toolbelt (APP-5371).
+                            if let Some((rows, is_done)) = render_computer_use_subtask(
+                                props,
+                                subagent_task_id,
+                                &recording_spans_by_action_id,
+                                app,
+                            ) {
+                                for row in rows {
+                                    output_items.add_child(row);
+                                }
+                                if !is_done {
+                                    should_render_footer = false;
+                                    should_render_suggestions = false;
+                                }
+                            }
                         }
                         _ => (),
                     };
@@ -3284,6 +3332,69 @@ fn render_request_computer_use(
     }
 
     renderable_action.render(app).finish()
+}
+
+/// Renders the tool-call rows for a computer-use subagent task, so they appear inline as part of
+/// the exchange that spawned the subagent (see `should_show_task_in_blocklist`), rather than in a
+/// separate trailing AI block.
+///
+/// Returns the rendered rows along with whether the subagent task has finished (either its result
+/// was returned to the parent exchange, or one of its own exchanges was cancelled). `None` is
+/// returned if the subagent task can no longer be found (e.g. it hasn't streamed in yet).
+fn render_computer_use_subtask(
+    props: Props,
+    subagent_task_id: &str,
+    recording_spans_by_action_id: &HashMap<AIAgentActionId, RecordingSpanInfo>,
+    app: &AppContext,
+) -> Option<(Vec<Box<dyn Element>>, bool)> {
+    let conversation = props.model.conversation(app)?;
+    let task_id = TaskId::new(subagent_task_id.to_owned());
+    let task = conversation.get_task(&task_id)?;
+
+    let is_finished = conversation
+        .is_subagent_task_finished(&task_id)
+        .unwrap_or(false);
+    let is_cancelled = task
+        .exchanges()
+        .any(|exchange| exchange.output_status.is_cancelled());
+
+    let rows = task
+        .exchanges()
+        .filter_map(|exchange| exchange.output_status.output())
+        .flat_map(|output| {
+            output
+                .get()
+                .messages
+                .iter()
+                .filter_map(|message| {
+                    let AIAgentOutputMessageType::Action(action) = &message.message else {
+                        return None;
+                    };
+                    match &action.action {
+                        AIAgentActionType::RequestComputerUse(request) => {
+                            Some(render_request_computer_use(props, &action.id, request, app))
+                        }
+                        AIAgentActionType::UseComputer(request) => Some(render_use_computer(
+                            props,
+                            &action.id,
+                            request,
+                            recording_spans_by_action_id.get(&action.id),
+                            app,
+                        )),
+                        AIAgentActionType::StartRecording { summary, .. } => Some(
+                            render_start_recording(props, &action.id, summary.as_deref(), app),
+                        ),
+                        AIAgentActionType::StopRecording { .. } => {
+                            Some(render_stop_recording(props, &action.id, app))
+                        }
+                        _ => None,
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    Some((rows, is_finished || is_cancelled))
 }
 
 /// Renders the collapsible references footer

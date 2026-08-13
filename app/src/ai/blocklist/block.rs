@@ -89,6 +89,7 @@ use super::{
 };
 use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::agent::redaction::redact_secrets;
+use crate::ai::agent::task::TaskId;
 use crate::ai::agent::telemetry::ForTelemetry as _;
 use crate::ai::agent::{
     AIAgentAction, AIAgentActionId, AIAgentActionResultType, AIAgentActionType, AIAgentAttachment,
@@ -1982,6 +1983,36 @@ impl AIBlock {
         ctx.notify();
     }
 
+    /// Returns the actions belonging to any computer-use subagent tasks referenced by this
+    /// exchange's output (via a `Subagent(SubagentCall { subagent_type: ComputerUse, .. })`
+    /// message). Computer-use subagent tasks are intentionally excluded from the blocklist (see
+    /// `should_show_task_in_blocklist`) so their tool calls render inline as part of this
+    /// exchange's output instead of in a separate trailing AI block (APP-5371); this lets the
+    /// same per-action UI state (buttons, etc.) get registered for those embedded actions too.
+    fn embedded_computer_use_subtask_actions(
+        &self,
+        output: &AIAgentOutput,
+        app: &AppContext,
+    ) -> Vec<AIAgentAction> {
+        let Some(conversation) = self.model.conversation(app) else {
+            return Vec::new();
+        };
+        output
+            .messages
+            .iter()
+            .filter_map(|message| match &message.message {
+                AIAgentOutputMessageType::Subagent(SubagentCall {
+                    subagent_type: SubagentType::ComputerUse,
+                    task_id,
+                }) => conversation.get_task(&TaskId::new(task_id.clone())),
+                _ => None,
+            })
+            .flat_map(|task| task.exchanges())
+            .filter_map(|exchange| exchange.output_status.output())
+            .flat_map(|shared_output| shared_output.get().actions().cloned().collect::<Vec<_>>())
+            .collect()
+    }
+
     fn handle_updated_output(&mut self, output: &AIAgentOutput, ctx: &mut ViewContext<Self>) {
         // Ensure ui state handles are initialized for todo operation output messages.
         for message in &output.messages {
@@ -1992,7 +2023,14 @@ impl AIBlock {
             }
         }
 
-        self.has_recording_related_actions = output.actions().any(|action| {
+        // Computer-use subagent tasks don't get their own AI block (see
+        // `should_show_task_in_blocklist`); their tool calls render inline on this exchange
+        // instead (APP-5371). Treat their actions the same as this exchange's own for the
+        // purposes of button/state registration below, so those inline rows work correctly.
+        let embedded_cu_actions = self.embedded_computer_use_subtask_actions(output, ctx);
+        let all_actions = || output.actions().chain(embedded_cu_actions.iter());
+
+        self.has_recording_related_actions = all_actions().any(|action| {
             matches!(
                 &action.action,
                 AIAgentActionType::StartRecording { .. }
@@ -2013,9 +2051,9 @@ impl AIBlock {
 
         self.fetch_conversation_search_agent_run_titles(output, ctx);
 
-        for action in output.actions() {
+        for action in all_actions() {
             let new_action_ids: HashSet<AIAgentActionId> =
-                output.actions().map(|action| action.id.clone()).collect();
+                all_actions().map(|action| action.id.clone()).collect();
 
             #[cfg(feature = "integration_tests")]
             {
