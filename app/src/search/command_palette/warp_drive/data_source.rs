@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use warp_core::execution_mode::AppExecutionMode;
 use warp_errors::report_error;
 use warpui::{AppContext, Entity, ModelContext, ModelHandle, SingletonEntity, WindowId};
 
@@ -68,7 +69,13 @@ pub struct DataSource {
 impl DataSource {
     #[cfg(not(target_family = "wasm"))]
     pub fn new(window_id: WindowId, ctx: &mut ModelContext<Self>) -> Self {
-        if warp_core::features::FeatureFlag::UseTantivySearch.is_enabled() {
+        if AppExecutionMode::as_ref(ctx).is_autonomous() {
+            // Autonomous execution modes (e.g. the SDK/agent driver, or the remote server
+            // daemon) have no user to present the command palette to, so there's no reason
+            // to build a full-text search index of Warp Drive objects. Object sync itself
+            // still runs; only the search index is skipped.
+            Self::new_no_op(window_id, ctx)
+        } else if warp_core::features::FeatureFlag::UseTantivySearch.is_enabled() {
             Self::new_full_text(window_id, ctx)
         } else {
             Self::new_fuzzy(window_id, ctx)
@@ -90,6 +97,11 @@ impl DataSource {
             ctx.background_executor(),
         ));
         Self::new_with_searcher(window_id, searcher, ctx)
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn new_no_op(window_id: WindowId, ctx: &mut ModelContext<Self>) -> Self {
+        Self::new_with_searcher(window_id, Box::new(NoOpWarpDriveSearcher), ctx)
     }
 
     fn new_with_searcher(
@@ -654,6 +666,77 @@ impl WarpDriveSearcher for FuzzyWarpDriveSearcher {
                 })
             })
             .collect())
+    }
+}
+
+/// Search backend used in autonomous execution modes (e.g. the SDK/agent driver, or the
+/// remote server daemon), where there is no user to open the command palette. Indexes
+/// nothing and always reports no results, since [`DataSource::run_query`] is never reached
+/// in these modes.
+#[cfg(not(target_family = "wasm"))]
+struct NoOpWarpDriveSearcher;
+
+#[cfg(not(target_family = "wasm"))]
+impl WarpDriveSearcher for NoOpWarpDriveSearcher {
+    fn insert_searchable_object(
+        &mut self,
+        _object: &dyn CloudObject,
+        _object_type: ObjectType,
+        _scope: &WindowScope,
+        _app: &AppContext,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn delete_searchable_object(
+        &mut self,
+        _uid: ObjectUid,
+        _object_type: ObjectType,
+        _app: &AppContext,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn refresh_search_index(
+        &mut self,
+        _scope: &WindowScope,
+        _app: &AppContext,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn search_notebook(
+        &self,
+        _query: &str,
+        _app: &AppContext,
+    ) -> anyhow::Result<Vec<NotebookSearchItem>> {
+        Ok(Vec::new())
+    }
+
+    fn search_workflow(
+        &self,
+        _query: &str,
+        _app: &AppContext,
+        _should_include_am_prompts: bool,
+        _should_include_command_workflow: bool,
+    ) -> anyhow::Result<Vec<WorkflowSearchItem>> {
+        Ok(Vec::new())
+    }
+
+    fn search_env_var(
+        &self,
+        _query: &str,
+        _app: &AppContext,
+    ) -> anyhow::Result<Vec<EnvVarCollectionSearchItem>> {
+        Ok(Vec::new())
+    }
+
+    fn search_plans(
+        &self,
+        _query: &str,
+        _app: &AppContext,
+    ) -> anyhow::Result<Vec<NotebookSearchItem>> {
+        Ok(Vec::new())
     }
 }
 

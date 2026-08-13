@@ -5,6 +5,7 @@ use chrono::Utc;
 use cloud_object_client::MockObjectClient;
 use instant::Instant;
 use settings::manager::SettingsManager;
+use warp_core::execution_mode::{AppExecutionMode, ExecutionMode};
 use warp_graphql::object_permissions::AccessLevel;
 use warpui::{App, SingletonEntity, WindowId};
 
@@ -131,7 +132,16 @@ fn mock_server_notebook(id: NotebookId, owner: Owner) -> ServerNotebook {
 }
 
 fn initialize_app(app: &mut App, workspaces: Vec<Workspace>) {
+    initialize_app_with_execution_mode(app, workspaces, ExecutionMode::App);
+}
+
+fn initialize_app_with_execution_mode(
+    app: &mut App,
+    workspaces: Vec<Workspace>,
+    execution_mode: ExecutionMode,
+) {
     // Add the necessary singleton models to the App
+    app.add_singleton_model(|ctx| AppExecutionMode::new(execution_mode, false, ctx));
     app.add_singleton_model(|_| NetworkStatus::new());
     app.add_singleton_model(|_| SystemStats::new());
     let mock_team_client = Arc::new(MockTeamClient::new());
@@ -725,6 +735,42 @@ fn test_full_text_drive_data_source_rebuilds_when_the_windows_team_changes() {
             "second",
             &[workflow_label("second team workflow")],
             &mut app,
+        );
+    })
+}
+
+/// Autonomous execution modes (the SDK/agent driver, and the remote server daemon) have no
+/// user to present the command palette to, so the Warp Drive data source falls back to a
+/// no-op search backend regardless of the tantivy feature flag: it always reports zero
+/// results instead of paying to build a full-text search index that nothing will ever query.
+#[test]
+fn test_drive_data_source_returns_no_results_in_autonomous_execution_mode() {
+    let _flag = FeatureFlag::UseTantivySearch.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app_with_execution_mode(&mut app, vec![], ExecutionMode::Sdk);
+        CloudModel::handle(&app).update(&mut app, |model, ctx| {
+            model.upsert_from_server_workflow(
+                mock_named_server_workflow(
+                    1.into(),
+                    Owner::mock_current_user(),
+                    "autonomous workflow",
+                    "echo autonomous",
+                ),
+                ctx,
+            );
+        });
+
+        let mixer = app.add_model(|_| CommandPaletteMixer::new());
+        let data_source_handle =
+            app.add_model(|ctx| warp_drive::DataSource::new(WindowId::new(), ctx));
+        mixer.update(&mut app, |mixer, _| {
+            mixer.add_sync_source(data_source_handle, [QueryFilter::Workflows]);
+        });
+
+        assert_eq!(
+            workflow_labels(&mixer, "autonomous", &mut app),
+            Vec::<String>::new()
         );
     })
 }
