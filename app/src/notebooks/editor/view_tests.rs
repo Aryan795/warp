@@ -990,3 +990,69 @@ fn test_show_find_bar_action_lazily_constructs_find_bar() {
         });
     });
 }
+
+#[test]
+fn test_switching_to_editable_with_existing_selection_lazily_constructs_omnibar() {
+    // Regression test: a text selection made while `Selectable` (`selection_start`/`selection_end`
+    // aren't edit-gated) survives a transition to `Editable`, and the model only emits
+    // `InteractionStateChanged` for that transition, never `ActiveStylesChanged`. The omnibar
+    // must therefore also be constructed from `set_interaction_state` itself, not only from
+    // selection-change events, or `should_show_omnibar` can become true while `omnibar` is still
+    // `None`.
+    App::test((), |mut app| async move {
+        let (_, editor_view, _) = initialize_editor(&mut app);
+
+        // The model defaults to `Editable`; switch to `Selectable` before making any content or
+        // selection changes, so none of them can construct the omnibar via the (still valid)
+        // selection-change hook.
+        editor_view.update(&mut app, |editor, ctx| {
+            editor.set_interaction_state(InteractionState::Selectable, ctx);
+            editor.reset_with_markdown("Some text", ctx);
+        });
+        let render_state = editor_view.read(&app, |editor, ctx| {
+            editor.model.as_ref(ctx).render_state().clone()
+        });
+        app.read(|ctx| render_state.as_ref(ctx).layout_complete())
+            .await;
+
+        // Select a text range while still `Selectable`. This does not construct the omnibar,
+        // since it can't be shown while the editor isn't editable.
+        editor_view.update(&mut app, |editor, ctx| {
+            editor.selection_start(CharOffset::from(0), false, ctx);
+            editor.selection_update(CharOffset::from(4), ctx);
+            editor.selection_end(ctx);
+        });
+        app.read(|ctx| render_state.as_ref(ctx).layout_complete())
+            .await;
+
+        editor_view.read(&app, |editor, _ctx| {
+            assert_eq!(
+                editor.constructed_chrome_count(),
+                1,
+                "Selecting text while not editable should not construct the omnibar"
+            );
+        });
+
+        editor_view.read(&app, |editor, ctx| {
+            assert!(!editor.selection_is_single_cursor(ctx));
+            assert!(!editor.should_show_omnibar(ctx));
+        });
+
+        // Switch to `Editable` without touching the selection.
+        editor_view.update(&mut app, |editor, ctx| {
+            editor.set_interaction_state(InteractionState::Editable, ctx);
+        });
+
+        editor_view.read(&app, |editor, ctx| {
+            assert!(
+                editor.should_show_omnibar(ctx),
+                "Omnibar should be shown once editable with a pre-existing non-cursor selection"
+            );
+            assert_eq!(
+                editor.constructed_chrome_count(),
+                2,
+                "Becoming editable with a pre-existing selection should construct the omnibar"
+            );
+        });
+    });
+}

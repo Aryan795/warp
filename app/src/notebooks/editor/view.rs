@@ -1522,6 +1522,19 @@ impl RichTextEditorView {
         }
         self.model
             .update(ctx, |model, ctx| model.set_interaction_state(state, ctx));
+
+        // `should_show_omnibar` requires `is_editable`, so becoming editable is itself a
+        // false->true transition of that predicate, independent of any selection change. A
+        // selection made while `Selectable` (selection isn't edit-gated) survives a transition
+        // to `Editable` here without the model ever emitting `ActiveStylesChanged`, so relying
+        // on that event alone would leave the omnibar unconstructed even though the omnibar
+        // should now be shown. This is the only setter for interaction state on this view, so
+        // hooking construction here (in addition to the selection-change hook in
+        // `handle_model_event`) covers every path into `Editable`, rather than enumerating the
+        // model events that can also flip the predicate.
+        if matches!(state, InteractionState::Editable) {
+            self.ensure_omnibar(ctx);
+        }
     }
 
     /// Whether an edit operation (insert, backspace, change style, etc.) should be allowed. Edits are allowed if:
