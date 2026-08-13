@@ -1,14 +1,16 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use ai::agent::orchestration_config::{
     OrchestrationConfig, OrchestrationConfigStatus, OrchestrationExecutionMode,
 };
 use warp::tui_export::{
-    AIActionStatus, AIAgentAction, AIAgentActionId, AIAgentActionType, AIConversationId,
-    Appearance, AuthSecretSelection, OptionRow, OptionSnapshot, OptionSourceStatus,
-    OrchestrationConfigState, OrchestrationEditState, RunAgentsAgentRunConfig,
-    RunAgentsExecutionMode, RunAgentsRequest, TaskId, register_tui_session_view_test_singletons,
+    AIActionStatus, AIAgentAction, AIAgentActionId, AIAgentActionResult, AIAgentActionResultType,
+    AIAgentActionType, AIConversationId, Appearance, AuthSecretSelection, OptionRow,
+    OptionSnapshot, OptionSourceStatus, OrchestrationConfigState, OrchestrationEditState,
+    RunAgentsAgentRunConfig, RunAgentsExecutionMode, RunAgentsRequest, RunAgentsResult, TaskId,
+    register_tui_session_view_test_singletons,
 };
 use warp_core::features::FeatureFlag;
 use warpui::platform::WindowStyle;
@@ -931,6 +933,86 @@ fn restored_without_a_result_renders_cancelled_state() {
                 .iter()
                 .any(|line| line.contains("Spawn agents cancelled")),
             "expected the cancelled label, got: {lines:?}"
+        );
+    });
+}
+
+/// Builds a `Finished` status wrapping `result` for the `run-agents-1` action
+/// used by [`test_block_with_terminal_flags`].
+fn finished_run_agents_status(result: RunAgentsResult) -> AIActionStatus {
+    AIActionStatus::Finished(Arc::new(AIAgentActionResult {
+        id: AIAgentActionId::from("run-agents-1".to_string()),
+        task_id: TaskId::new("task-1".to_string()),
+        result: AIAgentActionResultType::RunAgents(result),
+    }))
+}
+
+/// The highest-risk precedence contract: a statusful terminal result must
+/// never be overridden by the orphaned-cancelled fallback, even when the
+/// containing block's output has *also* reached a terminal state (a real
+/// result can still arrive on the same tick the block finishes). A `Denied`
+/// result keeps its own disabled-orchestration copy, distinct from the
+/// generic cancelled label.
+#[test]
+fn denied_result_is_not_overridden_by_a_terminal_block() {
+    App::test((), |mut app| async move {
+        let (block, controller) = test_block_with_terminal_flags(
+            &mut app,
+            &request("oz", RunAgentsExecutionMode::Local),
+            false,
+            true, // output_terminal_without_result: the block also looks orphaned-cancelled.
+        );
+        controller
+            .status
+            .replace(Some(finished_run_agents_status(RunAgentsResult::Denied {
+                reason: "orchestration disabled".to_string(),
+            })));
+
+        let lines = rendered_block_lines(&block, &app);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Orchestration disabled")),
+            "expected the Denied copy to survive, got: {lines:?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("Spawn agents cancelled")),
+            "a statusful Denied result must not be overridden by the terminal-block fallback: {lines:?}"
+        );
+    });
+}
+
+/// A real `Finished(RunAgentsResult::Cancelled)` result — the action actually
+/// reached the queue and was cancelled there — must render through its own
+/// result path rather than the orphaned-cancelled fallback, even though both
+/// produce the same copy. Exercising it with `output_terminal_without_result`
+/// unset confirms the ordinary statusful branch alone is sufficient; no
+/// orphaned-fallback plumbing is needed for a call that actually resolved.
+#[test]
+fn real_finished_cancelled_result_renders_through_its_own_path() {
+    App::test((), |mut app| async move {
+        let (block, controller) = test_block_with_terminal_flags(
+            &mut app,
+            &request("oz", RunAgentsExecutionMode::Local),
+            false,
+            false,
+        );
+        controller
+            .status
+            .replace(Some(finished_run_agents_status(RunAgentsResult::Cancelled)));
+
+        let lines = rendered_block_lines(&block, &app);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Spawn agents cancelled")),
+            "expected the cancelled label from the real result, got: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains('■')),
+            "expected the cancelled glyph, got: {lines:?}"
         );
     });
 }
