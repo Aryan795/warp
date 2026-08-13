@@ -199,19 +199,20 @@ fn test_vim_find_enter_keeps_find_input_clickable() {
         find_bar.update(&mut app, |find_bar, ctx| {
             find_bar.set_find_query(ctx, "hello");
         });
-        assert!(find_bar.as_ref(&app).is_find_input_focused(&app));
+        assert!(find_bar.read(&app, |find_bar, ctx| find_bar.is_find_input_focused(ctx)));
 
         find_bar.update(&mut app, |find_bar, ctx| {
             find_bar.simulate_enter_for_test(ctx);
         });
 
-        assert!(find_bar.as_ref(&app).is_open());
+        assert!(find_bar.read(&app, |find_bar, _ctx| find_bar.is_open()));
         assert!(
-            !find_bar.as_ref(&app).is_find_input_focused(&app),
+            !find_bar.read(&app, |find_bar, ctx| find_bar.is_find_input_focused(ctx)),
             "vim Enter should move keyboard focus away from the find input"
         );
         assert!(
-            find_bar.as_ref(&app).find_input_can_be_focused_for_test(&app),
+            find_bar.read(&app, |find_bar, ctx| find_bar
+                .find_input_can_be_focused_for_test(ctx)),
             "find input must remain focusable (clickable) after vim Enter"
         );
     });
@@ -243,17 +244,19 @@ fn test_non_vim_find_enter_keeps_focus_in_find_input() {
         find_bar.update(&mut app, |find_bar, ctx| {
             find_bar.set_find_query(ctx, "hello");
         });
-        assert!(find_bar.as_ref(&app).is_find_input_focused(&app));
+        assert!(find_bar.read(&app, |find_bar, ctx| find_bar.is_find_input_focused(ctx)));
 
         find_bar.update(&mut app, |find_bar, ctx| {
             find_bar.simulate_enter_for_test(ctx);
         });
 
         assert!(
-            find_bar.as_ref(&app).is_find_input_focused(&app),
+            find_bar.read(&app, |find_bar, ctx| find_bar.is_find_input_focused(ctx)),
             "non-vim Enter should keep focus in the find input"
         );
-        assert!(find_bar.as_ref(&app).find_input_can_be_focused_for_test(&app));
+        assert!(find_bar.read(&app, |find_bar, ctx| {
+            find_bar.find_input_can_be_focused_for_test(ctx)
+        }));
     });
 }
 
@@ -278,8 +281,8 @@ fn test_vim_search_word_at_cursor_leaves_buffer_receiving_keystrokes() {
             .read(&app, |view, _| view.find_bar.clone())
             .expect("find bar should be enabled");
 
-        assert!(find_bar.as_ref(&app).is_open());
-        assert!(!find_bar.as_ref(&app).is_find_input_focused(&app));
+        assert!(find_bar.read(&app, |find_bar, _ctx| find_bar.is_open()));
+        assert!(!find_bar.read(&app, |find_bar, ctx| find_bar.is_find_input_focused(ctx)));
 
         // Since the find input never had focus, vim keystrokes must still reach the buffer.
         vim_user_insert(&editor, "i", &mut app);
