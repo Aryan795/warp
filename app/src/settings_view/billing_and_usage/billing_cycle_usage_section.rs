@@ -21,11 +21,12 @@ use crate::auth::{AuthManager, AuthStateProvider};
 use crate::menu::{self, Menu, MenuItem, MenuItemFields};
 use crate::settings_view::admin_actions::AdminActions;
 use crate::settings_view::billing_and_usage::billing_cycle_usage_common::{
-    BillingUsageMouseStates, filter_legacy_buckets, has_non_viewer_data, legend_cost_types,
+    BillingUsageMouseStates, filter_entries_by_attributed_team, filter_legacy_buckets,
+    has_non_viewer_data, legend_cost_types,
 };
 use crate::settings_view::billing_and_usage::billing_cycle_usage_rows::{
-    SourceFilter, has_cloud_usage, render_own_usage_solo_row, render_own_usage_with_workspace_row,
-    render_rows,
+    SourceFilter, UsageRosterMember, has_cloud_usage, render_own_usage_solo_row,
+    render_own_usage_with_workspace_row, render_rows,
 };
 use crate::settings_view::billing_and_usage::billing_cycle_usage_team_totals::render_team_totals_block;
 use crate::settings_view::billing_and_usage_page_v2::{
@@ -273,6 +274,7 @@ impl BillingCycleUsageSectionView {
     ) -> Box<dyn Element> {
         let is_admin = self.viewer_is_team_admin(app);
         let visibility = workspace.resolve_usage_visibility(is_admin);
+        let team = UserWorkspaces::as_ref(app).team_for_view_handle(&self.self_handle, app);
 
         let mut column = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
         column.add_child(self.render_header(Some(workspace), &visibility, appearance, app));
@@ -282,6 +284,27 @@ impl BillingCycleUsageSectionView {
                 .map(|summary| summary.entries.as_slice())
                 .unwrap_or_default(),
         );
+        // Scope usage to the window's current team so an admin looking at
+        // Team A never sees Team B's members' usage folded into these
+        // totals/rows. Per the backend invariant `VIS != OwnOnly => viewer
+        // is admin` (see `viewer_is_team_admin`), reaching this branch
+        // guarantees a team is bound to the window; the `None` arms below
+        // only guard against that invariant being violated.
+        let entries = match &team {
+            Some(team) => filter_entries_by_attributed_team(&entries, &team.uid.to_string()),
+            None => entries,
+        };
+        let roster: Vec<UsageRosterMember> = team
+            .map(|team| {
+                team.members
+                    .iter()
+                    .map(|member| UsageRosterMember {
+                        uid: member.uid.as_str().to_string(),
+                        email: member.email.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let is_source_filter_shown = visibility.granularity
             == UsageVisibilityGranularity::FullBreakdown
@@ -309,7 +332,7 @@ impl BillingCycleUsageSectionView {
 
         column.add_child(
             Container::new(render_rows(
-                workspace,
+                &roster,
                 &entries,
                 &visibility,
                 source_filter,
