@@ -81,6 +81,9 @@ pub struct CodeEditorFind {
     replace_editor: ViewHandle<EditorView>,
     searcher: ModelHandle<Searcher>,
     button_mouse_states: ButtonMouseStates,
+    /// Save position of the find input, so its rendered bounds can be resolved for click
+    /// simulation in integration tests.
+    find_editor_position_id: String,
     preserve_case_enabled: bool,
     is_open: bool,
     is_replace_open: bool,
@@ -225,10 +228,11 @@ impl CodeEditorFind {
         });
 
         Self {
-            find_editor,
+            find_editor: find_editor.clone(),
             replace_editor,
             searcher,
             button_mouse_states: Default::default(),
+            find_editor_position_id: format!("code_editor_find_query_{}", find_editor.id()),
             preserve_case_enabled: false,
             is_open: false,
             is_replace_open: false,
@@ -786,10 +790,14 @@ impl CodeEditorFind {
             .with_child(
                 Shrinkable::new(
                     1.,
-                    ConstrainedBox::new(
-                        Clipped::new(ChildView::new(&self.find_editor).finish()).finish(),
+                    SavePosition::new(
+                        ConstrainedBox::new(
+                            Clipped::new(ChildView::new(&self.find_editor).finish()).finish(),
+                        )
+                        .with_height(editor_height)
+                        .finish(),
+                        &self.find_editor_position_id,
                     )
-                    .with_height(editor_height)
                     .finish(),
                 )
                 .finish(),
@@ -1062,11 +1070,18 @@ impl View for CodeEditorFind {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "integration_tests"))]
 impl CodeEditorFind {
     /// Returns a handle to the find query editor, for tests that need to inspect or drive its
     /// interaction state (e.g. simulating a click via `EditorAction::Focus`).
     pub fn find_editor_for_test(&self) -> ViewHandle<EditorView> {
         self.find_editor.clone()
+    }
+
+    /// Returns the saved-position id under which the find query editor's rendered bounds are
+    /// recorded, so an integration test can click on it to simulate a real pointer click.
+    #[cfg_attr(not(feature = "integration_tests"), allow(dead_code))]
+    pub fn find_editor_position_id_for_test(&self) -> &str {
+        &self.find_editor_position_id
     }
 }
