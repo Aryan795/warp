@@ -178,8 +178,6 @@ pub struct ModelIconFlags {
 /// add one entry here.
 const NON_FIRST_PARTY_MODEL_BRAND_ICONS: &[(&str, Icon)] = &[("kimi-", Icon::KimiLogo)];
 
-/// Returns the brand icon for a non-first-party model id, if any is
-/// registered in [`NON_FIRST_PARTY_MODEL_BRAND_ICONS`].
 fn non_first_party_model_icon(id: &str) -> Option<Icon> {
     let id = id.to_ascii_lowercase();
     NON_FIRST_PARTY_MODEL_BRAND_ICONS
