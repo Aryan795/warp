@@ -21,7 +21,8 @@ use crate::auth::{AuthManager, AuthStateProvider};
 use crate::menu::{self, Menu, MenuItem, MenuItemFields};
 use crate::settings_view::admin_actions::AdminActions;
 use crate::settings_view::billing_and_usage::billing_cycle_usage_common::{
-    BillingUsageMouseStates, filter_legacy_buckets, has_non_viewer_data, legend_cost_types,
+    BillingUsageMouseStates, filter_entries_to_team, filter_legacy_buckets, has_non_viewer_data,
+    legend_cost_types, workspace_members_for_team,
 };
 use crate::settings_view::billing_and_usage::billing_cycle_usage_rows::{
     SourceFilter, has_cloud_usage, render_own_usage_solo_row, render_own_usage_with_workspace_row,
@@ -33,11 +34,12 @@ use crate::settings_view::billing_and_usage_page_v2::{
     BONUS_CREDITS_DOT_COLOR, PAYG_CREDITS_DOT_COLOR,
 };
 use crate::ui_components::icons::Icon;
+use crate::workspaces::team::Team;
 use crate::workspaces::update_manager::TeamUpdateManager;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::workspaces::workspace::{
-    AiCreditsUsageAndCostType, BillingCycleUsageSummary, MaxPriorCycles, UsageVisibility,
-    UsageVisibilityGranularity, Workspace,
+    AiCreditsUsageAndCostType, BillingCycleUsageEntry, BillingCycleUsageSummary, MaxPriorCycles,
+    UsageVisibility, UsageVisibilityGranularity, Workspace,
 };
 
 const HEADER_FONT_SIZE: f32 = 16.;
@@ -120,14 +122,38 @@ impl BillingCycleUsageSectionView {
         AuthStateProvider::as_ref(app).get().user_email()
     }
 
+    /// The team associated with this section's window, if any. A native
+    /// workspace can span multiple teams, so this is the team whose usage
+    /// should actually be shown — see [`Self::entries_for_current_team`].
+    fn current_team<'a>(&self, app: &'a AppContext) -> Option<&'a Team> {
+        UserWorkspaces::as_ref(app).team_for_view_handle(&self.self_handle, app)
+    }
+
     fn viewer_is_team_admin(&self, app: &AppContext) -> bool {
-        let Some(team) = UserWorkspaces::as_ref(app).team_for_view_handle(&self.self_handle, app)
-        else {
+        let Some(team) = self.current_team(app) else {
             return false;
         };
         Self::resolved_viewer_email(app)
             .as_deref()
             .is_some_and(|email| team.has_admin_permissions(email))
+    }
+
+    /// Scopes `entries` down to the team currently being viewed.
+    ///
+    /// `Workspace.billing_cycle_usage` returns usage for every team in a
+    /// native workspace at once, so this must run before entries reach any
+    /// rendering path, otherwise a team admin would see every other team's
+    /// usage too. Falls back to the unfiltered list when there is no current
+    /// team (e.g. a teamless workspace).
+    fn entries_for_current_team(
+        &self,
+        entries: Vec<BillingCycleUsageEntry>,
+        app: &AppContext,
+    ) -> Vec<BillingCycleUsageEntry> {
+        match self.current_team(app) {
+            Some(team) => filter_entries_to_team(&entries, team.uid),
+            None => entries,
+        }
     }
 
     fn current_summary<'a>(
@@ -175,6 +201,7 @@ impl BillingCycleUsageSectionView {
                 .map(|s| s.entries.as_slice())
                 .unwrap_or_default(),
         );
+        let entries = self.entries_for_current_team(entries, app);
         let viewer_uid = AuthStateProvider::as_ref(app)
             .get()
             .user_id()
@@ -282,6 +309,7 @@ impl BillingCycleUsageSectionView {
                 .map(|summary| summary.entries.as_slice())
                 .unwrap_or_default(),
         );
+        let entries = self.entries_for_current_team(entries, app);
 
         let is_source_filter_shown = visibility.granularity
             == UsageVisibilityGranularity::FullBreakdown
@@ -307,9 +335,18 @@ impl BillingCycleUsageSectionView {
             column.add_child(Container::new(banner).with_margin_top(16.).finish());
         }
 
+        // `Workspace.members` spans every team in a native workspace, so
+        // per-member rows must be scoped to the current team the same way
+        // `entries` were scoped above, or an admin of one team would see
+        // every other team's roster.
+        let members = match self.current_team(app) {
+            Some(team) => workspace_members_for_team(&workspace.members, team),
+            None => workspace.members.clone(),
+        };
+
         column.add_child(
             Container::new(render_rows(
-                workspace,
+                &members,
                 &entries,
                 &visibility,
                 source_filter,
@@ -339,6 +376,7 @@ impl BillingCycleUsageSectionView {
                 .map(|s| s.entries.as_slice())
                 .unwrap_or_default(),
         );
+        let entries = self.entries_for_current_team(entries, app);
 
         let mut column = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
         column.add_child(self.render_header(Some(workspace), &visibility, appearance, app));
