@@ -258,6 +258,14 @@ fn with_agent_name(mut action: AIAgentAction, name: &str) -> AIAgentAction {
     action
 }
 
+fn with_agent_identity_uid(mut action: AIAgentAction, uid: &str) -> AIAgentAction {
+    let AIAgentActionType::RunAgents(request) = &mut action.action else {
+        panic!("expected run_agents action");
+    };
+    request.agent_run_configs[0].agent_identity_uid = uid.to_string();
+    action
+}
+
 #[test]
 fn local_codex_run_agents_maps_to_local_harness_mode_when_flag_enabled() {
     let _local_codex = FeatureFlag::LocalClaudeCodexChildHarnesses.override_enabled(true);
@@ -852,6 +860,129 @@ fn execute_denies_remote_non_warp_harness_without_default_auth_secret() {
         assert_eq!(
             reason,
             "Cloud child agents using this harness require an API key before they can run."
+        );
+    });
+}
+
+#[test]
+fn execute_does_not_deny_named_agent_remote_non_warp_harness_without_default_auth_secret() {
+    App::test((), |mut app| async move {
+        let state = initialize_run_agents_test(&mut app, ExecutionMode::App);
+        let action = with_agent_identity_uid(remote_run_agents_action("codex"), "sa-uid-1");
+
+        let execution = state.executor.update(&mut app, |executor, ctx| {
+            executor
+                .execute(
+                    ExecuteActionInput {
+                        action: &action,
+                        conversation_id: state.conversation_id,
+                    },
+                    ctx,
+                )
+                .into()
+        });
+
+        // A named-agent child brings its own harness credentials, so the
+        // absent run-wide auth secret no longer denies the call the way
+        // `execute_denies_remote_non_warp_harness_without_default_auth_secret`
+        // does for an unnamed child.
+        assert!(matches!(execution, AnyActionExecution::Async { .. }));
+    });
+}
+
+// A named agent's model, harness, and auth secret must all be dropped
+// together on the approved-config path, not just the model: the plan
+// resolves the batch to a claude harness/model/secret, but the named
+// child's own per-child model_id implies a different (codex) pairing.
+// Leaking any one of the three would run the named agent under a
+// mismatched or borrowed harness/model/secret combination.
+#[test]
+fn approved_config_drops_the_batch_harness_model_and_secret_only_for_named_children() {
+    App::test((), |mut app| async move {
+        let state = initialize_run_agents_test(&mut app, ExecutionMode::App);
+        persist_plan_config_with_harness(
+            &mut app,
+            state.conversation_id,
+            "plan-1",
+            "claude",
+            OrchestrationConfigStatus::Approved,
+        );
+        persist_default_auth_secret(&mut app, "claude", "default-anthropic-key");
+
+        let AIAgentActionType::RunAgents(mut request) =
+            with_plan_id(remote_run_agents_action("oz"), "plan-1").action
+        else {
+            panic!("expected run_agents action");
+        };
+        request.agent_run_configs = vec![
+            RunAgentsAgentRunConfig {
+                name: "code-review".to_string(),
+                prompt: "Review the PR".to_string(),
+                title: String::new(),
+                agent_identity_uid: "sa-uid-1".to_string(),
+                model_id: "codex-medium".to_string(),
+            },
+            RunAgentsAgentRunConfig {
+                name: "child".to_string(),
+                prompt: "Do the thing".to_string(),
+                title: String::new(),
+                agent_identity_uid: String::new(),
+                model_id: String::new(),
+            },
+        ];
+
+        state.executor.update(&mut app, |_, ctx| {
+            resolve_request_from_approved_config(&mut request, state.conversation_id, ctx);
+            populate_default_auth_secret_for_execution(&mut request, ctx);
+        });
+        assert_eq!(request.harness_type, "claude");
+        assert_eq!(request.model_id, "auto");
+        assert_eq!(
+            request.harness_auth_secret_name.as_deref(),
+            Some("default-anthropic-key")
+        );
+
+        let named_cfg = request.agent_run_configs[0].clone();
+        let unnamed_cfg = request.agent_run_configs[1].clone();
+        let mode_for = |cfg: &RunAgentsAgentRunConfig| {
+            run_agents_to_start_agent_mode(
+                &request.execution_mode,
+                &request.harness_type,
+                &request.model_id,
+                &request.skills,
+                request.harness_auth_secret_name.as_deref(),
+                cfg,
+            )
+            .expect("Remote+claude must convert")
+        };
+
+        let StartAgentExecutionMode::Remote {
+            model_id: named_model_id,
+            harness_type: named_harness_type,
+            auth_secret_name: named_auth_secret_name,
+            ..
+        } = mode_for(&named_cfg)
+        else {
+            panic!("expected Remote start-agent mode");
+        };
+        assert_eq!(named_model_id, "");
+        assert_eq!(named_harness_type, "");
+        assert_eq!(named_auth_secret_name, None);
+
+        let StartAgentExecutionMode::Remote {
+            model_id: unnamed_model_id,
+            harness_type: unnamed_harness_type,
+            auth_secret_name: unnamed_auth_secret_name,
+            ..
+        } = mode_for(&unnamed_cfg)
+        else {
+            panic!("expected Remote start-agent mode");
+        };
+        assert_eq!(unnamed_model_id, "auto");
+        assert_eq!(unnamed_harness_type, "claude");
+        assert_eq!(
+            unnamed_auth_secret_name.as_deref(),
+            Some("default-anthropic-key")
         );
     });
 }

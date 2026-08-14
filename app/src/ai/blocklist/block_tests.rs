@@ -517,6 +517,48 @@ fn local_arm_rejects_agent_identity_uid() {
 }
 
 #[test]
+fn remote_arm_named_agent_drops_batch_harness_and_auth_secret() {
+    let mut cfg = agent_cfg();
+    cfg.agent_identity_uid = "sa-uid-1".to_string();
+    let mode = run_agents_to_start_agent_mode(
+        &RunAgentsExecutionMode::Remote {
+            environment_id: "env-1".to_string(),
+            worker_host: "warp".to_string(),
+            computer_use_enabled: false,
+            runner_id: String::new(),
+        },
+        "claude",
+        "auto",
+        &[],
+        Some("my-claude-key"),
+        &cfg,
+    )
+    .expect("Remote+claude must convert");
+    let StartAgentExecutionMode::Remote {
+        model_id,
+        harness_type,
+        auth_secret_name,
+        ..
+    } = mode
+    else {
+        panic!("expected Remote start-agent mode");
+    };
+    assert_eq!(
+        model_id, "",
+        "a named-agent child must not carry the batch model"
+    );
+    assert_eq!(
+        harness_type, "",
+        "a named-agent child must not carry the batch harness, which would outrank its own"
+    );
+    assert_eq!(
+        auth_secret_name, None,
+        "a named-agent child must not carry the batch's harness auth secret, which is only \
+         valid for the batch harness and not the named agent's own"
+    );
+}
+
+#[test]
 fn remote_arm_with_empty_skills_propagates_empty_vec() {
     let mode = run_agents_to_start_agent_mode(
         &RunAgentsExecutionMode::Remote {

@@ -281,6 +281,10 @@ pub(crate) fn persist_auth_secret_selection(
 
 /// Whether Remote execution of `request` requires a managed auth secret
 /// (non-Oz cloud harness with at least one supported secret type).
+///
+/// A named-agent child brings its own harness and auth secret from its
+/// service account, so the run-wide secret is only needed when at least
+/// one child in the batch is unnamed and falls back to it.
 fn requires_default_auth_secret_for_execution(request: &RunAgentsRequest) -> bool {
     if !request.execution_mode.is_remote() {
         return false;
@@ -288,7 +292,13 @@ fn requires_default_auth_secret_for_execution(request: &RunAgentsRequest) -> boo
     let Some(harness) = Harness::parse_orchestration_harness(&request.harness_type) else {
         return false;
     };
-    harness != Harness::Oz && !auth_secret_types_for_harness(harness).is_empty()
+    if harness == Harness::Oz || auth_secret_types_for_harness(harness).is_empty() {
+        return false;
+    }
+    request
+        .agent_run_configs
+        .iter()
+        .any(|cfg| cfg.agent_identity_uid.trim().is_empty())
 }
 
 /// Whether the request can execute as-is: either it doesn't need a

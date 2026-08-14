@@ -774,15 +774,18 @@ pub fn run_agents_to_start_agent_mode(
                     "Remote child agents do not support the opencode harness yet.".to_string(),
                 );
             }
-            // A child dispatched as a named agent takes its model from that
-            // agent's own configuration, which the server only applies when the
-            // run-creation request carries no model of its own. Any model sent
-            // here would silently outrank it, so drop it — including the
-            // per-child override, since a named identity leaves no model to
-            // override. Mirrors the server-side suppression in `resolveModelID`;
-            // needed on the client too because an approved orchestration config
-            // resolves run-wide fields here rather than on the server.
-            let effective_model_id = if !cfg.agent_identity_uid.trim().is_empty() {
+            // A child dispatched as a named agent takes its model, harness, and
+            // harness auth secret from that agent's own configuration, which the
+            // server only applies when the run-creation request carries none of
+            // its own. Any of these sent here would silently outrank the named
+            // agent's own configuration, so drop all three together — including
+            // the per-child model override, since a named identity leaves no
+            // model to override. Mirrors the server-side suppression in
+            // `resolveModelID`/`resolveHarness`; needed on the client too because
+            // an approved orchestration config resolves run-wide fields here
+            // rather than on the server.
+            let is_named_agent = !cfg.agent_identity_uid.trim().is_empty();
+            let effective_model_id = if is_named_agent {
                 String::new()
             } else if !cfg.model_id.trim().is_empty() {
                 // Per-agent model_id overrides the batch-level run_model_id when set.
@@ -790,17 +793,27 @@ pub fn run_agents_to_start_agent_mode(
             } else {
                 run_model_id.to_string()
             };
+            let effective_harness_type = if is_named_agent {
+                String::new()
+            } else {
+                run_harness_type.to_string()
+            };
+            let effective_auth_secret_name = if is_named_agent {
+                None
+            } else {
+                run_auth_secret_name
+                    .map(str::to_string)
+                    .filter(|s| !s.trim().is_empty())
+            };
             Ok(StartAgentExecutionMode::Remote {
                 environment_id: environment_id.clone(),
                 skill_references: run_skills.to_vec(),
                 model_id: effective_model_id,
                 computer_use_enabled: *computer_use_enabled,
                 worker_host: worker_host.clone(),
-                harness_type: run_harness_type.to_string(),
+                harness_type: effective_harness_type,
                 title: cfg.title.clone(),
-                auth_secret_name: run_auth_secret_name
-                    .map(str::to_string)
-                    .filter(|s| !s.trim().is_empty()),
+                auth_secret_name: effective_auth_secret_name,
                 runner_id: runner_id.clone(),
                 agent_identity_uid: Some(cfg.agent_identity_uid.clone())
                     .filter(|s| !s.trim().is_empty()),
