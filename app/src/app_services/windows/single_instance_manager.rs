@@ -48,6 +48,29 @@ pub(super) fn uri_named_pipe_name() -> String {
     format!("Warp{:?}_URI_CHANNEL", ChannelState::channel())
 }
 
+/// Security descriptor applied to the URI named pipe, granting full control to SYSTEM, built-in
+/// Administrators, and interactively logged-on users (SDDL: `IU`), instead of the OS default
+/// (full control to the pipe's creator, read-only to Everyone).
+///
+/// This pipe must be reachable by a second Warp process running at a *different* elevation level
+/// than the sole instance that owns it -- for example, after a winget/Inno Setup install launches
+/// Warp elevated, a later double-click or deep-link (`warp://...`) starts a new, non-elevated
+/// process that needs to forward its arguments to the elevated instance over this pipe. The OS
+/// default DACL denies that non-elevated process access (`ERROR_ACCESS_DENIED`), which is the root
+/// cause of the sign-in loop this pipe permission fixes (see REV-1546).
+///
+/// We deliberately grant access to the `IU` (`INTERACTIVE`) well-known SID rather than to the
+/// pipe's owner (`OW`) or to `BA` (`Administrators`): Windows' UAC "split token" model marks the
+/// Administrators group as "use for deny only" in a standard (non-elevated) token, and a newly
+/// created object's owner often defaults to the Administrators group rather than the specific user
+/// account when the creating process is elevated. Either of those would silently fail to grant the
+/// non-elevated process access. `INTERACTIVE` remains an enabled (non-deny-only) SID in both the
+/// elevated and the linked standard token of the same interactive logon, so it reliably covers both
+/// directions of the elevation mismatch. This is narrower than a null DACL or an `Everyone`/`World`
+/// grant, which would let any local user's process (not just the interactively logged-on user)
+/// send startup arguments and auth redirect URIs to the running instance.
+const URI_NAMED_PIPE_SECURITY_DESCRIPTOR: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;IU)";
+
 fn try_create_mutex() -> Result<Option<MutexHandle>, Error> {
     // Scope this lock to the specific user session.
     // https://learn.microsoft.com/en-us/windows/win32/termserv/kernel-object-namespaces
@@ -104,6 +127,7 @@ impl SingleInstanceManager {
         let server = match ServerBuilder::default()
             .with_fixed_address(uri_named_pipe_name())
             .with_service(UriServiceImpl::new(tx))
+            .with_windows_pipe_security_descriptor(URI_NAMED_PIPE_SECURITY_DESCRIPTOR)
             .build_and_run(ctx.background_executor())
         {
             Ok((server, _)) => {

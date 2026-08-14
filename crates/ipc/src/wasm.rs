@@ -45,7 +45,10 @@ pub(crate) mod server {
 
     impl ConnectionListenerImpl {
         /// Returns an unsupported platform error, since this crate currently doesn't support wasm.
-        pub fn new(_connection_address: ConnectionAddress) -> Result<Self> {
+        pub fn new(
+            _connection_address: ConnectionAddress,
+            _windows_pipe_security_descriptor: Option<&str>,
+        ) -> Result<Self> {
             Err(ServerError::Initialization(
                 InitializationError::UnsupportedPlatform,
             ))
