@@ -7,7 +7,9 @@
 Research was performed at `4cd1c77c498821785baf0801bbd026f3693d2544`.
 
 - [`app/src/ai/execution_profiles/config.rs (21-219) @ 4cd1c77`](https://github.com/warpdotdev/warp/blob/4cd1c77c498821785baf0801bbd026f3693d2544/app/src/ai/execution_profiles/config.rs#L21-L219) stores execution profiles as an `IndexMap` keyed by validated identity. Its display `name` is separate and is not the uniqueness boundary. A changed or removed map key changes or removes profile identity, while a display-name edit does not. GUI-created profiles still use `profile-<uuid>` keys. APP-5380 reuses the collection shape but makes the map key the display name so it does not copy the opaque-ID workflow.
+- [`app/src/ai/execution_profiles/profiles.rs (71-171) @ 4cd1c77`](https://github.com/warpdotdev/warp/blob/4cd1c77c498821785baf0801bbd026f3693d2544/app/src/ai/execution_profiles/profiles.rs#L71-L171) enables one file-backed profile model for every TUI build and flagged GUI builds through `ProfileSource::{LegacyCloudObjects, SettingsCollection}`. [`profiles.rs (255-330, 500-719)`](https://github.com/warpdotdev/warp/blob/4cd1c77c498821785baf0801bbd026f3693d2544/app/src/ai/execution_profiles/profiles.rs#L255-L330) keeps reads and writes behind that source and performs a one-time GUI legacy import. Custom endpoints must follow this source-branch pattern.
 - [`app/src/settings/ai.rs (1435-1468) @ 4cd1c77`](https://github.com/warpdotdev/warp/blob/4cd1c77c498821785baf0801bbd026f3693d2544/app/src/settings/ai.rs#L1435-L1468) registers `agents.execution_profiles` with `max_table_depth: 2`. [`TuiStatuslineConfig`](https://github.com/warpdotdev/warp/blob/4cd1c77c498821785baf0801bbd026f3693d2544/app/src/settings/ai.rs#L759-L850) confirms nested structured values are supported.
+- [`app/src/terminal/input/slash_commands/data_source/core.rs (47-199) @ 4cd1c77`](https://github.com/warpdotdev/warp/blob/4cd1c77c498821785baf0801bbd026f3693d2544/app/src/terminal/input/slash_commands/data_source/core.rs#L47-L199) keeps shared behavior and dependencies in one core while [`gui.rs`](https://github.com/warpdotdev/warp/blob/4cd1c77c498821785baf0801bbd026f3693d2544/app/src/terminal/input/slash_commands/data_source/gui.rs#L34-L118) and [`tui.rs`](https://github.com/warpdotdev/warp/blob/4cd1c77c498821785baf0801bbd026f3693d2544/app/src/terminal/input/slash_commands/data_source/tui.rs#L28-L80) retain only surface lifecycle and presentation. Custom endpoint logic uses the same core-plus-thin-adapter boundary.
 - [`crates/ai/src/api_keys.rs (24-132) @ 4cd1c77`](https://github.com/warpdotdev/warp/blob/4cd1c77c498821785baf0801bbd026f3693d2544/crates/ai/src/api_keys.rs#L24-L132) defines `ApiKeys`, `CustomEndpoint`, `CustomEndpointModel`, and `CustomEndpointSchema`. The existing model `config_key` is a UUIDv4 minted by GUI CRUD.
 - [`crates/ai/src/api_keys.rs (278-382) @ 4cd1c77`](https://github.com/warpdotdev/warp/blob/4cd1c77c498821785baf0801bbd026f3693d2544/crates/ai/src/api_keys.rs#L278-L382) loads `AiApiKeys` and persists provider-key changes. [`api_keys.rs (471-604)`](https://github.com/warpdotdev/warp/blob/4cd1c77c498821785baf0801bbd026f3693d2544/crates/ai/src/api_keys.rs#L471-L604) mutates GUI custom endpoints and builds the request registry.
 - [`app/src/lib.rs (505-527) @ 4cd1c77`](https://github.com/warpdotdev/warp/blob/4cd1c77c498821785baf0801bbd026f3693d2544/app/src/lib.rs#L505-L527) appends `.tui` to the TUI secure-storage service. [`app/src/lib.rs (1458-1480)`](https://github.com/warpdotdev/warp/blob/4cd1c77c498821785baf0801bbd026f3693d2544/app/src/lib.rs#L1458-L1480) registers that service before settings and `ApiKeyManager` initialization.
@@ -21,16 +23,28 @@ Research was performed at `4cd1c77c498821785baf0801bbd026f3693d2544`.
 
 ## Proposed changes
 
-### 1. Add the TUI-only settings collection
+### 1. Add a shared endpoint-definition core and the TUI settings collection
 
-Add `TuiCustomEndpointsConfig`, `TuiCustomEndpointFile`, and `TuiCustomEndpointModelFile` near the AI settings definitions. Use an `IndexMap<String, TuiCustomEndpointFile>` file shape.
+Add `crates/ai/src/custom_endpoints.rs` as the surface-neutral owner of:
+
+- `CustomEndpointDefinitionsConfig`.
+- `CustomEndpointDefinitionFile`.
+- `CustomEndpointModelDefinitionFile`.
+- Per-entry parsing and diagnostics.
+- Definition validation.
+- Deterministic model identity derivation.
+- Definition/key joining and orphan reconciliation.
+
+Add `settings_value`, `schemars`, `indexmap`, and `url` dependencies to `crates/ai` as required by the shared file representation and validator. `sha2` already exists there.
+
+Use an `IndexMap<String, CustomEndpointDefinitionFile>` file shape. Do not prefix shared types or helpers with `Tui`; the TUI is only the first surface to select this format.
 
 Register one setting:
 
 ```rust
-custom_endpoints: TuiCustomEndpoints {
-    type: TuiCustomEndpointsConfig,
-    default: TuiCustomEndpointsConfig::default(),
+custom_endpoints: CustomEndpointDefinitions {
+    type: CustomEndpointDefinitionsConfig,
+    default: CustomEndpointDefinitionsConfig::default(),
     supported_platforms: SupportedPlatforms::ALL,
     sync_to_cloud: SyncToCloud::Never,
     surface: settings::SettingSurfaces::TUI,
@@ -41,11 +55,11 @@ custom_endpoints: TuiCustomEndpoints {
 }
 ```
 
-The map key is the endpoint name. Do not add a second `name` or `id` field. `models` is a `Vec<TuiCustomEndpointModelFile>` so the writer emits inline model records under each endpoint table, matching the `PRODUCT.md` example.
+The map key is the endpoint name. Do not add a second `name` or `id` field. `models` is a `Vec<CustomEndpointModelDefinitionFile>` so the writer emits inline model records under each endpoint table, matching the `PRODUCT.md` example.
 
 Use file-only types instead of adding `api_key: Option<_>` to a shared serializable definition. Mark endpoint and model file structs with `deny_unknown_fields`. This rejects an accidental plaintext `api_key`, a manually generated `config_key`, and misspelled fields.
 
-`TuiCustomEndpointsConfig::from_file_value` parses the top-level object one entry at a time and stores:
+`CustomEndpointDefinitionsConfig::from_file_value` parses the top-level object one entry at a time and stores:
 
 - Valid endpoint definitions in file order.
 - Invalid endpoint diagnostics keyed by the original map key.
@@ -57,9 +71,9 @@ The JSON schema describes a string-keyed map of endpoint records and excludes ru
 
 ### 2. Share validation and convert definitions
 
-Extract the URL validator and restricted-IP helpers from `custom_inference_modal.rs` into a reusable AI custom-endpoint validation module. The GUI modal calls the shared validator without changing GUI behavior.
+Move the URL validator and restricted-IP helpers from `custom_inference_modal.rs` into `crates/ai/src/custom_endpoints.rs`. Define one surface-neutral `validate_custom_endpoint_definition` entry point. The GUI modal adapts its legacy `CustomEndpointParams` into that validator and continues validating the API key separately. The settings parser calls the same entry point. This prevents URL, schema, name, and model rules from drifting before the GUI storage migration.
 
-Validate one TUI endpoint as a unit:
+Validate one endpoint definition as a unit:
 
 - Name is non-empty, already trimmed, and unique through the map.
 - URL passes the existing GUI validator.
@@ -69,22 +83,22 @@ Validate one TUI endpoint as a unit:
 - A non-empty alias is already trimmed. An empty alias remains valid and falls back through `display_label`.
 - Unknown fields fail deserialization.
 
-Convert every valid file definition to an existing `CustomEndpoint` with a blank `api_key` and derived model `config_key`. This preserves `LLMPreferences` and request-wire code as the common downstream representation.
+The shared core converts every valid file definition to an existing `CustomEndpoint` with a supplied API key and derived model `config_key`. This preserves `LLMPreferences`, GUI picker metadata, and request-wire code as the common downstream representation.
 
 ### 3. Derive deterministic per-model `config_key` values
 
-Add a pure helper in `crates/ai/src/api_keys.rs`:
+Add a pure helper in `crates/ai/src/custom_endpoints.rs`:
 
 ```rust
-fn tui_custom_model_config_key(endpoint_name: &str, model_name: &str) -> String;
+fn settings_custom_model_config_key(endpoint_name: &str, model_name: &str) -> String;
 ```
 
-Compute:
+Compute the same value on every settings-backed surface:
 
 ```text
-"tui-byoe:v1:" + lowercase_hex(
+"custom-endpoint:v1:" + lowercase_hex(
   SHA-256(
-    "warp.tui.custom_endpoint.config_key.v1\0"
+    "warp.settings.custom_endpoint.config_key.v1\0"
     || u64_be(endpoint_name_utf8_length)
     || endpoint_name_utf8
     || u64_be(model_name_utf8_length)
@@ -105,66 +119,113 @@ Consequences:
 
 Do not clear an unresolved ID from the execution profile. `LLMPreferences` already falls back when an ID does not resolve and deliberately preserves unknown profile IDs for QUALITY-866 cross-device safety. Changing back to the previous endpoint/model name can therefore restore the selection.
 
-### 4. Split TUI secret persistence inside `ApiKeyManager`
+### 4. Select the persistence source once
 
-Keep GUI behavior unchanged. Add an optional split-endpoint mode to `ApiKeyManager`, enabled only during `LaunchMode::Tui` initialization.
+Add `CustomEndpointSource` in a thin `app/src/ai/custom_endpoints.rs` coordinator, following `ProfileSource`:
 
-Use a second secure-storage entry in the existing `.tui` service:
-
-```text
-TuiCustomEndpointApiKeys = JSON object { "<endpoint name>": "<api key>", ... }
+```rust
+enum CustomEndpointSource {
+    LegacySecureBlob,
+    SettingsCollection,
+}
 ```
 
-Only names and API key strings exist in this entry. `AiApiKeys` continues to store built-in provider keys. In split mode, writes to `AiApiKeys` serialize `custom_endpoints: []`; composed endpoint definitions must never leak into that blob.
+`CustomEndpointSource::for_launch_mode` selects:
 
-Maintain these states separately:
+- `SettingsCollection` for `LaunchMode::Tui`.
+- `LegacySecureBlob` for GUI and test launches in v1.
+- The existing behavior for launch modes that do not expose member custom endpoints.
 
-- TUI endpoint definitions from `AISettings`.
-- The TUI name-to-key secure map.
-- The effective `ApiKeys` projection returned by `keys()` and used by current picker/request code.
+Do not scatter `LaunchMode::Tui` checks through parsing, joining, picker, or request code. Select the source in `app/src/lib.rs`, map it once to `ApiKeyManager`'s crate-level `CustomEndpointPersistenceMode::{Monolithic, Split}`, and pass settings definitions through the coordinator. This is the execution-profile pattern: one model serves both surfaces while the source branch owns persistence differences.
 
-At TUI startup:
+The planned GUI follow-up can add a feature-gated GUI `SettingsCollection` selection and a one-time `LegacySecureBlob` import without changing validation, identity derivation, joining, picker, or request code.
 
-1. Load built-in provider keys from `AiApiKeys`.
-2. Load `TuiCustomEndpointApiKeys`.
-3. Read valid definitions from `AISettings::custom_endpoints`.
-4. Join by exact endpoint name.
-5. Derive every model `config_key`.
-6. Populate the effective `keys.custom_endpoints`.
+### 5. Share split persistence, joining, and reconciliation
 
-Pass the startup file-parse state from `GlobalResourceHandlesProvider` when enabling split mode. If the TUI settings file failed to parse, compose no definitions and skip orphan cleanup. This keeps recoverable keys in secure storage until a successfully parsed settings document provides an authoritative set of present names.
+In `SettingsCollection` mode, use a second entry in the active surface's existing secure-storage service:
 
-Add synchronous, result-returning methods analogous to `persist_provider_key`:
+```text
+CustomEndpointApiKeys = JSON object { "<endpoint name>": "<api key>", ... }
+```
 
-- `persist_split_custom_endpoint_key(name, Option<String>, ctx)`.
-- `split_custom_endpoint_key_is_connected(name)`.
+The active service provides isolation: TUI launches use the existing `.tui` service, while a future GUI migration uses the GUI service. Do not encode a surface name in the secure-storage entry or data type.
 
-Persist the new secure map before publishing an in-memory key change. On success, rebuild the effective projection and emit `ApiKeyManagerEvent::KeysUpdated`. On failure, retain the old projection and return an error to `/api-keys`.
+Maintain these source-neutral states:
 
-GUI methods `add_custom_endpoint`, `save_custom_endpoint`, `remove_custom_endpoint`, and `clear_custom_endpoints` continue operating on the monolithic representation when split mode is disabled. They are not called by TUI flows.
+- Endpoint definitions from `AISettings`.
+- The name-to-key secure map.
+- The effective `ApiKeys` projection returned by `keys()` and consumed by existing picker and request code.
 
-### 5. Reconcile settings changes and orphaned keys
+At settings-backed startup, the shared coordinator:
 
-Extend `app/src/ai/tui_api_keys.rs` to initialize split mode and subscribe to `AISettingsChangedEvent::TuiCustomEndpoints`.
+1. Loads built-in provider keys from `AiApiKeys`.
+2. Loads `CustomEndpointApiKeys`.
+3. Reads valid definitions and present-name diagnostics from `AISettings::custom_endpoints`.
+4. Joins definitions and keys by exact endpoint name.
+5. Derives every model `config_key`.
+6. Populates the effective `keys.custom_endpoints`.
 
-On a valid settings hot reload:
+Pass the startup file-parse state from `GlobalResourceHandlesProvider` when selecting `SettingsCollection`. If the settings file failed to parse, compose no definitions and skip orphan cleanup. This keeps recoverable keys until a successfully parsed settings document provides an authoritative name set.
+
+Add result-returning methods with no surface prefix:
+
+- `persist_custom_endpoint_key(name, Option<String>, ctx)`.
+- `custom_endpoint_key_is_connected(name)`.
+
+Persist the key map before publishing an in-memory key change. On success, rebuild the effective projection and emit `ApiKeyManagerEvent::KeysUpdated`. On failure, retain the old projection and return an error to the calling surface.
+
+In `LegacySecureBlob` mode:
+
+- Continue loading and saving complete GUI `CustomEndpoint` values in `AiApiKeys`.
+- Keep `add_custom_endpoint`, `save_custom_endpoint`, `remove_custom_endpoint`, and `clear_custom_endpoints` behavior unchanged.
+- Continue using persisted GUI UUID `config_key` values.
+
+Route every `AiApiKeys` write through the selected source. `SettingsCollection` writes serialize `custom_endpoints: []`, so composed definitions cannot leak into the provider-key blob.
+
+Subscribe the thin `app/src/ai/custom_endpoints.rs` coordinator, not `tui_api_keys.rs`, to `AISettingsChangedEvent::CustomEndpointDefinitions`. The coordinator passes the updated shared config into `ApiKeyManager`; the AI crate runs the common reconciliation. On a successfully parsed settings change:
 
 1. Replace the definition set.
 2. Keep keys for valid names.
 3. Keep keys for names that are present but invalid, so correcting a typo restores the connection.
-4. Remove keys whose names are absent from both the valid and invalid sets. This covers delete and rename.
-5. Persist a changed key map and rebuild the effective endpoints.
+4. Remove keys absent from both valid and invalid names. This covers delete and rename.
+5. Persist a changed key map and rebuild effective endpoints.
 6. Emit `KeysUpdated`.
 
 If orphan cleanup fails, remove the endpoint from the effective projection, report the secure-storage error, and retry cleanup on the next startup or definition reload. The inaccessible orphan must not enter a request.
 
-Extend `reload_keys_from_secure_storage` so split mode reloads both `AiApiKeys` and `TuiCustomEndpointApiKeys`, then rejoins the retained definitions. After every successful custom-endpoint set, replace, or clear, call the existing exported `notify_tui_api_keys_changed`. The current process has already updated its singleton; the revision write makes other TUI processes reload. A revision-write failure does not roll back a securely persisted mutation. Report the failure and show `The API key changed, but other running Warp processes could not be notified.`
+`reload_keys_from_secure_storage` follows the selected source. In `SettingsCollection` mode it reloads `AiApiKeys` and `CustomEndpointApiKeys`, then calls the same shared join function used at startup and settings reload.
 
-Do not reconcile or clean orphans after a full-file parse error. The live reload exits before settings models change, and split-mode startup receives the parse-error state explicitly.
+Keep `app/src/ai/tui_api_keys.rs` limited to TUI process coordination. After every successful TUI custom-endpoint set, replace, or clear, call the existing `notify_tui_api_keys_changed`. The current process has already updated its singleton; the revision write makes other TUI processes reload. A revision-write failure does not roll back a securely persisted mutation. Report the failure and show `The API key changed, but other running Warp processes could not be notified.`
+
+Do not reconcile or clean orphans after a full-file parse error. Live reload exits before settings models change, and settings-backed startup receives the parse-error state explicitly.
+
+### Shared and surface-specific responsibilities
+
+Shared in `crates/ai`:
+
+- Definition types and file schema.
+- Per-entry parse diagnostics and validation.
+- Deterministic settings-backed identities.
+- Definition/key join and orphan classification.
+- Monolithic versus split secure persistence.
+- Effective `CustomEndpoint` projection, reload, and request registry.
+
+Shared in `app`:
+
+- One `CustomEndpointSource` launch decision.
+- Existing `LLMPreferences` synthesis, entitlement/team-policy gates, and request attachment.
+
+Surface-specific:
+
+- GUI v1 keeps modal authoring and legacy monolithic CRUD. It adapts to the shared validator.
+- TUI authors definitions through `settings.toml` or `/modify-settings`.
+- TUI `/api-keys` presents key actions and policy states.
+- TUI revision-file wiring notifies sibling TUI processes.
+- GUI and TUI render their own rows, but both consume the same effective endpoint projection and `Custom · <endpoint>` description.
 
 ### 6. Preserve endpoint-level settings diagnostics
 
-The generic `SettingsValue` contract returns one value or `None`; it cannot return a valid subset plus diagnostics. Keep the special handling local to APP-5380 instead of broadening every setting.
+The generic `SettingsValue` contract returns one value or `None`; it cannot return a valid subset plus diagnostics. Keep the special handling in the shared custom-endpoint config instead of broadening every setting.
 
 Add a helper in `app/src/settings/init.rs` that appends each invalid endpoint path to startup and hot-reload `InvalidSettings` keys:
 
@@ -188,7 +249,7 @@ Change `TuiApiKeysRow` from static `Copy` data to owned, cloneable data. Add row
 - `InvalidCustomEndpoint(String)`.
 - `WarpCreditFallbackSetting`.
 
-Extend browsing, editing, footer, clear, and save states to carry a custom endpoint name. Custom endpoint set/edit/clear calls the split persistence API. Keep the editor masked and preserve current provider error copy.
+Extend browsing, editing, footer, clear, and save states to carry a custom endpoint name. Custom endpoint set/edit/clear calls the shared `persist_custom_endpoint_key` API. Keep the editor masked and preserve current provider error copy.
 
 Build rows in this order:
 
@@ -200,7 +261,7 @@ Build rows in this order:
 Subscribe the open menu to:
 
 - `ApiKeyManagerEvent` for key and effective-definition changes.
-- `AISettingsChangedEvent::TuiCustomEndpoints` for invalid-only changes.
+- `AISettingsChangedEvent::CustomEndpointDefinitions` for invalid-only changes.
 - `UserWorkspacesEvent::TeamsChanged` for entitlement and team-policy changes.
 
 Add a dedicated inline-menu row style that renders the custom endpoint description in `builder.key_connected_suffix_style()` (muted italic) while preserving the connected state suffix. Do not encode formatting with literal underscores.
@@ -209,7 +270,7 @@ Add a dedicated inline-menu row style that renders the custom endpoint descripti
 
 The joined effective `ApiKeys` projection lets the current `build_custom_llm_infos` filter continue to exclude unkeyed endpoints. `ApiKeyManagerEvent::KeysUpdated` already rebuilds `LLMPreferences.custom_llms`, and `TuiModelMenuModel` already refreshes on `LLMPreferencesEvent::UpdatedAvailableLLMs`.
 
-For a custom `LLMInfo`, carry its existing `description` (`Custom · <endpoint>`) into the TUI model row. Keep hosted model rows unchanged. The existing key-connected state remains.
+For a custom `LLMInfo`, carry its existing GUI description (`Custom · <endpoint>`) into the TUI model row. Suppress the generic `(key connected)` suffix for custom endpoint models because `build_custom_llm_infos` already excludes unkeyed endpoints. Keep hosted/provider-key model rows unchanged.
 
 Change the request gate in `app/src/ai/agent/api.rs` to:
 
@@ -225,17 +286,37 @@ Use the same combined predicate in `/api-keys` and `LLMPreferences`. This preven
 
 ### 9. Expected files
 
-- `app/src/settings/ai.rs` and tests — setting types, schema registration, partial diagnostics.
+- `crates/ai/src/custom_endpoints.rs` and tests — shared config types, validation, deterministic identity, join, reconciliation, and effective projection.
+- `crates/ai/Cargo.toml` — file-format and validation dependencies.
+- `app/src/ai/custom_endpoints.rs` and tests — source selection plus `AISettings`/launch-mode adapter.
+- `app/src/settings/ai.rs` and tests — setting registration, schema exposure, and partial diagnostics.
 - `app/src/settings/init.rs` and tests — endpoint-level invalid-settings aggregation.
 - `app/src/settings_view/custom_inference_modal.rs` and tests — shared validation call.
-- `crates/ai/src/api_keys.rs` and tests — deterministic IDs, split secure map, join, persistence, reload.
-- `app/src/ai/tui_api_keys.rs` and tests — TUI split-mode initialization, hot reload, orphan cleanup, revision reload.
-- `app/src/lib.rs` — initialize the TUI-only split path.
+- `crates/ai/src/api_keys.rs` and tests — monolithic/split persistence selection, secure writes, and reload.
+- `app/src/ai/tui_api_keys.rs` and tests — TUI revision notification and reload only.
+- `app/src/lib.rs` — select and initialize `CustomEndpointSource`.
 - `app/src/ai/llms.rs` and tests — effective custom models and stale-selection fallback coverage.
 - `app/src/ai/agent/api.rs` and tests — combined entitlement and team-policy request gate.
 - `crates/warp_tui/src/api_keys_menu.rs` and tests — dynamic rows and custom key actions.
 - `crates/warp_tui/src/inline_menu.rs` and tests — muted italic custom-endpoint annotation.
 - `crates/warp_tui/src/model_menu.rs` and tests — endpoint description on custom models.
+
+## Decisions
+
+### Use one core with source-selected persistence
+
+- **Chosen:** Put format, validation, identity, join, reconciliation, and projection logic in `crates/ai`, with one app-level source selector and thin surface adapters.
+- **Advantages:** GUI legacy and TUI settings paths share rules now. A future GUI migration selects the settings source and imports data instead of replacing a TUI subsystem.
+- **Disadvantages:** V1 introduces a source abstraction before the GUI uses both branches.
+- **Rejected:** Keep the join and lifecycle in `tui_api_keys.rs`. This is smaller for v1 but would force the GUI migration to duplicate or move the core later.
+- **Rejected:** Migrate GUI storage in v1. That adds duplicate-name and selected-model identity migration to an already large TUI change.
+
+### Use a surface-neutral split-secret key
+
+- **Chosen:** Store settings-backed endpoint keys under `CustomEndpointApiKeys` in the active surface's secure-storage service.
+- **Advantages:** Existing service namespaces preserve GUI/TUI isolation. Future GUI migration can use the same persistence code and schema.
+- **Disadvantages:** The source mode, not the entry name, tells readers which surface owns the data.
+- **Rejected:** `TuiCustomEndpointApiKeys`. This bakes the first adopter into shared storage code and requires a second GUI path.
 
 ## Risks and mitigations
 
@@ -243,9 +324,9 @@ Use the same combined predicate in `/api-keys` and `LLMPreferences`. This preven
 
 The typed value contains only valid endpoint definitions. An ordinary setting write could serialize that subset and erase broken entries. Inhibit writes for the complete `cloud_platform.custom_endpoints` key whenever diagnostics exist.
 
-### Split mode can accidentally reserialize endpoint definitions into secure storage
+### Settings-backed mode can accidentally reserialize endpoint definitions into secure storage
 
-Current provider-key persistence clones and serializes the full `ApiKeys` value. Route all `AiApiKeys` writes through one helper that strips `custom_endpoints` in split mode. Assert in tests that endpoint URL, schema, and models are absent from both TUI secure blobs except the name-to-key map's names.
+Current provider-key persistence clones and serializes the full `ApiKeys` value. Route all `AiApiKeys` writes through the selected source and strip `custom_endpoints` in `SettingsCollection` mode. Assert that endpoint URL, schema, and models are absent from both secure blobs for a settings-backed surface except the key map's names.
 
 ### Rename cleanup can destroy a key during an incomplete edit
 
@@ -259,22 +340,28 @@ This is the deliberate cost of avoiding user-authored stable IDs. The model pick
 
 The combined gate hides custom choices and suppresses the request registry. Existing model resolution falls back when the selected ID is unavailable. Test entitlement and team policy independently.
 
+### Shared core can still fork through surface adapters
+
+Keep all definition parsing, validation, derivation, joining, reconciliation, and effective projection in `crates/ai/src/custom_endpoints.rs`. GUI and TUI adapters may select a source and present actions, but they must not reimplement a core rule. Add equivalence tests that pass the same definition through the legacy GUI validation adapter and settings parser.
+
 ## Testing and validation
 
 ### Unit and model tests
 
-- `cargo nextest run -p ai -E 'test(api_keys)'`
-  - File definitions join only by exact name.
-  - Split writes never persist definitions in `AiApiKeys`.
-  - Set, replace, clear, reload, and orphan cleanup are atomic.
-  - Successful mutations write the revision marker; revision failures preserve the committed key and return the partial-success error.
-  - Invalid-present names retain keys; absent names remove keys.
-  - Deterministic IDs are stable and tuple-boundary-safe.
-  - Endpoint/model rename and alias/URL/schema/reorder cases match `PRODUCT.md` Behaviors 27–30.
+- `cargo nextest run -p ai -E 'test(api_keys|custom_endpoints)'`
+  - Source-aware writes preserve legacy GUI behavior and strip definitions in settings-backed mode.
+  - Set, replace, clear, and secure reload are atomic.
 - `cargo nextest run -p warp -E 'test(custom_endpoint|custom_inference|settings)'`
   - The schema is TUI-only and omits `api_key`, `config_key`, and `id`.
   - Valid and invalid entries load independently.
+  - File definitions join only by exact name.
+  - Invalid-present names retain keys; absent names remove keys.
+  - Deterministic IDs are stable and tuple-boundary-safe.
+  - Endpoint/model rename and alias/URL/schema/reorder cases match `PRODUCT.md` Behaviors 27–30.
   - Every URL and model validation rule in `PRODUCT.md` Behavior 9 is covered.
+  - The GUI legacy adapter and settings parser produce equivalent validation results.
+  - `CustomEndpointSource` selects legacy GUI and settings-backed TUI behavior in v1.
+  - Successful TUI mutations write the revision marker; revision failures preserve the committed key and return the partial-success error.
   - Startup and hot reload emit endpoint-specific invalid-settings paths.
   - GUI modal validation remains unchanged.
   - Picker rebuild and combined request gate match Behaviors 18–26.
@@ -282,13 +369,13 @@ The combined gate hides custom choices and suppresses the request registry. Exis
   - Assert row order, filtering, italic style cells, status and invalid rows.
   - Assert masked set/edit, cancel, replace, empty-save, clear, and persistence failures.
   - Assert entitlement and team-policy transitions.
-  - Assert custom model endpoint descriptions and key-connected state.
+  - Assert custom model endpoint descriptions replace the redundant key-connected state.
 
 ### Repository checks
 
 - `./script/format --check`
 - `cargo clippy -p ai -p warp -p warp_tui --all-targets`
-- `cargo nextest run -p ai -p warp_tui`
+- `cargo nextest run -p ai -p warp -p warp_tui`
 
 ### Live TUI proof
 
@@ -307,14 +394,27 @@ The live run must also inspect one outbound request and confirm that the selecte
 
 Use one implementation PR on the existing APP-5380 branch.
 
-1. The lead implementer first lands the settings types, validator, deterministic key helper, and split `ApiKeyManager` API. These interfaces are prerequisites.
+1. The lead implementer first lands `crates/ai/src/custom_endpoints.rs`, the app-level source selector, settings types, shared validator, deterministic key helper, and persistence-aware `ApiKeyManager` API. These interfaces are prerequisites.
 2. After that foundation compiles, a local `tui-menu` child can work in `/workspace/warp-app-5380-tui-menu` on branch `factory/app-5380-tui-menu`. It owns `crates/warp_tui/src/api_keys_menu.rs`, `inline_menu.rs`, `model_menu.rs`, and their tests. It returns a commit for the lead to cherry-pick.
-3. In parallel, the lead owns `app/src/**`, `crates/ai/**`, policy gating, settings integration, and storage tests.
+3. In parallel, the lead owns the shared core, `app/src/settings/**`, `app/src/ai/**`, `crates/ai/**`, policy gating, source integration, and storage tests.
 4. The lead integrates the TUI commit, runs all repository checks, and performs the live TUI proof. Do not open separate implementation PRs.
+
+## Follow-up architecture
+
+A later, separately approved GUI migration should:
+
+1. Gate `LaunchMode::App` onto `SettingsCollection`.
+2. Read legacy complete endpoints from `AiApiKeys`.
+3. Resolve duplicate endpoint names before materializing the map.
+4. Write non-secret definitions into the GUI settings file and keys into `CustomEndpointApiKeys`.
+5. Preserve or rewrite execution-profile and per-pane model selections from legacy UUID `config_key` values to deterministic settings identities.
+6. Mark migration complete before stripping legacy endpoint values, with a rollback window modeled on file-backed execution profiles.
+
+This follow-up reuses the v1 parser, validator, derivation, join, reconciliation, effective projection, picker, and request paths. It adds only the GUI source gate, one-time import, selection rewrite, and GUI authoring adapter.
 
 ## Explicit non-goals
 
-- No GUI storage convergence.
+- No GUI storage migration in v1; the shared architecture intentionally prepares a separate follow-up.
 - No GUI-to-TUI endpoint import.
 - No credential migration through `tui-migrate-setup`.
 - No team-managed or enterprise BYOE.

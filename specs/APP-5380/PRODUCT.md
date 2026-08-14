@@ -16,10 +16,17 @@ Warp Agent CLI users can define custom LLM endpoints in the TUI `settings.toml` 
 
 - Sharing custom endpoint settings or credentials between the GUI and the TUI.
 - Importing GUI custom endpoint definitions or credentials into the TUI.
-- Changing the GUI custom endpoint storage format.
+- Changing the GUI custom endpoint storage format in v1.
 - Managing endpoint definitions from `/api-keys`.
 - Team-managed or enterprise custom endpoints.
 - Using TUI custom endpoints for Warp cloud agents. TUI custom endpoints depend on local configuration and credentials.
+
+## Follow-up
+
+- **TODO (not part of v1):** Evaluate and likely migrate GUI custom endpoints to the same file-backed definition plus split secure-key format. This is the intended direction, not a committed scope item.
+  - Follow the execution-profile precedent: use one shared model and a surface-selected persistence source, import legacy GUI data once, and retain a rollback path while migration is gated.
+  - The follow-up must define how to handle duplicate legacy endpoint names, preserve or rewrite existing model selections when UUID `config_key` values become deterministic identities, split legacy definitions from keys, and expose the setting on the GUI surface.
+  - GUI and TUI settings and secure-storage namespaces remain isolated after migration.
 
 ## Behavior
 
@@ -134,8 +141,8 @@ models = [
 
 24. After a non-empty key is saved, every valid model for that endpoint appears in the TUI model picker without a restart.
     - The row title is `alias` when it is non-blank. Otherwise, it is `name`.
-    - The row shows `Custom · <endpoint name>` to disambiguate equal model labels.
-    - The row shows the existing `(key connected)` state.
+    - The row shows only `Custom · <endpoint name>`, matching the GUI custom-model description and disambiguating equal model labels.
+    - The row does not show `(key connected)`. A custom model cannot appear until its endpoint has a key, so that state is redundant.
 
 25. Selecting a custom model follows the existing TUI model-selection behavior. Local agent requests include the selected model identity and the matching endpoint URL, key, schema, and raw model name.
 
@@ -157,7 +164,7 @@ models = [
 
 ## Assumptions
 
-- The five requester decisions in APP-5380 are authoritative. No additional requester decision was needed after code research.
+- The five settled APP-5380 decisions and Harry's PR review decisions are authoritative. No human question remains unresolved.
 
 ## Decisions
 
@@ -181,7 +188,7 @@ models = [
 
 1. Add the TOML example from Behavior 7. Verify `Acme Gateway custom endpoint` appears without a `(Connected)` state in `/api-keys`, while neither model appears in the model picker.
 2. Set, replace, and clear the endpoint key. Verify masked editing, connected-state transitions, and no `api_key` or generated identity appears in `settings.toml`.
-3. Set the key and verify both models appear immediately with the labels and endpoint annotation from Behavior 24.
+3. Set the key and verify both models appear immediately with the labels and sole `Custom · Acme Gateway` annotation from Behavior 24. Verify neither row shows `(key connected)`.
 4. Select each model and inspect the local request. Verify the matching URL, schema, raw model name, model identity, and key are sent.
 5. Add one valid and one invalid endpoint. Verify the valid endpoint remains usable, the invalid endpoint gets a `(Skipped)` row, and the standard invalid-settings hint appears.
 6. Exercise every URL rejection category in Behavior 9 and verify no rejected endpoint reaches a request.
