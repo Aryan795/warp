@@ -1,6 +1,6 @@
-//! Restricts the DACL on the Windows named pipes created by [`crate::Server`] so that only the
-//! creating user's own processes (elevated or not), `LocalSystem`, and
-//! `BUILTIN\Administrators` can connect to them.
+//! Builds the `SECURITY_ATTRIBUTES` used to create the Windows named pipes in
+//! [`crate::platform`] with a DACL scoped to the creating user (across elevation levels),
+//! `LocalSystem`, and `BUILTIN\Administrators`, instead of the OS default DACL.
 //!
 //! ## Background
 //! When a Windows named pipe is created without an explicit security descriptor,
@@ -16,6 +16,17 @@
 //! out (standard UAC token filtering) and so is left with only the read-only `Everyone` ACE.
 //! Connecting for full-duplex I/O then fails with `ERROR_ACCESS_DENIED` (OS error 5). See
 //! REV-1546.
+//!
+//! ## Why creation-time, not post-creation
+//! `SetNamedSecurityInfoW`/`GetNamedSecurityInfoW` (the "by name" APIs) only support a fixed set
+//! of kernel objects -- semaphores, events, mutexes, waitable timers, and file mappings -- and
+//! explicitly do *not* support named pipes (see [`SE_OBJECT_TYPE`]). Calling them on a pipe path
+//! fails outright, so patching the DACL in after the pipe is already created and accepting
+//! connections is not just a TOCTOU risk, it does not work at all. Instead, the DACL is built
+//! into a `SECURITY_ATTRIBUTES` structure that is passed directly to pipe creation
+//! (`CreateNamedPipeW`'s `lpSecurityAttributes`, via
+//! [`tokio`'s `ServerOptions::create_with_security_attributes_raw`][create_with_security_attributes_raw]),
+//! so the pipe never exists under a looser DACL than intended.
 //!
 //! ## Threat model / chosen ACL
 //! We replace the default DACL with one scoped to exactly what's needed to fix the bug, rather
@@ -36,20 +47,24 @@
 //! the OS default. `Everyone`/anonymous access is dropped entirely.
 //!
 //! [`CreateNamedPipeW`]: https://learn.microsoft.com/windows/win32/api/namedpipeapi/nf-namedpipeapi-createnamedpipew
+//! [`SE_OBJECT_TYPE`]: https://learn.microsoft.com/windows/win32/api/accctrl/ne-accctrl-se_object_type
+//! [create_with_security_attributes_raw]: https://docs.rs/tokio/latest/tokio/net/windows/named_pipe/struct.ServerOptions.html#method.create_with_security_attributes_raw
 use std::ffi::c_void;
 
-use windows::Win32::Foundation::{HANDLE, HLOCAL, LocalFree};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, LocalFree};
 use windows::Win32::Security::Authorization::{
-    EXPLICIT_ACCESS_W, GRANT_ACCESS, NO_MULTIPLE_TRUSTEE, SE_KERNEL_OBJECT, SetEntriesInAclW,
-    SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
+    EXPLICIT_ACCESS_W, GRANT_ACCESS, NO_MULTIPLE_TRUSTEE, SetEntriesInAclW, TRUSTEE_IS_SID,
+    TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
 };
 use windows::Win32::Security::{
-    ACL, CopySid, CreateWellKnownSid, DACL_SECURITY_INFORMATION, GetLengthSid, GetTokenInformation,
-    NO_INHERITANCE, PROTECTED_DACL_SECURITY_INFORMATION, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    ACL, CopySid, CreateWellKnownSid, GetLengthSid, GetTokenInformation,
+    InitializeSecurityDescriptor, NO_INHERITANCE, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
+    SECURITY_DESCRIPTOR, SetSecurityDescriptorDacl, TOKEN_QUERY, TOKEN_USER, TokenUser,
     WELL_KNOWN_SID_TYPE, WinBuiltinAdministratorsSid, WinLocalSystemSid,
 };
+use windows::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-use windows::core::PCWSTR;
+use windows::core::BOOL;
 
 /// `GENERIC_READ | GENERIC_WRITE`: exactly the access rights a duplex named-pipe client needs.
 const PIPE_CLIENT_ACCESS_MASK: u32 = 0x8000_0000 | 0x4000_0000;
@@ -58,61 +73,102 @@ const PIPE_CLIENT_ACCESS_MASK: u32 = 0x8000_0000 | 0x4000_0000;
 /// `LocalSystem`/`Administrators`.
 const FULL_CONTROL_ACCESS_MASK: u32 = 0x1000_0000;
 
-/// Restricts the DACL of the named pipe at `pipe_path` (of the form `\\.\pipe\<name>`, see
-/// [`super::native::server::windows_named_pipe_path`]) so that only the current user (across
-/// elevation levels), `LocalSystem`, and `BUILTIN\Administrators` can connect to it. See the
-/// module docs for the full threat model.
+/// Owns a `SECURITY_ATTRIBUTES` (and the DACL/security descriptor it points to) suitable for
+/// passing to named-pipe creation, restricting the pipe to the current user (across elevation
+/// levels), `LocalSystem`, and `BUILTIN\Administrators`. See the module docs for the full threat
+/// model.
 ///
-/// This must be called after the pipe's first instance has been created (i.e. after the
-/// listener is bound), since the DACL governs the pipe object shared by all instances of the
-/// name, not just the specific instance handle used to set it.
-pub(crate) fn restrict_named_pipe_to_current_user(pipe_path: &str) -> windows::core::Result<()> {
-    let user_sid = current_user_sid()?;
-    let system_sid = well_known_sid(WinLocalSystemSid)?;
-    let admins_sid = well_known_sid(WinBuiltinAdministratorsSid)?;
+/// The DACL/descriptor are kept alive for as long as this value is alive, since Windows only
+/// copies the descriptor's *contents* at `CreateNamedPipeW` time, not the pointer -- reusing one
+/// `PipeSecurityAttributes` to create every instance of a pipe (the first and all subsequent
+/// ones) is the documented pattern for keeping a named pipe's DACL consistent across instances.
+pub(crate) struct PipeSecurityAttributes {
+    /// From `SetEntriesInAclW`; freed on drop.
+    dacl: *mut ACL,
+    /// Never read directly -- kept only so its heap allocation (which `attributes` points into)
+    /// stays alive for as long as `PipeSecurityAttributes` does, and is freed when it drops.
+    #[allow(dead_code)]
+    descriptor: Box<SECURITY_DESCRIPTOR>,
+    attributes: SECURITY_ATTRIBUTES,
+}
 
-    let entries = [
-        explicit_access_entry(&user_sid, PIPE_CLIENT_ACCESS_MASK),
-        explicit_access_entry(&system_sid, FULL_CONTROL_ACCESS_MASK),
-        explicit_access_entry(&admins_sid, FULL_CONTROL_ACCESS_MASK),
-    ];
+// SAFETY: `PipeSecurityAttributes` owns all the memory its raw pointers refer to (the ACL and the
+// boxed security descriptor), so moving it across threads is sound. Nothing here is mutated
+// through a shared reference.
+unsafe impl Send for PipeSecurityAttributes {}
+unsafe impl Sync for PipeSecurityAttributes {}
 
-    unsafe {
-        let mut new_dacl: *mut ACL = std::ptr::null_mut();
-        SetEntriesInAclW(Some(&entries), None, &mut new_dacl).ok()?;
+impl PipeSecurityAttributes {
+    /// Builds the security attributes described in the module docs.
+    pub(crate) fn for_current_user() -> windows::core::Result<Self> {
+        let user_sid = current_user_sid()?;
+        let system_sid = well_known_sid(WinLocalSystemSid)?;
+        let admins_sid = well_known_sid(WinBuiltinAdministratorsSid)?;
 
-        let result = set_pipe_dacl(pipe_path, new_dacl);
+        let entries = [
+            explicit_access_entry(&user_sid, PIPE_CLIENT_ACCESS_MASK),
+            explicit_access_entry(&system_sid, FULL_CONTROL_ACCESS_MASK),
+            explicit_access_entry(&admins_sid, FULL_CONTROL_ACCESS_MASK),
+        ];
 
-        if !new_dacl.is_null() {
-            let _ = LocalFree(Some(HLOCAL(new_dacl as *mut c_void)));
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        unsafe {
+            SetEntriesInAclW(Some(&entries), None, &mut dacl).ok()?;
         }
-        result
+
+        let mut descriptor = Box::new(SECURITY_DESCRIPTOR::default());
+        // Safety: `descriptor` is a live, correctly-sized `SECURITY_DESCRIPTOR` we just
+        // allocated, and `dacl` was just built above by `SetEntriesInAclW`.
+        unsafe {
+            InitializeSecurityDescriptor(
+                PSECURITY_DESCRIPTOR(descriptor.as_mut() as *mut _ as *mut c_void),
+                SECURITY_DESCRIPTOR_REVISION,
+            )?;
+            SetSecurityDescriptorDacl(
+                PSECURITY_DESCRIPTOR(descriptor.as_mut() as *mut _ as *mut c_void),
+                true,
+                Some(dacl),
+                false,
+            )?;
+        }
+
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.as_mut() as *mut SECURITY_DESCRIPTOR as *mut c_void,
+            bInheritHandle: BOOL(0),
+        };
+
+        Ok(Self {
+            dacl,
+            descriptor,
+            attributes,
+        })
+    }
+
+    /// Returns a raw pointer to the `SECURITY_ATTRIBUTES`, suitable for passing as
+    /// `lpSecurityAttributes` to pipe-creation APIs. The pointer is valid for as long as `self`
+    /// is alive.
+    pub(crate) fn as_ptr(&self) -> *mut c_void {
+        &self.attributes as *const SECURITY_ATTRIBUTES as *mut c_void
     }
 }
 
-/// # Safety
-/// `dacl` must be a valid, non-null pointer to an `ACL` for the duration of this call.
-unsafe fn set_pipe_dacl(pipe_path: &str, dacl: *mut ACL) -> windows::core::Result<()> {
-    let mut wide_path: Vec<u16> = pipe_path.encode_utf16().chain(std::iter::once(0)).collect();
-    unsafe {
-        SetNamedSecurityInfoW(
-            PCWSTR(wide_path.as_mut_ptr()),
-            SE_KERNEL_OBJECT,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            None,
-            None,
-            Some(dacl as *const _),
-            None,
-        )
-        .ok()
+impl Drop for PipeSecurityAttributes {
+    fn drop(&mut self) {
+        if !self.dacl.is_null() {
+            // Safety: `dacl` was allocated by `SetEntriesInAclW`, which is documented to require
+            // freeing via `LocalFree`.
+            unsafe {
+                let _ = LocalFree(Some(HLOCAL(self.dacl as *mut c_void)));
+            }
+        }
     }
 }
 
 /// Builds an `EXPLICIT_ACCESS_W` entry granting `access_mask` to `sid`, without inheritance
 /// (named pipes have no child objects to inherit to).
 ///
-/// # Safety
-/// The returned value borrows `sid`; it must not outlive `sid`.
+/// The returned value borrows `sid`; the caller must not let it outlive `sid`.
 fn explicit_access_entry(sid: &[u8], access_mask: u32) -> EXPLICIT_ACCESS_W {
     EXPLICIT_ACCESS_W {
         grfAccessPermissions: access_mask,
@@ -123,9 +179,9 @@ fn explicit_access_entry(sid: &[u8], access_mask: u32) -> EXPLICIT_ACCESS_W {
             MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
             TrusteeForm: TRUSTEE_IS_SID,
             TrusteeType: TRUSTEE_IS_UNKNOWN,
-            // Safety: callers (`restrict_named_pipe_to_current_user`) keep `sid`'s backing buffer
-            // alive for as long as this entry is used, which is synchronously within the same
-            // function via `SetEntriesInAclW`.
+            // Safety: callers (`for_current_user`) keep `sid`'s backing buffer alive for as long
+            // as this entry is used, which is synchronously within the same function via
+            // `SetEntriesInAclW`.
             ptstrName: windows::core::PWSTR(sid.as_ptr() as *mut u16),
         },
     }
@@ -154,8 +210,10 @@ fn current_user_sid() -> windows::core::Result<Vec<u8>> {
         )?;
 
         // Safety: `buffer` was sized and filled by `GetTokenInformation` above for `TokenUser`,
-        // which is documented to return a `TOKEN_USER` struct.
-        let token_user = &*(buffer.as_ptr() as *const TOKEN_USER);
+        // which is documented to return a `TOKEN_USER` struct, but a `Vec<u8>`'s allocation is
+        // not guaranteed to satisfy `TOKEN_USER`'s alignment. Use an unaligned read rather than
+        // dereferencing a `*const TOKEN_USER` directly to avoid undefined behavior.
+        let token_user: TOKEN_USER = std::ptr::read_unaligned(buffer.as_ptr() as *const TOKEN_USER);
         copy_sid(token_user.User.Sid)
     }
 }
@@ -195,7 +253,11 @@ struct ScopedHandle(HANDLE);
 impl Drop for ScopedHandle {
     fn drop(&mut self) {
         unsafe {
-            let _ = windows::Win32::Foundation::CloseHandle(self.0);
+            let _ = CloseHandle(self.0);
         }
     }
 }
+
+#[cfg(test)]
+#[path = "windows_pipe_security_tests.rs"]
+mod tests;

@@ -1,11 +1,24 @@
-//! This module implements IPC transport on top of the `interprocess` crate, which uses Unix Domain
-//! Sockets on Unix platforms and named pipes on Windows under the hood.
-use async_compat::CompatExt as _;
-use futures::{AsyncRead, AsyncWrite};
-
+//! This module implements IPC transport for native (non-wasm) platforms.
+//!
+//! On Windows, the transport is built directly on `tokio`'s native named-pipe support
+//! (`tokio::net::windows::named_pipe`), since fixing REV-1546 requires setting a security
+//! descriptor at pipe *creation* time, which the `interprocess` crate does not expose (see
+//! `crate::windows_pipe_security` for the full rationale). On all other platforms, this uses the
+//! `interprocess` crate, which uses Unix Domain Sockets under the hood.
 use crate::ConnectionAddress;
 
+/// Builds the full Windows named-pipe path (`\\.\pipe\<name>`) for the given local socket name.
+/// Kept unconditional (rather than `#[cfg(windows)]`-gated) so its construction logic can be unit
+/// tested on every platform; it is only ever used on Windows.
+#[allow(dead_code)]
+pub(crate) fn windows_named_pipe_path(name: &str) -> String {
+    format!(r"\\.\pipe\{name}")
+}
+
+#[cfg(not(windows))]
 pub(crate) mod client {
+    use async_compat::CompatExt as _;
+    use futures::{AsyncRead, AsyncWrite};
     use interprocess::local_socket::tokio::LocalSocketStream;
 
     use super::*;
@@ -24,7 +37,37 @@ pub(crate) mod client {
     }
 }
 
+#[cfg(windows)]
+pub(crate) mod client {
+    use async_compat::{Compat, CompatExt as _};
+    use futures::{AsyncRead, AsyncWrite};
+    use tokio::io::split;
+    use tokio::net::windows::named_pipe::ClientOptions;
+
+    use super::*;
+    use crate::client::{ClientError, InitializationError, Result};
+
+    /// Returns a tuple containing structs for reading and writing to a local socket, which is the
+    /// underlying IPC transport for native (non-wasm) platforms.
+    pub async fn connect_client(
+        connection_address: ConnectionAddress,
+    ) -> Result<(impl AsyncRead + Unpin, impl AsyncWrite + Unpin)> {
+        let pipe_path = windows_named_pipe_path(&connection_address.to_string());
+        // `ClientOptions::open` requires an active Tokio runtime (it panics/errors otherwise);
+        // `.compat()` gives it one, matching the pattern used for the server side below.
+        let client = async move { ClientOptions::new().open(&pipe_path) }
+            .compat()
+            .await
+            .map_err(|e| ClientError::Initialization(InitializationError::Io(e)))?;
+        let (reader, writer) = split(client);
+        Ok((Compat::new(reader), Compat::new(writer)))
+    }
+}
+
+#[cfg(not(windows))]
 pub(crate) mod server {
+    use async_compat::CompatExt as _;
+    use futures::{AsyncRead, AsyncWrite};
     use interprocess::local_socket::tokio::{LocalSocketListener, LocalSocketStream};
 
     use super::*;
@@ -46,23 +89,10 @@ pub(crate) mod server {
 
     impl ConnectionListenerImpl {
         pub fn new(connection_address: ConnectionAddress) -> Result<Self> {
-            // Cloned up-front since `connection_address` is moved into the `bind` future below,
-            // but we still need it afterwards on Windows to locate the pipe for DACL hardening.
-            #[cfg(windows)]
-            let connection_address_for_dacl = connection_address.clone();
-
             let listener = warpui_core::r#async::block_on(
                 async move { LocalSocketListener::bind(connection_address.to_string()) }.compat(),
             )
             .map_err(|e| ServerError::Initialization(InitializationError::Io(e)))?;
-
-            // On Windows, the pipe `interprocess` just created keeps the OS default DACL, which
-            // is the root cause of REV-1546 (cross-elevation `ERROR_ACCESS_DENIED` on the
-            // single-instance URI pipe). Restrict it to the current user (across elevation
-            // levels), `SYSTEM`, and `Administrators`.
-            #[cfg(windows)]
-            harden_named_pipe_dacl(&connection_address_for_dacl);
-
             Ok(Self { listener })
         }
 
@@ -75,35 +105,123 @@ pub(crate) mod server {
                 .map_err(ServerError::AcceptConnection)
         }
     }
+}
 
-    /// Builds the full Windows named-pipe path (`\\.\pipe\<name>`) for the given local socket
-    /// name. `interprocess`'s `LocalSocketListener` performs the same transformation internally
-    /// when given a plain (non-namespaced) name, so this must be kept in sync with it for
-    /// `restrict_named_pipe_to_current_user` to target the right pipe object.
-    #[allow(dead_code)]
-    pub(crate) fn windows_named_pipe_path(name: &str) -> String {
-        format!(r"\\.\pipe\{name}")
+#[cfg(windows)]
+pub(crate) mod server {
+    use async_compat::{Compat, CompatExt as _};
+    use futures::{AsyncRead, AsyncWrite};
+    use tokio::io::split;
+    use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+
+    use super::*;
+    use crate::server::{InitializationError, Result, ServerError};
+    use crate::windows_pipe_security::PipeSecurityAttributes;
+
+    pub struct ConnectionImpl {
+        server: NamedPipeServer,
     }
 
-    /// Restricts the DACL on the just-created named pipe so that a later, differently-elevated
-    /// process for the same user can still connect to it. See `crate::windows_pipe_security` for
-    /// the full rationale (REV-1546). Failures are logged and otherwise ignored -- the pipe keeps
-    /// functioning under Windows' default DACL, which is what every prior release of Warp already
-    /// relied on.
-    #[cfg(windows)]
-    fn harden_named_pipe_dacl(connection_address: &ConnectionAddress) {
-        let pipe_path = windows_named_pipe_path(&connection_address.to_string());
-        if let Err(err) =
-            crate::windows_pipe_security::restrict_named_pipe_to_current_user(&pipe_path)
-        {
-            log::warn!(
-                "Failed to restrict ACL on named pipe {pipe_path}; it will keep the OS default \
-                 DACL, which can cause cross-elevation IPC failures (REV-1546): {err:?}"
-            );
+    impl ConnectionImpl {
+        pub fn into_split(self) -> (impl AsyncRead + Unpin, impl AsyncWrite + Unpin) {
+            let (reader, writer) = split(self.server);
+            (Compat::new(reader), Compat::new(writer))
+        }
+    }
+
+    pub struct ConnectionListenerImpl {
+        pipe_path: String,
+        // Kept alive for the listener's lifetime and reused for every instance created (the
+        // first and all subsequent ones), per the documented pattern for keeping a named pipe's
+        // DACL consistent across instances -- see `crate::windows_pipe_security`.
+        security_attributes: PipeSecurityAttributes,
+        // The next server instance to hand out on `accept_connection`, following tokio's
+        // documented named-pipe server pattern: a fresh instance must exist before the previous
+        // one is dropped, or a client connecting in between can transiently see `NotFound`.
+        //
+        // Taken out of the mutex (rather than held across the `.connect().await` point below) so
+        // the mutex guard is never held across an await.
+        next: std::sync::Mutex<Option<NamedPipeServer>>,
+    }
+
+    impl ConnectionListenerImpl {
+        pub fn new(connection_address: ConnectionAddress) -> Result<Self> {
+            let pipe_path = windows_named_pipe_path(&connection_address.to_string());
+
+            // This is the fix for REV-1546: create the pipe with an explicit security descriptor
+            // scoped to the current user (across elevation levels), SYSTEM, and Administrators,
+            // instead of Windows' default DACL. See `crate::windows_pipe_security` for the full
+            // rationale, including why this must happen at creation time rather than afterwards.
+            let security_attributes = PipeSecurityAttributes::for_current_user().map_err(|e| {
+                ServerError::Initialization(InitializationError::Io(std::io::Error::other(
+                    format!("Failed to build named pipe security attributes: {e:?}"),
+                )))
+            })?;
+
+            // `create_instance` constructs a `NamedPipeServer`, which (like the rest of tokio's
+            // I/O types) requires an active Tokio runtime; `.compat()` provides one, matching the
+            // pattern used by the non-Windows `interprocess`-based implementation above.
+            let first = warpui_core::r#async::block_on(
+                async { create_instance(&pipe_path, &security_attributes) }.compat(),
+            )
+            .map_err(|e| ServerError::Initialization(InitializationError::Io(e)))?;
+
+            Ok(Self {
+                pipe_path,
+                security_attributes,
+                next: std::sync::Mutex::new(Some(first)),
+            })
+        }
+
+        pub async fn accept_connection(&self) -> Result<ConnectionImpl> {
+            async {
+                let server = self
+                    .next
+                    .lock()
+                    .expect("named pipe listener mutex poisoned")
+                    .take()
+                    .expect(
+                        "ConnectionListenerImpl::accept_connection was called concurrently, \
+                         which is not supported",
+                    );
+
+                server
+                    .connect()
+                    .await
+                    .map_err(ServerError::AcceptConnection)?;
+
+                // Prepare the next instance *before* handing this one to the caller; see the
+                // `next` field's doc comment.
+                let next = create_instance(&self.pipe_path, &self.security_attributes)
+                    .map_err(ServerError::AcceptConnection)?;
+                *self
+                    .next
+                    .lock()
+                    .expect("named pipe listener mutex poisoned") = Some(next);
+
+                Ok(ConnectionImpl { server })
+            }
+            .compat()
+            .await
+        }
+    }
+
+    fn create_instance(
+        pipe_path: &str,
+        security_attributes: &PipeSecurityAttributes,
+    ) -> std::io::Result<NamedPipeServer> {
+        // Safety: `security_attributes.as_ptr()` points at a live, fully-initialized
+        // `SECURITY_ATTRIBUTES` whose `lpSecurityDescriptor` remains valid for at least as long
+        // as `security_attributes` (owned by `ConnectionListenerImpl` for its whole lifetime).
+        // The kernel copies the descriptor's contents during `CreateNamedPipeW`, so nothing
+        // borrows past this call.
+        unsafe {
+            ServerOptions::new()
+                .create_with_security_attributes_raw(pipe_path, security_attributes.as_ptr())
         }
     }
 }
 
 #[cfg(test)]
-#[path = "native_server_tests.rs"]
-mod native_server_tests;
+#[path = "native_tests.rs"]
+mod tests;
