@@ -76,6 +76,19 @@ pub struct TemplatableMCPServerManager {
     /// reconnection completes, all waiters are notified with the result.
     #[cfg(not(target_family = "wasm"))]
     pending_reconnections: HashMap<Uuid, Vec<ReconnectResultSender>>,
+    /// Retained installations for ephemeral MCP servers that are expected to
+    /// reconnect (the built-in Factory MCP, CLI-ephemeral servers, and
+    /// file-based servers), keyed by installation UUID.
+    ///
+    /// Ephemeral servers are never added to `locally_installed_servers`
+    /// (which represents user-managed, persisted installations), so without
+    /// this map a reconnect attempt after their peer disconnects - or after
+    /// their in-flight spawn is torn down - cannot reconstruct them. Entries
+    /// are removed when the owning server is shut down, so stale embedded
+    /// credentials (e.g. a bearer token baked into the built-in Factory
+    /// installation) don't outlive its runtime lifecycle.
+    #[cfg(not(target_family = "wasm"))]
+    reconnectable_ephemeral_installations: HashMap<Uuid, TemplatableMCPServerInstallation>,
     /// Maps the OAuth CSRF `state` token to the installation UUID of the server whose
     /// authorization flow is in progress.
     ///
