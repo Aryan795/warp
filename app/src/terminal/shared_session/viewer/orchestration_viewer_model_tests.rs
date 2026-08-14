@@ -718,6 +718,7 @@ fn test_model(
         children_by_run_id: HashMap::new(),
         metadata_fetches: HashSet::new(),
         pending_task_ids_for_discovery: HashSet::new(),
+        children_waiting_on_parent: HashMap::new(),
         pending_session_id_poll_handle: None,
         metadata_fetch_dispatch_count: 0,
     }
@@ -876,4 +877,146 @@ fn only_child_conversation(app: &App, fixture: &Fixture) -> AIConversation {
     let mut children = child_conversations(app, fixture);
     assert_eq!(children.len(), 1, "expected exactly one child conversation");
     children.remove(0)
+}
+
+// ---- Nested descendant placement (subtree streams) ---------------------------
+
+const GRANDCHILD_TASK_ID: &str = "55555555-5555-5555-5555-555555555555";
+
+/// Like [`task`], but parented under an arbitrary run instead of the anchor —
+/// the shape of a grandchild (or deeper) row on subtree streams.
+fn task_with_parent_run(
+    id: &str,
+    parent_run_id: &str,
+    state: AmbientAgentTaskState,
+    title: &str,
+) -> AmbientAgentTask {
+    let mut task = task(id, state, title);
+    task.parent_run_id = Some(parent_run_id.to_string());
+    task
+}
+
+#[test]
+fn registers_grandchild_under_its_parent_placeholder() {
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    App::test((), |mut app| async move {
+        let fixture = setup(&mut app);
+        register_child(&mut app, &fixture, queued_task(CHILD_A_TASK_ID, "Worker"));
+        register_child(
+            &mut app,
+            &fixture,
+            task_with_parent_run(
+                GRANDCHILD_TASK_ID,
+                CHILD_A_TASK_ID,
+                AmbientAgentTaskState::InProgress,
+                "Nested worker",
+            ),
+        );
+
+        let child_conv_id = read_child(&app, &fixture, CHILD_A_TASK_ID, |entry| {
+            entry.conversation_id
+        });
+        let grandchild_conv_id = read_child(&app, &fixture, GRANDCHILD_TASK_ID, |entry| {
+            entry.conversation_id
+        });
+        BlocklistAIHistoryModel::handle(&app).read(&app, |history, _| {
+            assert!(
+                history
+                    .child_conversation_ids_of(&child_conv_id)
+                    .contains(&grandchild_conv_id),
+                "the grandchild must attach under its actual parent's placeholder"
+            );
+            assert!(
+                !history
+                    .child_conversation_ids_of(&fixture.parent_conv_id)
+                    .contains(&grandchild_conv_id),
+                "the grandchild must not be hard-attributed to the stream anchor"
+            );
+        });
+    });
+}
+
+#[test]
+fn parks_grandchild_until_parent_registers_then_drains() {
+    // Subtree seeds and events can arrive out of dependency order: a
+    // grandchild observed before its parent parks until the parent's
+    // placeholder registers, then drains under it.
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    App::test((), |mut app| async move {
+        let fixture = setup(&mut app);
+        register_child(
+            &mut app,
+            &fixture,
+            task_with_parent_run(
+                GRANDCHILD_TASK_ID,
+                CHILD_A_TASK_ID,
+                AmbientAgentTaskState::InProgress,
+                "Nested worker",
+            ),
+        );
+        fixture.model.read(&app, |model, _| {
+            assert!(
+                !model.children.contains_key(&task_id(GRANDCHILD_TASK_ID)),
+                "the grandchild must park while its parent run is unknown"
+            );
+            assert_eq!(
+                model
+                    .children_waiting_on_parent
+                    .get(CHILD_A_TASK_ID)
+                    .map(|tasks| tasks.len()),
+                Some(1)
+            );
+        });
+
+        register_child(&mut app, &fixture, queued_task(CHILD_A_TASK_ID, "Worker"));
+
+        fixture.model.read(&app, |model, _| {
+            assert!(model.children_waiting_on_parent.is_empty());
+            assert!(model.children.contains_key(&task_id(GRANDCHILD_TASK_ID)));
+        });
+        let child_conv_id = read_child(&app, &fixture, CHILD_A_TASK_ID, |entry| {
+            entry.conversation_id
+        });
+        let grandchild_conv_id = read_child(&app, &fixture, GRANDCHILD_TASK_ID, |entry| {
+            entry.conversation_id
+        });
+        BlocklistAIHistoryModel::handle(&app).read(&app, |history, _| {
+            assert!(
+                history
+                    .child_conversation_ids_of(&child_conv_id)
+                    .contains(&grandchild_conv_id),
+                "the drained grandchild must attach under its parent's placeholder"
+            );
+        });
+    });
+}
+
+#[test]
+fn family_scope_covers_anchor_descendants_and_pending_discoveries() {
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    App::test((), |mut app| async move {
+        let fixture = setup(&mut app);
+        register_child(&mut app, &fixture, queued_task(CHILD_A_TASK_ID, "Worker"));
+        fixture.model.update(&mut app, |model, _| {
+            model
+                .pending_task_ids_for_discovery
+                .insert(task_id(CHILD_B_TASK_ID));
+        });
+
+        fixture.model.read(&app, |model, _| {
+            assert!(model.family_in_scope(task_id(PARENT_TASK_ID)));
+            assert!(
+                model.family_in_scope(task_id(CHILD_A_TASK_ID)),
+                "a tracked descendant is a family for its own children"
+            );
+            assert!(
+                model.family_in_scope(task_id(CHILD_B_TASK_ID)),
+                "a descendant awaiting discovery metadata can already parent grandchildren"
+            );
+            assert!(
+                !model.family_in_scope(task_id(GRANDCHILD_TASK_ID)),
+                "unknown families belong to other orchestrators"
+            );
+        });
+    });
 }
