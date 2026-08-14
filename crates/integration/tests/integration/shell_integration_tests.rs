@@ -77,6 +77,9 @@ integration_tests! {
     test_color_overrides_in_prompt_dont_crash,
     // Tests zsh-specific behavior with nounset option.
     test_zsh_bootstraps_with_nounset_option,
+    // Regression test for APP-5385: zsh bootstrap must not leak when .zshrc reconfigures
+    // ZLE/vi-mode widgets. Must run against zsh.
+    test_zsh_bootstraps_with_vi_mode_widgets,
 
     // Tests of ssh wrapper logic from bootstrap script.
     test_ssh_wrapper_into_bash,

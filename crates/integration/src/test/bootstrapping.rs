@@ -315,6 +315,61 @@ pub fn test_zsh_bootstraps_with_nounset_option() -> Builder {
         ))
 }
 
+/// Ensures the zsh bootstrap script doesn't leak onto the screen (or corrupt the next typed
+/// command) when the user's `.zshrc` reconfigures ZLE / vi-mode widgets, e.g. a vi-mode
+/// cursor-shape snippet that calls `bindkey -v` and redefines `zle-keymap-select` /
+/// `zle-line-init` (as `autoload -Uz cursor_mode; cursor_mode` does), or a framework like
+/// prezto. See APP-5385 / https://github.com/warpdotdev/warp/issues/7099.
+///
+/// Before the fix, Warp's zsh bootstrap script is pasted into the PTY as a heredoc while the
+/// tty is left in its default canonical/echo mode; only `unsetopt ZLE` is used to keep zsh's
+/// own line editor out of the way. If the just-sourced `.zshrc` reconfigures ZLE widgets, a
+/// trailing, not-yet-consumed portion of the pasted script can get echoed back or picked up as
+/// typeahead once the line editor is re-enabled, corrupting the very next command the user
+/// runs. This would cause either `wait_until_bootstrapped_single_pane_for_tab` to time out, or
+/// the command text asserted by `execute_command_for_single_terminal_in_tab` to not match.
+pub fn test_zsh_bootstraps_with_vi_mode_widgets() -> Builder {
+    new_builder()
+        .set_should_run_test(|| {
+            // Only run this one on zsh.
+            let (starter, _) = current_shell_starter_and_version();
+            matches!(starter.shell_type(), shell::ShellType::Zsh)
+        })
+        .with_setup(|utils| {
+            let dir = utils.test_dir();
+            write_rc_files_for_test(
+                dir,
+                r#"
+bindkey -v
+export KEYTIMEOUT=1
+
+function zle-keymap-select {
+  if [[ ${KEYMAP} == vicmd ]]; then
+    echo -ne '\e[2 q'
+  else
+    echo -ne '\e[6 q'
+  fi
+}
+zle -N zle-keymap-select
+
+zle-line-init() {
+  zle -K viins
+  echo -ne '\e[6 q'
+}
+zle -N zle-line-init
+"#,
+                [ShellRcType::Zsh],
+            );
+        })
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(0))
+        .with_step(execute_command_for_single_terminal_in_tab(
+            0,
+            "echo hello".to_string(),
+            ExpectedExitStatus::Success,
+            "hello",
+        ))
+}
+
 pub fn test_bash_bootstraps_with_prompt_command_array_that_sets_ps1() -> Builder {
     new_builder()
         .set_should_run_test(|| {
