@@ -1,8 +1,12 @@
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 use warpui_core::App;
 
 use super::{
     MAX_RESAMPLED_SAMPLES, StartListeningError, VoiceInput, VoiceInputLifecycle,
     VoiceInputLifecycleState, VoiceInputState, VoiceInputToggledFrom, append_resampled_samples,
+    mark_resample_cap_reached,
 };
 
 #[test]
@@ -92,4 +96,40 @@ fn append_resampled_samples_retains_already_captured_audio_when_capped() {
     assert_eq!(buffer[MAX_RESAMPLED_SAMPLES - 3], 42.0);
     assert_eq!(buffer[MAX_RESAMPLED_SAMPLES - 2], 1.0);
     assert_eq!(buffer[MAX_RESAMPLED_SAMPLES - 1], 2.0);
+}
+
+#[test]
+fn resample_cap_completion_applies_to_the_current_session() {
+    let resampled = Arc::new(Mutex::new(vec![]));
+    let mut cap_reached = false;
+
+    let newly_reached = mark_resample_cap_reached(&resampled, &resampled, &mut cap_reached);
+
+    assert!(newly_reached);
+    assert!(cap_reached);
+
+    // A later completion for the same, already-capped session shouldn't re-report.
+    let reported_again = mark_resample_cap_reached(&resampled, &resampled, &mut cap_reached);
+    assert!(!reported_again);
+}
+
+#[test]
+fn resample_cap_completion_ignores_a_stale_session_after_abort_restart() {
+    // Simulates a resample future spawned by a session that reached the cap, whose
+    // completion resolves only after that session was aborted/stopped and a new
+    // one (with its own `resampled` buffer) started listening.
+    let old_session_resampled = Arc::new(Mutex::new(vec![]));
+    let new_session_resampled = Arc::new(Mutex::new(vec![]));
+    let mut new_session_cap_reached = false;
+
+    let newly_reached = mark_resample_cap_reached(
+        &new_session_resampled,
+        &old_session_resampled,
+        &mut new_session_cap_reached,
+    );
+
+    assert!(!newly_reached);
+    // The new session must keep recording: its cap flag stays false, so
+    // `on_audio_frame` keeps resampling and appending future frames to its buffer.
+    assert!(!new_session_cap_reached);
 }

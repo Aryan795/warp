@@ -485,25 +485,27 @@ impl VoiceInput {
 
         let resampler = resampler.clone();
         let resampled = resampled.clone();
+        let session_resampled = resampled.clone();
         ctx.spawn(
             async move { Self::resample_audio_frame(resampler, resampled, input_buffer).await },
-            |me, result, _ctx| match result {
+            move |me, result, _ctx| match result {
                 Ok(cap_reached) => {
                     if !cap_reached {
                         return;
                     }
                     let VoiceInputState::Listening {
+                        resampled,
                         resample_cap_reached,
                         ..
                     } = &mut me.state
                     else {
                         return;
                     };
-                    // Multiple frames can already be in flight when the cap is crossed;
-                    // only the first one to observe it here should report, or a stuck
-                    // session would flood Sentry with one event per remaining frame.
-                    if !*resample_cap_reached {
-                        *resample_cap_reached = true;
+                    if mark_resample_cap_reached(
+                        resampled,
+                        &session_resampled,
+                        resample_cap_reached,
+                    ) {
                         report_error!(
                             "Voice input session hit the recording length cap; audio was truncated",
                             extra: { "max_duration_secs" => %MAX_LISTENING_DURATION.as_secs() }
@@ -571,6 +573,25 @@ fn append_resampled_samples(buffer: &mut Vec<f32>, samples: &[f32]) -> bool {
         buffer.extend(samples.iter().take(remaining).copied());
     }
     buffer.len() >= MAX_RESAMPLED_SAMPLES
+}
+
+/// Marks the cap reached for the session identified by `current_resampled`, unless
+/// the completion belongs to a stale session. A resample future spawned before a
+/// session hits the cap can still be in flight after that session is stopped or
+/// aborted and a new one starts; comparing `Arc` identity (rather than trusting
+/// whichever `Listening` state happens to be current) keeps a stale completion from
+/// truncating the new session's recording. Returns whether the cap was newly
+/// reached, so the caller reports it exactly once.
+fn mark_resample_cap_reached(
+    current_resampled: &Arc<Mutex<Vec<f32>>>,
+    session_resampled: &Arc<Mutex<Vec<f32>>>,
+    cap_reached: &mut bool,
+) -> bool {
+    if *cap_reached || !Arc::ptr_eq(current_resampled, session_resampled) {
+        return false;
+    }
+    *cap_reached = true;
+    true
 }
 
 #[cfg(test)]
