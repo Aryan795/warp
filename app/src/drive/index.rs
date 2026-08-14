@@ -666,17 +666,18 @@ impl DriveIndex {
             .collect::<Vec<_>>();
 
         if !user_workspaces.as_ref(ctx).has_teams() {
-            let can_create_team = user_workspaces.as_ref(ctx).can_create_team();
+            let should_offer_team_creation =
+                user_workspaces.as_ref(ctx).should_offer_team_creation();
             if user_workspaces
                 .as_ref(ctx)
                 .total_teammates_in_joinable_teams()
                 > 0
             {
                 sections.insert(0, DriveIndexSection::JoinTeam);
-                if can_create_team {
+                if should_offer_team_creation {
                     sections.insert(1, DriveIndexSection::CreateATeam);
                 }
-            } else if can_create_team {
+            } else if should_offer_team_creation {
                 sections.insert(0, DriveIndexSection::CreateATeam);
             }
         }
@@ -2251,8 +2252,6 @@ impl DriveIndex {
         let mut column = Flex::column();
         column.add_child(join_button);
 
-        // "Or" reads as a lead-in to the create-team section that normally follows, so
-        // it goes away with it.
         if self.sections.contains(&DriveIndexSection::CreateATeam) {
             let or_text = Container::new(
                 Text::new_inline("Or", appearance.ui_font_family(), ITEM_FONT_SIZE)

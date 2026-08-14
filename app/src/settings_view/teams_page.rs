@@ -121,12 +121,19 @@ const INVALID_EMAILS_INSTRUCTIONS: &str =
 
 const OFFLINE_TEXT: &str = "You are offline.";
 
-// Copy for a workspace member who is not on any team. Teams inside a workspace are
-// created through workspace administration, not from the client, so the create-team
-// form is replaced by an explanation of where a team comes from.
 const WORKSPACE_MANAGED_TEAMS_HEADER: &str = "You're not on a team";
-const WORKSPACE_MANAGED_TEAMS_DESCRIPTION: &str = "Teams in your workspace are created and managed by a workspace admin. Ask an admin to add you to a team.";
+const WORKSPACE_MANAGED_TEAMS_DESCRIPTION: &str =
+    "Teams in your workspace are created and managed by a workspace admin.";
+const WORKSPACE_MANAGED_TEAMS_ASK_ADMIN: &str = "Ask an admin to add you to a team.";
 const JOIN_TEAM_WITHOUT_CREATE_HEADER: &str = "Join an existing team within your company";
+
+fn workspace_managed_teams_description(has_discoverable_teams: bool) -> String {
+    if has_discoverable_teams {
+        WORKSPACE_MANAGED_TEAMS_DESCRIPTION.to_string()
+    } else {
+        format!("{WORKSPACE_MANAGED_TEAMS_DESCRIPTION} {WORKSPACE_MANAGED_TEAMS_ASK_ADMIN}")
+    }
+}
 
 const MAX_CHIP_WIDTH: f32 = 280.;
 
@@ -3993,28 +4000,13 @@ impl TeamsWidget {
             .finish()
     }
 
-    fn render_create_team_page_with_banner(
-        &self,
-        view: &TeamsPageView,
-        appearance: &Appearance,
-        app: &AppContext,
-    ) -> Box<dyn Element> {
-        let mut column = Flex::column();
-
-        column.add_child(self.render_create_team_page(view, appearance, app));
-
-        column.finish()
-    }
-
-    /// The Teams page for a member of a workspace who is not on any team. They cannot
-    /// create one from the client (see [`UserWorkspaces::can_create_team`]), so the page
-    /// explains where their teams come from instead of offering a form that would fail.
     fn render_workspace_managed_teams_page(
         &self,
         view: &TeamsPageView,
         appearance: &Appearance,
     ) -> Box<dyn Element> {
         let mut page = Flex::column();
+        let has_discoverable_teams = !view.discoverable_teams_states.is_empty();
 
         page.add_child(render_sub_header(appearance, "Teams".to_string(), None));
         page.add_child(self.render_sub_header_with_subtext_color(
@@ -4022,17 +4014,15 @@ impl TeamsWidget {
             WORKSPACE_MANAGED_TEAMS_HEADER.to_string(),
         ));
         page.add_child(
-            Container::new(
-                self.render_description(
-                    WORKSPACE_MANAGED_TEAMS_DESCRIPTION.to_string(),
-                    appearance,
-                ),
-            )
+            Container::new(self.render_description(
+                workspace_managed_teams_description(has_discoverable_teams),
+                appearance,
+            ))
             .with_padding_top(6.)
             .finish(),
         );
 
-        if !view.discoverable_teams_states.is_empty() {
+        if has_discoverable_teams {
             page.add_child(render_separator(appearance));
             page.add_child(self.render_sub_header_with_subtext_color(
                 appearance,
@@ -4454,10 +4444,10 @@ impl SettingsWidget for TeamsWidget {
                     appearance,
                     app,
                 ),
-                None if !teams.can_create_team() => {
+                None if !teams.should_offer_team_creation() => {
                     self.render_workspace_managed_teams_page(view, appearance)
                 }
-                None => self.render_create_team_page_with_banner(view, appearance, app),
+                None => self.render_create_team_page(view, appearance, app),
             }
         } else {
             appearance
@@ -4513,6 +4503,18 @@ pub fn test_valid_domains() {
     assert!(TeamsPageView::is_valid_domain("warp0.dev0"));
     assert!(TeamsPageView::is_valid_domain("warp.dev"));
     assert!(TeamsPageView::is_valid_domain("miniclip.com"));
+}
+
+#[cfg(test)]
+#[test]
+fn test_workspace_managed_teams_description_drops_ask_admin_when_teams_are_joinable() {
+    let with_discovery = workspace_managed_teams_description(true);
+    assert!(!with_discovery.contains(WORKSPACE_MANAGED_TEAMS_ASK_ADMIN));
+    assert_eq!(with_discovery, WORKSPACE_MANAGED_TEAMS_DESCRIPTION);
+
+    let without_discovery = workspace_managed_teams_description(false);
+    assert!(without_discovery.starts_with(WORKSPACE_MANAGED_TEAMS_DESCRIPTION));
+    assert!(without_discovery.ends_with(WORKSPACE_MANAGED_TEAMS_ASK_ADMIN));
 }
 
 #[cfg(test)]

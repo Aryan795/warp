@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use warp_core::ui::appearance::Appearance;
 use warpui::App;
 use warpui::platform::WindowStyle;
@@ -13,6 +15,8 @@ use crate::drive::index::DriveIndexSection;
 use crate::network::NetworkStatus;
 use crate::server::cloud_objects::update_manager::UpdateManager;
 use crate::server::server_api::ServerApiProvider;
+use crate::server::server_api::team::MockTeamClient;
+use crate::server::server_api::workspace::MockWorkspaceClient;
 use crate::server::sync_queue::SyncQueue;
 use crate::server::telemetry::context_provider::AppTelemetryContextProvider;
 use crate::settings_view::keybindings::KeybindingChangedNotifier;
@@ -21,13 +25,25 @@ use crate::terminal::shared_session::permissions_manager::SessionPermissionsMana
 use crate::test_util::settings::initialize_settings_for_tests;
 use crate::workspaces::team_tester::TeamTesterStatus;
 use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::workspace::{Workspace, WorkspaceUid};
 use crate::{ASSETS, ObjectActions};
 
 fn initialize_app(app: &mut App) {
+    initialize_app_with_workspaces(app, vec![]);
+}
+
+fn initialize_app_with_workspaces(app: &mut App, workspaces: Vec<Workspace>) {
     initialize_settings_for_tests(app);
 
     app.add_singleton_model(CloudModel::mock);
-    app.add_singleton_model(UserWorkspaces::default_mock);
+    app.add_singleton_model(|ctx| {
+        UserWorkspaces::mock(
+            Arc::new(MockTeamClient::new()),
+            Arc::new(MockWorkspaceClient::new()),
+            workspaces,
+            ctx,
+        )
+    });
     app.add_singleton_model(|_| NetworkStatus::new());
     app.add_singleton_model(|_| Appearance::mock());
     app.add_singleton_model(SyncQueue::mock);
@@ -63,6 +79,29 @@ fn test_warp_drive_sections_with_no_team() {
             assert_eq!(sections.len(), 2);
             assert_eq!(sections[0], DriveIndexSection::CreateATeam);
             assert_eq!(sections[1], DriveIndexSection::Space(Space::Personal))
+        });
+    })
+}
+
+#[test]
+fn test_warp_drive_sections_omit_create_a_team_for_a_teamless_workspace_member() {
+    App::test(ASSETS, |mut app| async move {
+        let workspace = Workspace::from_local_cache(
+            WorkspaceUid::from("workspace_uid123456789".to_string()),
+            "Test Workspace".to_string(),
+            None,
+        );
+        initialize_app_with_workspaces(&mut app, vec![workspace]);
+
+        let (_, panel) = app.add_window(WindowStyle::NotStealFocus, DrivePanel::new);
+
+        let index = panel.read(&app, |panel, _| panel.index_view.clone());
+        index.read(&app, |index, _| {
+            assert_eq!(
+                index.sections(),
+                &[DriveIndexSection::Space(Space::Personal)],
+                "the create-team section should be absent, not present-but-empty"
+            );
         });
     })
 }

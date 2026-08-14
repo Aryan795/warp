@@ -1027,16 +1027,11 @@ impl UserWorkspaces {
         !self.workspaces.is_empty()
     }
 
-    /// Whether the client should offer creating a new team.
+    /// Whether the desktop client supports creating a team for the current user.
     ///
-    /// The desktop client only ever calls the legacy `createTeam` mutation, which the
-    /// server rejects for a caller who already belongs to a workspace. Teams inside a
-    /// workspace are created with `createTeamInWorkspace`, which the client does not
-    /// call, and which requires workspace-admin permissions anyway. So for every
-    /// workspace member — admin or not — the create-team affordances lead nowhere and
-    /// are hidden; teamless users (whose placeholder workspace is filtered out of
-    /// [`Self::workspaces`]) keep them.
-    pub fn can_create_team(&self) -> bool {
+    /// Creating new teams within a workspace is only available in the web client today.
+    /// TODO(isaiah): Allow workspace admins to `createTeamInWorkspace` in the desktop too.
+    pub fn should_offer_team_creation(&self) -> bool {
         !self.has_workspaces()
     }
 
