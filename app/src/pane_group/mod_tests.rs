@@ -40,7 +40,7 @@ use crate::ai::ambient_agents::{
     AgentSource, AmbientAgentTask, AmbientAgentTaskId, AmbientAgentTaskState,
 };
 use crate::ai::blocklist::agent_view::AgentViewEntryOrigin;
-use crate::ai::blocklist::history_model::CloudConversationData;
+use crate::ai::blocklist::history_model::{CLIAgentConversation, CloudConversationData};
 use crate::ai::blocklist::local_agent_task_sync_model::LocalAgentTaskSyncModel;
 use crate::ai::blocklist::orchestration_event_streamer::OrchestrationEventStreamer;
 use crate::ai::blocklist::orchestration_events::OrchestrationEventService;
@@ -86,6 +86,7 @@ use crate::terminal::history::History;
 use crate::terminal::keys::TerminalKeybindings;
 use crate::terminal::local_tty::TerminalManager;
 use crate::terminal::local_tty::spawner::PtySpawner;
+use crate::terminal::model::block::SerializedBlock;
 use crate::terminal::model::terminal_model::ConversationTranscriptViewerStatus;
 use crate::terminal::resizable_data::ResizableData;
 use crate::terminal::shared_session::{
@@ -1258,6 +1259,153 @@ fn completed_shared_session_child_with_edit_access_uses_continuation_pane() {
                 model.shared_session_status(),
                 SharedSessionStatus::NotShared
             ));
+        });
+    });
+}
+
+/// QUALITY-1659 regression test: a completed CLI-harness (Claude/Gemini/
+/// Codex) child used to hit an early `return` in `hydrate_child_transcript`
+/// that never cleared `Loading`, leaving the child pane stuck on "Loading
+/// session..." forever. `restore_child_cli_agent_transcript` is the
+/// synchronous half of that fix (the async cloud fetch itself is exercised
+/// by `hydrate_child_transcript`); this drives it directly to confirm the
+/// pane reaches a terminal, read-only state with the block snapshot
+/// restored and the harness badge applied.
+#[test]
+fn completed_cli_agent_child_transcript_clears_loading_and_restores_content() {
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    let _agent_harness = FeatureFlag::AgentHarness.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+
+        pane_group.update(&mut app, |panes, ctx| {
+            let task_id = new_ambient_agent_task_id();
+
+            let mut child = AIConversation::new(false, false);
+            child.set_task_id(task_id);
+            let child_id = child.id();
+
+            let loading_pane_id = panes
+                .create_child_loading_placeholder(child, AgentViewEntryOrigin::CloudAgent, ctx)
+                .expect("child loading placeholder pane");
+
+            let loading_view = panes
+                .terminal_view_from_pane_id(loading_pane_id, ctx)
+                .expect("loading pane should have a terminal view");
+            assert_eq!(
+                loading_view
+                    .as_ref(ctx)
+                    .model
+                    .lock()
+                    .conversation_transcript_viewer_status(),
+                Some(&ConversationTranscriptViewerStatus::Loading),
+                "precondition: the placeholder pane starts in the Loading state",
+            );
+
+            let mut cli_metadata = test_server_conversation_metadata(Some(task_id));
+            cli_metadata.harness = AIAgentHarness::ClaudeCode;
+            let cli_conversation = CLIAgentConversation {
+                metadata: cli_metadata,
+                block: SerializedBlock::new_for_test(
+                    b"claude".to_vec(),
+                    b"hello from claude\r\n".to_vec(),
+                ),
+            };
+
+            panes.restore_child_cli_agent_transcript(
+                loading_pane_id,
+                child_id,
+                task_id,
+                cli_conversation,
+                ctx,
+            );
+
+            let pane_id = panes.child_agent_panes[&child_id];
+            assert_eq!(
+                pane_id, loading_pane_id,
+                "CLI restore happens in place; it must not swap to a new pane",
+            );
+
+            let view = panes
+                .terminal_view_from_pane_id(pane_id, ctx)
+                .expect("restored CLI child pane should have a terminal view");
+            let model = view.as_ref(ctx).model.lock();
+            assert!(
+                !model.is_loading_conversation_transcript(),
+                "CLI child transcript hydration must clear the Loading state (QUALITY-1659)",
+            );
+            assert_eq!(
+                model.conversation_transcript_viewer_status(),
+                Some(&ConversationTranscriptViewerStatus::ViewingAmbientConversation(task_id)),
+            );
+            assert!(model.is_read_only());
+            assert!(
+                model
+                    .block_list()
+                    .blocks()
+                    .iter()
+                    .any(|block| block.command_to_string() == "claude"),
+                "the CLI agent's block snapshot must be restored into the pane's block list",
+            );
+        });
+    });
+}
+
+/// A harness whose transcript genuinely can't be restored (here, because
+/// `AgentHarness` is disabled) must still leave the pane in a terminal,
+/// non-`Loading` state with the conversation-ended tombstone rather than an
+/// indefinite spinner.
+#[test]
+fn unsupported_cli_agent_child_transcript_still_clears_loading() {
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    let _agent_harness = FeatureFlag::AgentHarness.override_enabled(false);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+
+        pane_group.update(&mut app, |panes, ctx| {
+            let task_id = new_ambient_agent_task_id();
+
+            let mut child = AIConversation::new(false, false);
+            child.set_task_id(task_id);
+            let child_id = child.id();
+
+            let loading_pane_id = panes
+                .create_child_loading_placeholder(child, AgentViewEntryOrigin::CloudAgent, ctx)
+                .expect("child loading placeholder pane");
+
+            let mut cli_metadata = test_server_conversation_metadata(Some(task_id));
+            cli_metadata.harness = AIAgentHarness::ClaudeCode;
+            let cli_conversation = CLIAgentConversation {
+                metadata: cli_metadata,
+                block: SerializedBlock::new_for_test(
+                    b"claude".to_vec(),
+                    b"hello from claude\r\n".to_vec(),
+                ),
+            };
+
+            panes.restore_child_cli_agent_transcript(
+                loading_pane_id,
+                child_id,
+                task_id,
+                cli_conversation,
+                ctx,
+            );
+
+            let pane_id = panes.child_agent_panes[&child_id];
+            let view = panes
+                .terminal_view_from_pane_id(pane_id, ctx)
+                .expect("restored CLI child pane should have a terminal view");
+            let model = view.as_ref(ctx).model.lock();
+            assert!(
+                !model.is_loading_conversation_transcript(),
+                "a genuinely unsupported harness must still leave Loading, not spin forever",
+            );
+            assert_eq!(
+                model.conversation_transcript_viewer_status(),
+                Some(&ConversationTranscriptViewerStatus::ViewingAmbientConversation(task_id)),
+            );
         });
     });
 }

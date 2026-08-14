@@ -1,18 +1,19 @@
 use session_sharing_protocol::common::SessionId;
 use uuid::Uuid;
+use warp_cli::agent::Harness;
 use warp_errors::report_error;
 use warpui::{SingletonEntity, ViewContext};
 
 use super::materialization::{ChildPaneMaterialization, decide_child_pane_materialization};
 use crate::ai::agent::api::ServerConversationToken;
-use crate::ai::agent::conversation::{AIConversation, AIConversationId};
+use crate::ai::agent::conversation::{AIAgentHarness, AIConversation, AIConversationId};
 use crate::ai::agent_conversations_model::AgentConversationsModel;
 use crate::ai::ambient_agents::{
     AmbientAgentLiveSessionState, AmbientAgentTask, AmbientAgentTaskId,
 };
 use crate::ai::blocklist::BlocklistAIHistoryModel;
 use crate::ai::blocklist::agent_view::AgentViewEntryOrigin;
-use crate::ai::blocklist::history_model::CloudConversationData;
+use crate::ai::blocklist::history_model::{CLIAgentConversation, CloudConversationData};
 use crate::pane_group::{
     AmbientAgentViewModelHandleExt, PaneGroup, PaneId, TerminalPane, TerminalViewResources,
 };
@@ -423,10 +424,13 @@ impl PaneGroup {
                         }
                     }
                 }
-                Some(CloudConversationData::CLIAgent(_)) => {
-                    log::warn!(
-                        "child transcript upgrade unsupported \
-                         CLI transcript child_conversation_id={child_id:?}"
+                Some(CloudConversationData::CLIAgent(cli_conversation)) => {
+                    group.restore_child_cli_agent_transcript(
+                        pane_id,
+                        child_id,
+                        task_id,
+                        *cli_conversation,
+                        ctx,
                     );
                     return;
                 }
@@ -557,6 +561,89 @@ impl PaneGroup {
                 view.insert_conversation_ended_tombstone_with_resolved_cta(ctx);
             });
         }
+        self.child_agent_panes.insert(child_id, pane_id);
+    }
+
+    /// Restores a CLI-agent (Claude/Gemini/Codex) child transcript in place.
+    ///
+    /// Mirrors the parent-level CLI restore path (see
+    /// [`PaneGroup::load_data_into_restored_ambient_cloud_mode_view`]) so a
+    /// completed CLI-harness child leaves its "Loading session..."
+    /// placeholder instead of being silently dropped (see QUALITY-1659). The
+    /// pane already entered agent view for its placeholder conversation when
+    /// it was created by [`Self::create_child_loading_placeholder`], so this
+    /// only needs to restore the block snapshot into that existing
+    /// conversation rather than entering agent view again.
+    ///
+    /// If the harness genuinely can't be rendered (e.g. `AgentHarness` is
+    /// disabled), the pane still leaves `Loading` and shows the
+    /// conversation-ended tombstone rather than spinning forever, just
+    /// without the restored block content or harness badge.
+    pub(in crate::pane_group) fn restore_child_cli_agent_transcript(
+        &mut self,
+        pane_id: PaneId,
+        child_id: AIConversationId,
+        task_id: AmbientAgentTaskId,
+        cli_conversation: CLIAgentConversation,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if let Some(terminal_manager) = self
+            .terminal_session_by_id(pane_id)
+            .map(|session| session.terminal_manager(ctx))
+        {
+            terminal_manager.update(ctx, |manager, _ctx| {
+                let model_handle = manager.model();
+                let mut model = model_handle.lock();
+                model.set_shared_session_status(
+                    crate::terminal::shared_session::SharedSessionStatus::FinishedViewer,
+                );
+                model.set_conversation_transcript_viewer_status(Some(
+                    ConversationTranscriptViewerStatus::ViewingAmbientConversation(task_id),
+                ));
+            });
+        }
+        let Some(terminal_view) = self.terminal_view_from_pane_id(pane_id, ctx) else {
+            return;
+        };
+        BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, _ctx| {
+            history.mark_terminal_surface_as_conversation_transcript_viewer(terminal_view.id());
+        });
+
+        // A build with the CLI-harness feature disabled can't restore the
+        // block snapshot or attribute a harness badge; it still clears
+        // `Loading` above and inserts the tombstone below so the pane
+        // reaches a terminal, comprehensible state instead of spinning.
+        let harness = match cli_conversation.metadata.harness {
+            AIAgentHarness::ClaudeCode => Some(Harness::Claude),
+            AIAgentHarness::Gemini => Some(Harness::Gemini),
+            AIAgentHarness::Codex => Some(Harness::Codex),
+            AIAgentHarness::Oz => None,
+            AIAgentHarness::Unknown => Some(Harness::Unknown),
+        };
+        let harness = crate::features::FeatureFlag::AgentHarness
+            .is_enabled()
+            .then_some(harness)
+            .flatten();
+
+        terminal_view.update(ctx, |view, ctx| {
+            view.set_orchestration_child_live_unavailable(false, ctx);
+            view.restore_conversation_and_directory_context(
+                CloudConversationData::CLIAgent(Box::new(cli_conversation)),
+                true,
+                RestoreConversationEntryBehavior::PreserveAgentViewState,
+                false,
+                |_, _| {},
+                ctx,
+            );
+            if let Some(harness) = harness
+                && let Some(ambient_agent_view_model) = view.ambient_agent_view_model().cloned()
+            {
+                ambient_agent_view_model.update(ctx, |model, ctx| {
+                    model.set_harness(harness, ctx);
+                });
+            }
+            view.insert_conversation_ended_tombstone_with_resolved_cta(ctx);
+        });
         self.child_agent_panes.insert(child_id, pane_id);
     }
 
