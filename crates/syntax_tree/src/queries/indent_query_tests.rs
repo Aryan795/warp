@@ -1,6 +1,8 @@
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use arborium::tree_sitter::Tree;
+use instant::Instant;
 use languages::{Language, language_by_filename};
 use warp_editor::content::buffer::{Buffer, BufferSnapshot};
 use warp_editor::content::selection_model::BufferSelectionModel;
@@ -16,7 +18,14 @@ fn mock_buffer_and_tree(text_content: &str, language: Arc<Language>) -> (Buffer,
     // Create a tree by parsing the text
     let snapshot = BufferSnapshot::from_plain_text(text_content);
     let tree = warpui_core::r#async::block_on(async {
-        SyntaxTreeState::parse_text(snapshot, None, &language).await
+        SyntaxTreeState::parse_text(
+            snapshot,
+            None,
+            &language,
+            Instant::now() + std::time::Duration::from_secs(60),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
     })
     .expect_tree("test buffer is small and should parse");
 
@@ -61,7 +70,14 @@ fn test_indent_query() {
 
         let buffer_snapshot = buffer_handle.read(&app, |buffer, _| buffer.buffer_snapshot());
         let tree = warpui_core::r#async::block_on(async {
-            SyntaxTreeState::parse_text(buffer_snapshot, None, &language).await
+            SyntaxTreeState::parse_text(
+                buffer_snapshot,
+                None,
+                &language,
+                Instant::now() + std::time::Duration::from_secs(60),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await
         })
         .expect_tree("test buffer is small and should parse");
 
@@ -158,7 +174,14 @@ fn test_indent_query_on_go() {
 
         let buffer_snapshot = buffer_handle.read(&app, |buffer, _| buffer.buffer_snapshot());
         let tree = warpui_core::r#async::block_on(async {
-            SyntaxTreeState::parse_text(buffer_snapshot, None, &language).await
+            SyntaxTreeState::parse_text(
+                buffer_snapshot,
+                None,
+                &language,
+                Instant::now() + std::time::Duration::from_secs(60),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await
         })
         .expect_tree("test buffer is small and should parse");
 
