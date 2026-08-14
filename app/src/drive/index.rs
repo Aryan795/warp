@@ -194,13 +194,13 @@ const SHARED_OBJECT_LIMIT_HIT_BANNER_LINE: &str =
 const PAYMENT_ISSUE_BANNER_LINE_1: &str =
     "Shared objects have been restricted due to a subscription payment issue.";
 
-const PAYMENT_ISSUE_BANNER_LINE_2_ADMIN: &str =
-    "Please update your payment information to restore access.";
+const PAYMENT_ISSUE_BANNER_LINE_2_ADMIN: &str = "Please update your payment information to restore access. Contact billing@warp.dev for assistance.";
 
 const PAYMENT_ISSUE_BANNER_LINE_2_ADMIN_ENTERPRISE: &str =
-    "Please contact support@warp.dev to restore access.";
+    "Please contact billing@warp.dev for assistance.";
 
-const PAYMENT_ISSUE_BANNER_LINE_2_NONADMIN: &str = "Please contact a team admin to restore access.";
+const PAYMENT_ISSUE_BANNER_LINE_2_NONADMIN: &str =
+    "Please contact a team admin to restore access. Contact billing@warp.dev for assistance.";
 
 /// Struct to hold different state-related information on per-space basis.
 /// Currently, we only have 1 space (1 Team), but as we're working on personal space, and add

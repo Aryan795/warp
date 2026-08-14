@@ -79,8 +79,7 @@ const SORT_MENU_ITEM_REQUEST_USAGE_ASCENDING_LABEL: &str = "Usage ascending";
 const SORT_MENU_ITEM_REQUEST_USAGE_DESCENDING_LABEL: &str = "Usage descending";
 
 const AUTO_RELOAD_EXCEED_LIMIT_WARNING_STRING: &str = "Auto reload is disabled, as the next reload would exceed your monthly spend limit. Increase your limit to use auto reload.";
-const AUTO_RELOAD_DELINQUENT_WARNING_STRING: &str =
-    "Restricted due to billing issue. Update your payment method to purchase add-on credits.";
+const AUTO_RELOAD_DELINQUENT_WARNING_STRING: &str = "Restricted due to billing issue. Update your payment method to purchase add-on credits. Contact billing@warp.dev for assistance.";
 const RESTRICTED_BILLING_USAGE_WARNING_STRING: &str = "Auto reload is disabled due to recent failed reload. Please update your payment method and try again.";
 
 const OVERVIEW_TAB_TEXT: &str = "Overview";
@@ -2369,7 +2368,7 @@ impl BillingAndUsagePageView {
         }
 
         let request_count_label = if workspace_is_delinquent_due_to_payment_issue {
-            "Restricted due to billing issue".to_string()
+            "Restricted due to billing issue. Contact billing@warp.dev for assistance.".to_string()
         } else {
             match divisor {
                 Some(Divisor::Unlimited) => {
