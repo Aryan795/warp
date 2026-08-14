@@ -250,3 +250,39 @@ fn enqueue_bounds_task_map_size_under_backpressure() {
         "task_map grew unbounded: {map_len} entries after {attempts} enqueue attempts"
     );
 }
+
+/// Regression test proving `enqueue`'s return value distinguishes a task
+/// that was actually submitted from one dropped due to a full channel.
+/// Callers that key their own bookkeeping (e.g. a caller-owned dedup set)
+/// off a task rely on this to avoid stranding an entry forever: a dropped
+/// task never runs, so no broadcast result will ever arrive to clean it up.
+#[test]
+fn enqueue_returns_false_once_buffer_is_exhausted() {
+    let (queue, _executor) = create_streaming_queue();
+    let _rx = queue.subscribe();
+
+    // Block the worker so every subsequent enqueue piles up in the channel
+    // buffer instead of being drained.
+    let (blocker, _gate_tx) = gated_task(0);
+    assert!(queue.enqueue(blocker, None, "blocker"));
+    std::thread::sleep(Duration::from_millis(50));
+
+    let mut successes = 0;
+    let mut failures = 0;
+    for i in 0..(DEFAULT_BUFFER_SIZE * 2) {
+        if queue.enqueue(ungated_task(i as u32), None, "burst") {
+            successes += 1;
+        } else {
+            failures += 1;
+        }
+    }
+
+    assert!(
+        successes <= DEFAULT_BUFFER_SIZE + 1,
+        "successes should not exceed real channel capacity: {successes}"
+    );
+    assert!(
+        failures > 0,
+        "expected some enqueues to be rejected once the buffer fills"
+    );
+}

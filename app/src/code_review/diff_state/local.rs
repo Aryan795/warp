@@ -251,14 +251,17 @@ impl LocalDiffStateModel {
              ctx| {
                 // The task has finished either way, so its dedup slot is free
                 // regardless of whether the result is stale (full reload
-                // in-flight) or an error.
-                let completed_path = match &broadcast_result {
-                    Ok(arc_value) => arc_value.0.clone(),
+                // in-flight) or an error. Remove by the exact `PathBuf` on
+                // both branches: the success path's `String` is guaranteed
+                // valid UTF-8 (retrieve_diff_state rejects non-UTF-8 paths
+                // before producing a result) so converting it back to a
+                // `Path` is lossless, and the error path already carries the
+                // exact `PathBuf` for this reason.
+                let completed_path: PathBuf = match &broadcast_result {
+                    Ok(arc_value) => PathBuf::from(&arc_value.0),
                     Err(err) => err.path.clone(),
                 };
-                me.file_invalidation
-                    .queued_files
-                    .remove(Path::new(&completed_path));
+                me.file_invalidation.queued_files.remove(&completed_path);
 
                 if me.file_invalidation.invalidate_all_pending {
                     return;
@@ -1186,13 +1189,21 @@ impl LocalDiffStateModel {
         let merge_base = self.file_invalidation.merge_base.clone();
         let queue = self.file_invalidation.queue.clone();
         for file in files {
+            let relative = file.strip_prefix(&repo_path).unwrap_or(&file).to_path_buf();
             let task = FileInvalidationTask {
                 file,
                 repo_path: repo_path.clone(),
                 mode: mode.clone(),
                 merge_base: merge_base.clone(),
             };
-            queue.enqueue(task, None, "file-invalidation");
+            if !queue.enqueue(task, None, "file-invalidation") {
+                // The channel was full and the task was dropped before ever
+                // running, so no completion will ever be broadcast for it
+                // to free this slot. Free it here instead, or the file
+                // would be permanently stuck deduplicated until the next
+                // full reload.
+                self.file_invalidation.queued_files.remove(&relative);
+            }
         }
     }
 

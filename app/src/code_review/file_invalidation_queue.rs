@@ -19,9 +19,17 @@ pub(crate) struct FileInvalidationTask {
 /// the file it was invalidating. Unlike the success `Result`, a bare
 /// [`DiffStateError`] doesn't identify which file failed; callers need that
 /// to clear their own per-file dedup bookkeeping when a task completes.
+///
+/// This carries the exact `PathBuf` rather than a lossy `String`: the caller
+/// removes this same value from its dedup set by equality, and
+/// `retrieve_diff_state` rejects non-UTF-8 paths before ever producing a
+/// success result, so a lossy `to_string_lossy()` round-trip here would
+/// silently fail to match the original entry for such a path, stranding it
+/// in the dedup set (and therefore never invalidating that file again) until
+/// the next full reload.
 #[derive(Debug)]
 pub(crate) struct FileInvalidationError {
-    pub(crate) path: String,
+    pub(crate) path: PathBuf,
     pub(crate) error: DiffStateError,
 }
 
@@ -58,11 +66,7 @@ impl SyncQueueTaskTrait for FileInvalidationTask {
         let mode = self.mode.clone();
         let merge_base = self.merge_base.clone();
         Box::pin(async move {
-            let path = file
-                .strip_prefix(&repo_path)
-                .unwrap_or(&file)
-                .to_string_lossy()
-                .into_owned();
+            let path = file.strip_prefix(&repo_path).unwrap_or(&file).to_path_buf();
             // File invalidation runs local git commands against a local repo path,
             // so using LocalDiffStateModel directly is correct — remote repos use a
             // separate mechanism and never go through this queue.
@@ -80,3 +84,7 @@ impl SyncQueueTaskTrait for FileInvalidationTask {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "file_invalidation_queue_tests.rs"]
+mod tests;
