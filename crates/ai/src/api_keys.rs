@@ -463,22 +463,16 @@ impl ApiKeyManager {
         if self.custom_endpoint_persistence_mode != CustomEndpointPersistenceMode::Split {
             anyhow::bail!("custom endpoint keys are not settings-backed in this mode");
         }
-        let mut keys = self.custom_endpoint_keys.clone();
-        match key.filter(|key| !key.is_empty()) {
-            Some(key) => {
-                keys.insert(name.to_owned(), key);
+        let keys = Self::write_custom_endpoint_keys(ctx, |keys| {
+            match key.filter(|key| !key.is_empty()) {
+                Some(key) => {
+                    keys.insert(name.to_owned(), key);
+                }
+                None => {
+                    keys.shift_remove(name);
+                }
             }
-            None => {
-                keys.shift_remove(name);
-            }
-        }
-        let json = serde_json::to_string(&keys)
-            .map_err(|error| anyhow::Error::new(error).context("Failed to serialize API keys"))?;
-        ctx.secure_storage()
-            .write_value(CUSTOM_ENDPOINT_API_KEYS_STORAGE_KEY, &json)
-            .map_err(|error| {
-                anyhow::Error::new(error).context("Failed to write API keys to secure storage")
-            })?;
+        })?;
         self.custom_endpoint_keys = keys;
         let joined = custom_endpoints::join_custom_endpoint_keys(
             &self.custom_endpoint_definitions,
@@ -489,6 +483,41 @@ impl ApiKeyManager {
             ctx.emit(ApiKeyManagerEvent::KeysUpdated);
         }
         Ok(())
+    }
+
+    /// Applies `mutate` to the persisted `CustomEndpointApiKeys` map,
+    /// rereading the current map immediately before writing rather than
+    /// trusting the in-memory cache as the write's base.
+    ///
+    /// This closes the credential-loss window a plain clone-mutate-write
+    /// leaves open when two processes edit the shared map (e.g. two running
+    /// TUIs editing different endpoints, or one editing while another's
+    /// orphan cleanup runs): a stale whole-map write from a manager that
+    /// hasn't seen the other process's change would otherwise silently
+    /// revert it. See the APP-5380 review ("Concurrent TUI key mutations can
+    /// silently destroy another process's endpoint secret").
+    ///
+    /// This does not protect against two writes landing at the exact same
+    /// instant — the secure-storage backends this wraps (Keychain, libsecret,
+    /// DPAPI) expose no cross-process locking or compare-and-swap primitive
+    /// to do better — but it eliminates the far more likely case this review
+    /// describes: two sequential edits from different processes.
+    fn write_custom_endpoint_keys(
+        ctx: &mut ModelContext<Self>,
+        mutate: impl FnOnce(&mut IndexMap<String, String>),
+    ) -> anyhow::Result<IndexMap<String, String>> {
+        let mut keys = Self::load_custom_endpoint_keys_from_secure_storage(ctx);
+        mutate(&mut keys);
+        let json = serde_json::to_string(&keys).map_err(|error| {
+            anyhow::Error::new(error).context("Failed to serialize custom endpoint keys")
+        })?;
+        ctx.secure_storage()
+            .write_value(CUSTOM_ENDPOINT_API_KEYS_STORAGE_KEY, &json)
+            .map_err(|error| {
+                anyhow::Error::new(error)
+                    .context("Failed to write custom endpoint keys to secure storage")
+            })?;
+        Ok(keys)
     }
 
     /// Whether a settings-backed custom endpoint currently has a non-empty key.
@@ -533,6 +562,10 @@ impl ApiKeyManager {
     /// failure is reported and retried on the next reload or definitions
     /// change; the orphaned endpoint never reaches the effective projection
     /// regardless, since that is built solely from current valid definitions.
+    ///
+    /// Uses the same reread-before-write as [`Self::persist_custom_endpoint_key`]
+    /// so a cleanup racing a concurrent key update (in this process or
+    /// another) merges instead of clobbering it.
     fn prune_orphaned_custom_endpoint_keys(
         &mut self,
         orphaned_keys: &[String],
@@ -541,27 +574,13 @@ impl ApiKeyManager {
         if orphaned_keys.is_empty() {
             return;
         }
-        let mut pruned = self.custom_endpoint_keys.clone();
-        for name in orphaned_keys {
-            pruned.shift_remove(name);
-        }
-        let json = match serde_json::to_string(&pruned) {
-            Ok(json) => json,
-            Err(e) => {
-                report_error!(
-                    anyhow::Error::new(e).context("Failed to serialize custom endpoint keys")
-                );
-                return;
+        match Self::write_custom_endpoint_keys(ctx, |keys| {
+            for name in orphaned_keys {
+                keys.shift_remove(name);
             }
-        };
-        match ctx
-            .secure_storage()
-            .write_value(CUSTOM_ENDPOINT_API_KEYS_STORAGE_KEY, &json)
-        {
-            Ok(()) => self.custom_endpoint_keys = pruned,
-            Err(e) => report_error!(
-                anyhow::Error::new(e).context("Failed to remove orphaned custom endpoint keys")
-            ),
+        }) {
+            Ok(pruned) => self.custom_endpoint_keys = pruned,
+            Err(e) => report_error!(e.context("Failed to remove orphaned custom endpoint keys")),
         }
     }
 
@@ -580,7 +599,11 @@ impl ApiKeyManager {
                 provider.display_name()
             ));
         }
-        let json = serde_json::to_string(&keys)
+        let keys_to_persist = Self::strip_custom_endpoints_for_monolithic_storage(
+            &keys,
+            self.custom_endpoint_persistence_mode,
+        );
+        let json = serde_json::to_string(&keys_to_persist)
             .map_err(|error| anyhow::Error::new(error).context("Failed to serialize API keys"))?;
         ctx.secure_storage()
             .write_value(SECURE_STORAGE_KEY, &json)
@@ -601,6 +624,28 @@ impl ApiKeyManager {
             }
         }
         Ok(())
+    }
+
+    /// Returns the `ApiKeys` value to serialize into the legacy monolithic
+    /// `AiApiKeys` blob. In `Split` mode, `keys.custom_endpoints` holds the
+    /// *joined* settings+secret projection for in-memory/request-path use
+    /// only — the settings file is the sole source of endpoint definitions and
+    /// the API key lives in `CustomEndpointApiKeys`. Persisting it into
+    /// `AiApiKeys` too would duplicate the secret and put endpoint
+    /// definitions back into secure storage, breaking the split-persistence
+    /// contract (TECH.md requires Split-mode `AiApiKeys` to serialize
+    /// `custom_endpoints: []`).
+    fn strip_custom_endpoints_for_monolithic_storage(
+        keys: &ApiKeys,
+        mode: CustomEndpointPersistenceMode,
+    ) -> std::borrow::Cow<'_, ApiKeys> {
+        if mode == CustomEndpointPersistenceMode::Split && !keys.custom_endpoints.is_empty() {
+            let mut stripped = keys.clone();
+            stripped.custom_endpoints.clear();
+            std::borrow::Cow::Owned(stripped)
+        } else {
+            std::borrow::Cow::Borrowed(keys)
+        }
     }
 
     /// The currently stored xAI/Grok OAuth tokens, if the user has connected a
@@ -938,7 +983,11 @@ impl ApiKeyManager {
     }
 
     fn write_keys_to_secure_storage(&mut self, ctx: &mut ModelContext<Self>) {
-        let json = match serde_json::to_string(&self.keys) {
+        let keys_to_persist = Self::strip_custom_endpoints_for_monolithic_storage(
+            &self.keys,
+            self.custom_endpoint_persistence_mode,
+        );
+        let json = match serde_json::to_string(&keys_to_persist) {
             Ok(json) => json,
             Err(e) => {
                 report_error!(anyhow::Error::new(e).context("Failed to serialize API keys"));

@@ -306,6 +306,166 @@ fn split_mode_reload_from_secure_storage_picks_up_other_process_change() {
     });
 }
 
+// ── APP-5380 review: concurrent-process regressions ─────────────
+
+#[test]
+fn split_mode_concurrent_key_updates_for_different_endpoints_do_not_clobber_each_other() {
+    warpui_core::App::test((), |mut app| async move {
+        app.update(register_fake_secure_storage);
+        // Two independent `ApiKeyManager`s sharing the same secure storage,
+        // simulating two separate TUI processes.
+        let manager_a = app.add_model(split_mode_manager);
+        let manager_b = app.add_model(split_mode_manager);
+        let definitions = || valid_definitions(&[("Acme", &["gpt-4o"]), ("Widgets", &["gpt-4o"])]);
+        manager_a.update(&mut app, |manager, ctx| {
+            manager.set_custom_endpoint_definitions(definitions(), ctx);
+        });
+        manager_b.update(&mut app, |manager, ctx| {
+            manager.set_custom_endpoint_definitions(definitions(), ctx);
+        });
+
+        // Process A sets a key for "Acme".
+        manager_a
+            .update(&mut app, |manager, ctx| {
+                manager.persist_custom_endpoint_key("Acme", Some("sk-acme".to_owned()), ctx)
+            })
+            .unwrap();
+
+        // Process B, unaware of A's write (its in-memory cache is still
+        // empty), sets a key for a *different* endpoint, "Widgets". Without
+        // rereading fresh state before writing, B's write would overwrite
+        // the persisted map with only its own change, dropping Acme's key.
+        manager_b
+            .update(&mut app, |manager, ctx| {
+                manager.persist_custom_endpoint_key("Widgets", Some("sk-widgets".to_owned()), ctx)
+            })
+            .unwrap();
+
+        // A fresh manager loading from the shared storage must see both keys.
+        let manager_c = app.add_model(split_mode_manager);
+        manager_c.update(&mut app, |manager, ctx| {
+            manager.set_custom_endpoint_definitions(definitions(), ctx);
+        });
+        manager_c.read(&app, |manager, _| {
+            assert!(
+                manager.custom_endpoint_key_is_connected("Acme"),
+                "process A's key must survive process B's concurrent write to a different endpoint"
+            );
+            assert!(manager.custom_endpoint_key_is_connected("Widgets"));
+        });
+    });
+}
+
+#[test]
+fn split_mode_orphan_cleanup_racing_a_concurrent_key_update_does_not_clobber_it() {
+    warpui_core::App::test((), |mut app| async move {
+        app.update(register_fake_secure_storage);
+        let manager_a = app.add_model(split_mode_manager);
+        // Acme starts valid and keyed.
+        manager_a.update(&mut app, |manager, ctx| {
+            manager
+                .set_custom_endpoint_definitions(valid_definitions(&[("Acme", &["gpt-4o"])]), ctx);
+        });
+        manager_a
+            .update(&mut app, |manager, ctx| {
+                manager.persist_custom_endpoint_key("Acme", Some("sk-acme".to_owned()), ctx)
+            })
+            .unwrap();
+
+        // Process B independently keys a *different*, still-valid endpoint,
+        // representing a write landing between A's orphan-list computation
+        // and A's cleanup write.
+        let manager_b = app.add_model(split_mode_manager);
+        manager_b.update(&mut app, |manager, ctx| {
+            manager.set_custom_endpoint_definitions(
+                valid_definitions(&[("Widgets", &["gpt-4o"])]),
+                ctx,
+            );
+        });
+        manager_b
+            .update(&mut app, |manager, ctx| {
+                manager.persist_custom_endpoint_key("Widgets", Some("sk-widgets".to_owned()), ctx)
+            })
+            .unwrap();
+
+        // Acme is now deleted from settings on process A. Its orphan cleanup
+        // must remove only "Acme" from the *current* persisted map, not
+        // revert to A's stale pre-race snapshot (which never learned about
+        // Widgets).
+        manager_a.update(&mut app, |manager, ctx| {
+            manager
+                .set_custom_endpoint_definitions(CustomEndpointDefinitionsConfig::default(), ctx);
+        });
+
+        let manager_c = app.add_model(split_mode_manager);
+        manager_c.update(&mut app, |manager, ctx| {
+            manager.set_custom_endpoint_definitions(
+                valid_definitions(&[("Widgets", &["gpt-4o"])]),
+                ctx,
+            );
+        });
+        manager_c.read(&app, |manager, _| {
+            assert!(
+                manager.custom_endpoint_key_is_connected("Widgets"),
+                "orphan cleanup for a deleted endpoint must not drop a concurrently \
+                 added key for a different endpoint"
+            );
+        });
+    });
+}
+
+#[test]
+fn split_mode_provider_key_save_does_not_leak_custom_endpoints_into_legacy_blob() {
+    warpui_core::App::test((), |mut app| async move {
+        app.update(register_fake_secure_storage);
+        app.update(warp_core::telemetry::testing::MockTelemetryContextProvider::register);
+        let manager = app.add_singleton_model(split_mode_manager);
+        manager.update(&mut app, |manager, ctx| {
+            manager
+                .set_custom_endpoint_definitions(valid_definitions(&[("Acme", &["gpt-4o"])]), ctx);
+        });
+        manager
+            .update(&mut app, |manager, ctx| {
+                manager.persist_custom_endpoint_key("Acme", Some("sk-acme".to_owned()), ctx)
+            })
+            .unwrap();
+
+        // Editing a built-in provider key must not persist the joined
+        // `custom_endpoints` projection into the legacy monolithic blob.
+        manager
+            .update(&mut app, |manager, ctx| {
+                manager.persist_provider_key(LLMProvider::OpenAI, Some("sk-openai".to_owned()), ctx)
+            })
+            .unwrap();
+
+        app.read(|ctx| {
+            let raw = ctx
+                .secure_storage()
+                .read_value(SECURE_STORAGE_KEY)
+                .expect("provider key save should have written the legacy blob");
+            let persisted: ApiKeys = serde_json::from_str(&raw).unwrap();
+            assert!(
+                persisted.custom_endpoints.is_empty(),
+                "Split-mode AiApiKeys must serialize custom_endpoints: [] (found {:?})",
+                persisted.custom_endpoints
+            );
+            assert_eq!(persisted.openai.as_deref(), Some("sk-openai"));
+
+            let custom_endpoint_keys_raw = ctx
+                .secure_storage()
+                .read_value(CUSTOM_ENDPOINT_API_KEYS_STORAGE_KEY)
+                .expect("custom endpoint key entry should be unaffected by a provider key save");
+            assert!(custom_endpoint_keys_raw.contains("sk-acme"));
+        });
+
+        // The in-memory projection must still carry the joined endpoint for
+        // request-path/`/api-keys` use.
+        manager.read(&app, |manager, _| {
+            assert_eq!(manager.keys().custom_endpoints.len(), 1);
+        });
+    });
+}
+
 #[test]
 fn llm_provider_rejects_unsupported_api_key_provider() {
     assert_eq!(

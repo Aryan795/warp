@@ -1496,6 +1496,17 @@ pub(crate) fn initialize_app(
     let user_defaults_on_startup = settings::init(startup_toml_parse_error, ctx);
     timer.mark_interval_end("READ_USER_DEFAULTS_AND_INITIALIZE_SETTINGS");
 
+    // Whether `settings.toml`'s TOML parsed successfully this launch,
+    // independent of whether any particular setting (e.g. `custom_endpoints`)
+    // is present in it. Threaded into `ApiKeyManager`'s custom-endpoint
+    // coordinator so it can distinguish "the user has no custom endpoints"
+    // from "the file failed to parse, so this default view isn't
+    // authoritative" (see APP-5380 review finding #2).
+    let startup_settings_parse_succeeded = !matches!(
+        user_defaults_on_startup.settings_file_error,
+        Some(settings::SettingsFileError::FileParseFailed(_))
+    );
+
     if FeatureFlag::UIZoom.is_enabled() {
         ctx.set_zoom_factor(WindowSettings::as_ref(ctx).zoom_level.as_zoom_factor());
     }
@@ -1742,6 +1753,7 @@ pub(crate) fn initialize_app(
             use crate::ai::custom_endpoints::CustomEndpointDefinitionsCoordinator as _;
             manager.subscribe_to_custom_endpoint_definitions(
                 crate::ai::custom_endpoints::CustomEndpointSource::for_launch_mode(launch_mode),
+                startup_settings_parse_succeeded,
                 ctx,
             );
         }

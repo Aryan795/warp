@@ -322,8 +322,11 @@ pub fn register_tui_session_view_test_singletons(app: &mut warpui::App) {
         use crate::ai::custom_endpoints::{
             CustomEndpointDefinitionsCoordinator as _, CustomEndpointSource,
         };
+        // Matches `GlobalResourceHandles::mock`'s `settings_file_error: None`:
+        // this harness represents a successfully parsed settings file.
         manager.subscribe_to_custom_endpoint_definitions(
             CustomEndpointSource::SettingsCollection,
+            true,
             ctx,
         );
         manager

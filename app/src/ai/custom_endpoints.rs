@@ -62,9 +62,16 @@ pub(crate) trait CustomEndpointDefinitionsCoordinator {
     /// already-resolved [`CustomEndpointSource`] rather than a `LaunchMode` so
     /// test harnesses that construct `ApiKeyManager` directly in `Split` mode
     /// (with no `LaunchMode` on hand) can wire the same bridge.
+    ///
+    /// `startup_settings_parse_succeeded` reports whether `settings.toml`
+    /// parsed as valid TOML on this launch (regardless of whether
+    /// `custom_endpoints` itself is present) — see the seeding comment below
+    /// for why this, and not merely "is the value present", decides whether an
+    /// absent value is treated as authoritative.
     fn subscribe_to_custom_endpoint_definitions(
         &mut self,
         source: CustomEndpointSource,
+        startup_settings_parse_succeeded: bool,
         ctx: &mut ModelContext<Self>,
     ) where
         Self: Sized;
@@ -74,22 +81,28 @@ impl CustomEndpointDefinitionsCoordinator for ApiKeyManager {
     fn subscribe_to_custom_endpoint_definitions(
         &mut self,
         source: CustomEndpointSource,
+        startup_settings_parse_succeeded: bool,
         ctx: &mut ModelContext<Self>,
     ) {
         if source != CustomEndpointSource::SettingsCollection {
             return;
         }
 
-        // Only seed from an explicitly-set value. An absent value is either a
-        // genuinely empty collection (nothing to reconcile either way) or a
-        // startup TOML syntax error recovering the last-known-good document
-        // (where composing an authoritative empty collection would wrongly
-        // orphan-clean every stored key). The settings-change subscription
-        // below still fires for every subsequent explicit change.
+        // Seed from the current value whenever either (a) it was explicitly
+        // set, or (b) the file's TOML parsed successfully this launch, even if
+        // `custom_endpoints` itself is absent from it. Case (b) matters
+        // because an absent-but-successfully-parsed value is authoritatively
+        // empty — e.g. the user deleted their last endpoint and restarted — and
+        // must still orphan-clean any stored key. Only a full-file parse
+        // failure skips seeding: `AISettings` then falls back to a cached or
+        // default snapshot that does not reflect the user's actual file, so
+        // composing an "empty" collection from it would wrongly orphan-clean
+        // every stored key. The settings-change subscription below still
+        // fires for every subsequent explicit change regardless.
         let is_explicitly_set = AISettings::as_ref(ctx)
             .custom_endpoints
             .is_value_explicitly_set();
-        if is_explicitly_set {
+        if is_explicitly_set || startup_settings_parse_succeeded {
             let definitions = AISettings::as_ref(ctx).custom_endpoints.value().clone();
             self.set_custom_endpoint_definitions(definitions, ctx);
         }
@@ -105,3 +118,7 @@ impl CustomEndpointDefinitionsCoordinator for ApiKeyManager {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "custom_endpoints_tests.rs"]
+mod tests;
