@@ -2,9 +2,11 @@ mod queries;
 use std::cell::{Ref, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
-use arborium::tree_sitter::{InputEdit, Parser, Tree};
+use arborium::tree_sitter::{InputEdit, ParseOptions, ParseState, Parser, Tree};
 use futures::stream::AbortHandle;
+use instant::Instant;
 use languages::Language;
 use parking_lot::Mutex;
 use queries::highlight_query::HighlightQuery;
@@ -24,10 +26,30 @@ use warpui_core::{AppContext, Entity, ModelContext, WeakModelHandle};
 const MAX_SYNTAX_TREES: usize = 3;
 
 /// Maximum buffer size in bytes for which we attempt to parse a syntax tree.
-/// Files larger than this are skipped to avoid tree-sitter's super-linear
-/// memory growth on large inputs. See this tree-sitter issue:
+/// Files larger than this are skipped as a cheap first line of defense: this
+/// check is a size comparison, not a parse attempt, so it can never itself run
+/// away. It does NOT bound the cost of parsing a buffer under the limit -- see
+/// [`PARSE_BUDGET`] for that. See also this tree-sitter issue:
 /// https://github.com/tree-sitter/tree-sitter/issues/222#issuecomment-435987441
 const MAX_PARSE_BYTES: usize = 2 * 1024 * 1024; // 2 MB
+
+/// Wall-clock budget for a single tree-sitter parse, including error recovery.
+/// Tree-sitter's error-recovery pass (`ts_parser__recover`) can allocate memory
+/// super-linearly on dense-error inputs *regardless of file size*: a buffer
+/// well under [`MAX_PARSE_BYTES`] can still drive multi-GB memory spikes (see
+/// APP-4667). This budget is enforced via a progress callback, which
+/// tree-sitter polls roughly every 100 parse actions
+/// (`OP_COUNT_PER_PARSER_TIMEOUT_CHECK` in tree-sitter's own `parser.c`), so a
+/// runaway parse can only overshoot the deadline by the time it takes to run
+/// one more such batch, not by an amount that scales with input size.
+///
+/// In local benchmarks against dense-error SQL, that overshoot stayed within
+/// roughly 2x this budget even for inputs at the [`MAX_PARSE_BYTES`] cap, while
+/// an uncapped parse of the same input kept growing (a ~2 MB pathological
+/// input took ~700ms/~220MB unbounded; an ~8.5MB one took ~3s/~870MB). 750ms
+/// comfortably covers legitimate full parses of files up to the size cap while
+/// keeping the worst-case bailout in the low seconds instead of unbounded.
+const PARSE_BUDGET: Duration = Duration::from_millis(750);
 
 thread_local! {
     static PARSER: RefCell<Parser> = RefCell::new(Parser::new());
@@ -39,6 +61,25 @@ pub enum DecorationStateEvent {
 struct LanguageQueries {
     language: Arc<Language>,
     syntax_query: HighlightQuery,
+}
+
+/// Outcome of a single [`SyntaxTreeState::parse_text`] attempt.
+enum ParseOutcome {
+    Parsed(Tree),
+    /// The buffer exceeds [`MAX_PARSE_BYTES`]; parsing was skipped entirely.
+    TooLarge,
+    /// Parsing exceeded [`PARSE_BUDGET`] before finishing.
+    BudgetExceeded,
+}
+
+impl ParseOutcome {
+    #[cfg(test)]
+    fn expect_tree(self, msg: &str) -> Tree {
+        match self {
+            ParseOutcome::Parsed(tree) => tree,
+            ParseOutcome::TooLarge | ParseOutcome::BudgetExceeded => panic!("{msg}"),
+        }
+    }
 }
 
 /// Single-entry cache for highlight queries.
@@ -85,6 +126,11 @@ pub struct SyntaxTreeState {
     parsing_handle: Option<AbortHandle>,
     /// Cache for highlight results to avoid recomputing for the same viewport ranges.
     highlight_cache: RefCell<Option<HighlightCache>>,
+    /// Set once a parse for this buffer has exceeded [`PARSE_BUDGET`]. While set,
+    /// tree-sitter parsing is skipped entirely instead of re-spending the full
+    /// budget on every keystroke, so a pathological buffer degrades to "no
+    /// highlighting" rather than repeatedly stalling. Cleared by [`Self::set_language`].
+    parse_budget_exceeded: bool,
 }
 
 impl SyntaxTreeState {
@@ -101,6 +147,7 @@ impl SyntaxTreeState {
             parsing_handle: None,
             language_queries: None,
             highlight_cache: RefCell::new(None),
+            parse_budget_exceeded: false,
         }
     }
 
@@ -109,6 +156,7 @@ impl SyntaxTreeState {
             syntax_query: HighlightQuery::new(&language.highlight_query, self.color_map),
             language,
         });
+        self.parse_budget_exceeded = false;
     }
 
     pub fn has_supported_highlighting(&self) -> bool {
@@ -221,17 +269,15 @@ impl SyntaxTreeState {
     }
 
     /// Re-parse the tree based on the updated tree and source content.
-    ///
-    /// Returns `None` if the buffer exceeds [`MAX_PARSE_BYTES`].
     async fn parse_text(
         content: BufferSnapshot,
         old_tree: Option<Tree>,
         language: &Language,
-    ) -> Option<Tree> {
+    ) -> ParseOutcome {
         if content.byte_len() > MAX_PARSE_BYTES {
-            return None;
+            return ParseOutcome::TooLarge;
         }
-        Some(PARSER.with(|parser| {
+        PARSER.with(|parser| {
             let mut parser = parser.borrow_mut();
             parser
                 .set_language(&language.grammar)
@@ -242,10 +288,20 @@ impl SyntaxTreeState {
                 bytes.seek(ByteOffset::from(byte_offset + 1));
                 bytes.next().unwrap_or_default()
             };
-            parser
-                .parse_with_options(&mut callback, old_tree.as_ref(), None)
-                .expect("Should succeed")
-        }))
+
+            let deadline = Instant::now() + PARSE_BUDGET;
+            // The progress callback must return `true` to cancel parsing -- tree-sitter's
+            // polarity here is easy to get backwards (see
+            // https://github.com/tree-sitter/tree-sitter/discussions/4312).
+            let mut progress_callback =
+                |_state: &ParseState| -> bool { Instant::now() >= deadline };
+            let options = ParseOptions::new().progress_callback(&mut progress_callback);
+
+            match parser.parse_with_options(&mut callback, old_tree.as_ref(), Some(options)) {
+                Some(tree) => ParseOutcome::Parsed(tree),
+                None => ParseOutcome::BudgetExceeded,
+            }
+        })
     }
 
     /// Translate an incoming edit delta into an InputEdit for incrementally updating the syntax
@@ -330,6 +386,18 @@ impl DecorationLayer for SyntaxTreeState {
             return;
         };
 
+        if self.parse_budget_exceeded {
+            // This buffer already proved pathological; skip tree-sitter entirely instead of
+            // re-spending PARSE_BUDGET on every keystroke.
+            let mut syntax_tree_lock = self.syntax_tree.lock();
+            syntax_tree_lock.remove(&version);
+            drop(syntax_tree_lock);
+            self.invalidate_highlight_cache_for_version(version);
+            self.buffer_version = version;
+            ctx.emit(DecorationStateEvent::DecorationUpdated { version });
+            return;
+        }
+
         let mut syntax_tree_lock = self.syntax_tree.lock();
         let mut tree = syntax_tree_lock.get(&self.buffer_version).cloned();
         if let Some(tree) = &mut tree {
@@ -347,23 +415,39 @@ impl DecorationLayer for SyntaxTreeState {
                 Self::truncate_tree_state(&mut syntax_tree_lock, version);
             }
         }
+        drop(syntax_tree_lock);
 
         let handle = ctx
             .spawn(
                 async move {
-                    let new_tree = Self::parse_text(content, tree, &language).await;
+                    let outcome = Self::parse_text(content, tree, &language).await;
                     futures_lite::future::yield_now().await;
-                    new_tree
+                    outcome
                 },
-                move |model, new_tree, ctx| {
+                move |model, outcome, ctx| {
+                    let new_tree = match outcome {
+                        ParseOutcome::Parsed(tree) => Some(tree),
+                        ParseOutcome::TooLarge => None,
+                        ParseOutcome::BudgetExceeded => {
+                            // Expected-but-notable: a pathological buffer tripped the parse
+                            // budget. Latch it off so we don't repeat this on every
+                            // keystroke; logged once per trip (see the latch), not per edit.
+                            log::warn!(
+                                "[SyntaxTreeState] tree-sitter parse exceeded {PARSE_BUDGET:?} budget; disabling syntax highlighting for this buffer until its language is reset"
+                            );
+                            model.parse_budget_exceeded = true;
+                            None
+                        }
+                    };
                     let Some(new_tree) = new_tree else {
-                        // Buffer exceeded MAX_PARSE_BYTES; skip updating the syntax tree, but
-                        // still emit DecorationUpdated so any delayed rendering is flushed
+                        // Buffer exceeded MAX_PARSE_BYTES or PARSE_BUDGET; skip updating the
+                        // syntax tree, but still emit DecorationUpdated so any delayed
+                        // rendering is flushed (the editor delays showing content until this
+                        // event fires).
                         let mut syntax_tree_lock = model.syntax_tree.lock();
                         syntax_tree_lock.remove(&version);
                         drop(syntax_tree_lock);
                         model.invalidate_highlight_cache_for_version(version);
-                        // (the editor delays showing content until this event fires).
                         ctx.emit(DecorationStateEvent::DecorationUpdated { version });
                         return;
                     };
@@ -398,3 +482,7 @@ fn point_to_syntax_point(point: Point) -> arborium::tree_sitter::Point {
         column: point.column as usize,
     }
 }
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod tests;
