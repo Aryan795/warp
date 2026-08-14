@@ -439,19 +439,14 @@ impl PaneGroup {
                         "child transcript upgrade fetch-empty \
                          child_conversation_id={child_id:?}"
                     );
-                    // Re-queue without evicting the task so the retry is
-                    // driven by the normal TasksUpdated cadence rather than
-                    // firing immediately on every round-trip. Evicting would
-                    // create an unbounded loop on permanent failures such as
-                    // a 403 from an Observer that can see the task row but
-                    // not the conversation transcript.
+                    // Re-queue without evicting so a transient failure
+                    // (e.g. a 403 from an Observer that can see the task
+                    // row but not the transcript) still gets retried on the
+                    // next `TasksUpdated`. But `LoadTranscript` only runs
+                    // for an already-terminal task, so nothing will trigger
+                    // that update on its own -- end the load now instead of
+                    // leaving the pane in `Loading`.
                     group.pending_child_hydrations.insert(task_id, child_id);
-                    // `LoadTranscript` only runs for an already-terminal
-                    // task, so no further `TasksUpdated` will arrive to
-                    // retry it here; move the pane out of `Loading` now
-                    // rather than leave it spinning forever. A missing task
-                    // snapshot is treated the same way rather than assumed
-                    // still in progress.
                     if task
                         .as_ref()
                         .is_none_or(AmbientAgentTask::is_terminal_run_state)
@@ -581,15 +576,9 @@ impl PaneGroup {
     /// Restores a CLI-agent (Claude/Gemini/Codex) child transcript in place.
     ///
     /// The pane already has agent view entered for this conversation, so
-    /// this only restores the block snapshot into it rather than entering
-    /// agent view again. Keep the restore steps here in step with the
-    /// equivalent parent-level CLI restore in
+    /// this only needs to restore the block snapshot, not re-enter agent
+    /// view. Keep this in step with the equivalent CLI restore in
     /// `load_data_into_restored_ambient_cloud_mode_view`.
-    ///
-    /// A harness that can't actually be rendered (e.g. `AgentHarness`
-    /// disabled) still leaves `Loading` and shows the conversation-ended
-    /// tombstone rather than spinning forever, just without the restored
-    /// block content or harness badge.
     pub(in crate::pane_group) fn restore_child_cli_agent_transcript(
         &mut self,
         pane_id: PaneId,
@@ -620,9 +609,7 @@ impl PaneGroup {
             history.mark_terminal_surface_as_conversation_transcript_viewer(terminal_view.id());
         });
 
-        // A disabled `AgentHarness` build can't restore the snapshot or
-        // badge, but the pane must still reach a terminal, non-Loading
-        // state instead of spinning forever.
+        // A disabled `AgentHarness` build can't attribute a harness badge.
         let harness = match cli_conversation.metadata.harness {
             AIAgentHarness::ClaudeCode => Some(Harness::Claude),
             AIAgentHarness::Gemini => Some(Harness::Gemini),
@@ -645,10 +632,10 @@ impl PaneGroup {
                 |_, _| {},
                 ctx,
             );
-            // The restored block snapshot carries terminal-only visibility
-            // (no `agent_view_visibility` survives the cloud round-trip), so
-            // it must be attached to `child_id` here or it stays hidden
-            // under the child's `TranscriptScope::Conversation(child_id)`.
+            // The block snapshot carries terminal-only visibility (no
+            // `agent_view_visibility` survives the cloud round-trip), which
+            // stays hidden under the child's `TranscriptScope` unless
+            // attached to `child_id` here.
             view.model
                 .lock()
                 .block_list_mut()
@@ -670,11 +657,8 @@ impl PaneGroup {
     /// (read-only) transcript viewer, and shows the conversation-ended
     /// tombstone. Used when the cloud transcript fetch itself failed (a
     /// block-snapshot error, an unrecognized harness, or `AgentHarness`
-    /// disabled all surface as [`None`]) so the pane reaches a terminal,
-    /// comprehensible state instead of spinning on `Loading` forever.
-    /// Callers should leave the task queued in `pending_child_hydrations`
-    /// so a later `TasksUpdated` can still upgrade this pane if a retry
-    /// succeeds.
+    /// disabled all surface as [`None`]) so the pane reaches a terminal
+    /// state instead of spinning on `Loading` forever.
     pub(in crate::pane_group) fn end_child_transcript_load_without_content(
         &mut self,
         pane_id: PaneId,

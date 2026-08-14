@@ -1263,12 +1263,8 @@ fn completed_shared_session_child_with_edit_access_uses_continuation_pane() {
     });
 }
 
-/// A completed CLI-harness (Claude/Gemini/Codex) child must clear
-/// `Loading` and render real transcript content: restoring the block
-/// snapshot into the model isn't enough on its own, since an unattached
-/// block stays hidden under the pane's active `TranscriptScope`. Drives
-/// `restore_child_cli_agent_transcript` directly against a real loading
-/// placeholder pane.
+/// A completed CLI-harness child pane must actually render its restored
+/// transcript, not just hold it invisibly in the model.
 #[test]
 fn completed_cli_agent_child_transcript_clears_loading_and_restores_content() {
     let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
@@ -1348,10 +1344,7 @@ fn completed_cli_agent_child_transcript_clears_loading_and_restores_content() {
                 .expect(
                     "the CLI agent's block snapshot must be restored into the pane's block list",
                 );
-            // Presence alone doesn't prove the user sees anything: an
-            // unattached block is hidden under the child's active
-            // `TranscriptScope::Conversation(child_id)` (see
-            // `Block::should_hide_block`). Assert real visibility instead.
+            // Presence in the block list doesn't guarantee visibility.
             assert!(
                 restored_block.is_visible(&transcript_scope),
                 "the restored CLI block must be visible in the child's active transcript scope \
@@ -1361,10 +1354,9 @@ fn completed_cli_agent_child_transcript_clears_loading_and_restores_content() {
     });
 }
 
-/// A harness whose transcript genuinely can't be restored (here, because
-/// `AgentHarness` is disabled) must still leave the pane in a terminal,
-/// non-`Loading` state with the conversation-ended tombstone rather than an
-/// indefinite spinner.
+/// A harness that can't actually be rendered (`AgentHarness` disabled)
+/// must still leave the pane in a terminal, non-`Loading` state with the
+/// tombstone.
 #[test]
 fn unsupported_cli_agent_child_transcript_still_clears_loading() {
     let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
@@ -1419,11 +1411,8 @@ fn unsupported_cli_agent_child_transcript_still_clears_loading() {
     });
 }
 
-/// A terminal transcript-load failure (a block-snapshot error, an
-/// unrecognized harness, or `AgentHarness` disabled all surface as
-/// `None`) must still clear `Loading`: `LoadTranscript` only runs for an
-/// already-terminal task, so no future `TasksUpdated` would otherwise
-/// arrive to let this pane out of the spinner.
+/// A terminal transcript-load failure must still clear `Loading`; see the
+/// comment on `hydrate_child_transcript`'s `None` branch for why.
 #[test]
 fn terminal_child_transcript_fetch_failure_clears_loading() {
     let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
@@ -1471,8 +1460,7 @@ fn terminal_child_transcript_fetch_failure_clears_loading() {
             let model = view.as_ref(ctx).model.lock();
             assert!(
                 !model.is_loading_conversation_transcript(),
-                "a terminal transcript-load failure must still clear Loading instead of \
-                 spinning forever",
+                "a terminal transcript-load failure must still clear Loading",
             );
             assert_eq!(
                 model.conversation_transcript_viewer_status(),
