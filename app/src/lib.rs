@@ -1732,7 +1732,19 @@ pub(crate) fn initialize_app(
     // Initialize ApiKeyManager after UserWorkspaces so it can subscribe to workspace/settings changes
     ctx.add_singleton_model(|ctx| {
         #[cfg_attr(target_family = "wasm", allow(unused_mut))]
-        let mut manager = ::ai::api_keys::ApiKeyManager::new(ctx);
+        let mut manager = ::ai::api_keys::ApiKeyManager::new(
+            crate::ai::custom_endpoints::CustomEndpointSource::for_launch_mode(launch_mode)
+                .persistence_mode(),
+            ctx,
+        );
+        #[cfg(not(target_family = "wasm"))]
+        {
+            use crate::ai::custom_endpoints::CustomEndpointDefinitionsCoordinator as _;
+            manager.subscribe_to_custom_endpoint_definitions(
+                crate::ai::custom_endpoints::CustomEndpointSource::for_launch_mode(launch_mode),
+                ctx,
+            );
+        }
         #[cfg(not(target_family = "wasm"))]
         if matches!(launch_mode, LaunchMode::Tui { .. }) {
             manager.subscribe_to_tui_api_key_changes(ctx);

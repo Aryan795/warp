@@ -2,6 +2,7 @@ use std::time::{Duration, SystemTime};
 
 #[cfg(not(target_family = "wasm"))]
 use futures::channel::oneshot;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use warp_core::send_telemetry_from_ctx;
@@ -12,6 +13,9 @@ use warpui_extras::secure_storage::{self, AppContextExt};
 
 use crate::LLMProvider;
 pub use crate::aws_credentials::{AwsCredentials, AwsCredentialsState};
+use crate::custom_endpoints::{
+    self, CUSTOM_ENDPOINT_API_KEYS_STORAGE_KEY, CustomEndpointDefinitionsConfig,
+};
 #[cfg(not(target_family = "wasm"))]
 pub use crate::geap_credentials::GeapRefreshOutcome;
 pub use crate::geap_credentials::{
@@ -24,6 +28,21 @@ use crate::telemetry::{
 };
 
 const SECURE_STORAGE_KEY: &str = "AiApiKeys";
+
+/// Selects how [`ApiKeyManager`] persists and joins custom endpoint definitions
+/// and API keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CustomEndpointPersistenceMode {
+    /// Legacy: complete `CustomEndpoint` values (definition + key) live
+    /// together in the monolithic `AiApiKeys` secure-storage blob. Used by the
+    /// GUI and test launches in v1.
+    #[default]
+    Monolithic,
+    /// Settings-backed: endpoint definitions live in `AISettings`; only the
+    /// per-endpoint API key is stored, under [`CUSTOM_ENDPOINT_API_KEYS_STORAGE_KEY`]
+    /// in the active surface's secure-storage service. Used by the TUI.
+    Split,
+}
 
 /// Secure-storage key for the connected xAI/Grok subscription's OAuth tokens.
 /// Kept separate from [`SECURE_STORAGE_KEY`] because these are OAuth tokens with
@@ -61,8 +80,11 @@ pub struct CustomEndpoint {
 }
 
 /// The request/response protocol used by a custom inference endpoint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
 pub enum CustomEndpointSchema {
     /// OpenAI Chat Completions, retained as the legacy/default protocol.
     #[default]
@@ -273,6 +295,16 @@ pub struct ApiKeyManager {
     pub(crate) geap_credentials_state: GeapCredentialsState,
     secure_storage_write_version: u64,
     grok_secure_storage_write_version: u64,
+    /// Selected persistence backend for custom endpoint definitions/keys.
+    custom_endpoint_persistence_mode: CustomEndpointPersistenceMode,
+    /// Settings-backed endpoint definitions (`Split` mode only). Unused and
+    /// left empty in `Monolithic` mode, where GUI CRUD stores complete
+    /// `CustomEndpoint` values directly in `keys.custom_endpoints`.
+    custom_endpoint_definitions: CustomEndpointDefinitionsConfig,
+    /// Name-to-key map backing `Split` mode, persisted under
+    /// [`CUSTOM_ENDPOINT_API_KEYS_STORAGE_KEY`] in the active secure-storage
+    /// service. Unused in `Monolithic` mode.
+    custom_endpoint_keys: IndexMap<String, String>,
 }
 
 pub struct CustomEndpointParams {
@@ -322,8 +354,21 @@ fn send_provider_credential_telemetry(
 }
 
 impl ApiKeyManager {
-    pub fn new(ctx: &mut ModelContext<Self>) -> Self {
-        let keys = Self::load_keys_from_secure_storage(ctx);
+    pub fn new(
+        custom_endpoint_persistence_mode: CustomEndpointPersistenceMode,
+        ctx: &mut ModelContext<Self>,
+    ) -> Self {
+        let mut keys = Self::load_keys_from_secure_storage(ctx);
+        let custom_endpoint_keys =
+            if custom_endpoint_persistence_mode == CustomEndpointPersistenceMode::Split {
+                // Split mode never stores endpoint definitions/keys in the
+                // monolithic blob; the effective projection is rebuilt once
+                // the app layer supplies settings-backed definitions.
+                keys.custom_endpoints = Vec::new();
+                Self::load_custom_endpoint_keys_from_secure_storage(ctx)
+            } else {
+                IndexMap::new()
+            };
         let grok_tokens = Self::load_grok_tokens_from_secure_storage(ctx);
         Self {
             keys,
@@ -341,6 +386,9 @@ impl ApiKeyManager {
             geap_credentials_state: GeapCredentialsState::Missing,
             secure_storage_write_version: 0,
             grok_secure_storage_write_version: 0,
+            custom_endpoint_persistence_mode,
+            custom_endpoint_definitions: CustomEndpointDefinitionsConfig::default(),
+            custom_endpoint_keys,
         }
     }
 
@@ -354,12 +402,167 @@ impl ApiKeyManager {
     /// need to reload. TUI setup commands run in a separate process and notify
     /// the live TUI to refresh its cached keys after a successful write.
     pub fn reload_keys_from_secure_storage(&mut self, ctx: &mut ModelContext<Self>) {
-        let keys = Self::load_keys_from_secure_storage(ctx);
+        let mut keys = Self::load_keys_from_secure_storage(ctx);
+        if self.custom_endpoint_persistence_mode == CustomEndpointPersistenceMode::Split {
+            // Split mode never stores endpoint definitions/keys in the
+            // monolithic blob; recompute the effective projection from the
+            // freshly reloaded `CustomEndpointApiKeys` entry instead.
+            self.custom_endpoint_keys = Self::load_custom_endpoint_keys_from_secure_storage(ctx);
+            let joined = custom_endpoints::join_custom_endpoint_keys(
+                &self.custom_endpoint_definitions,
+                &self.custom_endpoint_keys,
+            );
+            self.prune_orphaned_custom_endpoint_keys(&joined.orphaned_keys, ctx);
+            keys.custom_endpoints = joined.endpoints;
+        }
         if self.keys == keys {
             return;
         }
         self.keys = keys;
         ctx.emit(ApiKeyManagerEvent::KeysUpdated);
+    }
+
+    /// Replaces the settings-backed endpoint definitions and reconciles the
+    /// effective projection (`Split` mode only; a no-op otherwise).
+    ///
+    /// Called once at startup with the initial `AISettings::custom_endpoints`
+    /// value (when explicitly set — see the app-level coordinator for why an
+    /// implicit/never-set value is skipped) and again on every subsequent
+    /// `AISettingsChangedEvent::CustomEndpointDefinitions`.
+    pub fn set_custom_endpoint_definitions(
+        &mut self,
+        definitions: CustomEndpointDefinitionsConfig,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if self.custom_endpoint_persistence_mode != CustomEndpointPersistenceMode::Split {
+            return;
+        }
+        self.custom_endpoint_definitions = definitions;
+        let joined = custom_endpoints::join_custom_endpoint_keys(
+            &self.custom_endpoint_definitions,
+            &self.custom_endpoint_keys,
+        );
+        self.prune_orphaned_custom_endpoint_keys(&joined.orphaned_keys, ctx);
+        if self.keys.custom_endpoints != joined.endpoints {
+            self.keys.custom_endpoints = joined.endpoints;
+            ctx.emit(ApiKeyManagerEvent::KeysUpdated);
+        }
+    }
+
+    /// Sets, replaces, or clears (`None` or empty) the API key for a
+    /// settings-backed custom endpoint by name, persisting synchronously so a
+    /// failed write can keep the calling surface's editor open with an error
+    /// (`Split` mode only; see [`Self::persist_provider_key`] for the same
+    /// pattern on provider keys).
+    pub fn persist_custom_endpoint_key(
+        &mut self,
+        name: &str,
+        key: Option<String>,
+        ctx: &mut ModelContext<Self>,
+    ) -> anyhow::Result<()> {
+        if self.custom_endpoint_persistence_mode != CustomEndpointPersistenceMode::Split {
+            anyhow::bail!("custom endpoint keys are not settings-backed in this mode");
+        }
+        let mut keys = self.custom_endpoint_keys.clone();
+        match key.filter(|key| !key.is_empty()) {
+            Some(key) => {
+                keys.insert(name.to_owned(), key);
+            }
+            None => {
+                keys.shift_remove(name);
+            }
+        }
+        let json = serde_json::to_string(&keys)
+            .map_err(|error| anyhow::Error::new(error).context("Failed to serialize API keys"))?;
+        ctx.secure_storage()
+            .write_value(CUSTOM_ENDPOINT_API_KEYS_STORAGE_KEY, &json)
+            .map_err(|error| {
+                anyhow::Error::new(error).context("Failed to write API keys to secure storage")
+            })?;
+        self.custom_endpoint_keys = keys;
+        let joined = custom_endpoints::join_custom_endpoint_keys(
+            &self.custom_endpoint_definitions,
+            &self.custom_endpoint_keys,
+        );
+        if self.keys.custom_endpoints != joined.endpoints {
+            self.keys.custom_endpoints = joined.endpoints;
+            ctx.emit(ApiKeyManagerEvent::KeysUpdated);
+        }
+        Ok(())
+    }
+
+    /// Whether a settings-backed custom endpoint currently has a non-empty key.
+    pub fn custom_endpoint_key_is_connected(&self, name: &str) -> bool {
+        self.keys
+            .custom_endpoints
+            .iter()
+            .find(|endpoint| endpoint.name == name)
+            .is_some_and(|endpoint| !endpoint.api_key.trim().is_empty())
+    }
+
+    fn load_custom_endpoint_keys_from_secure_storage(
+        ctx: &mut ModelContext<Self>,
+    ) -> IndexMap<String, String> {
+        let json = match ctx
+            .secure_storage()
+            .read_value(CUSTOM_ENDPOINT_API_KEYS_STORAGE_KEY)
+        {
+            Ok(json) => json,
+            Err(e) => {
+                if !matches!(e, secure_storage::Error::NotFound) {
+                    report_error!(
+                        anyhow::Error::new(e)
+                            .context("Failed to read custom endpoint keys from secure storage")
+                    );
+                }
+                return IndexMap::new();
+            }
+        };
+        match serde_json::from_str(&json) {
+            Ok(keys) => keys,
+            Err(e) => {
+                report_error!(
+                    anyhow::Error::new(e).context("Failed to deserialize custom endpoint keys")
+                );
+                IndexMap::new()
+            }
+        }
+    }
+
+    /// Best-effort removal of keys orphaned by a rename or delete. A write
+    /// failure is reported and retried on the next reload or definitions
+    /// change; the orphaned endpoint never reaches the effective projection
+    /// regardless, since that is built solely from current valid definitions.
+    fn prune_orphaned_custom_endpoint_keys(
+        &mut self,
+        orphaned_keys: &[String],
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if orphaned_keys.is_empty() {
+            return;
+        }
+        let mut pruned = self.custom_endpoint_keys.clone();
+        for name in orphaned_keys {
+            pruned.shift_remove(name);
+        }
+        let json = match serde_json::to_string(&pruned) {
+            Ok(json) => json,
+            Err(e) => {
+                report_error!(
+                    anyhow::Error::new(e).context("Failed to serialize custom endpoint keys")
+                );
+                return;
+            }
+        };
+        match ctx
+            .secure_storage()
+            .write_value(CUSTOM_ENDPOINT_API_KEYS_STORAGE_KEY, &json)
+        {
+            Ok(()) => self.custom_endpoint_keys = pruned,
+            Err(e) => report_error!(
+                anyhow::Error::new(e).context("Failed to remove orphaned custom endpoint keys")
+            ),
+        }
     }
 
     /// Persists a provider API key before publishing the updated in-memory value.
