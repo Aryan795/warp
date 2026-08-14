@@ -22,7 +22,7 @@ use serde::de::DeserializeOwned;
 use warp_core::channel::{Channel, ChannelState};
 use warp_core::execution_mode;
 use warp_core::operating_system_info::OperatingSystemInfo;
-use warp_errors::report_error;
+use warp_errors::{ReportErrorLogMode, report_error};
 
 use crate::iap::{IapTokenProvider, proxy_auth_header};
 
@@ -765,11 +765,22 @@ impl Response {
     /// Reads the full response body, aborting as soon as more than `limit` bytes have been
     /// received, rather than buffering the whole body unconditionally like [`Self::bytes`].
     /// Chunks are accumulated as they arrive via [`Self::bytes_stream`], so an oversized body is
-    /// never fully materialized in memory.
+    /// never fully materialized in memory -- *on native targets*.
+    ///
+    /// On `wasm32`, `reqwest`'s `bytes_stream()` copies each browser-delivered chunk into an
+    /// owned buffer (`Uint8Array::copy_to`) before this method ever sees it, so a single
+    /// oversized chunk can already be materialized in memory before the length check below
+    /// runs; this method only bounds the *running total* across chunks there, not each
+    /// individual chunk. This method's only current caller (the `oauth2::AsyncHttpClient`
+    /// adapter below, used exclusively by the OAuth device-code flow) never runs on wasm --
+    /// `AuthManager::authorize_device` and `on_device_code_received` in
+    /// `app/src/auth/auth_manager.rs` are both `#[cfg_attr(target_family = "wasm", allow(dead_code))]`
+    /// -- so this is not a live gap today, but a future wasm caller must not assume the
+    /// per-chunk bound holds there.
     ///
     /// Because `reqwest` transparently decompresses the response body, `limit` applies to
     /// *decompressed* bytes as they stream in, which also bounds decompression-bomb
-    /// amplification.
+    /// amplification (again, subject to the wasm caveat above).
     ///
     /// The `Content-Length` header, when present, is used only as a cheap early-rejection hint:
     /// a hostile or misconfigured peer controls that header, so it is never trusted to size an
@@ -899,9 +910,15 @@ impl<'c> oauth2::AsyncHttpClient<'c> for Client {
                     // here is not fully understood: an oversized response could mean a
                     // misbehaving proxy, a compromised peer, or a bug on our end in how we drive
                     // the device-code flow. Worth an engineer's eyes if it ever fires.
+                    //
+                    // Device-token polling treats every HTTP-client error (including this one)
+                    // as retryable, backing off and retrying for minutes, so report at most once
+                    // per run to avoid flooding Sentry with dozens of events from one bad
+                    // endpoint/proxy.
                     report_error!(
                         "OAuth HTTP response body exceeded size limit",
-                        extra: { "limit_bytes" => %limit, "uri" => %uri }
+                        extra: { "limit_bytes" => %limit, "uri" => %uri },
+                        ReportErrorLogMode::OncePerRun
                     );
                     return Err(oauth2::HttpClientError::Other(format!(
                         "response body exceeded the {limit}-byte limit"
