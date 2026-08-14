@@ -350,6 +350,15 @@ impl TemplatableMCPServerManager {
             .collect()
     }
 
+    /// Returns `true` if `installation_uuid` is currently tracked as a CLI-spawned ephemeral
+    /// server (started via `oz agent run --mcp`), regardless of whether it's active, pending,
+    /// or failed. Test-only: production code has no need to distinguish this from the other
+    /// `is_*` queries above.
+    #[cfg(test)]
+    pub fn is_cli_spawned_server(&self, installation_uuid: Uuid) -> bool {
+        self.cli_spawned_server_uuids.contains(&installation_uuid)
+    }
+
     /// Returns built-in Warp-hosted servers (e.g. the Factory MCP) that are
     /// currently active.
     pub fn get_active_builtin_servers(&self) -> HashMap<Uuid, &TemplatableMCPServerInfo> {

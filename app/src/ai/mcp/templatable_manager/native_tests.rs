@@ -101,13 +101,16 @@ fn ephemeral_installation(
 }
 
 /// Registers the minimal singletons `spawn_server_impl` unconditionally touches
-/// (`AppExecutionMode`, `GlobalResourceHandlesProvider`) plus `LogManager`, without pulling in
-/// the manager's full dependency graph (`FileBasedMCPManager`, `CloudModel`, `AuthStateProvider`,
-/// ...), which these tests never exercise since they call manager methods directly instead of
-/// going through `TemplatableMCPServerManager::new`/`sync_builtin_servers`.
+/// (`AppExecutionMode`, `GlobalResourceHandlesProvider`, `FileBasedMCPManager` - the last is
+/// read unconditionally by `delete_credentials_from_secure_storage` on any failed spawn) plus
+/// `LogManager`, without pulling in the manager's full dependency graph (`CloudModel`,
+/// `AuthStateProvider`'s real backing, `FileMCPWatcher`, ...), which these tests never exercise
+/// since they call manager methods directly instead of going through
+/// `TemplatableMCPServerManager::new`/`sync_builtin_servers`.
 fn setup_app(app: &mut App) -> ModelHandle<TemplatableMCPServerManager> {
     crate::test_util::settings::initialize_history_persistence_for_tests(app);
     app.add_singleton_model(|_| simple_logger::manager::LogManager::new());
+    app.add_singleton_model(|_| crate::ai::mcp::FileBasedMCPManager::default());
     app.add_model(|_| TemplatableMCPServerManager::default())
 }
 
@@ -301,5 +304,161 @@ fn shutdown_removes_retained_ephemeral_installation_and_credentials() {
             Err(message) => assert_eq!(message, "Installation not found"),
             Ok(_) => panic!("reconnect should fail once the installation is no longer retained"),
         }
+    });
+}
+
+/// A caller that joins a spawn via `reconnect_server` must not wait forever when something else
+/// (e.g. a later credential rotation or a logout) shuts that same installation down while the
+/// spawn - and the waiter - are still pending. `shutdown_server` must resolve the waiter with a
+/// terminal error instead of leaving it stranded in `pending_reconnections`.
+#[test]
+fn shutdown_notifies_reconnect_waiter_of_pending_spawn_instead_of_hanging() {
+    App::test((), |mut app| async move {
+        // Never released: the spawn - and the waiter that joins it below - stay pending until
+        // `shutdown_server` aborts it.
+        let (addr, _release_tx) = start_deferred_fake_mcp_server(&app).await;
+        let manager = setup_app(&mut app);
+
+        let installation_uuid = Uuid::new_v4();
+        let installation = ephemeral_installation(installation_uuid, "fake-ephemeral", addr);
+
+        manager.update(&mut app, |m, ctx| {
+            m.spawn_ephemeral_server(installation.clone(), ctx);
+        });
+        manager.read(&app, |m, _| {
+            assert!(m.spawned_servers.contains_key(&installation_uuid));
+        });
+
+        // A caller joins the still-pending spawn.
+        let (tx, rx) = oneshot::channel();
+        manager.update(&mut app, |m, ctx| {
+            m.reconnect_server(installation_uuid, tx, ctx)
+        });
+        manager.read(&app, |m, _| {
+            assert_eq!(
+                m.pending_reconnections
+                    .get(&installation_uuid)
+                    .map(Vec::len),
+                Some(1),
+                "the caller should be queued as a waiter on the pending spawn"
+            );
+        });
+
+        // Something else shuts the installation down while the spawn (and the waiter) are
+        // still pending.
+        manager.update(&mut app, |m, ctx| {
+            m.shutdown_server(installation_uuid, ctx);
+        });
+
+        // The waiter must resolve with a terminal error rather than hang forever.
+        match rx
+            .await
+            .expect("reconnect result channel should not be dropped")
+        {
+            Err(_) => {}
+            Ok(_) => panic!("reconnect should not succeed for an aborted, shut-down spawn"),
+        }
+
+        manager.read(&app, |m, _| {
+            assert!(
+                !m.pending_reconnections.contains_key(&installation_uuid),
+                "the waiter list must be drained once resolved"
+            );
+        });
+    });
+}
+
+/// A failed (re)spawn of a tracked built-in must not leave it marked as owned with neither an
+/// active nor a pending server: the retained installation, the built-in ownership entry, and its
+/// bearer token must all be cleared so `sync_builtin_servers` can cleanly retry on the next auth
+/// event instead of believing a server is still running.
+#[test]
+fn failed_respawn_clears_builtin_ownership_and_retained_installation() {
+    App::test((), |mut app| async move {
+        let manager = setup_app(&mut app);
+
+        let installation_uuid = Uuid::new_v4();
+        // Port 1 (TCPMUX) is essentially never bound in a sandboxed test environment, so the
+        // connection attempt reliably fails fast with "connection refused" instead of timing
+        // out, without needing a real unreachable-but-slow endpoint.
+        let unreachable_addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let installation =
+            ephemeral_installation(installation_uuid, "fake-factory", unreachable_addr);
+
+        manager.update(&mut app, |m, ctx| {
+            m.builtin_server_uuids.insert(installation_uuid);
+            m.builtin_server_token = Some("test-bearer-token".to_string());
+            m.spawn_ephemeral_server(installation.clone(), ctx);
+        });
+
+        // Join the doomed spawn so we can observe its failure rather than polling for it.
+        match join_reconnect(&manager, &mut app, installation_uuid).await {
+            Err(_) => {}
+            Ok(_) => panic!("a spawn against an unreachable address should fail"),
+        }
+
+        manager.read(&app, |m, _| {
+            assert!(
+                !m.reconnectable_ephemeral_installations
+                    .contains_key(&installation_uuid),
+                "a failed respawn must not retain the installation (or its embedded credentials)"
+            );
+            assert!(
+                !m.builtin_server_uuids.contains(&installation_uuid),
+                "a failed respawn must not leave the built-in marked as owned"
+            );
+            assert!(
+                m.builtin_server_token.is_none(),
+                "a failed respawn must clear the retained bearer token"
+            );
+            assert!(!m.spawned_servers.contains_key(&installation_uuid));
+            assert!(!m.active_servers.contains_key(&installation_uuid));
+        });
+    });
+}
+
+/// `despawn_cli_ephemeral_servers` (called by `AgentDriver::cleanup` on every run exit) must
+/// shut down every CLI-spawned ephemeral server and drop its retained installation, so a
+/// completed run's MCP configuration and embedded secrets don't survive it.
+#[test]
+fn despawn_cli_ephemeral_servers_removes_tracking_and_retained_installation() {
+    App::test((), |mut app| async move {
+        let (addr, release_tx) = start_deferred_fake_mcp_server(&app).await;
+        let _ = release_tx.send(());
+        let manager = setup_app(&mut app);
+
+        let installation_uuid = Uuid::new_v4();
+        let installation = ephemeral_installation(installation_uuid, "fake-cli-ephemeral", addr);
+
+        manager.update(&mut app, |m, ctx| {
+            m.spawn_cli_ephemeral_server(installation.clone(), ctx);
+        });
+        join_reconnect(&manager, &mut app, installation_uuid)
+            .await
+            .expect("initial spawn should succeed");
+
+        manager.read(&app, |m, _| {
+            assert!(m.is_cli_spawned_server(installation_uuid));
+            assert!(
+                m.reconnectable_ephemeral_installations
+                    .contains_key(&installation_uuid)
+            );
+            assert!(m.active_servers.contains_key(&installation_uuid));
+        });
+
+        manager.update(&mut app, |m, ctx| {
+            m.despawn_cli_ephemeral_servers(ctx);
+        });
+
+        manager.read(&app, |m, _| {
+            assert!(!m.is_cli_spawned_server(installation_uuid));
+            assert!(
+                !m.reconnectable_ephemeral_installations
+                    .contains_key(&installation_uuid),
+                "despawning must drop the retained installation and its embedded secrets"
+            );
+            assert!(!m.active_servers.contains_key(&installation_uuid));
+            assert!(!m.spawned_servers.contains_key(&installation_uuid));
+        });
     });
 }

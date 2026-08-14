@@ -769,6 +769,21 @@ impl TemplatableMCPServerManager {
         self.spawn_ephemeral_server(installation, ctx);
     }
 
+    /// Shuts down every CLI-spawned ephemeral MCP server (started via `oz agent run --mcp`) and
+    /// drops their retained installations and embedded secrets.
+    ///
+    /// Must be called once the owning CLI run ends (success, failure, or cancellation): in a
+    /// persistent-worker process that serves multiple sequential runs, `cli_spawned_server_uuids`
+    /// and `reconnectable_ephemeral_installations` would otherwise retain a completed run's MCP
+    /// configurations - and any secrets baked into them - for the lifetime of the manager rather
+    /// than ending with the run.
+    pub fn despawn_cli_ephemeral_servers(&mut self, ctx: &mut ModelContext<Self>) {
+        let installation_uuids: Vec<Uuid> = self.cli_spawned_server_uuids.drain().collect();
+        for installation_uuid in installation_uuids {
+            self.shutdown_server(installation_uuid, ctx);
+        }
+    }
+
     /// Reconciles built-in Warp-hosted MCP servers (currently the Factory
     /// MCP) with the feature-flag and auth state: spawns the server when it
     /// should be running and isn't, and shuts it down when it shouldn't be.
@@ -872,6 +887,23 @@ impl TemplatableMCPServerManager {
         );
     }
 
+    /// Drops any retained ephemeral installation for `installation_uuid` and, if it was
+    /// tracked as an owned built-in, clears that ownership and its bearer token too.
+    ///
+    /// Called on every path where a spawn attempt for an ephemeral installation (built-in,
+    /// CLI-ephemeral, file-based) terminates in failure, so a failed (re)spawn never leaves a
+    /// built-in marked as owned with neither an active nor a pending server - the exact
+    /// lifecycle hazard APP-5381 calls out - and never leaves its embedded credentials (e.g. a
+    /// bearer token baked into the installation) retained indefinitely. A no-op for persisted
+    /// installations, which are never present in `reconnectable_ephemeral_installations`.
+    fn clear_ephemeral_installation_on_failure(&mut self, installation_uuid: Uuid) {
+        self.reconnectable_ephemeral_installations
+            .remove(&installation_uuid);
+        if self.builtin_server_uuids.remove(&installation_uuid) {
+            self.builtin_server_token = None;
+        }
+    }
+
     /// Internal implementation of server spawning.
     fn spawn_server_impl(
         &mut self,
@@ -898,6 +930,7 @@ impl TemplatableMCPServerManager {
                         extra: { "template_uuid" => %template_uuid }
                     );
                     self.change_server_state(installation_uuid, MCPServerState::FailedToStart, ctx);
+                    self.clear_ephemeral_installation_on_failure(installation_uuid);
                     self.notify_reconnect_waiters(
                         installation_uuid,
                         Err("Template contains no servers".to_string()),
@@ -912,6 +945,7 @@ impl TemplatableMCPServerManager {
                     extra: { "template_uuid" => %template_uuid }
                 );
                 self.change_server_state(installation_uuid, MCPServerState::FailedToStart, ctx);
+                self.clear_ephemeral_installation_on_failure(installation_uuid);
                 self.notify_reconnect_waiters(installation_uuid, Err(detail));
                 return;
             }
@@ -943,6 +977,7 @@ impl TemplatableMCPServerManager {
                     });
                 }
 
+                self.clear_ephemeral_installation_on_failure(installation_uuid);
                 self.notify_reconnect_waiters(
                     installation_uuid,
                     Err("PATH not available".to_string()),
@@ -995,6 +1030,7 @@ impl TemplatableMCPServerManager {
                     full: ("Failed to register MCP log file for {template_uuid}: {e}")
                 );
                 self.change_server_state(installation_uuid, MCPServerState::FailedToStart, ctx);
+                self.clear_ephemeral_installation_on_failure(installation_uuid);
                 self.notify_reconnect_waiters(
                     installation_uuid,
                     Err("Failed to register MCP log file".to_string()),
@@ -1184,6 +1220,7 @@ impl TemplatableMCPServerManager {
                         );
 
                         me.delete_credentials_from_secure_storage(installation_uuid, ctx);
+                        me.clear_ephemeral_installation_on_failure(installation_uuid);
 
                         me.notify_reconnect_waiters(installation_uuid, Err(error_message));
 
@@ -1234,6 +1271,15 @@ impl TemplatableMCPServerManager {
         // We do both to avoid race conditions and have to do it in this order to avoid the server connecting between the shutdown_server and cancel_spawn calls
         if let Some(spawned_info) = self.spawned_servers.remove(&installation_uuid) {
             spawned_info.abort_handle.abort();
+            // A caller may have joined this spawn via `reconnect_server` before it was
+            // aborted here (e.g. it observed a closed transport just before this shutdown).
+            // Without this, that waiter's oneshot would never resolve: nothing else ever
+            // notifies `pending_reconnections` for a UUID whose spawn we just killed, so it
+            // would wait forever instead of surfacing a terminal error it can retry on.
+            self.notify_reconnect_waiters(
+                installation_uuid,
+                Err("Server was shut down before reconnecting".to_string()),
+            );
         }
         // Close the log stream now rather than when async teardown drops the
         // last logger clone, so an immediate respawn of the same server can
