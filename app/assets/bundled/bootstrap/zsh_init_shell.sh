@@ -9,12 +9,16 @@
 # effect for the entire paste; if the user's .zshrc reconfigures ZLE widgets (e.g. a vi-mode
 # cursor-shape snippet calling 'bindkey -v', or a framework like prezto), any bootstrap bytes
 # that haven't been consumed yet can be echoed back or picked up as typeahead once the line
-# editor is re-enabled, leaking Warp's own bootstrap script onto the screen. We restore the
-# tty to sane mode in zsh.sh, right before we eval the bootstrap logic.
+# editor is re-enabled, leaking Warp's own bootstrap script onto the screen. We capture the
+# user's actual pre-bootstrap tty settings here (rather than assuming a generic profile), so
+# that zsh.sh can restore those exact settings right before we eval the bootstrap logic,
+# instead of clobbering any of the user's own stty customizations (e.g. -ixon, a custom erase
+# key, etc.) with a one-size-fits-all reset.
 #
 # Note: on GNU/Linux, the 'raw' alias for stty does not itself imply '-echo'
 # (unlike BSD/macOS), so we disable echo explicitly to get the same hermetic
 # behavior on every platform.
+ WARP_ORIGINAL_STTY_STATE=$(command -p stty -g)
  command -p stty raw -echo
  unsetopt ZLE
  WARP_SESSION_ID=@@WARP_SESSION_ID@@
