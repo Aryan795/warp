@@ -38,6 +38,7 @@ use warp_graphql::workspace::{
     UgcCollectionSettingInfo as GqlUgcCollectionSettingInfo,
     UgcCollectionSettings as GqlUgcCollectionSettings,
     UsageBasedPricingSettings as GqlUsageBasedPricingSettings, Workspace as GqlWorkspace,
+    WorkspaceMember as GqlWorkspaceMember, WorkspaceMemberUsageInfo as GqlWorkspaceMemberUsageInfo,
     WorkspaceSettings as GqlWorkspaceSettings,
     WriteToPtyAutonomyValue as GqlWriteToPtyAutonomyValue,
     WriteToPtySettingInfo as GqlWriteToPtySettingInfo,
@@ -2291,6 +2292,121 @@ fn test_team_policy_wins_over_workspace_and_user_policy() {
                     .map_or(0, |policy| policy.effective_premium_bps()),
                 1000
             );
+        });
+    })
+}
+
+fn gql_workspace_member(uid: &str, role: GqlMembershipRole) -> GqlWorkspaceMember {
+    GqlWorkspaceMember {
+        uid: uid.into(),
+        email: format!("{uid}@example.com"),
+        role,
+        usage_info: GqlWorkspaceMemberUsageInfo {
+            is_unlimited: false,
+            request_limit: 1_000,
+            requests_used_since_last_refresh: 0,
+            is_request_limit_prorated: false,
+        },
+    }
+}
+
+#[test]
+fn test_teamless_user_outside_a_workspace_can_create_a_team() {
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![]);
+        register_ai_usage_model(&mut app);
+
+        // A true solo user's only workspace is the server's placeholder, which the
+        // conversion filters out.
+        apply_workspaces_metadata(
+            &mut app,
+            gql_user(None, vec![gql_workspace(PLACEHOLDER_WORKSPACE_UID, None)]).into(),
+        );
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert!(!user_workspaces.has_workspaces());
+            assert!(!user_workspaces.has_teams());
+            assert!(
+                user_workspaces.can_create_team(),
+                "a solo user is the only one the client can create a team for"
+            );
+        });
+    })
+}
+
+#[test]
+fn test_workspace_member_without_a_team_cannot_create_a_team() {
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![]);
+        register_ai_usage_model(&mut app);
+
+        // A workspace member who belongs to no team in it: the workspace's team is
+        // one they are not a member of, so it is filtered out of their memberships.
+        let mut workspace = gql_workspace("workspace_uid123456789", None);
+        workspace.members = vec![gql_workspace_member("test-user", GqlMembershipRole::User)];
+        workspace.teams = vec![gql_team("other-team", "Other Team", &["someone-else"])];
+
+        apply_workspaces_metadata(&mut app, gql_user(None, vec![workspace]).into());
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert!(user_workspaces.has_workspaces());
+            assert!(
+                !user_workspaces.has_teams(),
+                "the workspace's other team is not a membership of this user"
+            );
+            assert!(
+                !user_workspaces.can_create_team(),
+                "a workspace member has no client-side path to a new team"
+            );
+        });
+    })
+}
+
+#[test]
+fn test_workspace_admin_without_a_team_cannot_create_a_team() {
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![]);
+        register_ai_usage_model(&mut app);
+
+        // Creating a team inside a workspace needs `createTeamInWorkspace`, which the
+        // client never calls, so admin permissions do not re-open the affordance.
+        let mut workspace = gql_workspace("workspace_uid123456789", None);
+        workspace.members = vec![gql_workspace_member("test-user", GqlMembershipRole::Admin)];
+
+        apply_workspaces_metadata(&mut app, gql_user(None, vec![workspace]).into());
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert!(
+                user_workspaces
+                    .current_workspace()
+                    .is_some_and(|workspace| workspace.is_workspace_admin("test-user@example.com")),
+                "the fixture should make this user a workspace admin"
+            );
+            assert!(!user_workspaces.has_teams());
+            assert!(!user_workspaces.can_create_team());
+        });
+    })
+}
+
+#[test]
+fn test_workspace_member_with_a_team_cannot_create_a_team() {
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![]);
+        register_ai_usage_model(&mut app);
+
+        let mut workspace = gql_workspace("workspace_uid123456789", None);
+        workspace.members = vec![gql_workspace_member("test-user", GqlMembershipRole::User)];
+        workspace.teams = vec![gql_team("member-team", "Member Team", &["test-user"])];
+
+        apply_workspaces_metadata(&mut app, gql_user(None, vec![workspace]).into());
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert!(user_workspaces.has_teams());
+            assert!(!user_workspaces.can_create_team());
         });
     })
 }

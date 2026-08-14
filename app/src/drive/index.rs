@@ -666,14 +666,17 @@ impl DriveIndex {
             .collect::<Vec<_>>();
 
         if !user_workspaces.as_ref(ctx).has_teams() {
+            let can_create_team = user_workspaces.as_ref(ctx).can_create_team();
             if user_workspaces
                 .as_ref(ctx)
                 .total_teammates_in_joinable_teams()
                 > 0
             {
                 sections.insert(0, DriveIndexSection::JoinTeam);
-                sections.insert(1, DriveIndexSection::CreateATeam);
-            } else {
+                if can_create_team {
+                    sections.insert(1, DriveIndexSection::CreateATeam);
+                }
+            } else if can_create_team {
                 sections.insert(0, DriveIndexSection::CreateATeam);
             }
         }
@@ -2245,23 +2248,32 @@ impl DriveIndex {
         .with_margin_top(16.)
         .finish();
 
-        let or_text = Container::new(
-            Text::new_inline("Or", appearance.ui_font_family(), ITEM_FONT_SIZE)
-                .with_color(appearance.theme().nonactive_ui_text_color().into())
-                .with_style(Properties::default().weight(Weight::Medium))
-                .finish(),
-        )
-        .with_margin_top(14.)
-        .finish();
+        let mut column = Flex::column();
+        column.add_child(join_button);
 
-        let or_row = Flex::row()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_main_axis_alignment(MainAxisAlignment::Center)
-            .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_child(or_text)
+        // "Or" reads as a lead-in to the create-team section that normally follows, so
+        // it goes away with it.
+        if self.sections.contains(&DriveIndexSection::CreateATeam) {
+            let or_text = Container::new(
+                Text::new_inline("Or", appearance.ui_font_family(), ITEM_FONT_SIZE)
+                    .with_color(appearance.theme().nonactive_ui_text_color().into())
+                    .with_style(Properties::default().weight(Weight::Medium))
+                    .finish(),
+            )
+            .with_margin_top(14.)
             .finish();
 
-        Container::new(Flex::column().with_children([join_button, or_row]).finish())
+            column.add_child(
+                Flex::row()
+                    .with_main_axis_size(MainAxisSize::Max)
+                    .with_main_axis_alignment(MainAxisAlignment::Center)
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_child(or_text)
+                    .finish(),
+            );
+        }
+
+        Container::new(column.finish())
             .with_margin_left(INDEX_CONTENT_MARGIN_LEFT)
             .with_margin_right(INDEX_CONTENT_MARGIN_LEFT)
             .finish()

@@ -1027,6 +1027,19 @@ impl UserWorkspaces {
         !self.workspaces.is_empty()
     }
 
+    /// Whether the client should offer creating a new team.
+    ///
+    /// The desktop client only ever calls the legacy `createTeam` mutation, which the
+    /// server rejects for a caller who already belongs to a workspace. Teams inside a
+    /// workspace are created with `createTeamInWorkspace`, which the client does not
+    /// call, and which requires workspace-admin permissions anyway. So for every
+    /// workspace member — admin or not — the create-team affordances lead nowhere and
+    /// are hidden; teamless users (whose placeholder workspace is filtered out of
+    /// [`Self::workspaces`]) keep them.
+    pub fn can_create_team(&self) -> bool {
+        !self.has_workspaces()
+    }
+
     pub fn update_workspaces(&mut self, workspaces: Vec<Workspace>, ctx: &mut ModelContext<Self>) {
         // Check if sunsetted_to_build_ts changed for any workspace
         let sunsetted_to_build_changed = self.has_sunsetted_to_build_data_changed(&workspaces);

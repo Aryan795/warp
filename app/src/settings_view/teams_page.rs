@@ -121,6 +121,13 @@ const INVALID_EMAILS_INSTRUCTIONS: &str =
 
 const OFFLINE_TEXT: &str = "You are offline.";
 
+// Copy for a workspace member who is not on any team. Teams inside a workspace are
+// created through workspace administration, not from the client, so the create-team
+// form is replaced by an explanation of where a team comes from.
+const WORKSPACE_MANAGED_TEAMS_HEADER: &str = "You're not on a team";
+const WORKSPACE_MANAGED_TEAMS_DESCRIPTION: &str = "Teams in your workspace are created and managed by a workspace admin. Ask an admin to add you to a team.";
+const JOIN_TEAM_WITHOUT_CREATE_HEADER: &str = "Join an existing team within your company";
+
 const MAX_CHIP_WIDTH: f32 = 280.;
 
 lazy_static! {
@@ -3999,6 +4006,44 @@ impl TeamsWidget {
         column.finish()
     }
 
+    /// The Teams page for a member of a workspace who is not on any team. They cannot
+    /// create one from the client (see [`UserWorkspaces::can_create_team`]), so the page
+    /// explains where their teams come from instead of offering a form that would fail.
+    fn render_workspace_managed_teams_page(
+        &self,
+        view: &TeamsPageView,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
+        let mut page = Flex::column();
+
+        page.add_child(render_sub_header(appearance, "Teams".to_string(), None));
+        page.add_child(self.render_sub_header_with_subtext_color(
+            appearance,
+            WORKSPACE_MANAGED_TEAMS_HEADER.to_string(),
+        ));
+        page.add_child(
+            Container::new(
+                self.render_description(
+                    WORKSPACE_MANAGED_TEAMS_DESCRIPTION.to_string(),
+                    appearance,
+                ),
+            )
+            .with_padding_top(6.)
+            .finish(),
+        );
+
+        if !view.discoverable_teams_states.is_empty() {
+            page.add_child(render_separator(appearance));
+            page.add_child(self.render_sub_header_with_subtext_color(
+                appearance,
+                JOIN_TEAM_WITHOUT_CREATE_HEADER.to_string(),
+            ));
+            page.add_child(self.render_team_discovery_section(view, appearance));
+        }
+
+        page.finish()
+    }
+
     fn render_create_team_page(
         &self,
         view: &TeamsPageView,
@@ -4409,6 +4454,9 @@ impl SettingsWidget for TeamsWidget {
                     appearance,
                     app,
                 ),
+                None if !teams.can_create_team() => {
+                    self.render_workspace_managed_teams_page(view, appearance)
+                }
                 None => self.render_create_team_page_with_banner(view, appearance, app),
             }
         } else {
