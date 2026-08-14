@@ -1340,13 +1340,24 @@ fn completed_cli_agent_child_transcript_clears_loading_and_restores_content() {
                 Some(&ConversationTranscriptViewerStatus::ViewingAmbientConversation(task_id)),
             );
             assert!(model.is_read_only());
+
+            let transcript_scope = *model.block_list().transcript_scope();
+            let restored_block = model
+                .block_list()
+                .blocks()
+                .iter()
+                .find(|block| block.command_to_string() == "claude")
+                .expect(
+                    "the CLI agent's block snapshot must be restored into the pane's block list",
+                );
+            // Presence alone doesn't prove the user sees anything: an
+            // unattached block is hidden under the child's active
+            // `TranscriptScope::Conversation(child_id)` (see
+            // `Block::should_hide_block`). Assert real visibility instead.
             assert!(
-                model
-                    .block_list()
-                    .blocks()
-                    .iter()
-                    .any(|block| block.command_to_string() == "claude"),
-                "the CLI agent's block snapshot must be restored into the pane's block list",
+                restored_block.is_visible(&transcript_scope),
+                "the restored CLI block must be visible in the child's active transcript scope \
+                 ({transcript_scope:?}), not merely present in the block list",
             );
         });
     });
@@ -1406,6 +1417,81 @@ fn unsupported_cli_agent_child_transcript_still_clears_loading() {
                 model.conversation_transcript_viewer_status(),
                 Some(&ConversationTranscriptViewerStatus::ViewingAmbientConversation(task_id)),
             );
+        });
+    });
+}
+
+/// QUALITY-1659 regression test for `end_child_transcript_load_without_content`,
+/// the fix for the `None` branch of `hydrate_child_transcript` (a terminal
+/// transcript-load failure -- a block-snapshot fetch error, an unrecognized
+/// harness, or `AgentHarness` disabled all surface as `None` from the fetch).
+/// A previous version of that `None` arm just re-queued the task and
+/// returned, which left the pane on `Loading` forever, since `LoadTranscript`
+/// is only ever dispatched for an already-terminal run that will not produce
+/// a further `TasksUpdated` to retry on. This drives the extracted method
+/// directly (the reachable seam after the fetch resolves), the same style
+/// used by `hydrate_remote_child_placeholder_with_cloud_transcript_preserves_placeholder_identity`
+/// in `history_model_tests.rs`: exercising `hydrate_child_transcript`'s real
+/// async fetch end-to-end would require either a genuine network call --
+/// which `http_client::Client::new_for_test`'s own doc comment says tests
+/// must never make -- or a locally-resolvable seed, which was tried here and
+/// reproducibly hung past 60s (likely on auth-token refresh), so it was
+/// dropped in favor of this direct, fast, deterministic seam test.
+#[test]
+fn terminal_child_transcript_fetch_failure_clears_loading() {
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+
+        pane_group.update(&mut app, |panes, ctx| {
+            let task_id = new_ambient_agent_task_id();
+
+            let mut child = AIConversation::new(false, false);
+            child.set_task_id(task_id);
+            let child_id = child.id();
+
+            let loading_pane_id = panes
+                .create_child_loading_placeholder(child, AgentViewEntryOrigin::CloudAgent, ctx)
+                .expect("child loading placeholder pane");
+            assert_eq!(
+                panes
+                    .terminal_view_from_pane_id(loading_pane_id, ctx)
+                    .expect("loading pane should have a terminal view")
+                    .as_ref(ctx)
+                    .model
+                    .lock()
+                    .conversation_transcript_viewer_status(),
+                Some(&ConversationTranscriptViewerStatus::Loading),
+                "precondition: the placeholder pane starts in the Loading state",
+            );
+
+            panes.end_child_transcript_load_without_content(
+                loading_pane_id,
+                child_id,
+                task_id,
+                ctx,
+            );
+
+            let pane_id = panes.child_agent_panes[&child_id];
+            assert_eq!(
+                pane_id, loading_pane_id,
+                "ending the load without content happens in place; it must not swap panes",
+            );
+            let view = panes
+                .terminal_view_from_pane_id(pane_id, ctx)
+                .expect("child pane should have a terminal view");
+            let model = view.as_ref(ctx).model.lock();
+            assert!(
+                !model.is_loading_conversation_transcript(),
+                "a terminal transcript-load failure must still clear Loading instead of \
+                 spinning forever (QUALITY-1659)",
+            );
+            assert_eq!(
+                model.conversation_transcript_viewer_status(),
+                Some(&ConversationTranscriptViewerStatus::ViewingAmbientConversation(task_id)),
+            );
+            assert!(model.is_read_only());
         });
     });
 }
