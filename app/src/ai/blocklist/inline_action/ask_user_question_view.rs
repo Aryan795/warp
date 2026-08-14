@@ -70,7 +70,17 @@ const ASK_USER_QUESTION_ACTIVE: &str = "AskUserQuestionActive";
 
 pub(crate) const ASK_USER_QUESTION_AUTO_ADVANCE_DELAY: Duration = Duration::from_millis(300);
 pub(crate) const ASK_USER_QUESTION_MAX_CONTAINER_HEIGHT: f32 = 520.;
-pub(crate) const ASK_USER_QUESTION_SINGLE_MAX_CONTAINER_HEIGHT: f32 = 800.;
+// Matches `ASK_USER_QUESTION_MAX_CONTAINER_HEIGHT`. This cap is the trigger for the option
+// list's internal scroll (see `wrap_scrollable_body`): a list whose content stays under the cap
+// reports no overflow and shows no scrollbar or scroll-into-view behavior at all, regardless of
+// whether the card's actual on-screen space (governed by the surrounding blocklist/terminal
+// scroll position, not this constraint) is shorter. A single-question card has no nav footer, so
+// it used to carry a much larger cap (800) than the multi-question one (520) for no functional
+// reason; that let lists of ~15-20 options (the reported case) silently fit under the cap and
+// leave options unreachable. Keeping both caps equal makes long single-question lists reliably
+// scrollable too.
+pub(crate) const ASK_USER_QUESTION_SINGLE_MAX_CONTAINER_HEIGHT: f32 =
+    ASK_USER_QUESTION_MAX_CONTAINER_HEIGHT;
 // Must match `MARGIN_BETWEEN_BUTTONS` in number_shortcut_buttons.rs so off-screen measurement
 // copies match the interactive option list's height.
 const ASK_USER_QUESTION_OPTION_BUTTON_VERTICAL_SPACING: f32 = 4.;
