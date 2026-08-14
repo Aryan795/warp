@@ -115,6 +115,7 @@ pub(crate) mod server {
     use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 
     use super::*;
+    use crate::next_instance::NextInstance;
     use crate::server::{InitializationError, Result, ServerError};
     use crate::windows_pipe_security::PipeSecurityAttributes;
 
@@ -139,9 +140,11 @@ pub(crate) mod server {
         // documented named-pipe server pattern: a fresh instance must exist before the previous
         // one is dropped, or a client connecting in between can transiently see `NotFound`.
         //
-        // Taken out of the mutex (rather than held across the `.connect().await` point below) so
-        // the mutex guard is never held across an await.
-        next: std::sync::Mutex<Option<NamedPipeServer>>,
+        // `accept_connection` is only ever awaited serially by the single task spawned in
+        // `Server::listen_for_new_connections`, so this is never accessed concurrently; it still
+        // recovers gracefully (rather than panicking) if a previous call left it empty after a
+        // recoverable error -- see `NextInstance`.
+        next: NextInstance<NamedPipeServer>,
     }
 
     impl ConnectionListenerImpl {
@@ -169,35 +172,37 @@ pub(crate) mod server {
             Ok(Self {
                 pipe_path,
                 security_attributes,
-                next: std::sync::Mutex::new(Some(first)),
+                next: NextInstance::new(first),
             })
         }
 
         pub async fn accept_connection(&self) -> Result<ConnectionImpl> {
             async {
+                // Recreates an instance here if a previous call failed to prepare a replacement
+                // below and left the slot empty, rather than assuming one is always present.
                 let server = self
                     .next
-                    .lock()
-                    .expect("named pipe listener mutex poisoned")
-                    .take()
-                    .expect(
-                        "ConnectionListenerImpl::accept_connection was called concurrently, \
-                         which is not supported",
-                    );
-
-                server
-                    .connect()
-                    .await
+                    .take_or_create(|| create_instance(&self.pipe_path, &self.security_attributes))
                     .map_err(ServerError::AcceptConnection)?;
 
-                // Prepare the next instance *before* handing this one to the caller; see the
-                // `next` field's doc comment.
-                let next = create_instance(&self.pipe_path, &self.security_attributes)
-                    .map_err(ServerError::AcceptConnection)?;
-                *self
-                    .next
-                    .lock()
-                    .expect("named pipe listener mutex poisoned") = Some(next);
+                let connect_result = server.connect().await;
+
+                // Prepare the next instance before returning, regardless of whether accepting
+                // this one succeeded, so a transient failure here doesn't leave the listener
+                // unable to accept again; see the `next` field's doc comment. If this fails too,
+                // leave the slot empty -- `take_or_create` will retry on the next call.
+                match create_instance(&self.pipe_path, &self.security_attributes) {
+                    Ok(next) => self.next.restore(Some(next)),
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to pre-create the next named pipe instance; will retry on \
+                             the next accept: {e:?}"
+                        );
+                        self.next.restore(None);
+                    }
+                }
+
+                connect_result.map_err(ServerError::AcceptConnection)?;
 
                 Ok(ConnectionImpl { server })
             }

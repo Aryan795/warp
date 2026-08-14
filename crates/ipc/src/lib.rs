@@ -40,6 +40,7 @@
 //! let response = my_service_stub.call(MyServiceRequest { .. }).await;
 //! ```
 mod client;
+mod next_instance;
 mod protocol;
 mod server;
 mod service;
