@@ -1,7 +1,10 @@
 //! This module provides a fake, "placeholder" implementation of IPC transport for wasm targets.
 //!
 //! Eventually, this module will implement transport on top of the WebWorkers MessagePort API.
+use std::sync::Arc;
+
 use futures::{AsyncRead, AsyncWrite};
+use warpui_core::r#async::executor::Background;
 
 use crate::ConnectionAddress;
 
@@ -11,6 +14,7 @@ pub(crate) mod client {
 
     pub async fn connect_client(
         _connection_address: ConnectionAddress,
+        _background_executor: Arc<Background>,
     ) -> Result<(futures::io::Empty, futures::io::Sink)> {
         Err(ClientError::Initialization(
             InitializationError::UnsupportedPlatform,

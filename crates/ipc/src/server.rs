@@ -76,8 +76,14 @@ impl ConnectionListener {
     fn new(
         connection_address: ConnectionAddress,
         windows_pipe_security_descriptor: Option<&str>,
+        background_executor: Arc<Background>,
     ) -> Result<Self> {
-        ConnectionListenerImpl::new(connection_address, windows_pipe_security_descriptor).map(Self)
+        ConnectionListenerImpl::new(
+            connection_address,
+            windows_pipe_security_descriptor,
+            background_executor,
+        )
+        .map(Self)
     }
 
     /// Waits until a client connects and returns the connection.
@@ -192,6 +198,7 @@ impl Server {
         let listener = ConnectionListener::new(
             connection_address,
             windows_pipe_security_descriptor.as_deref(),
+            background_executor.clone(),
         )?;
 
         // Spawn two separate background tasks. The first is responsible for listening for new

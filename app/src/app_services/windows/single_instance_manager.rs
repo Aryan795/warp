@@ -48,9 +48,10 @@ pub(super) fn uri_named_pipe_name() -> String {
     format!("Warp{:?}_URI_CHANNEL", ChannelState::channel())
 }
 
-/// Security descriptor applied to the URI named pipe, granting full control to SYSTEM, built-in
-/// Administrators, and interactively logged-on users (SDDL: `IU`), instead of the OS default
-/// (full control to the pipe's creator, read-only to Everyone).
+/// Security descriptor applied to the URI named pipe. SYSTEM and the pipe owner retain full
+/// control so the server can create replacement pipe instances; built-in Administrators and
+/// interactively logged-on users (SDDL: `IU`) receive only the specific client-side rights needed
+/// to connect, read, and write.
 ///
 /// This pipe must be reachable by a second Warp process running at a *different* elevation level
 /// than the sole instance that owns it -- for example, after a winget/Inno Setup install launches
@@ -59,17 +60,18 @@ pub(super) fn uri_named_pipe_name() -> String {
 /// default DACL denies that non-elevated process access (`ERROR_ACCESS_DENIED`), which is the root
 /// cause of the sign-in loop this pipe permission fixes (see REV-1546).
 ///
-/// We deliberately grant access to the `IU` (`INTERACTIVE`) well-known SID rather than to the
-/// pipe's owner (`OW`) or to `BA` (`Administrators`): Windows' UAC "split token" model marks the
-/// Administrators group as "use for deny only" in a standard (non-elevated) token, and a newly
-/// created object's owner often defaults to the Administrators group rather than the specific user
-/// account when the creating process is elevated. Either of those would silently fail to grant the
-/// non-elevated process access. `INTERACTIVE` remains an enabled (non-deny-only) SID in both the
-/// elevated and the linked standard token of the same interactive logon, so it reliably covers both
-/// directions of the elevation mismatch. This is narrower than a null DACL or an `Everyone`/`World`
-/// grant, which would let any local user's process (not just the interactively logged-on user)
-/// send startup arguments and auth redirect URIs to the running instance.
-const URI_NAMED_PIPE_SECURITY_DESCRIPTOR: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;IU)";
+/// The client mask (`0x12019B`) expands to `FILE_GENERIC_READ | (FILE_GENERIC_WRITE -
+/// FILE_APPEND_DATA)`. On named pipes, `FILE_APPEND_DATA` aliases `FILE_CREATE_PIPE_INSTANCE`, so
+/// omitting that bit prevents a client from creating an additional server instance for this pipe
+/// name. The IPC client open path in `crates/ipc` requests the same specific mask, rather than
+/// `GENERIC_WRITE`, so connecting still succeeds without granting instance-creation rights.
+///
+/// `IU` is broader than the ideal current-user/logon SID and remains a residual cross-user/session
+/// injection risk until the product security decision in REV-1546 is resolved. Keeping the access
+/// mask and SDDL in this single constant makes a later switch to a user- or logon-scoped grant
+/// small.
+const URI_NAMED_PIPE_SECURITY_DESCRIPTOR: &str =
+    "D:(A;;GA;;;SY)(A;;GA;;;OW)(A;;0x12019B;;;BA)(A;;0x12019B;;;IU)";
 
 fn try_create_mutex() -> Result<Option<MutexHandle>, Error> {
     // Scope this lock to the specific user session.
@@ -176,3 +178,18 @@ impl Entity for SingleInstanceManager {
 }
 
 impl SingletonEntity for SingleInstanceManager {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uri_named_pipe_dacl_grants_ba_and_iu_client_only_access() {
+        assert!(URI_NAMED_PIPE_SECURITY_DESCRIPTOR.contains("(A;;GA;;;SY)"));
+        assert!(URI_NAMED_PIPE_SECURITY_DESCRIPTOR.contains("(A;;GA;;;OW)"));
+        assert!(URI_NAMED_PIPE_SECURITY_DESCRIPTOR.contains("(A;;0x12019B;;;BA)"));
+        assert!(URI_NAMED_PIPE_SECURITY_DESCRIPTOR.contains("(A;;0x12019B;;;IU)"));
+        assert!(!URI_NAMED_PIPE_SECURITY_DESCRIPTOR.contains("(A;;GA;;;BA)"));
+        assert!(!URI_NAMED_PIPE_SECURITY_DESCRIPTOR.contains("(A;;GA;;;IU)"));
+    }
+}

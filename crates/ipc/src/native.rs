@@ -4,9 +4,69 @@ use async_compat::CompatExt as _;
 use futures::{AsyncRead, AsyncWrite};
 
 use crate::ConnectionAddress;
+#[cfg(windows)]
+mod windows_pipe {
+    use std::io;
+    use std::sync::{Arc, mpsc};
+
+    use warpui_core::r#async::executor::Background;
+
+    use crate::ConnectionAddress;
+
+    /// Client-side access requested when opening a Warp IPC named pipe.
+    ///
+    /// This is `FILE_GENERIC_READ | (FILE_GENERIC_WRITE - FILE_APPEND_DATA)`, expanded as a
+    /// specific mask instead of using `GENERIC_WRITE`. On named pipes, `FILE_APPEND_DATA` aliases
+    /// `FILE_CREATE_PIPE_INSTANCE`; requesting/granting it would allow a client to create an
+    /// additional server instance for the same pipe name and race/capture traffic.
+    pub(super) const NAMED_PIPE_CLIENT_ACCESS_MASK: u32 = 0x0012_019B;
+
+    /// Returns the full `\\.\pipe\<name>` path for `connection_address`, matching the path
+    /// `interprocess` derives internally for the same connection address.
+    pub(super) fn pipe_path(connection_address: &ConnectionAddress) -> String {
+        format!(r"\\.\pipe\{connection_address}")
+    }
+
+    pub(super) fn run_on_background<T>(
+        background_executor: Arc<Background>,
+        work: impl FnOnce() -> io::Result<T> + Send + 'static,
+    ) -> io::Result<T>
+    where
+        T: Send + 'static,
+    {
+        let (tx, rx) = mpsc::channel();
+        background_executor
+            .spawn(async move {
+                let _ = tx.send(work());
+            })
+            .detach();
+        rx.recv().map_err(io::Error::other)?
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn client_access_mask_omits_pipe_instance_creation_bit() {
+            const FILE_APPEND_DATA_AND_CREATE_PIPE_INSTANCE: u32 = 0x0000_0004;
+
+            assert_eq!(
+                NAMED_PIPE_CLIENT_ACCESS_MASK & FILE_APPEND_DATA_AND_CREATE_PIPE_INSTANCE,
+                0
+            );
+            assert_ne!(NAMED_PIPE_CLIENT_ACCESS_MASK & 0x0000_0001, 0);
+            assert_ne!(NAMED_PIPE_CLIENT_ACCESS_MASK & 0x0000_0002, 0);
+        }
+    }
+}
 
 pub(crate) mod client {
+    use std::sync::Arc;
+
+    #[cfg(not(windows))]
     use interprocess::local_socket::tokio::LocalSocketStream;
+    use warpui_core::r#async::executor::Background;
 
     use super::*;
     use crate::client::{ClientError, InitializationError, Result};
@@ -15,17 +75,115 @@ pub(crate) mod client {
     /// underlying IPC transport for native (non-wasm) platforms.
     pub async fn connect_client(
         connection_address: ConnectionAddress,
-    ) -> Result<(impl AsyncRead + Unpin, impl AsyncWrite + Unpin)> {
+        background_executor: Arc<Background>,
+    ) -> Result<(
+        Box<dyn AsyncRead + Send + Unpin>,
+        Box<dyn AsyncWrite + Send + Unpin>,
+    )> {
+        #[cfg(windows)]
+        {
+            windows_pipe_client::connect_client(connection_address, background_executor)
+                .await
+                .map_err(|e| ClientError::Initialization(InitializationError::Io(e)))
+        }
+
+        #[cfg(not(windows))]
+        drop(background_executor);
+        #[cfg(not(windows))]
         let stream = LocalSocketStream::connect(connection_address.0.as_str())
             .compat()
             .await
             .map_err(|e| ClientError::Initialization(InitializationError::Io(e)))?;
-        Ok(stream.into_split())
+        #[cfg(not(windows))]
+        {
+            let (reader, writer) = stream.into_split();
+            Ok((Box::new(reader), Box::new(writer)))
+        }
+    }
+
+    #[cfg(windows)]
+    mod windows_pipe_client {
+        use std::io;
+        use std::sync::Arc;
+
+        use futures::{AsyncRead, AsyncWrite};
+        use tokio::net::windows::named_pipe::NamedPipeClient;
+        use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
+        use warpui_core::r#async::executor::Background;
+        use windows::Win32::Foundation::ERROR_PIPE_BUSY;
+        use windows::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_FLAG_OVERLAPPED, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, OPEN_EXISTING, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
+        };
+        use windows::Win32::System::Pipes::WaitNamedPipeW;
+        use windows::core::PCWSTR;
+
+        use crate::ConnectionAddress;
+        use crate::platform::windows_pipe::{
+            NAMED_PIPE_CLIENT_ACCESS_MASK, pipe_path, run_on_background,
+        };
+
+        pub async fn connect_client(
+            connection_address: ConnectionAddress,
+            background_executor: Arc<Background>,
+        ) -> io::Result<(
+            Box<dyn AsyncRead + Send + Unpin>,
+            Box<dyn AsyncWrite + Send + Unpin>,
+        )> {
+            let path = pipe_path(&connection_address);
+            let client = run_on_background(background_executor, move || open_client(&path))?;
+            let (reader, writer) = tokio::io::split(client);
+            Ok((Box::new(reader.compat()), Box::new(writer.compat_write())))
+        }
+
+        fn open_client(path: &str) -> io::Result<NamedPipeClient> {
+            let path_wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+            loop {
+                match open_client_once(&path_wide) {
+                    Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY.0 as i32) => {
+                        wait_for_server(&path_wide)?;
+                    }
+                    result => return result,
+                }
+            }
+        }
+
+        fn open_client_once(path_wide: &[u16]) -> io::Result<NamedPipeClient> {
+            let handle = unsafe {
+                CreateFileW(
+                    PCWSTR(path_wide.as_ptr()),
+                    NAMED_PIPE_CLIENT_ACCESS_MASK,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_FLAGS_AND_ATTRIBUTES(
+                        FILE_FLAG_OVERLAPPED.0
+                            | SECURITY_IDENTIFICATION.0
+                            | SECURITY_SQOS_PRESENT.0,
+                    ),
+                    None,
+                )
+            }
+            .map_err(io::Error::from)?;
+
+            // SAFETY: `CreateFileW` returned a valid, owned, overlapped named-pipe handle. Tokio's
+            // `NamedPipeClient` assumes ownership of it from here.
+            unsafe { NamedPipeClient::from_raw_handle(handle.0 as _) }
+        }
+
+        fn wait_for_server(path_wide: &[u16]) -> io::Result<()> {
+            unsafe { WaitNamedPipeW(PCWSTR(path_wide.as_ptr()), 0) }
+                .ok()
+                .map_err(io::Error::from)
+        }
     }
 }
 
 pub(crate) mod server {
+    use std::sync::Arc;
+
     use interprocess::local_socket::tokio::{LocalSocketListener, LocalSocketStream};
+    use warpui_core::r#async::executor::Background;
 
     use super::*;
     use crate::server::{InitializationError, Result, ServerError};
@@ -86,17 +244,24 @@ pub(crate) mod server {
         pub fn new(
             connection_address: ConnectionAddress,
             windows_pipe_security_descriptor: Option<&str>,
+            background_executor: Arc<Background>,
         ) -> Result<Self> {
             #[cfg(windows)]
             if let Some(sddl) = windows_pipe_security_descriptor {
-                let listener = windows_pipe::PipeListener::bind(&connection_address, sddl)
-                    .map_err(|e| ServerError::Initialization(InitializationError::Io(e)))?;
+                let listener = windows_pipe::PipeListener::bind(
+                    &connection_address,
+                    sddl,
+                    background_executor,
+                )
+                .map_err(|e| ServerError::Initialization(InitializationError::Io(e)))?;
                 return Ok(Self {
                     listener: ListenerImpl::WindowsPipe(listener),
                 });
             }
             #[cfg(not(windows))]
             let _ = windows_pipe_security_descriptor;
+            #[cfg(not(windows))]
+            let _ = background_executor;
 
             let listener = warpui_core::r#async::block_on(
                 async move { LocalSocketListener::bind(connection_address.to_string()) }.compat(),
@@ -140,12 +305,14 @@ pub(crate) mod server {
     mod windows_pipe {
         use std::ffi::c_void;
         use std::io;
+        use std::sync::Arc;
 
         use tokio::net::windows::named_pipe::{self, NamedPipeServer};
         use tokio::sync::Mutex;
         use tokio_util::compat::{
             Compat, TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _,
         };
+        use warpui_core::r#async::executor::Background;
         use windows::Win32::Foundation::{HLOCAL, LocalFree};
         use windows::Win32::Security::Authorization::{
             ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -154,6 +321,7 @@ pub(crate) mod server {
         use windows::core::PCWSTR;
 
         use crate::ConnectionAddress;
+        use crate::platform::windows_pipe::{pipe_path, run_on_background};
 
         /// RAII wrapper around a security descriptor allocated by
         /// `ConvertStringSecurityDescriptorToSecurityDescriptorW`, which the caller is
@@ -191,13 +359,6 @@ pub(crate) mod server {
             Ok(OwnedSecurityDescriptor(descriptor))
         }
 
-        /// Returns the full `\\.\pipe\<name>` path for `connection_address`, matching the path
-        /// `interprocess` derives internally for the same connection address so that clients
-        /// connecting via `interprocess` (see `client::connect_client`) can still reach this pipe.
-        fn pipe_path(connection_address: &ConnectionAddress) -> String {
-            format!(r"\\.\pipe\{connection_address}")
-        }
-
         pub struct PipeStream(NamedPipeServer);
 
         impl PipeStream {
@@ -224,14 +385,25 @@ pub(crate) mod server {
         }
 
         impl PipeListener {
-            pub fn bind(connection_address: &ConnectionAddress, sddl: &str) -> io::Result<Self> {
+            pub fn bind(
+                connection_address: &ConnectionAddress,
+                sddl: &str,
+                background_executor: Arc<Background>,
+            ) -> io::Result<Self> {
                 let path = pipe_path(connection_address);
                 let security_descriptor = parse_security_descriptor(sddl)?;
                 // `first_pipe_instance` guards against "named pipe squatting": without it, a
                 // malicious process could pre-create a pipe with this name before we do, and we'd
                 // silently become an additional instance of that attacker-controlled pipe instead
                 // of failing loudly.
-                let first_instance = Self::create_pipe_instance(&path, &security_descriptor, true)?;
+                let first_instance = {
+                    let path = path.clone();
+                    let sddl = sddl.to_owned();
+                    run_on_background(background_executor, move || {
+                        let security_descriptor = parse_security_descriptor(&sddl)?;
+                        Self::create_pipe_instance(&path, &security_descriptor, true)
+                    })?
+                };
                 Ok(Self {
                     path,
                     security_descriptor,
@@ -271,6 +443,32 @@ pub(crate) mod server {
                     Self::create_pipe_instance(&self.path, &self.security_descriptor, false)?;
                 let connected_instance = std::mem::replace(&mut *stored_instance, next_instance);
                 Ok(PipeStream(connected_instance))
+            }
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use std::sync::Arc;
+
+            use uuid::Uuid;
+            use warpui_core::r#async::executor::Background;
+
+            use super::*;
+
+            #[test]
+            fn bind_creates_initial_instance_on_background_runtime() {
+                let background_executor =
+                    Arc::new(Background::new(1, |_| "ipc-test-background".to_owned()));
+                let connection_address =
+                    ConnectionAddress::from(format!("WarpTest{}_URI_CHANNEL", Uuid::new_v4()));
+
+                let listener = PipeListener::bind(
+                    &connection_address,
+                    "D:(A;;GA;;;SY)(A;;GA;;;OW)(A;;0x12019B;;;IU)",
+                    background_executor,
+                );
+
+                assert!(listener.is_ok(), "{:?}", listener.err());
             }
         }
     }
