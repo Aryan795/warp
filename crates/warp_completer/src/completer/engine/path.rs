@@ -145,7 +145,7 @@ pub(crate) async fn sorted_cd_directories(
     matcher: MatchStrategy,
     ctx: &dyn PathCompletionContext,
 ) -> Vec<MatchedSuggestion> {
-    if !is_cdpath_eligible_token(path.as_str()) {
+    if !is_cdpath_eligible_token(path.as_str(), ctx) {
         return sorted_directories_relative_to(path, matcher, ctx).await;
     }
 
@@ -214,16 +214,30 @@ fn resolve_cdpath_entry(entry: &str, ctx: &dyn PathCompletionContext) -> TypedPa
     }
 }
 
-fn is_cdpath_eligible_token(token: &str) -> bool {
-    !(token.starts_with('/')
+fn is_cdpath_eligible_token(token: &str, ctx: &dyn PathCompletionContext) -> bool {
+    if token.starts_with('/')
         || token.starts_with('~')
         || token.starts_with("./")
         || token.starts_with("../")
         || token == "."
         || token == ".."
-        // A `$VAR/`/`${VAR}/` reference expands to an absolute path (or resolves to nothing),
-        // so CDPATH must be skipped for it just like any other absolute token.
-        || leading_env_var_reference(token, &['/']).is_some())
+    {
+        return false;
+    }
+
+    let Some((var_name, _)) = leading_env_var_reference(token, &['/']) else {
+        return true;
+    };
+
+    // Only skip CDPATH when the variable is known to resolve to an absolute path, matching the
+    // treatment of any other absolute token. A variable that resolves to a relative value should
+    // still be searched via CDPATH: `SplitPath` joins a relative value against `ctx.pwd()`, and
+    // `sorted_cd_directories` re-resolves the token against a `CdpathOverrideContext` per entry,
+    // so each CDPATH entry naturally gets prepended to the resolved relative path -- matching how
+    // a relative `$CDPATH` entry itself is resolved. An unset variable still yields no
+    // suggestions regardless, via `SplitPath`'s unresolved-variable handling.
+    !ctx.environment_variable(var_name)
+        .is_some_and(|value| TypedPathBuf::from(value).is_absolute())
 }
 
 /// Wraps a `PathCompletionContext` and overrides only `pwd()` so we can reuse
@@ -507,8 +521,23 @@ impl SplitPath {
                     .filter(|value| !value.is_empty())
                 {
                     Some(value) => {
-                        let mut base = TypedPathBuf::from(value);
-                        base.push(directory_relative_path_name[consumed..].replace(r"\~", "~"));
+                        let value_path = TypedPathBuf::from(value);
+                        // A relative value resolves against the shell's pwd, mirroring how a
+                        // relative `$CDPATH` entry is resolved in `resolve_cdpath_entry`.
+                        let mut base = if value_path.is_absolute() {
+                            value_path
+                        } else {
+                            ctx.pwd().join(value_path)
+                        };
+                        // Strip any extra leading separators from the remainder before joining:
+                        // `TypedPathBuf::push` treats an absolute suffix as a replacement for the
+                        // receiver, so joining an unstripped remainder like "/App" (from a
+                        // doubled separator, e.g. `$VAR//App`) would discard `base` entirely
+                        // instead of appending to it.
+                        let rest = directory_relative_path_name[consumed..]
+                            .trim_start_matches(path_separators)
+                            .replace(r"\~", "~");
+                        base.push(rest);
                         (base, false)
                     }
                     None => (TypedPathBuf::from(""), true),

@@ -830,3 +830,122 @@ pub fn test_sorted_cd_directories_ignores_cdpath_for_env_var_token() {
 
     assert_eq!(displays, vec!["src/"]);
 }
+
+/// A repeated separator immediately after the variable reference (e.g. `$VAR//App`) must not be
+/// treated as an absolute suffix that discards the resolved variable base: `TypedPathBuf::push`
+/// replaces its receiver outright when pushed an absolute path, so an unstripped remainder like
+/// `/src` would otherwise search `/` instead of the variable's value. Covers both the bare and
+/// brace forms.
+#[cfg(unix)]
+#[test]
+pub fn test_path_completions_env_var_repeated_separator_resolves() {
+    let ctx = mock_path_completion_ctx_env_var();
+
+    assert_eq!(
+        warpui_core::r#async::block_on(sorted_directories_relative_to(
+            &ParsedToken::new("$PROJ//src"),
+            MatchStrategy::Fuzzy,
+            &ctx
+        ))
+        .into_iter()
+        .map(|matched_suggestion| matched_suggestion.suggestion)
+        .collect_vec(),
+        vec![
+            Suggestion::new(
+                "src/",
+                "$PROJ//src/",
+                Some("Directory".into()),
+                SuggestionType::Argument,
+                Priority::default(),
+            )
+            .with_icon_override(IconType::Folder)
+            .with_file_type(EngineFileType::Directory),
+        ]
+    );
+
+    assert_eq!(
+        warpui_core::r#async::block_on(sorted_directories_relative_to(
+            &ParsedToken::new("${PROJ}//src"),
+            MatchStrategy::Fuzzy,
+            &ctx
+        ))
+        .into_iter()
+        .map(|matched_suggestion| matched_suggestion.suggestion)
+        .collect_vec(),
+        vec![
+            Suggestion::new(
+                "src/",
+                "${PROJ}//src/",
+                Some("Directory".into()),
+                SuggestionType::Argument,
+                Priority::default(),
+            )
+            .with_icon_override(IconType::Folder)
+            .with_file_type(EngineFileType::Directory),
+        ]
+    );
+}
+
+/// A variable whose value is relative (rather than absolute) resolves against the shell's pwd,
+/// not the Warp process's own cwd.
+#[cfg(unix)]
+#[test]
+pub fn test_path_completions_env_var_relative_value_resolves_against_pwd() {
+    let ctx = MockPathCompletionContext::new(TypedPathBuf::from("/work/proj"))
+        .with_entries_in_pwd([dir_entry("local-only")])
+        .with_entries(
+            TypedPathBuf::from("/work/proj/projects"),
+            [dir_entry("app")],
+        )
+        .with_environment_variable("ROOT", "projects");
+
+    assert_eq!(
+        warpui_core::r#async::block_on(sorted_directories_relative_to(
+            &ParsedToken::new("$ROOT/"),
+            MatchStrategy::Fuzzy,
+            &ctx
+        ))
+        .into_iter()
+        .map(|matched_suggestion| matched_suggestion.suggestion)
+        .collect_vec(),
+        vec![
+            Suggestion::new(
+                "app/",
+                "$ROOT/app/",
+                Some("Directory".into()),
+                SuggestionType::Argument,
+                Priority::default(),
+            )
+            .with_icon_override(IconType::Folder)
+            .with_file_type(EngineFileType::Directory),
+        ]
+    );
+}
+
+/// When a `$VAR/` token resolves to a *relative* path, `$CDPATH` eligibility must follow that
+/// resolved-path semantics (not assume every `$VAR/` token is absolute): the relative value gets
+/// resolved against each `$CDPATH` entry in turn, exactly like a relative `$CDPATH` entry itself
+/// is resolved against pwd.
+#[cfg(unix)]
+#[test]
+pub fn test_sorted_cd_directories_applies_cdpath_for_relative_env_var_value() {
+    let ctx = MockPathCompletionContext::new(TypedPathBuf::from("/work/proj"))
+        .with_entries_in_pwd([dir_entry("local-only")])
+        .with_entries(
+            TypedPathBuf::from("/srv/projects/relvar"),
+            [dir_entry("from-cdpath")],
+        )
+        .with_environment_variable("RELVAR", "relvar")
+        .with_cdpath("/srv/projects".to_owned());
+
+    let displays: Vec<String> = warpui_core::r#async::block_on(sorted_cd_directories(
+        &ParsedToken::new("$RELVAR/"),
+        MatchStrategy::CaseInsensitive,
+        &ctx,
+    ))
+    .into_iter()
+    .map(|m| m.suggestion.display.to_string())
+    .collect();
+
+    assert_eq!(displays, vec!["from-cdpath/"]);
+}

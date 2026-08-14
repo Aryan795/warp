@@ -1349,7 +1349,10 @@ pub fn test_env_var_path_completion() {
         .with_environment_variable("PROJ", proj_dir.to_string_lossy().to_string());
 
     let env_vars = HashSet::from_iter([("PROJ".into())]);
-    let ctx = FakeCompletionContext::new(CommandRegistry::default())
+    // Use a test-only registry (rather than `CommandRegistry::default()`) so this test doesn't
+    // depend on the real `warp` CLI signature registration, which checks feature flags that
+    // aren't initialized in this crate's test binary.
+    let ctx = FakeCompletionContext::new(create_test_command_registry([cd_signature()]))
         .with_path_completion_context(path_ctx)
         .with_top_level_commands(["cd"])
         .with_environment_variable_names(env_vars);
