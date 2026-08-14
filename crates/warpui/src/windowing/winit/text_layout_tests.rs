@@ -698,6 +698,141 @@ fn test_combining_marks_are_placed_with_gpos_offsets() -> Result<()> {
     Ok(())
 }
 
+/// Regression coverage for CSAT-10272: non-Latin single-line UI labels (e.g. the file tree and
+/// completion menu rows, both of which use `Text::new_inline` -> `layout_line`) rendered blank.
+/// Root cause: those elements are frequently laid out with an unbounded (`f32::INFINITY`)
+/// max-width constraint, e.g. as a non-flexible child of a `Flex`
+/// (`SizeConstraint::child_constraint_along_axis` always sets the main-axis max to `INFINITY`).
+/// `layout_line` forwarded that width straight into cosmic-text's `ShapeLine::layout`, whose
+/// `Align::Left` alignment math for RTL runs computes `line_width - visual_line.w` and then
+/// `start_x - alignment_correction`. With an infinite `line_width` this becomes
+/// `INFINITY - INFINITY`, i.e. NaN, so every glyph in the run got a NaN position and rendered
+/// nothing. LTR runs are unaffected because their alignment correction is always zero, which is
+/// why Latin (and, as verified below, CJK) labels were never affected--only RTL (Arabic/Hebrew)
+/// ones were.
+/// Asserts a laid-out line has at least one run with at least one glyph, and that every glyph's
+/// position and width are finite. Also spot-checks that the line has a positive advance width.
+fn assert_line_has_finite_glyphs_with_positive_width(line: &Line, text: &str) {
+    let glyphs = line
+        .runs
+        .iter()
+        .flat_map(|run| run.glyphs.iter())
+        .collect_vec();
+    assert!(
+        !glyphs.is_empty(),
+        "expected at least one glyph laying out {text:?}, got none"
+    );
+    for glyph in &glyphs {
+        assert!(
+            glyph.position_along_baseline.x().is_finite()
+                && glyph.position_along_baseline.y().is_finite(),
+            "expected finite glyph position laying out {text:?}, got {:?}",
+            glyph.position_along_baseline
+        );
+        assert!(
+            glyph.width.is_finite(),
+            "expected finite glyph width laying out {text:?}, got {}",
+            glyph.width
+        );
+    }
+    assert!(
+        line.width.is_finite() && line.width > 0.,
+        "expected a positive, finite advance width laying out {text:?}, got {}",
+        line.width
+    );
+}
+
+/// A pure (no spaces) Arabic string laid out with an unbounded max width, matching how
+/// `Text::new_inline` is laid out as a non-flexible child of a `Flex` (e.g. the completion menu's
+/// list row, `app/src/input_suggestions.rs`).
+#[test]
+fn test_layout_line_arabic_with_unbounded_width_produces_finite_glyphs() -> Result<()> {
+    let (font_db, roboto) = init_fonts();
+    let text = "التعرف";
+
+    let line = font_db.text_layout_system().layout_line(
+        text,
+        LineStyle {
+            font_size: FONT_SIZE,
+            line_height_ratio: DEFAULT_UI_LINE_HEIGHT_RATIO,
+            baseline_ratio: DEFAULT_TOP_BOTTOM_RATIO,
+            fixed_width_tab_size: None,
+        },
+        &[(
+            0..text.chars().count(),
+            StyleAndFont::new(roboto, Properties::default(), TextStyle::new()),
+        )],
+        f32::INFINITY,
+        crate::text_layout::ClipConfig::default(),
+    );
+
+    assert_line_has_finite_glyphs_with_positive_width(&line, text);
+
+    Ok(())
+}
+
+/// An Arabic string containing spaces, laid out with an unbounded max width. Spaces only affect
+/// shell escaping of the completion replacement elsewhere in the product; they should have no
+/// bearing on whether the label itself lays out with finite, visible glyphs.
+#[test]
+fn test_layout_line_arabic_with_spaces_and_unbounded_width_produces_finite_glyphs() -> Result<()> {
+    let (font_db, roboto) = init_fonts();
+    let text = "التعرف على خط اليد";
+
+    let line = font_db.text_layout_system().layout_line(
+        text,
+        LineStyle {
+            font_size: FONT_SIZE,
+            line_height_ratio: DEFAULT_UI_LINE_HEIGHT_RATIO,
+            baseline_ratio: DEFAULT_TOP_BOTTOM_RATIO,
+            fixed_width_tab_size: None,
+        },
+        &[(
+            0..text.chars().count(),
+            StyleAndFont::new(roboto, Properties::default(), TextStyle::new()),
+        )],
+        f32::INFINITY,
+        crate::text_layout::ClipConfig::default(),
+    );
+
+    assert_line_has_finite_glyphs_with_positive_width(&line, text);
+
+    Ok(())
+}
+
+/// A CJK (LTR) string laid out with an unbounded max width. CJK filenames have separately been
+/// reported as blank in the file tree (CSAT-7199, CSAT-7810, CSAT-8095 / CODE-1155), but since CJK
+/// is left-to-right its `Align::Left` alignment correction is always zero, so it can never hit the
+/// `INFINITY - INFINITY` NaN this fix addresses. This test documents that the unbounded-width
+/// layout path already produced finite glyph positions for CJK before and after this fix--i.e.
+/// the older CJK reports are a different bug (most likely missing-glyph/font-fallback coverage
+/// for CJK in the selected UI font, not this shared bidi/alignment defect).
+#[test]
+fn test_layout_line_cjk_with_unbounded_width_produces_finite_glyphs() -> Result<()> {
+    let (font_db, roboto) = init_fonts();
+    let text = "测试文件";
+
+    let line = font_db.text_layout_system().layout_line(
+        text,
+        LineStyle {
+            font_size: FONT_SIZE,
+            line_height_ratio: DEFAULT_UI_LINE_HEIGHT_RATIO,
+            baseline_ratio: DEFAULT_TOP_BOTTOM_RATIO,
+            fixed_width_tab_size: None,
+        },
+        &[(
+            0..text.chars().count(),
+            StyleAndFont::new(roboto, Properties::default(), TextStyle::new()),
+        )],
+        f32::INFINITY,
+        crate::text_layout::ClipConfig::default(),
+    );
+
+    assert_line_has_finite_glyphs_with_positive_width(&line, text);
+
+    Ok(())
+}
+
 /// Checks that the head indent and first line's width don't exceed the frame's width.
 fn first_line_bounded(frame: &TextFrame, first_line_indent: f32, frame_width: f32) -> bool {
     let first_line_width = frame.lines().first().unwrap().width;
