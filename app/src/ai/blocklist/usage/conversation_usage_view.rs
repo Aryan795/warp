@@ -57,12 +57,12 @@ pub struct ConversationUsageInfo {
     pub lines_removed: i32,
     pub commands_executed: i32,
     /// Cumulative per-category charged-usage breakdown (input/output/
-    /// cache-read/cache-write cost + token counts) for the whole
-    /// conversation so far, gated by `FeatureFlag::PricingTransparency`.
-    /// `None` when the server didn't provide it (flag off, or the source
-    /// doesn't yet carry it — e.g. the settings usage-history surface,
-    /// which sources this view from a GraphQL query that doesn't yet
-    /// expose the breakdown; documented gap, see `gql_convert.rs`).
+    /// cache-read/cache-write cost) for the whole conversation so far,
+    /// gated by `FeatureFlag::PricingTransparency`. `None` when the server
+    /// didn't provide it (flag off) or the source doesn't carry it. Token
+    /// counts are always zero when sourced from GraphQL's aggregate-only
+    /// fields (see `gql_convert.rs`), which this section's rendering
+    /// doesn't need.
     pub charged_usage: Option<ChargedUsageTotals>,
 }
 

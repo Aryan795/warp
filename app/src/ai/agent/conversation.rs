@@ -1171,6 +1171,21 @@ impl AIConversation {
             self.conversation_usage_metadata
                 .total_provider_cost_in_cents = Some(total_provider_cost_in_cents);
         }
+        // Same never-regress reasoning as `total_provider_cost_in_cents`
+        // above, applied to the per-category charged-usage aggregate: this
+        // is the historical/GraphQL-sourced path (conversation reload after
+        // restart, cloud metadata merge), which must not clobber a fresher
+        // total the live proto stream already accumulated.
+        if let Some(total_charged_usage) = metadata.usage.total_charged_usage
+            && self
+                .conversation_usage_metadata
+                .total_charged_usage
+                .is_none_or(|current| {
+                    total_charged_usage.total_cost_in_cents() >= current.total_cost_in_cents()
+                })
+        {
+            self.conversation_usage_metadata.total_charged_usage = Some(total_charged_usage);
+        }
         // Usage evidence is derived from the metadata's contents (not its
         // presence) so a zero-usage conversation keeps the footer entry
         // hidden.
