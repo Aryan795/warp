@@ -602,29 +602,23 @@ fn test_fully_truncated_run_paints_no_background() {
     });
 }
 
-/// Regression test for CSAT-10272 (GH#15146): Arabic/CJK file names rendered as
-/// blank labels in the file explorer and autocomplete list rows.
-///
-/// A purely-RTL run is laid out (correctly) with glyphs stored in logical
-/// (vector) order while their `x` position *decreases* per glyph, since the pen
-/// sweeps right-to-left. `paint_internal`'s default End+Fade truncation used to
-/// walk `run.glyphs` in vector order and stop as soon as a width budget was
-/// exhausted, silently assuming vector order matched on-screen (ascending-x)
-/// order. For a narrow paint width that assumption spent the whole budget on the
-/// off-screen glyphs at the logical start of the run and the loop stopped before
-/// ever reaching the glyphs that actually fall within the visible bounds --
-/// painting nothing at all.
+/// A run's glyphs are not necessarily monotonic in `x` (a purely-RTL run
+/// stores glyphs in logical order while `x` descends per glyph, since the pen
+/// sweeps right-to-left). Visibility under End+Fade clipping must therefore be
+/// decided per glyph from its own position: exactly the glyphs whose `x` falls
+/// within `[bounds.origin.x(), bounds.origin.x() + available_width)` should be
+/// painted, regardless of their order in the run.
 #[test]
-fn test_paint_rtl_line_in_narrow_bounds_shows_visible_glyphs() {
+fn test_paint_line_in_narrow_bounds_paints_exactly_the_glyphs_within_bounds() {
     App::test((), |mut app| async move {
         app.update(|ctx| {
             let glyph_width = 12.0;
             let glyph_count = 10usize;
+            let available_width = 50.;
 
-            // Mimic a purely-RTL run: glyphs are stored in ascending logical
-            // (vector) order, but their baseline x position descends from
-            // `(glyph_count - 1) * glyph_width` down to `0`.
-            let glyphs = (0..glyph_count)
+            // Descending `x` per glyph, as in a purely-RTL run: index 0 is at the
+            // highest `x` (off-screen) and the last index is at `x = 0`.
+            let glyphs: Vec<Glyph> = (0..glyph_count)
                 .map(|i| Glyph {
                     id: 0,
                     position_along_baseline: vec2f((glyph_count - 1 - i) as f32 * glyph_width, 0.),
@@ -632,6 +626,18 @@ fn test_paint_rtl_line_in_narrow_bounds_shows_visible_glyphs() {
                     width: glyph_width,
                 })
                 .collect();
+
+            let mut expected_visible_positions: Vec<f32> = glyphs
+                .iter()
+                .map(|glyph| glyph.position_along_baseline.x())
+                .filter(|&x| x >= 0. && x < available_width)
+                .collect();
+            expected_visible_positions.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            assert!(
+                !expected_visible_positions.is_empty(),
+                "test setup should place at least one glyph within the visible bounds",
+            );
+
             let run = Run {
                 font_id: FontId(0),
                 glyphs,
@@ -645,7 +651,6 @@ fn test_paint_rtl_line_in_narrow_bounds_shows_visible_glyphs() {
                 font_size: 12.,
                 line_height_ratio: 1.,
                 baseline_ratio: DEFAULT_TOP_BOTTOM_RATIO,
-                // Default End+Fade clipping -- what file-tree and autocomplete rows use.
                 clip_config: Some(ClipConfig::default()),
                 ascent: 10.,
                 descent: 2.,
@@ -653,9 +658,7 @@ fn test_paint_rtl_line_in_narrow_bounds_shows_visible_glyphs() {
                 chars_with_missing_glyphs: Vec::new(),
             };
 
-            // Bounds (50px) are much narrower than the line's natural width (120px),
-            // matching a file-tree/autocomplete row too narrow for the full name.
-            let available_width = 50.;
+            // Bounds narrower than the line's natural width (120px) force truncation.
             let mut scene = Scene::new(1., rendering::Config::default());
             line.paint(
                 RectF::new(Vector2F::zero(), Vector2F::new(available_width, 20.)),
@@ -665,22 +668,22 @@ fn test_paint_rtl_line_in_narrow_bounds_shows_visible_glyphs() {
                 &mut scene,
             );
 
-            let painted_x_positions: Vec<f32> = scene
+            let mut painted_positions: Vec<f32> = scene
                 .layers()
                 .flat_map(|layer| layer.glyphs.iter())
                 .map(|glyph| glyph.position.x())
                 .collect();
+            painted_positions.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-            assert!(
-                !painted_x_positions.is_empty(),
-                "expected at least one glyph within the visible bounds to be painted, \
-                 but the row was left blank",
+            assert_eq!(
+                painted_positions.len(),
+                expected_visible_positions.len(),
+                "expected exactly the glyphs within [0, {available_width}) to be painted; \
+                 painted {painted_positions:?}, expected {expected_visible_positions:?}",
             );
-            assert!(
-                painted_x_positions.iter().all(|&x| x < available_width),
-                "expected only glyphs within the visible bounds to be painted, got \
-                 positions {painted_x_positions:?}",
-            );
+            for (painted, expected) in painted_positions.iter().zip(&expected_visible_positions) {
+                assert_approx_eq!(f32, *painted, *expected);
+            }
         });
     });
 }

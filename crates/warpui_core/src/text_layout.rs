@@ -1478,17 +1478,13 @@ impl Line {
             itertools::Either::Right(self.runs.iter())
         };
 
-        // For the common End+Fade case (which is also what a `None` clip_config
-        // falls back to), truncation must be decided from each glyph's own laid-out
-        // position rather than by sequentially consuming a width budget in vector
-        // (storage) order. Vector order only matches on-screen (ascending-x) order
-        // for LTR text: for a purely-RTL run, glyphs are stored in logical order
-        // while their `x` position *decreases* per glyph (the pen sweeps
-        // right-to-left). Consuming the width budget in vector order therefore
-        // spends it on the glyphs at the visually-off-screen end of the run and
-        // never reaches the glyphs that actually fall within `available_width`,
-        // which is exactly why RTL file names rendered as blank labels while their
-        // LTR counterparts (where vector order and screen order coincide) did not.
+        // A glyph's visibility can only be decided from its own laid-out position,
+        // not from sequentially consuming a width budget in vector (storage) order:
+        // vector order only matches on-screen (ascending-x) order for LTR text. In a
+        // purely-RTL run, glyphs are stored in logical order while their `x`
+        // position *decreases* per glyph (the pen sweeps right-to-left), so a
+        // sequential budget would be spent on the glyphs at the visually-off-screen
+        // end of the run before ever reaching the ones within `available_width`.
         let use_position_based_visibility = !is_start_clipping && clip_style == ClipStyle::Fade;
 
         let mut remaining_width = match clip_style {
@@ -1624,10 +1620,10 @@ impl Line {
                 }
 
                 if use_position_based_visibility {
-                    // Skip (rather than stop at) glyphs beyond the visible edge: for
-                    // RTL runs, later glyphs in vector order can still be on-screen
-                    // even after an off-screen one, so we cannot assume everything
-                    // past this glyph is also off-screen.
+                    // Skip glyphs beyond the visible edge without stopping the loop:
+                    // in vector order, a run's glyphs are not guaranteed to be
+                    // monotonic in `x`, so a later glyph can still be on-screen even
+                    // after an off-screen one.
                     let glyph_x = line_origin.x() + glyph.position_along_baseline.x();
                     if glyph_x >= line_origin.x() + available_width {
                         continue;

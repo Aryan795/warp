@@ -827,15 +827,10 @@ impl InputSuggestions {
                             }
 
                             row.add_child(
-                                // Without this, `Flex` lays out `display_text` at its
-                                // unconstrained natural width (see the "non-flexible children
-                                // are rendered at an unbounded size" comment in `Flex::layout`),
-                                // so a long name never gets a real max width to clip/fade
-                                // against. That is harmless for short (e.g. Latin) names, but for
-                                // a name wider than the row it leaves the row's own clip bounds
-                                // (and thus `Line::paint_internal`'s truncation) never triggered,
-                                // which is how a long RTL file name ended up painted completely
-                                // outside the visible row instead of being readably truncated.
+                                // `Flex` lays out non-flexible children (see the "unbounded
+                                // size" comment in `Flex::layout`) at their unconstrained
+                                // natural width, so `display_text` needs `Shrinkable` to
+                                // receive a real bounded max width to clip/fade against.
                                 Shrinkable::new(1., {
                                     let mut display_text = Text::new_inline(
                                         display_text_str,
