@@ -1438,9 +1438,19 @@ impl platform::TextLayoutSystem for TextLayoutSystem {
                 tab_width,
             );
 
+            // See the comment in `layout_line` above: we only forward `max_width` here when it
+            // is finite. `Wrap::WordOrGlyph`'s fitting checks already treat a `None` width as
+            // "unbounded" via `width_opt.unwrap_or(f32::INFINITY)`, so this doesn't change
+            // wrapping decisions at all (both `None` and `Some(f32::INFINITY)` produce the same
+            // unbounded fitting behavior). It only avoids feeding `f32::INFINITY` into the
+            // `Align::Left` + RTL alignment math (`line_width - visual_line.w`, then
+            // `start_x - alignment_correction`), which otherwise computes `INFINITY - INFINITY`,
+            // i.e. NaN, glyph positions for a soft-wrapped RTL paragraph that ends up fitting
+            // on a single visual line because nothing needs to wrap at an unbounded width.
+            let bounded_max_width = max_width.is_finite().then_some(max_width);
             let layout_lines = shape_line.layout(
                 line_style.font_size,
-                Some(max_width),
+                bounded_max_width,
                 Wrap::WordOrGlyph,
                 Some(Align::Left),
                 first_line_head_indent,
