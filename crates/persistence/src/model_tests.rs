@@ -428,14 +428,10 @@ fn is_entirely_passive_is_unknown_without_a_parentless_task() {
     assert_eq!(summary.is_entirely_passive, None);
 }
 
-/// Whether an `InvokeSkill` message renders a display query depends on client
-/// state this crate cannot see, so it degrades to unknown rather than guessing.
-#[test]
-fn is_entirely_passive_is_unknown_when_the_root_invokes_a_skill() {
-    let mut root = auto_code_diff_task("root");
-    root.messages.push(api::Message {
-        id: "root-invoke-skill".to_string(),
-        task_id: "root".to_string(),
+fn invoke_skill_message(task_id: &str) -> api::Message {
+    api::Message {
+        id: format!("{task_id}-invoke-skill"),
+        task_id: task_id.to_string(),
         message: Some(api::message::Message::InvokeSkill(
             api::message::InvokeSkill {
                 skill: Some(Default::default()),
@@ -443,12 +439,79 @@ fn is_entirely_passive_is_unknown_when_the_root_invokes_a_skill() {
             },
         )),
         ..Default::default()
-    });
+    }
+}
+
+/// Whether an `InvokeSkill` message renders a display query depends on client
+/// state this crate cannot see, so a root that pairs one with a passive request
+/// degrades to unknown rather than guessing.
+#[test]
+fn is_entirely_passive_is_unknown_when_the_root_invokes_a_skill() {
+    let mut root = auto_code_diff_task("root");
+    root.messages.push(invoke_skill_message("root"));
 
     assert_eq!(
         AgentConversationSummary::from_tasks([&root]).is_entirely_passive,
         None
     );
+}
+
+/// An unclassifiable message can only resolve to a user query or to nothing,
+/// never to a passive request. Without a passive request in the root the answer
+/// is settled either way, so a slash-command conversation must not be pushed
+/// onto the slow path.
+#[test]
+fn is_entirely_passive_is_false_for_a_skill_invocation_without_a_passive_request() {
+    let mut root = parentless_task("root", 0);
+    root.messages = vec![invoke_skill_message("root")];
+
+    assert_eq!(
+        AgentConversationSummary::from_tasks([&root]).is_entirely_passive,
+        Some(false)
+    );
+}
+
+/// Restore treats `Some(Dependencies { parent_task_id: "" })` as parentless (via
+/// `TaskExt::parent_id`), so the summary must too. In the legacy QUALITY-774
+/// `[stub + real root]` shape, answering from the empty stub instead of the real
+/// root would call a passive-only conversation active and restore it with a
+/// spurious "Previous session" banner.
+#[test]
+fn is_entirely_passive_treats_an_empty_parent_task_id_as_parentless() {
+    let mut real_root = child_task("server-root-id", "");
+    real_root.messages = vec![auto_code_diff_message("server-root-id")];
+
+    let summary = AgentConversationSummary::from_tasks([
+        &parentless_task("optimistic-stub-uuid", 0),
+        &real_root,
+    ]);
+    assert_eq!(summary.is_entirely_passive, Some(true));
+
+    // The same shape with a real user query in the real root.
+    let mut real_root = child_task("server-root-id", "");
+    real_root.messages = vec![user_query_message("server-root-id", "Initial query", None)];
+
+    let summary = AgentConversationSummary::from_tasks([
+        &parentless_task("optimistic-stub-uuid", 0),
+        &real_root,
+    ]);
+    assert_eq!(summary.is_entirely_passive, Some(false));
+
+    // Only `restored_root_task` prefers the message-bearing candidate; the
+    // title/query finder shares the parentless rule but still takes the first
+    // candidate in order, so a leading stub still wins there. That asymmetry is
+    // pre-existing and out of scope here — pinned so a future change to the
+    // finder is a deliberate one.
+    let mut real_root_with_title = real_root.clone();
+    real_root_with_title.description = "Root title".to_string();
+    let summary = AgentConversationSummary::from_tasks([
+        &parentless_task("optimistic-stub-uuid", 0),
+        &real_root_with_title,
+    ]);
+    assert_eq!(summary.title, "");
+    let summary = AgentConversationSummary::from_tasks([&real_root_with_title]);
+    assert_eq!(summary.title, "Root title");
+    assert_eq!(summary.initial_query, "Initial query");
 }
 
 #[test]

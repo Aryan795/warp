@@ -1040,9 +1040,16 @@ pub fn api_task_initial_working_directory(task: &api::Task) -> Option<String> {
 
 /// Current [`AgentConversationSummary`] schema version.
 ///
-/// Bump this whenever a derived field is added or its meaning changes, so
-/// summaries written by older clients are re-derived from their task snapshot
-/// exactly once instead of being trusted with a missing or stale field.
+/// Bump this when a derived field is *added*, so summaries written by older
+/// clients are re-derived from their task snapshot exactly once instead of
+/// being trusted with a field they never carried.
+///
+/// Only additive changes belong here, because
+/// [`AgentConversationSummary::is_current_version`] accepts any version at or
+/// above this one — otherwise two clients on adjacent versions would re-derive
+/// each other's rows forever. Changing what an *existing* field means requires
+/// a new field, not a bump: an older client would keep reading the old field
+/// with its new meaning.
 pub const AGENT_CONVERSATION_SUMMARY_VERSION: u32 = 1;
 
 /// Task-derived conversation metadata, serialized into the `summary` column
@@ -1081,10 +1088,10 @@ pub struct AgentConversationSummary {
     /// conversations without loading and decoding their tasks.
     ///
     /// `None` means "the persisted snapshot cannot answer this": the root task
-    /// restore would pick is absent or ambiguous, or the root carries a message
-    /// whose rendered input can't be determined from the proto alone. Consumers
-    /// must fall back to a full load rather than guessing, so an unknown value
-    /// is only ever slower, never wrong.
+    /// restore would pick is absent or ambiguous, or the root pairs a passive
+    /// request with a message whose rendered input can't be determined from the
+    /// proto alone. Consumers must fall back to a full load rather than
+    /// guessing, so an unknown value is only ever slower, never wrong.
     #[serde(default)]
     pub is_entirely_passive: Option<bool>,
 }
@@ -1112,6 +1119,15 @@ enum RestoredMessageKind {
 /// Every arm mirrors a specific branch of that conversion; keep the two in
 /// sync. Unclassifiable messages return [`RestoredMessageKind::Unknown`] so
 /// callers degrade to a full load instead of a wrong answer.
+///
+/// The exhaustive `match` below only guards against new *proto* variants. It is
+/// silent when the client changes how an existing message renders, which is the
+/// real drift hazard in both directions: editing `into_exchanges` or
+/// `display_query` without editing this function, or the reverse. The
+/// `filter_matches_loaded_behavior_*` tests in
+/// `app/src/ai/restored_conversations_tests.rs` are what catches that — each one
+/// asserts this classifier's verdict against the verdict computed from the
+/// fully restored conversation — so extend them when either side changes.
 fn restored_message_kind(message: &api::Message) -> RestoredMessageKind {
     use api::message::Message as M;
     use api::message::system_query::Type as SystemQueryType;
@@ -1207,20 +1223,30 @@ fn restored_message_kind(message: &api::Message) -> RestoredMessageKind {
     }
 }
 
+/// The tasks restore treats as root candidates: those with no `dependencies` at
+/// all, or with `dependencies` whose `parent_task_id` is empty.
+///
+/// Mirrors `TaskExt::parent_id`, which restore filters candidates through, and
+/// matches [`tasks_are_restorable`]'s rule.
+fn parentless_tasks<'a, 'tasks>(
+    tasks: &'tasks [&'a api::Task],
+) -> impl Iterator<Item = &'a api::Task> + 'tasks {
+    tasks.iter().copied().filter(|task| {
+        task.dependencies
+            .as_ref()
+            .is_none_or(|deps| deps.parent_task_id.is_empty())
+    })
+}
+
 /// Picks the task that restore would use as the conversation's root, mirroring
-/// `AIConversation::new_restored_synthesizing_on_empty`: a task counts as
-/// parentless only when it carries no `dependencies` at all, and a parentless
-/// candidate with messages wins over an empty stub.
+/// `AIConversation::new_restored_synthesizing_on_empty`: candidates are the
+/// [`parentless_tasks`], and one carrying messages wins over an empty stub.
 ///
 /// Returns `None` when restore's own pick would be ambiguous (several
 /// message-bearing parentless tasks, resolved there by hash iteration order)
 /// or when restore would fail outright (no parentless task at all).
 fn restored_root_task<'a>(tasks: &[&'a api::Task]) -> Option<&'a api::Task> {
-    let parentless: Vec<&'a api::Task> = tasks
-        .iter()
-        .copied()
-        .filter(|task| task.dependencies.is_none())
-        .collect();
+    let parentless: Vec<&'a api::Task> = parentless_tasks(tasks).collect();
 
     let mut with_messages = parentless
         .iter()
@@ -1263,7 +1289,12 @@ fn derive_is_entirely_passive(tasks: &[&api::Task]) -> Option<bool> {
         }
     }
 
-    if has_unclassifiable_message {
+    // An unclassifiable message resolves to either a user query or nothing,
+    // never to a passive request, so it can only change the answer once a
+    // passive request has been found. Bailing out unconditionally would send
+    // every conversation started from a slash command down the full-load path
+    // on every startup.
+    if has_passive_request && has_unclassifiable_message {
         return None;
     }
     Some(has_passive_request)
@@ -1299,7 +1330,10 @@ impl AgentConversationSummary {
             }
         }
 
-        let root_task = tasks.iter().find(|task| task.dependencies.is_none());
+        // Incidental to the pane-restore fix: this finder predates it and only
+        // feeds `initial_query`/`title`, but it is aligned with
+        // `parentless_tasks` so the file has one definition of "parentless".
+        let root_task = parentless_tasks(&tasks).next();
 
         // The first user query in the root task (or, for a passive code
         // diff, the summary of the diff).

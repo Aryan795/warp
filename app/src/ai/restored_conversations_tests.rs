@@ -148,11 +148,12 @@ mod db_backed {
         }
     }
 
-    /// Writes a conversation to `conn` and returns a store reading from it.
-    fn store_with_conversation(
+    /// Writes a conversation through the normal upsert path and returns the
+    /// database it lives in.
+    fn connection_with_conversation(
         conversation_id: AIConversationId,
         messages: Vec<api::Message>,
-    ) -> RestoredAgentConversations {
+    ) -> SqliteConnection {
         let mut conn = test_connection();
         let task_id = format!("task-{conversation_id}");
         let messages = messages
@@ -167,7 +168,36 @@ mod db_backed {
             &conversation_id.to_string(),
             [&root_task(&task_id, messages)],
         );
-        RestoredAgentConversations::new_with_db_connection(conn)
+        conn
+    }
+
+    fn store_with_conversation(
+        conversation_id: AIConversationId,
+        messages: Vec<api::Message>,
+    ) -> RestoredAgentConversations {
+        RestoredAgentConversations::new_with_db_connection(connection_with_conversation(
+            conversation_id,
+            messages,
+        ))
+    }
+
+    fn delete_task_rows(conn: &mut SqliteConnection, conversation: &str) {
+        use diesel::prelude::*;
+
+        use crate::persistence::schema::agent_tasks::dsl::*;
+        diesel::delete(agent_tasks.filter(conversation_id.eq(conversation)))
+            .execute(conn)
+            .expect("task rows should delete");
+    }
+
+    fn clear_summary(conn: &mut SqliteConnection, conversation: &str) {
+        use diesel::prelude::*;
+
+        use crate::persistence::schema::agent_conversations::dsl::*;
+        diesel::update(agent_conversations.filter(conversation_id.eq(conversation)))
+            .set(summary.eq(None::<String>))
+            .execute(conn)
+            .expect("summary reset should succeed");
     }
 
     /// The filter decision must match what evaluating the loaded conversation
@@ -244,5 +274,42 @@ mod db_backed {
         assert!(store.should_restore_into_pane(&conversation_id));
         assert!(store.take_conversation(&conversation_id).is_some());
         assert_eq!(store.cached_conversation_count(), 0);
+    }
+
+    /// Pins that the decision actually comes out of the `summary` column rather
+    /// than out of the task payloads — which is the whole fix, and which every
+    /// other test here would keep passing without.
+    ///
+    /// A passive conversation with no `agent_tasks` rows is the shape where the
+    /// two paths disagree: the summary says "entirely passive" and rejects,
+    /// while a fallback load finds no tasks, synthesizes an empty root, and
+    /// accepts. The second half clears the summary to show the fallback really
+    /// does reach the opposite answer, so the first assertion is discriminating
+    /// rather than vacuous.
+    #[test]
+    fn the_filter_answers_from_the_summary_not_from_the_task_rows() {
+        let conversation_id = AIConversationId::new();
+        let mut conn =
+            connection_with_conversation(conversation_id, vec![auto_code_diff_message("root")]);
+        delete_task_rows(&mut conn, &conversation_id.to_string());
+
+        let mut store = RestoredAgentConversations::new_with_db_connection(conn);
+        assert!(
+            !store.should_restore_into_pane(&conversation_id),
+            "the filter must be answered from the summary column alone"
+        );
+        assert_eq!(store.cached_conversation_count(), 0);
+
+        let conversation_id = AIConversationId::new();
+        let mut conn =
+            connection_with_conversation(conversation_id, vec![auto_code_diff_message("root")]);
+        delete_task_rows(&mut conn, &conversation_id.to_string());
+        clear_summary(&mut conn, &conversation_id.to_string());
+
+        let mut store = RestoredAgentConversations::new_with_db_connection(conn);
+        assert!(
+            store.should_restore_into_pane(&conversation_id),
+            "with no summary to read, the fallback load must run and reach the other answer"
+        );
     }
 }
