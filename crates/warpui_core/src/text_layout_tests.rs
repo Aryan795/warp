@@ -602,6 +602,89 @@ fn test_fully_truncated_run_paints_no_background() {
     });
 }
 
+/// Regression test for CSAT-10272 (GH#15146): Arabic/CJK file names rendered as
+/// blank labels in the file explorer and autocomplete list rows.
+///
+/// A purely-RTL run is laid out (correctly) with glyphs stored in logical
+/// (vector) order while their `x` position *decreases* per glyph, since the pen
+/// sweeps right-to-left. `paint_internal`'s default End+Fade truncation used to
+/// walk `run.glyphs` in vector order and stop as soon as a width budget was
+/// exhausted, silently assuming vector order matched on-screen (ascending-x)
+/// order. For a narrow paint width that assumption spent the whole budget on the
+/// off-screen glyphs at the logical start of the run and the loop stopped before
+/// ever reaching the glyphs that actually fall within the visible bounds --
+/// painting nothing at all.
+#[test]
+fn test_paint_rtl_line_in_narrow_bounds_shows_visible_glyphs() {
+    App::test((), |mut app| async move {
+        app.update(|ctx| {
+            let glyph_width = 12.0;
+            let glyph_count = 10usize;
+
+            // Mimic a purely-RTL run: glyphs are stored in ascending logical
+            // (vector) order, but their baseline x position descends from
+            // `(glyph_count - 1) * glyph_width` down to `0`.
+            let glyphs = (0..glyph_count)
+                .map(|i| Glyph {
+                    id: 0,
+                    position_along_baseline: vec2f((glyph_count - 1 - i) as f32 * glyph_width, 0.),
+                    index: i,
+                    width: glyph_width,
+                })
+                .collect();
+            let run = Run {
+                font_id: FontId(0),
+                glyphs,
+                styles: TextStyle::default(),
+                width: glyph_width * glyph_count as f32, // 120px
+            };
+            let line = Line {
+                width: run.width,
+                trailing_whitespace_width: 0.,
+                runs: vec![run],
+                font_size: 12.,
+                line_height_ratio: 1.,
+                baseline_ratio: DEFAULT_TOP_BOTTOM_RATIO,
+                // Default End+Fade clipping -- what file-tree and autocomplete rows use.
+                clip_config: Some(ClipConfig::default()),
+                ascent: 10.,
+                descent: 2.,
+                caret_positions: Vec::new(),
+                chars_with_missing_glyphs: Vec::new(),
+            };
+
+            // Bounds (50px) are much narrower than the line's natural width (120px),
+            // matching a file-tree/autocomplete row too narrow for the full name.
+            let available_width = 50.;
+            let mut scene = Scene::new(1., rendering::Config::default());
+            line.paint(
+                RectF::new(Vector2F::zero(), Vector2F::new(available_width, 20.)),
+                &PaintStyleOverride::default(),
+                ColorU::black(),
+                ctx.font_cache(),
+                &mut scene,
+            );
+
+            let painted_x_positions: Vec<f32> = scene
+                .layers()
+                .flat_map(|layer| layer.glyphs.iter())
+                .map(|glyph| glyph.position.x())
+                .collect();
+
+            assert!(
+                !painted_x_positions.is_empty(),
+                "expected at least one glyph within the visible bounds to be painted, \
+                 but the row was left blank",
+            );
+            assert!(
+                painted_x_positions.iter().all(|&x| x < available_width),
+                "expected only glyphs within the visible bounds to be painted, got \
+                 positions {painted_x_positions:?}",
+            );
+        });
+    });
+}
+
 /// When start-clipping without an ellipsis (fade style), the offset fix must
 /// not change the existing layout — visible glyphs should remain right-aligned
 /// in the paint bounds with no extra horizontal shift.

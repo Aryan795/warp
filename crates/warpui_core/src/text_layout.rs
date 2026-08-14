@@ -1478,6 +1478,19 @@ impl Line {
             itertools::Either::Right(self.runs.iter())
         };
 
+        // For the common End+Fade case (which is also what a `None` clip_config
+        // falls back to), truncation must be decided from each glyph's own laid-out
+        // position rather than by sequentially consuming a width budget in vector
+        // (storage) order. Vector order only matches on-screen (ascending-x) order
+        // for LTR text: for a purely-RTL run, glyphs are stored in logical order
+        // while their `x` position *decreases* per glyph (the pen sweeps
+        // right-to-left). Consuming the width budget in vector order therefore
+        // spends it on the glyphs at the visually-off-screen end of the run and
+        // never reaches the glyphs that actually fall within `available_width`,
+        // which is exactly why RTL file names rendered as blank labels while their
+        // LTR counterparts (where vector order and screen order coincide) did not.
+        let use_position_based_visibility = !is_start_clipping && clip_style == ClipStyle::Fade;
+
         let mut remaining_width = match clip_style {
             // For ellipsis, reserve space on the side where we will draw the ellipsis.
             ClipStyle::Ellipsis if ellipsis_width > 0. => match clip_direction {
@@ -1531,6 +1544,15 @@ impl Line {
                     itertools::Either::Right(run.glyphs.iter())
                 };
                 for glyph in sim_glyph_iter {
+                    if use_position_based_visibility {
+                        let glyph_x = line_origin.x() + glyph.position_along_baseline.x();
+                        if glyph_x >= line_origin.x() + available_width {
+                            continue;
+                        }
+                        visible_left = visible_left.min(glyph_x);
+                        visible_right = visible_right.max(glyph_x + glyph.width);
+                        continue;
+                    }
                     if clip_style == ClipStyle::Ellipsis
                         && ellipsis_width > 0.
                         && sim_remaining_width < glyph.width
@@ -1601,14 +1623,24 @@ impl Line {
                     break 'runs;
                 }
 
-                // If there is not enough space to paint even part of the glyph,
-                // stop painting glyphs but still paint run decorations
-                // (so that the decorations are still visible even if the glyphs are partially hidden).
-                if remaining_width <= 0. {
+                if use_position_based_visibility {
+                    // Skip (rather than stop at) glyphs beyond the visible edge: for
+                    // RTL runs, later glyphs in vector order can still be on-screen
+                    // even after an off-screen one, so we cannot assume everything
+                    // past this glyph is also off-screen.
+                    let glyph_x = line_origin.x() + glyph.position_along_baseline.x();
+                    if glyph_x >= line_origin.x() + available_width {
+                        continue;
+                    }
+                } else if remaining_width <= 0. {
+                    // If there is not enough space to paint even part of the glyph,
+                    // stop painting glyphs but still paint run decorations
+                    // (so that the decorations are still visible even if the glyphs are partially hidden).
                     should_stop_after_run = true;
                     break;
+                } else {
+                    remaining_width -= glyph.width;
                 }
-                remaining_width -= glyph.width;
 
                 let glyph_origin = if is_start_clipping {
                     line_origin
