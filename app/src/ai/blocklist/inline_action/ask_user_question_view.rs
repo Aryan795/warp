@@ -11,11 +11,12 @@ use itertools::Itertools;
 use warp_core::ui::theme::WarpTheme;
 use warp_core::ui::theme::color::internal_colors;
 use warpui::r#async::{SpawnedFutureHandle, Timer};
-use warpui::elements::new_scrollable::SingleAxisConfig;
+use warpui::elements::new_scrollable::{ScrollableAppearance, SingleAxisConfig};
 use warpui::elements::{
     Border, ChildView, Clipped, ClippedScrollStateHandle, ConstrainedBox, Container, CornerRadius,
     CrossAxisAlignment, DEFAULT_UI_LINE_HEIGHT_RATIO, Fill, Flex, FormattedTextElement,
-    MainAxisAlignment, MainAxisSize, MouseStateHandle, ParentElement, Point, Radius, Stack, Text,
+    MainAxisAlignment, MainAxisSize, MouseStateHandle, ParentElement, Point, Radius,
+    ScrollbarWidth, Stack, Text,
 };
 use warpui::event::DispatchedEvent;
 use warpui::geometry::vector::Vector2F;
@@ -1029,6 +1030,16 @@ impl AskUserQuestionView {
             theme.active_ui_detail().into(),
             Fill::None,
         )
+        // Long option lists need a *discoverable* way past the visible area. Keep the
+        // scrollbar thumb visible whenever there's overflow instead of only while hovered
+        // (the default), since keyboard-only navigation through the options never hovers the
+        // card. Also let wheel events this list can't use (no overflow, or already at an
+        // edge) fall through to the surrounding blocklist instead of being swallowed, matching
+        // the other scrollable inline-action cards (e.g. requested_command.rs).
+        .with_vertical_scrollbar(
+            ScrollableAppearance::new(ScrollbarWidth::Auto, false).with_always_show_thumb(true),
+        )
+        .with_propagate_mousewheel_if_not_handled(true)
         .finish();
 
         Self::with_body_insets(Clipped::new(scrollable).finish())
