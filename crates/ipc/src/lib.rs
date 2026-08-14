@@ -51,6 +51,11 @@ mod service;
 #[cfg_attr(target_family = "wasm", path = "wasm.rs")]
 mod platform;
 
+// Hardens the DACL on Windows named pipes created by `platform::server`; see its module docs for
+// why this is needed (REV-1546).
+#[cfg(windows)]
+mod windows_pipe_security;
+
 pub use client::{Client, ClientError};
 pub use protocol::ConnectionAddress;
 pub use server::{Server, ServerBuilder};
