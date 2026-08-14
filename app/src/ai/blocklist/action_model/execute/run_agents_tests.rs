@@ -288,6 +288,73 @@ fn local_codex_run_agents_maps_to_local_harness_mode_when_flag_enabled() {
     );
 }
 
+fn remote_batch_mode() -> RunAgentsExecutionMode {
+    RunAgentsExecutionMode::Remote {
+        environment_id: "env-1".to_string(),
+        worker_host: "warp".to_string(),
+        computer_use_enabled: false,
+        runner_id: String::new(),
+    }
+}
+
+fn remote_child_model_id(cfg: &RunAgentsAgentRunConfig, run_model_id: &str) -> String {
+    let mode =
+        run_agents_to_start_agent_mode(&remote_batch_mode(), "oz", run_model_id, &[], None, cfg)
+            .expect("Remote+oz should convert");
+    let StartAgentExecutionMode::Remote { model_id, .. } = mode else {
+        panic!("expected Remote start-agent mode");
+    };
+    model_id
+}
+
+#[test]
+fn remote_named_agent_child_drops_the_batch_model_id() {
+    let cfg = RunAgentsAgentRunConfig {
+        name: "code-review".to_string(),
+        prompt: "Review the PR".to_string(),
+        title: String::new(),
+        agent_identity_uid: "sa-uid-1".to_string(),
+        model_id: String::new(),
+    };
+
+    assert!(
+        remote_child_model_id(&cfg, "claude-5-opus-high").is_empty(),
+        "a named-agent child must not carry the batch model, which would outrank its own"
+    );
+}
+
+#[test]
+fn remote_named_agent_child_drops_the_per_child_model_id() {
+    let cfg = RunAgentsAgentRunConfig {
+        name: "code-review".to_string(),
+        prompt: "Review the PR".to_string(),
+        title: String::new(),
+        agent_identity_uid: "sa-uid-1".to_string(),
+        model_id: "claude-5-opus-high".to_string(),
+    };
+
+    assert!(
+        remote_child_model_id(&cfg, "").is_empty(),
+        "a named identity leaves no model to override per child"
+    );
+}
+
+#[test]
+fn remote_unnamed_child_keeps_the_batch_model_id() {
+    let cfg = RunAgentsAgentRunConfig {
+        name: "child".to_string(),
+        prompt: "Do the thing".to_string(),
+        title: String::new(),
+        agent_identity_uid: String::new(),
+        model_id: String::new(),
+    };
+
+    assert_eq!(
+        remote_child_model_id(&cfg, "claude-5-opus-high"),
+        "claude-5-opus-high"
+    );
+}
+
 fn persist_default_auth_secret(app: &mut App, harness_config_name: &str, secret_name: &str) {
     CloudAgentSettings::handle(app).update(app, |settings, ctx| {
         let mut secrets = settings.last_selected_auth_secret.value().clone();

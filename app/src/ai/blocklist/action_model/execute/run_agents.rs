@@ -774,8 +774,18 @@ pub fn run_agents_to_start_agent_mode(
                     "Remote child agents do not support the opencode harness yet.".to_string(),
                 );
             }
-            // Per-agent model_id overrides the batch-level run_model_id when set.
-            let effective_model_id = if !cfg.model_id.trim().is_empty() {
+            // A child dispatched as a named agent takes its model from that
+            // agent's own configuration, which the server only applies when the
+            // run-creation request carries no model of its own. Any model sent
+            // here would silently outrank it, so drop it — including the
+            // per-child override, since a named identity leaves no model to
+            // override. Mirrors the server-side suppression in `resolveModelID`;
+            // needed on the client too because an approved orchestration config
+            // resolves run-wide fields here rather than on the server.
+            let effective_model_id = if !cfg.agent_identity_uid.trim().is_empty() {
+                String::new()
+            } else if !cfg.model_id.trim().is_empty() {
+                // Per-agent model_id overrides the batch-level run_model_id when set.
                 cfg.model_id.clone()
             } else {
                 run_model_id.to_string()

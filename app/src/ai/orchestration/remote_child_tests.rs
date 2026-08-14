@@ -110,6 +110,63 @@ fn prepared_remote_request_matches_gui_wire_semantics() {
     });
 }
 
+// A named-agent child launches with no model on the wire so the server can
+// apply that named agent's own configured model; `run_agents` suppresses the
+// run-wide model upstream, and this pins the omission the suppression relies on.
+#[test]
+fn named_identity_launch_with_empty_model_omits_model_id() {
+    App::test((), |mut app| async move {
+        crate::test_util::terminal::initialize_app_for_terminal_view(&mut app);
+        let request = StartAgentRequest {
+            id: Default::default(),
+            name: "code-review".to_string(),
+            prompt: "Review the PR".to_string(),
+            execution_mode: StartAgentExecutionMode::Remote {
+                environment_id: "env-1".to_string(),
+                skill_references: Vec::new(),
+                model_id: String::new(),
+                computer_use_enabled: false,
+                worker_host: "warp".to_string(),
+                harness_type: "oz".to_string(),
+                title: String::new(),
+                auth_secret_name: None,
+                runner_id: String::new(),
+                agent_identity_uid: Some("code-review-agent".to_string()),
+            },
+            lifecycle_subscription: None,
+            parent_conversation_id: crate::ai::agent::conversation::AIConversationId::new(),
+            parent_run_id: Some("parent-run".to_string()),
+        };
+        app.read(|ctx| {
+            let prepared = prepare_remote_child_launch(
+                &request,
+                RemoteChildLaunchConfig {
+                    environment_id: "env-1".to_string(),
+                    skill_references: Vec::new(),
+                    working_dir: PathBuf::new(),
+                    model_id: String::new(),
+                    computer_use_enabled: false,
+                    worker_host: "warp".to_string(),
+                    harness_type: "oz".to_string(),
+                    title: String::new(),
+                    auth_secret_name: None,
+                    runner_id: String::new(),
+                    agent_identity_uid: Some("code-review-agent".to_string()),
+                },
+                ctx,
+            )
+            .unwrap();
+            assert_eq!(
+                prepared.spawn_request.agent_identity_uid.as_deref(),
+                Some("code-review-agent")
+            );
+            let config = prepared.spawn_request.config.unwrap();
+            assert_eq!(config.model_id, None);
+            assert_eq!(config.runner_id, None);
+        });
+    });
+}
+
 #[test]
 fn repo_qualified_skill_spec_resolves_into_runtime_skills() {
     let temp = TempDir::new().unwrap();
