@@ -122,6 +122,10 @@ Warp has two front-ends that share the `warp_core`/`warpui` Entity/model core (A
 - Do not pass `Itertools::format` results directly to logging macros (`log::*`, `safe_*`, etc.). `Itertools::format` produces a single-use formatter, while logging implementations may format a message more than once. Use a reusable `String` such as `iter.join(", ")` for logging arguments instead. Direct use in `format!` or `write!` is fine.
 - When adding a toggleable setting, also add the matching Command Palette enable/disable entry and any required context flags so the setting is discoverable outside Settings.
 
+**Platform-Specific Code**:
+- When a type crosses a cross-platform contract — it's `Serialize`/`Deserialize`, persisted, sent over IPC, or matched by telemetry — keep its variants defined on every platform, even if only one platform's code path uses them. Gate the platform-specific *behavior* (a URL helper, button visibility, an open-url handler) behind `#[cfg(target_os = "...")]`, not the variant itself. A variant that only compiles on one OS silently breaks deserialization or exhaustive matching wherever that type is shared.
+- A `#[cfg(target_os = "...")]`-gated variant is fine when the type has no such contract to keep in sync — e.g. the macOS-only `InstallOz`/`UninstallOz`/`InstallWarpctrl`/`UninstallWarpctrl`/`SampleProcess` variants on `WorkspaceAction` in `app/src/workspace/action.rs`, which is dispatched in-process only. The rule only applies once the type is shared across a boundary other than in-process dispatch.
+
 **Comments**:
 Comments have a cost. They carry a maintenance burden, because they must be kept in sync
 with the code they describe. It is tempting to assume that more comments is always better,
