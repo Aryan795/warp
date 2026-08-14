@@ -512,7 +512,15 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
           # Tricking the shell into rendering the prompt
           # Note that in more modern versions of bash we could use ${PS1@P} to achieve the same,
           # but MacOS comes by default with a much older version of bash, and we want to be compatible.
-          deref_ps1=$(echo -e "\n" | PS1="$WARP_PS1" BASH_SILENCE_DEPRECATION_WARNING=1 "$BASH" --norc -i 2>&1 | command -p head -2 | command -p tail -1)
+          #
+          # We run this in a subshell that unsets PROMPT_COMMAND and PS0 (mirroring the same
+          # cleanup performed for Warp-managed subshells in bash_init_subshell.sh) before
+          # exec-ing the nested bash. Otherwise, if either of those ends up exported into our
+          # environment (e.g. by a bash-preexec-style framework), the nested shell would try to
+          # invoke hooks -- such as __bp_interactive_mode -- that only exist as functions in
+          # this shell, and the resulting "command not found" errors get captured (via 2>&1)
+          # into the expanded prompt. See https://github.com/warpdotdev/Warp/issues/1162.
+          deref_ps1=$(echo -e "\n" | (unset PROMPT_COMMAND PS0; PS1="$WARP_PS1" BASH_SILENCE_DEPRECATION_WARNING=1 exec "$BASH" --norc -i) 2>&1 | command -p head -2 | command -p tail -1)
         fi
 
         # Escaped PS1 variable
