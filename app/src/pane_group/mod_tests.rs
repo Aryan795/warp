@@ -1263,14 +1263,12 @@ fn completed_shared_session_child_with_edit_access_uses_continuation_pane() {
     });
 }
 
-/// QUALITY-1659 regression test: a completed CLI-harness (Claude/Gemini/
-/// Codex) child used to hit an early `return` in `hydrate_child_transcript`
-/// that never cleared `Loading`, leaving the child pane stuck on "Loading
-/// session..." forever. `restore_child_cli_agent_transcript` is the
-/// synchronous half of that fix (the async cloud fetch itself is exercised
-/// by `hydrate_child_transcript`); this drives it directly to confirm the
-/// pane reaches a terminal, read-only state with the block snapshot
-/// restored and the harness badge applied.
+/// A completed CLI-harness (Claude/Gemini/Codex) child must clear
+/// `Loading` and render real transcript content: restoring the block
+/// snapshot into the model isn't enough on its own, since an unattached
+/// block stays hidden under the pane's active `TranscriptScope`. Drives
+/// `restore_child_cli_agent_transcript` directly against a real loading
+/// placeholder pane.
 #[test]
 fn completed_cli_agent_child_transcript_clears_loading_and_restores_content() {
     let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
@@ -1333,7 +1331,7 @@ fn completed_cli_agent_child_transcript_clears_loading_and_restores_content() {
             let model = view.as_ref(ctx).model.lock();
             assert!(
                 !model.is_loading_conversation_transcript(),
-                "CLI child transcript hydration must clear the Loading state (QUALITY-1659)",
+                "CLI child transcript hydration must clear the Loading state",
             );
             assert_eq!(
                 model.conversation_transcript_viewer_status(),
@@ -1421,22 +1419,11 @@ fn unsupported_cli_agent_child_transcript_still_clears_loading() {
     });
 }
 
-/// QUALITY-1659 regression test for `end_child_transcript_load_without_content`,
-/// the fix for the `None` branch of `hydrate_child_transcript` (a terminal
-/// transcript-load failure -- a block-snapshot fetch error, an unrecognized
-/// harness, or `AgentHarness` disabled all surface as `None` from the fetch).
-/// A previous version of that `None` arm just re-queued the task and
-/// returned, which left the pane on `Loading` forever, since `LoadTranscript`
-/// is only ever dispatched for an already-terminal run that will not produce
-/// a further `TasksUpdated` to retry on. This drives the extracted method
-/// directly (the reachable seam after the fetch resolves), the same style
-/// used by `hydrate_remote_child_placeholder_with_cloud_transcript_preserves_placeholder_identity`
-/// in `history_model_tests.rs`: exercising `hydrate_child_transcript`'s real
-/// async fetch end-to-end would require either a genuine network call --
-/// which `http_client::Client::new_for_test`'s own doc comment says tests
-/// must never make -- or a locally-resolvable seed, which was tried here and
-/// reproducibly hung past 60s (likely on auth-token refresh), so it was
-/// dropped in favor of this direct, fast, deterministic seam test.
+/// A terminal transcript-load failure (a block-snapshot error, an
+/// unrecognized harness, or `AgentHarness` disabled all surface as
+/// `None`) must still clear `Loading`: `LoadTranscript` only runs for an
+/// already-terminal task, so no future `TasksUpdated` would otherwise
+/// arrive to let this pane out of the spinner.
 #[test]
 fn terminal_child_transcript_fetch_failure_clears_loading() {
     let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
@@ -1485,7 +1472,7 @@ fn terminal_child_transcript_fetch_failure_clears_loading() {
             assert!(
                 !model.is_loading_conversation_transcript(),
                 "a terminal transcript-load failure must still clear Loading instead of \
-                 spinning forever (QUALITY-1659)",
+                 spinning forever",
             );
             assert_eq!(
                 model.conversation_transcript_viewer_status(),
