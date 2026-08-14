@@ -2068,7 +2068,7 @@ impl TeamsWidget {
         );
         let cta_sentence = if !has_admin_permissions {
             if is_delinquency {
-                "Contact a team admin to restore access. Contact billing@warp.dev for assistance."
+                "Contact a team admin for help."
             } else {
                 "Contact a team admin to grow the team."
             }
@@ -2076,12 +2076,12 @@ impl TeamsWidget {
             match cta {
                 GrowTeamWarningCta::Upgrade => "Upgrade to grow your team.",
                 GrowTeamWarningCta::UpdateBilling => {
-                    "Update your payment information to restore access. Contact billing@warp.dev for assistance."
+                    "Update your payment information or contact billing@warp.dev for help."
                 }
-                GrowTeamWarningCta::ContactSupport => "Contact billing@warp.dev for assistance.",
+                GrowTeamWarningCta::ContactSupport => "Contact your Account Executive for help.",
                 GrowTeamWarningCta::None => {
                     if is_delinquency {
-                        "Contact billing@warp.dev for assistance."
+                        "Contact your Account Executive for help."
                     } else {
                         "Contact sales to grow your team."
                     }

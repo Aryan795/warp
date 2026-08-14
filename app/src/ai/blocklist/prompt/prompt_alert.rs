@@ -37,7 +37,7 @@ const COMPARE_PLANS_TEXT: &str = "Compare plans";
 const CONTACT_SUPPORT_TEXT: &str = "Contact support";
 const CONTACT_BILLING_TEXT: &str = "billing@warp.dev";
 const CONTACT_BILLING_MAILTO: &str = "mailto:billing@warp.dev";
-const NON_ADMIN_CONTACT_ADMIN_TEXT: &str = ", contact a team admin";
+const NON_ADMIN_CONTACT_ADMIN_TEXT: &str = " Contact a team admin for help.";
 const NON_ADMIN_ASK_ADMIN_TO_ENABLE_OVERAGES_TEXT: &str = ", ask a team admin to enable overages";
 const NON_ADMIN_ASK_ADMIN_TO_INCREASE_OVERAGES_TEXT: &str =
     ", ask a team admin to increase overages";
@@ -265,13 +265,8 @@ impl PromptAlertView {
             }
             PromptAlertState::DelinquentDueToPaymentIssue => {
                 text_fragments.push(FormattedTextFragment::plain_text(
-                    "Restricted due to payment issue. Contact ",
+                    "Restricted due to payment issue.",
                 ));
-                text_fragments.push(FormattedTextFragment::hyperlink(
-                    CONTACT_BILLING_TEXT,
-                    CONTACT_BILLING_MAILTO.to_owned(),
-                ));
-                text_fragments.push(FormattedTextFragment::plain_text(" for assistance."));
             }
             PromptAlertState::OveragesToggleableButNotEnabled
             | PromptAlertState::MonthlyOveragesSpendLimitReached
@@ -312,12 +307,23 @@ impl PromptAlertView {
                     .map(|team| team.has_billing_history)
                     .unwrap_or_default();
                 if has_admin_permissions && has_billing_history {
-                    text_fragments.push(FormattedTextFragment::plain_text("  "));
+                    text_fragments.push(FormattedTextFragment::plain_text(
+                        " Update your payment information or contact ",
+                    ));
+                    text_fragments.push(FormattedTextFragment::hyperlink(
+                        CONTACT_BILLING_TEXT,
+                        CONTACT_BILLING_MAILTO.to_owned(),
+                    ));
+                    text_fragments.push(FormattedTextFragment::plain_text(" for help.  "));
                     text_fragments.push(FormattedTextFragment::hyperlink_action(
                         DELINQUENT_DUE_TO_PAYMENT_ISSUE_ACTION_TEXT,
                         PromptAlertAction::ManageBillingClicked {
                             team_uid: current_team.map(|team| team.uid).unwrap_or_default(),
                         },
+                    ));
+                } else if has_admin_permissions {
+                    text_fragments.push(FormattedTextFragment::plain_text(
+                        " Contact your Account Executive for help.",
                     ));
                 } else {
                     text_fragments.push(FormattedTextFragment::plain_text(
