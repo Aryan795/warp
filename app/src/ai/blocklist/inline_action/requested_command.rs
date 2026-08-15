@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::cmp::{Ordering, PartialEq};
 use std::collections::HashMap;
 use std::ops::Range;
@@ -15,7 +16,7 @@ use uuid::Uuid;
 use warp_completer::signatures::CommandRegistry;
 use warp_core::features::FeatureFlag;
 use warp_core::ui::Icon;
-use warp_core::ui::appearance::Appearance;
+use warp_core::ui::appearance::{Appearance, AppearanceEvent};
 use warp_core::ui::theme::{AnsiColorIdentifier, AnsiColors};
 use warp_editor::render::element::VerticalExpansionBehavior;
 use warpui::r#async::SpawnedFutureHandle;
@@ -67,7 +68,7 @@ use crate::code::editor::view::{CodeEditorEvent, CodeEditorRenderOptions, CodeEd
 use crate::completer::SessionAgnosticContext;
 use crate::editor::InteractionState;
 use crate::menu::{Event as MenuEvent, Menu, MenuItem, MenuItemFields, MenuVariant};
-use crate::settings::{InputModeSettings, InputSettings};
+use crate::settings::{InputModeSettings, InputSettings, InputSettingsChangedEvent};
 use crate::terminal::TerminalModel;
 use crate::terminal::block_list_viewport::InputMode;
 use crate::terminal::input::decorations::{
@@ -390,6 +391,18 @@ pub struct RequestedCommandView {
     // colors are pushed explicitly whenever a parse completes (see `apply_command_highlighting`).
     parsed_command_tokens: Option<ParsedTokensSnapshot>,
     command_highlight_parse_handle: Option<SpawnedFutureHandle>,
+    // Cache of the most recently computed header highlight ranges, to avoid recomputing them
+    // (and their per-range allocations) on every render — including while merely scrolling
+    // through history. `render_header` takes `&self`, hence the `RefCell`.
+    header_highlight_cache: RefCell<Option<CachedHeaderHighlight>>,
+}
+
+/// Cache key + result for [`RequestedCommandView::command_highlighted_ranges_for_header`].
+struct CachedHeaderHighlight {
+    buffer_text: String,
+    terminal_colors: AnsiColors,
+    max_char: Option<usize>,
+    ranges: Vec<HighlightedRange>,
 }
 
 impl RequestedCommandView {
@@ -580,6 +593,28 @@ impl RequestedCommandView {
             );
         }
 
+        // Both directions of `InputSettings.syntax_highlighting` need to be reflected on an
+        // already-open card: turning it on should highlight a card that was created while it
+        // was off, and turning it off should clear an editor that already has colors applied
+        // (the header re-reads the setting live at render time, but the editor's colors are
+        // pushed imperatively and would otherwise go stale).
+        ctx.subscribe_to_model(&InputSettings::handle(ctx), |me, _, event, ctx| {
+            if let InputSettingsChangedEvent::SyntaxHighlighting { .. } = event {
+                me.request_command_highlighting(ctx);
+                ctx.notify();
+            }
+        });
+
+        // The editor stores theme-resolved `ColorU`s rather than resolving them at paint time,
+        // so a runtime theme change needs to explicitly recompute and re-push them. No reparse
+        // is needed since only the colors, not the underlying tokens, depend on the theme.
+        ctx.subscribe_to_model(&Appearance::handle(ctx), |me, _, event, ctx| {
+            if let AppearanceEvent::ThemeChanged = event {
+                me.apply_command_highlighting_to_editor(ctx);
+                ctx.notify();
+            }
+        });
+
         let accept_menu = ctx.add_typed_action_view(|ctx| {
             let theme = Appearance::as_ref(ctx).theme();
             Menu::new()
@@ -649,6 +684,7 @@ impl RequestedCommandView {
             mcp_tool_name: None,
             parsed_command_tokens: None,
             command_highlight_parse_handle: None,
+            header_highlight_cache: RefCell::new(None),
         }
     }
 
@@ -692,11 +728,14 @@ impl RequestedCommandView {
         self.editor = None;
     }
 
-    /// Reads the editor contents into `command_text`, committing any user edits.
+    /// Reads the editor contents into `command_text`, committing any user edits. Re-syncs the
+    /// header's highlighting cache to the committed text, since edit-mode highlighting is driven
+    /// by the editor's own (possibly diverged) buffer, not by `parsed_command_tokens`.
     fn commit_editor_contents(&mut self, ctx: &mut ViewContext<Self>) {
         if let Some(editor) = &self.editor {
             self.command_text = editor.as_ref(ctx).text(ctx).into_string();
         }
+        self.request_command_highlighting(ctx);
     }
 
     /// Commits any pending editor edits to `command_text` and returns the committed text.
@@ -730,6 +769,14 @@ impl RequestedCommandView {
             CodeEditorEvent::CopiedEmptyText => {
                 ctx.emit(RequestedCommandViewEvent::CopiedEmptyText);
             }
+            CodeEditorEvent::ContentChanged { origin } => {
+                // Only user edits (via `RequestedCommandViewAction::OpenEditMode`) need a fresh
+                // reparse here; our own streamed/system updates already trigger highlighting
+                // through `apply_streamed_update`/`request_command_highlighting`.
+                if origin.from_user() {
+                    self.request_editor_content_highlighting(ctx);
+                }
+            }
             #[cfg(windows)]
             CodeEditorEvent::WindowsCtrlC { copied_selection } if !copied_selection => {
                 ctx.emit(RequestedCommandViewEvent::Rejected);
@@ -746,49 +793,94 @@ impl RequestedCommandView {
             && *InputSettings::as_ref(app).syntax_highlighting.value()
     }
 
-    /// (Re-)parses `command_text` in the background so completer-based syntax highlighting —
-    /// matching the terminal input's own highlighting — can be applied to the collapsed header
-    /// and, if present, the permission-prompt editor. Any in-flight parse is aborted first, so
-    /// at most one parse ever runs; a debounce isn't necessary since `command_text` streams in
-    /// via relatively small, infrequent chunks.
-    fn request_command_highlighting(&mut self, ctx: &mut ViewContext<Self>) {
+    /// Spawns a background completer parse of `text`, invoking `on_complete` once ready with
+    /// the parsed tokens (or `None`, called synchronously, when highlighting is disabled or
+    /// `text` is empty). Aborts any previously in-flight parse first, so at most one is ever
+    /// running; a debounce isn't necessary since both callers reparse in response to relatively
+    /// small, infrequent changes (streamed chunks or individual user edits).
+    fn spawn_highlight_parse(
+        &mut self,
+        text: String,
+        ctx: &mut ViewContext<Self>,
+        on_complete: impl FnOnce(&mut Self, Option<ParsedTokensSnapshot>, &mut ViewContext<Self>)
+        + 'static,
+    ) {
         if let Some(handle) = self.command_highlight_parse_handle.take() {
             handle.abort();
         }
 
-        if !self.should_highlight_command(ctx) || self.command_text.is_empty() {
-            self.parsed_command_tokens = None;
-            self.apply_command_highlighting_to_editor(ctx);
+        if !self.should_highlight_command(ctx) || text.is_empty() {
+            on_complete(self, None, ctx);
             return;
         }
 
-        let command_text = self.command_text.clone();
         // The command hasn't necessarily executed yet (and may never, e.g. if rejected), so
         // there isn't always a live session to derive path/alias/env-aware completions from.
         // This mirrors the same session-agnostic fallback used to highlight static shell
         // snippets elsewhere (e.g. `CloudSetupGuideView`, `NotebookCommand`).
         let completion_context = SessionAgnosticContext::new(CommandRegistry::global_instance());
-        self.command_highlight_parse_handle =
-            Some(ctx.spawn(
-                async move {
-                    parse_current_commands_and_tokens(command_text, &completion_context).await
-                },
-                |me, parsed_tokens, ctx| {
-                    me.command_highlight_parse_handle = None;
-                    if parsed_tokens.buffer_text != me.command_text {
-                        // Stale: `command_text` moved on before this parse completed.
-                        return;
-                    }
-                    me.parsed_command_tokens = Some(parsed_tokens);
-                    me.apply_command_highlighting_to_editor(ctx);
-                    ctx.notify();
-                },
-            ));
+        self.command_highlight_parse_handle = Some(ctx.spawn(
+            async move { parse_current_commands_and_tokens(text, &completion_context).await },
+            move |me, parsed_tokens, ctx| {
+                me.command_highlight_parse_handle = None;
+                on_complete(me, Some(parsed_tokens), ctx);
+            },
+        ));
     }
 
-    /// Pushes the latest completer-derived colors into the permission-prompt editor, if one
-    /// currently exists. The collapsed header instead reads `parsed_command_tokens` directly at
-    /// render time (see `command_highlighted_ranges_for_header`), so it needs no explicit push.
+    /// (Re-)parses `command_text` so completer-based syntax highlighting — matching the
+    /// terminal input's own highlighting — can be applied to the collapsed header and, if
+    /// present, the permission-prompt editor.
+    fn request_command_highlighting(&mut self, ctx: &mut ViewContext<Self>) {
+        let command_text = self.command_text.clone();
+        self.spawn_highlight_parse(command_text, ctx, |me, parsed_tokens, ctx| {
+            if let Some(parsed_tokens) = &parsed_tokens
+                && parsed_tokens.buffer_text != me.command_text
+            {
+                // Stale: `command_text` moved on before this parse completed.
+                return;
+            }
+            me.parsed_command_tokens = parsed_tokens;
+            me.apply_command_highlighting_to_editor(ctx);
+            ctx.notify();
+        });
+    }
+
+    /// Re-parses the permission-prompt editor's own (possibly not-yet-committed) buffer text
+    /// whenever the user edits it directly, so highlighting keeps up with live edits instead of
+    /// only reflecting the last streamed/committed `command_text`. `command_text` and the
+    /// header's cache are left untouched until the edit is committed (see
+    /// `commit_editor_contents`), since the header always shows the committed text.
+    fn request_editor_content_highlighting(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(editor) = self.editor.clone() else {
+            return;
+        };
+        let editor_text = editor.as_ref(ctx).text(ctx).into_string();
+        self.spawn_highlight_parse(editor_text, ctx, |me, parsed_tokens, ctx| {
+            let Some(editor) = me.editor.clone() else {
+                return;
+            };
+            if let Some(parsed_tokens) = &parsed_tokens
+                && parsed_tokens.buffer_text != editor.as_ref(ctx).text(ctx).into_string()
+            {
+                // Stale: the editor's text moved on before this parse completed.
+                return;
+            }
+            let colors = parsed_tokens
+                .map(|parsed_tokens| {
+                    let terminal_colors = Appearance::as_ref(ctx).theme().terminal_colors().normal;
+                    command_highlight_color_ranges(&parsed_tokens, &terminal_colors)
+                })
+                .unwrap_or_default();
+            editor.update(ctx, |editor, ctx| {
+                editor.set_external_highlight_colors(colors, ctx);
+            });
+        });
+    }
+
+    /// Pushes the latest completer-derived colors (from `parsed_command_tokens`) into the
+    /// permission-prompt editor, if one currently exists. Also used to re-push colors with a
+    /// freshly resolved theme palette on a runtime theme change, without reparsing.
     fn apply_command_highlighting_to_editor(&self, ctx: &mut ViewContext<Self>) {
         let Some(editor) = &self.editor else {
             return;
@@ -808,6 +900,8 @@ impl RequestedCommandView {
 
     /// Computes the completer-based highlighted ranges for the collapsed header's title,
     /// clipped to the (possibly truncated) text that `format_command_text` actually renders.
+    /// Cached per `(buffer_text, terminal_colors, max_char)` since this is recomputed on every
+    /// render of the header, including while scrolling through history.
     fn command_highlighted_ranges_for_header(&self, app: &AppContext) -> Vec<HighlightedRange> {
         if !self.should_highlight_command(app) {
             return Vec::new();
@@ -820,12 +914,28 @@ impl RequestedCommandView {
         }
 
         let terminal_colors = Appearance::as_ref(app).theme().terminal_colors().normal;
-        let color_ranges = command_highlight_color_ranges(parsed_tokens, &terminal_colors);
         let max_char = self
             .command_text
             .find('\n')
             .map(|byte_idx| self.command_text[..byte_idx].chars().count());
-        header_highlight_ranges(&color_ranges, max_char)
+
+        if let Some(cached) = self.header_highlight_cache.borrow().as_ref()
+            && cached.buffer_text == parsed_tokens.buffer_text
+            && cached.terminal_colors == terminal_colors
+            && cached.max_char == max_char
+        {
+            return cached.ranges.clone();
+        }
+
+        let color_ranges = command_highlight_color_ranges(parsed_tokens, &terminal_colors);
+        let ranges = header_highlight_ranges(&color_ranges, max_char);
+        *self.header_highlight_cache.borrow_mut() = Some(CachedHeaderHighlight {
+            buffer_text: parsed_tokens.buffer_text.clone(),
+            terminal_colors,
+            max_char,
+            ranges: ranges.clone(),
+        });
+        ranges
     }
 
     fn set_is_header_expanded(&mut self, value: bool, ctx: &mut ViewContext<Self>) {
