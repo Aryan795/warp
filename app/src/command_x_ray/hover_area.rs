@@ -1,11 +1,11 @@
 use pathfinder_geometry::rect::RectF;
 use pathfinder_geometry::vector::Vector2F;
+use warpui::AppContext;
 use warpui::elements::{
     AfterLayoutContext, Element, Event, EventContext, LayoutContext, PaintContext, Point,
     SizeConstraint, ZIndex,
 };
 use warpui::event::DispatchedEvent;
-use warpui::AppContext;
 
 use super::hover::{CommandXRayHover, HoverOutcome, HoverProbe};
 

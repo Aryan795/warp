@@ -798,7 +798,8 @@ impl RequestedCommandView {
 
     /// Records the character under the pointer and whether it is inside the described token.
     fn set_command_x_ray_hit(&self, offset: Option<CharOffset>, ctx: &AppContext) {
-        let is_within_token = offset.is_some_and(|offset| self.is_within_described_token(offset, ctx));
+        let is_within_token =
+            offset.is_some_and(|offset| self.is_within_described_token(offset, ctx));
         *self.command_x_ray_hit.lock() = CommandXRayHit {
             offset,
             is_within_token,
@@ -1844,9 +1845,7 @@ impl View for RequestedCommandView {
                 }),
                 Box::new(|outcome, ctx| match outcome {
                     HoverOutcome::Show => {
-                        ctx.dispatch_typed_action(
-                            RequestedCommandViewAction::TryToShowCommandXRay,
-                        );
+                        ctx.dispatch_typed_action(RequestedCommandViewAction::TryToShowCommandXRay);
                     }
                     HoverOutcome::Hide => {
                         ctx.dispatch_typed_action(RequestedCommandViewAction::HideCommandXRay);
