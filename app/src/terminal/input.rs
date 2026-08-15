@@ -215,6 +215,7 @@ use crate::cloud_object::{CloudObject, CloudObjectLookup as _, Space};
 #[cfg(feature = "local_fs")]
 use crate::code::editor_management::CodeSource;
 use crate::code_review::diff_state::DiffMode;
+use crate::command_x_ray::{self, CommandXRayContext, CommandXRayHost, CommandXRayUpdate};
 use crate::completer::SessionContext;
 use crate::context_chips::display::{PromptDisplay, PromptDisplayEvent};
 use crate::context_chips::display_chip::{DisplayChipConfig, PromptChipShellCommand};
@@ -12918,13 +12919,7 @@ impl Input {
     }
 
     fn hide_x_ray(&mut self, ctx: &mut ViewContext<Self>) {
-        if self.command_x_ray_description.take().is_some() {
-            self.editor.update(ctx, |editor, ctx| {
-                editor.clear_command_x_ray();
-                ctx.notify();
-            });
-            ctx.notify();
-        }
+        command_x_ray::host::hide(self, ctx);
     }
 
     fn start_xray_at_offset(
@@ -12933,42 +12928,7 @@ impl Input {
         trigger: CommandXRayTrigger,
         ctx: &mut ViewContext<Self>,
     ) {
-        if let Some(completion_context) = self.completion_session_context(ctx) {
-            let buffer_text = self.buffer_text(ctx);
-            let _ =
-                ctx.spawn(
-                    async move {
-                        completer::describe(buffer_text.as_str(), pos, &completion_context).await
-                    },
-                    |input, description, ctx| {
-                        input.show_xray(description, trigger, ctx);
-                    },
-                );
-        }
-    }
-
-    fn show_xray(
-        &mut self,
-        description: Option<Description>,
-        trigger: CommandXRayTrigger,
-        ctx: &mut ViewContext<'_, Self>,
-    ) {
-        let description = description.map(Arc::new);
-        self.command_x_ray_description.clone_from(&description);
-        if let Some(description) = description {
-            if trigger == CommandXRayTrigger::Keystroke {
-                ctx.emit_a11y_content(AccessibilityContent::new_without_help(
-                    description.a11y_text(),
-                    WarpA11yRole::UserAction,
-                ));
-            }
-            ctx.notify();
-            self.editor.update(ctx, move |editor, ctx| {
-                editor.set_command_x_ray(description);
-                ctx.notify();
-            });
-        }
-        ctx.notify();
+        command_x_ray::host::start_at_offset(self, pos, trigger, ctx);
     }
 
     fn active_block_session_id(&self) -> Option<SessionId> {
@@ -15988,6 +15948,43 @@ impl Input {
 
 impl Entity for Input {
     type Event = Event;
+}
+
+impl CommandXRayHost for Input {
+    fn x_ray_command_text(&self, ctx: &AppContext) -> String {
+        self.buffer_text(ctx).to_string()
+    }
+
+    fn x_ray_context(&self, ctx: &AppContext) -> Option<CommandXRayContext> {
+        self.completion_session_context(ctx)
+            .map(CommandXRayContext::Session)
+    }
+
+    fn x_ray_description(&self) -> Option<&Arc<Description>> {
+        self.command_x_ray_description.as_ref()
+    }
+
+    fn apply_x_ray_update(&mut self, update: CommandXRayUpdate, ctx: &mut ViewContext<Self>) {
+        match update {
+            CommandXRayUpdate::Show(description) => {
+                self.command_x_ray_description = Some(description.clone());
+                self.editor.update(ctx, move |editor, ctx| {
+                    editor.set_command_x_ray(description);
+                    ctx.notify();
+                });
+            }
+            CommandXRayUpdate::Empty => {
+                self.command_x_ray_description = None;
+            }
+            CommandXRayUpdate::Dismiss => {
+                self.command_x_ray_description = None;
+                self.editor.update(ctx, |editor, ctx| {
+                    editor.clear_command_x_ray();
+                    ctx.notify();
+                });
+            }
+        }
+    }
 }
 
 impl TypedActionView for Input {

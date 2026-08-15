@@ -19,6 +19,7 @@ mod code_review;
 mod coding_entrypoints;
 mod coding_panel_enablement_state;
 mod command_palette;
+mod command_x_ray;
 mod completer;
 #[allow(dead_code)]
 mod context_chips;

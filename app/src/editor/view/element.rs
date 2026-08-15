@@ -1,10 +1,8 @@
 use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::Arc;
 use std::{cmp, mem};
 
-use instant::Instant;
 use itertools::Itertools;
 use pathfinder_geometry::rect::RectF;
 use pathfinder_geometry::vector::{Vector2F, vec2f};
@@ -30,7 +28,7 @@ use warpui::text_selection_utils::{
     selection_crosses_newline_row_based,
 };
 use warpui::ui_components::components::UiComponent;
-use warpui::{AppContext, SingletonEntity, TaskId, ViewHandle};
+use warpui::{AppContext, SingletonEntity, ViewHandle};
 
 use super::super::soft_wrap::{
     ClampDirection, DisplayPointAndClampDirection, FrameLayouts, SoftWrapPoint, SoftWrapState,
@@ -42,6 +40,7 @@ use super::{
     ReplicaId, ScrollState, SelectAction, position_id_for_cached_point, position_id_for_cursor,
 };
 use crate::appearance::Appearance;
+use crate::command_x_ray::{CommandXRayHover, HoverOutcome, HoverProbe};
 use crate::editor::accept_autosuggestion_keybinding_view::{
     AUTOSUGGESTION_HINT_MINIMUM_HEIGHT, AcceptAutosuggestionKeybinding,
 };
@@ -65,29 +64,7 @@ const REMOTE_BEAM_CURSOR_WIDTH_PX: f32 = 2.;
 const DEFAULT_BLOCK_CURSOR_WIDTH_PX: f32 = 8.;
 
 const COMMAND_X_RAY_BOTTOM_PADDING_PX: f32 = 5.;
-const COMMAND_X_RAY_HOVER_THRESHOLD_PX: f32 = 3.;
-const COMMAND_X_RAY_HOVER_DELAY: Duration = Duration::from_millis(500);
 const AUTOSUGGESTION_HINT_PADDING: f32 = 10.;
-
-#[derive(Clone, Debug)]
-pub struct CommandXRayMouseState {
-    // The point at which the hover originated, in pixels
-    pub hover_point: Vector2F,
-
-    /// Whether the x-ray tooltip is visible
-    pub visible: bool,
-
-    /// The instant at which the x-ray should show
-    pub hover_at: Instant,
-
-    /// The timer id for the x-ray, in case we need to cancel it
-    pub timer_id: TaskId,
-
-    /// Whether the user has dismissed the hover through some action (e.g. esc or cmd-i or typing
-    /// or scrolling)
-    pub user_dismissed: bool,
-}
-pub type CommandXRayMouseStateHandle = Arc<Mutex<Option<CommandXRayMouseState>>>;
 
 // Defined separately from LayoutState since LayoutState in used in broader
 // methods such as paint_lines where we use the final computed line_height.
@@ -187,7 +164,7 @@ pub struct EditorElement {
     scroll_state: ScrollState,
     layout: Option<LayoutState>,
     paint: Option<PaintState>,
-    mouse_state: CommandXRayMouseStateHandle,
+    mouse_state: CommandXRayHover,
     preferred_cursor_type: CursorDisplayType,
     soft_wrap: bool,
     /// Whether the placeholder text should soft wrap
@@ -217,7 +194,7 @@ impl EditorElement {
     pub(super) fn new(
         view_snapshot: ViewSnapshot,
         scroll_state: ScrollState,
-        mouse_state: CommandXRayMouseStateHandle,
+        mouse_state: CommandXRayHover,
         soft_wrap: bool,
         soft_wrap_state: SoftWrapState,
         placeholder_soft_wrap: bool,
@@ -476,72 +453,40 @@ impl EditorElement {
             .as_ref()
             .expect("paint should be set at event handling");
 
-        let mut state_guard = self.mouse_state.lock().expect("mouse state lock");
-        if let Some(state) = &mut *state_guard
-            && state.user_dismissed
-        {
-            if (state.hover_point - position).length() < COMMAND_X_RAY_HOVER_THRESHOLD_PX {
-                // Early exit if some user action has caused the x-ray tooltip to be dismissed
-                // and the mouse hasn't moved.
-                return false;
-            } else {
-                return self.reset_x_ray(&mut state_guard, Some(position), ctx);
-            }
-        }
-
-        if !paint.rect.contains_point(position) {
-            // Mouse is outside of the editor, so clear any pending x-ray and exit early
-            return self.reset_x_ray(&mut state_guard, None, ctx);
-        }
-
-        let possible_point = paint.possible_point_for_position(
-            &self.view_snapshot,
-            self.scroll_position(),
-            layout,
+        // The hover rules live in the shared state machine; this element only supplies the
+        // geometry, which depends on the editor's soft-wrap layout, scroll offset and notches.
+        let mut hovered_point = None;
+        let outcome = self.mouse_state.on_mouse_moved(
             position,
+            paint.rect.contains_point(position),
+            || {
+                let possible_point = paint.possible_point_for_position(
+                    &self.view_snapshot,
+                    self.scroll_position(),
+                    layout,
+                    position,
+                );
+                let probe = HoverProbe {
+                    is_clamped: possible_point.is_clamped,
+                    is_within_token: self
+                        .is_position_within_x_ray_token_bounds(&possible_point, app),
+                };
+                hovered_point = Some(possible_point.display_point);
+                probe
+            },
+            ctx,
         );
 
-        if let Some(state) = &mut *state_guard {
-            let within_last_mouse_move_radius =
-                (state.hover_point - position).length() < COMMAND_X_RAY_HOVER_THRESHOLD_PX;
-            let is_within_word_boundary =
-                self.is_position_within_x_ray_token_bounds(&possible_point, app);
-
-            // Case 1: the command xray tooltip is open. We only want to close it if:
-            //  - the cursor is not within the word boundary for the token being described
-            //  - and the cursor is more than a radius away from the token
-            // The latter condition ensures that we only close the tooltip when
-            // there is a substantial mouse movement (if the cursor is only slightly
-            // moved, even outside of the word boundary, we still want to keep it open).
-            if state.visible && !is_within_word_boundary && !within_last_mouse_move_radius {
-                return self.reset_x_ray(&mut state_guard, Some(position), ctx);
-            } else if !state.visible {
-                // Case 2: the command xray tooltip is not open yet. We only want to open it if
-                //  - enough time has elapsed
-                //  - the mouse is still within the same radius as it was before
-                //  - the point we are considering isn't a clamped point (since we don't
-                //    want to describe the last token if the cursor is actually well past the buffer text)
-                let timer_elapsed = Instant::now() >= state.hover_at;
-                if timer_elapsed && within_last_mouse_move_radius && !possible_point.is_clamped {
-                    ctx.dispatch_typed_action(EditorAction::TryToShowXRay(
-                        possible_point.display_point,
-                    ));
-                    ctx.clear_notify_timer(state.timer_id);
-                    state.visible = true;
-                    return true;
-                } else if !within_last_mouse_move_radius {
-                    // Case 3: the command xray tooltip is not open yet. We should reset the
-                    // state as long as the mouse has moved more than a radius away since the
-                    // last tracked mouse position.
-                    return self.reset_x_ray(&mut state_guard, Some(position), ctx);
+        match outcome {
+            HoverOutcome::Show => {
+                if let Some(display_point) = hovered_point {
+                    ctx.dispatch_typed_action(EditorAction::TryToShowXRay(display_point));
                 }
             }
-        } else {
-            // Case 4: No timer set, set a new one
-            return self.reset_x_ray(&mut state_guard, Some(position), ctx);
+            HoverOutcome::Hide => ctx.dispatch_typed_action(EditorAction::HideXRay),
+            HoverOutcome::Idle => {}
         }
-
-        false
+        outcome.is_handled()
     }
 
     fn middle_mouse_down(&self, position: Vector2F, ctx: &mut EventContext) -> bool {
@@ -579,37 +524,6 @@ impl EditorElement {
             }
         }
         false
-    }
-
-    /// Resets the timer and (optional) position for triggering command x-ray
-    fn reset_x_ray(
-        &self,
-        x_ray_state: &mut Option<CommandXRayMouseState>,
-        new_position: Option<Vector2F>,
-        ctx: &mut EventContext,
-    ) -> bool {
-        let mut updated = false;
-        if let Some(state) = &mut *x_ray_state {
-            if state.visible {
-                ctx.dispatch_typed_action(EditorAction::HideXRay);
-                updated = true;
-            }
-            ctx.clear_notify_timer(state.timer_id);
-        }
-
-        if let Some(position) = new_position {
-            let (timer_id, hover_at) = ctx.notify_after(COMMAND_X_RAY_HOVER_DELAY);
-            *x_ray_state = Some(CommandXRayMouseState {
-                visible: false,
-                hover_point: position,
-                hover_at,
-                timer_id,
-                user_dismissed: false,
-            });
-        } else {
-            *x_ray_state = None;
-        }
-        updated
     }
 
     fn typed_characters(&self, chars: &str, ctx: &mut EventContext) -> bool {

@@ -21,7 +21,6 @@ use anyhow::Result;
 use async_fs;
 use base64::Engine as _;
 use base64::engine::general_purpose;
-use element::CommandXRayMouseStateHandle;
 use figma_utils::is_figma_png;
 use itertools::{Either, Itertools};
 use mime_guess::from_path;
@@ -98,6 +97,7 @@ use crate::ai::blocklist::{BlocklistAIContextModel, InputType, PendingAttachment
 use crate::ai::predict::next_command_model::{NextCommandModel, NextCommandSuggestionState};
 use crate::appearance::Appearance;
 use crate::channel::{Channel, ChannelState};
+use crate::command_x_ray::CommandXRayHover;
 use crate::editor::RangeExt;
 use crate::editor::accept_autosuggestion_keybinding_view::AcceptAutosuggestionKeybinding;
 use crate::editor::autosuggestion_ignore_view::{AutosuggestionIgnore, AutosuggestionIgnoreEvent};
@@ -1812,7 +1812,7 @@ pub struct EditorView {
     /// Empty string prefix "" is the default placeholder (shown when buffer is empty).
     placeholder_texts: Arc<HashMap<String, String>>,
     hover_handle: MouseStateHandle,
-    command_x_ray_mouse_handle: CommandXRayMouseStateHandle,
+    command_x_ray_mouse_handle: CommandXRayHover,
     command_x_ray_state: Option<Arc<Description>>,
     enter_settings: EnterSettings,
     soft_wrap: bool,
@@ -3632,15 +3632,10 @@ impl EditorView {
         self.command_x_ray_state.clone()
     }
 
-    /// Clears any current command x-ray state, and marks the
+    /// Clears any current command x-ray state, and marks the hover as user-dismissed so it stays
+    /// closed until the pointer moves.
     pub fn clear_command_x_ray(&mut self) {
-        let state = &mut *self
-            .command_x_ray_mouse_handle
-            .lock()
-            .expect("should get mouse handle lock");
-        if let Some(state) = state {
-            state.user_dismissed = true;
-        }
+        self.command_x_ray_mouse_handle.mark_user_dismissed();
         self.command_x_ray_state = None;
     }
 
