@@ -6,9 +6,9 @@ use warp_core::ui::appearance::Appearance;
 use warp_core::ui::theme::color::internal_colors;
 use warpui::elements::{
     Border, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, DispatchEventResult,
-    EventHandler, Expanded, Flex, FormattedTextElement, Hoverable, MainAxisAlignment, MainAxisSize,
-    MouseStateHandle, ParentElement, Radius, Shrinkable, SizeConstraintCondition,
-    SizeConstraintSwitch, Text,
+    EventHandler, Expanded, Flex, FormattedTextElement, HighlightedRange, Hoverable,
+    MainAxisAlignment, MainAxisSize, MouseStateHandle, ParentElement, Radius, Shrinkable,
+    SizeConstraintCondition, SizeConstraintSwitch, Text,
 };
 use warpui::fonts::FamilyId;
 use warpui::platform::Cursor;
@@ -119,6 +119,9 @@ pub struct HeaderConfig {
     pub font_color_override: Option<ColorU>,
     pub corner_radius_override: Option<CornerRadius>,
     pub soft_wrap_title: bool,
+    /// Completer-based syntax highlight ranges applied to `title`, matching the terminal
+    /// input's own syntax highlighting. Empty unless the title is showing raw command text.
+    pub highlighted_ranges: Vec<HighlightedRange>,
 }
 
 impl HeaderConfig {
@@ -134,6 +137,7 @@ impl HeaderConfig {
             font_color_override: None,
             corner_radius_override: None,
             soft_wrap_title: false,
+            highlighted_ranges: Vec::new(),
         }
     }
 
@@ -174,6 +178,11 @@ impl HeaderConfig {
 
     pub fn with_corner_radius_override(mut self, corner_radius: CornerRadius) -> Self {
         self.corner_radius_override = Some(corner_radius);
+        self
+    }
+
+    pub fn with_highlighted_ranges(mut self, highlighted_ranges: Vec<HighlightedRange>) -> Self {
+        self.highlighted_ranges = highlighted_ranges;
         self
     }
 
@@ -226,6 +235,7 @@ impl HeaderConfig {
         .soft_wrap(self.soft_wrap_title)
         .with_selectable(self.is_text_selectable)
         .with_color(text_color)
+        .with_highlights(self.highlighted_ranges.clone())
         .finish();
 
         if self.use_markdown

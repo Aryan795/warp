@@ -1,26 +1,32 @@
 use std::borrow::Cow;
 use std::cmp::{Ordering, PartialEq};
 use std::collections::HashMap;
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use lazy_static::lazy_static;
 use parking_lot::FairMutex;
+use pathfinder_color::ColorU;
 use pathfinder_geometry::vector::vec2f;
 use settings::Setting as _;
+use string_offset::{CharCounter, CharOffset};
 use uuid::Uuid;
+use warp_completer::signatures::CommandRegistry;
 use warp_core::features::FeatureFlag;
 use warp_core::ui::Icon;
 use warp_core::ui::appearance::Appearance;
+use warp_core::ui::theme::{AnsiColorIdentifier, AnsiColors};
 use warp_editor::render::element::VerticalExpansionBehavior;
+use warpui::r#async::SpawnedFutureHandle;
 use warpui::clipboard::ClipboardContent;
 use warpui::elements::new_scrollable::{NewScrollable, ScrollableAppearance, SingleAxisConfig};
 use warpui::elements::{
     Align, Border, ChildAnchor, ChildView, Clipped, ClippedScrollStateHandle, ConstrainedBox,
-    Container, CornerRadius, CrossAxisAlignment, Dismiss, Empty, Expanded, Flex, MainAxisSize,
-    MouseStateHandle, OffsetPositioning, ParentElement, PositionedElementAnchor,
-    PositionedElementOffsetBounds, Radius, ScrollbarWidth, SelectableArea, SelectionHandle, Stack,
-    Text,
+    Container, CornerRadius, CrossAxisAlignment, Dismiss, Empty, Expanded, Flex, Highlight,
+    HighlightedRange, MainAxisSize, MouseStateHandle, OffsetPositioning, ParentElement,
+    PositionedElementAnchor, PositionedElementOffsetBounds, Radius, ScrollbarWidth, SelectableArea,
+    SelectionHandle, Stack, Text,
 };
 use warpui::keymap::{Context, EditableBinding, FixedBinding, Keystroke};
 use warpui::ui_components::components::UiComponent as _;
@@ -58,11 +64,15 @@ use crate::ai::blocklist::{
 use crate::ai::mcp::TemplatableMCPServerManager;
 use crate::cmd_or_ctrl_shift;
 use crate::code::editor::view::{CodeEditorEvent, CodeEditorRenderOptions, CodeEditorView};
+use crate::completer::SessionAgnosticContext;
 use crate::editor::InteractionState;
 use crate::menu::{Event as MenuEvent, Menu, MenuItem, MenuItemFields, MenuVariant};
-use crate::settings::InputModeSettings;
+use crate::settings::{InputModeSettings, InputSettings};
 use crate::terminal::TerminalModel;
 use crate::terminal::block_list_viewport::InputMode;
+use crate::terminal::input::decorations::{
+    ParsedTokensSnapshot, parse_current_commands_and_tokens,
+};
 use crate::terminal::model::block::Block;
 use crate::ui_components::blended_colors;
 use crate::ui_components::json_tree::{
@@ -373,6 +383,13 @@ pub struct RequestedCommandView {
     // The MCP tool name is kept separately from the formatted command text so
     // headers never need to parse a presentation label to recover identity.
     mcp_tool_name: Option<String>,
+
+    // Completer-based syntax highlighting for `command_text`, matching the terminal input's
+    // own highlighting (`apply_colors_syntax_highlighting_all_tokens`). The collapsed header
+    // reads `parsed_command_tokens` directly at render time; the permission-prompt editor's
+    // colors are pushed explicitly whenever a parse completes (see `apply_command_highlighting`).
+    parsed_command_tokens: Option<ParsedTokensSnapshot>,
+    command_highlight_parse_handle: Option<SpawnedFutureHandle>,
 }
 
 impl RequestedCommandView {
@@ -516,6 +533,7 @@ impl RequestedCommandView {
                         let is_view_only = me.action_model.as_ref(ctx).is_view_only();
                         me.sync_command_from_result_for_viewer(&action_result, is_view_only);
                         me.destroy_editor();
+                        me.request_command_highlighting(ctx);
 
                         match &action_result.result {
                             AIAgentActionResultType::RequestCommandOutput(command_result) => {
@@ -629,6 +647,8 @@ impl RequestedCommandView {
             mcp_context_menu_anchor_id: None,
             mcp_server_id: None,
             mcp_tool_name: None,
+            parsed_command_tokens: None,
+            command_highlight_parse_handle: None,
         }
     }
 
@@ -663,6 +683,7 @@ impl RequestedCommandView {
             me.handle_editor_event(event, view, ctx);
         });
         self.editor = Some(editor);
+        self.request_command_highlighting(ctx);
     }
 
     /// Drops the editor view. Does not sync editor contents back to `command_text`;
@@ -715,6 +736,96 @@ impl RequestedCommandView {
             }
             _ => {}
         }
+    }
+
+    /// Whether completer-based syntax highlighting should be computed for this requested
+    /// command. Mirrors the terminal input's own `InputSettings::syntax_highlighting` setting,
+    /// so toggling it off leaves both the collapsed header and the permission-prompt editor plain.
+    fn should_highlight_command(&self, app: &AppContext) -> bool {
+        self.action_type.is_requested_command()
+            && *InputSettings::as_ref(app).syntax_highlighting.value()
+    }
+
+    /// (Re-)parses `command_text` in the background so completer-based syntax highlighting —
+    /// matching the terminal input's own highlighting — can be applied to the collapsed header
+    /// and, if present, the permission-prompt editor. Any in-flight parse is aborted first, so
+    /// at most one parse ever runs; a debounce isn't necessary since `command_text` streams in
+    /// via relatively small, infrequent chunks.
+    fn request_command_highlighting(&mut self, ctx: &mut ViewContext<Self>) {
+        if let Some(handle) = self.command_highlight_parse_handle.take() {
+            handle.abort();
+        }
+
+        if !self.should_highlight_command(ctx) || self.command_text.is_empty() {
+            self.parsed_command_tokens = None;
+            self.apply_command_highlighting_to_editor(ctx);
+            return;
+        }
+
+        let command_text = self.command_text.clone();
+        // The command hasn't necessarily executed yet (and may never, e.g. if rejected), so
+        // there isn't always a live session to derive path/alias/env-aware completions from.
+        // This mirrors the same session-agnostic fallback used to highlight static shell
+        // snippets elsewhere (e.g. `CloudSetupGuideView`, `NotebookCommand`).
+        let completion_context = SessionAgnosticContext::new(CommandRegistry::global_instance());
+        self.command_highlight_parse_handle =
+            Some(ctx.spawn(
+                async move {
+                    parse_current_commands_and_tokens(command_text, &completion_context).await
+                },
+                |me, parsed_tokens, ctx| {
+                    me.command_highlight_parse_handle = None;
+                    if parsed_tokens.buffer_text != me.command_text {
+                        // Stale: `command_text` moved on before this parse completed.
+                        return;
+                    }
+                    me.parsed_command_tokens = Some(parsed_tokens);
+                    me.apply_command_highlighting_to_editor(ctx);
+                    ctx.notify();
+                },
+            ));
+    }
+
+    /// Pushes the latest completer-derived colors into the permission-prompt editor, if one
+    /// currently exists. The collapsed header instead reads `parsed_command_tokens` directly at
+    /// render time (see `command_highlighted_ranges_for_header`), so it needs no explicit push.
+    fn apply_command_highlighting_to_editor(&self, ctx: &mut ViewContext<Self>) {
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        let colors = self
+            .parsed_command_tokens
+            .as_ref()
+            .map(|parsed_tokens| {
+                let terminal_colors = Appearance::as_ref(ctx).theme().terminal_colors().normal;
+                command_highlight_color_ranges(parsed_tokens, &terminal_colors)
+            })
+            .unwrap_or_default();
+        editor.update(ctx, |editor, ctx| {
+            editor.set_external_highlight_colors(colors, ctx);
+        });
+    }
+
+    /// Computes the completer-based highlighted ranges for the collapsed header's title,
+    /// clipped to the (possibly truncated) text that `format_command_text` actually renders.
+    fn command_highlighted_ranges_for_header(&self, app: &AppContext) -> Vec<HighlightedRange> {
+        if !self.should_highlight_command(app) {
+            return Vec::new();
+        }
+        let Some(parsed_tokens) = &self.parsed_command_tokens else {
+            return Vec::new();
+        };
+        if parsed_tokens.buffer_text != self.command_text {
+            return Vec::new();
+        }
+
+        let terminal_colors = Appearance::as_ref(app).theme().terminal_colors().normal;
+        let color_ranges = command_highlight_color_ranges(parsed_tokens, &terminal_colors);
+        let max_char = self
+            .command_text
+            .find('\n')
+            .map(|byte_idx| self.command_text[..byte_idx].chars().count());
+        header_highlight_ranges(&color_ranges, max_char)
     }
 
     fn set_is_header_expanded(&mut self, value: bool, ctx: &mut ViewContext<Self>) {
@@ -1098,6 +1209,8 @@ impl RequestedCommandView {
                 }
             });
         }
+
+        self.request_command_highlighting(ctx);
     }
 
     /// Returns the currently selected text.
@@ -1317,8 +1430,18 @@ impl RequestedCommandView {
             }
         };
 
+        // Highlighting only applies when `title` is actually showing raw (possibly truncated)
+        // command text, i.e. not one of the status messages set in the branches above.
+        let title_str: &str = title.as_ref();
+        let highlighted_ranges = if title_str == self.get_header_title_text(app) {
+            self.command_highlighted_ranges_for_header(app)
+        } else {
+            Vec::new()
+        };
+
         let mut config = HeaderConfig::new(title, app)
             .with_selectable_text()
+            .with_highlighted_ranges(highlighted_ranges)
             .with_icon(if let Some(block) = requested_command_block {
                 if !block.finished() {
                     if let Some(long_running_command_control_state) =
@@ -2193,6 +2316,84 @@ pub fn format_command_text(text: &str) -> String {
     } else {
         text.to_string()
     }
+}
+
+/// Converts a completer parse result into per-suggestion-type colored character ranges,
+/// matching the terminal input's own completer-based syntax highlighting (see
+/// `apply_colors_syntax_highlighting_all_tokens` in `terminal/input/decorations.rs`).
+/// Extracted for unit testing.
+pub fn command_highlight_color_ranges(
+    parsed_tokens: &ParsedTokensSnapshot,
+    terminal_colors: &AnsiColors,
+) -> Vec<(Range<CharOffset>, ColorU)> {
+    let buffer_text = &parsed_tokens.buffer_text;
+    let mut char_counter = CharCounter::new(buffer_text);
+    // `CharCounter::char_offset` only resolves offsets that land on a char boundary strictly
+    // before the end of the string, so the (extremely common) case of a token ending at the
+    // very end of `buffer_text` — e.g. the last word of any command — needs the total char
+    // count instead.
+    let total_chars = CharOffset::from(buffer_text.chars().count());
+    let mut ranges = Vec::new();
+    for token_data in &parsed_tokens.parsed_tokens {
+        let Some(description) = &token_data.token_description else {
+            continue;
+        };
+
+        let byte_start = token_data.token.span.start();
+        let byte_end = token_data.token.span.end();
+
+        let Some(char_start) = char_counter.char_offset(byte_start) else {
+            continue;
+        };
+        let char_end = if byte_end >= buffer_text.len() {
+            total_chars
+        } else {
+            let Some(char_end) = char_counter.char_offset(byte_end) else {
+                continue;
+            };
+            char_end
+        };
+        if char_start >= char_end {
+            continue;
+        }
+
+        let color_id: AnsiColorIdentifier = description.suggestion_type.to_name().into();
+        ranges.push((
+            char_start..char_end,
+            color_id.to_ansi_color(terminal_colors).into(),
+        ));
+    }
+    ranges
+}
+
+/// Clips completer-derived color ranges to a maximum char offset (used to respect the
+/// collapsed header's single-line, possibly-truncated title; see `format_command_text`) and
+/// converts them into [`HighlightedRange`]s for `Text::with_highlights`. Extracted for unit
+/// testing.
+pub fn header_highlight_ranges(
+    color_ranges: &[(Range<CharOffset>, ColorU)],
+    max_char: Option<usize>,
+) -> Vec<HighlightedRange> {
+    color_ranges
+        .iter()
+        .filter_map(|(range, color)| {
+            let start = range.start.as_usize();
+            let mut end = range.end.as_usize();
+            if let Some(max_char) = max_char {
+                if start >= max_char {
+                    return None;
+                }
+                end = end.min(max_char);
+            }
+            if start >= end {
+                return None;
+            }
+            Some(HighlightedRange {
+                highlight: Highlight::new().with_foreground_color(*color),
+                highlight_indices: (start..end).collect(),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

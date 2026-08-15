@@ -13,6 +13,7 @@ use itertools::Itertools;
 use languages::{Language, language_by_filename, language_by_local_filename, language_by_name};
 use line_ending::LineEnding;
 use num_traits::SaturatingSub;
+use pathfinder_color::ColorU;
 use rangemap::{RangeMap, RangeSet};
 use string_offset::CharOffset;
 use syntax_tree::{ColorMap, DecorationStateEvent, SyntaxTreeState};
@@ -291,6 +292,10 @@ pub struct CodeEditorModel {
     syntax_tree: ModelHandle<SyntaxTreeState>,
     comments: ModelHandle<EditorCommentsModel>,
     hidden_lines: ModelHandle<HiddenLinesModel>,
+    /// Externally computed syntax highlight colors (e.g. completer-based highlighting) that take
+    /// precedence over the tree-sitter-derived `syntax_tree` colors. Independent of `syntax_tree`
+    /// so callers can highlight buffers that have no configured language.
+    external_highlight_colors: RangeMap<CharOffset, ColorU>,
     /// The current state of diff navigation (collapsed, expanded, or focused on a specific hunk)
     diff_navigation_state: DiffNavigationState,
     interaction_state: InteractionState,
@@ -459,6 +464,7 @@ impl CodeEditorModel {
             syntax_tree,
             comments,
             hidden_lines,
+            external_highlight_colors: RangeMap::new(),
             diff_navigation_state: DiffNavigationState::Collapsed,
             interaction_state: InteractionState::Editable,
             show_current_line_highlights,
@@ -684,6 +690,19 @@ impl CodeEditorModel {
         }
         self.hovered_symbol_range = range;
         true
+    }
+
+    /// Sets externally computed syntax highlight colors (e.g. completer-based highlighting, as
+    /// used by requested-command permission prompts) that take precedence over the editor's own
+    /// `syntax_tree`-derived colors. Pass an empty `colors` to clear.
+    pub fn set_external_highlight_colors(
+        &mut self,
+        colors: Vec<(Range<CharOffset>, ColorU)>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.external_highlight_colors = RangeMap::from_iter(colors);
+        ctx.emit(CodeEditorModelEvent::SyntaxHighlightingUpdated);
+        ctx.notify();
     }
 
     pub fn maybe_click_on_hovered_link(&self, offset: &CharOffset, ctx: &mut ModelContext<Self>) {
@@ -1451,9 +1470,17 @@ impl CodeEditorModel {
             .as_ref()
             .map(|link| RangeMap::from_iter([(link.range.clone(), underline_color)]));
 
+        let mut override_color_map = (!self.external_highlight_colors.is_empty())
+            .then(|| self.external_highlight_colors.clone());
+        if let Some(underline_range) = &underline_range {
+            override_color_map
+                .get_or_insert_with(RangeMap::new)
+                .extend(underline_range.clone());
+        }
+
         TextDecoration {
             base_color_map,
-            override_color_map: underline_range.clone(),
+            override_color_map,
             underline_range,
         }
     }

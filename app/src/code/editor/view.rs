@@ -8,6 +8,7 @@ use std::path::Path;
 use ai::diff_validation::DiffDelta;
 use lazy_static::lazy_static;
 use num_traits::SaturatingSub;
+use pathfinder_color::ColorU;
 use pathfinder_geometry::vector::vec2f;
 use settings::Setting as _;
 use string_offset::CharOffset;
@@ -1760,6 +1761,19 @@ impl CodeEditorView {
         }
 
         updated
+    }
+
+    /// Sets externally computed syntax highlight colors (e.g. completer-based highlighting)
+    /// that take precedence over the editor's own language-based highlighting. Pass an empty
+    /// `colors` to clear.
+    pub fn set_external_highlight_colors(
+        &self,
+        colors: Vec<(Range<CharOffset>, ColorU)>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.model.update(ctx, |model, ctx| {
+            model.set_external_highlight_colors(colors, ctx);
+        });
     }
 
     pub fn apply_edits(
