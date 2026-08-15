@@ -76,25 +76,19 @@ These results came from executing the current public parser APIs. They are failu
    - Required: cursor selection returns `b`.
    - Consequence: X-Ray cannot identify the deepest command.
 
-5. **Deep incomplete input**
-   - Input: `echo "$(a $(b $(c`, cursor on `c`.
-   - Current: `parse_for_completions` returns `c`, but `command_at_cursor_position` returns the outer `echo $(...)`.
-   - Required: both APIs select `c`, with three open nested-command groups.
-   - Consequence: completion and Describe disagree about which command owns the cursor.
-
-6. **Process substitution**
+5. **Process substitution**
    - Input: `cat <(printf x)`, cursor on `printf`.
    - Current: `all_parsed_commands` returns two top-level commands, `cat` and `printf x`, and reports a redirect. The parser has no process-substitution node.
    - Required: `cat` is top-level. `printf x` is a child in an input-process-substitution group. Permissions preserve conservative redirect handling until the safety migration explicitly changes it.
    - Consequence: structural consumers cannot distinguish a nested process from a separate top-level command.
 
-7. **Redirect inside a nested command**
+6. **Redirect inside a nested command**
    - Input: `echo "$(KEY=VALUE env >out)"`, cursor on `env`.
    - Current: cursor selection returns parts equivalent to `KEY=VALUE env out`; the redirect destination is treated as a positional part.
    - Required: the nested command has assignment `KEY=VALUE`, executable `env`, and a separate `>out` redirection.
    - Consequence: Describe and signature classification see a false positional argument.
 
-8. **Escaped nested backticks bypass a deny predicate**
+7. **Escaped nested backticks bypass a deny predicate**
    - Input: ``echo `echo \`rm -rf /\````. `bash -n` accepts this syntax, and a harmless equivalent executes the innermost substitution.
    - Current `decompose_command` returns:
      - `` `echo \`rm ``
@@ -112,6 +106,7 @@ Known-good controls must remain separate from this failure list:
 
 - `echo "$(pwd)"` already returns `pwd` at the cursor.
 - `echo "$(pw` already selects `pw` for completion and cursor lookup.
+- `echo "$(a $(b $(c` already selects `c` for completion and cursor lookup. The current `command_at_cursor` recursion handles this nested `OpenSubshell` shape.
 - Plain `$()` nesting, `$()` inside backticks, and backticks inside `$()` already expose `rm -rf /` to the deny rule.
 - `echo '$(pwd)'` correctly treats the substitution text as literal in POSIX shells.
 - A pipeline and statement list inside a non-concatenated `$()` already decompose into the individual commands.
@@ -411,7 +406,7 @@ Done means every parser consumer uses the Warp adapter for Bash, Zsh, Fish, and 
 - `cargo test -p warp_completer shell_adapter_incomplete_corpus`
   - Verifies open delimiters, clipped synthetic spans, and deepest cursor/completion selection.
 - `cargo test -p warp_completer shell_adapter_legacy_failure_corpus`
-  - Contains all eight empirical failures and asserts the required corrected result.
+  - Contains all seven empirical failures and asserts the required corrected result.
 - `cargo test -p warp_completer shell_adapter_known_good_parity`
   - Protects the controls listed above from regression.
 - `cargo test -p warp_completer shell_adapter_no_backend_types_in_public_api`
