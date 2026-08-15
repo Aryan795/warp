@@ -114,6 +114,46 @@ fn observed_fixed_escaped_nested_backticks_expose_inner_command() {
     assert!(!contains_redirection);
 }
 
+/// Documents the depth boundary of the APP-5433 fix: `until_backtick` (`iter.rs`) only handles
+/// *one* level of escaped-backtick nesting (a single `` \` `` pair, as in the corpus's own
+/// `` `echo \`rm -rf /\`` `` case above). A second escaped level -- real Bash's convention
+/// requires the backslash count to roughly double per level, so level 3 uses three backslashes,
+/// not one -- is not surfaced at all: `decompose_command` fragments the input instead of
+/// producing a clean `rm -rf /` string, and none of the fragments match an anchored
+/// `rm(\s.*)?` deny rule (verified directly against `can_autoexecute_command` in
+/// `app/src/ai/blocklist/permissions_tests.rs`, which returns `Allowed` for this input even with
+/// that deny rule active).
+///
+/// This is a live, confirmed gap in the shipping fix, not a theoretical one: the exact input
+/// below is valid, executing Bash (confirmed with `bash -n`, and by substituting a harmless
+/// `printf` payload for `rm -rf /` and running it for real, which prints the expected inner
+/// value). APP-5433 is closed for depth 2, not depth 3+. Extending the fix to
+/// arbitrary depth requires the hand-written parser to understand Bash's actual (exponential)
+/// backtick-escaping convention, which is a larger, separate piece of work than this regression
+/// fix; see the Phase 1 tree-sitter adapter's own equivalent, deliberate depth-1 limit in
+/// `crates/warp_completer/src/parsers/shell/mapper.rs`'s `detect_escaped_backtick_group` for the
+/// same tradeoff made explicitly there.
+#[test]
+fn observed_legacy_escaped_nested_backtick_depth_3_is_not_fixed() {
+    // Level 1 (outermost): 0 backslashes. Level 2: 1 backslash. Level 3: 3 backslashes. Verified
+    // with `bash -n` (valid syntax) and by executing it (prints the payload target, confirming
+    // real semantics, not just parseable text).
+    let source = "echo `echo \\`echo \\\\\\`rm -rf /\\\\\\`\\``";
+    let (decomposed, _) = decompose_command(source, EscapeChar::Backslash);
+    assert!(
+        !decomposed.contains(&"rm -rf /".to_string()),
+        "if this now passes, the depth boundary documented here has changed and this test (and \
+         the comment above it) needs updating -- do not just delete the assertion"
+    );
+    let deny_rule = regex::Regex::new(r"^rm(\s.*)?$").unwrap();
+    assert!(
+        !decomposed.iter().any(|c| deny_rule.is_match(c)),
+        "expected no decomposed fragment to match the production `rm(\\s.*)?` deny rule at depth \
+         3, got a match in {decomposed:?} -- if this fails, the gap this test documents may have \
+         closed by accident; confirm with a real can_autoexecute_command test before deleting it"
+    );
+}
+
 /// Known-good control: `echo "$(pwd)"` already returns `pwd` at the cursor.
 #[test]
 fn known_good_simple_quoted_nested_command_cursor() {

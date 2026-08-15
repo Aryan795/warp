@@ -795,6 +795,71 @@ fn test_can_autoexecute_command_denylist_catches_escaped_nested_backtick() {
     })
 }
 
+// Documents a live, confirmed gap in the APP-5433 fix (see
+// `observed_legacy_escaped_nested_backtick_depth_3_is_not_fixed` in
+// `crates/warp_completer/src/parsers/simple/legacy_corpus_tests.rs` for the parser-level detail
+// and the exact backslash-count structure of the input below). `until_backtick` only handles one
+// level of escaped-backtick nesting; at a second escaped level, `decompose_command` fragments the
+// input instead of producing a clean inner command string, so an explicit `rm` deny rule never
+// sees it and an `AlwaysAllow` profile auto-executes the destructive command. Confirmed with
+// `bash -n` (valid syntax) and by substituting a harmless `printf` payload and running it for
+// real.
+//
+// This test intentionally pins the *current, vulnerable* behavior (`Allowed`, not `Denied`), the
+// same way `observed_legacy_*` tests in the parser corpus do: if this test starts failing because
+// the result changed to `Denied`, that means the depth-3 gap has been closed and this test (and
+// its sibling in `legacy_corpus_tests.rs`) should be deleted, not "fixed" back to asserting
+// `Allowed`.
+#[test]
+fn test_can_autoexecute_command_denylist_does_not_catch_escaped_nested_backtick_at_depth_3() {
+    App::test((), |mut app| async move {
+        let PermissionsTestState {
+            convo_id,
+            permissions,
+            profile_model,
+            terminal_view_id,
+            ..
+        } = initialize_permissions_test(&mut app);
+
+        profile_model.update(&mut app, |model, ctx| {
+            let profile_id = model
+                .active_profile(Some(terminal_view_id), ctx)
+                .id()
+                .clone();
+            model.set_execute_commands(&profile_id, &ActionPermission::AlwaysAllow, ctx);
+            model.add_to_command_denylist(
+                &profile_id,
+                &AgentModeCommandExecutionPredicate::new_regex(r"rm(\s.*)?").unwrap(),
+                ctx,
+            );
+        });
+
+        permissions.read(&app, |model, ctx| {
+            // Level 1: 0 backslashes. Level 2: 1 backslash. Level 3: 3 backslashes.
+            let result = model.can_autoexecute_command(
+                &convo_id,
+                "echo `echo \\`echo \\\\\\`rm -rf /\\\\\\`\\``",
+                EscapeChar::Backslash,
+                false,
+                None,
+                Some(terminal_view_id),
+                ctx,
+            );
+            assert!(
+                matches!(
+                    result,
+                    CommandExecutionPermission::Allowed(
+                        CommandExecutionPermissionAllowedReason::AlwaysAllowed
+                    )
+                ),
+                "expected the depth-3 escaped nested `rm -rf /` to still bypass the rm denylist \
+                 (documenting a known gap), got {result:?} -- if this is now Denied, the gap has \
+                 closed; delete this test rather than updating the assertion"
+            );
+        });
+    })
+}
+
 #[test]
 fn test_can_autoexecute_command_allowlist_precedence() {
     App::test((), |mut app| async move {
