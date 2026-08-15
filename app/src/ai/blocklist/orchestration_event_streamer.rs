@@ -1651,7 +1651,11 @@ impl OrchestrationEventStreamer {
             self.spawn_ancestor_seed_fetch(parent_task_id, ctx);
         } else {
             // Already seeded: open the SSE immediately if it's not running
-            // (e.g. after a transient teardown).
+            // (e.g. after a transient teardown). The scope resolved by the
+            // original seed is deliberately sticky for the entry's lifetime
+            // — including a DirectChildren fallback from a transient
+            // root-ness fetch failure — and re-resolves only after the last
+            // consumer unregisters and the entry is rebuilt.
             self.start_ancestor_sse_if_seeded(parent_task_id, ctx);
             self.emit_known_viewer_mode_children(parent_task_id, ctx);
         }
@@ -1774,18 +1778,7 @@ impl OrchestrationEventStreamer {
         ctx.spawn(
             async move { ai_client.get_ambient_agent_task(&parent_task_id).await },
             move |me, result, ctx| {
-                let scope = match result {
-                    Ok(task) if task.parent_run_id.is_none() => ViewerAnchorScope::Subtree,
-                    Ok(_) => ViewerAnchorScope::DirectChildren,
-                    Err(err) => {
-                        log::warn!(
-                            "[orch-viewer-streamer] anchor root-ness fetch failed for \
-                             parent_task_id={parent_task_id}: {err:#}; falling back to \
-                             direct-children scope"
-                        );
-                        ViewerAnchorScope::DirectChildren
-                    }
-                };
+                let scope = viewer_scope_from_anchor_fetch(parent_task_id, &result);
                 me.spawn_viewer_seed_list(parent_task_id, scope, ctx);
             },
         );
@@ -3354,6 +3347,28 @@ fn agent_event_filters_equivalent(a: &AgentEventFilter, b: &AgentEventFilter) ->
 pub(crate) fn multi_level_subtree_scope_enabled() -> bool {
     FeatureFlag::MultiLevelOrchestration.is_enabled()
         && FeatureFlag::OrchestrationUnifiedStack.is_enabled()
+}
+
+/// Maps the viewer anchor's root-ness fetch outcome onto a stream scope:
+/// roots (no `parent_run_id`) stream their whole subtree; mid-tree anchors
+/// — and anchors whose root-ness cannot be determined — keep the legacy
+/// direct-children scope.
+fn viewer_scope_from_anchor_fetch(
+    parent_task_id: AmbientAgentTaskId,
+    result: &anyhow::Result<crate::ai::ambient_agents::task::AmbientAgentTask>,
+) -> ViewerAnchorScope {
+    match result {
+        Ok(task) if task.parent_run_id.is_none() => ViewerAnchorScope::Subtree,
+        Ok(_) => ViewerAnchorScope::DirectChildren,
+        Err(err) => {
+            log::warn!(
+                "[orch-viewer-streamer] anchor root-ness fetch failed for \
+                 parent_task_id={parent_task_id}: {err:#}; falling back to \
+                 direct-children scope"
+            );
+            ViewerAnchorScope::DirectChildren
+        }
+    }
 }
 
 pub(crate) fn agent_task_harness(

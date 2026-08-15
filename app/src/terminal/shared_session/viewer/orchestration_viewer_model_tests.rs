@@ -994,6 +994,7 @@ fn parks_grandchild_until_parent_registers_then_drains() {
 #[test]
 fn family_scope_covers_anchor_descendants_and_pending_discoveries() {
     let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    let _multi_level = FeatureFlag::MultiLevelOrchestration.override_enabled(true);
     App::test((), |mut app| async move {
         let fixture = setup(&mut app);
         register_child(&mut app, &fixture, queued_task(CHILD_A_TASK_ID, "Worker"));
@@ -1016,6 +1017,135 @@ fn family_scope_covers_anchor_descendants_and_pending_discoveries() {
             assert!(
                 !model.family_in_scope(task_id(GRANDCHILD_TASK_ID)),
                 "unknown families belong to other orchestrators"
+            );
+        });
+    });
+}
+
+#[test]
+fn family_scope_covers_descendants_parked_on_unregistered_parents() {
+    // A descendant parked behind a not-yet-registered parent can already be
+    // announcing children of its own; dropping those broadcasts as foreign
+    // would permanently lose already-terminal grandchildren.
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    let _multi_level = FeatureFlag::MultiLevelOrchestration.override_enabled(true);
+    App::test((), |mut app| async move {
+        let fixture = setup(&mut app);
+        register_child(
+            &mut app,
+            &fixture,
+            task_with_parent_run(
+                GRANDCHILD_TASK_ID,
+                CHILD_A_TASK_ID,
+                AmbientAgentTaskState::InProgress,
+                "Nested worker",
+            ),
+        );
+
+        fixture.model.read(&app, |model, _| {
+            assert!(
+                !model.children.contains_key(&task_id(GRANDCHILD_TASK_ID)),
+                "precondition: the descendant is parked, not registered"
+            );
+            assert!(
+                model.family_in_scope(task_id(GRANDCHILD_TASK_ID)),
+                "a parked descendant must still be an acceptable family"
+            );
+        });
+    });
+}
+
+#[test]
+fn family_scope_is_anchor_only_without_multi_level_orchestration() {
+    // Without multi-level subtree scope, overlapping viewer panes (for
+    // example a second top-level pane anchored on a child run) must keep
+    // the legacy contract: only the anchor's own broadcasts are accepted.
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    let _multi_level = FeatureFlag::MultiLevelOrchestration.override_enabled(false);
+    App::test((), |mut app| async move {
+        let fixture = setup(&mut app);
+        register_child(&mut app, &fixture, queued_task(CHILD_A_TASK_ID, "Worker"));
+
+        fixture.model.read(&app, |model, _| {
+            assert!(model.family_in_scope(task_id(PARENT_TASK_ID)));
+            assert!(
+                !model.family_in_scope(task_id(CHILD_A_TASK_ID)),
+                "a tracked child is not a family without multi-level orchestration"
+            );
+        });
+    });
+}
+
+#[test]
+fn depth_four_descendants_park_and_drain_bottom_up() {
+    // A depth-4 chain arriving fully out of dependency order: each level
+    // parks on its missing parent, and registrations drain the chain.
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    let _multi_level = FeatureFlag::MultiLevelOrchestration.override_enabled(true);
+    App::test((), |mut app| async move {
+        const GREAT_GRANDCHILD_TASK_ID: &str = "66666666-6666-6666-6666-666666666666";
+        let fixture = setup(&mut app);
+
+        // Deepest first: great-grandchild parks on the grandchild, then the
+        // grandchild parks on the child.
+        register_child(
+            &mut app,
+            &fixture,
+            task_with_parent_run(
+                GREAT_GRANDCHILD_TASK_ID,
+                GRANDCHILD_TASK_ID,
+                AmbientAgentTaskState::InProgress,
+                "Depth four",
+            ),
+        );
+        register_child(
+            &mut app,
+            &fixture,
+            task_with_parent_run(
+                GRANDCHILD_TASK_ID,
+                CHILD_A_TASK_ID,
+                AmbientAgentTaskState::InProgress,
+                "Depth three",
+            ),
+        );
+        fixture.model.read(&app, |model, _| {
+            assert!(
+                model.children.is_empty(),
+                "everything parks until the child lands"
+            );
+            assert!(
+                model.family_in_scope(task_id(GRANDCHILD_TASK_ID)),
+                "parked mid levels stay in scope for their own children"
+            );
+        });
+
+        // The direct child registers: the whole chain drains bottom-up.
+        register_child(&mut app, &fixture, queued_task(CHILD_A_TASK_ID, "Worker"));
+
+        fixture.model.read(&app, |model, _| {
+            assert!(model.children_waiting_on_parent.is_empty());
+            assert!(model.children.contains_key(&task_id(CHILD_A_TASK_ID)));
+            assert!(model.children.contains_key(&task_id(GRANDCHILD_TASK_ID)));
+            assert!(
+                model
+                    .children
+                    .contains_key(&task_id(GREAT_GRANDCHILD_TASK_ID)),
+                "the depth-4 leaf drains once its whole ancestor chain registers"
+            );
+        });
+        let grandchild_conv_id = read_child(&app, &fixture, GRANDCHILD_TASK_ID, |entry| {
+            entry.conversation_id
+        });
+        let great_grandchild_conv_id =
+            read_child(&app, &fixture, GREAT_GRANDCHILD_TASK_ID, |entry| {
+                entry.conversation_id
+            });
+        BlocklistAIHistoryModel::handle(&app).read(&app, |history, _| {
+            assert!(
+                history
+                    .child_conversation_ids_of(&grandchild_conv_id)
+                    .contains(&great_grandchild_conv_id),
+                "each drained level attaches under its actual parent"
             );
         });
     });

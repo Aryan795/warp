@@ -26,7 +26,7 @@ use crate::ai::ambient_agents::{AmbientAgentTask, AmbientAgentTaskId, AmbientAge
 use crate::ai::blocklist::BlocklistAIHistoryModel;
 use crate::ai::blocklist::history_model::BlocklistAIHistoryEvent;
 use crate::ai::blocklist::orchestration_event_streamer::{
-    OrchestrationEventStreamer, OrchestrationEventStreamerEvent,
+    OrchestrationEventStreamer, OrchestrationEventStreamerEvent, multi_level_subtree_scope_enabled,
 };
 use crate::features::FeatureFlag;
 use crate::pane_group::{ChildPaneMaterialization, decide_child_pane_materialization};
@@ -219,15 +219,28 @@ impl OrchestrationViewerModel {
     }
 
     /// True iff a broadcast attributed to `family_task_id` belongs to this
-    /// viewer's tree: the anchor itself, a tracked descendant, or a
-    /// descendant whose own discovery fetch is still pending (its children
-    /// can announce before its metadata resolves).
+    /// viewer's tree: the anchor itself or — with multi-level subtree scope
+    /// enabled — a tracked descendant, a descendant whose discovery fetch is
+    /// still pending, or one parked on a not-yet-registered parent (its own
+    /// children can announce before it resolves). Without the flag only the
+    /// anchor's own broadcasts are accepted, preserving the legacy
+    /// direct-children contract for overlapping viewer panes.
     fn family_in_scope(&self, family_task_id: AmbientAgentTaskId) -> bool {
-        family_task_id == self.parent_task_id
-            || self.children.contains_key(&family_task_id)
+        if family_task_id == self.parent_task_id {
+            return true;
+        }
+        if !multi_level_subtree_scope_enabled() {
+            return false;
+        }
+        self.children.contains_key(&family_task_id)
             || self
                 .pending_task_ids_for_discovery
                 .contains(&family_task_id)
+            || self
+                .children_waiting_on_parent
+                .values()
+                .flatten()
+                .any(|task| task.task_id == family_task_id)
     }
 
     /// Routes broadcast events from the streamer. `parent_task_id` on the
@@ -449,10 +462,13 @@ impl OrchestrationViewerModel {
                              parent run {parent} registers (anchor={})",
                             self.parent_task_id,
                         );
-                        self.children_waiting_on_parent
+                        let parked = self
+                            .children_waiting_on_parent
                             .entry(parent.to_string())
-                            .or_default()
-                            .push(task);
+                            .or_default();
+                        if !parked.iter().any(|parked| parked.task_id == task_id) {
+                            parked.push(task);
+                        }
                         return;
                     }
                 }

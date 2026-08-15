@@ -4097,7 +4097,14 @@ fn viewer_subtree_drain_drops_anchor_events_and_attributes_families() {
             model.restore_conversations(terminal_view_id, vec![placeholder], ctx);
         });
 
-        let ai_client: Arc<dyn AIClient> = Arc::new(MockAIClient::new());
+        // No `expect_update_event_sequence_on_server`: the Observer drain
+        // must never push the server cursor, and any attempt panics the
+        // mock. Placeholder / missing-family fetches fire as side effects
+        // of discovery and parking; their outcome is not under test.
+        let mut mock = MockAIClient::new();
+        mock.expect_get_ambient_agent_task()
+            .returning(|_| Err(anyhow::anyhow!("metadata fetch not under test")));
+        let ai_client: Arc<dyn AIClient> = Arc::new(mock);
         let server_api = ServerApiProvider::new_for_test().get();
         let streamer = app.add_singleton_model(|ctx| {
             OrchestrationEventStreamer::new_with_clients_for_test(ai_client, server_api, ctx)
@@ -4184,4 +4191,35 @@ fn viewer_subtree_drain_drops_anchor_events_and_attributes_families() {
             );
         });
     });
+}
+
+// ---- Viewer anchor scope resolution -----------------------------------------
+
+#[test]
+fn viewer_scope_resolution_maps_root_rows_to_subtree() {
+    let anchor = make_parent_task_id_for_test(0xb7);
+    assert_eq!(
+        viewer_scope_from_anchor_fetch(anchor, &Ok(make_ambient_task_with_task_id(anchor, None))),
+        ViewerAnchorScope::Subtree
+    );
+}
+
+#[test]
+fn viewer_scope_resolution_maps_mid_tree_rows_to_direct_children() {
+    let anchor = make_parent_task_id_for_test(0xb8);
+    let mut row = make_ambient_task_with_task_id(anchor, None);
+    row.parent_run_id = Some(make_parent_task_id_for_test(0xb9).to_string());
+    assert_eq!(
+        viewer_scope_from_anchor_fetch(anchor, &Ok(row)),
+        ViewerAnchorScope::DirectChildren
+    );
+}
+
+#[test]
+fn viewer_scope_resolution_falls_back_to_direct_children_on_fetch_errors() {
+    let anchor = make_parent_task_id_for_test(0xba);
+    assert_eq!(
+        viewer_scope_from_anchor_fetch(anchor, &Err(anyhow::anyhow!("server unavailable"))),
+        ViewerAnchorScope::DirectChildren
+    );
 }
