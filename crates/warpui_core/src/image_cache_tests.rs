@@ -658,6 +658,131 @@ fn test_evict_size_drops_arc_only_for_targeted_entry() {
 }
 
 #[test]
+fn test_image_evicts_lru_size_variant_when_cache_exceeds_capacity() {
+    let asset_cache = new_asset_cache();
+    let image_cache = ImageCache::new();
+    let source = AssetSource::Bundled { path: "local.png" };
+
+    let mut s = DefaultHasher::new();
+    source.hash(&mut s);
+    let cache_key = s.finish();
+
+    // Simulate a continuous window-resize drag that sweeps through more
+    // distinct pixel sizes than MAX_CACHED_SIZES_PER_ASSET.
+    let num_sizes = MAX_CACHED_SIZES_PER_ASSET + 4;
+    let mut weaks = Vec::new();
+    for size in 1..=num_sizes {
+        let bounds = Vector2I::new(size as i32 * 10, size as i32 * 10);
+        let image = image_cache.image(
+            source.clone(),
+            bounds,
+            FitType::Cover,
+            AnimatedImageBehavior::FullAnimation,
+            CacheOption::BySize,
+            None,
+            &asset_cache,
+        );
+        let AssetState::Loaded { data: image } = image else {
+            panic!("Bundled asset should be available immediately!");
+        };
+        let Image::Static(arc) = image.as_ref() else {
+            panic!("Expected static image!");
+        };
+        weaks.push(Arc::downgrade(arc));
+        // Drop the local Rc<Image> clone; only ImageCache should hold a strong
+        // reference to entries once they age out.
+    }
+
+    let retained = image_cache
+        .images
+        .read()
+        .get(&cache_key)
+        .map(|inner_map| inner_map.len())
+        .unwrap_or(0);
+    assert_eq!(
+        retained, MAX_CACHED_SIZES_PER_ASSET,
+        "the per-asset cache should never grow past MAX_CACHED_SIZES_PER_ASSET, regardless of how \
+         many distinct sizes have been requested over the asset's lifetime"
+    );
+
+    // The earliest-requested (least-recently-used) sizes should have been
+    // evicted, releasing their Arc<StaticImage>, while the most recently
+    // requested sizes remain retained.
+    let evicted_count = weaks.len() - MAX_CACHED_SIZES_PER_ASSET;
+    for weak in &weaks[..evicted_count] {
+        assert_eq!(
+            weak.strong_count(),
+            0,
+            "stale size variants evicted by the LRU pass should have no strong holders left"
+        );
+    }
+    for weak in &weaks[evicted_count..] {
+        assert_eq!(
+            weak.strong_count(),
+            1,
+            "recently requested size variants should remain retained by ImageCache"
+        );
+    }
+}
+
+#[test]
+fn test_image_does_not_evict_active_size_variants_at_capacity() {
+    let asset_cache = new_asset_cache();
+    let image_cache = ImageCache::new();
+    let source = AssetSource::Bundled { path: "local.png" };
+
+    // Simulate an asset legitimately rendered at exactly
+    // MAX_CACHED_SIZES_PER_ASSET distinct fixed sizes at once (e.g. an icon
+    // reused at several sizes across the UI).
+    let bounds: Vec<Vector2I> = (1..=MAX_CACHED_SIZES_PER_ASSET)
+        .map(|size| Vector2I::new(size as i32 * 10, size as i32 * 10))
+        .collect();
+
+    let mut originals = Vec::new();
+    for bound in &bounds {
+        let image = image_cache.image(
+            source.clone(),
+            *bound,
+            FitType::Cover,
+            AnimatedImageBehavior::FullAnimation,
+            CacheOption::BySize,
+            None,
+            &asset_cache,
+        );
+        let AssetState::Loaded { data: image } = image else {
+            panic!("Bundled asset should be available immediately!");
+        };
+        originals.push(image);
+    }
+
+    // Simulate several more paint frames re-requesting the same steady-state
+    // set of sizes. None should ever be evicted or recomputed: every request
+    // is a hit, so the LRU pass never observes a miss that would trigger
+    // eviction, and the app doesn't pay a decode-per-frame treadmill cost.
+    for _ in 0..5 {
+        for (bound, original) in bounds.iter().zip(originals.iter()) {
+            let image = image_cache.image(
+                source.clone(),
+                *bound,
+                FitType::Cover,
+                AnimatedImageBehavior::FullAnimation,
+                CacheOption::BySize,
+                None,
+                &asset_cache,
+            );
+            let AssetState::Loaded { data: image } = image else {
+                panic!("Bundled asset should be available immediately!");
+            };
+            assert!(
+                Rc::ptr_eq(&image, original),
+                "a steady-state size variant within capacity should be served from cache, not \
+                 recomputed or evicted"
+            );
+        }
+    }
+}
+
+#[test]
 fn test_svg_image_size_returns_intrinsic_dimensions() {
     let image_type = ImageType::try_from_bytes(
         br##"<svg width="160" height="40" viewBox="0 0 160 40" xmlns="http://www.w3.org/2000/svg"></svg>"##,
