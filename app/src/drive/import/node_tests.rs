@@ -1,11 +1,25 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use futures_lite::io::Cursor;
+
 use super::{
     FileId, FileNode, FileType, FileUploadState, FolderId, FolderNode, ImportedNode,
-    MAX_IMPORT_FILE_SIZE_BYTES, parse_file,
+    MAX_IMPORT_FILE_SIZE_BYTES, parse_file, read_bounded_by_import_cap,
 };
 use crate::drive::import::nodes::{FileContent, UploadResult, UploadStatus};
+
+/// Builds workflow YAML that parses to a single `Workflow::Command` and is exactly `total_len`
+/// bytes, by padding a trailing comment out to the target size.
+fn workflow_yaml_of_size(total_len: usize) -> Vec<u8> {
+    let mut content = b"name: My Workflow\ncommand: echo hello\n# ".to_vec();
+    let filler_len = total_len
+        .checked_sub(content.len() + 1)
+        .expect("total_len should be large enough for the workflow YAML preamble");
+    content.extend(std::iter::repeat_n(b'a', filler_len));
+    content.push(b'\n');
+    content
+}
 
 fn mock_tree() -> FileUploadState {
     let mut folder_id_to_node = HashMap::new();
@@ -209,6 +223,20 @@ async fn test_parse_file_notebook_under_cap_succeeds() {
 }
 
 #[tokio::test]
+async fn test_parse_file_notebook_at_cap_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("at_cap.md");
+    std::fs::write(&path, vec![b'a'; MAX_IMPORT_FILE_SIZE_BYTES as usize]).unwrap();
+
+    let content = parse_file(path, FileType::Notebook)
+        .await
+        .expect("exactly-at-cap file should parse");
+    assert!(
+        matches!(content, FileContent::Notebook(text) if text.len() == MAX_IMPORT_FILE_SIZE_BYTES as usize)
+    );
+}
+
+#[tokio::test]
 async fn test_parse_file_notebook_over_cap_errors() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("huge.md");
@@ -237,6 +265,22 @@ async fn test_parse_file_workflow_under_cap_succeeds() {
 }
 
 #[tokio::test]
+async fn test_parse_file_workflow_at_cap_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("at_cap.yaml");
+    std::fs::write(
+        &path,
+        workflow_yaml_of_size(MAX_IMPORT_FILE_SIZE_BYTES as usize),
+    )
+    .unwrap();
+
+    let content = parse_file(path, FileType::Workflow)
+        .await
+        .expect("exactly-at-cap file should parse");
+    assert!(matches!(content, FileContent::Workflow { workflows, .. } if workflows.len() == 1));
+}
+
+#[tokio::test]
 async fn test_parse_file_workflow_over_cap_errors() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("huge.yaml");
@@ -244,6 +288,31 @@ async fn test_parse_file_workflow_over_cap_errors() {
 
     let Err(err) = parse_file(path, FileType::Workflow).await else {
         panic!("over-cap file should be rejected");
+    };
+    assert!(err.to_string().contains("import size limit"));
+}
+
+// `parse_file`'s over-cap tests above write caps+1 bytes to disk, which always trips the
+// `metadata`-based fast-reject in `read_capped_for_import` before the bounded read underneath it
+// ever runs. The tests below drive `read_bounded_by_import_cap` directly over an in-memory
+// `AsyncRead` so that guard is exercised the same way it would be for a source whose reported
+// size understates what it actually yields (e.g. a file that grows after being stat'd).
+#[tokio::test]
+async fn test_read_bounded_by_import_cap_at_cap_succeeds() {
+    let data = vec![b'a'; MAX_IMPORT_FILE_SIZE_BYTES as usize];
+
+    let bytes = read_bounded_by_import_cap(Cursor::new(data.clone()))
+        .await
+        .expect("exactly-at-cap reader should be accepted");
+    assert_eq!(bytes, data);
+}
+
+#[tokio::test]
+async fn test_read_bounded_by_import_cap_over_cap_errors() {
+    let data = vec![b'a'; (MAX_IMPORT_FILE_SIZE_BYTES + 1) as usize];
+
+    let Err(err) = read_bounded_by_import_cap(Cursor::new(data)).await else {
+        panic!("over-cap reader should be rejected");
     };
     assert!(err.to_string().contains("import size limit"));
 }
