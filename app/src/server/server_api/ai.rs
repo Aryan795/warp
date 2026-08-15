@@ -374,13 +374,11 @@ pub struct AgentRunEvent {
     pub occurred_at: String,
     pub sequence: i64,
     /// The direct parent run of `run_id`, when the run is part of an
-    /// orchestration tree. Absent on old servers and for tree roots.
+    /// orchestration tree. Absent on old servers and for tree roots. The
+    /// wire payload also carries a `depth` field; it is not parsed because
+    /// no client surface consumes it yet.
     #[serde(default)]
     pub parent_run_id: Option<String>,
-    /// Depth of `run_id` in its orchestration tree (roots are 0). Absent
-    /// on old servers.
-    #[serde(default)]
-    pub depth: Option<i64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

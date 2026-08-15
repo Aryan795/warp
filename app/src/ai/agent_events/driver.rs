@@ -9,7 +9,9 @@ use instant::Instant;
 use warp_errors::{AnyhowErrorExt as _, report_error};
 use warpui::r#async::Timer;
 
-use crate::server::retry_strategies::{is_auth_error, is_transient_http_error};
+use crate::server::retry_strategies::{
+    is_auth_error, is_permanent_non_auth_4xx_error, is_transient_http_error,
+};
 use crate::server::server_api::ServerApi;
 use crate::server::server_api::ai::AgentRunEvent;
 use crate::server::server_api::presigned_upload::HttpStatusError;
@@ -115,6 +117,13 @@ pub(crate) struct AgentEventDriverConfig {
     /// through auth errors forever (the default for local, interactive
     /// listeners whose credentials refresh in the background).
     pub auth_error_give_up_failures: Option<usize>,
+    /// Consecutive permanent non-auth 4xx failures (400, 404, 405, ...) after
+    /// which the driver stops and returns an error instead of reconnecting.
+    /// Lets callers of filters the server may not accept (for example a
+    /// subtree stream against a server without the endpoint) observe the
+    /// rejection and fall back, instead of retrying a dead filter forever.
+    /// `None` keeps retrying.
+    pub permanent_error_give_up_failures: Option<usize>,
     /// Total wall-clock time the driver keeps retrying after failures begin
     /// (measured from the first failure since the last successful open/event)
     /// before it stops and returns an error. `None` retries without a time
@@ -134,6 +143,7 @@ impl AgentEventDriverConfig {
             proactive_reconnect_after: Some(DEFAULT_AGENT_EVENT_PROACTIVE_RECONNECT),
             failures_before_error_log: DEFAULT_AGENT_EVENT_FAILURES_BEFORE_ERROR_LOG,
             auth_error_give_up_failures: None,
+            permanent_error_give_up_failures: None,
             max_retry_duration: None,
         }
     }
@@ -365,6 +375,9 @@ where
     // of auth failures. Any non-auth failure or success resets it, so a mix like
     // 500, 500, 401 does not trip a "3 consecutive auth failures" policy.
     let mut consecutive_auth_failures = 0usize;
+    // Consecutive permanent non-auth 4xx failures, with the same streak
+    // semantics as `consecutive_auth_failures`.
+    let mut consecutive_permanent_failures = 0usize;
     let mut has_connected_once = false;
     // Start of the current run of consecutive failures. Reset to `None` after any
     // successful open/event so the `max_retry_duration` window only measures
@@ -387,6 +400,7 @@ where
                     err,
                     failures,
                     &mut consecutive_auth_failures,
+                    &mut consecutive_permanent_failures,
                     &mut retry_window_started_at,
                     !has_connected_once,
                 )
@@ -426,6 +440,7 @@ where
                 NextDriverItem::StreamItem(Some(Ok(AgentEventSourceItem::Open))) => {
                     failures = 0;
                     consecutive_auth_failures = 0;
+                    consecutive_permanent_failures = 0;
                     retry_window_started_at = None;
                     has_connected_once = true;
                     notify_driver_state(consumer, AgentEventDriverState::Connected).await;
@@ -437,6 +452,7 @@ where
                 NextDriverItem::StreamItem(Some(Ok(AgentEventSourceItem::Event(event)))) => {
                     failures = 0;
                     consecutive_auth_failures = 0;
+                    consecutive_permanent_failures = 0;
                     retry_window_started_at = None;
                     if event.sequence <= since_sequence {
                         continue;
@@ -464,6 +480,7 @@ where
                         err,
                         failures,
                         &mut consecutive_auth_failures,
+                        &mut consecutive_permanent_failures,
                         &mut retry_window_started_at,
                         false,
                     )
@@ -476,12 +493,15 @@ where
                 NextDriverItem::StreamItem(None) => {
                     failures += 1;
                     // A clean server-side close carries no HTTP status, so it is
-                    // never treated as an auth failure; reset the auth streak and
-                    // let only the time-based backstop trigger a give-up here.
+                    // never treated as an auth or permanent failure; reset both
+                    // streaks and let only the time-based backstop trigger a
+                    // give-up here.
                     consecutive_auth_failures = 0;
+                    consecutive_permanent_failures = 0;
                     if let Some(reason) = agent_event_give_up_reason(
                         &config,
                         consecutive_auth_failures,
+                        consecutive_permanent_failures,
                         &mut retry_window_started_at,
                     ) {
                         return Err(anyhow!(
@@ -516,14 +536,16 @@ enum NextDriverItem {
     ProactiveReconnect,
 }
 
-/// Update the consecutive auth-failure streak for `err` and return a give-up
-/// reason if the driver should stop retrying. Bumps `consecutive_auth_failures`
-/// on an HTTP 401/403 error and resets it otherwise, then defers to
+/// Update the consecutive auth- and permanent-failure streaks for `err` and
+/// return a give-up reason if the driver should stop retrying. Bumps the
+/// matching streak (HTTP 401/403 for auth; other permanent 4xx for
+/// permanent) and resets the other, then defers to
 /// [`agent_event_give_up_reason`].
 fn classify_failure_and_give_up_reason(
     config: &AgentEventDriverConfig,
     err: &anyhow::Error,
     consecutive_auth_failures: &mut usize,
+    consecutive_permanent_failures: &mut usize,
     retry_window_started_at: &mut Option<Instant>,
 ) -> Option<String> {
     if is_auth_error(err) {
@@ -531,7 +553,17 @@ fn classify_failure_and_give_up_reason(
     } else {
         *consecutive_auth_failures = 0;
     }
-    agent_event_give_up_reason(config, *consecutive_auth_failures, retry_window_started_at)
+    if is_permanent_non_auth_4xx_error(err) {
+        *consecutive_permanent_failures += 1;
+    } else {
+        *consecutive_permanent_failures = 0;
+    }
+    agent_event_give_up_reason(
+        config,
+        *consecutive_auth_failures,
+        *consecutive_permanent_failures,
+        retry_window_started_at,
+    )
 }
 
 /// Handles an HTTP error from either `open_stream` or a stream item: checks the
@@ -539,12 +571,14 @@ fn classify_failure_and_give_up_reason(
 /// pending retry, and waits out the backoff delay. Returns `Err` if the driver
 /// should stop — the error is ready to propagate directly — or `Ok(())` once the
 /// retry delay has elapsed.
+#[allow(clippy::too_many_arguments)]
 async fn handle_http_error<C: AgentEventConsumer>(
     config: &AgentEventDriverConfig,
     consumer: &mut C,
     err: anyhow::Error,
     failures: usize,
     consecutive_auth_failures: &mut usize,
+    consecutive_permanent_failures: &mut usize,
     retry_window_started_at: &mut Option<Instant>,
     is_initial_connect: bool,
 ) -> Result<()> {
@@ -552,6 +586,7 @@ async fn handle_http_error<C: AgentEventConsumer>(
         config,
         &err,
         consecutive_auth_failures,
+        consecutive_permanent_failures,
         retry_window_started_at,
     ) {
         return Err(err.context(format!(
@@ -596,6 +631,7 @@ async fn handle_http_error<C: AgentEventConsumer>(
 fn agent_event_give_up_reason(
     config: &AgentEventDriverConfig,
     consecutive_auth_failures: usize,
+    consecutive_permanent_failures: usize,
     retry_window_started_at: &mut Option<Instant>,
 ) -> Option<String> {
     let now = Instant::now();
@@ -606,6 +642,14 @@ fn agent_event_give_up_reason(
     {
         return Some(format!(
             "stopping after {consecutive_auth_failures} consecutive authentication failures"
+        ));
+    }
+
+    if let Some(threshold) = config.permanent_error_give_up_failures
+        && consecutive_permanent_failures >= threshold
+    {
+        return Some(format!(
+            "stopping after {consecutive_permanent_failures} consecutive permanent 4xx failures"
         ));
     }
 

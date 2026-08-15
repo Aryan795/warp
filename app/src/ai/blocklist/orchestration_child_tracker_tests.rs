@@ -399,3 +399,117 @@ fn the_parents_own_seed_row_is_not_tracked_as_a_child() {
         assert!(tracker.children.is_empty());
     });
 }
+
+// ---- Lifecycle sequence guard ----------------------------------------------
+
+#[test]
+fn stale_lifecycle_replays_are_dropped_by_the_sequence_guard() {
+    with_tracker(|tracker, ctx| {
+        tracker.observe_child(
+            CHILD_A_RUN_ID,
+            ChildSignal::Lifecycle {
+                kind: api::LifecycleEventType::Succeeded,
+                sequence: 20,
+            },
+            &no_killed_runs(),
+            ctx,
+        );
+        // A replay at or below the applied sequence must not regress.
+        tracker.observe_child(
+            CHILD_A_RUN_ID,
+            ChildSignal::Lifecycle {
+                kind: api::LifecycleEventType::InProgress,
+                sequence: 19,
+            },
+            &no_killed_runs(),
+            ctx,
+        );
+
+        let child = tracker.children.get(&child_task_id()).expect("tracked");
+        assert_eq!(
+            child.last_lifecycle,
+            Some(api::LifecycleEventType::Succeeded)
+        );
+        assert_eq!(child.last_lifecycle_sequence, Some(20));
+    });
+}
+
+#[test]
+fn terminal_status_is_not_sticky_for_newer_lifecycle_events() {
+    // Runs legitimately go Succeeded -> InProgress on wake; only ORDER is
+    // guarded, not terminal-ness.
+    with_tracker(|tracker, ctx| {
+        tracker.observe_child(
+            CHILD_A_RUN_ID,
+            ChildSignal::Lifecycle {
+                kind: api::LifecycleEventType::Succeeded,
+                sequence: 20,
+            },
+            &no_killed_runs(),
+            ctx,
+        );
+        tracker.observe_child(
+            CHILD_A_RUN_ID,
+            ChildSignal::Lifecycle {
+                kind: api::LifecycleEventType::InProgress,
+                sequence: 21,
+            },
+            &no_killed_runs(),
+            ctx,
+        );
+
+        let child = tracker.children.get(&child_task_id()).expect("tracked");
+        assert_eq!(
+            child.last_lifecycle,
+            Some(api::LifecycleEventType::InProgress)
+        );
+    });
+}
+
+#[test]
+fn seed_rows_floor_the_lifecycle_sequence_guard() {
+    // A seed snapshot taken at server cursor N already reflects every
+    // lifecycle up to N; replays at or below it must not regress the state.
+    with_tracker(|tracker, ctx| {
+        let mut row = seed_row(child_task_id());
+        row.state = AmbientAgentTaskState::Succeeded;
+        row.last_event_sequence = Some(30);
+        tracker.observe_child(
+            CHILD_A_RUN_ID,
+            ChildSignal::Seeded(row),
+            &no_killed_runs(),
+            ctx,
+        );
+
+        tracker.observe_child(
+            CHILD_A_RUN_ID,
+            ChildSignal::Lifecycle {
+                kind: api::LifecycleEventType::InProgress,
+                sequence: 25,
+            },
+            &no_killed_runs(),
+            ctx,
+        );
+        let child = tracker.children.get(&child_task_id()).expect("tracked");
+        assert_eq!(
+            child.last_lifecycle, None,
+            "a replay below the seed snapshot's cursor must be dropped"
+        );
+
+        tracker.observe_child(
+            CHILD_A_RUN_ID,
+            ChildSignal::Lifecycle {
+                kind: api::LifecycleEventType::InProgress,
+                sequence: 31,
+            },
+            &no_killed_runs(),
+            ctx,
+        );
+        let child = tracker.children.get(&child_task_id()).expect("tracked");
+        assert_eq!(
+            child.last_lifecycle,
+            Some(api::LifecycleEventType::InProgress),
+            "events newer than the seed snapshot apply normally"
+        );
+    });
+}

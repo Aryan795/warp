@@ -28,7 +28,7 @@ use crate::ai::agent_events::{
     AgentMessageEventMetadata, MessageHydrator, ServerApiAgentEventSource, run_agent_event_driver,
 };
 use crate::ai::ambient_agents::AmbientAgentTaskId;
-use crate::server::retry_strategies::is_transient_http_error;
+use crate::server::retry_strategies::{is_permanent_non_auth_4xx_error, is_transient_http_error};
 use crate::server::server_api::ai::{AIClient, AgentRunEvent, TaskListFilter};
 use crate::server::server_api::{ServerApi, ServerApiProvider};
 
@@ -46,6 +46,12 @@ const MAX_KILLED_RUN_IDS: usize = 1024;
 /// Max child runs fetched per cold-start `?ancestor_run_id=` REST seed in
 /// viewer mode. The server caps at 100 regardless.
 const VIEWER_MODE_SEED_FETCH_LIMIT: i32 = 100;
+/// Consecutive permanent 4xx failures on a subtree stream before the
+/// conversation falls back to the ancestor scope. Protects against servers
+/// without the subtree endpoint and against local/server root-ness
+/// disagreement: the parent's own inbox must never stay dark behind an
+/// un-openable subtree stream.
+const SUBTREE_PERMANENT_ERROR_GIVE_UP_FAILURES: usize = 3;
 
 /// Wire `event_type` for a parent's own inbox message events.
 const EVENT_NEW_MESSAGE: &str = "new_message";
@@ -225,6 +231,12 @@ struct ConversationStreamState {
     /// subtree-scoped streams add one tracker per mid-tree parent as
     /// descendants are discovered.
     family_trackers: HashMap<AmbientAgentTaskId, OrchestrationChildTracker>,
+    /// Set once a subtree stream for this conversation has been rejected
+    /// with sustained permanent 4xx failures (server without the endpoint,
+    /// or a root-ness disagreement). Filter selection then falls back to
+    /// the ancestor scope for the rest of the session so the parent's own
+    /// inbox keeps flowing.
+    subtree_stream_unavailable: bool,
 }
 
 /// Per-orchestrator SSE stream state. Parallels [`ConversationStreamState`]
@@ -302,6 +314,9 @@ pub struct OrchestrationEventStreamer {
     /// parent's placeholder fetch is still in flight). Retried when the
     /// parent's placeholder materializes.
     descendants_waiting_on_family: HashMap<String, Vec<ParkedDescendantPlaceholder>>,
+    /// Family run ids with a missing-family placeholder fetch in flight
+    /// (see [`Self::ensure_missing_family_placeholder`]).
+    family_placeholder_fetches_in_flight: HashSet<String>,
 }
 
 /// A descendant whose placeholder creation is deferred until its family
@@ -718,7 +733,16 @@ impl OrchestrationEventStreamer {
                         mode,
                         ctx,
                     );
-                    if mode == FamilyDrainMode::Primary {
+                    // Only DIRECT children's lifecycle events are injected
+                    // into the parent conversation's pending-event queue
+                    // (parity with the anchor-scoped behavior, where every
+                    // family event belongs to the anchor). Deeper
+                    // descendants surface through the tracker's status
+                    // write-through and broadcasts instead — injecting the
+                    // whole tree would flood the root's transcript and
+                    // double-deliver when a local mid-tree parent's own
+                    // family stream also carries the event.
+                    if mode == FamilyDrainMode::Primary && family_run_id == self_run_id {
                         child_lifecycle_for_batch.push(event);
                     }
                     family_tracker(&mut trackers, &family_run_id, anchor_task_id).observe_child(
@@ -817,18 +841,23 @@ impl OrchestrationEventStreamer {
                 anchor_conversation_id,
                 child_run_id,
                 mode,
+                ctx,
             ),
         }
     }
 
     /// Parks a descendant placeholder request until `family_run_id`'s own
     /// placeholder conversation exists. Deduplicated per (anchor, child).
+    /// Also re-kicks the missing family's own placeholder fetch: without
+    /// this, a single failed family fetch would strand every descendant
+    /// parked behind it until an unrelated event for the family arrived.
     fn park_descendant_placeholder(
         &mut self,
         family_run_id: String,
         anchor_conversation_id: AIConversationId,
         child_run_id: String,
         mode: FamilyDrainMode,
+        ctx: &mut ModelContext<Self>,
     ) {
         log::info!(
             "[orch-drain] parking descendant placeholder child_run_id={child_run_id} until \
@@ -836,7 +865,7 @@ impl OrchestrationEventStreamer {
         );
         let parked = self
             .descendants_waiting_on_family
-            .entry(family_run_id)
+            .entry(family_run_id.clone())
             .or_default();
         if parked.iter().any(|p| {
             p.child_run_id == child_run_id && p.anchor_conversation_id == anchor_conversation_id
@@ -848,10 +877,90 @@ impl OrchestrationEventStreamer {
             child_run_id,
             mode,
         });
+        self.ensure_missing_family_placeholder(anchor_conversation_id, family_run_id, mode, ctx);
+    }
+
+    /// Fetches a missing family parent's task row and creates its
+    /// placeholder under its own resolved parent, so descendants parked on
+    /// it can drain. Guarded against duplicate in-flight fetches; a failed
+    /// fetch leaves the parked descendants for the next drain (whose
+    /// parking call re-kicks this fetch).
+    fn ensure_missing_family_placeholder(
+        &mut self,
+        anchor_conversation_id: AIConversationId,
+        family_run_id: String,
+        mode: FamilyDrainMode,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if !self
+            .family_placeholder_fetches_in_flight
+            .insert(family_run_id.clone())
+        {
+            return;
+        }
+        let Ok(family_task_id) = family_run_id.parse::<AmbientAgentTaskId>() else {
+            self.family_placeholder_fetches_in_flight
+                .remove(&family_run_id);
+            return;
+        };
+        let ai_client = self.ai_client.clone();
+        ctx.spawn(
+            async move { ai_client.get_ambient_agent_task(&family_task_id).await },
+            move |me, result, ctx| {
+                me.family_placeholder_fetches_in_flight
+                    .remove(&family_run_id);
+                let task = match result {
+                    Ok(task) => task,
+                    Err(err) => {
+                        log::warn!(
+                            "[orch-drain] missing-family placeholder fetch failed for \
+                             family_run_id={family_run_id}: {err:#}; parked descendants \
+                             retry on the next drain"
+                        );
+                        return;
+                    }
+                };
+                // The family's own placeholder nests under ITS parent: the
+                // anchor conversation when the row names no other parent,
+                // otherwise that run's conversation (parking the family
+                // itself if that is also still missing — the chain resolves
+                // one level per fetch).
+                let family_parent_conversation_id = match task.parent_run_id.as_deref() {
+                    Some(parent) => {
+                        BlocklistAIHistoryModel::as_ref(ctx).conversation_id_for_agent_id(parent)
+                    }
+                    None => Some(anchor_conversation_id),
+                };
+                match family_parent_conversation_id {
+                    Some(parent_conversation_id) => me.finish_remote_child_placeholder(
+                        anchor_conversation_id,
+                        parent_conversation_id,
+                        family_run_id,
+                        mode,
+                        Ok(task),
+                        ctx,
+                    ),
+                    None => {
+                        let grandparent_run_id = task
+                            .parent_run_id
+                            .clone()
+                            .expect("a missing parent conversation implies a named parent");
+                        me.park_descendant_placeholder(
+                            grandparent_run_id,
+                            anchor_conversation_id,
+                            family_run_id,
+                            mode,
+                            ctx,
+                        );
+                    }
+                }
+            },
+        );
     }
 
     /// Re-drives placeholder creation for descendants parked on
     /// `family_run_id` once that run's own placeholder conversation exists.
+    /// Children killed while parked are dropped rather than resurrected.
     fn unpark_descendants_waiting_on(&mut self, family_run_id: &str, ctx: &mut ModelContext<Self>) {
         let Some(parked) = self.descendants_waiting_on_family.remove(family_run_id) else {
             return;
@@ -866,6 +975,9 @@ impl OrchestrationEventStreamer {
             return;
         };
         for parked_child in parked {
+            if self.killed_run_ids.contains(&parked_child.child_run_id) {
+                continue;
+            }
             self.ensure_remote_child_placeholder(
                 parked_child.anchor_conversation_id,
                 family_conversation_id,
@@ -1244,6 +1356,7 @@ impl OrchestrationEventStreamer {
             killed_run_ids: HashSet::new(),
             killed_run_id_order: VecDeque::new(),
             descendants_waiting_on_family: HashMap::new(),
+            family_placeholder_fetches_in_flight: HashSet::new(),
         }
     }
 
@@ -1270,6 +1383,7 @@ impl OrchestrationEventStreamer {
             killed_run_ids: HashSet::new(),
             killed_run_id_order: VecDeque::new(),
             descendants_waiting_on_family: HashMap::new(),
+            family_placeholder_fetches_in_flight: HashSet::new(),
         }
     }
 
@@ -1515,15 +1629,28 @@ impl OrchestrationEventStreamer {
         let Some(entry) = self.viewer_mode_orchestrators.get_mut(&parent_task_id) else {
             return;
         };
-        entry.consumers.remove(&consumer_id);
+        let removed_placeholder = entry.consumers.remove(&consumer_id);
         let remaining = entry.consumers.len();
         if remaining == 0 {
-            // Last viewer closed: tear down the ancestor SSE.
+            // Last viewer closed: tear down the ancestor SSE and drop any
+            // descendants still parked against this entry's placeholder.
             if let Some(connection) = entry.sse_connection.take() {
                 connection.abort_handle.abort();
             }
             self.viewer_mode_orchestrators.remove(&parent_task_id);
+            if let Some(placeholder) = removed_placeholder {
+                self.prune_parked_descendants_for_anchor(placeholder);
+            }
         }
+    }
+
+    /// Drops parked descendant placeholder requests anchored on
+    /// `anchor_conversation_id`.
+    fn prune_parked_descendants_for_anchor(&mut self, anchor_conversation_id: AIConversationId) {
+        self.descendants_waiting_on_family.retain(|_, parked| {
+            parked.retain(|p| p.anchor_conversation_id != anchor_conversation_id);
+            !parked.is_empty()
+        });
     }
 
     /// True iff the viewer-mode entry has previously observed `run_id`
@@ -2149,6 +2276,10 @@ impl OrchestrationEventStreamer {
             }
         }
 
+        // Parked descendants anchored on the removed conversation can never
+        // materialize; drop them so they don't leak or resurrect later.
+        self.prune_parked_descendants_for_anchor(conversation_id);
+
         if let Some(run_id) = removed_run_id.as_deref() {
             let mut affected = Vec::new();
             for (other_id, stream) in self.streams.iter_mut() {
@@ -2378,6 +2509,20 @@ impl OrchestrationEventStreamer {
             .and_then(|c| c.run_id())
     }
 
+    /// Server-side root-ness of `run_id` from the cached task row (`Some`
+    /// only when a row is cached: a root has no `parent_run_id`). Guarded on
+    /// the singleton being registered so test harnesses without an
+    /// `AgentConversationsModel` fall back to local state.
+    fn server_task_row_is_root(&self, run_id: &str, ctx: &warpui::AppContext) -> Option<bool> {
+        if !ctx.has_singleton_model::<AgentConversationsModel>() {
+            return None;
+        }
+        let task_id = run_id.parse::<AmbientAgentTaskId>().ok()?;
+        AgentConversationsModel::as_ref(ctx)
+            .get_task_data(&task_id)
+            .map(|task| task.parent_run_id.is_none())
+    }
+
     /// Parent role: the conversation has at least one watched child
     /// run_id (i.e. a watched run_id that is not its own self_run_id).
     fn is_parent_agent_conversation(
@@ -2509,11 +2654,26 @@ impl OrchestrationEventStreamer {
                     // its whole subtree so runs spawned by remote mid-tree
                     // children are observed too. Mid-tree parents keep the
                     // direct-family ancestor scope (the server rejects
-                    // non-root subtree anchors).
-                    let is_tree_root = !BlocklistAIHistoryModel::as_ref(ctx)
-                        .conversation(&conversation_id)
-                        .is_some_and(|c| c.is_child_agent_conversation());
-                    let filter = if multi_level_subtree_scope_enabled() && is_tree_root {
+                    // non-root subtree anchors). Root-ness prefers the
+                    // server's task row (matching the restore seed) and only
+                    // falls back to local parent linkage when no row is
+                    // cached; a subtree stream the server already rejected
+                    // stays on the ancestor fallback.
+                    let is_tree_root = self
+                        .server_task_row_is_root(&self_run_id, ctx)
+                        .unwrap_or_else(|| {
+                            !BlocklistAIHistoryModel::as_ref(ctx)
+                                .conversation(&conversation_id)
+                                .is_some_and(|c| c.is_child_agent_conversation())
+                        });
+                    let subtree_unavailable = self
+                        .streams
+                        .get(&conversation_id)
+                        .is_some_and(|stream| stream.subtree_stream_unavailable);
+                    let filter = if multi_level_subtree_scope_enabled()
+                        && is_tree_root
+                        && !subtree_unavailable
+                    {
                         AgentEventFilter::SubtreeRootRunId {
                             root_run_id: self_run_id,
                         }
@@ -2745,7 +2905,16 @@ impl OrchestrationEventStreamer {
             filter.log_label()
         );
 
-        let config = AgentEventDriverConfig::retry_forever(filter.clone(), cursor);
+        let mut config = AgentEventDriverConfig::retry_forever(filter.clone(), cursor);
+        if matches!(filter, AgentEventFilter::SubtreeRootRunId { .. }) {
+            // A server without the subtree endpoint (or one that disagrees
+            // about the anchor's root-ness) rejects the stream with a
+            // permanent 4xx. Let the driver give up after a short streak so
+            // the exit callback can fall back to the ancestor scope instead
+            // of blacking out the parent's inbox behind a dead filter.
+            config.permanent_error_give_up_failures =
+                Some(SUBTREE_PERMANENT_ERROR_GIVE_UP_FAILURES);
+        }
         let source = ServerApiAgentEventSource::new(server_api);
         let hydrator = self.message_hydrator_for_run_id(&self_run_id);
 
@@ -2775,6 +2944,7 @@ impl OrchestrationEventStreamer {
                     log::warn!(
                         "SSE driver exited for {conversation_id:?} (gen={generation}): {err:#}"
                     );
+                    me.note_sse_driver_exit_error(conversation_id, &err);
                     me.reconnect_sse(conversation_id, ctx);
                 }
             },
@@ -2790,6 +2960,33 @@ impl OrchestrationEventStreamer {
 
         // Start periodic event drain.
         self.start_sse_drain_timer(conversation_id, generation, ctx);
+    }
+
+    /// Marks the subtree scope unavailable for `conversation_id` when its
+    /// stream driver gave up on a permanent 4xx streak; the subsequent
+    /// reconnect then selects the ancestor fallback via
+    /// [`Self::desired_sse_filter`].
+    fn note_sse_driver_exit_error(
+        &mut self,
+        conversation_id: AIConversationId,
+        err: &anyhow::Error,
+    ) {
+        let Some(stream) = self.streams.get_mut(&conversation_id) else {
+            return;
+        };
+        let subtree_connected = stream.sse_connection.as_ref().is_some_and(|c| {
+            matches!(
+                c.connected_filter,
+                AgentEventFilter::SubtreeRootRunId { .. }
+            )
+        });
+        if subtree_connected && is_permanent_non_auth_4xx_error(err) {
+            log::warn!(
+                "Subtree event stream for {conversation_id:?} was rejected by the server \
+                 ({err:#}); falling back to the ancestor scope"
+            );
+            stream.subtree_stream_unavailable = true;
+        }
     }
 
     /// True iff the open SSE's connected filter is stale relative to the

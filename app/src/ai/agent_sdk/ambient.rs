@@ -118,8 +118,7 @@ pub(super) fn filter_from_args(args: &ListTasksArgs) -> TaskListFilter {
         skill_spec: args.skill.clone(),
         schedule_id: args.schedule.clone(),
         ancestor_run_id: args.ancestor_run.clone(),
-        // Not exposed on the CLI yet; the owner-side subtree restore seed is
-        // the only consumer of the root_run_id list filter.
+        // Not exposed on the CLI yet.
         root_run_id: None,
         config_name: args.name.clone(),
         model_id: args.model.clone(),

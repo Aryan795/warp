@@ -1113,7 +1113,7 @@ fn build_list_agent_runs_url_routes_to_runs_not_tasks() {
 }
 
 #[test]
-fn agent_run_event_parses_without_parent_run_id_and_depth() {
+fn agent_run_event_parses_without_parent_run_id() {
     // Old servers omit the additive orchestration-tree fields.
     let event: AgentRunEvent = serde_json::from_value(serde_json::json!({
         "event_type": "run_in_progress",
@@ -1126,11 +1126,11 @@ fn agent_run_event_parses_without_parent_run_id_and_depth() {
     .unwrap();
 
     assert_eq!(event.parent_run_id, None);
-    assert_eq!(event.depth, None);
 }
 
 #[test]
-fn agent_run_event_parses_parent_run_id_and_depth() {
+fn agent_run_event_parses_parent_run_id_and_ignores_depth() {
+    // `depth` rides the wire payload but has no client consumer yet.
     let event: AgentRunEvent = serde_json::from_value(serde_json::json!({
         "event_type": "run_in_progress",
         "run_id": "grandchild-run",
@@ -1144,7 +1144,6 @@ fn agent_run_event_parses_parent_run_id_and_depth() {
     .unwrap();
 
     assert_eq!(event.parent_run_id.as_deref(), Some("child-run"));
-    assert_eq!(event.depth, Some(2));
 }
 
 #[test]

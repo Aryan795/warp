@@ -27,9 +27,12 @@ use crate::terminal::view::load_ai_conversation::{
     RestoreConversationEntryBehavior, RestoredAIConversation,
 };
 
-/// Max direct children fetched per ancestor-list restore seed. The server
-/// caps at 100 regardless, matching the Observer-side ancestor seed fetch.
-const RESTORE_CHILD_SEED_FETCH_LIMIT: i32 = 30;
+/// Max rows fetched per restore seed listing (direct children for mid-tree
+/// parents, the whole subtree for roots), matching the Observer-side seed
+/// fetch. The server caps at 100 regardless; subtrees larger than one page
+/// are not paginated yet, so rows beyond the cap are only discovered
+/// through the live subtree stream.
+const RESTORE_CHILD_SEED_FETCH_LIMIT: i32 = 100;
 
 /// Bounds the recursive ancestor-pane materialization used when revealing a
 /// deep descendant whose intermediate parents have no panes yet.
@@ -146,30 +149,18 @@ impl PaneGroup {
         self.ensure_pending_ambient_restoration_subscription(ctx);
 
         let ai_client = ServerApiProvider::as_ref(ctx).get_ai_client();
-        // Root-ness comes from the parent's own task row (a root has no
-        // parent_run_id). When the row is not cached yet, stay pending and
-        // let the shared TasksUpdated re-drive retry once the fetch lands —
-        // guessing the scope here could permanently miss grandchildren.
-        let filter = if multi_level_subtree_scope_enabled() {
-            let parent_task = AgentConversationsModel::handle(ctx).update(ctx, |model, ctx| {
+        let cached_parent_task = if multi_level_subtree_scope_enabled() {
+            AgentConversationsModel::handle(ctx).update(ctx, |model, ctx| {
                 model.get_or_async_fetch_task_data(&parent_task_id, ctx)
-            });
-            match parent_task {
-                Some(task) if task.parent_run_id.is_none() => TaskListFilter {
-                    root_run_id: Some(parent_task_id.to_string()),
-                    ..TaskListFilter::default()
-                },
-                Some(_) => TaskListFilter {
-                    ancestor_run_id: Some(parent_task_id.to_string()),
-                    ..TaskListFilter::default()
-                },
-                None => return,
-            }
+            })
         } else {
-            TaskListFilter {
-                ancestor_run_id: Some(parent_task_id.to_string()),
-                ..TaskListFilter::default()
-            }
+            None
+        };
+        let Some(filter) = restore_seed_filter(parent_task_id, cached_parent_task.as_ref()) else {
+            // Scope not determinable yet (parent row still fetching): stay
+            // pending and let the shared TasksUpdated re-drive retry —
+            // guessing the scope here could permanently miss grandchildren.
+            return;
         };
         ctx.spawn(
             async move {
@@ -192,7 +183,7 @@ impl PaneGroup {
     /// `seed_child_conversations_from_task`: links each reported direct child
     /// under `parent_conversation_id` and clears the pending entry once every
     /// child's own task data has resolved.
-    fn finish_seed_child_conversations_from_task(
+    pub(in crate::pane_group) fn finish_seed_child_conversations_from_task(
         &mut self,
         parent_conversation_id: AIConversationId,
         parent_task_id: AmbientAgentTaskId,
@@ -288,11 +279,20 @@ impl PaneGroup {
                 linked_any = true;
             }
             if deferred.is_empty() || !linked_any {
-                // Rows still deferred here reference parents outside the
-                // listing (or ones whose task data is still fetching); keep
-                // the seed pending so TasksUpdated re-drives it.
+                // Rows still deferred after a no-progress pass reference
+                // parents outside the listing (a truncated page or an
+                // out-of-scope ancestor). Deliberately do NOT keep the seed
+                // pending for them: an identical refetch cannot resolve
+                // them, so re-driving on every TasksUpdated would churn
+                // forever. The live subtree stream remains the discovery
+                // path for their families.
                 if !deferred.is_empty() {
-                    all_children_resolved = false;
+                    log::warn!(
+                        "seed_child_conversations_from_task: {} row(s) reference parents \
+                         outside the listing for parent_task_id={parent_task_id} (truncated \
+                         page?); leaving them to live-stream discovery",
+                        deferred.len(),
+                    );
                 }
                 break;
             }
@@ -705,3 +705,37 @@ impl PaneGroup {
         }
     }
 }
+
+/// Selects the restore-seed listing filter for `parent_task_id` from the
+/// parent's cached task row: tree roots (no `parent_run_id`) list their whole
+/// subtree via `root_run_id`; mid-tree parents — and every parent while
+/// multi-level subtree scope is disabled — list direct children via
+/// `ancestor_run_id`. Returns `None` when the scope cannot be determined yet
+/// (subtree scope enabled but no row cached); the caller stays pending and
+/// retries once the row lands.
+fn restore_seed_filter(
+    parent_task_id: AmbientAgentTaskId,
+    cached_parent_task: Option<&crate::ai::ambient_agents::task::AmbientAgentTask>,
+) -> Option<TaskListFilter> {
+    if !multi_level_subtree_scope_enabled() {
+        return Some(TaskListFilter {
+            ancestor_run_id: Some(parent_task_id.to_string()),
+            ..TaskListFilter::default()
+        });
+    }
+    match cached_parent_task {
+        Some(task) if task.parent_run_id.is_none() => Some(TaskListFilter {
+            root_run_id: Some(parent_task_id.to_string()),
+            ..TaskListFilter::default()
+        }),
+        Some(_) => Some(TaskListFilter {
+            ancestor_run_id: Some(parent_task_id.to_string()),
+            ..TaskListFilter::default()
+        }),
+        None => None,
+    }
+}
+
+#[cfg(test)]
+#[path = "restoration_tests.rs"]
+mod tests;

@@ -3603,3 +3603,259 @@ fn test_undo_close_keeps_a_file_pane_watching_its_file() {
         });
     });
 }
+
+// ---- Root restore seed: dependency-ordered subtree linking -------------------
+
+/// Builds a subtree row for the restore-seed listing: a run parented under
+/// `parent_run_id` (the shape a `?root_run_id=` listing returns for
+/// grandchildren and deeper).
+fn subtree_seed_row(
+    task_id: AmbientAgentTaskId,
+    parent_run_id: AmbientAgentTaskId,
+) -> AmbientAgentTask {
+    let mut task = ambient_agent_task_for_current_user(task_id);
+    task.parent_run_id = Some(parent_run_id.to_string());
+    task
+}
+
+#[test]
+fn test_root_seed_links_subtree_rows_in_dependency_order() {
+    // A root_run_id listing returns the whole subtree in arbitrary order;
+    // rows must link under their actual parents (grandchild under the
+    // mid-tree child's placeholder) even when a child row appears after
+    // its own descendants.
+    let _unified = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    let _multi_level = FeatureFlag::MultiLevelOrchestration.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+
+        pane_group.update(&mut app, |panes, ctx| {
+            let parent_pane_id = get_newly_created_pane_id(panes, &[]);
+            let parent_conversation_id = start_parent_conversation(panes, parent_pane_id, ctx);
+            let root_task_id = new_ambient_agent_task_id();
+            let mid_task_id = new_ambient_agent_task_id();
+            let leaf_task_id = new_ambient_agent_task_id();
+            let parent_terminal_view_id = panes
+                .terminal_view_from_pane_id(parent_pane_id, ctx)
+                .expect("parent pane should have a terminal view")
+                .id();
+            BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+                history.assign_run_id_for_conversation(
+                    parent_conversation_id,
+                    root_task_id.to_string(),
+                    Some(root_task_id),
+                    parent_terminal_view_id,
+                    ctx,
+                );
+            });
+            // Cache both rows' task data so linking resolves synchronously.
+            AgentConversationsModel::handle(ctx).update(ctx, |model, _| {
+                model.insert_task_for_test(subtree_seed_row(mid_task_id, root_task_id));
+                model.insert_task_for_test(subtree_seed_row(leaf_task_id, mid_task_id));
+            });
+
+            // Grandchild row FIRST: it must defer one pass, then link under
+            // the mid-tree placeholder created by the second pass.
+            panes.finish_seed_child_conversations_from_task(
+                parent_conversation_id,
+                root_task_id,
+                Ok(vec![
+                    subtree_seed_row(leaf_task_id, mid_task_id),
+                    subtree_seed_row(mid_task_id, root_task_id),
+                ]),
+                ctx,
+            );
+
+            let history = BlocklistAIHistoryModel::as_ref(ctx);
+            let mid_conversation_id = history
+                .conversation_id_for_agent_id(&mid_task_id.to_string())
+                .expect("the mid-tree row must link");
+            let leaf_conversation_id = history
+                .conversation_id_for_agent_id(&leaf_task_id.to_string())
+                .expect("the grandchild row must link");
+            assert!(
+                history
+                    .child_conversation_ids_of(&parent_conversation_id)
+                    .contains(&mid_conversation_id),
+                "the direct child links under the anchor conversation"
+            );
+            assert!(
+                history
+                    .child_conversation_ids_of(&mid_conversation_id)
+                    .contains(&leaf_conversation_id),
+                "the grandchild links under the mid-tree placeholder, not the anchor"
+            );
+            assert!(
+                !history
+                    .child_conversation_ids_of(&parent_conversation_id)
+                    .contains(&leaf_conversation_id),
+                "the grandchild must not be hard-attributed to the anchor"
+            );
+            assert!(
+                !panes.pending_parent_child_seeds.contains_key(&root_task_id),
+                "a fully-linked seed clears its pending entry"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_root_seed_does_not_respin_on_rows_with_out_of_listing_parents() {
+    // Rows whose parents fall outside the listing (a truncated page) can
+    // never be resolved by refetching the identical listing; the seed must
+    // complete instead of re-driving on every TasksUpdated forever.
+    let _unified = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    let _multi_level = FeatureFlag::MultiLevelOrchestration.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+
+        pane_group.update(&mut app, |panes, ctx| {
+            let parent_pane_id = get_newly_created_pane_id(panes, &[]);
+            let parent_conversation_id = start_parent_conversation(panes, parent_pane_id, ctx);
+            let root_task_id = new_ambient_agent_task_id();
+            let missing_parent_task_id = new_ambient_agent_task_id();
+            let orphan_task_id = new_ambient_agent_task_id();
+            let parent_terminal_view_id = panes
+                .terminal_view_from_pane_id(parent_pane_id, ctx)
+                .expect("parent pane should have a terminal view")
+                .id();
+            BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+                history.assign_run_id_for_conversation(
+                    parent_conversation_id,
+                    root_task_id.to_string(),
+                    Some(root_task_id),
+                    parent_terminal_view_id,
+                    ctx,
+                );
+            });
+            AgentConversationsModel::handle(ctx).update(ctx, |model, _| {
+                model
+                    .insert_task_for_test(subtree_seed_row(orphan_task_id, missing_parent_task_id));
+            });
+
+            // The orphan's parent is not in the listing and has no local
+            // conversation: the row must be left to live-stream discovery.
+            panes.finish_seed_child_conversations_from_task(
+                parent_conversation_id,
+                root_task_id,
+                Ok(vec![subtree_seed_row(
+                    orphan_task_id,
+                    missing_parent_task_id,
+                )]),
+                ctx,
+            );
+
+            let history = BlocklistAIHistoryModel::as_ref(ctx);
+            assert!(
+                history
+                    .conversation_id_for_agent_id(&orphan_task_id.to_string())
+                    .is_none(),
+                "an out-of-listing-parent row cannot link"
+            );
+            assert!(
+                !panes.pending_parent_child_seeds.contains_key(&root_task_id),
+                "the seed must not stay pending for rows an identical refetch cannot resolve"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_deep_descendant_reveal_materializes_without_a_parent_pane() {
+    // Revealing a grandchild whose mid-tree parent has no pane must still
+    // succeed: the mid-tree placeholder resolves its hosting pane through
+    // the shared root surface, and the leaf's own pane materializes. The
+    // mid-tree parent's pane stays lazy until it is revealed itself.
+    let _unified = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    let _multi_level = FeatureFlag::MultiLevelOrchestration.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+
+        pane_group.update(&mut app, |panes, ctx| {
+            let parent_pane_id = get_newly_created_pane_id(panes, &[]);
+            let parent_conversation_id = start_parent_conversation(panes, parent_pane_id, ctx);
+            let mid_task_id = new_ambient_agent_task_id();
+            let leaf_task_id = new_ambient_agent_task_id();
+            // Mid-tree placeholder under the root, grandchild under it;
+            // neither has a pane.
+            let mid_conversation_id = restore_remote_child_conversation(
+                panes,
+                parent_pane_id,
+                parent_conversation_id,
+                mid_task_id,
+                ctx,
+            );
+            let leaf_conversation_id = restore_remote_child_conversation(
+                panes,
+                parent_pane_id,
+                mid_conversation_id,
+                leaf_task_id,
+                ctx,
+            );
+            AgentConversationsModel::handle(ctx).update(ctx, |model, _| {
+                model.insert_task_for_test(attachable_ambient_agent_task(mid_task_id));
+                model.insert_task_for_test(attachable_ambient_agent_task(leaf_task_id));
+            });
+            assert!(!panes.child_agent_panes.contains_key(&mid_conversation_id));
+            assert!(!panes.child_agent_panes.contains_key(&leaf_conversation_id));
+
+            let revealed =
+                panes.ensure_hidden_child_agent_pane_for_conversation(leaf_conversation_id, ctx);
+
+            assert!(revealed, "the deep reveal must succeed");
+            assert!(
+                panes
+                    .child_agent_panes
+                    .get(&leaf_conversation_id)
+                    .is_some_and(|pane_id| panes.has_pane_id(*pane_id)),
+                "the revealed descendant pane must materialize"
+            );
+
+            // The mid-tree parent stays lazily materializable on its own
+            // reveal.
+            assert!(
+                panes.ensure_hidden_child_agent_pane_for_conversation(mid_conversation_id, ctx,)
+            );
+            assert!(
+                panes
+                    .child_agent_panes
+                    .get(&mid_conversation_id)
+                    .is_some_and(|pane_id| panes.has_pane_id(*pane_id)),
+                "revealing the mid-tree parent materializes its own pane"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_reveal_ancestor_chain_recursion_is_depth_capped() {
+    // A cyclic parent graph (corrupt restore data) must terminate at the
+    // depth cap instead of recursing forever.
+    let _unified = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    let _multi_level = FeatureFlag::MultiLevelOrchestration.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+
+        pane_group.update(&mut app, |panes, ctx| {
+            let conversation_a = AIConversationId::new();
+            let conversation_b = AIConversationId::new();
+            BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, _| {
+                history.set_parent_for_conversation(conversation_a, conversation_b);
+                history.set_parent_for_conversation(conversation_b, conversation_a);
+            });
+
+            assert!(
+                !panes.ensure_hidden_child_agent_pane_for_conversation(conversation_a, ctx),
+                "a cyclic ancestor chain must fail the reveal, not hang"
+            );
+        });
+    });
+}

@@ -91,6 +91,21 @@ fn is_transient_status(status: u16) -> bool {
     matches!(status, 408 | 429 | 500..=599)
 }
 
+/// Returns `true` if the error chain carries an [`HttpStatusError`] with a
+/// permanent, non-authentication 4xx status (400, 404, 405, ...). Used to
+/// recognise endpoints the server rejects outright (missing route, invalid
+/// anchor) as opposed to transient failures or credential problems.
+pub(crate) fn is_permanent_non_auth_4xx_error(e: &anyhow::Error) -> bool {
+    for cause in e.chain() {
+        if let Some(http_err) = cause.downcast_ref::<HttpStatusError>() {
+            return matches!(http_err.status, 400..=499)
+                && !is_transient_status(http_err.status)
+                && !matches!(http_err.status, 401 | 403);
+        }
+    }
+    false
+}
+
 /// Returns `true` if the error chain carries an [`HttpStatusError`] with an
 /// authentication/authorization status (401 or 403).
 ///

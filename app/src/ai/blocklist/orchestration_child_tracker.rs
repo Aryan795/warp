@@ -356,11 +356,17 @@ impl OrchestrationChildTracker {
 
         self.children_awaiting_metadata.remove(&run_id);
 
+        // The row's `last_event_sequence` floors the lifecycle replay guard:
+        // a stream resuming from an older cursor must not transiently
+        // regress a status the seed snapshot already reflects.
+        let seed_sequence = task.last_event_sequence;
+
         if let Some(existing) = self.children.get_mut(&task_id) {
             existing.last_state = Some(state);
             if existing.session_id.is_none() {
                 existing.session_id = seed_session_id;
             }
+            existing.last_lifecycle_sequence = existing.last_lifecycle_sequence.max(seed_sequence);
             return;
         }
 
@@ -375,7 +381,7 @@ impl OrchestrationChildTracker {
                 last_state: Some(state),
                 is_remote_child: true,
                 last_lifecycle: None,
-                last_lifecycle_sequence: None,
+                last_lifecycle_sequence: seed_sequence,
             },
             ctx,
         );

@@ -102,7 +102,6 @@ fn make_run_event(
         occurred_at: "2026-01-01T00:00:00Z".to_string(),
         sequence,
         parent_run_id: None,
-        depth: None,
     }
 }
 
@@ -148,6 +147,7 @@ async fn driver_skips_duplicate_sequences_and_persists_new_cursor() {
         proactive_reconnect_after: None,
         failures_before_error_log: DEFAULT_AGENT_EVENT_FAILURES_BEFORE_ERROR_LOG,
         auth_error_give_up_failures: None,
+        permanent_error_give_up_failures: None,
         max_retry_duration: None,
     };
 
@@ -196,6 +196,7 @@ async fn driver_resets_failures_after_successful_event_delivery() {
         proactive_reconnect_after: None,
         failures_before_error_log: DEFAULT_AGENT_EVENT_FAILURES_BEFORE_ERROR_LOG,
         auth_error_give_up_failures: None,
+        permanent_error_give_up_failures: None,
         max_retry_duration: None,
     };
 
@@ -243,6 +244,7 @@ async fn driver_ignores_persist_cursor_errors() {
         proactive_reconnect_after: None,
         failures_before_error_log: DEFAULT_AGENT_EVENT_FAILURES_BEFORE_ERROR_LOG,
         auth_error_give_up_failures: None,
+        permanent_error_give_up_failures: None,
         max_retry_duration: None,
     };
 
@@ -279,6 +281,7 @@ async fn driver_ignores_driver_state_errors() {
         proactive_reconnect_after: None,
         failures_before_error_log: DEFAULT_AGENT_EVENT_FAILURES_BEFORE_ERROR_LOG,
         auth_error_give_up_failures: None,
+        permanent_error_give_up_failures: None,
         max_retry_duration: None,
     };
 
@@ -317,6 +320,7 @@ async fn driver_retries_initial_connection_until_stream_opens() {
         proactive_reconnect_after: None,
         failures_before_error_log: DEFAULT_AGENT_EVENT_FAILURES_BEFORE_ERROR_LOG,
         auth_error_give_up_failures: None,
+        permanent_error_give_up_failures: None,
         max_retry_duration: None,
     };
 
@@ -457,6 +461,7 @@ async fn driver_uses_slow_backoff_on_permanent_http_error() {
         proactive_reconnect_after: None,
         failures_before_error_log: DEFAULT_AGENT_EVENT_FAILURES_BEFORE_ERROR_LOG,
         auth_error_give_up_failures: None,
+        permanent_error_give_up_failures: None,
         max_retry_duration: None,
     };
 
@@ -499,6 +504,7 @@ async fn driver_gives_up_after_consecutive_auth_failures() {
         proactive_reconnect_after: None,
         failures_before_error_log: DEFAULT_AGENT_EVENT_FAILURES_BEFORE_ERROR_LOG,
         auth_error_give_up_failures: Some(3),
+        permanent_error_give_up_failures: None,
         max_retry_duration: None,
     };
 
@@ -541,6 +547,7 @@ async fn driver_does_not_give_up_on_non_auth_error_when_only_auth_bounded() {
         proactive_reconnect_after: None,
         failures_before_error_log: DEFAULT_AGENT_EVENT_FAILURES_BEFORE_ERROR_LOG,
         auth_error_give_up_failures: Some(3),
+        permanent_error_give_up_failures: None,
         max_retry_duration: None,
     };
 
@@ -582,6 +589,7 @@ async fn driver_does_not_count_non_auth_failures_toward_auth_give_up() {
         proactive_reconnect_after: None,
         failures_before_error_log: DEFAULT_AGENT_EVENT_FAILURES_BEFORE_ERROR_LOG,
         auth_error_give_up_failures: Some(3),
+        permanent_error_give_up_failures: None,
         max_retry_duration: None,
     };
 
@@ -615,6 +623,7 @@ async fn driver_resets_auth_streak_after_non_auth_failure() {
         proactive_reconnect_after: None,
         failures_before_error_log: DEFAULT_AGENT_EVENT_FAILURES_BEFORE_ERROR_LOG,
         auth_error_give_up_failures: Some(3),
+        permanent_error_give_up_failures: None,
         max_retry_duration: None,
     };
 
@@ -647,6 +656,7 @@ async fn driver_gives_up_after_max_retry_duration() {
         proactive_reconnect_after: None,
         failures_before_error_log: DEFAULT_AGENT_EVENT_FAILURES_BEFORE_ERROR_LOG,
         auth_error_give_up_failures: None,
+        permanent_error_give_up_failures: None,
         max_retry_duration: Some(Duration::from_secs(0)),
     };
 
@@ -690,6 +700,7 @@ async fn driver_uses_fast_backoff_on_transient_http_error() {
         proactive_reconnect_after: None,
         failures_before_error_log: DEFAULT_AGENT_EVENT_FAILURES_BEFORE_ERROR_LOG,
         auth_error_give_up_failures: None,
+        permanent_error_give_up_failures: None,
         max_retry_duration: None,
     };
 
