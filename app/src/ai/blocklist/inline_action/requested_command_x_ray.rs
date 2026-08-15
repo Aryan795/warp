@@ -155,10 +155,16 @@ impl CommandXRayHoverElement {
     /// This is the agent-command copy of `EditorElement::mouse_moved`
     /// (`app/src/editor/view/element.rs`), including its four cases and the reasoning behind
     /// them. A change to the input's rules has to be made here too.
+    ///
+    /// The hovered offset this reads is the one the code editor resolved for the *previous*
+    /// mouse-move event, because the editor reports it through a dispatched action rather than
+    /// synchronously. That only matters while the pointer is moving; the tooltip opens and
+    /// closes on a pointer that has come to rest, by which point the offset has caught up.
     fn mouse_moved(&mut self, position: Vector2F, ctx: &mut EventContext) -> bool {
         let mut state = self.state.lock();
+        let pointer = state.pointer.clone();
 
-        if let Some(pointer) = &state.pointer
+        if let Some(pointer) = &pointer
             && pointer.user_dismissed
         {
             return if (pointer.hover_point - position).length() < COMMAND_X_RAY_HOVER_THRESHOLD_PX {
@@ -175,7 +181,7 @@ impl CommandXRayHoverElement {
             return Self::reset_x_ray(&mut state, None, ctx);
         }
 
-        let Some(pointer) = &state.pointer else {
+        let Some(pointer) = pointer else {
             // Case 4: no timer set, set a new one.
             return Self::reset_x_ray(&mut state, Some(position), ctx);
         };
@@ -186,7 +192,6 @@ impl CommandXRayHoverElement {
         let timer_elapsed = Instant::now() >= pointer.hover_at;
         let timer_id = pointer.timer_id;
         let is_within_token_bounds = state.is_pointer_within_described_token();
-
         // Case 1: the tooltip is open. We only close it if the pointer is outside the described
         // token *and* has moved more than a radius away. The latter condition keeps the tooltip
         // open through small movements, even ones that leave the token.
