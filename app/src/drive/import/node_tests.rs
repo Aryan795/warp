@@ -1,8 +1,11 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use super::{FileId, FileNode, FileType, FileUploadState, FolderId, FolderNode, ImportedNode};
-use crate::drive::import::nodes::{UploadResult, UploadStatus};
+use super::{
+    FileId, FileNode, FileType, FileUploadState, FolderId, FolderNode, ImportedNode,
+    MAX_IMPORT_FILE_SIZE_BYTES, parse_file,
+};
+use crate::drive::import::nodes::{FileContent, UploadResult, UploadStatus};
 
 fn mock_tree() -> FileUploadState {
     let mut folder_id_to_node = HashMap::new();
@@ -191,4 +194,56 @@ fn test_empty_folders_update() {
             .status,
         UploadStatus::Loaded(String::new())
     );
+}
+
+#[tokio::test]
+async fn test_parse_file_notebook_under_cap_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("notes.md");
+    std::fs::write(&path, "# Heading\n\nSome notes.").unwrap();
+
+    let content = parse_file(path, FileType::Notebook)
+        .await
+        .expect("under-cap file should parse");
+    assert!(matches!(content, FileContent::Notebook(text) if text.contains("Heading")));
+}
+
+#[tokio::test]
+async fn test_parse_file_notebook_over_cap_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("huge.md");
+    std::fs::write(&path, vec![b'a'; (MAX_IMPORT_FILE_SIZE_BYTES + 1) as usize]).unwrap();
+
+    let Err(err) = parse_file(path, FileType::Notebook).await else {
+        panic!("over-cap file should be rejected");
+    };
+    assert!(err.to_string().contains("import size limit"));
+}
+
+#[tokio::test]
+async fn test_parse_file_workflow_under_cap_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("workflow.yaml");
+    std::fs::write(
+        &path,
+        "name: My Workflow\ncommand: echo hello\narguments: []\n",
+    )
+    .unwrap();
+
+    let content = parse_file(path, FileType::Workflow)
+        .await
+        .expect("under-cap file should parse");
+    assert!(matches!(content, FileContent::Workflow { workflows, .. } if workflows.len() == 1));
+}
+
+#[tokio::test]
+async fn test_parse_file_workflow_over_cap_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("huge.yaml");
+    std::fs::write(&path, vec![b'a'; (MAX_IMPORT_FILE_SIZE_BYTES + 1) as usize]).unwrap();
+
+    let Err(err) = parse_file(path, FileType::Workflow).await else {
+        panic!("over-cap file should be rejected");
+    };
+    assert!(err.to_string().contains("import size limit"));
 }
