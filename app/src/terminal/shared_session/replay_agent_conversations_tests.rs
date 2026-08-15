@@ -8,6 +8,7 @@ use crate::persistence::model::AgentConversationData;
 
 const TOKENLESS_TASK_ID: &str = "tokenless-task";
 const TOKENED_TASK_ID: &str = "tokened-task";
+const REMOTE_CHILD_TASK_ID: &str = "remote-child-task";
 
 fn conversation_data(
     server_token: Option<&str>,
@@ -122,6 +123,36 @@ fn test_replay_skips_conversations_with_no_server_token() {
         replayed_message_task_ids(&events),
         vec![TOKENED_TASK_ID.to_string()],
         "the tokenless conversation's messages must not be replayed either"
+    );
+}
+
+/// QUALITY-1676: a remote-child placeholder lives on the orchestrator's own
+/// terminal surface but mirrors another run, which a viewer materializes in its
+/// own child pane from that run's session. Its token is real, so only the
+/// placeholder check keeps it out of this session's replay.
+#[test]
+fn test_replay_skips_remote_child_placeholders() {
+    let mut remote_child_data = conversation_data(Some("remote-child-token"), None);
+    remote_child_data.is_remote_child = true;
+    let conversations = vec![
+        conversation_with_user_query(remote_child_data, REMOTE_CHILD_TASK_ID, "child prompt"),
+        conversation_with_user_query(
+            conversation_data(Some("orchestrator-token"), None),
+            TOKENED_TASK_ID,
+            "orchestrator prompt",
+        ),
+    ];
+
+    let events = reconstruct_response_events_from_conversations(&conversations);
+
+    assert_eq!(
+        replayed_conversation_tokens(&events),
+        vec!["orchestrator-token".to_string()],
+        "another run's placeholder is not part of this session's replay"
+    );
+    assert_eq!(
+        replayed_message_task_ids(&events),
+        vec![TOKENED_TASK_ID.to_string()]
     );
 }
 

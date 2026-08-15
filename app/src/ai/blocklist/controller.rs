@@ -2860,21 +2860,8 @@ impl BlocklistAIController {
                 let history_model = BlocklistAIHistoryModel::handle(ctx);
                 match event {
                     Ok(event) => {
-                        // Remote-child placeholders are created on their *parent's*
-                        // terminal surface but mirror another run's conversation, so
-                        // their streams are not part of this shared session. Relaying
-                        // one hands the viewer an `Init` for a conversation it cannot
-                        // match, which used to swap the viewer's pane onto an empty
-                        // conversation and drop the shared transcript (QUALITY-1676).
-                        let is_remote_child_placeholder = history_model
-                            .as_ref(ctx)
-                            .conversation(&conversation_id)
-                            .is_some_and(|conversation| conversation.is_remote_child());
-
                         // If this controller is part of a shared session, forward the entire response event to viewers first.
-                        if FeatureFlag::AgentSharedSessions.is_enabled()
-                            && !is_remote_child_placeholder
-                        {
+                        if FeatureFlag::AgentSharedSessions.is_enabled() {
                             let mut model = self.terminal_model.lock();
                             if model.shared_session_status().is_sharer() {
                                 // Get the participant who initiated this response, falling back to the sharer if needed.

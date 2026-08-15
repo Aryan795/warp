@@ -2459,10 +2459,16 @@ fn assert_pane_still_shows_conversation(
 
 /// QUALITY-1676: the sharer can relay a stream for a conversation the viewer does
 /// not hold (e.g. a remote-child placeholder living on the sharer's surface).
-/// Recording it is fine, but it must not repoint the pane at the freshly minted
-/// empty conversation — that is what dropped the orchestrator's transcript
-/// mid-replay and left the raw terminal blocklist on screen. The viewer-side
-/// invariant is not feature-gated, so it is asserted in both
+/// Recording it is fine, but it must not repoint the pane at that conversation —
+/// that is what dropped the orchestrator's transcript mid-replay and left the raw
+/// terminal blocklist on screen.
+///
+/// The second `Init` is the part that matters: replay emits one per *exchange*,
+/// and the first one binds the foreign token to the conversation minted for it,
+/// so from then on the foreign conversation is one the viewer does hold. A guard
+/// that only refuses conversations it just minted lets the second `Init` through.
+///
+/// The viewer-side invariant is not feature-gated, so it is asserted in both
 /// `OrchestrationUnifiedStack` states.
 fn assert_unknown_conversation_init_keeps_pane(unified_stack_enabled: bool) {
     let _unified_stack_flag =
@@ -2489,11 +2495,27 @@ fn assert_unknown_conversation_init_keeps_pane(unified_stack_enabled: bool) {
             "orchestrator prompt",
             &app,
         );
+
+        apply_shared_session_events(
+            &terminal,
+            vec![shared_session_init_event(
+                "sibling-request-2",
+                "sibling-conversation-token",
+            )],
+            &mut app,
+        );
+
+        assert_pane_still_shows_conversation(
+            &terminal,
+            conversation_id,
+            "orchestrator prompt",
+            &app,
+        );
         assert_eq!(
             live_conversation_count(&terminal, &app),
             conversation_count_before + 1,
-            "the unknown conversation is still recorded so a later selection update \
-             can navigate to it"
+            "both events belong to one foreign conversation, which is still recorded \
+             so a later selection update can navigate to it"
         );
     });
 }
