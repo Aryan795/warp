@@ -357,6 +357,8 @@ impl ParsedCommand {
 #[path = "adapter_tests.rs"]
 mod adapter_tests;
 #[cfg(test)]
+mod api_boundary_tests;
+#[cfg(test)]
 #[path = "grammar_tests.rs"]
 mod grammar_tests;
 #[cfg(test)]

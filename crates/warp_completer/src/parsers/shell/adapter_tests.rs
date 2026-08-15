@@ -283,6 +283,82 @@ mod shell_adapter_known_good_parity {
     }
 }
 
+/// Covers the escaped-backtick context/parity model in `mapper::detect_escaped_backtick_group`,
+/// added after a review round caught two bugs in an earlier version: (1) it fired on a literal
+/// escaped backtick with no enclosing real backtick substitution, fabricating a command that
+/// does not exist, and (2) EOF recovery lost an unclosed escaped nested backtick, exposing no
+/// inner command at all. Both cases are covered here alongside the corpus's original closed case.
+mod shell_adapter_escaped_backtick_context_and_parity {
+    use super::*;
+
+    /// A top-level escaped backtick pair with no enclosing real backtick substitution is literal
+    /// text in Bash (it just prints the backslash-backtick characters); it must not be treated as
+    /// a nested command.
+    #[test]
+    fn literal_escaped_backtick_outside_any_backtick_substitution_is_not_nested() {
+        let source = r"echo \`rm -rf /\`";
+        let result = parse(ShellDialect::Bash, source);
+        assert_eq!(result.status, ShellParseStatus::Complete);
+        assert!(
+            result.commands[0].nested_groups.is_empty(),
+            "a literal escaped backtick outside backtick-substitution context must not become a nested group"
+        );
+        let decomposed = result.decompose_for_permissions(source);
+        assert_eq!(
+            decomposed.commands,
+            vec![source.to_string()],
+            "must not fabricate a `rm -rf /` command that Bash would not execute as one"
+        );
+    }
+
+    /// An escaped backtick opened but never closed, inside an outer real backtick substitution
+    /// that is *also* unclosed, must still expose the inner command as an open group -- the
+    /// deepest-open-command contract that incomplete-input recovery relies on.
+    #[test]
+    fn unclosed_escaped_backtick_inside_unclosed_outer_backtick_exposes_inner_command() {
+        let source = r"echo `echo \`rm";
+        let result = parse(ShellDialect::Bash, source);
+        assert!(matches!(result.status, ShellParseStatus::Recovered { .. }));
+        let decomposed = result.decompose_for_permissions(source);
+        assert!(
+            decomposed.commands.contains(&"rm".to_string()),
+            "expected the unclosed inner `rm` to be exposed, got {:?}",
+            decomposed.commands
+        );
+        let cursor = result
+            .completion_command_at(ByteOffset::from(source.len()))
+            .unwrap();
+        assert_eq!(executable(cursor), Some("rm"));
+    }
+
+    /// The outer real backtick can be unclosed while the escaped inner pair is fully closed; the
+    /// inner group must still be reported correctly even though the outer one is `Open`.
+    #[test]
+    fn closed_inner_escaped_pair_survives_an_unclosed_outer_backtick() {
+        let source = r"echo `echo \`rm -rf /\`";
+        let result = parse(ShellDialect::Bash, source);
+        assert!(matches!(result.status, ShellParseStatus::Recovered { .. }));
+        let decomposed = result.decompose_for_permissions(source);
+        assert!(decomposed.commands.contains(&"rm -rf /".to_string()));
+    }
+
+    /// A 2+ backslash run before a backtick represents a third nesting level and deeper, which is
+    /// deliberately not modeled (see the doc comment on `detect_escaped_backtick_group`). It must
+    /// not be misinterpreted as a fresh, independent single-backslash open/close elsewhere in the
+    /// same text -- i.e. no nested group may be fabricated from it.
+    #[test]
+    fn unmodeled_deeper_backslash_run_does_not_fabricate_a_nested_group() {
+        let source = r"echo `echo \\\`x\`";
+        let result = parse(ShellDialect::Bash, source);
+        let outer = &result.commands[0].nested_groups[0];
+        assert_eq!(outer.commands.len(), 1);
+        assert!(
+            outer.commands[0].nested_groups.is_empty(),
+            "a 3-backslash run before a backtick must not be treated as a nested escaped-backtick group"
+        );
+    }
+}
+
 mod shell_adapter_zsh_bash_compatibility {
     use super::*;
 
@@ -357,27 +433,6 @@ mod shell_adapter_zsh_bash_compatibility {
     }
 }
 
-/// No public item in `warp_completer` (in this module or transitively re-exported from it) may
-/// contain an Arborium or tree-sitter type. `mod.rs` defines every public item in the shell
-/// adapter's surface; `mapper.rs` is where `arborium`/`tree_sitter` usage lives, and it is not
-/// `pub`. This is a grep-based API review test rather than a type-level one, per the spec's "add
-/// a compile-fail boundary test or API review test" requirement: it fails loudly if a future edit
-/// adds a `pub` declaration in `mod.rs` that mentions either crate.
-#[test]
-fn shell_adapter_no_backend_types_in_public_api() {
-    let mod_rs = include_str!("mod.rs");
-    assert!(
-        !mod_rs.contains("mod mapper;")
-            || mod_rs.contains("mod mapper;") && !mod_rs.contains("pub mod mapper"),
-        "the mapper submodule (where arborium/tree_sitter usage lives) must stay private"
-    );
-    for line in mod_rs.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("pub ") || trimmed.starts_with("pub(crate)") {
-            assert!(
-                !trimmed.contains("arborium") && !trimmed.contains("tree_sitter"),
-                "found an Arborium/tree-sitter type on a pub declaration: {line:?}"
-            );
-        }
-    }
-}
+// See `api_boundary_tests.rs` for `shell_adapter_no_backend_types_in_public_api`: it moved there
+// alongside the alias-resolving checker it now uses (an earlier, purely substring-based version
+// of this test lived here, but review found it could not catch a type-alias leak).

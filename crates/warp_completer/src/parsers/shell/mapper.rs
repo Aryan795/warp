@@ -46,7 +46,7 @@ pub(super) fn parse(
     };
 
     if !tree.root_node().has_error() {
-        let commands = collect_commands(tree.root_node(), source, source.len(), dialect);
+        let commands = collect_commands(tree.root_node(), source, source.len(), dialect, false);
         return ParsedShellInput {
             dialect,
             source_len: source.len(),
@@ -89,8 +89,13 @@ pub(super) fn parse(
     let padded = format!("{source}{sentinel}{}", recovery.closers);
     match parse_tree(dialect, &padded) {
         Some(recovered_tree) if !recovered_tree.root_node().has_error() => {
-            let commands =
-                collect_commands(recovered_tree.root_node(), source, source.len(), dialect);
+            let commands = collect_commands(
+                recovered_tree.root_node(),
+                source,
+                source.len(),
+                dialect,
+                false,
+            );
             ParsedShellInput {
                 dialect,
                 source_len: source.len(),
@@ -355,11 +360,18 @@ fn named_children(node: Node) -> Vec<Node> {
 
 /// Collects every top-level (or substitution-body) command from a container node, in source
 /// order, flattening pipelines/statement-lists/groupings into sibling commands.
+///
+/// `in_backtick_context` is true only when `node` is (or descends from) the content of a
+/// grammar-recognized *backtick*-delimited `command_substitution`: that is the one construct
+/// where an escaped backtick (`` \` ``) inside the content is a nesting delimiter rather than
+/// literal text, so escaped-backtick detection (`detect_escaped_backtick_group`) must not run
+/// anywhere else -- see its doc comment for why running it unconditionally is wrong.
 fn collect_commands(
     node: Node,
     source: &str,
     original_len: usize,
     dialect: ShellDialect,
+    in_backtick_context: bool,
 ) -> Vec<ParsedCommand> {
     let mut commands = Vec::new();
     match dialect {
@@ -367,9 +379,13 @@ fn collect_commands(
             collect_powershell_commands(node, source, original_len, &mut commands)
         }
         ShellDialect::Fish => collect_fish_commands(node, source, original_len, &mut commands),
-        ShellDialect::Bash | ShellDialect::Zsh => {
-            collect_posix_commands(node, source, original_len, &mut commands)
-        }
+        ShellDialect::Bash | ShellDialect::Zsh => collect_posix_commands(
+            node,
+            source,
+            original_len,
+            in_backtick_context,
+            &mut commands,
+        ),
     }
     commands
 }
@@ -380,6 +396,7 @@ fn collect_posix_commands(
     node: Node,
     source: &str,
     original_len: usize,
+    in_backtick_context: bool,
     out: &mut Vec<ParsedCommand>,
 ) {
     match node.kind() {
@@ -395,25 +412,30 @@ fn collect_posix_commands(
             // as a statement container (their content is itself a list of statements); as a word
             // constituent, they are handled by `collect_nested_groups` instead.
             for child in named_children(node) {
-                collect_posix_commands(child, source, original_len, out);
+                collect_posix_commands(child, source, original_len, in_backtick_context, out);
             }
         }
         "redirected_statement" => {
             let start = out.len();
             if let Some(body) = node.child_by_field_name("body") {
-                collect_posix_commands(body, source, original_len, out);
+                collect_posix_commands(body, source, original_len, in_backtick_context, out);
             }
             let redirects = posix_redirections(node, source, original_len);
             for command in &mut out[start..] {
                 command.redirections.extend(redirects.clone());
             }
         }
-        "command" => out.push(map_posix_command(node, source, original_len)),
+        "command" => out.push(map_posix_command(
+            node,
+            source,
+            original_len,
+            in_backtick_context,
+        )),
         _ => {
             // Unrecognized container kind (e.g. `negated_command`, `test_command`): best-effort
             // recurse into named children rather than silently dropping the command entirely.
             for child in named_children(node) {
-                collect_posix_commands(child, source, original_len, out);
+                collect_posix_commands(child, source, original_len, in_backtick_context, out);
             }
         }
     }
@@ -454,7 +476,12 @@ fn redirect_kind_from_operator_text(text: &str) -> ShellRedirectionKind {
     }
 }
 
-fn map_posix_command(node: Node, source: &str, original_len: usize) -> ParsedCommand {
+fn map_posix_command(
+    node: Node,
+    source: &str,
+    original_len: usize,
+    in_backtick_context: bool,
+) -> ParsedCommand {
     let mut parts = Vec::new();
     let mut leading_assignments = Vec::new();
     let mut executable = None;
@@ -498,30 +525,60 @@ fn map_posix_command(node: Node, source: &str, original_len: usize) -> ParsedCom
 
     // Escaped nested backticks (e.g. `` `echo \`rm -rf /\`` ``, APP-5433) are not modeled as a
     // nested `command_substitution` by the Bash grammar at all: it tokenizes the escaped
-    // backticks as literal characters split across ordinary word arguments. Detect that pattern
-    // directly against this command's own source text and inject the resulting nested group, so
-    // permission decomposition still exposes the innermost command to deny rules. Any region
-    // already covered by a natural nested group (e.g. this command's own text includes a whole
-    // outer backtick substitution as one of its arguments) is excluded, since that region's
-    // *own* command mapping already runs this same detection on the way down -- without the
-    // exclusion, an outer command whose argument contains an escaped-backtick pair nested two
-    // levels down would detect and inject the same group a second time at the outer level.
+    // backticks as literal characters. Only meaningful *inside* a real (grammar-recognized)
+    // backtick substitution's content -- see `detect_escaped_backtick_group`'s doc comment for
+    // why this must not run for a command outside that context (e.g. a top-level `` \`x\` ``,
+    // which Bash prints literally, is not a nested command).
     let command_span = clip(node.byte_range(), original_len);
-    let covered: Vec<Span> = nested_groups.iter().map(|g| g.span).collect();
-    nested_groups.extend(detect_escaped_backtick_groups(
-        command_span,
-        source,
-        &covered,
-    ));
+    if in_backtick_context {
+        nested_groups.extend(detect_escaped_backtick_group(command_span, source));
+    }
+
+    // Extend the command's own span (not just `post_whitespace`) to cover trailing whitespace up
+    // to the next sibling token, matching the legacy parser's `LiteCommand::span()` convention.
+    // `span` is what every containment check in this file uses (`deepest_command_at` and nested
+    // group boundaries), so a cursor sitting in the gap between this command and a following `|`
+    // must resolve to *this* command rather than falling back to an ancestor -- setting only
+    // `post_whitespace` without also extending `span` would leave that gap unclaimed.
+    let post_whitespace = trailing_whitespace_span(node, source, original_len);
+    let span = match post_whitespace {
+        Some(ws) => Span::new(command_span.start(), ws.end()),
+        None => command_span,
+    };
 
     ParsedCommand {
-        span: command_span,
+        span,
         parts,
         leading_assignments,
         executable,
-        post_whitespace: None,
+        post_whitespace,
         nested_groups,
         redirections: posix_redirections(node, source, original_len),
+    }
+}
+
+/// The span of pure-whitespace text between `node`'s own end and the start of its next sibling
+/// (a following command, or the next operator token such as `|`/`;`/`&&`), if any. Mirrors the
+/// legacy parser's `LiteCommand::post_whitespace`, which extends a command's overall span to
+/// include this gap so a cursor sitting in the whitespace between two commands (e.g. right before
+/// a `|`) still resolves to the preceding command rather than falling back to an ancestor.
+///
+/// Only considers the immediate next sibling within the same parent node; a command that is the
+/// *last* child before its parent closes (e.g. trailing space before a `)` or `` ` `` closing a
+/// substitution) is not covered by this and keeps `post_whitespace: None`. That narrower case is
+/// not currently exercised by the checked-in corpus.
+fn trailing_whitespace_span(node: Node, source: &str, original_len: usize) -> Option<Span> {
+    let next = node.next_sibling()?;
+    let gap_start = node.end_byte();
+    let gap_end = next.start_byte();
+    if gap_start >= gap_end {
+        return None;
+    }
+    let gap_text = source.get(gap_start..gap_end)?;
+    if gap_text.chars().all(char::is_whitespace) {
+        Some(clip(gap_start..gap_end, original_len))
+    } else {
+        None
     }
 }
 
@@ -545,74 +602,126 @@ fn map_posix_argument(
     map_word(node, source, original_len, nested_groups)
 }
 
-/// Finds escaped-backtick-delimited regions in `command_span`'s own text (`` \`...\` ``, ignoring
-/// content inside single quotes and inside `exclude`d spans) and maps each to a
-/// `NestedCommandGroup` by reparsing the unescaped inner text as its own Bash program. Only
-/// single-quote state is tracked (not double quotes), since escaped backticks inside a
-/// *double*-quoted string are still tokenized as ordinary word text by the grammar and reach this
-/// same command-level scan either way.
-fn detect_escaped_backtick_groups(
-    command_span: Span,
-    source: &str,
-    exclude: &[Span],
-) -> Vec<NestedCommandGroup> {
+/// Finds at most one escaped-backtick-delimited region (`` \`...\` ``) in `command_span`'s own
+/// text and maps it to a `NestedCommandGroup`. Only called when `command_span` is already known
+/// to be inside the content of a real, grammar-recognized *backtick* `command_substitution` --
+/// that is the sole context where POSIX shells treat `` \` `` as a nesting delimiter rather than
+/// a literal backtick (see `specs/APP-5430/TECH.md`'s "Zsh-on-Bash compatibility contract" note
+/// on escaped backticks, and APP-5433). Calling this unconditionally (as an earlier version of
+/// this function did) is exactly the bug review caught: `` echo \`rm -rf /\` `` at the *top*
+/// level is not inside any backtick substitution, so Bash prints it literally, but a
+/// context-blind scan matched the pair anyway and fabricated a nested `rm -rf /` command that
+/// does not exist.
+///
+/// Requires *exactly one* backslash immediately before the backtick (not zero -- that would be a
+/// real, grammar-handled backtick -- and not two or more, which is how Bash's actual nesting
+/// convention represents a *third* level and deeper). Deeper escaped-backtick nesting is
+/// deliberately not modeled: the real convention roughly doubles the required backslash count
+/// per level, and reproducing that recursively via text scanning (rather than a real parser) is
+/// fragile enough that getting a 3rd level wrong risks a confidently-wrong hierarchy, which is
+/// worse than not modeling it. A 3+ backslash run is left as ordinary word text, matching what
+/// the grammar itself already did for the whole word before this function ever ran.
+///
+/// An escaped-backtick open with no matching escaped-backtick close before the end of
+/// `command_span` is an *open* group extending to the end of the span (mirroring how a bare
+/// unclosed `$(` becomes an open `NestedCommandGroup` elsewhere in this file), and its content is
+/// parsed with the same recovery-aware `parse` entry point used for top-level input, so further
+/// incompleteness inside it (e.g. a `$(` opened but not closed within the escaped fragment) is
+/// still handled rather than silently dropped.
+fn detect_escaped_backtick_group(command_span: Span, source: &str) -> Option<NestedCommandGroup> {
     let command_source = command_span.slice(source);
     let base = command_span.start();
-    let mut groups = Vec::new();
     let bytes = command_source.as_bytes();
     let mut i = 0;
     let mut in_single_quote = false;
     while i < bytes.len() {
-        if let Some(skip_to) = exclude
-            .iter()
-            .find(|span| span.start() <= base + i && base + i < span.end())
-            .map(|span| span.end() - base)
-        {
-            i = skip_to;
-            continue;
-        }
         match bytes[i] {
             b'\'' => {
                 in_single_quote = !in_single_quote;
                 i += 1;
             }
-            b'\\' if !in_single_quote && bytes.get(i + 1) == Some(&b'`') => {
-                let open_start = i;
-                let content_start = i + 2;
-                if let Some(rel_close) = find_escaped_backtick(&command_source[content_start..]) {
-                    let content_end = content_start + rel_close;
-                    let close_end = content_end + 2;
-                    let inner_text =
-                        unescape_backticks(&command_source[content_start..content_end]);
-                    let commands = parse_fragment_as_bash(&inner_text, base + content_start);
-                    groups.push(NestedCommandGroup {
-                        span: Span::new(base + open_start, base + close_end),
-                        content_span: Span::new(base + content_start, base + content_end),
-                        kind: NestedCommandKind::BacktickSubstitution,
-                        closure: DelimiterState::Closed,
-                        commands,
-                    });
-                    i = close_end;
-                    continue;
-                }
-                i += 2;
+            // A 2+ backslash run before a backtick is a level-3-or-deeper delimiter this
+            // function deliberately does not model (see the doc comment above). Bail out of the
+            // whole scan here rather than skipping past just this backtick and continuing: once
+            // an unmodeled construct is present, a later single-backslash backtick elsewhere in
+            // the same text is not reliably still a fresh, independent open -- it could be the
+            // *close* of this unmodeled sequence -- so guessing at that point risks exactly the
+            // confidently-wrong hierarchy this function exists to avoid.
+            b'`' if !in_single_quote && backslash_run_len(bytes, i) >= 2 => return None,
+            b'`' if !in_single_quote && backslash_run_len(bytes, i) == 1 => {
+                let open_start = i - 1;
+                let content_start = i + 1;
+                return Some(
+                    match find_single_escaped_backtick(&command_source[content_start..]) {
+                        Some(rel_close) => {
+                            let content_end = content_start + rel_close;
+                            let close_end = content_end + 2;
+                            let inner_text =
+                                unescape_backticks(&command_source[content_start..content_end]);
+                            let commands =
+                                parse_fragment_as_bash(&inner_text, base + content_start);
+                            NestedCommandGroup {
+                                span: Span::new(base + open_start, base + close_end),
+                                content_span: Span::new(base + content_start, base + content_end),
+                                kind: NestedCommandKind::BacktickSubstitution,
+                                closure: DelimiterState::Closed,
+                                commands,
+                            }
+                        }
+                        None => {
+                            let content_end = command_source.len();
+                            let inner_text =
+                                unescape_backticks(&command_source[content_start..content_end]);
+                            let commands =
+                                parse_fragment_with_recovery(&inner_text, base + content_start);
+                            NestedCommandGroup {
+                                span: Span::new(base + open_start, base + content_end),
+                                content_span: Span::new(base + content_start, base + content_end),
+                                kind: NestedCommandKind::BacktickSubstitution,
+                                closure: DelimiterState::Open,
+                                commands,
+                            }
+                        }
+                    },
+                );
             }
             _ => i += 1,
         }
     }
-    groups
+    None
 }
 
-/// Finds the byte offset (relative to `text`) of the next escaped backtick (`` \` ``), which
-/// closes an escaped-backtick-delimited region opened by `detect_escaped_backtick_groups`.
-fn find_escaped_backtick(text: &str) -> Option<usize> {
+/// Returns the number of consecutive `\` bytes immediately preceding `bytes[at]` (which must
+/// itself be a backtick). A single-quote-literal region is never passed in here since the caller
+/// tracks that separately.
+fn backslash_run_len(bytes: &[u8], at: usize) -> usize {
+    let mut count = 0;
+    let mut i = at;
+    while i > 0 && bytes[i - 1] == b'\\' {
+        count += 1;
+        i -= 1;
+    }
+    count
+}
+
+/// Finds the byte offset (relative to `text`) of the next backtick preceded by *exactly one*
+/// backslash, which closes an escaped-backtick-delimited region opened by
+/// `detect_escaped_backtick_group`. Stops and reports "not found" (treated as an open group by
+/// the caller) as soon as it sees a 2+ backslash run before a backtick, for the same reason
+/// `detect_escaped_backtick_group` bails out on one: guessing past an unmodeled deeper-nesting
+/// delimiter risks matching the wrong backtick as the close.
+fn find_single_escaped_backtick(text: &str) -> Option<usize> {
     let bytes = text.as_bytes();
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        if bytes[i] == b'\\' && bytes[i + 1] == b'`' {
-            return Some(i);
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'`' {
+            let run = backslash_run_len(bytes, i);
+            if run == 1 {
+                return Some(i - 1);
+            }
+            if run >= 2 {
+                return None;
+            }
         }
-        i += 1;
     }
     None
 }
@@ -621,9 +730,9 @@ fn unescape_backticks(text: &str) -> String {
     text.replace("\\`", "`")
 }
 
-/// Parses `text` as a standalone Bash fragment and offsets every resulting span by `base_offset`
-/// so it lines up with the original document. Used for regions the grammar does not expose as a
-/// nested node at all (currently only escaped-backtick substitutions).
+/// Parses `text` as a standalone, complete-only Bash fragment and offsets every resulting span by
+/// `base_offset` so it lines up with the original document. Used for a *closed* escaped-backtick
+/// region, which by construction has no further incompleteness of its own.
 fn parse_fragment_as_bash(text: &str, base_offset: usize) -> Vec<ParsedCommand> {
     let Some(tree) = parse_tree(ShellDialect::Bash, text) else {
         return Vec::new();
@@ -631,7 +740,18 @@ fn parse_fragment_as_bash(text: &str, base_offset: usize) -> Vec<ParsedCommand> 
     if tree.root_node().has_error() {
         return Vec::new();
     }
-    let mut commands = collect_commands(tree.root_node(), text, text.len(), ShellDialect::Bash);
+    let mut commands =
+        collect_commands(tree.root_node(), text, text.len(), ShellDialect::Bash, true);
+    offset_commands(&mut commands, base_offset);
+    commands
+}
+
+/// Parses `text` (the trailing content of an *open* escaped-backtick region) recursively through
+/// the full recovery-aware `parse` entry point, so any further incompleteness inside it (e.g. an
+/// unclosed `$(` within the escaped fragment) is still recovered rather than silently dropped, and
+/// offsets every resulting span by `base_offset`.
+fn parse_fragment_with_recovery(text: &str, base_offset: usize) -> Vec<ParsedCommand> {
+    let mut commands = parse(text, ShellDialect::Bash, ShellParseOptions::default()).commands;
     offset_commands(&mut commands, base_offset);
     commands
 }
@@ -685,17 +805,85 @@ fn map_word(
 ) -> ParsedWord {
     let raw = node_text(node, source, original_len);
     collect_nested_groups(node, source, original_len, nested_groups);
-    let has_substitution = has_descendant_kind(node, "command_substitution")
-        || has_descendant_kind(node, "process_substitution");
-    let completion_value = if has_substitution {
-        "$(...)".to_string()
-    } else {
-        raw.trim_matches(|c| c == '"' || c == '\'').to_string()
-    };
+    let completion_value = completion_value_with_placeholders(
+        node,
+        source,
+        original_len,
+        |kind| matches!(kind, "command_substitution" | "process_substitution"),
+        true,
+    );
     ParsedWord {
         span: clip(node.byte_range(), original_len),
         raw,
         completion_value,
+    }
+}
+
+/// Builds a word's completion-facing value: literal text as-is, with each top-level substitution
+/// node's own span (as identified by `is_substitution_kind`) replaced by the `$(...)` placeholder.
+/// This matches the legacy parser's `Part::Display`, which reconstructs a quoted or unquoted word
+/// mixing literal text with a nested command/process substitution the same way (e.g.
+/// `pre$(pwd)post` becomes `pre$(...)post`, not just `$(...)` -- losing the surrounding
+/// `pre`/`post` text was a real bug an earlier, less rigorous version of the shadow-comparison
+/// suite caught).
+///
+/// `trim_quotes` preserves each dialect's pre-existing surrounding-quote behavior (Bash trims one
+/// layer of quote characters from a word's completion value; Fish/PowerShell do not) rather than
+/// changing untested behavior as a side effect of this fix.
+fn completion_value_with_placeholders(
+    node: Node,
+    source: &str,
+    original_len: usize,
+    is_substitution_kind: impl Fn(&str) -> bool,
+    trim_quotes: bool,
+) -> String {
+    let raw = node_text(node, source, original_len);
+    let mut ranges = Vec::new();
+    collect_substitution_ranges(node, original_len, &is_substitution_kind, &mut ranges);
+    let result = if ranges.is_empty() {
+        raw
+    } else {
+        let node_start = node.start_byte();
+        let mut result = String::new();
+        let mut cursor = 0usize;
+        for (start, end) in ranges {
+            let rel_start = start.saturating_sub(node_start).min(raw.len());
+            let rel_end = end.saturating_sub(node_start).min(raw.len()).max(rel_start);
+            if rel_start > cursor {
+                result.push_str(&raw[cursor..rel_start]);
+            }
+            result.push_str("$(...)");
+            cursor = rel_end;
+        }
+        if cursor < raw.len() {
+            result.push_str(&raw[cursor..]);
+        }
+        result
+    };
+    if trim_quotes {
+        result.trim_matches(|c| c == '"' || c == '\'').to_string()
+    } else {
+        result
+    }
+}
+
+/// Collects the clipped `(start, end)` byte ranges of every top-level descendant of `node` whose
+/// kind matches `is_substitution_kind`, without recursing into a matched node's own children (its
+/// entire span becomes one placeholder, so nothing nested inside it needs its own range).
+fn collect_substitution_ranges(
+    node: Node,
+    original_len: usize,
+    is_substitution_kind: &impl Fn(&str) -> bool,
+    out: &mut Vec<(usize, usize)>,
+) {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if is_substitution_kind(child.kind()) {
+            let span = clip(child.byte_range(), original_len);
+            out.push((span.start(), span.end()));
+        } else {
+            collect_substitution_ranges(child, original_len, is_substitution_kind, out);
+        }
     }
 }
 
@@ -745,12 +933,23 @@ fn push_nested_group(
             }
         }
     };
+    // Whether the *content* of this group is itself inside backtick-escaping context depends on
+    // this group's own kind, not on whatever context `node` was reached from: a `$()` or `<()`
+    // never needs backslash-escaped backticks for its content regardless of where it appears, and
+    // a backtick substitution's content always does, even when nested inside a `$()`.
+    let in_backtick_context = kind == NestedCommandKind::BacktickSubstitution;
     out.push(NestedCommandGroup {
         span: clip(node.byte_range(), original_len),
         content_span: inner_content_span(node, original_len, delimiter_len),
         kind,
         closure: is_open(node, original_len),
-        commands: collect_commands(node, source, original_len, ShellDialect::Bash),
+        commands: collect_commands(
+            node,
+            source,
+            original_len,
+            ShellDialect::Bash,
+            in_backtick_context,
+        ),
     });
 }
 
@@ -835,12 +1034,13 @@ fn map_fish_word(
 ) -> ParsedWord {
     let raw = node_text(node, source, original_len);
     collect_fish_nested_groups(node, source, original_len, nested_groups);
-    let has_substitution = has_descendant_kind(node, "command_substitution");
-    let completion_value = if has_substitution {
-        "$(...)".to_string()
-    } else {
-        raw.clone()
-    };
+    let completion_value = completion_value_with_placeholders(
+        node,
+        source,
+        original_len,
+        |kind| kind == "command_substitution",
+        false,
+    );
     ParsedWord {
         span: clip(node.byte_range(), original_len),
         raw,
@@ -875,7 +1075,7 @@ fn push_fish_nested_group(
         content_span: inner_content_span(node, original_len, 1),
         kind: NestedCommandKind::FishSubstitution,
         closure: is_open(node, original_len),
-        commands: collect_commands(node, source, original_len, ShellDialect::Fish),
+        commands: collect_commands(node, source, original_len, ShellDialect::Fish, false),
     });
 }
 
@@ -937,23 +1137,18 @@ fn map_powershell_word(
 ) -> ParsedWord {
     let raw = node_text(node, source, original_len);
     collect_powershell_nested_groups(node, source, original_len, nested_groups);
-    let has_substitution = has_descendant_kind(node, "sub_expression");
-    let completion_value = if has_substitution {
-        "$(...)".to_string()
-    } else {
-        raw.clone()
-    };
+    let completion_value = completion_value_with_placeholders(
+        node,
+        source,
+        original_len,
+        |kind| kind == "sub_expression",
+        false,
+    );
     ParsedWord {
         span: clip(node.byte_range(), original_len),
         raw,
         completion_value,
     }
-}
-
-fn has_descendant_kind(node: Node, kind: &str) -> bool {
-    let mut cursor = node.walk();
-    node.children(&mut cursor)
-        .any(|c| c.kind() == kind || has_descendant_kind(c, kind))
 }
 
 fn collect_powershell_nested_groups(
@@ -967,7 +1162,7 @@ fn collect_powershell_nested_groups(
         if child.kind() == "sub_expression" {
             let commands = child
                 .child_by_field_name("statements")
-                .map(|s| collect_commands(s, source, original_len, ShellDialect::PowerShell))
+                .map(|s| collect_commands(s, source, original_len, ShellDialect::PowerShell, false))
                 .unwrap_or_default();
             out.push(NestedCommandGroup {
                 span: clip(child.byte_range(), original_len),
