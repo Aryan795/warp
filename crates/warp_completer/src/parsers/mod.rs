@@ -8,6 +8,7 @@ use imp::*;
 mod errors;
 pub use errors::{ArgumentError, ParseError, ParseErrorReason};
 pub mod hir;
+mod shell;
 pub mod simple;
 
 use derive_new::new;

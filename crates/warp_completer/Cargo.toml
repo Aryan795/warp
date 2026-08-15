@@ -11,6 +11,7 @@ license.workspace = true
 async-recursion.workspace = true
 async-trait.workspace = true
 anyhow.workspace = true
+arborium.workspace = true
 bincode.workspace = true
 cfg-if.workspace = true
 clap.workspace = true

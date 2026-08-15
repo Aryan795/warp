@@ -299,7 +299,12 @@ tracing-subscriber = { version = "0.3.22", default-features = false, features = 
   "registry",
   "std",
 ] }
-arborium = { version = "2", default-features = false, features = [
+# Pinned to a single reviewed version per specs/APP-5430/TECH.md: the shell parser adapter work
+# selects grammars (lang-bash/lang-fish/lang-powershell) that must not silently drift to a version
+# with different conformance behavior. Zsh maps to the Bash grammar (per the requester's decision
+# on APP-5430 Phase 0, since Arborium 2.18.1's own Zsh grammar fails basic conformance), so there
+# is no separate `lang-zsh` feature to enable here.
+arborium = { version = "=2.18.1", default-features = false, features = [
   "lang-rust",
   "lang-go",
   "lang-yaml",
@@ -334,6 +339,7 @@ arborium = { version = "2", default-features = false, features = [
   "lang-vue",
   "lang-dockerfile",
   "lang-markdown",
+  "lang-fish",
 ] }
 unicode-general-category = "1.1.0"
 unicode-linebreak = "0.1.5"
