@@ -419,9 +419,13 @@ impl SkillManager {
     ///
     /// When multiple skills share `name`, home-scoped skills take precedence
     /// over project skills — the same precedence documented for unqualified
-    /// `--skill` name resolution in `resolve_skill_spec.rs` — and any
-    /// remaining ties are broken with a stable path sort so the result is
-    /// deterministic.
+    /// `--skill` name resolution in `resolve_skill_spec.rs`. Remaining ties
+    /// within the chosen scope are broken by provider-directory precedence
+    /// (`.agents` before `.warp` before `.claude`, etc., per
+    /// [`SKILL_PROVIDER_DEFINITIONS`]) — the same rank `resolve_skill_spec.rs`
+    /// uses via `directory_precedence_rank` — so this fallback never serves
+    /// different instructions than canonical name resolution would pick, and
+    /// finally by a stable path sort so the result is fully deterministic.
     fn active_path_skill_by_name(
         &self,
         name: &str,
@@ -452,7 +456,13 @@ impl SkillManager {
             candidates = home_candidates;
         }
 
-        candidates.sort_by_key(|path| path.display_path());
+        candidates.sort_by_key(|path| {
+            let rank = self
+                .skills_by_path
+                .get(*path)
+                .map_or(usize::MAX, |skill| provider_rank(skill.provider));
+            (rank, path.display_path())
+        });
         candidates
             .into_iter()
             .next()
