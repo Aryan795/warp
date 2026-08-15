@@ -865,9 +865,6 @@ impl ImageCache {
     /// `bounds` and `fit_type` must match the resolved values used as the
     /// cache key inside `image()` (i.e., after any `max_dimension`
     /// adjustment), not only the originally requested bounds.
-    ///
-    /// Called from `image()`'s lazy LRU eviction pass once an asset's cached
-    /// size variants reach `MAX_CACHED_SIZES_PER_ASSET`.
     fn evict_size(
         &self,
         asset_source: &AssetSource,

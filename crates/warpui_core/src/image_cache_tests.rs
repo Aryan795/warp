@@ -780,6 +780,76 @@ fn test_image_does_not_evict_active_size_variants_at_capacity() {
             );
         }
     }
+
+    // Every round above touched bounds[0] first and bounds[last] last, so
+    // bounds[0] is currently the least-recently-used entry and bounds[1] is
+    // the next-oldest. Capture weak handles for both, then drop our strong
+    // Rc<Image> clones so ImageCache is the sole holder (matching the
+    // eviction tests above), before distinguishing them by eviction.
+    let weak_oldest = {
+        let Image::Static(arc) = originals[0].as_ref() else {
+            panic!("Expected static image!");
+        };
+        Arc::downgrade(arc)
+    };
+    let weak_next_oldest = {
+        let Image::Static(arc) = originals[1].as_ref() else {
+            panic!("Expected static image!");
+        };
+        Arc::downgrade(arc)
+    };
+    drop(originals);
+
+    // Re-hit the oldest entry once more. This should refresh its recency via
+    // the hit path in `image()`, so it's no longer the least-recently-used
+    // entry even though it was the first one touched in every round above.
+    let refreshed = image_cache.image(
+        source.clone(),
+        bounds[0],
+        FitType::Cover,
+        AnimatedImageBehavior::FullAnimation,
+        CacheOption::BySize,
+        None,
+        &asset_cache,
+    );
+    let AssetState::Loaded { data: refreshed } = refreshed else {
+        panic!("Bundled asset should be available immediately!");
+    };
+    drop(refreshed);
+
+    // Request a brand-new size, pushing the per-asset cache over capacity and
+    // forcing eviction of whichever entry is truly least-recently-used.
+    let new_bounds = Vector2I::new(
+        (MAX_CACHED_SIZES_PER_ASSET as i32 + 1) * 10,
+        (MAX_CACHED_SIZES_PER_ASSET as i32 + 1) * 10,
+    );
+    let new_image = image_cache.image(
+        source.clone(),
+        new_bounds,
+        FitType::Cover,
+        AnimatedImageBehavior::FullAnimation,
+        CacheOption::BySize,
+        None,
+        &asset_cache,
+    );
+    let AssetState::Loaded { data: new_image } = new_image else {
+        panic!("Bundled asset should be available immediately!");
+    };
+    drop(new_image);
+
+    // If cache hits didn't refresh LRU recency, bounds[0] (never re-hit after
+    // the loop, in that hypothetical) would have been evicted instead of
+    // bounds[1], so these assertions genuinely depend on the hit-path bump.
+    assert_eq!(
+        weak_oldest.strong_count(),
+        1,
+        "the entry just re-hit should survive eviction, proving cache hits refresh LRU recency"
+    );
+    assert_eq!(
+        weak_next_oldest.strong_count(),
+        0,
+        "the entry that wasn't re-hit should be evicted as the true least-recently-used entry"
+    );
 }
 
 #[test]
