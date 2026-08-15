@@ -796,6 +796,12 @@ impl RequestedCommandView {
                 // we only record what it resolved. A clamped hit means the pointer is past the
                 // end of the text rather than on a token, which is the same condition the input
                 // checks with `PossibleDisplayPoint::is_clamped`.
+                //
+                // This offset is a render-model offset, which is already the 0-indexed character
+                // index this host wants: `RichTextAction::mouse_hovered` forwards it untouched,
+                // unlike the selection paths, which add one to reach content-model offsets. Do
+                // not "fix" the asymmetry with `toggle_command_x_ray_at_cursor` below, which
+                // starts from a content-model cursor offset and therefore has to subtract one.
                 let hovered_char_index = (!clamped && !is_covered).then(|| offset.as_usize());
                 self.command_x_ray_hover
                     .lock()

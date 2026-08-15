@@ -310,6 +310,13 @@ impl Element for CommandXRayHoverElement {
         let handled = self.child.dispatch_event(event, ctx, app);
 
         if let Event::MouseMoved { position, .. } = event.raw_event() {
+            // Deliberate divergence from `EditorElement::dispatch_event`
+            // (`app/src/editor/view/element.rs`), which returns its `mouse_moved` result and so
+            // claims a move that opened or closed the tooltip. The terminal input's editor can
+            // afford that; this command body sits inside the block list, whose ancestors drive
+            // their own hover states off the same event, so swallowing it here would regress
+            // unrelated hover UI. The tooltip re-renders through the dispatched actions instead,
+            // so nothing is lost by letting the move keep propagating.
             self.mouse_moved(*position, ctx);
         }
 
