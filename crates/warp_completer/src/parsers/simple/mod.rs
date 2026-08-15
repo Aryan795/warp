@@ -2,6 +2,8 @@ use crate::meta::{Spanned, SpannedItem};
 
 mod convert;
 mod iter;
+#[cfg(test)]
+mod legacy_corpus_tests;
 mod lexer;
 mod parser;
 mod token;

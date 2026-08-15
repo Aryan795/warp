@@ -742,6 +742,59 @@ fn test_can_autoexecute_command_denylist_matches_env_prefixed_commands() {
     })
 }
 
+// Regression test for APP-5433: escaped nested backticks (e.g. `` `echo \`rm -rf /\`` ``) used
+// to bypass `decompose_command`, so an explicit deny rule for `rm` never saw the innermost
+// command and an `AlwaysAllow` profile could auto-execute it. See `until_backtick` in
+// `crates/warp_completer/src/parsers/simple/iter.rs` for the parser-level fix.
+#[test]
+fn test_can_autoexecute_command_denylist_catches_escaped_nested_backtick() {
+    App::test((), |mut app| async move {
+        let PermissionsTestState {
+            convo_id,
+            permissions,
+            profile_model,
+            terminal_view_id,
+            ..
+        } = initialize_permissions_test(&mut app);
+
+        profile_model.update(&mut app, |model, ctx| {
+            let profile_id = model
+                .active_profile(Some(terminal_view_id), ctx)
+                .id()
+                .clone();
+            // Mirrors the production default `rm` denylist rule (see
+            // `DEFAULT_COMMAND_EXECUTION_DENYLIST` in `ai_execution_profile.rs`).
+            model.set_execute_commands(&profile_id, &ActionPermission::AlwaysAllow, ctx);
+            model.add_to_command_denylist(
+                &profile_id,
+                &AgentModeCommandExecutionPredicate::new_regex(r"rm(\s.*)?").unwrap(),
+                ctx,
+            );
+        });
+
+        permissions.read(&app, |model, ctx| {
+            let result = model.can_autoexecute_command(
+                &convo_id,
+                "echo `echo \\`rm -rf /\\``",
+                EscapeChar::Backslash,
+                false,
+                None,
+                Some(terminal_view_id),
+                ctx,
+            );
+            assert!(
+                matches!(
+                    result,
+                    CommandExecutionPermission::Denied(
+                        CommandExecutionPermissionDeniedReason::ExplicitlyDenylisted
+                    )
+                ),
+                "expected the escaped nested `rm -rf /` to be caught by the rm denylist, got {result:?}"
+            );
+        });
+    })
+}
+
 #[test]
 fn test_can_autoexecute_command_allowlist_precedence() {
     App::test((), |mut app| async move {

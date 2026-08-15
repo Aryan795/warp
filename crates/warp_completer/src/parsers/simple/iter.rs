@@ -77,7 +77,16 @@ where
     /// Create a ParserInput that will yield tokens until a backtick is found and then stop,
     /// preserving the position.
     ///
-    /// Note: This will buffer all of the tokens until the next backtick
+    /// Note: This will buffer all of the tokens until the next backtick. A backtick nested inside
+    /// backtick-substitution content must be escaped (e.g. `` `echo \`rm -rf /\`` ``) so the
+    /// outer subshell doesn't close on it; per shell semantics, that escaping backslash is then
+    /// stripped and the inner backtick is a delimiter of its own (nested) subshell. So an escaped
+    /// backtick is buffered as a plain, unescaped `Backtick` token, letting the nested parser
+    /// recurse into it via `parse_backticked_subshell` instead of treating either the escape or
+    /// the backtick as this subshell's closing delimiter. An escaped non-backtick token keeps its
+    /// normal escape semantics and is buffered as-is for the nested parser to interpret. Without
+    /// this, an escaped backtick is mistaken for the outer subshell's closing backtick, which
+    /// truncates the nested command and lets it evade decomposition-based deny rules.
     pub fn until_backtick(&mut self) -> ParserInput<Vec<Spanned<Token<'a>>>> {
         let mut buffer = Vec::new();
         let start = self.pos;
@@ -85,6 +94,20 @@ where
         while let Some(token) = self.peek() {
             match token {
                 Token::Backtick => break,
+                Token::EscapeChar(_) => {
+                    // Safety: We are peeking first so the next token will always exist
+                    let escape = self.next_with_span().unwrap();
+                    match self.next_with_span() {
+                        Some(escaped) if escaped.item == Token::Backtick => {
+                            buffer.push(escaped);
+                        }
+                        Some(escaped) => {
+                            buffer.push(escape);
+                            buffer.push(escaped);
+                        }
+                        None => buffer.push(escape),
+                    }
+                }
                 _ => {
                     // Safety: We are peeking first so the next token will always exist
                     buffer.push(self.next_with_span().unwrap());

@@ -63,6 +63,11 @@ fn test_parse_nested_command() {
 
 #[test]
 fn test_parse() {
+    // Note: `` `ps \`` `` contains an escaped backtick, which per shell semantics opens a nested
+    // command substitution rather than a literal backtick (see the `until_backtick` docs). Since
+    // there is no further backtick in the source to close either the inner or outer subshell,
+    // both remain open and the inner one absorbs the rest of the input, including `{echo
+    // Goodbye😀}`.
     let source = r#"ls | rm -rf || touch 'hello.txt\' &
 cat "Hello $(ls -la)" && echo `ps \`; {echo Goodbye😀}"#;
 
@@ -102,21 +107,23 @@ cat "Hello $(ls -la)" && echo `ps \`; {echo Goodbye😀}"#;
             .spanned((36, 58)),
             Command::new(vec![
                 Part::Literal("echo".into()).spanned((61, 65)),
-                Part::ClosedSubshell(vec![
+                Part::OpenSubshell(vec![
                     Command::new(vec![
                         Part::Literal("ps".into()).spanned((67, 69)),
-                        Part::Literal("\\".into()).spanned((70, 71)),
+                        Part::OpenSubshell(vec![
+                            Command::new(vec![
+                                Part::Literal("echo".into()).spanned((75, 79)),
+                                Part::Literal("Goodbye😀".into()).spanned((80, 91)),
+                            ])
+                            .spanned((75, 91)),
+                        ])
+                        .spanned((70, 92)),
                     ])
-                    .spanned((67, 71))
+                    .spanned((67, 92))
                 ])
-                .spanned((66, 72)),
+                .spanned((66, 92)),
             ])
-            .spanned((61, 72)),
-            Command::new(vec![
-                Part::Literal("echo".into()).spanned((75, 79)),
-                Part::Literal("Goodbye😀".into()).spanned((80, 91))
-            ])
-            .spanned((75, 91)),
+            .spanned((61, 92)),
         ]
     );
 }
