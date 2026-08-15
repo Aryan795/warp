@@ -2966,13 +2966,16 @@ impl BlockList {
     ///
     /// Equivalent to calling [`Self::insert_restored_block`] once per block, except only
     /// one fresh active block is created at the end of the batch, rather than one after
-    /// each restored block. Each `Block` owns several full-size grid buffers (prompt,
+    /// each restored block. Every `Block` ever created stays resident in `self.blocks`
+    /// for the life of the block list -- `restore_block` only *appends* a new block via
+    /// `create_new_block` and shifts which one is "active" (the last one); it never
+    /// removes any. Each `Block` also owns several full-size grid buffers (prompt,
     /// prompt+command, output, rprompt), so restoring N historical command blocks one at
-    /// a time allocates 2N `Block`s: N to hold the restored content, and N disposable
-    /// placeholders that exist only to keep `active_block()` valid between calls and are
-    /// immediately discarded by the next restored block. Batching halves that allocation
-    /// for large restorations, e.g. a long-running CLI agent conversation with many
-    /// historical commands.
+    /// a time leaves 2N resident `Block`s: N holding the restored content, and N
+    /// placeholders that exist only to give the next call a valid `active_block()` and
+    /// then sit unused, still resident, for the rest of the block list's life. Batching
+    /// halves that resident allocation for large restorations, e.g. a long-running CLI
+    /// agent conversation with many historical commands.
     pub fn insert_restored_blocks(&mut self, blocks: &[&SerializedBlock]) {
         if blocks.is_empty() {
             return;
@@ -2982,9 +2985,9 @@ impl BlockList {
         for block in blocks {
             self.restore_block(block, BootstrapStage::PostBootstrapPrecmd, &mut processor);
         }
-        // restore_block consumed the previous active block and made the last restored
-        // block the new active (finished) block. Create a fresh active block so
-        // the terminal can continue accepting input.
+        // Each `restore_block` call above appended a new block and left it active.
+        // Append one more fresh block now so the terminal can continue accepting input,
+        // instead of doing so after every single restored block above.
         self.create_new_block(
             BlockId::new(),
             self.bootstrap_stage,

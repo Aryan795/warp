@@ -1481,17 +1481,11 @@ fn fetched_memories_dedupes_keeping_first_position_and_latest_data() {
     );
 }
 
-/// Regression test for APP-5428: a conversation with far more historical shell
-/// commands than `MAX_RESTORED_COMMAND_BLOCKS` must not restore one terminal block
-/// per command (each of which allocates several full-size grids). Only the most
-/// recent commands are kept, and a synthetic notice block communicates the
-/// truncation instead of silently dropping history.
-#[test]
-fn to_serialized_blocklist_items_caps_command_blocks_and_notes_truncation() {
-    let extra_commands = 10;
-    let total_commands = super::MAX_RESTORED_COMMAND_BLOCKS + extra_commands;
-    let mut messages = Vec::with_capacity(total_commands * 2);
-    for i in 0..total_commands {
+/// Builds a restored conversation with `n` sequential `RunShellCommand` tool
+/// calls/results (`echo 0`, `echo 1`, ... `echo {n-1}`), in chronological order.
+fn restored_conversation_with_n_run_shell_commands(n: usize) -> AIConversation {
+    let mut messages = Vec::with_capacity(n * 2);
+    for i in 0..n {
         let tool_call_id = format!("call-{i}");
         let command = format!("echo {i}");
         messages.push(tool_call_message(
@@ -1507,8 +1501,19 @@ fn to_serialized_blocklist_items_caps_command_blocks_and_notes_truncation() {
             run_shell_command_finished_result(&command, &i.to_string(), &format!("command-{i}")),
         ));
     }
+    restored_conversation_with_messages(messages)
+}
 
-    let conversation = restored_conversation_with_messages(messages);
+/// Regression test for APP-5428: a conversation with far more historical shell
+/// commands than `MAX_RESTORED_COMMAND_BLOCKS` must not restore one terminal block
+/// per command (each of which allocates several full-size grids). Only the most
+/// recent commands are kept, and a synthetic notice block communicates the
+/// truncation instead of silently dropping history.
+#[test]
+fn to_serialized_blocklist_items_caps_command_blocks_and_notes_truncation() {
+    let extra_commands = 10;
+    let total_commands = super::MAX_RESTORED_COMMAND_BLOCKS + extra_commands;
+    let conversation = restored_conversation_with_n_run_shell_commands(total_commands);
     let items = conversation.to_serialized_blocklist_items();
 
     // +1 for the synthetic truncation-notice block.
@@ -1535,5 +1540,32 @@ fn to_serialized_blocklist_items_caps_command_blocks_and_notes_truncation() {
     assert!(
         last_kept_command.contains(&format!("echo {}", total_commands - 1)),
         "expected the most recent command to be restored, got: {last_kept_command:?}"
+    );
+}
+
+/// Regression test for APP-5428 review finding: pins the `>` (not `>=`) boundary
+/// condition. At exactly `MAX_RESTORED_COMMAND_BLOCKS` commands, nothing is
+/// truncated: all commands are returned and no synthetic notice block is inserted.
+#[test]
+fn to_serialized_blocklist_items_does_not_truncate_at_exact_cap() {
+    let conversation =
+        restored_conversation_with_n_run_shell_commands(super::MAX_RESTORED_COMMAND_BLOCKS);
+    let items = conversation.to_serialized_blocklist_items();
+
+    assert_eq!(items.len(), super::MAX_RESTORED_COMMAND_BLOCKS);
+
+    let SerializedBlockListItem::Command { block: first } = &items[0];
+    let first_command = String::from_utf8_lossy(&first.stylized_command).into_owned();
+    assert!(
+        first_command.contains("echo 0"),
+        "at exactly the cap, the oldest command must still be the very first one \
+         restored (no notice block prepended), got: {first_command:?}"
+    );
+
+    let SerializedBlockListItem::Command { block: last } = items.last().unwrap();
+    let last_command = String::from_utf8_lossy(&last.stylized_command).into_owned();
+    assert!(
+        last_command.contains(&format!("echo {}", super::MAX_RESTORED_COMMAND_BLOCKS - 1)),
+        "got: {last_command:?}"
     );
 }
