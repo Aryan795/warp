@@ -176,6 +176,12 @@ pub struct DisplayOptions {
     /// editor can choose when to update the hovered block based on mouse movement.
     pub hovered_block_start: Option<CharOffset>,
 
+    /// The start of the token described by command x-ray, if a description is showing. The
+    /// element records that character's on-screen bounds in the position cache so the host can
+    /// anchor the tooltip to it. Anchoring has to happen here because only the element knows
+    /// where the viewport is painted.
+    pub command_x_ray_start: Option<CharOffset>,
+
     /// Whether or not to paint the boundaries of each block for debugging.
     pub debug_bounds: bool,
 
@@ -195,6 +201,7 @@ impl Default for DisplayOptions {
             blink_cursors: true,
             debug_bounds: true,
             hovered_block_start: None,
+            command_x_ray_start: None,
             focused: true,
             left_gutter: 0.,
             right_gutter: 0.,
@@ -1177,6 +1184,21 @@ impl<V: EditorView> Element for RichTextElement<V> {
                 }
             }
             None => report_error!("Rich-text blocks missing after layout"),
+        }
+
+        match self
+            .display_options
+            .command_x_ray_start
+            .and_then(|offset| model.character_bounds_on_screen(offset, &ctx))
+        {
+            Some(token_bounds) => ctx
+                .paint
+                .position_cache
+                .cache_position_indefinitely(model.saved_positions().command_x_ray(), token_bounds),
+            None => ctx
+                .paint
+                .position_cache
+                .clear_position(model.saved_positions().command_x_ray().as_str()),
         }
 
         ctx.paint.scene.stop_layer();

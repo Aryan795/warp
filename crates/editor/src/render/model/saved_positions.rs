@@ -29,4 +29,9 @@ impl SavedPositions {
     pub fn hovered_block_start(&self) -> String {
         format!("warp_editor:hovered_block_start_{}", self.model_id)
     }
+
+    /// The start of the token currently described by command x-ray, which the tooltip anchors to.
+    pub fn command_x_ray(&self) -> String {
+        format!("warp_editor:command_x_ray_{}", self.model_id)
+    }
 }

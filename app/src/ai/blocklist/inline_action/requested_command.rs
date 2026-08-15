@@ -5,10 +5,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use lazy_static::lazy_static;
-use parking_lot::FairMutex;
+use parking_lot::{FairMutex, Mutex};
 use pathfinder_geometry::vector::vec2f;
 use settings::Setting as _;
+use string_offset::{ByteOffset, CharOffset};
 use uuid::Uuid;
+use warp_completer::completer::Description;
+use warp_completer::signatures::CommandRegistry;
 use warp_core::features::FeatureFlag;
 use warp_core::ui::Icon;
 use warp_core::ui::appearance::Appearance;
@@ -16,11 +19,11 @@ use warp_editor::render::element::VerticalExpansionBehavior;
 use warpui::clipboard::ClipboardContent;
 use warpui::elements::new_scrollable::{NewScrollable, ScrollableAppearance, SingleAxisConfig};
 use warpui::elements::{
-    Align, Border, ChildAnchor, ChildView, Clipped, ClippedScrollStateHandle, ConstrainedBox,
-    Container, CornerRadius, CrossAxisAlignment, Dismiss, Empty, Expanded, Flex, MainAxisSize,
-    MouseStateHandle, OffsetPositioning, ParentElement, PositionedElementAnchor,
-    PositionedElementOffsetBounds, Radius, ScrollbarWidth, SelectableArea, SelectionHandle, Stack,
-    Text,
+    Align, AnchorPair, Border, ChildAnchor, ChildView, Clipped, ClippedScrollStateHandle,
+    ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Dismiss, Empty, Expanded, Flex,
+    MainAxisSize, MouseStateHandle, OffsetPositioning, OffsetType, ParentElement,
+    PositionedElementAnchor, PositionedElementOffsetBounds, Radius, ScrollbarWidth, SelectableArea,
+    SelectionHandle, Stack, Text, YAxisAnchor,
 };
 use warpui::keymap::{Context, EditableBinding, FixedBinding, Keystroke};
 use warpui::ui_components::components::UiComponent as _;
@@ -58,8 +61,15 @@ use crate::ai::blocklist::{
 use crate::ai::mcp::TemplatableMCPServerManager;
 use crate::cmd_or_ctrl_shift;
 use crate::code::editor::view::{CodeEditorEvent, CodeEditorRenderOptions, CodeEditorView};
+use crate::command_x_ray::{
+    self, CommandXRayContext, CommandXRayHost, CommandXRayHover, CommandXRayHoverArea,
+    CommandXRayTooltipAnchor, CommandXRayUpdate, HoverOutcome, HoverProbe,
+    add_command_x_ray_overlay,
+};
+use crate::completer::SessionAgnosticContext;
 use crate::editor::InteractionState;
 use crate::menu::{Event as MenuEvent, Menu, MenuItem, MenuItemFields, MenuVariant};
+use crate::server::telemetry::CommandXRayTrigger;
 use crate::settings::InputModeSettings;
 use crate::terminal::TerminalModel;
 use crate::terminal::block_list_viewport::InputMode;
@@ -99,6 +109,7 @@ pub const VIEWING_COMMAND_DETAIL_MESSAGE: &str = "Viewing command detail";
 const VIEWING_MCP_TOOL_DETAIL_MESSAGE: &str = "Viewing MCP tool call detail";
 
 const EDIT_COMMAND_ACTION_NAME: &str = "requested_command:edit";
+const INSPECT_COMMAND_ACTION_NAME: &str = "requested_command:inspect_command";
 
 const EDIT_MODE_OPEN_KEYMAP_CONTEXT: &str = "RequestedCommandViewEditModeOpen";
 const REQUESTED_ACTION_BLOCKED_KEYMAP_CONTEXT: &str = "RequestedActionBlocked";
@@ -182,6 +193,34 @@ pub fn init(app: &mut AppContext) {
             & id!(REQUESTED_ACTION_BLOCKED_KEYMAP_CONTEXT)
             & !id!(EDIT_MODE_OPEN_KEYMAP_CONTEXT),
     )]);
+
+    // The keyboard path for command x-ray. Deliberately has no default keystroke, matching
+    // `editor_view:inspect_command`, which also ships unbound whenever Agent Mode is on — and
+    // Agent Mode is always on wherever this permission prompt exists.
+    app.register_editable_bindings([EditableBinding::new(
+        INSPECT_COMMAND_ACTION_NAME,
+        "Inspect requested command",
+        RequestedCommandViewAction::InspectCommand,
+    )
+    .with_context_predicate(
+        id!(RequestedCommandView::ui_name()) & id!(REQUESTED_ACTION_BLOCKED_KEYMAP_CONTEXT),
+    )]);
+}
+
+/// What the code editor's hit test last reported about the pointer, shared between the view and
+/// the [`CommandXRayHoverArea`] wrapping it.
+///
+/// The hover state machine asks its questions from inside a pointer event, where the view is not
+/// borrowable, so the answers are published here instead of read off the view. The offset itself
+/// comes from `CodeEditorEvent::MouseHovered`, which the rich text element already dispatches
+/// whenever the character under the pointer changes — that event *is* the code editor's
+/// pointer→offset hit test, and reusing it is why this host needs no geometry code of its own.
+#[derive(Clone, Copy, Default)]
+struct CommandXRayHit {
+    /// The character under the pointer, or `None` when the pointer is past the end of the text.
+    offset: Option<CharOffset>,
+    /// Whether that character falls inside the token currently described.
+    is_within_token: bool,
 }
 
 /// Structured representation of an MCP tool call request for JSON tree rendering.
@@ -303,6 +342,12 @@ pub enum RequestedCommandViewAction {
     CopyMcpSelection,
     /// Dismiss the MCP JSON tree right-click context menu.
     CloseMcpContextMenu,
+    /// The pointer has rested over a token long enough to describe it.
+    TryToShowCommandXRay,
+    /// Close the command x-ray tooltip.
+    HideCommandXRay,
+    /// Toggle the command x-ray at the editor's cursor. This is the keyboard path.
+    InspectCommand,
 }
 
 pub struct RequestedCommandView {
@@ -373,6 +418,15 @@ pub struct RequestedCommandView {
     // The MCP tool name is kept separately from the formatted command text so
     // headers never need to parse a presentation label to recover identity.
     mcp_tool_name: Option<String>,
+
+    /// The token description currently on screen, if any. Owned here because this view is the
+    /// command x-ray host; the shared flow in [`crate::command_x_ray::host`] reads and writes it
+    /// through [`CommandXRayHost`].
+    command_x_ray_description: Option<Arc<Description>>,
+    /// The shared hover state machine: delay, movement threshold, and dismissal.
+    command_x_ray_hover: CommandXRayHover,
+    /// What the editor's hit test last reported, shared with the hover area element.
+    command_x_ray_hit: Arc<Mutex<CommandXRayHit>>,
 }
 
 impl RequestedCommandView {
@@ -629,6 +683,9 @@ impl RequestedCommandView {
             mcp_context_menu_anchor_id: None,
             mcp_server_id: None,
             mcp_tool_name: None,
+            command_x_ray_description: None,
+            command_x_ray_hover: Default::default(),
+            command_x_ray_hit: Default::default(),
         }
     }
 
@@ -709,12 +766,78 @@ impl RequestedCommandView {
             CodeEditorEvent::CopiedEmptyText => {
                 ctx.emit(RequestedCommandViewEvent::CopiedEmptyText);
             }
+            CodeEditorEvent::MouseHovered {
+                offset, clamped, ..
+            } => {
+                // This event is the code editor's pointer→offset hit test. It fires only when the
+                // character under the pointer changes, so the result is cached for the hover state
+                // machine, which runs on every pointer move.
+                self.set_command_x_ray_hit(if *clamped { None } else { Some(*offset) }, ctx);
+            }
+            CodeEditorEvent::ContentChanged { .. } => {
+                // Dismiss on edit, matching the terminal input.
+                command_x_ray::host::hide(self, ctx);
+            }
             #[cfg(windows)]
             CodeEditorEvent::WindowsCtrlC { copied_selection } if !copied_selection => {
                 ctx.emit(RequestedCommandViewEvent::Rejected);
             }
             _ => {}
         }
+    }
+
+    /// The text that command x-ray offsets index into. Offsets come from the editor's own hit
+    /// test, so they must be resolved against the editor's buffer rather than `command_text`,
+    /// which only catches up with user edits when they are committed.
+    fn x_ray_text(&self, ctx: &AppContext) -> String {
+        match &self.editor {
+            Some(editor) => editor.as_ref(ctx).text(ctx).into_string(),
+            None => self.command_text.clone(),
+        }
+    }
+
+    /// Records the character under the pointer and whether it is inside the described token.
+    fn set_command_x_ray_hit(&self, offset: Option<CharOffset>, ctx: &AppContext) {
+        let is_within_token = offset.is_some_and(|offset| self.is_within_described_token(offset, ctx));
+        *self.command_x_ray_hit.lock() = CommandXRayHit {
+            offset,
+            is_within_token,
+        };
+    }
+
+    /// Whether `offset` falls inside the span of the token currently described.
+    fn is_within_described_token(&self, offset: CharOffset, ctx: &AppContext) -> bool {
+        let Some(description) = &self.command_x_ray_description else {
+            return false;
+        };
+        let text = self.x_ray_text(ctx);
+        let Some(byte_offset) = byte_offset_for_char(&text, offset) else {
+            return false;
+        };
+        let byte_offset = byte_offset.as_usize();
+        byte_offset >= description.token.span.start() && byte_offset < description.token.span.end()
+    }
+
+    /// The character offset of the start of the described token, which the editor element turns
+    /// into an on-screen position for the tooltip to anchor to.
+    fn described_token_start(&self, ctx: &AppContext) -> Option<CharOffset> {
+        let description = self.command_x_ray_description.as_ref()?;
+        let text = self.x_ray_text(ctx);
+        char_offset_for_byte(&text, description.token.span.start())
+    }
+
+    /// Keeps the editor's tooltip anchor in step with the description being shown.
+    fn sync_command_x_ray_anchor(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(editor) = self.editor.clone() else {
+            return;
+        };
+        let offset = self.described_token_start(ctx);
+        editor.update(ctx, |editor, ctx| {
+            editor.set_command_x_ray_anchor_offset(offset, ctx);
+        });
+        // The description changing also changes whether the pointer is inside it.
+        let hovered = self.command_x_ray_hit.lock().offset;
+        self.set_command_x_ray_hit(hovered, ctx);
     }
 
     fn set_is_header_expanded(&mut self, value: bool, ctx: &mut ViewContext<Self>) {
@@ -1562,8 +1685,66 @@ fn mcp_viewing_detail_title_text(tool_name: &str, server_name: Option<&str>) -> 
     }
 }
 
+/// Converts a character offset into the byte offset the completer indexes by.
+///
+/// The code editor reports hits as [`CharOffset`]s while [`warp_completer`] spans are byte
+/// offsets, so the two have to be reconciled somewhere; doing it here keeps byte offsets out of
+/// the editor and character offsets out of the completer.
+fn byte_offset_for_char(text: &str, offset: CharOffset) -> Option<ByteOffset> {
+    let char_count = offset.as_usize();
+    match text.char_indices().nth(char_count) {
+        Some((byte_index, _)) => Some(ByteOffset::from(byte_index)),
+        // An offset one past the last character is the end of the text, which is in range.
+        None => (text.chars().count() == char_count).then(|| ByteOffset::from(text.len())),
+    }
+}
+
+/// The inverse of [`byte_offset_for_char`].
+fn char_offset_for_byte(text: &str, byte_index: usize) -> Option<CharOffset> {
+    if byte_index > text.len() {
+        return None;
+    }
+    text.is_char_boundary(byte_index)
+        .then(|| CharOffset::from(text[..byte_index].chars().count()))
+}
+
 impl Entity for RequestedCommandView {
     type Event = RequestedCommandViewEvent;
+}
+
+impl CommandXRayHost for RequestedCommandView {
+    fn x_ray_command_text(&self, ctx: &AppContext) -> String {
+        self.x_ray_text(ctx)
+    }
+
+    fn x_ray_context(&self, _ctx: &AppContext) -> Option<CommandXRayContext> {
+        // The permission prompt is not attached to a shell session, so descriptions here come
+        // from the static command registry. Aliases, functions and path completions will not
+        // resolve, unlike in the terminal input.
+        Some(CommandXRayContext::SessionAgnostic(
+            SessionAgnosticContext::new(CommandRegistry::global_instance()),
+        ))
+    }
+
+    fn x_ray_description(&self) -> Option<&Arc<Description>> {
+        self.command_x_ray_description.as_ref()
+    }
+
+    fn apply_x_ray_update(&mut self, update: CommandXRayUpdate, ctx: &mut ViewContext<Self>) {
+        match update {
+            CommandXRayUpdate::Show(description) => {
+                self.command_x_ray_description = Some(description);
+            }
+            CommandXRayUpdate::Empty => {
+                self.command_x_ray_description = None;
+            }
+            CommandXRayUpdate::Dismiss => {
+                self.command_x_ray_description = None;
+                self.command_x_ray_hover.mark_user_dismissed();
+            }
+        }
+        self.sync_command_x_ray_anchor(ctx);
+    }
 }
 
 impl View for RequestedCommandView {
@@ -1647,9 +1828,37 @@ impl View for RequestedCommandView {
             .with_child(Clipped::new(header_element).finish());
 
         if let (true, Some(editor)) = (should_render_editor, &self.editor) {
+            // The hover area feeds raw pointer positions to the shared state machine. The hit
+            // test itself is not in it: the probe just reads what the editor's own
+            // `MouseHovered` events already resolved.
+            let hit = self.command_x_ray_hit.clone();
+            let editor_body = CommandXRayHoverArea::new(
+                ChildView::new(editor).finish(),
+                self.command_x_ray_hover.clone(),
+                Box::new(move |_app| {
+                    let hit = *hit.lock();
+                    HoverProbe {
+                        is_clamped: hit.offset.is_none(),
+                        is_within_token: hit.is_within_token,
+                    }
+                }),
+                Box::new(|outcome, ctx| match outcome {
+                    HoverOutcome::Show => {
+                        ctx.dispatch_typed_action(
+                            RequestedCommandViewAction::TryToShowCommandXRay,
+                        );
+                    }
+                    HoverOutcome::Hide => {
+                        ctx.dispatch_typed_action(RequestedCommandViewAction::HideCommandXRay);
+                    }
+                    HoverOutcome::Idle => {}
+                }),
+            )
+            .finish();
+
             content.add_child(
                 ConstrainedBox::new(
-                    Container::new(ChildView::new(editor).finish())
+                    Container::new(editor_body)
                         .with_horizontal_padding(INLINE_ACTION_HORIZONTAL_PADDING)
                         .with_padding_top(REQUESTED_COMMAND_BODY_VERTICAL_PADDING)
                         .with_padding_bottom(
@@ -1999,6 +2208,21 @@ impl View for RequestedCommandView {
         let mut root_stack = Stack::new();
         root_stack.add_child(container);
 
+        // The same tooltip the terminal input shows, anchored the same way, against the position
+        // the code editor's element cached for the described token.
+        if let (Some(description), Some(editor)) = (&self.command_x_ray_description, &self.editor) {
+            add_command_x_ray_overlay(
+                &mut root_stack,
+                CommandXRayTooltipAnchor {
+                    position_id: editor.as_ref(app).command_x_ray_position_id(app),
+                    y_anchor: AnchorPair::new(YAxisAnchor::Top, YAxisAnchor::Bottom),
+                    y_offset: OffsetType::Pixel(0.),
+                },
+                description,
+                appearance,
+            );
+        }
+
         if self.is_accept_split_button_menu_open {
             root_stack.add_positioned_child(
                 ChildView::new(&self.accept_split_button_menu).finish(),
@@ -2075,6 +2299,33 @@ impl TypedActionView for RequestedCommandView {
             }
             RequestedCommandViewAction::ToggleExpanded => {
                 self.set_is_header_expanded(!self.is_header_expanded, ctx)
+            }
+            RequestedCommandViewAction::TryToShowCommandXRay => {
+                let Some(offset) = self.command_x_ray_hit.lock().offset else {
+                    return;
+                };
+                let text = self.x_ray_text(ctx);
+                if let Some(byte_offset) = byte_offset_for_char(&text, offset) {
+                    command_x_ray::host::start_at_offset(
+                        self,
+                        byte_offset,
+                        CommandXRayTrigger::Hover,
+                        ctx,
+                    );
+                }
+            }
+            RequestedCommandViewAction::HideCommandXRay => {
+                command_x_ray::host::hide(self, ctx);
+            }
+            RequestedCommandViewAction::InspectCommand => {
+                let Some(editor) = self.editor.clone() else {
+                    return;
+                };
+                let cursor = editor.as_ref(ctx).cursor_head_offset(ctx);
+                let text = self.x_ray_text(ctx);
+                if let Some(byte_offset) = byte_offset_for_char(&text, cursor) {
+                    command_x_ray::host::toggle_at_offset(self, byte_offset, ctx);
+                }
             }
             RequestedCommandViewAction::OpenActiveAgentProfileEditor => {
                 ctx.emit(RequestedCommandViewEvent::OpenActiveAgentProfileEditor)

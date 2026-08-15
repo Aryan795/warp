@@ -4132,6 +4132,18 @@ impl RenderState {
         Some(block.item.first_line_height())
     }
 
+    /// The on-screen bounding box of the character at `offset`.
+    ///
+    /// Unlike [`Self::character_bounds_in_viewport`], this accounts for where the viewport is
+    /// actually painted, so it is only meaningful during paint.
+    pub fn character_bounds_on_screen(
+        &self,
+        offset: CharOffset,
+        ctx: &RenderContext,
+    ) -> Option<RectF> {
+        Some(ctx.content_rect_to_screen(self.character_bounds(offset)?))
+    }
+
     /// The bounding box of the first line of this block, based on its viewport location.
     pub fn first_line_bounds(
         &self,

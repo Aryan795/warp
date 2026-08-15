@@ -282,6 +282,9 @@ pub struct CodeEditorView {
     show_find_references_provider: Box<dyn ShowFindReferencesCardProvider>,
     /// The offset where find references card is anchored (if showing).
     find_references_anchor_offset: Option<CharOffset>,
+    /// The start of the token described by command x-ray, if a host is showing one. The element
+    /// records that character's on-screen position so the host can anchor its tooltip to it.
+    command_x_ray_anchor_offset: Option<CharOffset>,
     window_id: WindowId,
 }
 
@@ -429,12 +432,37 @@ impl CodeEditorView {
             ),
             show_find_references_provider: render_options.show_find_references_provider,
             find_references_anchor_offset: None,
+            command_x_ray_anchor_offset: None,
             window_id: ctx.window_id(),
         }
     }
 
     pub fn set_find_references_anchor_offset(&mut self, offset: Option<CharOffset>) {
         self.find_references_anchor_offset = offset;
+    }
+
+    /// Points the command x-ray anchor at the start of the described token, or clears it.
+    pub fn set_command_x_ray_anchor_offset(
+        &mut self,
+        offset: Option<CharOffset>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if self.command_x_ray_anchor_offset == offset {
+            return;
+        }
+        self.command_x_ray_anchor_offset = offset;
+        ctx.notify();
+    }
+
+    /// The saved-position id the command x-ray tooltip anchors to. Only populated while
+    /// [`Self::set_command_x_ray_anchor_offset`] holds an offset that is in the viewport.
+    pub fn command_x_ray_position_id(&self, app: &AppContext) -> String {
+        self.model
+            .as_ref(app)
+            .render_state()
+            .as_ref(app)
+            .saved_positions()
+            .command_x_ray()
     }
 
     pub fn find_references_save_position_id(&self) -> &str {
@@ -2191,6 +2219,7 @@ impl View for CodeEditorView {
             blink_cursors,
             vertical_expansion_behavior: self.display_options.vertical_expansion_behavior,
             editable,
+            command_x_ray_start: self.command_x_ray_anchor_offset,
             ..Default::default()
         };
 
