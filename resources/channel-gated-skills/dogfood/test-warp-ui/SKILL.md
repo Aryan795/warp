@@ -42,6 +42,14 @@ After launching, confirm both of the following before testing:
 
 If that warning appears (or the app is logged out), the wrong binary/channel was launched — stop and relaunch with `cargo run --bin warp`.
 
+### If the app is still logged out: staging IAP
+
+Staging dogfood gates the API-key login behind IAP: unlike the TUI (which authenticates immediately and resolves IAP out of band), the GUI withholds `--api-key`/`WARP_API_KEY` authentication until an IAP token is loaded (`authenticate_user_after_iap_access` in `app/src/lib.rs`). A correctly-launched `cargo run --bin warp` that still shows the logged-out onboarding screen is usually this, not a missing account.
+
+- The sandbox is expected to self-mint an IAP token via Workload Identity Federation, using `WARP_STAGING_IAP_BOOTSTRAP_JWT` together with `OZ_RUN_ID` (`crates/warp_server_client/src/iap.rs`) — no `gcloud` needed.
+- Check Settings > Account for the "Staging IAP credentials" status widget (`app/src/settings_view/main_page.rs`): `Loaded (refreshes in ~Nm)` means the token minted; `Failed: <message>` shows the actual error (e.g. a failed WIF token exchange).
+- Only once a real launch attempt shows a `Failed` status is falling back to the hardcode/mock path below appropriate. Never describe a capture made against a mocked or hardcoded state as a live Cloud Mode (or other authenticated-surface) verification — say plainly that it's mocked.
+
 ## Testing Workflow
 
 ### 1. Hardcode or Mock Data (When Needed)
