@@ -347,24 +347,7 @@ fn zsh_named_directory_reference_is_error_free_but_not_semantically_understood()
     assert!(!tree.root_node().has_error());
 }
 
-// ---------------------------------------------------------------------------------------------
-// Module boundary.
-// ---------------------------------------------------------------------------------------------
-
-/// No public item in `warp_completer` may contain an Arborium or tree-sitter type (see the
-/// module boundary in `specs/APP-5430/TECH.md`). `shell` is a private module for exactly this
-/// reason: nothing it exports is reachable from outside the crate today. This test exists so a
-/// future Phase 1 change that makes `shell` (or `ShellDialect`) `pub` gets a clear signal to
-/// re-examine the boundary rather than silently leaking `tree_sitter::Language` through it.
-#[test]
-fn shell_module_is_not_part_of_the_public_api() {
-    // If this module is ever re-exported as `pub mod shell` from `crate::parsers`, the crate's
-    // public API would gain a path to `arborium`/`tree_sitter` types. Grep-based rather than
-    // type-based on purpose: the point is to catch the *declaration* changing, which a
-    // compile-time trait check cannot observe from within the module it is guarding.
-    let mod_rs = include_str!("../mod.rs");
-    assert!(
-        mod_rs.contains("mod shell;") && !mod_rs.contains("pub mod shell;"),
-        "the shell module must stay private to warp_completer's public API"
-    );
-}
+// See `adapter_tests.rs`'s `shell_adapter_no_backend_types_in_public_api` for the Phase 1 module
+// boundary test: `shell` is now `pub` (it exposes the Warp-owned `ParsedShellInput` model), so the
+// boundary is enforced by checking that no Arborium/tree-sitter type appears in this module's own
+// public declarations, rather than by keeping the whole module private.
