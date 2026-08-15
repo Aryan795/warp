@@ -3954,10 +3954,16 @@ impl Workspace {
                     .enumerate()
                     .for_each(|(tab_index, saved_tab)| {
                         let custom_title = saved_tab.custom_title.clone();
-                        self.add_tab_with_pane_layout(
+                        // Only the tab that will actually be shown at launch needs its
+                        // terminal panes' scrollback/AI conversations restored eagerly;
+                        // every other tab's shell still starts now, but its restoration
+                        // is deferred until the tab is activated (see
+                        // `FeatureFlag::LazyBackgroundTabScrollbackRestore`).
+                        self.add_tab_with_pane_layout_and_active_hint(
                             PanesLayout::Snapshot(Box::new(saved_tab.root.clone())),
                             block_lists.clone(),
                             custom_title,
+                            tab_index == active_tab_index,
                             ctx,
                         );
                         self.tabs[tab_index].default_directory_color =
@@ -5416,6 +5422,18 @@ impl Workspace {
         };
 
         self.active_tab_index = index;
+
+        // Apply any scrollback/AI conversation restoration that was deferred
+        // for this tab at startup (see
+        // `FeatureFlag::LazyBackgroundTabScrollbackRestore`), before anything
+        // below reads this tab's pane content (title, focus, etc.). A no-op
+        // once the tab has been activated once.
+        if let Some(tab) = self.tabs.get(index) {
+            let pane_group = tab.pane_group.clone();
+            pane_group.update(ctx, |pane_group, ctx| {
+                pane_group.materialize_lazy_tab_restorations(ctx);
+            });
+        }
 
         // The range selection's anchor is the active tab, so any change to
         // the active tab makes the existing selection stale; clear it.
@@ -12799,6 +12817,29 @@ impl Workspace {
         custom_tab_title: Option<String>,
         ctx: &mut ViewContext<Self>,
     ) {
+        self.add_tab_with_pane_layout_and_active_hint(
+            panes_layout,
+            block_lists,
+            custom_tab_title,
+            true,
+            ctx,
+        );
+    }
+
+    /// Like [`Self::add_tab_with_pane_layout`], but lets the caller indicate
+    /// whether the new tab will be the window's initially-active tab.
+    /// Restoring a window's tabs from a snapshot uses `is_active_tab: false`
+    /// for every tab except the one `active_tab_index` points at, so
+    /// `PaneGroup::new_with_panes_layout` can defer expensive scrollback/AI
+    /// conversation restoration for tabs the user won't see at launch.
+    pub fn add_tab_with_pane_layout_and_active_hint(
+        &mut self,
+        panes_layout: PanesLayout,
+        block_lists: Arc<HashMap<PaneUuid, Vec<SerializedBlockListItem>>>,
+        custom_tab_title: Option<String>,
+        is_active_tab: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
         // Remember whether the left panel was open on the current active pane group
         // before creating a new active pane group.
         let left_panel_was_open = if self.tabs.is_empty() {
@@ -12823,6 +12864,7 @@ impl Workspace {
                 panes_layout,
                 block_lists,
                 self.model_event_sender.clone(),
+                is_active_tab,
                 ctx,
             );
             if let Some(title) = custom_tab_title {

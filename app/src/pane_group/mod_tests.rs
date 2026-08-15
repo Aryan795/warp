@@ -258,6 +258,7 @@ fn mock_pane_group(app: &mut App, options: MockOptions) -> ViewHandle<PaneGroup>
                 options.layout,
                 block_lists,
                 None,
+                true,
                 ctx,
             )
         });
@@ -3806,6 +3807,7 @@ fn test_focused_pane_is_synchronized_with_application_focus() {
                         panes_layout,
                         block_lists,
                         None,
+                        true,
                         ctx,
                     )
                 });
@@ -3949,5 +3951,127 @@ fn test_undo_close_keeps_a_file_pane_watching_its_file() {
                 "a permanently discarded pane should release its file"
             );
         });
+    });
+}
+
+/// APP-5257: restoring a `PanesLayout::Snapshot` for a tab other than the window's
+/// initially-active one, under `FeatureFlag::LazyBackgroundTabScrollbackRestore`, must:
+/// - still create the terminal session/shell eagerly (unaffected by the flag),
+/// - defer applying the persisted block into the live terminal view until the tab is
+///   activated,
+/// - round-trip the exact original snapshot if the tab is closed/persisted before ever
+///   being activated, and
+/// - apply the deferred restoration once `materialize_lazy_tab_restorations` runs (as
+///   `Workspace::set_active_tab_index` does on activation).
+#[test]
+fn test_lazy_background_tab_scrollback_restore() {
+    use crate::terminal::model::block::SerializedBlock;
+
+    let _flag = FeatureFlag::LazyBackgroundTabScrollbackRestore.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let uuid = Uuid::new_v4().as_bytes().to_vec();
+        let restored_block =
+            SerializedBlock::new_for_test(b"echo restored".to_vec(), b"restored\n".to_vec());
+        let mut block_lists = HashMap::new();
+        block_lists.insert(
+            PaneUuid(uuid.clone()),
+            vec![SerializedBlockListItem::Command {
+                block: Box::new(restored_block),
+            }],
+        );
+
+        let original_snapshot = TerminalPaneSnapshot {
+            uuid: uuid.clone(),
+            cwd: None,
+            shell_launch_data: None,
+            is_active: true,
+            is_read_only: false,
+            input_config: None,
+            llm_model_override: None,
+            active_profile_id: None,
+            conversation_ids_to_restore: Vec::new(),
+            active_conversation_id: None,
+        };
+        let root = PaneNodeSnapshot::Leaf(LeafSnapshot {
+            is_focused: true,
+            custom_vertical_tabs_title: None,
+            contents: LeafContents::Terminal(original_snapshot.clone()),
+        });
+
+        let tips_model = app.add_model(|_| TipsCompleted::default());
+        let (_, pane_group) =
+            app.add_window_with_bounds(WindowStyle::NotStealFocus, WindowBounds::Default, |ctx| {
+                let banner = ctx.add_model(|_| BannerState::default());
+                PaneGroup::new_with_panes_layout(
+                    tips_model,
+                    banner,
+                    ServerApiProvider::as_ref(ctx).get(),
+                    PanesLayout::Snapshot(Box::new(root)),
+                    Arc::new(block_lists),
+                    None,
+                    false, // is_active_tab: simulates a background tab at startup.
+                    ctx,
+                )
+            });
+
+        let pane_id = pane_group.read(&app, |panes, _| {
+            panes.pane_ids().next().expect("should have one pane")
+        });
+
+        let has_restored_command = |app: &App| {
+            pane_group.read(app, |panes, ctx| {
+                let terminal_view = panes
+                    .terminal_view_from_pane_id(pane_id, ctx)
+                    .expect("terminal pane should have a view");
+                let model = terminal_view.as_ref(ctx).model.lock();
+                model
+                    .block_list()
+                    .blocks()
+                    .iter()
+                    .any(|block| block.command_to_string().contains("echo restored"))
+            })
+        };
+
+        // The session/shell is created eagerly regardless of the flag: a terminal view
+        // exists, but the deferred block hasn't been applied yet.
+        assert!(
+            !has_restored_command(&app),
+            "background tab shouldn't have its restored block applied before activation"
+        );
+
+        // Snapshotting before activation must round-trip the exact original snapshot, so a
+        // never-activated tab's history isn't lost if the user quits.
+        pane_group.read(&app, |panes, ctx| {
+            let snapshot = panes.snapshot(ctx);
+            let PaneNodeSnapshot::Leaf(leaf) = snapshot else {
+                panic!("expected a leaf snapshot");
+            };
+            let LeafContents::Terminal(restored) = leaf.contents else {
+                panic!("expected terminal leaf contents");
+            };
+            assert_eq!(
+                restored, original_snapshot,
+                "snapshot should round-trip unchanged before activation"
+            );
+        });
+
+        // Activating the tab materializes the deferred restoration.
+        pane_group.update(&mut app, |panes, ctx| {
+            panes.materialize_lazy_tab_restorations(ctx);
+        });
+
+        assert!(
+            has_restored_command(&app),
+            "activation should apply the deferred restored block"
+        );
+
+        // Materializing again is a no-op (idempotent): the pending map was drained.
+        pane_group.update(&mut app, |panes, ctx| {
+            panes.materialize_lazy_tab_restorations(ctx);
+        });
+        assert!(has_restored_command(&app));
     });
 }
