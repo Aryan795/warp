@@ -624,9 +624,15 @@ impl TerminalManager<TerminalView> {
     ) {
         // Get all conversations for this terminal view
         // Any conversation could be continued during session sharing
+        //
+        // Remote-child placeholders are excluded: they live on this (the
+        // parent's) surface but belong to another run, and replaying them makes
+        // the viewer's pane drop the shared transcript (QUALITY-1676). This
+        // mirrors the live-forwarding scope in
+        // `BlocklistAIController::handle_response_stream_event`.
         let conversations: Vec<AIConversation> = BlocklistAIHistoryModel::as_ref(ctx)
             .all_live_conversations_for_terminal_surface(terminal_view.id())
-            .filter(|conv| conv.exchange_count() > 0)
+            .filter(|conv| conv.exchange_count() > 0 && !conv.is_remote_child())
             .cloned()
             .collect();
 

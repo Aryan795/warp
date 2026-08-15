@@ -117,6 +117,24 @@ impl BlocklistAIController {
         self.shared_session_state.current_response_id = None;
         self.shared_session_state
             .should_skip_current_replayed_response = false;
+
+        // An `Init` with no server conversation token identifies no conversation at
+        // all: it can never match one locally, so falling through would mint an
+        // empty conversation for a stream that does not belong to this pane. Skip
+        // the stream — and, through the latch, its trailing actions — instead.
+        // See QUALITY-1676.
+        if init_event.conversation_id.is_empty() {
+            log::warn!(
+                "Ignoring shared session response stream with an empty conversation token \
+                 (request_id={})",
+                init_event.request_id
+            );
+            self.shared_session_state.current_response_id = Some(stream_id);
+            self.shared_session_state
+                .should_skip_current_replayed_response = true;
+            return;
+        }
+
         let terminal_surface_id = self.terminal_surface_id;
         let history = BlocklistAIHistoryModel::handle(ctx);
 
@@ -126,6 +144,12 @@ impl BlocklistAIController {
         // This preserves block visibility for terminal blocks created in the given agent view.
         let existing_conversation_id =
             self.find_existing_conversation_by_server_token(&init_event.conversation_id, ctx);
+        // Whether this pane already shows a shared-session transcript that a
+        // rebind would replace. Read before any conversation is created below so
+        // it describes the pane's state on arrival of this event.
+        let has_established_session_conversation =
+            self.has_established_shared_session_conversation(ctx);
+        let mut minted_new_conversation = false;
         let conversation_id = existing_conversation_id
             .or_else(|| {
                 let selected_conversation_id = self
@@ -161,10 +185,20 @@ impl BlocklistAIController {
                 Some(selected_conversation_id)
             })
             .unwrap_or_else(|| {
+                minted_new_conversation = true;
                 history.update(ctx, |h, ctx| {
                     h.start_new_conversation(terminal_surface_id, false, true, false, ctx)
                 })
             });
+        // A stream whose conversation is unknown to this pane still gets recorded
+        // (a later `SelectedConversation` update can navigate to it), but it must
+        // not steal the pane: repointing the agent view at the freshly minted empty
+        // conversation is what dropped the orchestrator's transcript mid-replay and
+        // left the raw terminal blocklist on screen (QUALITY-1676). Conversation
+        // selection is carried by `UniversalDeveloperInputContextUpdate`
+        // (`apply_selected_conversation_update`), not by `Init` events.
+        let should_bind_pane_to_conversation =
+            !minted_new_conversation || !has_established_session_conversation;
         if self.should_skip_replayed_response_for_existing_conversation(
             existing_conversation_id,
             &init_event.request_id,
@@ -230,19 +264,36 @@ impl BlocklistAIController {
                 ConversationStatus::InProgress,
                 ctx,
             );
-            history_model.set_active_conversation_id(
-                conversation_id,
-                self.terminal_surface_id,
-                ctx,
-            );
+            if should_bind_pane_to_conversation {
+                history_model.set_active_conversation_id(
+                    conversation_id,
+                    self.terminal_surface_id,
+                    ctx,
+                );
+            }
         });
-        self.context_model.update(ctx, |context_model, ctx| {
-            context_model.set_pending_query_state_for_existing_conversation(
-                conversation_id,
-                AgentViewEntryOrigin::SharedSessionSelection,
-                ctx,
-            );
-        });
+        if should_bind_pane_to_conversation {
+            self.context_model.update(ctx, |context_model, ctx| {
+                context_model.set_pending_query_state_for_existing_conversation(
+                    conversation_id,
+                    AgentViewEntryOrigin::SharedSessionSelection,
+                    ctx,
+                );
+            });
+        }
+    }
+
+    /// Whether this pane's active conversation is a shared-session conversation
+    /// that already holds content, i.e. one whose transcript the viewer would
+    /// lose if the pane were repointed at another conversation.
+    fn has_established_shared_session_conversation(&self, ctx: &mut ModelContext<Self>) -> bool {
+        let history = BlocklistAIHistoryModel::as_ref(ctx);
+        history
+            .active_conversation_id(self.terminal_surface_id)
+            .and_then(|conversation_id| history.conversation(&conversation_id))
+            .is_some_and(|conversation| {
+                conversation.is_viewing_shared_session() && conversation.exchange_count() > 0
+            })
     }
 
     /// Returns whether replayed events for an already-populated shared-session conversation should
@@ -637,6 +688,17 @@ impl BlocklistAIController {
             // Only StreamInit events have conversation_id.
             _ => return,
         };
+
+        // Blanking a live conversation's token would unmatch every later `Init`
+        // for it, so each one would mint a fresh empty conversation instead
+        // (QUALITY-1676).
+        if new_conversation_id.is_empty() {
+            log::warn!(
+                "Ignoring forked conversation link with an empty conversation token \
+                 (forked_from={forked_from_token})"
+            );
+            return;
+        }
 
         // Find the conversation with the forked_from token
         if let Some(conversation_id) =

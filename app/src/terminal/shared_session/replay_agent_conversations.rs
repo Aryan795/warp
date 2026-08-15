@@ -70,11 +70,18 @@ pub fn reconstruct_response_events_from_conversations(
         // Use the server conversation token if it's available.
         // Otherwise, fall back to the id that this conversation was forked from.
         // This ensures viewers can properly group historical exchanges together.
-        let token = conversation
+        //
+        // A conversation with neither token cannot be addressed on the viewer
+        // side: an empty `conversation_id` matches nothing there and makes the
+        // viewer mint an empty conversation instead (QUALITY-1676). Replay it as
+        // nothing at all rather than as an unidentifiable stream.
+        let Some(token) = conversation
             .server_conversation_token()
             .or_else(|| conversation.forked_from_server_conversation_token())
             .map(|t| t.as_str().to_string())
-            .unwrap_or_default();
+        else {
+            continue;
+        };
         let request_id = exchange_messages
             .first()
             .map(|(_, msg)| msg.request_id.clone())
@@ -214,3 +221,7 @@ fn create_finished_event_from_conversation(conversation: &AIConversation) -> Res
         )),
     }
 }
+
+#[cfg(test)]
+#[path = "replay_agent_conversations_tests.rs"]
+mod tests;
