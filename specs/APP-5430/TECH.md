@@ -2,7 +2,7 @@
 
 ## Summary
 
-Replace the hand-written command-input parser with Arborium tree-sitter grammars for Bash, Zsh, Fish, and PowerShell. Keep tree-sitter private to `warp_completer`. Expose a Warp-owned hierarchical command model to completions, Describe/X-Ray, input decorations, alias expansion, agent permissions, and other consumers. Migrate one consumer at a time, then delete `crates/warp_completer/src/parsers/simple/`.
+Replace the hand-written command-input parser with Arborium tree-sitter grammars for Bash, Fish, and PowerShell. Parse Zsh with the Bash grammar and a Zsh compatibility guard. Keep tree-sitter private to `warp_completer`. Expose a Warp-owned hierarchical command model to completions, Describe/X-Ray, input decorations, alias expansion, agent permissions, and other consumers. Migrate one consumer at a time, then delete `crates/warp_completer/src/parsers/simple/`.
 
 This spec uses **nested command** to mean a command inside command substitution or process substitution. For example, `pwd` is nested in `echo "$(pwd)"`. Signature subcommands such as `git commit` are not the accuracy target of this refactor.
 
@@ -16,7 +16,7 @@ The source revision researched for this spec is [`e72fd7aacbbb2236d9b3be2aad7e71
 - [`crates/warp_completer/src/parsers/mod.rs (34-144)`](https://github.com/warpdotdev/warp/blob/e72fd7aacbbb2236d9b3be2aad7e7178fe94b4bc/crates/warp_completer/src/parsers/mod.rs#L34-L144) defines `LiteCommand` and feeds it to signature-backed `classify_command`. The signature HIR is Warp-specific and remains above the new adapter.
 - [`app/src/ai/blocklist/permissions.rs (883-954)`](https://github.com/warpdotdev/warp/blob/e72fd7aacbbb2236d9b3be2aad7e7178fe94b4bc/app/src/ai/blocklist/permissions.rs#L883-L954) decomposes a command, normalizes leading assignments, and evaluates every returned string against command deny rules before any allow decision.
 - [`crates/warp_terminal/src/shell/mod.rs (224-302)`](https://github.com/warpdotdev/warp/blob/e72fd7aacbbb2236d9b3be2aad7e7178fe94b4bc/crates/warp_terminal/src/shell/mod.rs#L224-L302) already distinguishes Bash, Zsh, Fish, and PowerShell as `ShellType`. `warp_terminal` depends on `warp_completer`, so `warp_completer` cannot import `ShellType`.
-- [`crates/warp_util/src/path.rs (207-238)`](https://github.com/warpdotdev/warp/blob/e72fd7aacbbb2236d9b3be2aad7e7178fe94b4bc/crates/warp_util/src/path.rs#L207-L238) groups Bash, Zsh, and Fish as `ShellFamily::Posix` for escaping. This two-value type cannot select four grammars and remains an escaping API only.
+- [`crates/warp_util/src/path.rs (207-238)`](https://github.com/warpdotdev/warp/blob/e72fd7aacbbb2236d9b3be2aad7e7178fe94b4bc/crates/warp_util/src/path.rs#L207-L238) groups Bash, Zsh, and Fish as `ShellFamily::Posix` for escaping. This two-value type cannot express the four-dialect parser policy and remains an escaping API only.
 - [`crates/languages/src/lib.rs (244-319)`](https://github.com/warpdotdev/warp/blob/e72fd7aacbbb2236d9b3be2aad7e7178fe94b4bc/crates/languages/src/lib.rs#L244-L319) maps file-editor `shell` highlighting to Arborium Bash and separately maps PowerShell.
 - [`crates/syntax_tree/src/lib.rs (22-31, 63-99, 240-280)`](https://github.com/warpdotdev/warp/blob/e72fd7aacbbb2236d9b3be2aad7e7178fe94b4bc/crates/syntax_tree/src/lib.rs#L22-L31) caches editor trees, applies incremental edits, and refuses files above 2 MiB. Its buffer, highlighting, and asynchronous decoration ownership make `SyntaxTreeState` the wrong command-input API.
 
@@ -27,7 +27,7 @@ A real shell grammar can identify the structure of:
 - `$()` at arbitrary depth.
 - Backtick command substitution.
 - Command substitution inside double-quoted and concatenated words.
-- Bash and Zsh process substitution.
+- Bash process substitution. The accepted Zsh compatibility subset includes the Bash forms.
 - Pipelines, `&&`, `||`, and statement lists inside a substitution.
 - Assignments and redirects inside a nested command.
 - Heredocs, arrays, quoting, parameter expansion, and compound commands without corrupting adjacent command boundaries.
@@ -36,15 +36,18 @@ The grammar does not replace Warp's signature data or signature HIR. `classify_c
 
 ### Empirical grammar findings
 
-An isolated probe used Arborium `2.18.1` and the four language features.
+The initial isolated probe used Arborium `2.18.1` and all four language features. The implementation follow-up tested the shipping three-feature configuration.
 
 - Bash produced error-free hierarchical nodes for complete nested `$()`, process substitution, pipelines, `&&`, statement lists, assignment-plus-redirect, and heredoc inputs.
 - Bash reduced incomplete `echo "pre$(pw` to an `ERROR` node without a nested `command`. The adapter must provide Warp recovery; the grammar alone does not preserve completion behavior.
 - Fish produced the expected nested `command_substitution` hierarchy after appending a synthetic newline. Without a terminator, otherwise valid command buffers contain a missing `;`. The adapter must append and then clip a sentinel newline.
-- Zsh marked every tested valid complete input as erroneous, including newline-terminated `print "pre$(pwd)post"`, three-level nesting, and process substitution. The installed Zsh executable accepted the same inputs with `zsh -n`. Arborium still exposed some nested nodes, but command names appeared under `ERROR` nodes or in the wrong structural role. Zsh cannot migrate until the pinned grammar passes the conformance gate in Phase 0.
+- The dedicated Zsh grammar marked every tested valid complete input as erroneous, including bare `ls`, newline-terminated `print "pre$(pwd)post"`, three-level nesting, and process substitution. The installed Zsh executable accepted the same inputs with `zsh -n`. Arborium `2.18.1` is the newest release, and its vendored Zsh `parser.c` has no external scanner. A fix requires upstream grammar source work that is outside this project.
 - PowerShell produced correct nested hierarchy for complete expandable strings, three-level `$()` nesting, and pipelines plus statement lists. Incomplete strings still require adapter recovery.
 
-Enabling Fish and Zsh in addition to the already-enabled Bash and PowerShell features increased a matched LTO, stripped Linux x86-64 probe from 2,567,856 bytes to 2,743,712 bytes: **175,856 bytes (171.7 KiB)**. A local WASM measurement could not run because Arborium's C grammar build requires `clang`, which was not present. The implementation PR must report the actual optimized and compressed WASM delta before enabling Fish and Zsh in a WASM artifact.
+The shipping configuration enables `lang-bash`, `lang-fish`, and `lang-powershell`. Zsh reuses `lang-bash`; `lang-zsh` is not enabled. Adding Fish to a Bash-plus-PowerShell baseline costs:
+
+- Native x86-64 with release LTO and stripping: **68,328 bytes (66.7 KiB)** uncompressed and **13,887 bytes** gzipped.
+- WASM with the `release-wasm` profile: **66,589 bytes (65.0 KiB)** uncompressed and **12,887 bytes** gzipped.
 
 CORE-2284 does not record a technical cancellation reason. Its only comment reports that a PowerShell Arborium parser probe worked. Related PowerShell highlighting and underlining issues later reached Done. Treat the canceled ticket as prior exploration, not evidence that the grammar failed.
 
@@ -125,7 +128,7 @@ Add `crates/warp_completer/src/parsers/shell/`. This module owns:
 
 No public item in `warp_completer` may contain an Arborium or tree-sitter type. Add a compile-fail boundary test or API review test that imports only the public shell parser module without an Arborium dependency.
 
-Pin Arborium and its language crates to one reviewed version, initially `=2.18.1`. Enable `lang-bash`, `lang-zsh`, `lang-fish`, and `lang-powershell`. Do not map Zsh or Fish to the Bash grammar.
+Pin Arborium and its language crates to one reviewed version, initially `=2.18.1`. Enable `lang-bash`, `lang-fish`, and `lang-powershell`. Map `ShellDialect::Zsh` to the Bash grammar. Do not enable `lang-zsh`. Fish uses its dedicated grammar.
 
 Define `warp_completer::parsers::shell::ShellDialect` with `Bash`, `Zsh`, `Fish`, and `PowerShell`. Implement conversion from `warp_terminal::shell::ShellType` in `warp_terminal`, which already depends on `warp_completer`. Keep `ShellFamily` and `EscapeChar` for escaping paths and generated text. Do not use them to select a grammar.
 
@@ -212,6 +215,7 @@ pub enum OpenDelimiter {
 pub enum ShellParseRejection {
     InputTooLarge,
     GrammarUnavailable,
+    UnsupportedDialectSyntax,
     Unrecoverable,
 }
 
@@ -282,14 +286,36 @@ Recovery must cover incomplete quotes, `$()`, backticks, Fish `()`, PowerShell `
 
 ### Grammar viability gate
 
-Before a dialect can enter shadow mode:
+Before an enabled grammar or the accepted Zsh compatibility subset can enter shadow mode:
 
 - Run its corpus through the real shell's syntax checker when available.
-- Require every valid complete input to produce stable executable spans and nested-command ownership.
+- Require every valid complete input in the supported corpus to produce stable executable spans and nested-command ownership.
 - Permit grammar `ERROR` nodes only when the adapter proves a correct, dialect-specific projection in a golden test.
 - Require incomplete inputs to produce the documented recovered hierarchy.
 
-The current Zsh result fails this gate. Phase 0 must upgrade the grammar, contribute an upstream fix, or carry a narrowly scoped grammar patch. A Bash fallback for Zsh is prohibited. The hand-written parser remains only as migration scaffolding until all four dialects pass.
+The dedicated Zsh grammar fails this gate and is not part of the shipping configuration. The requester accepted Bash grammar coverage for Zsh because the dedicated grammar is non-functional and cannot be repaired within this project's scope. The hand-written parser remains only as migration scaffolding until the three enabled grammars and the Zsh compatibility contract pass.
+
+### Zsh-on-Bash compatibility contract
+
+The Bash grammar supports the measured common subset of Zsh input. It does not implement the complete Zsh language. For Zsh, the absence of a tree-sitter error is **not** evidence that the hierarchy is correct. Phase 1 and every consumer migration phase must enforce this rule instead of gating only on `has_error()`.
+
+Measured Zsh-only constructs have these outcomes through the Bash grammar:
+
+- `=(...)` process substitution, both tested anonymous-function forms, short-form `for i (1 2 3)` loops, glob qualifiers such as `*.txt(.)`, parameter-expansion flags such as `${(f)...}`, `try`/`always` blocks, and `$+name` existence checks set `has_error = true`.
+- `repeat 3 do; echo hi; done` is silently wrong. It parses without an error as three unrelated top-level commands: `repeat 3 do`, `echo hi`, and `done`.
+- Named directories such as `~mydir` and `**` globs are not structural divergences. Both grammars leave expansion and glob interpretation to the shell.
+
+Add a private, token-aware `ZshCompatibilityGuard` as part of the Phase 1 adapter:
+
+1. Reject a Zsh parse with `UnsupportedDialectSyntax` when it has a non-EOF `ERROR` or missing node.
+2. Permit existing EOF recovery only for syntax in the accepted Bash-compatible subset.
+3. Reject command-position Zsh-only reserved words and forms that can parse cleanly under Bash. The initial detector must include `repeat`.
+4. Expand the detector and its corpus for every newly identified silent divergence before that case can enter shadow mode.
+5. Return no partial hierarchy on rejection. Consumers use the existing rejected-parse degradation behavior, and agent permissions fail closed.
+
+The detector must distinguish command-position syntax from quoted text and ordinary argument text. It must not reject `echo repeat`. Zsh-specific conformance tests use real Zsh inputs; relabeling Bash fixtures as Zsh is insufficient.
+
+[APP-5434](https://linear.app/warpdotdev/issue/APP-5434/zsh-constructs-that-parse-silently-wrong-under-the-bash-grammar) owns exhaustive coverage of silent divergences, including untested `select` and short-form `while` and `until` constructs. It must close before Phase 5 migrates agent permissions.
 
 ### Parse ownership, performance, and memory
 
@@ -327,22 +353,23 @@ Permissions do not migrate until the new decomposition passes every legacy safet
 
 - Add parameterized legacy-observation tests for the failure corpus and known-good controls.
 - Add adapter golden tests with the required hierarchy and spans.
-- Pin Arborium, enable all four grammar features, and add the four dialect mappings.
-- Fix or replace the Zsh grammar behavior until it passes the gate.
+- Pin Arborium, enable the three shipping grammar features, and add the four dialect mappings.
+- Add executable Zsh divergence tests that record loud errors, the silent `repeat` misparse, and the measured non-divergences.
 - Measure native and WASM artifact size on release settings.
 - Land the escaped nested-backtick permissions regression test immediately. Do not wait for the parser migration to fix this pre-existing safety bug.
 
-Exit condition: all four grammars pass complete-input conformance, and the desired incomplete hierarchy is executable as adapter tests.
+Exit condition: all three enabled grammars pass complete-input conformance, the Zsh divergence observations are executable tests, and the desired incomplete hierarchy is executable as adapter tests.
 
 ### Phase 1: adapter and shadow comparison
 
 - Add the private tree-sitter mapper and public Warp model.
+- Add `ZshCompatibilityGuard` and expose rejected Zsh syntax as `UnsupportedDialectSyntax`.
 - Keep `simple/` as a temporary reference backend.
 - Parse with both backends behind per-dialect rollout controls.
 - Compare only normalized, non-sensitive facts: command count, executable spans, nesting spans, redirect presence, selected cursor command, and recovery status.
 - Classify expected improvements separately from regressions.
 
-Exit condition: no unexplained mismatch on the checked-in corpus and sampled non-sensitive fixtures.
+Exit condition: no unexplained mismatch on the checked-in corpus and sampled non-sensitive fixtures. The Zsh guard rejects every measured unsupported form, including the clean `repeat` misparse, without rejecting the measured compatible controls.
 
 ### Phase 2: Describe and X-Ray
 
@@ -366,7 +393,7 @@ Exit condition: semantic color and error-underline snapshots are unchanged excep
 
 Move `decompose_command` to `decompose_for_permissions`. Run denylist, allowlist, redirect, assignment, pipeline, nested-command, recovered-input, and over-limit tests. Roll out permissions per dialect after all other consumers are stable.
 
-Exit condition: the permissions suite is fail-closed for every mismatch. Escaped nested backticks expose the complete inner command. Security review approves any intentional difference.
+Exit condition: APP-5434 is closed. The permissions suite is fail-closed for every mismatch. Escaped nested backticks expose the complete inner command. Security review approves any intentional difference.
 
 ### Phase 6: delete the hand-written parser
 
@@ -381,7 +408,7 @@ Done means every parser consumer uses the Warp adapter for Bash, Zsh, Fish, and 
 
 - **Warp hierarchy versus flat `LiteCommand` only:** expose hierarchy. It fixes cursor ownership and supports nested consumers. `LiteCommand` remains a classification projection to avoid rewriting signature HIR.
 - **Single cutover versus coexistence:** coexist per consumer during rollout. Delete the legacy backend only after all phases pass.
-- **Bash grammar for POSIX-like shells versus exact dialects:** use exact Bash, Zsh, and Fish grammars. This costs 171.7 KiB in the isolated native probe but avoids knowingly incorrect syntax.
+- **Dedicated Zsh grammar versus Bash grammar for Zsh:** use the Bash grammar with a Zsh compatibility guard. The dedicated Arborium `2.18.1` Zsh grammar fails valid input as small as `ls`, and repairing its unshipped sources is outside this project. This choice removes the larger Zsh grammar artifact cost, but it deliberately rejects detected Zsh-only syntax and requires guards for silent divergences.
 - **Grammar recovery versus Warp recovery:** use both. Grammar nodes provide structure; the adapter owns EOF closure state and completion selection.
 - **Incremental parse immediately versus benchmark first:** start with bounded parser reuse and full parse. Add private incremental edits only if the approved latency budget requires them.
 - **Fallback above 64 KiB versus deletion:** reject parser-derived automation above the cap. Do not retain the hand-written parser as a hidden permanent fallback.
@@ -401,6 +428,8 @@ Done means every parser consumer uses the Warp adapter for Bash, Zsh, Fish, and 
 
 ### Unit and conformance tests
 
+- `cargo test -p warp_completer parsers::shell::grammar_tests`
+  - Runs the 24 Phase 0 grammar and Zsh divergence observations with no ignored cases.
 - `cargo test -p warp_completer shell_adapter_complete_corpus`
   - Verifies exact spans, executables, nested groups, redirects, assignments, and top-level ownership for all four dialects.
 - `cargo test -p warp_completer shell_adapter_incomplete_corpus`
@@ -409,6 +438,8 @@ Done means every parser consumer uses the Warp adapter for Bash, Zsh, Fish, and 
   - Contains all seven empirical failures and asserts the required corrected result.
 - `cargo test -p warp_completer shell_adapter_known_good_parity`
   - Protects the controls listed above from regression.
+- `cargo test -p warp_completer shell_adapter_zsh_bash_compatibility`
+  - Runs the measured Zsh-only corpus, asserts loud grammar failures reject, asserts `repeat` rejects despite a clean Bash parse, and protects accepted common syntax.
 - `cargo test -p warp_completer shell_adapter_no_backend_types_in_public_api`
   - Verifies the public adapter surface is Warp-owned.
 - `cargo test -p warp permissions_nested_shell_commands`
@@ -425,7 +456,7 @@ Done means every parser consumer uses the Warp adapter for Bash, Zsh, Fish, and 
 
 - Run the repository native presubmit for Linux, macOS, and Windows.
 - Run `cargo check -p warp_completer --target wasm32-unknown-unknown`.
-- Build matched release artifacts before and after `lang-fish` and `lang-zsh`. Report uncompressed and compressed native and WASM deltas in the implementation PR.
+- Build matched release artifacts before and after `lang-fish`. Report uncompressed and compressed native and WASM deltas in the implementation PR.
 - Confirm `cargo tree` resolves one Arborium version and matching grammar-crate versions.
 
 ### Rollout validation
@@ -440,7 +471,7 @@ Done means every parser consumer uses the Warp adapter for Bash, Zsh, Fish, and 
 Parallel work is useful after Phase 0 establishes the shared model.
 
 - **adapter-core** — Local worktree `../warp-app5430-adapter`, branch `factory/app5430-adapter-core`. Owns `warp_completer` types, Bash/Fish/PowerShell mapping, recovery, corpus tests, and benchmarks.
-- **zsh-grammar** — Remote environment with the Warp repository, branch `factory/app5430-zsh-grammar`. Owns the Arborium Zsh conformance investigation and any upstream or pinned grammar patch. Returns a pushed branch and probe results.
+- **zsh-compatibility** — Remote environment with the Warp repository, branch `factory/app5430-zsh-compatibility`. Owns the Zsh compatibility detector, Zsh-only conformance corpus, and failure-mode tests. Returns a pushed branch and probe results.
 - **consumer-migration** — Local worktree `../warp-app5430-consumers`, branch `factory/app5430-consumers`. Starts only after adapter-core API stabilization. Owns Describe, completions, decorations, aliases, and helpers.
 - **permissions-migration** — Local worktree `../warp-app5430-permissions`, branch `factory/app5430-permissions`. Starts after adapter-core and consumer-migration. Owns permission decomposition and safety tests.
 - **cross-platform-validation** — Remote native and WASM runners. Starts after integration. Owns platform builds, latency comparison, heap evidence, and artifact-size results.
