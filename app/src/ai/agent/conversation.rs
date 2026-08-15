@@ -212,6 +212,19 @@ fn usage_metadata_indicates_usage(metadata: &ConversationUsageMetadata) -> bool 
         || metadata.was_summarized
 }
 
+/// Upper bound on the number of historical shell command blocks materialized when
+/// restoring an AI conversation into a terminal block list.
+///
+/// Each restored command becomes a full terminal `Block`, which owns several full-size
+/// grid buffers (prompt, prompt+command, output, rprompt) sized to the pane's current
+/// rows x columns, not to the command's actual content. A conversation with an
+/// unbounded number of historical commands (e.g. a long-running CLI agent session with
+/// thousands of tool calls) would otherwise materialize thousands of these grids up
+/// front at restoration time. Restoring only the most recent commands bounds that
+/// memory usage; the full AI transcript (exchanges, tool calls, agent output) is
+/// unaffected and always restored in full.
+const MAX_RESTORED_COMMAND_BLOCKS: usize = 500;
+
 // basic info for creating a dummy command block based on an exchange's inputs
 pub(crate) struct CommandBlockInfo {
     pub(crate) command: String,
@@ -4078,12 +4091,33 @@ impl AIConversation {
         let mut serialized_blocks = Vec::new();
 
         // Extract all command blocks from the task messages
-        let command_blocks = self.extract_command_blocks();
+        let mut command_blocks = self.extract_command_blocks();
+        let total_command_blocks = command_blocks.len();
         log::info!(
             "Extracted {} command blocks for conversation {}",
-            command_blocks.len(),
+            total_command_blocks,
             self.id()
         );
+
+        // Cap the number of command blocks materialized as terminal blocks: each one
+        // becomes a full `Block` with several full-size grid buffers, so an agent
+        // conversation with an unbounded command history would otherwise allocate
+        // unbounded memory at restoration time (see MAX_RESTORED_COMMAND_BLOCKS). Keep
+        // the most recent commands, since those are the ones a user restoring the
+        // conversation is most likely to want to see; the full AI transcript (chat
+        // messages, tool calls, agent output) is unaffected and always restored in full.
+        let truncated_command_count =
+            total_command_blocks.saturating_sub(MAX_RESTORED_COMMAND_BLOCKS);
+        if truncated_command_count > 0 {
+            command_blocks = command_blocks.split_off(truncated_command_count);
+            log::warn!(
+                "Conversation {} has {} historical command blocks; only restoring the most \
+                 recent {} to bound memory usage",
+                self.id(),
+                total_command_blocks,
+                MAX_RESTORED_COMMAND_BLOCKS
+            );
+        }
 
         // Build a map from message ID to exchange for quick lookup
         let mut message_id_to_exchange: HashMap<&str, &AIAgentExchange> = HashMap::new();
@@ -4099,6 +4133,42 @@ impl AIConversation {
             .root_task_exchanges()
             .next()
             .and_then(|e| e.working_directory.clone());
+
+        // Surface the truncation to the user rather than silently dropping history: insert
+        // a synthetic shell-comment block right before the oldest command we kept.
+        if truncated_command_count > 0 {
+            let (pwd, exchange_time) = command_blocks
+                .first()
+                .and_then(|first| message_id_to_exchange.get(first.message_id.as_str()))
+                .map(|e| (e.working_directory.clone(), Some(e.start_time)))
+                .unwrap_or((fallback_pwd.clone(), None));
+            let notice_ts = command_blocks
+                .first()
+                .and_then(|first| first.start_ts)
+                .or(exchange_time)
+                .map(|ts| ts - chrono::Duration::seconds(1))
+                .unwrap_or_else(Local::now);
+
+            let notice_block = SerializedBlock {
+                id: BlockId::new(),
+                stylized_command: Self::to_stylized_bytes(&format!(
+                    "# {truncated_command_count} earlier command(s) in this conversation were \
+                     not restored to limit memory usage"
+                )),
+                pwd,
+                exit_code: ExitCode::from(0),
+                did_execute: true,
+                start_ts: Some(notice_ts),
+                completed_ts: Some(notice_ts),
+                agent_view_visibility: Some(
+                    AgentViewVisibility::new_from_conversation(self.id).into(),
+                ),
+                ..Default::default()
+            };
+            serialized_blocks.push(SerializedBlockListItem::Command {
+                block: Box::new(notice_block),
+            });
+        }
 
         // Create serialized blocks from the extracted command blocks
         for command_block in command_blocks {

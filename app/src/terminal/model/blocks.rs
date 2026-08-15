@@ -2959,10 +2959,30 @@ impl BlockList {
     /// This is used to insert a block snapshot from a CLI agent conversation
     /// into an already-initialized block list.
     pub fn insert_restored_block(&mut self, block: &SerializedBlock) {
+        self.insert_restored_blocks(&[block]);
+    }
+
+    /// Inserts a batch of fully serialized blocks into the block list.
+    ///
+    /// Equivalent to calling [`Self::insert_restored_block`] once per block, except only
+    /// one fresh active block is created at the end of the batch, rather than one after
+    /// each restored block. Each `Block` owns several full-size grid buffers (prompt,
+    /// prompt+command, output, rprompt), so restoring N historical command blocks one at
+    /// a time allocates 2N `Block`s: N to hold the restored content, and N disposable
+    /// placeholders that exist only to keep `active_block()` valid between calls and are
+    /// immediately discarded by the next restored block. Batching halves that allocation
+    /// for large restorations, e.g. a long-running CLI agent conversation with many
+    /// historical commands.
+    pub fn insert_restored_blocks(&mut self, blocks: &[&SerializedBlock]) {
+        if blocks.is_empty() {
+            return;
+        }
         let did_active_block_receive_precmd = self.active_block().has_received_precmd();
         let mut processor = Processor::new();
-        self.restore_block(block, BootstrapStage::PostBootstrapPrecmd, &mut processor);
-        // restore_block consumed the previous active block and made the restored
+        for block in blocks {
+            self.restore_block(block, BootstrapStage::PostBootstrapPrecmd, &mut processor);
+        }
+        // restore_block consumed the previous active block and made the last restored
         // block the new active (finished) block. Create a fresh active block so
         // the terminal can continue accepting input.
         self.create_new_block(
