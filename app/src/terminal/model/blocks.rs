@@ -1013,16 +1013,17 @@ impl BlockList {
         );
     }
 
-    /// Applies command blocks that were intentionally deferred at startup
-    /// (see `FeatureFlag::LazyBackgroundTabScrollbackRestore`) into an
-    /// already-bootstrapped, live block list, inserting them before the
-    /// current (still-pristine) active block.
-    ///
-    /// This is the general-purpose counterpart to
-    /// `append_followup_shared_session_scrollback`: same insertion
-    /// mechanics, but for locally-persisted scrollback rather than
-    /// shared-session data streamed from a viewer connection.
-    pub fn apply_deferred_restored_blocks(&mut self, restored_blocks: &[SerializedBlockListItem]) {
+    /// Applies scrollback blocks whose restoration was deferred at startup.
+    /// No-ops if the live session is no longer pristine (a command has
+    /// already started in it): the restored content is strictly older than
+    /// anything the live session could have produced, and this list only
+    /// supports appending, so splicing it in now would force-finish and
+    /// misorder real, possibly still-running, output. Returns whether the
+    /// blocks were applied.
+    pub fn apply_deferred_restored_blocks(
+        &mut self,
+        restored_blocks: &[SerializedBlockListItem],
+    ) -> bool {
         let valid_blocks: Vec<&SerializedBlock> = restored_blocks
             .iter()
             .filter_map(|item| match item {
@@ -1036,7 +1037,18 @@ impl BlockList {
             .collect();
 
         if valid_blocks.is_empty() {
-            return;
+            return false;
+        }
+
+        // A still-bootstrapping session's active block can already be
+        // `started()` (e.g. the script-execution stage), which is expected
+        // and harmless to finish here. Only bail once bootstrapping is done
+        // and a real post-bootstrap command has genuinely started.
+        if self.is_bootstrapping_precmd_done() && self.active_block().started() {
+            report_error!(
+                "Dropping deferred scrollback restoration: session is no longer pristine"
+            );
+            return false;
         }
 
         self.is_restored_session = true;
@@ -1046,7 +1058,7 @@ impl BlockList {
 
         let mut processor = Processor::new();
         for block in valid_blocks {
-            // Tag these as `RestoreBlocks` (matching eager restoration via
+            // Tag as `RestoreBlocks` (matching eager restoration via
             // `initialize`), not `PostBootstrapPrecmd` like
             // `append_followup_shared_session_scrollback` uses: this content
             // genuinely comes from a previous session, so it should render
@@ -1056,6 +1068,7 @@ impl BlockList {
 
         self.ensure_active_block_after_shared_session_scrollback();
         self.event_proxy.send_wakeup_event();
+        true
     }
 
     /// Inserts an inline banner _before_ the provided block_index.

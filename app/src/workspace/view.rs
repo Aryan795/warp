@@ -3954,12 +3954,11 @@ impl Workspace {
                     .enumerate()
                     .for_each(|(tab_index, saved_tab)| {
                         let custom_title = saved_tab.custom_title.clone();
-                        // Only the tab that will actually be shown at launch needs its
-                        // terminal panes' scrollback/AI conversations restored eagerly;
-                        // every other tab's shell still starts now, but its restoration
-                        // is deferred until the tab is activated (see
-                        // `FeatureFlag::LazyBackgroundTabScrollbackRestore`).
-                        self.add_tab_with_pane_layout_and_active_hint(
+                        // Insert without activating: activating every restored tab as
+                        // it's inserted would materialize its deferred scrollback
+                        // restoration immediately, defeating the point of deferring it.
+                        // The intended active tab is activated once, after this loop.
+                        self.add_restored_tab(
                             PanesLayout::Snapshot(Box::new(saved_tab.root.clone())),
                             block_lists.clone(),
                             custom_title,
@@ -12057,9 +12056,15 @@ impl Workspace {
         else {
             return false;
         };
+        let pending_restoration = pane_group.update(ctx, |pg, _| {
+            pg.take_pending_lazy_terminal_restoration(pane_id)
+        });
 
         source_pane_group.update(ctx, |pg, ctx| {
             pg.re_adopt_child_agent_pane(pane_content, origin.conversation_id, ctx);
+            if let Some(pending_restoration) = pending_restoration {
+                pg.insert_pending_lazy_terminal_restoration(pane_id, pending_restoration);
+            }
         });
 
         true
@@ -12817,29 +12822,6 @@ impl Workspace {
         custom_tab_title: Option<String>,
         ctx: &mut ViewContext<Self>,
     ) {
-        self.add_tab_with_pane_layout_and_active_hint(
-            panes_layout,
-            block_lists,
-            custom_tab_title,
-            true,
-            ctx,
-        );
-    }
-
-    /// Like [`Self::add_tab_with_pane_layout`], but lets the caller indicate
-    /// whether the new tab will be the window's initially-active tab.
-    /// Restoring a window's tabs from a snapshot uses `is_active_tab: false`
-    /// for every tab except the one `active_tab_index` points at, so
-    /// `PaneGroup::new_with_panes_layout` can defer expensive scrollback/AI
-    /// conversation restoration for tabs the user won't see at launch.
-    pub fn add_tab_with_pane_layout_and_active_hint(
-        &mut self,
-        panes_layout: PanesLayout,
-        block_lists: Arc<HashMap<PaneUuid, Vec<SerializedBlockListItem>>>,
-        custom_tab_title: Option<String>,
-        is_active_tab: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
         // Remember whether the left panel was open on the current active pane group
         // before creating a new active pane group.
         let left_panel_was_open = if self.tabs.is_empty() {
@@ -12864,7 +12846,7 @@ impl Workspace {
                 panes_layout,
                 block_lists,
                 self.model_event_sender.clone(),
-                is_active_tab,
+                true,
                 ctx,
             );
             if let Some(title) = custom_tab_title {
@@ -12931,6 +12913,46 @@ impl Workspace {
                 pg.set_left_panel_open(true, ctx);
             });
         }
+    }
+
+    /// Appends a tab restored from a persisted window snapshot, without
+    /// activating it and without the interactive-placement/inheritance rules
+    /// `add_tab_with_pane_layout` applies (irrelevant when bulk-restoring a
+    /// whole window's tabs in their original order, which sets that state
+    /// explicitly from each tab's own snapshot). The caller must activate
+    /// the intended tab once, after every tab has been inserted.
+    fn add_restored_tab(
+        &mut self,
+        panes_layout: PanesLayout,
+        block_lists: Arc<HashMap<PaneUuid, Vec<SerializedBlockListItem>>>,
+        custom_tab_title: Option<String>,
+        is_active_tab: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let new_pane_group = ctx.add_typed_action_view(|ctx| {
+            let mut pane_group = PaneGroup::new_with_panes_layout(
+                self.tips_completed.clone(),
+                self.user_default_shell_unsupported_banner_model_handle
+                    .clone(),
+                self.server_api.clone(),
+                panes_layout,
+                block_lists,
+                self.model_event_sender.clone(),
+                is_active_tab,
+                ctx,
+            );
+            if let Some(title) = custom_tab_title {
+                pane_group.set_title(&title, ctx);
+            }
+            pane_group
+        });
+
+        ctx.subscribe_to_view(&new_pane_group, move |me, pane_group, event, ctx| {
+            me.handle_file_tree_event(pane_group, event, ctx)
+        });
+
+        self.tab_mru_order.push(new_pane_group.id());
+        self.tabs.push(TabData::new(new_pane_group));
     }
 
     pub fn add_tab_from_existing_pane(
@@ -16625,20 +16647,28 @@ impl Workspace {
                         } => {
                             // If an editor tab is dropped into a new position in the workspace tab group,
                             // create a new pane and insert it into the group.
-                            let pane = if let ActionOrigin::EditorTab(editor_tab_index) = origin {
-                                pane_group.update(ctx, |pane_group, ctx| {
-                                    pane_group.remove_editor_tab_for_move(
-                                        *pane_id,
-                                        *editor_tab_index,
-                                        ctx,
-                                    )
-                                })
-                            } else {
-                                // Otherwise, move the existing pane's contents into the workspace tab group.
-                                pane_group.update(ctx, |pane_group, ctx| {
-                                    pane_group.remove_pane_for_move(pane_id, ctx)
-                                })
-                            };
+                            let (pane, pending_restoration) =
+                                if let ActionOrigin::EditorTab(editor_tab_index) = origin {
+                                    let pane = pane_group.update(ctx, |pane_group, ctx| {
+                                        pane_group.remove_editor_tab_for_move(
+                                            *pane_id,
+                                            *editor_tab_index,
+                                            ctx,
+                                        )
+                                    });
+                                    (pane, None)
+                                } else {
+                                    // Otherwise, move the existing pane's contents into the workspace tab group.
+                                    let pane = pane_group.update(ctx, |pane_group, ctx| {
+                                        pane_group.remove_pane_for_move(pane_id, ctx)
+                                    });
+                                    let pending_restoration =
+                                        pane_group.update(ctx, |pane_group, _| {
+                                            pane_group
+                                                .take_pending_lazy_terminal_restoration(*pane_id)
+                                        });
+                                    (pane, pending_restoration)
+                                };
 
                             if let Some(pane) = pane {
                                 // `index`/`group` are already resolved by
@@ -16656,6 +16686,18 @@ impl Workspace {
                                     inherited_group,
                                     ctx,
                                 );
+
+                                if let Some(pending_restoration) = pending_restoration
+                                    && let Some(new_pane_group) =
+                                        self.get_pane_group_view(self.active_tab_index).cloned()
+                                {
+                                    new_pane_group.update(ctx, |pane_group, _| {
+                                        pane_group.insert_pending_lazy_terminal_restoration(
+                                            *pane_id,
+                                            pending_restoration,
+                                        );
+                                    });
+                                }
 
                                 // If the setting is enabled, preserve the color of the original pane's
                                 // tab for the newly created tab.
@@ -16855,9 +16897,18 @@ impl Workspace {
                 if let Some(pane) = pane_group.update(ctx, |pane_group, ctx| {
                     pane_group.remove_pane_for_move(pane_id, ctx)
                 }) {
+                    let pending_restoration = pane_group.update(ctx, |pane_group, _| {
+                        pane_group.take_pending_lazy_terminal_restoration(*pane_id)
+                    });
                     self.set_active_tab_index(*tab_idx, ctx);
                     self.active_tab_pane_group().update(ctx, |pane_group, ctx| {
-                        pane_group.add_pane_as_hidden(pane, *hidden_pane_preview_direction, ctx)
+                        pane_group.add_pane_as_hidden(pane, *hidden_pane_preview_direction, ctx);
+                        if let Some(pending_restoration) = pending_restoration {
+                            pane_group.insert_pending_lazy_terminal_restoration(
+                                *pane_id,
+                                pending_restoration,
+                            );
+                        }
                     });
                 }
             }

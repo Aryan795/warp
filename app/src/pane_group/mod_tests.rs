@@ -4075,3 +4075,88 @@ fn test_lazy_background_tab_scrollback_restore() {
         assert!(has_restored_command(&app));
     });
 }
+
+/// APP-5257: permanently closing a background pane before it was ever
+/// activated must drop its pending lazy restoration entry, rather than
+/// leaking the stashed blocks/conversation payload.
+#[test]
+fn test_closing_pending_pane_drops_its_lazy_restoration() {
+    use crate::terminal::model::block::SerializedBlock;
+
+    let _flag = FeatureFlag::LazyBackgroundTabScrollbackRestore.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let uuid = Uuid::new_v4().as_bytes().to_vec();
+        let restored_block =
+            SerializedBlock::new_for_test(b"echo restored".to_vec(), b"restored\n".to_vec());
+        let mut block_lists = HashMap::new();
+        block_lists.insert(
+            PaneUuid(uuid.clone()),
+            vec![SerializedBlockListItem::Command {
+                block: Box::new(restored_block),
+            }],
+        );
+
+        let root = PaneNodeSnapshot::Leaf(LeafSnapshot {
+            is_focused: true,
+            custom_vertical_tabs_title: None,
+            contents: LeafContents::Terminal(TerminalPaneSnapshot {
+                uuid: uuid.clone(),
+                cwd: None,
+                shell_launch_data: None,
+                is_active: true,
+                is_read_only: false,
+                input_config: None,
+                llm_model_override: None,
+                active_profile_id: None,
+                conversation_ids_to_restore: Vec::new(),
+                active_conversation_id: None,
+            }),
+        });
+
+        let tips_model = app.add_model(|_| TipsCompleted::default());
+        let (_, pane_group) =
+            app.add_window_with_bounds(WindowStyle::NotStealFocus, WindowBounds::Default, |ctx| {
+                let banner = ctx.add_model(|_| BannerState::default());
+                PaneGroup::new_with_panes_layout(
+                    tips_model,
+                    banner,
+                    ServerApiProvider::as_ref(ctx).get(),
+                    PanesLayout::Snapshot(Box::new(root)),
+                    Arc::new(block_lists),
+                    None,
+                    false, // is_active_tab: simulates a background tab at startup.
+                    ctx,
+                )
+            });
+
+        let pane_id = pane_group.read(&app, |panes, _| {
+            panes.pane_ids().next().expect("should have one pane")
+        });
+
+        pane_group.read(&app, |panes, _| {
+            assert!(
+                panes
+                    .pending_lazy_terminal_restorations
+                    .contains_key(&pane_id),
+                "restoring a background tab should stash a pending entry for its pane"
+            );
+        });
+
+        pane_group.update(&mut app, |panes, ctx| {
+            panes.cleanup_closed_pane(pane_id, ctx);
+        });
+
+        pane_group.read(&app, |panes, _| {
+            assert!(
+                !panes
+                    .pending_lazy_terminal_restorations
+                    .contains_key(&pane_id),
+                "permanently closing a never-activated pane must drop its pending restoration, \
+                 not leak the stashed blocks/conversation payload"
+            );
+        });
+    });
+}

@@ -999,17 +999,15 @@ pub struct PaneGroup {
     /// Terminal panes whose persisted scrollback/AI-conversation restoration
     /// was deferred at startup (see
     /// `FeatureFlag::LazyBackgroundTabScrollbackRestore`), keyed by the
-    /// pane's [`PaneId`]. Drained by `materialize_lazy_tab_restorations` the
-    /// first time this pane group's tab is activated. `snapshot_for_node`
-    /// consults this map so a pane that's closed or persisted before ever
-    /// being activated round-trips its original snapshot unchanged, rather
-    /// than a partially-restored one.
+    /// pane's [`PaneId`]. Kept around so a pane that's closed or persisted
+    /// before ever being activated round-trips its original snapshot
+    /// unchanged, rather than a partially-restored one.
     pending_lazy_terminal_restorations: HashMap<PaneId, PendingLazyTerminalRestoration>,
 }
 
 /// Deferred restoration payload for a single terminal pane. See
 /// [`PaneGroup::pending_lazy_terminal_restorations`].
-struct PendingLazyTerminalRestoration {
+pub(crate) struct PendingLazyTerminalRestoration {
     /// The original, unmodified snapshot this pane was restored from. Used
     /// to round-trip persistence for a pane that's never activated.
     original_snapshot: TerminalPaneSnapshot,
@@ -1562,10 +1560,6 @@ impl PaneGroup {
 
     /// Restores the pane tree with the given snapshot. This returns the restored
     /// pane tree structure as well as the focus state.
-    ///
-    /// `is_active_tab` is `false` when this tree belongs to a tab other than
-    /// the window's initially-active tab; see `restore_pane_leaf` for how
-    /// that's used to defer expensive scrollback/conversation restoration.
     #[allow(clippy::too_many_arguments)]
     fn restore_pane_tree(
         root: PaneNodeSnapshot,
@@ -1651,17 +1645,11 @@ impl PaneGroup {
         }
     }
 
-    /// Restores a single leaf pane from a snapshot.
-    ///
-    /// `is_active_tab` is `false` when this leaf belongs to a tab other than
-    /// the window's initially-active tab. In that case, and when
-    /// `FeatureFlag::LazyBackgroundTabScrollbackRestore` is enabled, a
-    /// terminal leaf's session is still created eagerly (so the shell starts
-    /// at launch like any other tab), but its persisted scrollback and AI
-    /// conversation restoration are deferred into
-    /// `pending_lazy_terminal_restorations` rather than fed into the
-    /// terminal view immediately. `Workspace::set_active_tab_index` applies
-    /// the deferred payload the first time the tab is activated.
+    /// Restores a single leaf pane from a snapshot. Non-active-tab terminal
+    /// leaves keep an eager shell (so a restored window doesn't change when
+    /// its tabs' processes start) but skip laying out their restored
+    /// scrollback/AI conversation text, since that's the expensive part and
+    /// isn't needed until the tab is actually shown.
     #[allow(clippy::too_many_arguments)]
     fn restore_pane_leaf(
         leaf: LeafSnapshot,
@@ -3537,10 +3525,10 @@ impl PaneGroup {
     /// to the specification of the provided [`PanesLayout`].
     ///
     /// `is_active_tab` should be `false` when constructing a tab other than
-    /// the window's initially-active tab during session restoration; see
-    /// `restore_pane_leaf` for how that defers expensive scrollback/AI
-    /// conversation restoration for `PanesLayout::Snapshot`. It has no effect
-    /// on other layout kinds.
+    /// the window's initially-active tab during session restoration, so a
+    /// `PanesLayout::Snapshot` can skip its most expensive restoration work
+    /// for tabs the user won't see at launch. It has no effect on other
+    /// layout kinds.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_panes_layout(
         tips_completed: ModelHandle<TipsCompleted>,
@@ -3676,20 +3664,20 @@ impl PaneGroup {
                 continue;
             };
 
+            let has_conversation_restoration = restoration.conversation_restoration.is_some();
+
             let has_restored_command_blocks = restoration
                 .restored_blocks
                 .as_ref()
-                .is_some_and(|blocks| !blocks.is_empty());
-            let has_conversation_restoration = restoration.conversation_restoration.is_some();
-
-            if let Some(restored_blocks) = &restoration.restored_blocks {
-                terminal_view
+                .is_some_and(|blocks| !blocks.is_empty())
+                && terminal_view
                     .as_ref(ctx)
                     .model
                     .lock()
                     .block_list_mut()
-                    .apply_deferred_restored_blocks(restored_blocks);
-            }
+                    .apply_deferred_restored_blocks(
+                        restoration.restored_blocks.as_deref().unwrap_or_default(),
+                    );
 
             if let Some(conversation_restoration) = restoration.conversation_restoration {
                 terminal_view.update(ctx, |view, ctx| {
@@ -4585,6 +4573,30 @@ impl PaneGroup {
         ctx.emit(Event::TerminalViewStateChanged);
         ctx.emit(Event::AppStateChanged);
         pane_content
+    }
+
+    /// Takes any pending lazy scrollback/AI-conversation restoration for
+    /// `pane_id`, if it was never materialized. A pane moved out of this
+    /// group via `remove_pane_for_move` must have its entry transferred with
+    /// this and `insert_pending_lazy_terminal_restoration`, rather than left
+    /// behind or dropped, so it's still applied on activation, or still
+    /// round-tripped if the pane is never activated, in its new home.
+    pub(crate) fn take_pending_lazy_terminal_restoration(
+        &mut self,
+        pane_id: PaneId,
+    ) -> Option<PendingLazyTerminalRestoration> {
+        self.pending_lazy_terminal_restorations.remove(&pane_id)
+    }
+
+    /// Re-registers a pending lazy restoration for `pane_id` in this group.
+    /// See `take_pending_lazy_terminal_restoration`.
+    pub(crate) fn insert_pending_lazy_terminal_restoration(
+        &mut self,
+        pane_id: PaneId,
+        restoration: PendingLazyTerminalRestoration,
+    ) {
+        self.pending_lazy_terminal_restorations
+            .insert(pane_id, restoration);
     }
 
     pub fn notebook_pane_by_pane_id(&self, pane_id: Option<PaneId>) -> Option<&NotebookPane> {
@@ -5754,6 +5766,9 @@ impl PaneGroup {
         // Drop any transitive-share tracking entry for this pane so the
         // map doesn't accumulate stale ids.
         self.forget_transitively_shared_pane(pane_id);
+        // A pane can be closed before its deferred restoration was ever
+        // materialized; drop its entry so the payload doesn't linger.
+        self.pending_lazy_terminal_restorations.remove(&pane_id);
 
         ctx.notify();
         ctx.emit(Event::TerminalViewStateChanged);
