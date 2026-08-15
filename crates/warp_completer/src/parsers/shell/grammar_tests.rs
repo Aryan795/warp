@@ -33,18 +33,44 @@ fn parse(dialect: ShellDialect, source: &str) -> Tree {
         .expect("parsing a string always produces a tree")
 }
 
-/// Returns the first node anywhere in the tree (depth-first, pre-order) with the given kind.
-fn find_kind<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
-    if node.kind() == kind {
-        return Some(node);
-    }
+/// Returns the first descendant of `node` (never `node` itself) with the given kind, searched
+/// depth-first, pre-order.
+///
+/// Deliberately excludes `node` itself: every caller here passes an ancestor (often a node of the
+/// very kind being searched for, e.g. looking for a nested `command_substitution` inside another
+/// `command_substitution`) and wants the *nested* occurrence. Matching on `node` itself would
+/// make that search vacuous -- it would return the ancestor without ever inspecting its children.
+fn find_descendant_kind<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
     let mut cursor = node.walk();
-    node.children(&mut cursor)
-        .find_map(|child| find_kind(child, kind))
+    node.children(&mut cursor).find_map(|child| {
+        if child.kind() == kind {
+            Some(child)
+        } else {
+            find_descendant_kind(child, kind)
+        }
+    })
+}
+
+/// Returns every descendant of `node` (never `node` itself) with the given kind, in depth-first,
+/// pre-order. Use this instead of `find_descendant_kind` whenever a construct is expected to
+/// contain more than one occurrence (e.g. two process substitutions) -- taking only the first
+/// match would silently ignore a collapsed, dropped, or duplicated second one.
+fn find_all_descendant_kind<'tree>(node: Node<'tree>, kind: &str) -> Vec<Node<'tree>> {
+    let mut results = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == kind {
+            results.push(child);
+        }
+        results.extend(find_all_descendant_kind(child, kind));
+    }
+    results
 }
 
 fn kinds_present(node: Node, kinds: &[&str]) -> bool {
-    kinds.iter().all(|kind| find_kind(node, kind).is_some())
+    kinds
+        .iter()
+        .all(|kind| find_descendant_kind(node, kind).is_some())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -53,19 +79,26 @@ fn kinds_present(node: Node, kinds: &[&str]) -> bool {
 
 #[test]
 fn bash_dollar_paren_nesting_is_error_free() {
-    let tree = parse(ShellDialect::Bash, "echo \"$(a $(b $(c)))\"");
+    let source = "echo \"$(a $(b $(c)))\"";
+    let tree = parse(ShellDialect::Bash, source);
     assert!(!tree.root_node().has_error());
-    // Three levels of `command_substitution` should be nested, not flattened.
-    let outer = find_kind(tree.root_node(), "command_substitution").unwrap();
-    let middle = find_kind(outer, "command_substitution").unwrap();
-    assert!(find_kind(middle, "command_substitution").is_some());
+    // Three levels of `command_substitution`, each strictly nested inside the previous one (not
+    // flattened into siblings), with exact spans for every level.
+    let outer = find_descendant_kind(tree.root_node(), "command_substitution").unwrap();
+    assert_eq!(&source[outer.byte_range()], "$(a $(b $(c)))");
+    let middle = find_descendant_kind(outer, "command_substitution").unwrap();
+    assert_eq!(&source[middle.byte_range()], "$(b $(c))");
+    let inner = find_descendant_kind(middle, "command_substitution").unwrap();
+    assert_eq!(&source[inner.byte_range()], "$(c)");
+    // The innermost level has no further nested substitution.
+    assert!(find_descendant_kind(inner, "command_substitution").is_none());
 }
 
 #[test]
 fn bash_backtick_substitution_is_error_free() {
     let tree = parse(ShellDialect::Bash, "echo `pwd`");
     assert!(!tree.root_node().has_error());
-    assert!(find_kind(tree.root_node(), "command_substitution").is_some());
+    assert!(find_descendant_kind(tree.root_node(), "command_substitution").is_some());
 }
 
 #[test]
@@ -73,9 +106,9 @@ fn bash_substitution_inside_double_quoted_concatenated_word_is_error_free() {
     let source = "echo pre\"mid$(pwd)post\"tail";
     let tree = parse(ShellDialect::Bash, source);
     assert!(!tree.root_node().has_error());
-    let substitution = find_kind(tree.root_node(), "command_substitution").unwrap();
+    let substitution = find_descendant_kind(tree.root_node(), "command_substitution").unwrap();
     // The nested `pwd` command's span must point at exactly "pwd", not swallow surrounding text.
-    let inner_command = find_kind(substitution, "command_name").unwrap();
+    let inner_command = find_descendant_kind(substitution, "command_name").unwrap();
     assert_eq!(&source[inner_command.byte_range()], "pwd");
 }
 
@@ -84,17 +117,21 @@ fn bash_process_substitution_is_error_free() {
     let source = "diff <(sort a) <(sort b)";
     let tree = parse(ShellDialect::Bash, source);
     assert!(!tree.root_node().has_error());
-    // Both `<(...)` process substitutions must be represented, not collapsed into one or
-    // mistaken for plain redirects.
-    let first = find_kind(tree.root_node(), "process_substitution").unwrap();
-    assert_eq!(&source[first.byte_range()], "<(sort a)");
+    // Both `<(...)` process substitutions must be represented as distinct, correctly spanned
+    // nodes -- not collapsed into one, dropped, or mistaken for plain redirects.
+    let substitutions = find_all_descendant_kind(tree.root_node(), "process_substitution");
+    let spans: Vec<&str> = substitutions
+        .iter()
+        .map(|node| &source[node.byte_range()])
+        .collect();
+    assert_eq!(spans, vec!["<(sort a)", "<(sort b)"]);
 }
 
 #[test]
 fn bash_pipeline_and_statement_list_inside_substitution_is_error_free() {
     let tree = parse(ShellDialect::Bash, "echo \"$(a $(b | c) && d; e)\"");
     assert!(!tree.root_node().has_error());
-    let substitution = find_kind(tree.root_node(), "command_substitution").unwrap();
+    let substitution = find_descendant_kind(tree.root_node(), "command_substitution").unwrap();
     assert!(kinds_present(substitution, &["pipeline", "list"]));
 }
 
@@ -103,11 +140,11 @@ fn bash_assignment_and_redirect_inside_nested_command_is_error_free() {
     let source = "echo \"$(KEY=VALUE env >out)\"";
     let tree = parse(ShellDialect::Bash, source);
     assert!(!tree.root_node().has_error());
-    let substitution = find_kind(tree.root_node(), "command_substitution").unwrap();
-    let assignment = find_kind(substitution, "variable_assignment").unwrap();
+    let substitution = find_descendant_kind(tree.root_node(), "command_substitution").unwrap();
+    let assignment = find_descendant_kind(substitution, "variable_assignment").unwrap();
     assert_eq!(&source[assignment.byte_range()], "KEY=VALUE");
-    let redirect = find_kind(substitution, "file_redirect").unwrap();
-    let destination = find_kind(redirect, "word").unwrap();
+    let redirect = find_descendant_kind(substitution, "file_redirect").unwrap();
+    let destination = find_descendant_kind(redirect, "word").unwrap();
     assert_eq!(&source[destination.byte_range()], "out");
 }
 
@@ -132,7 +169,7 @@ fn bash_heredoc_is_error_free() {
 fn bash_incomplete_substitution_has_no_nested_command_at_grammar_level() {
     let tree = parse(ShellDialect::Bash, "echo \"pre$(pw");
     assert!(tree.root_node().has_error());
-    assert!(find_kind(tree.root_node(), "command_substitution").is_none());
+    assert!(find_descendant_kind(tree.root_node(), "command_substitution").is_none());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -149,15 +186,15 @@ fn fish_command_substitution_requires_trailing_newline() {
     // recovery" section); appending one directly here confirms the grammar accepts the result.
     let with_newline = parse(ShellDialect::Fish, "echo (pwd)\n");
     assert!(!with_newline.root_node().has_error());
-    assert!(find_kind(with_newline.root_node(), "command_substitution").is_some());
+    assert!(find_descendant_kind(with_newline.root_node(), "command_substitution").is_some());
 }
 
 #[test]
 fn fish_nested_pipe_inside_substitution_is_error_free() {
     let tree = parse(ShellDialect::Fish, "cat (printf x | psub)\n");
     assert!(!tree.root_node().has_error());
-    let substitution = find_kind(tree.root_node(), "command_substitution").unwrap();
-    assert!(find_kind(substitution, "pipe").is_some());
+    let substitution = find_descendant_kind(tree.root_node(), "command_substitution").unwrap();
+    assert!(find_descendant_kind(substitution, "pipe").is_some());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -168,7 +205,7 @@ fn fish_nested_pipe_inside_substitution_is_error_free() {
 fn powershell_expandable_string_subexpression_is_error_free() {
     let tree = parse(ShellDialect::PowerShell, "echo \"pre$(pwd)post\"");
     assert!(!tree.root_node().has_error());
-    assert!(find_kind(tree.root_node(), "sub_expression").is_some());
+    assert!(find_descendant_kind(tree.root_node(), "sub_expression").is_some());
 }
 
 #[test]
@@ -176,9 +213,15 @@ fn powershell_three_level_nesting_is_error_free() {
     let source = "echo \"$(a $(b) $(c))\"";
     let tree = parse(ShellDialect::PowerShell, source);
     assert!(!tree.root_node().has_error());
-    let outer = find_kind(tree.root_node(), "sub_expression").unwrap();
-    // Two sibling `$(...)` substitutions are nested inside the outer one.
-    assert!(find_kind(outer, "sub_expression").is_some());
+    let outer = find_descendant_kind(tree.root_node(), "sub_expression").unwrap();
+    assert_eq!(&source[outer.byte_range()], "$(a $(b) $(c))");
+    // Two sibling `$(...)` substitutions, both nested inside the outer one, with exact spans.
+    let inner = find_all_descendant_kind(outer, "sub_expression");
+    let spans: Vec<&str> = inner
+        .iter()
+        .map(|node| &source[node.byte_range()])
+        .collect();
+    assert_eq!(spans, vec!["$(b)", "$(c)"]);
 }
 
 #[test]
@@ -207,7 +250,7 @@ fn zsh_posix_compatible_syntax_is_error_free() {
         "echo \"$(a $(b))\" | grep x && echo done",
     );
     assert!(!tree.root_node().has_error());
-    assert!(find_kind(tree.root_node(), "command_substitution").is_some());
+    assert!(find_descendant_kind(tree.root_node(), "command_substitution").is_some());
 }
 
 /// Zsh named-pipe process substitution (`=(...)`) has no Bash equivalent (Bash only has
@@ -292,7 +335,7 @@ fn zsh_repeat_loop_parses_without_error_into_a_wrong_hierarchy() {
         "expected the repeat loop to be misparsed as three separate commands, got {}",
         tree.root_node().to_sexp()
     );
-    assert!(find_kind(tree.root_node(), "do_group").is_none());
+    assert!(find_descendant_kind(tree.root_node(), "do_group").is_none());
 }
 
 /// Zsh named-directory (`~name`) and Bash both leave the tilde-prefixed word as an opaque `word`
