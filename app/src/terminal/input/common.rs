@@ -366,7 +366,9 @@ pub(super) fn add_command_xray_overlay(
     );
 }
 
-fn render_command_token_description(
+/// Renders the command x-ray tooltip for a described token. Shared by every host that shows
+/// command x-ray: the terminal input and the agent permission prompt's command body.
+pub(crate) fn render_command_token_description(
     description: &Arc<Description>,
     appearance: &Appearance,
 ) -> Box<dyn Element> {

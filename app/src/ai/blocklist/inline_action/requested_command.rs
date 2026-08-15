@@ -5,22 +5,26 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use lazy_static::lazy_static;
-use parking_lot::FairMutex;
+use parking_lot::{FairMutex, Mutex};
 use pathfinder_geometry::vector::vec2f;
 use settings::Setting as _;
+use string_offset::CharOffset;
 use uuid::Uuid;
+use warp_completer::completer::{Description, describe};
+use warp_completer::signatures::CommandRegistry;
 use warp_core::features::FeatureFlag;
 use warp_core::ui::Icon;
 use warp_core::ui::appearance::Appearance;
 use warp_editor::render::element::VerticalExpansionBehavior;
+use warpui::accessibility::{AccessibilityContent, WarpA11yRole};
 use warpui::clipboard::ClipboardContent;
 use warpui::elements::new_scrollable::{NewScrollable, ScrollableAppearance, SingleAxisConfig};
 use warpui::elements::{
     Align, Border, ChildAnchor, ChildView, Clipped, ClippedScrollStateHandle, ConstrainedBox,
     Container, CornerRadius, CrossAxisAlignment, Dismiss, Empty, Expanded, Flex, MainAxisSize,
-    MouseStateHandle, OffsetPositioning, ParentElement, PositionedElementAnchor,
-    PositionedElementOffsetBounds, Radius, ScrollbarWidth, SelectableArea, SelectionHandle, Stack,
-    Text,
+    MouseStateHandle, OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds,
+    PositionedElementAnchor, PositionedElementOffsetBounds, Radius, ScrollbarWidth, SelectableArea,
+    SelectionHandle, Stack, Text,
 };
 use warpui::keymap::{Context, EditableBinding, FixedBinding, Keystroke};
 use warpui::ui_components::components::UiComponent as _;
@@ -30,6 +34,10 @@ use warpui::{
 };
 
 use super::inline_action_icons::{self, icon_size};
+use super::requested_command_x_ray::{
+    CommandXRayHoverElement, CommandXRayHoverState, CommandXRayHoverStateHandle,
+    byte_index_to_char_index, token_char_range, token_start_byte_offset,
+};
 use crate::ai::agent::conversation::ConversationStatus;
 use crate::ai::agent::{
     AIAgentActionId, AIAgentActionResult, AIAgentActionResultType, AIAgentActionType,
@@ -58,12 +66,15 @@ use crate::ai::blocklist::{
 use crate::ai::mcp::TemplatableMCPServerManager;
 use crate::cmd_or_ctrl_shift;
 use crate::code::editor::view::{CodeEditorEvent, CodeEditorRenderOptions, CodeEditorView};
+use crate::completer::{SessionAgnosticContext, SessionContext};
 use crate::editor::InteractionState;
 use crate::menu::{Event as MenuEvent, Menu, MenuItem, MenuItemFields, MenuVariant};
 use crate::settings::InputModeSettings;
 use crate::terminal::TerminalModel;
 use crate::terminal::block_list_viewport::InputMode;
+use crate::terminal::input::common::render_command_token_description;
 use crate::terminal::model::block::Block;
+use crate::terminal::model::session::active_session::ActiveSession;
 use crate::ui_components::blended_colors;
 use crate::ui_components::json_tree::{
     CopyJsonFn, JsonTreeColors, JsonTreeState, PathSegment, TREE_FONT_SIZE, ToggleFn,
@@ -99,6 +110,11 @@ pub const VIEWING_COMMAND_DETAIL_MESSAGE: &str = "Viewing command detail";
 const VIEWING_MCP_TOOL_DETAIL_MESSAGE: &str = "Viewing MCP tool call detail";
 
 const EDIT_COMMAND_ACTION_NAME: &str = "requested_command:edit";
+
+/// The name of the "Inspect Command" binding that toggles command x-ray. This is the same
+/// binding name the terminal input registers in `app/src/editor/view/mod.rs`, so one keystroke
+/// covers x-ray in both hosts.
+const INSPECT_COMMAND_ACTION_NAME: &str = "editor_view:inspect_command";
 
 const EDIT_MODE_OPEN_KEYMAP_CONTEXT: &str = "RequestedCommandViewEditModeOpen";
 const REQUESTED_ACTION_BLOCKED_KEYMAP_CONTEXT: &str = "RequestedActionBlocked";
@@ -182,6 +198,32 @@ pub fn init(app: &mut AppContext) {
             & id!(REQUESTED_ACTION_BLOCKED_KEYMAP_CONTEXT)
             & !id!(EDIT_MODE_OPEN_KEYMAP_CONTEXT),
     )]);
+
+    // Command x-ray over the requested command, toggled by the same "Inspect Command" binding
+    // the terminal input uses. The pair below mirrors the input's registration in
+    // `app/src/editor/view/mod.rs`: with Agent Mode on, cmdorctrl-i toggles AI input mode, so
+    // x-ray ships without a default keystroke there.
+    app.register_editable_bindings([
+        EditableBinding::new(
+            INSPECT_COMMAND_ACTION_NAME,
+            "Inspect Command",
+            RequestedCommandViewAction::ToggleCommandXRayAtCursor,
+        )
+        .with_enabled(|| FeatureFlag::AgentMode.is_enabled())
+        .with_context_predicate(
+            id!(RequestedCommandView::ui_name()) & id!(REQUESTED_ACTION_BLOCKED_KEYMAP_CONTEXT),
+        ),
+        EditableBinding::new(
+            INSPECT_COMMAND_ACTION_NAME,
+            "Inspect Command",
+            RequestedCommandViewAction::ToggleCommandXRayAtCursor,
+        )
+        .with_enabled(|| !FeatureFlag::AgentMode.is_enabled())
+        .with_context_predicate(
+            id!(RequestedCommandView::ui_name()) & id!(REQUESTED_ACTION_BLOCKED_KEYMAP_CONTEXT),
+        )
+        .with_key_binding("cmdorctrl-i"),
+    ]);
 }
 
 /// Structured representation of an MCP tool call request for JSON tree rendering.
@@ -303,6 +345,27 @@ pub enum RequestedCommandViewAction {
     CopyMcpSelection,
     /// Dismiss the MCP JSON tree right-click context menu.
     CloseMcpContextMenu,
+    /// The pointer has rested on a command token long enough to describe it.
+    ShowCommandXRayAtPointer,
+    /// Hide the command x-ray tooltip because the pointer moved off the described token.
+    HideCommandXRay,
+    /// Toggle the command x-ray tooltip for the token at the editor's cursor.
+    ToggleCommandXRayAtCursor,
+}
+
+/// What triggered the command x-ray tooltip. Only the keyboard path is announced, matching the
+/// terminal input's `CommandXRayTrigger` handling in `Input::show_xray`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommandXRayTrigger {
+    Hover,
+    Keystroke,
+}
+
+/// The completion context used to describe a command token. `describe` is generic over the
+/// context type, so the two kinds this host can supply are carried in an enum.
+enum CommandCompletionContext {
+    Session(SessionContext),
+    SessionAgnostic(SessionAgnosticContext),
 }
 
 pub struct RequestedCommandView {
@@ -373,6 +436,15 @@ pub struct RequestedCommandView {
     // The MCP tool name is kept separately from the formatted command text so
     // headers never need to parse a presentation label to recover identity.
     mcp_tool_name: Option<String>,
+
+    // The active shell session, used to describe command tokens against the same session the
+    // command would run in.
+    active_session: ModelHandle<ActiveSession>,
+    // The token description currently shown by the command x-ray tooltip, if any.
+    command_x_ray_description: Option<Arc<Description>>,
+    // Hover state for command x-ray, shared with the `CommandXRayHoverElement` that wraps the
+    // command body.
+    command_x_ray_hover: CommandXRayHoverStateHandle,
 }
 
 impl RequestedCommandView {
@@ -384,6 +456,7 @@ impl RequestedCommandView {
         block_model: Rc<dyn AIBlockModel<View = AIBlock>>,
         action_model: &ModelHandle<BlocklistAIActionModel>,
         terminal_model: Arc<FairMutex<TerminalModel>>,
+        active_session: ModelHandle<ActiveSession>,
         autonomy_setting_speedbump: AutonomySettingSpeedbump,
         manage_autonomy_settings_link_handle: MouseStateHandle,
         ai_block_view_id: EntityId,
@@ -629,6 +702,9 @@ impl RequestedCommandView {
             mcp_context_menu_anchor_id: None,
             mcp_server_id: None,
             mcp_tool_name: None,
+            active_session,
+            command_x_ray_description: None,
+            command_x_ray_hover: Arc::new(Mutex::new(CommandXRayHoverState::default())),
         }
     }
 
@@ -709,12 +785,206 @@ impl RequestedCommandView {
             CodeEditorEvent::CopiedEmptyText => {
                 ctx.emit(RequestedCommandViewEvent::CopiedEmptyText);
             }
+            CodeEditorEvent::MouseHovered {
+                offset,
+                clamped,
+                is_covered,
+                ..
+            } => {
+                // The pointer-to-offset hit test for this host: the code editor element already
+                // resolved the pointer position with `RichTextElement::position_to_location`, so
+                // we only record what it resolved. A clamped hit means the pointer is past the
+                // end of the text rather than on a token, which is the same condition the input
+                // checks with `PossibleDisplayPoint::is_clamped`.
+                let hovered_char_index = (!clamped && !is_covered).then(|| offset.as_usize());
+                self.command_x_ray_hover
+                    .lock()
+                    .set_hovered_char_index(hovered_char_index);
+            }
+            CodeEditorEvent::ContentChanged { .. } => {
+                // Dismiss on edit, like `Input::handle_editor_event` does for the terminal input.
+                self.dismiss_command_x_ray(ctx);
+            }
             #[cfg(windows)]
             CodeEditorEvent::WindowsCtrlC { copied_selection } if !copied_selection => {
                 ctx.emit(RequestedCommandViewEvent::Rejected);
             }
             _ => {}
         }
+    }
+
+    /// Describes the token the pointer has been resting on and shows the x-ray tooltip for it.
+    fn show_command_x_ray_at_pointer(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(char_index) = self.command_x_ray_hover.lock().hovered_char_index() else {
+            return;
+        };
+        self.start_command_x_ray_at(char_index, CommandXRayTrigger::Hover, ctx);
+    }
+
+    /// Toggles the x-ray tooltip for the token at the editor's cursor, mirroring what
+    /// `EditorAction::InspectCommand` does for the terminal input.
+    fn toggle_command_x_ray_at_cursor(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.command_x_ray_description.is_some() {
+            self.dismiss_command_x_ray(ctx);
+            return;
+        }
+
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        // Buffer offsets are 1-indexed gaps - the character at index `i` sits at gap `i + 1` -
+        // so step back one to index the command text.
+        let cursor_char_index = editor
+            .as_ref(ctx)
+            .cursor_head_offset(ctx)
+            .as_usize()
+            .saturating_sub(1);
+        self.start_command_x_ray_at(cursor_char_index, CommandXRayTrigger::Keystroke, ctx);
+    }
+
+    /// Describes the token containing `char_index` and shows the result.
+    fn start_command_x_ray_at(
+        &mut self,
+        char_index: usize,
+        trigger: CommandXRayTrigger,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let command_text = self.command_text.clone();
+        if command_text.is_empty() {
+            return;
+        }
+        let position = token_start_byte_offset(&command_text, char_index);
+        let completion_context = self.completion_context(ctx);
+
+        let _ = ctx.spawn(
+            async move {
+                match completion_context {
+                    CommandCompletionContext::Session(context) => {
+                        describe(command_text.as_str(), position, &context).await
+                    }
+                    CommandCompletionContext::SessionAgnostic(context) => {
+                        describe(command_text.as_str(), position, &context).await
+                    }
+                }
+            },
+            move |me, description, ctx| {
+                me.show_command_x_ray(description, trigger, ctx);
+            },
+        );
+    }
+
+    /// The completion context used to describe command tokens. Prefers the session the command
+    /// would actually run in, so paths and shell-specific suggestions resolve, and falls back to
+    /// the command registry alone when the block has no live session.
+    fn completion_context(&self, ctx: &AppContext) -> CommandCompletionContext {
+        let active_session = self.active_session.as_ref(ctx);
+        let session_and_pwd = active_session
+            .session(ctx)
+            .zip(active_session.current_working_directory().cloned());
+
+        match session_and_pwd {
+            Some((session, pwd)) => {
+                let current_working_directory = session.convert_directory_to_typed_path_buf(pwd);
+                CommandCompletionContext::Session(SessionContext::new(
+                    session,
+                    CommandRegistry::global_instance(),
+                    current_working_directory,
+                    ctx,
+                ))
+            }
+            None => CommandCompletionContext::SessionAgnostic(SessionAgnosticContext::new(
+                CommandRegistry::global_instance(),
+            )),
+        }
+    }
+
+    /// Shows the tooltip for a described token, or hides it when the token has no description.
+    fn show_command_x_ray(
+        &mut self,
+        description: Option<Description>,
+        trigger: CommandXRayTrigger,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(description) = description else {
+            self.hide_command_x_ray(ctx);
+            return;
+        };
+
+        let token_range = token_char_range(
+            &self.command_text,
+            description.token.span.start()..description.token.span.end(),
+        );
+        self.command_x_ray_hover
+            .lock()
+            .set_described_token_range(Some(token_range));
+
+        if trigger == CommandXRayTrigger::Keystroke {
+            ctx.emit_a11y_content(AccessibilityContent::new_without_help(
+                description.a11y_text(),
+                WarpA11yRole::UserAction,
+            ));
+        }
+
+        self.command_x_ray_description = Some(Arc::new(description));
+        ctx.notify();
+    }
+
+    /// Hides the tooltip because the pointer left the described token.
+    fn hide_command_x_ray(&mut self, ctx: &mut ViewContext<Self>) {
+        self.command_x_ray_hover
+            .lock()
+            .set_described_token_range(None);
+        if self.command_x_ray_description.take().is_some() {
+            ctx.notify();
+        }
+    }
+
+    /// Hides the tooltip and keeps it hidden until the pointer moves somewhere else. Mirrors
+    /// `EditorView::clear_command_x_ray` for the terminal input.
+    fn dismiss_command_x_ray(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.command_x_ray_description.take().is_none() {
+            return;
+        }
+        self.command_x_ray_hover.lock().mark_user_dismissed();
+        ctx.notify();
+    }
+
+    /// The overlay anchor for this host: the tooltip sits directly above the first glyph of the
+    /// described token, positioned from the code editor's own view-relative geometry. The
+    /// terminal input anchors its tooltip on a paint-time position-cache entry instead
+    /// (`EditorElement::x_ray_position_id` and `add_command_xray_overlay`).
+    fn command_x_ray_overlay(
+        &self,
+        app: &AppContext,
+    ) -> Option<(Arc<Description>, OffsetPositioning)> {
+        let description = self.command_x_ray_description.clone()?;
+        let editor = self.editor.as_ref()?.as_ref(app);
+
+        let token_start =
+            byte_index_to_char_index(&self.command_text, description.token.span.start());
+        let token_bounds =
+            editor.character_bounds_in_viewport(CharOffset::from(token_start), app)?;
+
+        // Bounds are viewport-relative, so a token scrolled out of the command body reports a
+        // position outside it. Don't anchor the tooltip to something the user can't see.
+        let viewport_height = editor.viewport_height(app).unwrap_or(f32::MAX);
+        if token_bounds.max_y() < 0. || token_bounds.origin_y() > viewport_height {
+            return None;
+        }
+
+        // The editor sits inside the command body's padding, which is the offset between the
+        // stack this overlay is added to and the editor's own origin.
+        let positioning = OffsetPositioning::offset_from_parent(
+            vec2f(
+                INLINE_ACTION_HORIZONTAL_PADDING + token_bounds.origin_x(),
+                REQUESTED_COMMAND_BODY_VERTICAL_PADDING + token_bounds.origin_y(),
+            ),
+            ParentOffsetBounds::WindowByPosition,
+            ParentAnchor::TopLeft,
+            ChildAnchor::BottomLeft,
+        );
+
+        Some((description, positioning))
     }
 
     fn set_is_header_expanded(&mut self, value: bool, ctx: &mut ViewContext<Self>) {
@@ -1647,20 +1917,40 @@ impl View for RequestedCommandView {
             .with_child(Clipped::new(header_element).finish());
 
         if let (true, Some(editor)) = (should_render_editor, &self.editor) {
+            // The command body drives command x-ray, so it is wrapped in the hover element that
+            // owns this host's hover state machine.
+            let command_body = CommandXRayHoverElement::new(
+                ChildView::new(editor).finish(),
+                self.command_x_ray_hover.clone(),
+            )
+            .finish();
+
+            // The x-ray tooltip is anchored within this stack, which wraps the command body
+            // tightly so the editor's own view-relative geometry lines up with the offsets used
+            // by `command_x_ray_overlay`.
+            let mut command_body_stack = Stack::new();
+            command_body_stack.add_child(
+                Container::new(command_body)
+                    .with_horizontal_padding(INLINE_ACTION_HORIZONTAL_PADDING)
+                    .with_padding_top(REQUESTED_COMMAND_BODY_VERTICAL_PADDING)
+                    .with_padding_bottom(
+                        REQUESTED_COMMAND_BODY_VERTICAL_PADDING - SCROLLBAR_WIDTH.as_f32() - 2.,
+                    )
+                    .with_background_color(theme.background().into_solid())
+                    .with_corner_radius(CornerRadius::with_bottom(Radius::Pixels(7.)))
+                    .finish(),
+            );
+            if let Some((description, positioning)) = self.command_x_ray_overlay(app) {
+                command_body_stack.add_positioned_overlay_child(
+                    render_command_token_description(&description, appearance),
+                    positioning,
+                );
+            }
+
             content.add_child(
-                ConstrainedBox::new(
-                    Container::new(ChildView::new(editor).finish())
-                        .with_horizontal_padding(INLINE_ACTION_HORIZONTAL_PADDING)
-                        .with_padding_top(REQUESTED_COMMAND_BODY_VERTICAL_PADDING)
-                        .with_padding_bottom(
-                            REQUESTED_COMMAND_BODY_VERTICAL_PADDING - SCROLLBAR_WIDTH.as_f32() - 2.,
-                        )
-                        .with_background_color(theme.background().into_solid())
-                        .with_corner_radius(CornerRadius::with_bottom(Radius::Pixels(7.)))
-                        .finish(),
-                )
-                .with_max_height(MAX_EDITOR_HEIGHT)
-                .finish(),
+                ConstrainedBox::new(command_body_stack.finish())
+                    .with_max_height(MAX_EDITOR_HEIGHT)
+                    .finish(),
             );
         }
 
@@ -2152,6 +2442,13 @@ impl TypedActionView for RequestedCommandView {
             RequestedCommandViewAction::CloseMcpContextMenu => {
                 self.mcp_context_menu_open = false;
                 ctx.notify();
+            }
+            RequestedCommandViewAction::ShowCommandXRayAtPointer => {
+                self.show_command_x_ray_at_pointer(ctx);
+            }
+            RequestedCommandViewAction::HideCommandXRay => self.hide_command_x_ray(ctx),
+            RequestedCommandViewAction::ToggleCommandXRayAtCursor => {
+                self.toggle_command_x_ray_at_cursor(ctx);
             }
         }
     }

@@ -3517,6 +3517,7 @@ impl AIBlock {
                         self.model.clone(),
                         &self.action_model,
                         self.terminal_model.clone(),
+                        self.active_session.clone(),
                         self.autonomy_setting_speedbump.clone(),
                         self.state_handles
                             .manage_autonomy_settings_link_handle
@@ -3668,6 +3669,7 @@ impl AIBlock {
                         self.model.clone(),
                         &self.action_model,
                         self.terminal_model.clone(),
+                        self.active_session.clone(),
                         self.autonomy_setting_speedbump.clone(),
                         self.state_handles
                             .manage_autonomy_settings_link_handle

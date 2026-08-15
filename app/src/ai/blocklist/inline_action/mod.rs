@@ -12,6 +12,7 @@ pub(crate) mod orchestration_controls;
 pub(crate) mod requested_action;
 pub(crate) mod requested_command;
 pub(crate) mod requested_command_attribution;
+mod requested_command_x_ray;
 pub(crate) mod run_agents_card_view;
 pub(super) mod search_codebase;
 pub(crate) mod search_results_common;

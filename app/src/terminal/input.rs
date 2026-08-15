@@ -3,7 +3,7 @@ pub mod buffer_model;
 mod classic;
 mod cli_agent;
 mod cloud_mode_v2_history_menu;
-mod common;
+pub(crate) mod common;
 pub mod conversations;
 pub mod decorations;
 pub(crate) mod handoff_compose;
