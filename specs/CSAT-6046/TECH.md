@@ -302,32 +302,83 @@ their existing `axis_should_handle_scroll_wheel` routing so Phase 1 does not cap
 vertical wheel events.
 
 ### Phase 2: normal terminal scrollback
-Add a `SmoothScrollController` field to `TerminalView` using `Lines` as its logical unit. Reuse the
-shared easing and lifecycle logic; do not convert terminal animation state to pixels.
+#### Amendment: cancellation-surface audit, and the shape that actually shipped
+Before implementation, the ~20 `ScrollPositionUpdate` variants and the call sites that reach them
+were audited to determine whether cancellation collapses into a single guard or needs bespoke
+handling per call site -- Phase 1's manual/legacy-wrapper surface had turned out materially larger
+than its first estimate, and this was the equivalent risk for Phase 2.
 
-In `BlockListElement::scroll_internal`, preserve routing order:
-1. Reject out-of-bounds and disabled scrolling as today.
-2. Convert precise pixels to fractional lines as today.
-3. Determine whether a long-running-block event must be forwarded as `AltMouseAction`.
-4. Forward PTY-bound input immediately and return. Do not touch the controller.
-5. For normal block-list scrolling, dispatch the input source and delta to `TerminalView`.
+Finding: `TerminalView::update_scroll_position_locking` is the **sole** call site of
+`ScrollState::update` (grep-verified: every one of the ~30 call sites across `view.rs` and related
+files that changes scroll position -- page/home/end, jump-to-block, jump-to-exchange, filter
+apply/clear, resize, clear, command-execution-started, agent-view entry/exit, and every other
+`ScrollPositionUpdate` variant -- routes through this one function). This makes cancellation a
+single, universal guard rather than an M-vs-L-defining per-site concern: cancel any in-flight
+animation on every update **except** `AfterScrollEvent`, placed once inside
+`update_scroll_position_locking`. The one call site that needs bespoke handling is the wheel-input
+entry point itself (`TerminalView::scroll`), because it must distinguish an `AfterScrollEvent` that
+is its own animation-frame increment (must not cancel) from one that is an immediate precise/
+flag-off scroll (must explicitly cancel first, since the universal guard exempts the variant).
+This audit found the cancellation surface materially cleaner than Phase 1's, not materially worse.
 
-In `TerminalView`:
-- Precise input cancels the controller and uses `ScrollPositionUpdate::AfterScrollEvent` immediately.
-- Eligible non-precise input updates the controller target.
-- Each frame applies an incremental fractional `Lines` delta through the existing
-  `scroll_position_for_delta` path.
-- Reaching the bottom preserves `FollowsBottomOfMostRecentBlock`.
-- Every non-animation `ScrollPositionUpdate` that directly changes position cancels active
-  contributions. This includes page/home/end, block and find navigation, resize correction,
-  command-driven follow-bottom, clear, and rich-block autoscroll.
+The rest of this section describes the actual shipped shape, which differs from the original
+proposal below in one respect: rather than the controller emitting a full delta that
+`TerminalView` applies as one incremental `Lines` value per repaint, the controller output is
+applied via the same lazy, per-event-dispatch pattern already proven for Phase 1's `Manual`-axis
+scrollables (`ScrollState`/`take_smooth_scroll_increment` in `crates/warpui_core/src/elements/gui/
+scrollable.rs`), since `TerminalView::scroll` (which owns the only code path that can call
+`update_scroll_position_locking`) requires a `ViewContext`, unavailable during `BlockListElement`'s
+paint. Concretely:
+
+- `SmoothScrollHandle` (`app/src/terminal/block_list_viewport.rs`) wraps a
+  `SmoothScrollController` behind an `Arc<Mutex<_>>`, tracking only the relative, unapplied
+  remainder of an animation -- not an absolute position, unlike `ClippedScrollStateHandle`.
+  `TerminalView` owns the persistent handle; `TerminalViewRenderContext` and `BlockListElement`
+  each hold a clone, mirroring how `horizontal_clipped_scroll_state` is already threaded through.
+- `TerminalView::scroll(delta, precise, ctx)`: for precise input or the flag off, cancels the
+  handle and applies `AfterScrollEvent` immediately, exactly as before. For eligible non-precise
+  input, calls `SmoothScrollHandle::add_delta` and returns without touching `scroll_position`.
+- `BlockListElement::paint` requests `ctx.repaint_after(SMOOTH_SCROLL_FRAME_INTERVAL)` while
+  `is_animating()`, identically to Phase 1's `Manual`/`Clipped` axes.
+- `BlockListElement::dispatch_event` unconditionally dispatches
+  `TerminalAction::AdvanceSmoothScroll` on every event it receives (mirroring
+  `Scrollable::dispatch_event`'s unconditional `advance_smooth_scroll` call exactly -- gating this
+  on `is_animating()` first would race with a segment completing between the gate check and the
+  actual increment-taking, silently dropping the final increment and landing short of the exact
+  target).
+- `TerminalView::advance_smooth_scroll` (the `AdvanceSmoothScroll` handler) takes the pending
+  increment and, if non-zero, applies it via `update_scroll_position_locking(AfterScrollEvent{..})`
+  -- the same existing path a direct scroll uses, so `scroll_position_for_delta`'s clamping and
+  `FollowsBottomOfMostRecentBlock` transition logic runs unmodified, against whatever the block
+  list's current state is that frame. This is what makes content arriving mid-animation a
+  non-issue: each increment is small and re-resolved against current state, not a captured
+  absolute target.
+
+In `BlockListElement::scroll_internal`, the routing order is preserved exactly as originally
+proposed (reject-out-of-bounds, precise-to-lines conversion, long-running-block
+`AltMouseAction` decision, PTY-bound early return, then dispatch to `TerminalView`) -- confirmed
+structurally clean: alt-screen input never reaches `BlockListElement` at all (a separate element
+entirely, swapped in by `TerminalView::render`), and the long-running-block forwarding decision is
+a single branch, so the animation cannot leak into either path. `TerminalAction::Scroll` gained a
+`precise: bool` field (threaded through every construction site, including scrollbar-drag and
+keyboard-single-line-scroll call sites, which pass `precise: true` since they are not real wheel
+notches) since the action previously discarded that information before it reached `TerminalView`.
+
+One pre-existing bug this exposed and fixed: `scroll_position_for_delta`'s `fix_to_bottom` check
+used a raw `new_top >= max_scroll_top` comparison. An animated scroll composes its final position
+from the last of several small increments rather than one one-shot delta; in one observed case a
+large-overshoot animation settled a hair short of `max_scroll_top` (floating-point precision, not a
+logic error), which the raw comparison rejected -- leaving the view in `FixedAtPosition` right at
+the boundary instead of the `FollowsBottomOfMostRecentBlock` sticky-bottom mode an equivalent
+immediate scroll would reach. Changed to the codebase's existing `heights_approx_gte` tolerance
+(already used for every other boundary comparison in this file).
 
 Do not change `AltScreenElement::on_scroll`, `TerminalView::alt_scroll`,
-`alt_screen_scroll_to_pty_bytes`, `TerminalAction::AltMouseAction`, or mouse protocol encoding except
-for any exhaustive match updates required by new internal event metadata.
+`alt_screen_scroll_to_pty_bytes`, `TerminalAction::AltMouseAction`, or mouse protocol encoding --
+confirmed unchanged.
 
-Phase 2 must be a follow-up implementation after Phase 1. It reuses the controller and frame driver
-but does not block Phase 1 release.
+Phase 2 shipped as a follow-up PR after Phase 1, stacked on the Phase 1 branch so its diff shows
+only the terminal work; it retargets to `master` once Phase 1 merges.
 
 ## Testing and validation
 ### Automated tests
@@ -359,15 +410,27 @@ Extend `new_scrollable/scrollable_tests.rs`, legacy `scrollable_tests.rs`, and
 - Dual-axis input animates axes independently.
 - A stale frame cannot move a rebuilt or cancelled scrollable.
 
-Add Phase 2 terminal tests:
-- Normal non-precise block-list input reaches the same final fractional-line position.
-- Precise input cancels and applies immediately.
-- Page/home/end, jump-to-bottom, find navigation, and follow-bottom updates cancel.
-- Bottom clamping preserves `FollowsBottomOfMostRecentBlock`.
-- Alternate-screen wheel input produces the same PTY bytes with the flag on and off.
-- Mouse-reporting and long-running-block `AltMouseAction` receive exactly one unchanged action per
-  source wheel event.
-- No animation frame is emitted to a PTY.
+Phase 2 terminal tests added in `app/src/terminal/view_tests.rs` (driving `TerminalView::scroll`
+and `TerminalView::advance_smooth_scroll` directly rather than through a full `BlockListElement`
+paint/dispatch cycle -- the frame-driving mechanism itself is structurally identical to Phase 1's
+already-tested `Manual`-axis pattern, so these focus on what's actually new: precise/flag
+branching and the cancellation guard):
+- `test_smooth_scroll_wheel_animates_and_settles_to_exact_target`: a non-precise notch defers
+  (doesn't apply synchronously), shows partial progress mid-flight, and lands exactly where an
+  immediate scroll of the same delta would have.
+- `test_smooth_scroll_precise_input_applies_immediately` / `..._disabled_flag_applies_immediately`:
+  precise input, and non-precise input with the flag off, both apply synchronously.
+- `test_smooth_scroll_direct_action_cancels_in_flight_animation`: a direct operation (`AfterHome`)
+  arriving mid-animation cancels it; advancing the animation afterward is a no-op.
+- `test_smooth_scroll_animation_settles_into_follows_bottom_of_most_recent_block`: a large
+  animated overshoot settles into sticky-bottom mode, not stuck at `FixedAtPosition` right at the
+  boundary (this is the test that found the `heights_approx_gte` fix above).
+
+Not covered by an automated test, and flagged rather than silently skipped: a live, real-content-
+streaming-mid-animation scenario (the reasoning for why this should already work -- increments are
+small and re-resolved against current state each frame -- is described above, but wasn't
+empirically exercised against genuinely arriving PTY output during an active animation). Recommend
+this get a pass during human/visual verification.
 
 Run focused tests while implementing:
 
@@ -443,8 +506,11 @@ On each platform, confirm:
 Implementation is sequential across phases:
 - **Phase 1:** Reuse this spec PR after approval. Own shared controller, frame driving, flag wiring,
   and generic WarpUI scrollables on `factory/smooth-scrolling-spec`.
-- **Phase 2:** Start after the Phase 1 controller contract is merged. Use a follow-up branch
-  `factory/smooth-scrolling-terminal` and a separate PR so terminal work cannot block Phase 1.
+- **Phase 2:** Started after the Phase 1 controller contract merged, per the audit above. Shipped
+  on branch `factory/smooth-scrolling-phase2`, stacked on `factory/smooth-scrolling-phase1` (not
+  `factory/smooth-scrolling-terminal`, and including this spec amendment as its first commit
+  rather than a separate spec PR, per the requester's explicit preference), as a separate PR so
+  terminal work does not block Phase 1.
 
 Within each phase, implementation and core unit-test edits touch the same state and should remain one
 workstream. After local validation passes, platform verification can fan out to independent remote
