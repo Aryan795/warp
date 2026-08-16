@@ -5,11 +5,15 @@ use warp_core::features::FeatureFlag;
 use warpui_core::{App, ModelHandle, ReadModel};
 
 use super::model::test_utils::{TEST_STYLES, init_logging};
-use super::model::{BlockItem, MAX_DEFERRED_LAYOUTS, RenderEvent, RenderState};
+use super::model::{
+    BlockItem, LineCount, MAX_DEFERRED_LAYOUTS, RenderEvent, RenderState, RenderedSelection,
+    RenderedSelectionSet, WidthSetting,
+};
 use crate::content::buffer::{
     AutoScrollBehavior, Buffer, BufferEditAction, BufferEvent, BufferSelectAction, EditOrigin,
     InitialBufferState, ShouldAutoscroll,
 };
+use crate::content::edit::TemporaryBlock;
 use crate::content::selection_model::BufferSelectionModel;
 use crate::content::text::{BlockType, BufferBlockItem, IndentBehavior, TextStyles};
 use crate::content::version::BufferVersion;
@@ -470,6 +474,69 @@ fn eagerly_laid_out_backlog_is_still_reported_as_flushed() {
     });
 }
 
+#[test]
+fn early_flush_releases_a_selection_held_for_the_flushed_version() {
+    init_logging();
+    App::test((), |mut app| async move {
+        let app = &mut app;
+        let state = TestState::new_lazy(app);
+
+        // Lay one edit out through the element first, so the model has a last-rendered version —
+        // that is what makes a newer selection park instead of applying straight away.
+        state.insert_char(app).await;
+        state.try_layout_pending_edits(app);
+        let selection = RenderedSelection::new(CharOffset::from(1), CharOffset::from(1));
+        state.update_selection(selection.clone(), BufferVersion::new(), app);
+        assert_eq!(state.selection(app), RenderedSelection::default());
+
+        // Take the backlog past its budget without ever laying the element out. The early flush
+        // advances the content tree, so it has to release the parked selection along with it.
+        for _ in 0..EDITS_OVER_DEFERRED_BUDGET {
+            state.insert_char(app).await;
+        }
+
+        assert_eq!(
+            state.selection(app),
+            selection,
+            "a selection parked for a version the early flush laid out must not stay parked"
+        );
+    });
+}
+
+#[test]
+fn early_flush_of_a_mixed_backlog_matches_draining_it_at_element_layout() {
+    init_logging();
+    App::test((), |mut app| async move {
+        let app = &mut app;
+        // Both states receive the same interleaved sequence of edits and temporary blocks. Only
+        // `element_drain` is laid out as it goes, so `early_flush` is the one whose backlog
+        // overruns its budget and gets laid out early.
+        let early_flush = TestState::new_lazy(app);
+        let element_drain = TestState::new_lazy(app);
+
+        for _ in 0..EDITS_OVER_DEFERRED_BUDGET {
+            early_flush.insert_char(app).await;
+            early_flush.add_temporary_block(app).await;
+            assert!(early_flush.deferred_layout_count(app) <= MAX_DEFERRED_LAYOUTS);
+
+            element_drain.insert_char(app).await;
+            element_drain.add_temporary_block(app).await;
+            element_drain.try_layout_pending_edits(app);
+        }
+
+        // Whatever each has left is drained, so this compares the two final trees rather than the
+        // point either happened to stop at.
+        early_flush.try_layout_pending_edits(app);
+        element_drain.try_layout_pending_edits(app);
+
+        assert_eq!(
+            early_flush.rendered(app),
+            element_drain.rendered(app),
+            "laying a mixed backlog out early must produce what draining it at element layout does"
+        );
+    });
+}
+
 /// Helper for testing edits end-to-end. This is essentially a stripped-down editor model.
 struct TestState {
     content: ModelHandle<Buffer>,
@@ -492,7 +559,16 @@ impl TestState {
     fn new_internal(app: &mut App, lazy_layout: bool) -> Self {
         let content = app.add_model(|_| Buffer::new(Box::new(|_, _| IndentBehavior::Ignore)));
         let selection = app.add_model(|_| BufferSelectionModel::new(content.clone()));
-        let render = app.add_model(|ctx| RenderState::new(TEST_STYLES, lazy_layout, None, ctx));
+        let render = app.add_model(|ctx| {
+            let render_state = RenderState::new(TEST_STYLES, lazy_layout, None, ctx);
+            if lazy_layout {
+                // `CodeEditorModel::new` builds every lazy editor this way, and laying deferred
+                // work out ahead of the element depends on it (see `RenderState::defer_layout`).
+                render_state.with_width_setting(WidthSetting::InfiniteWidth)
+            } else {
+                render_state
+            }
+        });
 
         let (layout_tx, layout_rx) = async_channel::unbounded();
         app.update(|ctx| {
@@ -582,6 +658,42 @@ impl TestState {
         .await
     }
 
+    /// Queue a temporary block — the other kind of deferred layout action — and wait for it to be
+    /// handled.
+    async fn add_temporary_block(&self, app: &mut App) {
+        self.render.update(app, |render_state, _| {
+            render_state.add_temporary_blocks(vec![TemporaryBlock {
+                content: "removed".to_string(),
+                insert_before: LineCount::zero(),
+                line_decoration: None,
+                inline_text_decorations: Vec::new(),
+            }]);
+        });
+        self.layout_updates
+            .recv()
+            .await
+            .expect("Layout channel should not be closed");
+    }
+
+    /// Queue a selection change for `buffer_version`, as `SelectionModel` does.
+    fn update_selection(
+        &self,
+        selection: RenderedSelection,
+        buffer_version: BufferVersion,
+        app: &mut App,
+    ) {
+        self.render.update(app, |render_state, _| {
+            render_state.update_selection(RenderedSelectionSet::new(selection), buffer_version);
+        });
+    }
+
+    /// The render state's first rendered selection.
+    fn selection(&self, ctx: &impl ReadModel) -> RenderedSelection {
+        self.render.read(ctx, |render_state, _| {
+            render_state.selections().first().clone()
+        })
+    }
+
     /// The number of layout actions the render model is still holding for its element.
     fn deferred_layout_count(&self, ctx: &impl ReadModel) -> usize {
         self.render
@@ -606,15 +718,20 @@ impl TestState {
         .await
     }
 
+    /// The render state's contents, as produced by describing its `SumTree` of `BlockItem`s.
+    fn rendered(&self, ctx: &impl ReadModel) -> String {
+        self.render.read(ctx, |render_state, _| {
+            let content = render_state.content();
+            let described_content = content.describe_content();
+            described_content.to_string()
+        })
+    }
+
     /// Assert that the render state has the expected contents, as produced by describing its
     /// `SumTree` of `BlockItem`s.
     #[track_caller]
     fn assert_rendered(&self, ctx: &impl ReadModel, expected: &str) {
-        let rendered = self.render.read(ctx, |render_state, _| {
-            let content = render_state.content();
-            let described_content = content.describe_content();
-            described_content.to_string()
-        });
+        let rendered = self.rendered(ctx);
         // TODO: Consider using https://github.com/rust-analyzer/expect-test.
         let rendered = rendered.trim();
         let expected = expected.trim();

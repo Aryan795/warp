@@ -3253,7 +3253,8 @@ impl RenderState {
                 } else if self.lazy_layout {
                     // If we are performing layout lazily, push the temporary
                     // blocks to the pending edits queue which is flushed at
-                    // editor element layout time.
+                    // editor element layout time, or earlier once the backlog
+                    // exceeds its budget (see `defer_layout`).
                     self.defer_layout(PendingLayout::TemporaryBlocks(blocks), ctx);
                 } else {
                     self.layout_temporary_blocks(blocks, ctx);
@@ -3284,15 +3285,23 @@ impl RenderState {
                     .map(|hl| hl.as_ref(ctx).hidden_ranges_at_version(buffer_version));
 
                 // If we are performing layout lazily, push the delta to the pending edits queue which is flushed
-                // at editor element layout time.
+                // at editor element layout time, or earlier once the backlog exceeds its budget
+                // (see `defer_layout`).
                 if self.lazy_layout {
-                    self.defer_layout(
+                    let flushed_early = self.defer_layout(
                         PendingLayout::Edit {
                             delta,
                             hidden_ranges,
                         },
                         ctx,
                     );
+                    if flushed_early {
+                        // The backlog was laid out here rather than at element layout time, so the
+                        // content tree has advanced to this version. Release any selection held
+                        // for it now, as the eager branch below does, instead of leaving it parked
+                        // against content it no longer matches.
+                        self.flush_pending_selection_update(Some(buffer_version));
+                    }
                 } else {
                     // If there were pending edits, we need to re-render so that RenderableBlocks
                     // are properly laid out with the new set of BlockItems.
@@ -3389,7 +3398,8 @@ impl RenderState {
         pending_edits_flushed
     }
 
-    /// Defer layout work until the editor element is next laid out.
+    /// Defer layout work until the editor element is next laid out, returning whether the backlog
+    /// was laid out here instead.
     ///
     /// The element's layout pass is the only thing that drains the backlog, so an editor whose
     /// element is not in the element tree at all — a collapsed agent diff block, an unselected
@@ -3398,12 +3408,12 @@ impl RenderState {
     /// is only bounded if we stop deferring at some point: once it exceeds the budget, lay the
     /// whole thing out now. That applies the same deltas in the same order, so the resulting
     /// content tree is identical; only the timing changes.
-    fn defer_layout(&mut self, layout: PendingLayout, app: &AppContext) {
+    fn defer_layout(&mut self, layout: PendingLayout, app: &AppContext) -> bool {
         let backlog = {
             let mut pending_edits = self.pending_edits.lock();
             pending_edits.push(layout);
-            if !pending_edits.over_budget() {
-                return;
+            if !pending_edits.over_budget() || !self.has_layout_width() {
+                return false;
             }
             pending_edits.flushed_early = true;
             pending_edits.drain()
@@ -3415,6 +3425,20 @@ impl RenderState {
         );
         self.layout_deferred(backlog, app);
         self.update_content_sizing();
+        true
+    }
+
+    /// Whether text laid out now would wrap the way the element's own layout pass will wrap it.
+    ///
+    /// [`WidthSetting::FitViewport`] wraps to the viewport width, which is only known once the
+    /// element has been laid out at least once — laying out before that wraps at zero. Every
+    /// `lazy_layout` editor is built with [`WidthSetting::InfiniteWidth`], which has no such
+    /// dependency, so this holds back only a configuration that does not exist today.
+    fn has_layout_width(&self) -> bool {
+        match self.width_setting {
+            WidthSetting::InfiniteWidth => true,
+            WidthSetting::FitViewport => self.viewport.width() > Pixels::zero(),
+        }
     }
 
     /// Lay out deferred actions in the order they were deferred.
@@ -4238,13 +4262,13 @@ pub enum AutoScrollMode {
     PositionOffsetInViewportCenter(CharOffset),
 }
 
-/// Upper bound on the number of layout actions [`RenderState::lazy_layout`] defers before
-/// laying the backlog out eagerly.
+/// A [`RenderState::lazy_layout`] backlog is laid out eagerly once it holds more than this many
+/// layout actions.
 pub(super) const MAX_DEFERRED_LAYOUTS: usize = 128;
 
-/// Upper bound, in characters of buffer content, on what the deferred layout actions may
-/// retain. A count bound alone is not enough, since a single whole-file edit can carry
-/// megabytes of text.
+/// A [`RenderState::lazy_layout`] backlog is laid out eagerly once it retains more than this many
+/// characters of buffer content. A count bound alone is not enough, since a single whole-file edit
+/// can carry megabytes of text.
 const MAX_DEFERRED_LAYOUT_CHARS: usize = 1 << 20;
 
 #[derive(Clone, Debug)]
@@ -4258,6 +4282,11 @@ enum PendingLayout {
 
 impl PendingLayout {
     /// The characters of buffer content this action holds on to while deferred.
+    ///
+    /// This measures text, not total retained bytes: `StyledBufferBlock::content_length` counts an
+    /// embedded item as one character whatever its payload, and a temporary block's inline
+    /// decorations are not counted at all. [`MAX_DEFERRED_LAYOUTS`] is what bounds a backlog whose
+    /// weight is in items rather than text.
     fn content_length(&self) -> usize {
         match self {
             Self::Edit { delta, .. } => delta
