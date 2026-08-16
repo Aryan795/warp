@@ -101,7 +101,7 @@ impl SharedSessionSettings {
     /// Whether the warning phase is enabled: it needs both a non-zero warning duration of
     /// its own, and a non-zero end duration -- a countdown to an end that will never come
     /// would be misleading, so disabling the end phase disables the warning too.
-    fn is_warning_phase_enabled(&self) -> bool {
+    pub fn is_warning_phase_enabled(&self) -> bool {
         !self.inactivity_period_before_warning.value().is_zero()
             && !self
                 .inactivity_period_before_ending_session
@@ -277,6 +277,19 @@ fn migrate_legacy_private_inactivity_settings(ctx: &mut AppContext) {
                 .read_value(key)
                 .unwrap_or_default()?;
             Some((key, value))
+        })
+        // Before this change, these settings were private with no UI to request "no
+        // timeout at all", so a legacy zero meant an immediate timer, not "disabled" --
+        // it was never a real user request for an uncapped session. Carrying it over
+        // as-is would silently and permanently disable that phase for a user who never
+        // asked for that. Leave the public key absent instead, so the non-zero default
+        // applies; a zero already present in the *public* location is unaffected by this
+        // filter (it's excluded above because the public key already has a value), since
+        // that one is a real, current choice made under the new semantics.
+        .filter(|(_, value)| {
+            serde_json::from_str::<Duration>(value)
+                .map(|duration| !duration.is_zero())
+                .unwrap_or(true)
         })
         .collect();
 

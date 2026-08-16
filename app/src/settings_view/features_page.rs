@@ -872,10 +872,18 @@ const SHARED_SESSION_INACTIVITY_OFF_TEXT: &str = "Off";
 const TAB_KEYSTROKE_STR: &str = "Tab";
 
 /// Parses user-entered text into a number of minutes, bounded so converting back to
-/// seconds can never overflow. Zero is valid and means "disable this phase". Returns
-/// `None` for anything else (empty, non-numeric, negative, or too large).
+/// seconds can never overflow. Zero is valid and means "disable this phase": both the
+/// digit "0" and the "Off" sentinel that [`shared_session_inactivity_display_text`]
+/// renders it as (matched case-insensitively) parse to it, so a field's own committed
+/// display text always reads back as valid rather than tripping the same field's
+/// validity check. Returns `None` for anything else (empty, non-numeric, negative, or
+/// too large).
 fn parse_shared_session_inactivity_minutes(text: &str) -> Option<u64> {
-    text.trim()
+    let trimmed = text.trim();
+    if trimmed.eq_ignore_ascii_case(SHARED_SESSION_INACTIVITY_OFF_TEXT) {
+        return Some(0);
+    }
+    trimmed
         .parse::<u64>()
         .ok()
         .filter(|&minutes| minutes <= SHARED_SESSION_INACTIVITY_MAX_MINUTES)
@@ -6082,12 +6090,7 @@ fn render_shared_session_inactivity_row(
         ..Default::default()
     };
 
-    let minutes_label_color = match toggle_state {
-        ToggleState::Enabled => theme.active_ui_text_color(),
-        ToggleState::Disabled => theme.disabled_ui_text_color(),
-    };
-
-    let control = Flex::row()
+    let mut control = Flex::row()
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
         .with_child(
             appearance
@@ -6096,21 +6099,25 @@ fn render_shared_session_inactivity_row(
                 .with_style(editor_style)
                 .build()
                 .finish(),
-        )
-        .with_child(
+        );
+    // "Off" already says everything the "minutes" unit would; pairing them as
+    // "Off minutes" reads as a mistake rather than a deliberately disabled phase.
+    if let ToggleState::Enabled = toggle_state {
+        control.add_child(
             Container::new(
                 Text::new_inline(
                     "minutes",
                     appearance.ui_font_family(),
                     appearance.ui_font_size(),
                 )
-                .with_color(minutes_label_color.into())
+                .with_color(theme.active_ui_text_color().into())
                 .finish(),
             )
             .with_margin_left(8.)
             .finish(),
-        )
-        .finish();
+        );
+    }
+    let control = control.finish();
 
     render_body_item::<FeaturesPageAction>(
         label.to_string(),

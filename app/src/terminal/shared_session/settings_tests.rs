@@ -173,6 +173,42 @@ fn migration_is_one_time_via_its_own_marker() {
     });
 }
 
+#[test]
+fn migration_does_not_treat_a_legacy_private_zero_as_the_new_off_sentinel() {
+    App::test((), |mut app| async move {
+        let _guard = FeatureFlag::SettingsFile.override_enabled(true);
+        app.update(init_test_app);
+
+        // Before this zero-disables-a-phase increment, these settings were private with no
+        // UI to request "no timeout at all" -- a legacy zero meant an immediate timer, not
+        // a deliberate request to disable it. Simulate a user who has exactly that stale
+        // value on disk.
+        app.update(|ctx| {
+            write_private(
+                ctx,
+                InactivityPeriodBeforeRevokingRoles::storage_key(),
+                Duration::ZERO,
+            );
+        });
+
+        app.update(|ctx| {
+            SharedSessionSettings::register_and_enforce_inactivity_ordering(ctx);
+        });
+
+        app.read(|ctx| {
+            assert_eq!(
+                *SharedSessionSettings::as_ref(ctx)
+                    .inactivity_period_before_revoking_roles
+                    .value(),
+                InactivityPeriodBeforeRevokingRoles::default_value(),
+                "a legacy private-store zero must not be carried over as the new Off \
+                 sentinel -- the user never asked to disable this phase, so the non-zero \
+                 default should apply instead"
+            );
+        });
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Ordering enforcement at the authoritative boundary (review finding 2)
 // ---------------------------------------------------------------------------
