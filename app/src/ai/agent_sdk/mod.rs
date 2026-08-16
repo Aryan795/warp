@@ -859,57 +859,30 @@ impl AgentDriverRunner {
             .await
     }
 
-    async fn bootstrap_git_credentials_for_task(
-        foreground: &ModelSpawner<Self>,
-        task_id_str: &str,
-        args: &RunAgentArgs,
+    /// Fetches server-minted git credentials for `task_id_str` via `ai_client`, then applies
+    /// the result. See [`Self::apply_fetched_git_credentials`] for the fetch-outcome handling.
+    async fn configure_task_git_credentials(
+        ai_client: Arc<dyn AIClient>,
+        task_id_str: String,
+        tolerate_fetch_failures: bool,
     ) -> Result<(), AgentDriverError> {
-        if warp_isolation_platform::detect().is_none() && args.configure_git_credentials_with_github
-        {
-            foreground
-                .spawn(|_, _| {
-                    command::blocking::Command::new("gh")
-                        .args(["auth", "setup-git"])
-                        .spawn()
-                        .map_err(|err| {
-                            AgentDriverError::ConfigBuildFailed(anyhow::anyhow!(
-                                "gh auth setup-git failed: {err:?}"
-                            ))
-                        })
-                })
-                .await?
-                .map(|_| ())?;
-            // Deliberately no early return: server-minted per-task credentials
-            // (e.g. GitLab Factory identities) still apply outside isolation
-            // platforms when a generic workload token is available. Hosts
-            // without one skip below via NoIsolationPlatformDetected.
-        }
+        let fetch_result = Self::fetch_task_git_credentials(task_id_str, ai_client).await;
+        Self::apply_fetched_git_credentials(fetch_result, tolerate_fetch_failures)
+    }
 
-        if !FeatureFlag::GitCredentialRefresh.is_enabled() {
-            return Ok(());
-        }
-
-        if task_id_str.parse::<AmbientAgentTaskId>().is_err() {
-            log::debug!(
-                "Skipping git credentials bootstrap: could not parse task ID '{task_id_str}'"
-            );
-            return Ok(());
-        }
-
-        let (ai_client, task_id_str) = foreground
-            .spawn({
-                let task_id_str = task_id_str.to_string();
-                move |_, ctx| {
-                    let ai_client = ServerApiProvider::handle(ctx)
-                        .as_ref(ctx)
-                        .get_ai_client()
-                        .clone();
-                    (ai_client, task_id_str)
-                }
-            })
-            .await?;
-
-        let credentials = match Self::fetch_task_git_credentials(task_id_str, ai_client).await {
+    /// Applies the outcome of a server-minted git credentials fetch: writes the credentials to
+    /// the local credential store, or decides how to handle a fetch failure.
+    ///
+    /// On a host with a detected isolation platform, a fetch failure other than
+    /// `NoIsolationPlatformDetected` is fatal, since the isolation platform is the only route to
+    /// git credentials there. When `tolerate_fetch_failures` is set, the same failure is instead
+    /// logged and swallowed: this covers hosts with no isolation platform where `gh` credentials
+    /// were already configured, so the run remains viable without the server-minted credentials.
+    fn apply_fetched_git_credentials(
+        fetch_result: anyhow::Result<Vec<GitCredential>>,
+        tolerate_fetch_failures: bool,
+    ) -> Result<(), AgentDriverError> {
+        let credentials = match fetch_result {
             Ok(credentials) => credentials,
             Err(err)
                 if err
@@ -919,6 +892,18 @@ impl AgentDriverRunner {
                     }) =>
             {
                 log::debug!("Skipping git credentials bootstrap: {err}");
+                return Ok(());
+            }
+            Err(err) if tolerate_fetch_failures => {
+                log::warn!(
+                    "Failed to fetch server-minted git credentials; continuing with the gh \
+                     credentials already configured: {err:#}"
+                );
+                tracing::warn!(
+                    error = ?err,
+                    "Failed to fetch server-minted git credentials on a non-isolation-platform \
+                     host with gh credentials already configured"
+                );
                 return Ok(());
             }
             Err(err) => {
@@ -949,6 +934,60 @@ impl AgentDriverRunner {
         })?;
         log::info!("Git credentials configured before task setup");
         Ok(())
+    }
+
+    async fn bootstrap_git_credentials_for_task(
+        foreground: &ModelSpawner<Self>,
+        task_id_str: &str,
+        args: &RunAgentArgs,
+    ) -> Result<(), AgentDriverError> {
+        // A host with no isolation platform may still carry a generic `WARP_WORKLOAD_TOKEN`
+        // (e.g. injected by oz-agent-worker), so server-minted per-task credentials (like
+        // GitLab Factory identities) can apply on top of the gh credentials configured below.
+        let gh_credentials_configured = warp_isolation_platform::detect().is_none()
+            && args.configure_git_credentials_with_github;
+        if gh_credentials_configured {
+            foreground
+                .spawn(|_, _| {
+                    command::blocking::Command::new("gh")
+                        .args(["auth", "setup-git"])
+                        .spawn()
+                        .map_err(|err| {
+                            AgentDriverError::ConfigBuildFailed(anyhow::anyhow!(
+                                "gh auth setup-git failed: {err:?}"
+                            ))
+                        })
+                })
+                .await?
+                .map(|_| ())?;
+        }
+
+        if !FeatureFlag::GitCredentialRefresh.is_enabled() {
+            return Ok(());
+        }
+
+        if task_id_str.parse::<AmbientAgentTaskId>().is_err() {
+            log::debug!(
+                "Skipping git credentials bootstrap: could not parse task ID '{task_id_str}'"
+            );
+            return Ok(());
+        }
+
+        let (ai_client, task_id_str) = foreground
+            .spawn({
+                let task_id_str = task_id_str.to_string();
+                move |_, ctx| {
+                    let ai_client = ServerApiProvider::handle(ctx)
+                        .as_ref(ctx)
+                        .get_ai_client()
+                        .clone();
+                    (ai_client, task_id_str)
+                }
+            })
+            .await?;
+
+        Self::configure_task_git_credentials(ai_client, task_id_str, gh_credentials_configured)
+            .await
     }
 
     /// Resolve the skill spec from args, if one was provided.

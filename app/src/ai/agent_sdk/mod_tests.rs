@@ -6,10 +6,11 @@ use warp_cli::artifact::{
 };
 use warp_cli::task::{MessageCommand, MessageSendArgs, MessageWatchArgs, TaskCommand};
 use warp_core::telemetry::TelemetryEvent;
+use warp_isolation_platform::IsolationPlatformError;
 
 use super::{
-    CommandAuthentication, command_authentication, command_requires_auth,
-    command_to_telemetry_event, reconcile_task_harness,
+    AgentDriverError, AgentDriverRunner, CommandAuthentication, command_authentication,
+    command_requires_auth, command_to_telemetry_event, reconcile_task_harness,
 };
 
 const TASK_ID: &str = "00000000-0000-0000-0000-000000000001";
@@ -215,4 +216,89 @@ fn run_message_watch_telemetry_defaults_to_unknown_harness() {
     )));
 
     assert_eq!(event.payload(), Some(json!({ "harness": "unknown" })));
+}
+
+// ── apply_fetched_git_credentials ───────────────────────────────────────────
+//
+// These cover `bootstrap_git_credentials_for_task`'s fetch-outcome handling, factored out into
+// `apply_fetched_git_credentials` specifically so it can be tested without depending on the
+// real, process-wide isolation-platform detection (`warp_isolation_platform::detect()` is
+// memoized for the life of the process and reflects the actual host, which in a cloud sandbox
+// can itself be an isolation platform). A missing workload token surfaces from the real fetch
+// path as `IsolationPlatformError::NoIsolationPlatformDetected`, which these tests construct
+// directly. All cases use an empty or erroring credential result, so
+// `driver::git_credentials::configure_git_credentials` (which mutates the real git config and
+// credential files) is never reached.
+
+fn workload_token_missing_error() -> anyhow::Error {
+    IsolationPlatformError::NoIsolationPlatformDetected.into()
+}
+
+#[test]
+fn missing_workload_token_skips_on_the_isolation_platform_path() {
+    let result = AgentDriverRunner::apply_fetched_git_credentials(
+        Err(workload_token_missing_error()),
+        false,
+    );
+
+    assert!(
+        result.is_ok(),
+        "a missing workload token must be skipped gracefully, not treated as a failure"
+    );
+}
+
+#[test]
+fn missing_workload_token_skips_on_the_gh_configured_path() {
+    let result =
+        AgentDriverRunner::apply_fetched_git_credentials(Err(workload_token_missing_error()), true);
+
+    assert!(
+        result.is_ok(),
+        "a missing workload token must be skipped gracefully on the gh-configured path too"
+    );
+}
+
+#[test]
+fn empty_credential_response_is_a_no_op_success() {
+    // Represents a successful fetch (e.g. via the env-token fallback) that simply had no
+    // credentials to apply.
+    let result = AgentDriverRunner::apply_fetched_git_credentials(Ok(Vec::new()), false);
+
+    assert!(
+        result.is_ok(),
+        "an empty credential response from the server should be a no-op success"
+    );
+}
+
+#[test]
+fn gh_configured_host_tolerates_a_credentials_fetch_failure() {
+    // The regression this covers: before this change, a non-isolation-platform host with gh
+    // credentials already configured never attempted this fetch. Now that it does, a fetch
+    // failure here must not fail a run that is otherwise viable on the gh credentials alone.
+    let result = AgentDriverRunner::apply_fetched_git_credentials(
+        Err(anyhow::anyhow!("server rejected workload token")),
+        true,
+    );
+
+    assert!(
+        result.is_ok(),
+        "a fetch failure must be tolerated when gh credentials are already configured"
+    );
+}
+
+#[test]
+fn isolation_platform_host_still_fails_hard_on_a_credentials_fetch_failure() {
+    // The isolation-platform path has no gh fallback, so a fetch failure there must remain
+    // fatal; this guards against the task-1 leniency accidentally widening to that path.
+    let result = AgentDriverRunner::apply_fetched_git_credentials(
+        Err(anyhow::anyhow!("server rejected workload token")),
+        false,
+    );
+
+    match result {
+        Err(AgentDriverError::SkillResolutionFailed(message)) => {
+            assert!(message.contains("server rejected workload token"));
+        }
+        other => panic!("expected a fatal SkillResolutionFailed error, got {other:?}"),
+    }
 }
