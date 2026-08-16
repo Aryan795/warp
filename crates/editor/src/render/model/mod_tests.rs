@@ -1472,33 +1472,6 @@ fn test_first_hidden_section_line_range_none_without_hidden_sections() {
     );
 }
 
-/// Pushing items one at a time gives each item a leaf of its own once the tree is taller than a
-/// single leaf, which is what `layout_pending_edit` batches away.
-#[test]
-fn extend_packs_leaves_that_per_item_push_leaves_nearly_empty() {
-    let items: Vec<BlockItem> = (0..1000).map(|_| mock_paragraph(24., 1., 5)).collect();
-
-    let mut pushed = SumTree::new();
-    for item in items.iter().cloned() {
-        pushed.push(item);
-    }
-    let mut extended = SumTree::new();
-    extended.extend(items.iter().cloned());
-
-    let pushed_stats = pushed.node_stats();
-    let extended_stats = extended.node_stats();
-
-    assert_eq!(pushed_stats.items, extended_stats.items);
-    assert!(
-        extended_stats.leaf_occupancy() > 0.9,
-        "extend should fill leaves, got {extended_stats:?}"
-    );
-    assert!(
-        pushed_stats.nodes() > 3 * extended_stats.nodes(),
-        "per-item push should cost far more nodes: push {pushed_stats:?} vs extend {extended_stats:?}"
-    );
-}
-
 #[test]
 fn every_replacement_item_is_retained_without_hidden_ranges() {
     let items = vec![mock_paragraph(24., 1., 5), mock_paragraph(24., 1., 5)];

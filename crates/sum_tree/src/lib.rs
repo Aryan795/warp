@@ -151,6 +151,13 @@ impl<T: Item> SumTree<T> {
         }
     }
 
+    /// Append a single item to the end of the tree.
+    ///
+    /// This does **not** fill the rightmost leaf. The item is wrapped in a node of its own, so
+    /// once the tree is taller than a single leaf, `push_tree_recursive` adopts that node's
+    /// one-item leaf as a new child rather than merging the item into the leaf before it — and a
+    /// leaf allocation costs the same however few items it holds. Pushing `n` items one at a time
+    /// therefore costs roughly `n` leaves. Use [`SumTree::extend`] to append in bulk.
     pub fn push(&mut self, item: T) {
         let summary = item.summary();
         self.push_tree(SumTree::from_child_trees(vec![SumTree(Arc::new(
