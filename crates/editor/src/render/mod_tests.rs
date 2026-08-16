@@ -5,7 +5,7 @@ use warp_core::features::FeatureFlag;
 use warpui_core::{App, ModelHandle, ReadModel};
 
 use super::model::test_utils::{TEST_STYLES, init_logging};
-use super::model::{BlockItem, RenderEvent, RenderState};
+use super::model::{BlockItem, MAX_DEFERRED_LAYOUTS, RenderEvent, RenderState};
 use crate::content::buffer::{
     AutoScrollBehavior, Buffer, BufferEditAction, BufferEvent, BufferSelectAction, EditOrigin,
     InitialBufferState, ShouldAutoscroll,
@@ -398,6 +398,78 @@ Trailing Newline (1 characters, 1 lines, 24.00px tall)
     });
 }
 
+/// One more edit than `lazy_layout` is willing to defer.
+const EDITS_OVER_DEFERRED_BUDGET: usize = MAX_DEFERRED_LAYOUTS + 1;
+
+#[test]
+fn lazy_layout_defers_edits_up_to_its_budget() {
+    init_logging();
+    App::test((), |mut app| async move {
+        let app = &mut app;
+        let state = TestState::new_lazy(app);
+
+        for _ in 0..MAX_DEFERRED_LAYOUTS {
+            state.insert_char(app).await;
+        }
+
+        assert_eq!(state.deferred_layout_count(app), MAX_DEFERRED_LAYOUTS);
+        // Nothing has been laid out yet, so the content is still the initial trailing newline.
+        state.assert_rendered(
+            app,
+            r#"
+-------- 0.00px / 0 characters --------
+Trailing Newline (1 characters, 1 lines, 24.00px tall)
+"#,
+        );
+    });
+}
+
+#[test]
+fn lazy_layout_stops_deferring_once_the_backlog_exceeds_its_budget() {
+    init_logging();
+    App::test((), |mut app| async move {
+        let app = &mut app;
+        let state = TestState::new_lazy(app);
+
+        // The element is never laid out, so nothing here drains the backlog the way
+        // `try_layout_pending_edits` would.
+        for _ in 0..EDITS_OVER_DEFERRED_BUDGET {
+            state.insert_char(app).await;
+        }
+
+        assert_eq!(
+            state.deferred_layout_count(app),
+            0,
+            "an editor whose element never lays out must not hold its edits forever"
+        );
+        // Laying the backlog out early must produce the same content the eager path would.
+        state.assert_rendered(
+            app,
+            r#"
+-------- 0.00px / 0 characters --------
+Paragraph (130 characters, 1 lines, 24.00px tall)
+"#,
+        );
+    });
+}
+
+#[test]
+fn eagerly_laid_out_backlog_is_still_reported_as_flushed() {
+    init_logging();
+    App::test((), |mut app| async move {
+        let app = &mut app;
+        let state = TestState::new_lazy(app);
+        for _ in 0..EDITS_OVER_DEFERRED_BUDGET {
+            state.insert_char(app).await;
+        }
+
+        // `RenderEvent::PendingEditsFlushed` is what marks lazy layout as initialized, so the
+        // element's next layout pass must still see the flush even with nothing left queued.
+        assert!(state.try_layout_pending_edits(app));
+        assert!(!state.try_layout_pending_edits(app));
+    });
+}
+
 /// Helper for testing edits end-to-end. This is essentially a stripped-down editor model.
 struct TestState {
     content: ModelHandle<Buffer>,
@@ -408,9 +480,19 @@ struct TestState {
 
 impl TestState {
     fn new(app: &mut App) -> Self {
+        Self::new_internal(app, false)
+    }
+
+    /// A state whose render model defers layout until its element is laid out, as the code
+    /// review and agent-diff editors do.
+    fn new_lazy(app: &mut App) -> Self {
+        Self::new_internal(app, true)
+    }
+
+    fn new_internal(app: &mut App, lazy_layout: bool) -> Self {
         let content = app.add_model(|_| Buffer::new(Box::new(|_, _| IndentBehavior::Ignore)));
         let selection = app.add_model(|_| BufferSelectionModel::new(content.clone()));
-        let render = app.add_model(|ctx| RenderState::new(TEST_STYLES, false, None, ctx));
+        let render = app.add_model(|ctx| RenderState::new(TEST_STYLES, lazy_layout, None, ctx));
 
         let (layout_tx, layout_rx) = async_channel::unbounded();
         app.update(|ctx| {
@@ -484,6 +566,33 @@ impl TestState {
             .recv()
             .await
             .expect("Layout channel should not be closed");
+    }
+
+    /// Insert a single character and wait for its layout action to be handled.
+    async fn insert_char(&self, app: &mut App) {
+        self.edit(
+            BufferEditAction::Insert {
+                text: "x",
+                style: Default::default(),
+                override_text_style: None,
+            },
+            EditOrigin::UserTyped,
+            app,
+        )
+        .await
+    }
+
+    /// The number of layout actions the render model is still holding for its element.
+    fn deferred_layout_count(&self, ctx: &impl ReadModel) -> usize {
+        self.render
+            .read(ctx, |render_state, _| render_state.deferred_layout_count())
+    }
+
+    /// Stand in for the editor element's layout pass, which is what drains deferred layouts.
+    fn try_layout_pending_edits(&self, ctx: &impl ReadModel) -> bool {
+        self.render.read(ctx, |render_state, app| {
+            render_state.try_layout_pending_edits(app)
+        })
     }
 
     /// Replace the buffer with the given Markdown.

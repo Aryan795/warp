@@ -1113,7 +1113,7 @@ pub struct RenderState {
     /// Whether we are performing a lazy layout.
     lazy_layout: bool,
 
-    pending_edits: Mutex<Vec<PendingLayout>>,
+    pending_edits: Mutex<PendingLayouts>,
     pending_selection_change: Mutex<Option<PendingSelectionUpdate>>,
     layout_options: RenderLayoutOptions,
 
@@ -2523,7 +2523,7 @@ impl RenderState {
             saved_positions: SavedPositions::new(entity_id),
             buffer_version: RefCell::new(Default::default()),
             lazy_layout: false,
-            pending_edits: Mutex::new(Vec::new()),
+            pending_edits: Default::default(),
             #[cfg(any(test, feature = "test-util"))]
             outstanding_layouts: Default::default(),
             pending_selection_change: Mutex::new(None),
@@ -2586,7 +2586,7 @@ impl RenderState {
             saved_positions: SavedPositions::new(entity_id),
             buffer_version: RefCell::new(Default::default()),
             lazy_layout,
-            pending_edits: Mutex::new(Vec::new()),
+            pending_edits: Default::default(),
             #[cfg(any(test, feature = "test-util"))]
             outstanding_layouts: Default::default(),
             pending_selection_change: Mutex::new(None),
@@ -3254,9 +3254,7 @@ impl RenderState {
                     // If we are performing layout lazily, push the temporary
                     // blocks to the pending edits queue which is flushed at
                     // editor element layout time.
-                    self.pending_edits
-                        .lock()
-                        .push(PendingLayout::TemporaryBlocks(blocks));
+                    self.defer_layout(PendingLayout::TemporaryBlocks(blocks), ctx);
                 } else {
                     self.layout_temporary_blocks(blocks, ctx);
                     self.update_content_sizing();
@@ -3288,10 +3286,13 @@ impl RenderState {
                 // If we are performing layout lazily, push the delta to the pending edits queue which is flushed
                 // at editor element layout time.
                 if self.lazy_layout {
-                    self.pending_edits.lock().push(PendingLayout::Edit {
-                        delta,
-                        hidden_ranges,
-                    });
+                    self.defer_layout(
+                        PendingLayout::Edit {
+                            delta,
+                            hidden_ranges,
+                        },
+                        ctx,
+                    );
                 } else {
                     // If there were pending edits, we need to re-render so that RenderableBlocks
                     // are properly laid out with the new set of BlockItems.
@@ -3373,27 +3374,70 @@ impl RenderState {
     pub fn try_layout_pending_edits(&self, app: &AppContext) -> bool {
         let mut pending_edits = self.pending_edits.lock();
         let last_rendered_version = self.buffer_version.borrow_mut().start_layout();
-        let pending_edits_flushed = self.lazy_layout && !pending_edits.is_empty();
+        let flushed_early = mem::take(&mut pending_edits.flushed_early);
+        let pending_edits_flushed =
+            self.lazy_layout && (flushed_early || !pending_edits.layouts.is_empty());
 
         if pending_edits_flushed {
-            for edit in mem::take(&mut *pending_edits) {
-                match edit {
-                    PendingLayout::Edit {
-                        delta,
-                        hidden_ranges,
-                    } => {
-                        self.layout_edit_delta(delta, hidden_ranges, app);
-                    }
-                    PendingLayout::TemporaryBlocks(blocks) => {
-                        self.layout_temporary_blocks(blocks, app);
-                    }
-                };
-            }
+            let backlog = pending_edits.drain();
+            drop(pending_edits);
+            self.layout_deferred(backlog, app);
         }
 
         // Flush the pending selection changes.
         self.flush_pending_selection_update(last_rendered_version);
         pending_edits_flushed
+    }
+
+    /// Defer layout work until the editor element is next laid out.
+    ///
+    /// The element's layout pass is the only thing that drains the backlog, so an editor whose
+    /// element is not in the element tree at all — a collapsed agent diff block, an unselected
+    /// file tab, a code review file scrolled out of view — never drains it while its buffer keeps
+    /// being edited. Each deferred action holds the text of every line it changed, so the backlog
+    /// is only bounded if we stop deferring at some point: once it exceeds the budget, lay the
+    /// whole thing out now. That applies the same deltas in the same order, so the resulting
+    /// content tree is identical; only the timing changes.
+    fn defer_layout(&mut self, layout: PendingLayout, app: &AppContext) {
+        let backlog = {
+            let mut pending_edits = self.pending_edits.lock();
+            pending_edits.push(layout);
+            if !pending_edits.over_budget() {
+                return;
+            }
+            pending_edits.flushed_early = true;
+            pending_edits.drain()
+        };
+
+        log::debug!(
+            "Deferred layout budget exceeded; laying out {} deferred actions",
+            backlog.len()
+        );
+        self.layout_deferred(backlog, app);
+        self.update_content_sizing();
+    }
+
+    /// Lay out deferred actions in the order they were deferred.
+    fn layout_deferred(&self, backlog: Vec<PendingLayout>, app: &AppContext) {
+        for layout in backlog {
+            match layout {
+                PendingLayout::Edit {
+                    delta,
+                    hidden_ranges,
+                } => {
+                    self.layout_edit_delta(delta, hidden_ranges, app);
+                }
+                PendingLayout::TemporaryBlocks(blocks) => {
+                    self.layout_temporary_blocks(blocks, app);
+                }
+            }
+        }
+    }
+
+    /// The number of layout actions currently deferred by `lazy_layout`.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn deferred_layout_count(&self) -> usize {
+        self.pending_edits.lock().layouts.len()
     }
 
     /// Updates the model with the results of laying out its element.
@@ -4194,6 +4238,15 @@ pub enum AutoScrollMode {
     PositionOffsetInViewportCenter(CharOffset),
 }
 
+/// Upper bound on the number of layout actions [`RenderState::lazy_layout`] defers before
+/// laying the backlog out eagerly.
+pub(super) const MAX_DEFERRED_LAYOUTS: usize = 128;
+
+/// Upper bound, in characters of buffer content, on what the deferred layout actions may
+/// retain. A count bound alone is not enough, since a single whole-file edit can carry
+/// megabytes of text.
+const MAX_DEFERRED_LAYOUT_CHARS: usize = 1 << 20;
+
 #[derive(Clone, Debug)]
 enum PendingLayout {
     Edit {
@@ -4201,6 +4254,52 @@ enum PendingLayout {
         hidden_ranges: Option<RangeSet<CharOffset>>,
     },
     TemporaryBlocks(Vec<TemporaryBlock>),
+}
+
+impl PendingLayout {
+    /// The characters of buffer content this action holds on to while deferred.
+    fn content_length(&self) -> usize {
+        match self {
+            Self::Edit { delta, .. } => delta
+                .new_lines
+                .iter()
+                .map(|block| block.content_length().as_usize())
+                .sum(),
+            Self::TemporaryBlocks(blocks) => blocks
+                .iter()
+                .map(|block| block.content.chars().count())
+                .sum(),
+        }
+    }
+}
+
+/// Layout work that [`RenderState::lazy_layout`] defers until the editor element is next laid
+/// out, plus the bookkeeping that bounds how much text the backlog may retain.
+#[derive(Debug, Default)]
+struct PendingLayouts {
+    layouts: Vec<PendingLayout>,
+    /// Characters of buffer content retained by `layouts`.
+    chars: usize,
+    /// Whether the backlog was laid out since the element last drained it. The element still
+    /// reports that flush, so listeners of [`RenderEvent::PendingEditsFlushed`] see it.
+    flushed_early: bool,
+}
+
+impl PendingLayouts {
+    fn push(&mut self, layout: PendingLayout) {
+        self.chars += layout.content_length();
+        self.layouts.push(layout);
+    }
+
+    /// Whether the backlog retains more than we are willing to defer.
+    fn over_budget(&self) -> bool {
+        self.layouts.len() > MAX_DEFERRED_LAYOUTS || self.chars > MAX_DEFERRED_LAYOUT_CHARS
+    }
+
+    fn drain(&mut self) -> Vec<PendingLayout> {
+        self.chars = 0;
+        mem::take(&mut self.layouts)
+    }
 }
 
 struct PendingSelectionUpdate {
