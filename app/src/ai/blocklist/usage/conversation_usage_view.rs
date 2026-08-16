@@ -9,7 +9,7 @@ use warp_core::ui::theme::color::internal_colors;
 use warpui::elements::{
     Border, ChildAnchor, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, DropShadow,
     Empty, Flex, Hoverable, MainAxisSize, MouseStateHandle, OffsetPositioning, ParentAnchor,
-    ParentElement, ParentOffsetBounds, Radius, Stack, Text,
+    ParentElement, ParentOffsetBounds, Radius, SavePosition, Stack, Text,
 };
 use warpui::fonts::{Properties, Weight};
 use warpui::platform::Cursor;
@@ -530,6 +530,7 @@ impl ConversationUsageView {
                         "Hide breakdown",
                         "View breakdown",
                         ConversationUsageViewAction::ToggleContextWindowExpanded,
+                        CONTEXT_WINDOW_TOGGLE_POSITION_ID,
                         appearance,
                     ));
         }
@@ -746,6 +747,7 @@ impl ConversationUsageView {
             "Hide details",
             "View details",
             ConversationUsageViewAction::ToggleCreditsDetailsExpanded,
+            CREDITS_DETAILS_TOGGLE_POSITION_ID,
             appearance,
         );
         Flex::row()
@@ -780,6 +782,7 @@ impl ConversationUsageView {
             "Hide details",
             "View details",
             ConversationUsageViewAction::ToggleDiffsDetailsExpanded,
+            DIFFS_DETAILS_TOGGLE_POSITION_ID,
             appearance,
         );
         Flex::row()
@@ -1199,12 +1202,17 @@ fn render_value_text(text: String, appearance: &Appearance) -> Box<dyn Element> 
 }
 
 /// Renders a hyperlink-styled expand/collapse toggle with a chevron.
+///
+/// Wrapped in a [`SavePosition`] under a stable `position_id` so integration
+/// tests can drive the toggle via `with_click_on_saved_position` without
+/// depending on layout-sensitive pixel coordinates.
 fn render_toggle_link(
     mouse_state: MouseStateHandle,
     expanded: bool,
     expanded_label: &'static str,
     collapsed_label: &'static str,
     action: ConversationUsageViewAction,
+    position_id: &str,
     appearance: &Appearance,
 ) -> Box<dyn Element> {
     let theme = appearance.theme();
@@ -1216,29 +1224,42 @@ fn render_toggle_link(
     } else {
         (collapsed_label, Icon::ChevronDown)
     };
-    Hoverable::new(mouse_state, move |_hover_state| {
-        let text_element = Text::new(label.to_string(), appearance.ui_font_family(), font_size)
-            .with_color(link_color)
-            .with_selectable(false)
-            .finish();
-        let icon_element = ConstrainedBox::new(icon.to_warpui_icon(link_color.into()).finish())
-            .with_width(icon_size)
-            .with_height(icon_size)
-            .finish();
-        Flex::row()
-            .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_main_axis_size(MainAxisSize::Min)
-            .with_spacing(4.)
-            .with_child(text_element)
-            .with_child(icon_element)
-            .finish()
-    })
-    .with_cursor(Cursor::PointingHand)
-    .on_click(move |ctx, _, _| {
-        ctx.dispatch_typed_action(action.clone());
-    })
+    SavePosition::new(
+        Hoverable::new(mouse_state, move |_hover_state| {
+            let text_element = Text::new(label.to_string(), appearance.ui_font_family(), font_size)
+                .with_color(link_color)
+                .with_selectable(false)
+                .finish();
+            let icon_element = ConstrainedBox::new(icon.to_warpui_icon(link_color.into()).finish())
+                .with_width(icon_size)
+                .with_height(icon_size)
+                .finish();
+            Flex::row()
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_main_axis_size(MainAxisSize::Min)
+                .with_spacing(4.)
+                .with_child(text_element)
+                .with_child(icon_element)
+                .finish()
+        })
+        .with_cursor(Cursor::PointingHand)
+        .on_click(move |ctx, _, _| {
+            ctx.dispatch_typed_action(action.clone());
+        })
+        .finish(),
+        position_id,
+    )
     .finish()
 }
+
+/// Position ids for the usage-footer expand/collapse toggles, so integration
+/// tests can drive them via `with_click_on_saved_position` instead of pixel
+/// coordinates. Only one usage footer is open at a time in practice (opening
+/// a new AI block's footer, or a new exchange, closes any other open one),
+/// so these do not need to be parameterized per conversation.
+const CREDITS_DETAILS_TOGGLE_POSITION_ID: &str = "usage_footer:credits_details_toggle";
+const DIFFS_DETAILS_TOGGLE_POSITION_ID: &str = "usage_footer:diffs_details_toggle";
+const CONTEXT_WINDOW_TOGGLE_POSITION_ID: &str = "usage_footer:context_window_toggle";
 
 /// Computes the per-segment display rows for the context-window breakdown.
 /// Each row's percentage is derived as
