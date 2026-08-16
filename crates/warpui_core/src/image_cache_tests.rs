@@ -32,6 +32,27 @@ impl AssetProvider for Assets {
     }
 }
 
+/// Builds raw, real GIF bytes for a synthetic animation with `frame_count` solid-color frames
+/// of the given dimensions and per-frame delay, for exercising animated-frame decoding without
+/// depending on a bundled test asset.
+fn make_animated_gif_bytes(frame_count: usize, width: u32, height: u32, delay_ms: u32) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = image::codecs::gif::GifEncoder::new(&mut bytes);
+        for i in 0..frame_count {
+            let mut buffer = image::RgbaImage::new(width, height);
+            let color = image::Rgba([(i % 256) as u8, 0, 0, 255]);
+            for pixel in buffer.pixels_mut() {
+                *pixel = color;
+            }
+            let delay = image::Delay::from_numer_denom_ms(delay_ms, 1);
+            let frame = Frame::from_parts(buffer, 0, 0, delay);
+            encoder.encode_frame(frame).expect("encode synthetic frame");
+        }
+    }
+    bytes
+}
+
 fn new_asset_cache() -> AssetCache {
     AssetCache::new(
         Box::new(Assets),
@@ -284,6 +305,66 @@ fn test_respects_max_dimensions_for_cacheoption_original() {
     };
     // Assert that, when we specify a max dimension of 512, the image is resized accordingly.
     assert_eq!(image.img.dimensions(), (512, 512));
+}
+
+#[test]
+fn test_animated_gif_within_budget_keeps_all_frames_and_duration() {
+    let gif_bytes = make_animated_gif_bytes(3, 4, 4, 100);
+
+    let image_type = ImageType::try_from_bytes(&gif_bytes).expect("synthetic gif should decode");
+    let ImageType::AnimatedBitmap { image } = image_type else {
+        panic!("Expected an animated bitmap");
+    };
+
+    assert_eq!(image.frames.len(), 3);
+    // MIN_REFRESH_DELAY_MS (50) is below our 100ms per-frame delay, so it doesn't kick in.
+    assert_eq!(image.duration, 300);
+}
+
+#[test]
+fn test_collect_bounded_animated_frames_truncates_on_byte_budget() {
+    // Each 4x4 RGBA frame decodes to 4 * 4 * 4 = 64 bytes.
+    let gif_bytes = make_animated_gif_bytes(10, 4, 4, 100);
+    let decoder = GifDecoder::new(std::io::Cursor::new(gif_bytes.as_slice()))
+        .expect("synthetic gif should decode");
+
+    // A budget of 200 bytes fits 3 frames (192 bytes) but not a 4th (256 bytes), so decoding
+    // should stop well short of materializing all 10 frames.
+    let frames = collect_bounded_animated_frames_with_limits(decoder.into_frames(), 1000, 200)
+        .expect("truncation should not surface as an error");
+    assert_eq!(frames.len(), 3);
+
+    let animated = AnimatedImage::from(frames);
+    assert_eq!(
+        animated.duration, 300,
+        "retained duration should reflect only the retained frames, not the original 10"
+    );
+}
+
+#[test]
+fn test_collect_bounded_animated_frames_always_keeps_first_frame_over_budget() {
+    let gif_bytes = make_animated_gif_bytes(5, 4, 4, 100);
+    let decoder = GifDecoder::new(std::io::Cursor::new(gif_bytes.as_slice()))
+        .expect("synthetic gif should decode");
+
+    // A budget smaller than a single frame (64 bytes) must still retain that first frame so
+    // the image has something to render.
+    let frames = collect_bounded_animated_frames_with_limits(decoder.into_frames(), 1000, 10)
+        .expect("an over-budget first frame should still be kept, not error");
+
+    assert_eq!(frames.len(), 1);
+}
+
+#[test]
+fn test_collect_bounded_animated_frames_truncates_on_frame_count() {
+    let gif_bytes = make_animated_gif_bytes(5, 4, 4, 100);
+    let decoder = GifDecoder::new(std::io::Cursor::new(gif_bytes.as_slice()))
+        .expect("synthetic gif should decode");
+
+    let frames = collect_bounded_animated_frames_with_limits(decoder.into_frames(), 2, usize::MAX)
+        .expect("frame count cap should truncate rather than error");
+
+    assert_eq!(frames.len(), 2);
 }
 
 #[test]
