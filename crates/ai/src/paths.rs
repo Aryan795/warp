@@ -101,27 +101,26 @@ pub fn join_paths(paths: &[&str], shell: Option<&ShellLaunchData>) -> String {
         .into_owned()
 }
 
-/// Reverses a *host-native* path back into the shell's native (Unix) form, for shells whose
-/// paths are always Unix-style.
-///
-/// Actions like `read_files` execute via [`host_native_absolute_path`], which converts a
-/// WSL/MSYS2 shell path into a Windows-native path so the host filesystem can actually open it
-/// (e.g. a `\\wsl$\<distro>\...` UNC path, or a Git-Bash-style drive path). That host-native
-/// string is what ends up stored in the action result and later displayed. Rendering it verbatim
-/// shows Windows-style backslashes even though the session itself is Unix-style — and does so
-/// independent of whoever renders it, since for a shared session viewed on the web, the renderer
-/// isn't even the session's host. This reverses that conversion so display always matches what
-/// the shell itself would show. A path that's already shell-native (the common case, e.g. fresh
-/// out of a shell command, or a WSL/MSYS2 path that was never host-converted) passes through
-/// unchanged.
-fn to_shell_native_display_path<'a>(
+// Persisted `read_files` results can carry the host's native path encoding (see
+// `host_native_absolute_path`); this normalizes such a path back to the shell's native form for
+// display. Only used where a stored `FileContext.file_name` is being rendered — never on the
+// path-for-execution path, since shape isn't provenance and a legitimate Unix filename can look
+// Windows-shaped.
+pub(crate) fn to_shell_native_display_path<'a>(
     path: &'a str,
     shell: Option<&ShellLaunchData>,
 ) -> Cow<'a, str> {
     match shell {
-        Some(ShellLaunchData::WSL { .. }) => {
+        Some(ShellLaunchData::WSL { distro }) => {
             if let Some(unc) = parse_wsl_unc_path(Path::new(path)) {
-                return Cow::Owned(unc.linux_path);
+                if unc.distro.eq_ignore_ascii_case(distro) {
+                    return Cow::Owned(unc.linux_path);
+                }
+                // A UNC path naming a different distro isn't a path within this session. Keep it
+                // explicit (the `WSL$`/distro segments make it unmistakably not a real local
+                // path) rather than rendering it as if it were local: swap in forward slashes so
+                // it stays absolute and isn't joined onto the cwd like a relative path.
+                return Cow::Owned(path.replace('\\', "/"));
             }
             if detect_path_style(path) == Some(PathStyle::Windows) {
                 return Cow::Owned(convert_windows_path_to_wsl(path));
@@ -174,11 +173,10 @@ pub fn shell_native_absolute_path(
     shell: Option<&ShellLaunchData>,
     current_working_directory: Option<&String>,
 ) -> String {
-    let file_path = to_shell_native_display_path(file_path, shell);
     let Some(cwd) = current_working_directory else {
-        return shellexpand::tilde(&file_path).into_owned();
+        return shellexpand::tilde(file_path).into_owned();
     };
-    shell_native_absolute_path_internal(&file_path, shell, cwd)
+    shell_native_absolute_path_internal(file_path, shell, cwd)
         .to_string_lossy()
         .into_owned()
 }
