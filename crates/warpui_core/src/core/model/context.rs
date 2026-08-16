@@ -485,6 +485,7 @@ impl<'a, T: Entity> ModelContext<'a, T> {
     ///
     /// Note that the spawner *does not* keep a strong reference to the model. If the model is
     /// dropped, any pending or future tasks will be discarded.
+    #[track_caller]
     pub fn spawner(&mut self) -> ModelSpawner<T> {
         let (task_tx, task_rx) = async_channel::unbounded();
         let (completion_tx, _completion_rx) = futures::channel::oneshot::channel();
@@ -511,6 +512,7 @@ impl<'a, T: Entity> ModelContext<'a, T> {
         }
     }
 
+    #[track_caller]
     pub fn spawn_stream_local<S, F, G>(
         &mut self,
         stream: S,

@@ -650,6 +650,7 @@ impl<'a, T: Entity> ViewContext<'a, T> {
     /// The callbacks receive mutable references to the spawning view and its
     /// context, allowing for updating of the view's internal state and dirtying
     /// it (via [`Self::notify`]) if appropriate.
+    #[track_caller]
     pub fn spawn_stream_local<S, F, G>(
         &mut self,
         stream: S,
@@ -779,6 +780,7 @@ impl<'a, T: Entity> ViewContext<'a, T> {
     ///
     /// Note that the spawner *does not* keep a strong reference to the view. If the view is
     /// dropped, any pending or future tasks will be discarded.
+    #[track_caller]
     pub fn spawner(&mut self) -> ViewSpawner<T> {
         let (task_tx, task_rx) = async_channel::unbounded();
         let (completion_tx, _completion_rx) = futures::channel::oneshot::channel();
