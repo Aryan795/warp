@@ -3705,12 +3705,12 @@ impl FeaturesPageView {
             shared_session_inactivity_minutes(*settings.inactivity_period_before_ending_session);
         let clamped = clamp_shared_session_revoke_minutes(minutes, warning_minutes, end_minutes);
 
-        if clamped != minutes {
-            self.shared_session_revoke_edit_access_editor
-                .update(ctx, |editor, ctx| {
-                    editor.set_buffer_text(&shared_session_inactivity_display_text(clamped), ctx);
-                });
-        }
+        // Always re-render the committed value, not just when clamping changed it: a
+        // literal "0" the user typed must still be normalized to "Off".
+        self.shared_session_revoke_edit_access_editor
+            .update(ctx, |editor, ctx| {
+                editor.set_buffer_text(&shared_session_inactivity_display_text(clamped), ctx);
+            });
 
         let new_duration = Duration::from_secs(clamped * 60);
         if *SharedSessionSettings::as_ref(ctx).inactivity_period_before_revoking_roles
@@ -3768,12 +3768,12 @@ impl FeaturesPageView {
             shared_session_inactivity_minutes(*settings.inactivity_period_before_ending_session);
         let clamped = clamp_shared_session_warning_minutes(minutes, revoke_minutes, end_minutes);
 
-        if clamped != minutes {
-            self.shared_session_warning_editor
-                .update(ctx, |editor, ctx| {
-                    editor.set_buffer_text(&shared_session_inactivity_display_text(clamped), ctx);
-                });
-        }
+        // Always re-render the committed value, not just when clamping changed it: a
+        // literal "0" the user typed must still be normalized to "Off".
+        self.shared_session_warning_editor
+            .update(ctx, |editor, ctx| {
+                editor.set_buffer_text(&shared_session_inactivity_display_text(clamped), ctx);
+            });
 
         let new_duration = Duration::from_secs(clamped * 60);
         if *SharedSessionSettings::as_ref(ctx).inactivity_period_before_warning != new_duration {
@@ -3831,12 +3831,12 @@ impl FeaturesPageView {
             shared_session_inactivity_minutes(*settings.inactivity_period_before_warning);
         let clamped = clamp_shared_session_end_minutes(minutes, revoke_minutes, warning_minutes);
 
-        if clamped != minutes {
-            self.shared_session_end_session_editor
-                .update(ctx, |editor, ctx| {
-                    editor.set_buffer_text(&shared_session_inactivity_display_text(clamped), ctx);
-                });
-        }
+        // Always re-render the committed value, not just when clamping changed it: a
+        // literal "0" the user typed must still be normalized to "Off".
+        self.shared_session_end_session_editor
+            .update(ctx, |editor, ctx| {
+                editor.set_buffer_text(&shared_session_inactivity_display_text(clamped), ctx);
+            });
 
         let new_duration = Duration::from_secs(clamped * 60);
         if *SharedSessionSettings::as_ref(ctx).inactivity_period_before_ending_session
