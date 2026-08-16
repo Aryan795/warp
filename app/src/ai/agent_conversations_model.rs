@@ -1261,6 +1261,7 @@ impl AgentConversationsModel {
                 }
                 None => has_new_tasks = true,
             };
+            Self::apply_task_credit_estimate(&task, ctx);
             self.tasks.insert(task_id, task);
         }
 
@@ -1269,6 +1270,28 @@ impl AgentConversationsModel {
         } else if has_updated_tasks {
             ctx.emit(AgentConversationsModelEvent::TasksUpdated);
         }
+    }
+
+    /// Feeds a remote child's live credit estimate — from its ambient agent
+    /// task's polled `credits_used()` — into its local placeholder
+    /// conversation, so the orchestration credit rollup counts a running
+    /// remote child's spend without waiting for its cloud transcript to be
+    /// hydrated, which only happens once the run is terminal (QUALITY-1702).
+    /// No-op when the task carries no usage data yet or has no matching
+    /// local placeholder conversation.
+    fn apply_task_credit_estimate(task: &AmbientAgentTask, ctx: &mut ModelContext<Self>) {
+        let Some(credits) = task.credits_used() else {
+            return;
+        };
+        let run_id = task.run_id().to_string();
+        let Some(conversation_id) =
+            BlocklistAIHistoryModel::as_ref(ctx).conversation_id_for_agent_id(&run_id)
+        else {
+            return;
+        };
+        BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+            history.apply_remote_child_task_credit_estimate(conversation_id, credits, ctx);
+        });
     }
 
     /// Returns whether the unfiltered conversation list contains any entries.
@@ -1860,6 +1883,7 @@ impl AgentConversationsModel {
             move |model, result, ctx| match result {
                 RequestState::RequestSucceeded(task) => {
                     let fetched_id = task.task_id;
+                    Self::apply_task_credit_estimate(&task, ctx);
                     model.tasks.insert(fetched_id, task);
                     model.task_fetch_state.remove(&fetched_id);
                     ctx.emit(AgentConversationsModelEvent::TasksUpdated);

@@ -131,6 +131,93 @@ fn ensure_remote_child_conversation_creates_one_named_run_mapping() {
     });
 }
 
+/// QUALITY-1702: a remote child's live task-derived credit estimate must
+/// land on its loaded placeholder conversation and notify the orchestration
+/// rollup, without waiting for cloud-transcript hydration.
+#[test]
+fn apply_remote_child_task_credit_estimate_updates_loaded_remote_child_and_emits_event() {
+    App::test((), |mut app| async move {
+        initialize_history_persistence_for_tests(&mut app);
+        let terminal_view_id = EntityId::new();
+        let history_model = app.add_singleton_model(|_| BlocklistAIHistoryModel::new_for_test());
+        let child_task_id: AmbientAgentTaskId =
+            "33333333-3333-3333-3333-333333333333".parse().unwrap();
+
+        let (parent_id, child_id) = history_model.update(&mut app, |history, ctx| {
+            let parent_id =
+                history.start_new_conversation(terminal_view_id, false, true, false, ctx);
+            let child_id = history.ensure_remote_child_conversation(
+                terminal_view_id,
+                parent_id,
+                child_task_id.to_string(),
+                child_task_id,
+                "Triage".to_string(),
+                "Investigate the report".to_string(),
+                None,
+                ctx,
+            );
+            (parent_id, child_id)
+        });
+
+        let captured_events = Arc::new(Mutex::new(Vec::new()));
+        app.update(|ctx| {
+            let captured_events = captured_events.clone();
+            ctx.subscribe_to_model(&history_model, move |_, event, _| {
+                captured_events.lock().unwrap().push(event.clone());
+            });
+        });
+
+        history_model.update(&mut app, |history, ctx| {
+            history.apply_remote_child_task_credit_estimate(child_id, 12.5, ctx);
+        });
+
+        history_model.read(&app, |history, _| {
+            let child = history
+                .conversation(&child_id)
+                .expect("child should be loaded");
+            assert_eq!(child.credits_spent(), 12.5);
+            // Sibling and parent conversations must be untouched.
+            assert_eq!(
+                history
+                    .conversation(&parent_id)
+                    .expect("parent should be loaded")
+                    .credits_spent(),
+                0.0
+            );
+        });
+
+        let events = captured_events.lock().unwrap().clone();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                BlocklistAIHistoryEvent::ConversationUsageMetadataUpdated { conversation_id }
+                    if *conversation_id == child_id
+            )),
+            "applying a credit estimate should notify rollup subscribers",
+        );
+    });
+}
+
+/// A credit estimate for a task with no matching local placeholder
+/// conversation must be a silent no-op rather than panicking or creating a
+/// detached entry.
+#[test]
+fn apply_remote_child_task_credit_estimate_is_noop_when_conversation_not_loaded() {
+    App::test((), |mut app| async move {
+        let history_model =
+            app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
+        let unknown_id = AIConversationId::new();
+
+        history_model.update(&mut app, |history, ctx| {
+            history.apply_remote_child_task_credit_estimate(unknown_id, 12.5, ctx);
+        });
+
+        history_model.read(&app, |history, _| {
+            assert!(history.conversation(&unknown_id).is_none());
+        });
+    });
+}
+
 fn create_user_query_message(
     id: &str,
     task_id: &str,

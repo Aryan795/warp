@@ -2097,6 +2097,25 @@ impl BlocklistAIHistoryModel {
         }
     }
 
+    /// Applies a live credit estimate for a loaded remote-child placeholder
+    /// conversation, sourced from its ambient agent task's polled usage (see
+    /// `AIConversation::apply_remote_child_task_credit_estimate`). No-op when
+    /// `conversation_id` isn't loaded, isn't a remote child, or the estimate
+    /// doesn't advance its currently known credit total. See QUALITY-1702.
+    pub fn apply_remote_child_task_credit_estimate(
+        &mut self,
+        conversation_id: AIConversationId,
+        credits: f32,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let Some(conversation) = self.conversations_by_id.get_mut(&conversation_id) else {
+            return;
+        };
+        if conversation.apply_remote_child_task_credit_estimate(credits) {
+            ctx.emit(BlocklistAIHistoryEvent::ConversationUsageMetadataUpdated { conversation_id });
+        }
+    }
+
     pub fn mark_response_stream_cancelled(
         &mut self,
         stream_id: &ResponseStreamId,
