@@ -7,7 +7,10 @@ use pathfinder_geometry::vector::vec2f;
 use warpui_core::Event;
 use warpui_core::event::{KeyEventDetails, ModifiersState};
 use warpui_core::keymap::Keystroke;
-use warpui_core::platform::keyboard::{KeyCode, PhysicalKey};
+use warpui_core::platform::keyboard::{
+    KeyCode, PhysicalKey, ctrl_chord_needs_physical_key_fallback, ctrl_chord_physical_letter,
+    ctrl_letter_to_control_char,
+};
 
 use super::keycode::{Keycode, scancode_to_physicalkey};
 use super::utils::unicode_char_to_key;
@@ -61,6 +64,7 @@ pub unsafe fn from_native(
         match event_type {
             NSEventType::KeyDown => {
                 let native_modifiers = native_event.modifierFlags();
+                let ctrl_held = native_modifiers.contains(NSEventModifierFlags::Control);
 
                 // Get the base character for this key without any modifiers (including Shift)
                 // using UCKeyTranslate via the platform's keyCodeToChar function.
@@ -73,28 +77,53 @@ pub unsafe fn from_native(
                     right_alt: (native_modifiers.bits() & RIGHT_ALT_MASK) != 0,
                     key_without_modifiers,
                 };
-                let unmodified_chars = native_event.charactersIgnoringModifiers()?;
-                let unmodified_chars = CStr::from_ptr(unmodified_chars.UTF8String())
-                    .to_str()
-                    .ok()?;
 
-                let unmodified_chars = if let Some(first_char) = unmodified_chars.chars().next() {
-                    unicode_char_to_key(first_char as u16).unwrap_or(unmodified_chars)
+                // A Ctrl-modified key press is never IME composition input, so recover the
+                // physical key (layout-independent) as a fallback for when the active input
+                // source doesn't produce a usable ASCII character for it -- e.g. an empty
+                // string, or a Hangul jamo while a Korean input source is active. Mirrors the
+                // Windows physical-key chord fallback for non-Latin layouts (see
+                // `ctrl_chord_physical_letter`, and `us_qwerty_fallback_for_chord` in
+                // `windowing/winit/event_loop/key_events.rs`, GH#9036). See GH#15196 /
+                // CSAT-10277.
+                let ctrl_physical_letter = native_key_code_to_key_code(native_event.keyCode())
+                    .and_then(ctrl_chord_physical_letter);
+
+                let unmodified_chars = match native_event.charactersIgnoringModifiers() {
+                    Some(unmodified_chars) => Some(
+                        CStr::from_ptr(unmodified_chars.UTF8String())
+                            .to_str()
+                            .ok()?
+                            .to_owned(),
+                    ),
+                    None => None,
+                };
+                let ime_first_char = unmodified_chars.as_deref().and_then(|s| s.chars().next());
+
+                let key = if let Some(letter) = ctrl_physical_letter
+                    .filter(|_| ctrl_chord_needs_physical_key_fallback(ctrl_held, ime_first_char))
+                {
+                    letter.to_owned()
+                } else if let Some(first_char) = ime_first_char {
+                    let unmodified_chars = unmodified_chars.as_deref().unwrap();
+                    unicode_char_to_key(first_char as u16)
+                        .unwrap_or(unmodified_chars)
+                        .to_owned()
                 } else {
                     return None;
                 };
 
                 let keystroke = Keystroke {
-                    ctrl: native_modifiers.contains(NSEventModifierFlags::Control),
+                    ctrl: ctrl_held,
                     alt: native_modifiers.contains(NSEventModifierFlags::Option),
                     shift: native_modifiers.contains(NSEventModifierFlags::Shift),
                     cmd: native_modifiers.contains(NSEventModifierFlags::Command),
                     meta: false, /* handled separately */
-                    key: unmodified_chars.into(),
+                    key,
                 };
 
                 let characters = native_event.characters();
-                let chars = match characters.as_deref() {
+                let mut chars = match characters.as_deref() {
                     None => String::new(),
                     Some(characters) => {
                         let chars = characters.UTF8String();
@@ -110,6 +139,20 @@ pub unsafe fn from_native(
                         }
                     }
                 };
+
+                // Likewise, make sure a Ctrl-modified key event still carries its C0 control
+                // byte (e.g. `0x0A` / LF for Ctrl+J) for PTY passthrough (see
+                // `alt_screen_element.rs` / `block_list_element.rs`) even when the active input
+                // source didn't put one in `characters` for the same reason. See GH#15196 /
+                // CSAT-10277.
+                let already_has_control_byte =
+                    !chars.is_empty() && chars.chars().all(char::is_control);
+                if !already_has_control_byte
+                    && let Some(letter) = ctrl_physical_letter.filter(|_| ctrl_held)
+                    && let Some(control_char) = ctrl_letter_to_control_char(letter)
+                {
+                    chars = control_char.to_string();
+                }
 
                 Some(Event::KeyDown {
                     keystroke,
