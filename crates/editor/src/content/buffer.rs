@@ -4909,6 +4909,15 @@ impl Buffer {
         );
 
         let style_end = self.containing_block_end(style_start);
+
+        // Callers may reapply the exact same computed colors to a block whose text (and thus
+        // syntax highlighting) hasn't changed since the last pass. Detecting that up front avoids
+        // rebuilding the block's entire content (and its `SumTree` nodes) to reproduce what's
+        // already there.
+        if self.code_block_colors_match(style_start, style_end, colors) {
+            return EditResult::default();
+        }
+
         let old_range = style_start..style_end;
         let replaced_points = self.offset_range_to_point_range(old_range.clone());
 
@@ -4928,6 +4937,10 @@ impl Buffer {
                 .text_styles()
                 .is_colored();
 
+            // Characters are batched here and flushed with a single `append_str` call rather than
+            // appended one at a time, since each `SumTree` write allocates: batching means a run of
+            // unchanged text between two color markers costs one allocation instead of one per char.
+            let mut pending_text = String::new();
             let mut byte_index = ByteOffset::from(0);
             let mut active_color = None;
             let mut is_first_item = true;
@@ -4944,6 +4957,10 @@ impl Buffer {
                     Some((color_range, _))
                         if color_range.end <= byte_index && active_color.is_some() =>
                     {
+                        if !pending_text.is_empty() {
+                            new_content.append_str(&pending_text);
+                            pending_text.clear();
+                        }
                         new_content.push(BufferText::Color(ColorMarker::End));
                         active_color = None;
                         active_color_index += 1;
@@ -4961,6 +4978,10 @@ impl Buffer {
                     Some((color_range, color))
                         if color_range.start == byte_index && active_color != Some(*color) =>
                     {
+                        if !pending_text.is_empty() {
+                            new_content.append_str(&pending_text);
+                            pending_text.clear();
+                        }
                         new_content.push(BufferText::Color(ColorMarker::Start(*color)));
                         active_color = Some(*color);
                     }
@@ -4969,11 +4990,19 @@ impl Buffer {
 
                 if let Some(c) = buffer_cursor.char() {
                     byte_index += c.len_utf8();
-                    new_content.append_str(&c.to_string());
+                    pending_text.push(c);
                     buffer_cursor.next_char_position()
                 } else {
+                    if !pending_text.is_empty() {
+                        new_content.append_str(&pending_text);
+                        pending_text.clear();
+                    }
                     buffer_cursor.next()
                 }
+            }
+
+            if !pending_text.is_empty() {
+                new_content.append_str(&pending_text);
             }
 
             // Make sure we don't leave any unclosed color ranges.
@@ -5012,6 +5041,75 @@ impl Buffer {
             }),
             anchor_updates: vec![],
         }
+    }
+
+    /// Whether the code block's existing color markers in `style_start..style_end` already match
+    /// what [`Self::color_code_block_ranges_internal`] would produce for `colors`, so that rebuild
+    /// can be skipped entirely. This only reads the existing content (no `SumTree` mutation), and
+    /// is conservative: any ambiguity is resolved by returning `false`, which just means the
+    /// caller falls back to actually rebuilding the block (always correct, just not the fast path).
+    fn code_block_colors_match(
+        &self,
+        style_start: CharOffset,
+        style_end: CharOffset,
+        colors: &[(Range<ByteOffset>, ColorU)],
+    ) -> bool {
+        let cursor = self.content.cursor::<CharOffset, CharOffset>();
+        let mut buffer_cursor = BufferCursor::new(cursor);
+        // Reuse the exact same prefix computation as the rebuild path so `started_colored` here
+        // always agrees with what a real rebuild would decide.
+        let started_colored = buffer_cursor
+            .slice_to_offset_before_markers(style_start)
+            .summary()
+            .style_summary()
+            .text_styles()
+            .is_colored();
+
+        // The exact (position, marker) sequence a rebuild would produce: an optional leading
+        // marker closing a color inherited from before `style_start`, then a Start/End pair per
+        // entry in `colors`. `None` stands in for `ColorMarker::End` here since it doesn't carry a
+        // color.
+        let mut expected: Vec<(ByteOffset, Option<ColorU>)> =
+            Vec::with_capacity(colors.len() * 2 + 1);
+        if started_colored {
+            expected.push((ByteOffset::from(0), None));
+        }
+        for (range, color) in colors {
+            expected.push((range.start, Some(*color)));
+            expected.push((range.end, None));
+        }
+
+        let mut matched = 0;
+        let mut byte_index = ByteOffset::from(0);
+        while let Some(item) = buffer_cursor.item() {
+            if buffer_cursor.offset() >= style_end - 1 && !matches!(item, BufferText::Color(_)) {
+                break;
+            }
+
+            let marker = match item {
+                BufferText::Color(ColorMarker::Start(color)) => Some((byte_index, Some(*color))),
+                BufferText::Color(ColorMarker::End) => Some((byte_index, None)),
+                BufferText::Text { .. } | BufferText::Newline => None,
+                // Any other item (link, inline style marker, embedded item, etc.) is dropped by a
+                // real rebuild, so its mere presence means this isn't a no-op.
+                _ => return false,
+            };
+            if let Some(marker) = marker {
+                if expected.get(matched) != Some(&marker) {
+                    return false;
+                }
+                matched += 1;
+            }
+
+            if let Some(c) = buffer_cursor.char() {
+                byte_index += c.len_utf8();
+                buffer_cursor.next_char_position();
+            } else {
+                buffer_cursor.next();
+            }
+        }
+
+        matched == expected.len()
     }
 
     pub fn bytes_in_range(&self, start: ByteOffset, end: ByteOffset) -> Bytes<'_> {
