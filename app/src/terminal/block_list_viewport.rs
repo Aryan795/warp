@@ -1,12 +1,14 @@
 use std::ops::Range;
 use std::rc::Rc;
-use std::sync::MutexGuard;
+use std::sync::{Arc, Mutex, MutexGuard};
 
+use instant::Instant;
 use pathfinder_geometry::vector::Vector2F;
 use serde::{Deserialize, Serialize};
 use sum_tree::{Cursor, SeekBias};
 use warp_core::features::FeatureFlag;
 use warpui::elements::ClippedScrollStateHandle;
+use warpui::smooth_scroll::SmoothScrollController;
 use warpui::units::{IntoLines, IntoPixels, Lines, Pixels};
 use warpui::{AppContext, ModelHandle};
 
@@ -28,6 +30,71 @@ use super::{
 use crate::terminal::input::inline_menu::InlineMenuPositioner;
 use crate::terminal::model::blocks::RichContentItem;
 use crate::terminal::model::index::Point as IndexPoint;
+
+/// Shared handle to a [`SmoothScrollController`] animating discrete (non-precise) wheel input
+/// for the block list's vertical scrollback, gated by `FeatureFlag::SmoothScrolling`.
+///
+/// Unlike a generic WarpUI scrollable's `ClippedScrollStateHandle`, this handle does not own an
+/// absolute scroll position -- the block list's actual position is owned by
+/// [`ScrollState`]/[`ScrollPosition`], whose `FollowsBottomOfMostRecentBlock` and
+/// `ScrollLines::ScrollBottom` anchoring must stay authoritative so scroll position keeps
+/// behaving correctly as content streams in and blocks resize. Instead, this controller tracks
+/// only the *relative, unapplied remainder* of an in-flight animation, mirroring
+/// `warpui_core`'s `Manual`-axis scrollable pattern: [`Self::take_increment`] is applied lazily
+/// to `ScrollState` via `TerminalView::advance_smooth_scroll`, called on every event dispatched
+/// to `BlockListElement` (since the app's redraw machinery replays a synthetic `MouseMoved`
+/// after each repaint requested by [`Self::is_animating`] -- see `PaintContext::repaint_after`).
+/// Applying only a small incremental delta per frame, through the same `AfterScrollEvent` path
+/// a direct scroll uses, means each frame's clamping and mode transitions (e.g. into or out of
+/// `FollowsBottomOfMostRecentBlock`) are recomputed fresh against whatever the block list looks
+/// like *that* frame, so new output arriving mid-animation is handled by the same logic that
+/// already handles it for non-animated scrolling, with no special-casing needed here.
+#[derive(Clone, Default)]
+pub struct SmoothScrollHandle(Arc<Mutex<SmoothScrollHandleState>>);
+
+#[derive(Default)]
+struct SmoothScrollHandleState {
+    controller: SmoothScrollController,
+    /// The portion of `controller`'s displayed position already applied to `ScrollState` via
+    /// `take_increment`. The next call's increment is `displayed_position(now) - applied`.
+    applied: f32,
+}
+
+impl SmoothScrollHandle {
+    /// Adds a discrete wheel delta as a smooth-scroll contribution. See
+    /// [`SmoothScrollController::add_delta`].
+    pub fn add_delta(&self, delta: Lines, now: Instant) {
+        self.0
+            .lock()
+            .unwrap()
+            .controller
+            .add_delta(delta.as_f64() as f32, now);
+    }
+
+    /// Cancels any in-flight animation and clears pending emission, so a direct scroll
+    /// operation (precise input, keyboard, jump-to-block, etc.) doesn't inherit stale queued
+    /// movement.
+    pub fn cancel(&self, now: Instant) {
+        let mut state = self.0.lock().unwrap();
+        let displayed = state.controller.cancel(now);
+        state.applied = displayed;
+    }
+
+    /// Whether a segment is still easing in.
+    pub fn is_animating(&self, now: Instant) -> bool {
+        self.0.lock().unwrap().controller.is_animating(now)
+    }
+
+    /// Returns the incremental delta that hasn't yet been applied to `ScrollState`, advancing
+    /// the applied baseline so the same movement isn't emitted twice.
+    pub fn take_increment(&self, now: Instant) -> Lines {
+        let mut state = self.0.lock().unwrap();
+        let displayed = state.controller.displayed_position(now);
+        let increment = displayed - state.applied;
+        state.applied = displayed;
+        (increment as f64).into_lines()
+    }
+}
 
 /// Wraps a scroll position for the purposes of centralizing update logic.
 pub struct ScrollState {
@@ -1295,7 +1362,13 @@ impl<'a> ViewportState<'a> {
         let current_top = self.scroll_top_in_lines();
 
         let new_top = (current_top - delta).max(Lines::zero()).min(max_scroll_top);
-        let fix_to_bottom = new_top >= max_scroll_top
+        // Use an approximate comparison here rather than a raw `>=`: an animated scroll applies
+        // many small floating-point increments over the course of a tween instead of one
+        // one-shot delta, and summing them can land a hair's breadth short of `max_scroll_top`
+        // due to accumulated rounding error, which would otherwise leave the view stuck in
+        // `FixedAtPosition` right at the boundary instead of settling into sticky-bottom mode
+        // the same way an immediate scroll of the same total delta would.
+        let fix_to_bottom = heights_approx_gte(new_top, max_scroll_top)
             && matches!(
                 self.input_mode,
                 InputMode::PinnedToBottom | InputMode::Waterfall

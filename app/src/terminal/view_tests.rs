@@ -3950,7 +3950,7 @@ fn test_scroll_fixed_to_bottom() {
                 view.scroll_position(),
                 ScrollPosition::FollowsBottomOfMostRecentBlock
             );
-            view.scroll(1.0.into_lines(), ctx);
+            view.scroll(1.0.into_lines(), true /* precise */, ctx);
 
             let expected_scroll_top = {
                 let model = view.model.lock();
@@ -4083,7 +4083,7 @@ fn test_stable_scrolling_during_grid_truncation() {
                 view.scroll_position(),
                 ScrollPosition::FollowsBottomOfMostRecentBlock
             );
-            view.scroll(1.into_lines(), ctx);
+            view.scroll(1.into_lines(), true /* precise */, ctx);
             assert!(matches!(
                 view.scroll_position(),
                 ScrollPosition::FixedWithinLongRunningBlock { .. }
@@ -4122,7 +4122,7 @@ fn test_stable_scrolling_during_grid_truncation() {
             }
 
             // Scroll up one line, bringing the previous block into the viewport.
-            view.scroll(1.into_lines(), ctx);
+            view.scroll(1.into_lines(), true /* precise */, ctx);
             assert!(matches!(
                 view.scroll_position(),
                 ScrollPosition::FixedAtPosition { .. }
@@ -4140,6 +4140,246 @@ fn test_stable_scrolling_during_grid_truncation() {
                     assert_eq!(scroll_top_before_newlines, new_scroll_top);
                 }
             }
+        });
+    })
+}
+
+/// Regression coverage for the terminal-scrollback smooth-scroll wiring (CSAT-6046 phase 2).
+/// Unlike the generic WarpUI scrollables (phase 1), these drive `TerminalView::scroll` and
+/// `TerminalView::advance_smooth_scroll` directly rather than through a full `BlockListElement`
+/// paint/dispatch cycle -- the animation-frame-driving mechanism itself (`PaintContext::
+/// repaint_after` scheduling a synthetic-`MouseMoved`-triggered `advance_smooth_scroll` call) is
+/// structurally identical to phase 1's already-tested `Manual`-axis pattern, so these tests focus
+/// on what's actually new here: `TerminalView::scroll`'s precise/flag branching, and the
+/// `ScrollPositionUpdate` cancellation guard in `update_scroll_position_locking`.
+#[test]
+fn test_smooth_scroll_wheel_animates_and_settles_to_exact_target() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let _smooth_scrolling = FeatureFlag::SmoothScrolling.override_enabled(true);
+
+        let terminal = add_window_with_terminal(&mut app, None);
+        terminal.update(&mut app, |view, _ctx| {
+            let mut model = view.model.lock();
+            for _ in 0..100 {
+                model.simulate_block("ls", "foo");
+            }
+        });
+        // Let any block-list height recalculation triggered by inserting 100 blocks settle
+        // before reading scroll positions below; otherwise a still-settling content height
+        // can make a small delta appear to produce no movement at all.
+        warpui::r#async::Timer::after(std::time::Duration::from_millis(50)).await;
+
+        let (before_position, expected_final_position) = terminal.update(&mut app, |view, ctx| {
+            let before = view.scroll_position();
+            let input_mode = *InputModeSettings::as_ref(ctx).input_mode.value();
+            let expected = {
+                let model = view.model.lock();
+                let viewport = view.viewport_state(model.block_list(), input_mode, ctx);
+                viewport.next_scroll_position(
+                    ScrollPositionUpdate::AfterScrollEvent {
+                        scroll_delta: 1.0.into_lines(),
+                    },
+                    ctx,
+                )
+            };
+            assert_ne!(
+                before, expected,
+                "test setup should pick a delta that actually moves the scroll position"
+            );
+
+            // A non-precise wheel notch, with the flag on, must not apply immediately.
+            view.scroll(1.0.into_lines(), false /* precise */, ctx);
+            assert_eq!(
+                view.scroll_position(),
+                before,
+                "a non-precise scroll with SmoothScrolling on should defer to the animation, \
+                 not apply synchronously"
+            );
+
+            (before, expected)
+        });
+
+        // Real time passes, but not the full ~100-200ms duration: some progress should have
+        // been made without yet reaching the final target.
+        warpui::r#async::Timer::after(std::time::Duration::from_millis(30)).await;
+        terminal.update(&mut app, |view, ctx| {
+            view.advance_smooth_scroll(ctx);
+            let mid_position = view.scroll_position();
+            assert_ne!(
+                mid_position, before_position,
+                "the animation should have made some progress by now"
+            );
+            assert_ne!(
+                mid_position, expected_final_position,
+                "the animation should not have already reached the final target this early"
+            );
+        });
+
+        // Enough real time for the animation to fully complete (max duration is 200ms).
+        warpui::r#async::Timer::after(std::time::Duration::from_millis(250)).await;
+        terminal.update(&mut app, |view, ctx| {
+            view.advance_smooth_scroll(ctx);
+            assert_eq!(
+                view.scroll_position(),
+                expected_final_position,
+                "the animation must land exactly where an immediate scroll of the same delta \
+                 would have"
+            );
+        });
+    })
+}
+
+#[test]
+fn test_smooth_scroll_precise_input_applies_immediately() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let _smooth_scrolling = FeatureFlag::SmoothScrolling.override_enabled(true);
+
+        let terminal = add_window_with_terminal(&mut app, None);
+        terminal.update(&mut app, |view, _ctx| {
+            let mut model = view.model.lock();
+            for _ in 0..100 {
+                model.simulate_block("ls", "foo");
+            }
+        });
+        warpui::r#async::Timer::after(std::time::Duration::from_millis(50)).await;
+
+        terminal.update(&mut app, |view, ctx| {
+            let before = view.scroll_position();
+            // Precise (trackpad) input keeps its existing continuous behavior even with
+            // SmoothScrolling on: it must apply synchronously, not animate.
+            view.scroll(1.0.into_lines(), true /* precise */, ctx);
+            assert_ne!(
+                view.scroll_position(),
+                before,
+                "precise input should apply immediately, not defer to the animation"
+            );
+        });
+    })
+}
+
+#[test]
+fn test_smooth_scroll_disabled_flag_applies_immediately() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let _smooth_scrolling = FeatureFlag::SmoothScrolling.override_enabled(false);
+
+        let terminal = add_window_with_terminal(&mut app, None);
+        terminal.update(&mut app, |view, _ctx| {
+            let mut model = view.model.lock();
+            for _ in 0..100 {
+                model.simulate_block("ls", "foo");
+            }
+        });
+        warpui::r#async::Timer::after(std::time::Duration::from_millis(50)).await;
+
+        terminal.update(&mut app, |view, ctx| {
+            let before = view.scroll_position();
+            // Even a non-precise wheel notch must apply immediately when the flag is off,
+            // preserving the pre-existing behavior.
+            view.scroll(1.0.into_lines(), false /* precise */, ctx);
+            assert_ne!(
+                view.scroll_position(),
+                before,
+                "non-precise input should apply immediately when SmoothScrolling is disabled"
+            );
+        });
+    })
+}
+
+#[test]
+fn test_smooth_scroll_direct_action_cancels_in_flight_animation() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let _smooth_scrolling = FeatureFlag::SmoothScrolling.override_enabled(true);
+
+        let terminal = add_window_with_terminal(&mut app, None);
+        terminal.update(&mut app, |view, _ctx| {
+            let mut model = view.model.lock();
+            for _ in 0..100 {
+                model.simulate_block("ls", "foo");
+            }
+        });
+
+        terminal.update(&mut app, |view, ctx| {
+            // Start an animation, but before it can progress, dispatch a direct/programmatic
+            // scroll operation (Home). The universal cancellation guard in
+            // `update_scroll_position_locking` must cancel the in-flight animation so it can't
+            // resume and corrupt the result once Home has already landed the view elsewhere.
+            view.scroll(1.0.into_lines(), false /* precise */, ctx);
+            view.update_scroll_position_locking(ScrollPositionUpdate::AfterHome, ctx);
+            assert!(matches!(
+                view.scroll_position(),
+                ScrollPosition::FixedAtPosition {
+                    scroll_lines: ScrollLines::ScrollTop(top)
+                } if top == Lines::zero()
+            ));
+        });
+
+        // Advancing the (now-cancelled) animation after Home must be a no-op: it must not
+        // resume and move the view away from where Home explicitly placed it.
+        warpui::r#async::Timer::after(std::time::Duration::from_millis(250)).await;
+        terminal.update(&mut app, |view, ctx| {
+            view.advance_smooth_scroll(ctx);
+            assert!(matches!(
+                view.scroll_position(),
+                ScrollPosition::FixedAtPosition {
+                    scroll_lines: ScrollLines::ScrollTop(top)
+                } if top == Lines::zero()
+            ));
+        });
+    })
+}
+
+#[test]
+fn test_smooth_scroll_animation_settles_into_follows_bottom_of_most_recent_block() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let _smooth_scrolling = FeatureFlag::SmoothScrolling.override_enabled(true);
+
+        let terminal = add_window_with_terminal(&mut app, None);
+        terminal.update(&mut app, |view, _ctx| {
+            let mut model = view.model.lock();
+            for _ in 0..100 {
+                model.simulate_block("ls", "foo");
+            }
+        });
+
+        // Let any block-list height recalculation triggered by inserting 100 blocks settle
+        // before starting the scroll sequence below. Without this, such a recalculation can
+        // land mid-animation and legitimately dispatch `AfterResize`, which -- correctly, per
+        // the cancellation guard in `update_scroll_position_locking` -- cancels the in-flight
+        // animation, the same way a real content resize during a real scroll gesture would.
+        // That's accurate production behavior, but it isn't what this test is about, so give
+        // the setup room to finish first.
+        warpui::r#async::Timer::after(std::time::Duration::from_millis(50)).await;
+
+        terminal.update(&mut app, |view, ctx| {
+            // Scroll away from the bottom first, immediately (precise), so there's
+            // somewhere for the subsequent animated scroll-down to travel from.
+            view.scroll(50.0.into_lines(), true /* precise */, ctx);
+            assert!(matches!(
+                view.scroll_position(),
+                ScrollPosition::FixedAtPosition { .. }
+            ));
+
+            // A large animated scroll downward (negative delta) that overshoots the max
+            // scroll top must settle into `FollowsBottomOfMostRecentBlock`, not get stuck
+            // just short of the bottom or panic on an out-of-range clamp.
+            view.scroll(-1000.0.into_lines(), false /* precise */, ctx);
+        });
+
+        // Enough real time for the animation to fully complete (max duration is 200ms).
+        warpui::r#async::Timer::after(std::time::Duration::from_millis(250)).await;
+        terminal.update(&mut app, |view, ctx| {
+            view.advance_smooth_scroll(ctx);
+            assert_eq!(
+                view.scroll_position(),
+                ScrollPosition::FollowsBottomOfMostRecentBlock,
+                "an animated scroll that overshoots the bottom must settle into sticky-bottom \
+                 mode, exactly like an immediate scroll of the same delta would"
+            );
         });
     })
 }
@@ -5955,7 +6195,7 @@ fn test_scroll_position_doesnt_change_when_block_finished() {
             view.model.lock().simulate_long_running_block("", "lr");
 
             // Before the block is finished, scroll up.
-            view.scroll(1.0.into_lines(), ctx);
+            view.scroll(1.0.into_lines(), true /* precise */, ctx);
             let scroll_position_before_finished = view.scroll_position();
             assert!(matches!(
                 scroll_position_before_finished,

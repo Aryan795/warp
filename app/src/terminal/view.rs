@@ -385,7 +385,7 @@ use crate::terminal::block_list_element::{
 };
 use crate::terminal::block_list_viewport::{
     AutoscrollBehavior, InputMode, OverhangingBlock, ScrollPosition, ScrollPositionUpdate,
-    ScrollState, ViewportState,
+    ScrollState, SmoothScrollHandle, ViewportState,
 };
 use crate::terminal::bootstrap::init_subshell_command;
 use crate::terminal::cli_agent_sessions::event::{
@@ -2317,6 +2317,10 @@ pub struct TerminalViewRenderContext {
 
     pub horizontal_clipped_scroll_state: ClippedScrollStateHandle,
 
+    /// Animates discrete (non-precise) wheel input for the block list's vertical scrollback.
+    /// See [`SmoothScrollHandle`].
+    pub vertical_smooth_scroll: SmoothScrollHandle,
+
     /// Context for struct containing information about blocks and AI blocks used to render
     /// AI-specific decoration in the blocklist element.
     pub ai_render_context: Rc<RefCell<BlocklistAIRenderContext>>,
@@ -2494,6 +2498,10 @@ pub struct TerminalView {
 
     /// Cached scroll position from before entering agent view, used to restore on exit.
     scroll_position_before_entering_agent_view: Option<ScrollPosition>,
+
+    /// Animates discrete (non-precise) wheel input for the block list's vertical scrollback.
+    /// See [`SmoothScrollHandle`] for why this is separate from `scroll_position`.
+    smooth_scroll: SmoothScrollHandle,
 
     /// Scroll state for scrolling vertically in the blocklist.
     blocklist_vertical_scroll_state: ScrollStateHandle,
@@ -4301,6 +4309,7 @@ impl TerminalView {
             colors,
             scroll_position: ScrollState::new(ScrollPosition::FollowsBottomOfMostRecentBlock),
             scroll_position_before_entering_agent_view: None,
+            smooth_scroll: SmoothScrollHandle::default(),
             blocklist_vertical_scroll_state: Default::default(),
             alt_screen_vertical_scroll_state: Default::default(),
             alt_screen_scroll_top: Lines::zero(),
@@ -9221,6 +9230,17 @@ impl TerminalView {
         update: ScrollPositionUpdate,
         ctx: &mut ViewContext<Self>,
     ) {
+        // Every direct/programmatic scroll operation reaches this single choke point, so a
+        // universal guard here covers all of them: cancel any in-flight smooth-scroll animation
+        // before applying anything other than a scroll-wheel event. `AfterScrollEvent` itself is
+        // exempted because it's used both by the animation's own incremental frame emission (see
+        // `advance_smooth_scroll`, which must not cancel the very animation it's advancing) and
+        // by the immediate precise/flag-off wheel path in `scroll`, which explicitly cancels
+        // beforehand itself since it needs to happen before, not after, this dispatch.
+        if !matches!(update, ScrollPositionUpdate::AfterScrollEvent { .. }) {
+            self.smooth_scroll.cancel(Instant::now());
+        }
+
         let mut model = self.model.lock();
         // Clear the cached pre-filter scroll position if a non-filter user
         // event is detected.
@@ -9594,15 +9614,42 @@ impl TerminalView {
         }
     }
 
-    fn scroll(&mut self, delta: Lines, ctx: &mut ViewContext<Self>) {
+    fn scroll(&mut self, delta: Lines, precise: bool, ctx: &mut ViewContext<Self>) {
         self.dismiss_tooltips(ctx);
-        self.update_scroll_position_locking(
-            ScrollPositionUpdate::AfterScrollEvent {
-                scroll_delta: delta,
-            },
-            ctx,
-        );
+        if precise || !FeatureFlag::SmoothScrolling.is_enabled() {
+            // Precise (trackpad) input keeps its current continuous behavior, and disabling the
+            // flag keeps the pre-existing immediate-jump behavior. Cancel explicitly here (rather
+            // than relying on `update_scroll_position_locking`'s guard, which exempts
+            // `AfterScrollEvent`) so a precise scroll arriving mid-animation still cancels it.
+            self.smooth_scroll.cancel(Instant::now());
+            self.update_scroll_position_locking(
+                ScrollPositionUpdate::AfterScrollEvent {
+                    scroll_delta: delta,
+                },
+                ctx,
+            );
+        } else {
+            // Compose with or reverse any animation already in flight; the actual scroll-position
+            // update is applied incrementally, once per frame, by `advance_smooth_scroll`.
+            self.smooth_scroll.add_delta(delta, Instant::now());
+        }
         ctx.notify();
+    }
+
+    /// Applies any pending smooth-scroll increment to `scroll_position`. Called on every event
+    /// dispatched to `BlockListElement` so the animation keeps advancing as the app's existing
+    /// redraw machinery replays a synthetic `MouseMoved` event after each repaint requested by
+    /// `SmoothScrollHandle::is_animating` (see `PaintContext::repaint_after`).
+    fn advance_smooth_scroll(&mut self, ctx: &mut ViewContext<Self>) {
+        let increment = self.smooth_scroll.take_increment(Instant::now());
+        if increment != Lines::zero() {
+            self.update_scroll_position_locking(
+                ScrollPositionUpdate::AfterScrollEvent {
+                    scroll_delta: increment,
+                },
+                ctx,
+            );
+        }
     }
 
     fn handle_typeahead_event(&mut self, ctx: &mut ViewContext<Self>) {
@@ -18833,7 +18880,9 @@ impl TerminalView {
             }
         }
 
-        self.scroll(delta, ctx);
+        // Auto-scroll during a drag-select near the viewport edge, not a wheel notch, so it
+        // always applies immediately rather than animating.
+        self.scroll(delta, true /* precise */, ctx);
 
         // Clear the selected block index on mouse drag.
         self.clear_selected_blocks(ctx);
@@ -23695,6 +23744,7 @@ impl TerminalView {
             obfuscate_secrets: get_secret_obfuscation_mode(app),
             hovered_secret: self.hovered_secret,
             horizontal_clipped_scroll_state: self.horizontal_clipped_scroll_state.clone(),
+            vertical_smooth_scroll: self.smooth_scroll.clone(),
             ai_render_context: self.ai_render_context.clone(),
         }
     }
@@ -26631,6 +26681,7 @@ impl TypedActionView for TerminalView {
             // Below are actions that are most likely irrelevant to users or are very noisy and the
             // debug version shouldn't be announced.
             Scroll { .. }
+            | AdvanceSmoothScroll
             | AltScroll { .. }
             | SharedSessionViewerAltScroll { .. }
             | ClickOnGrid { .. }
@@ -26729,7 +26780,8 @@ impl TypedActionView for TerminalView {
         let input_mode = *InputModeSettings::as_ref(ctx).input_mode.value();
 
         match action {
-            Scroll { delta } => self.scroll(*delta, ctx),
+            Scroll { delta, precise } => self.scroll(*delta, *precise, ctx),
+            AdvanceSmoothScroll => self.advance_smooth_scroll(ctx),
             AltScroll { delta, point } => self.alt_scroll(*delta, *point, ctx),
             SharedSessionViewerAltScroll { new_scroll_top } => {
                 self.alt_screen_scroll_top = *new_scroll_top;
