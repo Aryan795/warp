@@ -597,6 +597,75 @@ pub fn ctrl_letter_to_control_char(letter: &str) -> Option<char> {
     }
 }
 
+/// The resolved `keystroke.key` and PTY-facing `chars` fields for a macOS `KeyDown` event, after
+/// applying the Ctrl-modified physical-key fallback ([`ctrl_chord_physical_letter`]) where
+/// needed. See [`resolve_ctrl_chord_key_and_chars`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CtrlChordKeyResolution {
+    /// The resolved `keystroke.key`, or `None` if the event has nothing usable at all and should
+    /// be dropped -- matching the pre-existing behavior when neither the active input source nor
+    /// the physical-key fallback produced anything.
+    pub key: Option<String>,
+    /// The resolved PTY-facing `chars` field.
+    pub chars: String,
+}
+
+/// Resolves the `key` (used for keybinding matching) and `chars` (used for raw-mode PTY
+/// passthrough) fields of a macOS `KeyDown` event, applying the Ctrl-modified physical-key
+/// fallback when the active input source didn't produce a usable ASCII character for a
+/// plain-Ctrl chord. This is the full decision the macOS `from_native` event conversion makes;
+/// keeping it here (rather than inline in the AppKit-only conversion) makes it possible to unit
+/// test on any platform. See GH#15196 / CSAT-10277.
+///
+/// - `ctrl_held` / `alt_held` / `cmd_held`: the event's modifier state.
+/// - `ime_first_char`: the first character of `charactersIgnoringModifiers`, if the active input
+///   source produced anything (used only to decide whether the fallback is needed).
+/// - `ime_key_candidate`: the key string the active input source would otherwise resolve to
+///   (already mapped through any special-key table, e.g. arrow/function keys), if it produced
+///   anything usable at all.
+/// - `physical_letter`: the US-QWERTY letter the physical key produces, ignoring the active
+///   layout/input source, if it's a letter key ([`ctrl_chord_physical_letter`]).
+/// - `os_chars`: `characters()` (with modifiers already applied by the OS), the OS's candidate
+///   PTY bytes.
+///
+/// The physical-key fallback for `chars` only applies to a plain-Ctrl chord (Ctrl held, Alt and
+/// Cmd not held), aligning with the existing ctrl-only C0 semantics elsewhere in the codebase
+/// (e.g. `keystroke_to_c0_control_code` in `warp_terminal`'s `escape_sequences.rs`). The `key`
+/// fallback isn't restricted this way, since it only affects keybinding matching (which already
+/// accounts for every modifier via exact `Keystroke` equality) rather than raw byte passthrough.
+pub fn resolve_ctrl_chord_key_and_chars(
+    ctrl_held: bool,
+    alt_held: bool,
+    cmd_held: bool,
+    ime_first_char: Option<char>,
+    ime_key_candidate: Option<&str>,
+    physical_letter: Option<&'static str>,
+    os_chars: &str,
+) -> CtrlChordKeyResolution {
+    let needs_fallback = ctrl_chord_needs_physical_key_fallback(ctrl_held, ime_first_char);
+
+    let key = if let Some(letter) = physical_letter.filter(|_| needs_fallback) {
+        Some(letter.to_owned())
+    } else {
+        ime_key_candidate.map(str::to_owned)
+    };
+
+    let already_has_control_byte = !os_chars.is_empty() && os_chars.chars().all(char::is_control);
+    let is_plain_ctrl_chord = ctrl_held && !alt_held && !cmd_held;
+    let chars = if !already_has_control_byte
+        && needs_fallback
+        && is_plain_ctrl_chord
+        && let Some(letter) = physical_letter
+        && let Some(control_char) = ctrl_letter_to_control_char(letter)
+    {
+        control_char.to_string()
+    } else {
+        os_chars.to_owned()
+    };
+
+    CtrlChordKeyResolution { key, chars }
+}
+
 #[cfg(test)]
 #[path = "keyboard_tests.rs"]
 mod tests;
