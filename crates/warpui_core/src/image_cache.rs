@@ -29,11 +29,12 @@ const MIN_REFRESH_DELAY_MS: u32 = 50;
 const MAX_ANIMATED_IMAGE_FRAME_COUNT: usize = 512;
 
 /// Hard ceiling on the total decoded RGBA bytes retained for a single animated image, summed
-/// across all of its frames. `Frames::next()` decodes one full RGBA bitmap per frame up front
-/// (APP-5444), so without a cap a single large/long animated GIF or WebP can balloon memory by
-/// gigabytes. 256 MiB comfortably covers ordinary GIFs/WebPs pasted into chat, markdown, or
-/// notebooks (typically well under a few MB of decoded frames in total) while still bounding
-/// worst-case memory for pathological inputs.
+/// across all of its frames. `Frames::next()` decodes one full RGBA bitmap per frame, so without
+/// a cap a single large/long animated GIF or WebP can balloon memory by gigabytes. 256 MiB
+/// comfortably covers ordinary GIFs/WebPs pasted into chat, markdown, or notebooks (typically
+/// well under a few MB of decoded frames in total) while still bounding worst-case memory for
+/// pathological inputs. This bounds the retained set only: a single frame's own decode
+/// allocation happens before this budget is checked and is not itself governed by it.
 const MAX_ANIMATED_IMAGE_DECODED_BYTES: usize = 256 * 1024 * 1024;
 
 static SVG_FONT_DB: LazyLock<Arc<usvg::fontdb::Database>> = LazyLock::new(|| {
@@ -283,10 +284,9 @@ impl CustomImageHeader {
     }
 }
 
-/// Decodes frames from `frames` one at a time, stopping before decoding any frame that would
-/// push the retained set over `MAX_ANIMATED_IMAGE_DECODED_BYTES` decoded bytes or
-/// `MAX_ANIMATED_IMAGE_FRAME_COUNT` frames, instead of eagerly decoding the entire animation up
-/// front (APP-5444).
+/// Decodes frames of an animated image one at a time, stopping once the retained set would
+/// exceed `MAX_ANIMATED_IMAGE_DECODED_BYTES` decoded bytes or `MAX_ANIMATED_IMAGE_FRAME_COUNT`
+/// frames, so the full animation is never retained at once.
 fn collect_bounded_animated_frames(frames: Frames<'_>) -> Result<Vec<Frame>> {
     collect_bounded_animated_frames_with_limits(
         frames,
@@ -295,11 +295,9 @@ fn collect_bounded_animated_frames(frames: Frames<'_>) -> Result<Vec<Frame>> {
     )
 }
 
-/// Implements [`collect_bounded_animated_frames`] with injectable limits, so unit tests can
-/// exercise the budget-enforcement logic against small synthetic frames instead of needing to
-/// materialize hundreds of megabytes of pixel data.
+/// Implements [`collect_bounded_animated_frames`] with the limits as parameters.
 ///
-/// When the budget is hit, the frames decoded so far are kept as a (shorter) looping animation
+/// When a limit is hit, the frames decoded so far are kept as a (shorter) looping animation
 /// rather than failing the whole image. Always keeps at least the first successfully decoded
 /// frame, even if it alone exceeds the byte budget, so the image still has something to render.
 fn collect_bounded_animated_frames_with_limits(
@@ -313,7 +311,11 @@ fn collect_bounded_animated_frames_with_limits(
 
     loop {
         if collected.len() >= max_frame_count {
-            truncated = true;
+            // Only report truncation if another frame genuinely exists; an animation with
+            // exactly `max_frame_count` frames should not warn about dropping anything.
+            if frames.next().is_some() {
+                truncated = true;
+            }
             break;
         }
 

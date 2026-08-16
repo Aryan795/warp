@@ -32,9 +32,8 @@ impl AssetProvider for Assets {
     }
 }
 
-/// Builds raw, real GIF bytes for a synthetic animation with `frame_count` solid-color frames
-/// of the given dimensions and per-frame delay, for exercising animated-frame decoding without
-/// depending on a bundled test asset.
+/// Builds raw GIF bytes for a synthetic animation with `frame_count` solid-color frames of the
+/// given dimensions and per-frame delay.
 fn make_animated_gif_bytes(frame_count: usize, width: u32, height: u32, delay_ms: u32) -> Vec<u8> {
     let mut bytes = Vec::new();
     {
@@ -365,6 +364,76 @@ fn test_collect_bounded_animated_frames_truncates_on_frame_count() {
         .expect("frame count cap should truncate rather than error");
 
     assert_eq!(frames.len(), 2);
+}
+
+#[test]
+fn test_collect_bounded_animated_frames_does_not_warn_when_count_matches_exactly() {
+    let gif_bytes = make_animated_gif_bytes(2, 4, 4, 100);
+    let decoder = GifDecoder::new(std::io::Cursor::new(gif_bytes.as_slice()))
+        .expect("synthetic gif should decode");
+
+    let frames = collect_bounded_animated_frames_with_limits(decoder.into_frames(), 2, usize::MAX)
+        .expect("exact frame count should not error");
+
+    assert_eq!(frames.len(), 2);
+}
+
+#[test]
+fn test_collect_bounded_animated_frames_stops_pulling_once_byte_budget_rejects_a_frame() {
+    // Frame 1 (64 bytes) is always kept. Frame 2 (64 bytes) pushes the running total to 128,
+    // over the 100-byte budget, so it is decoded but rejected. If the implementation kept
+    // pulling after that rejection, it would call `next()` a third time and hit the panic
+    // below, so reaching `Ok` here proves the iterator is not drained past that point.
+    let make_frame = |value: u8| {
+        Frame::new(image::RgbaImage::from_pixel(
+            4,
+            4,
+            image::Rgba([value, 0, 0, 255]),
+        ))
+    };
+    let mut scripted_frames = vec![make_frame(1), make_frame(2)].into_iter();
+    let frames = Frames::new(Box::new(std::iter::from_fn(
+        move || match scripted_frames.next() {
+            Some(frame) => Some(Ok(frame)),
+            None => panic!(
+                "frame iterator was pulled past the point the byte budget should have stopped it"
+            ),
+        },
+    )));
+
+    let collected = collect_bounded_animated_frames_with_limits(frames, usize::MAX, 100)
+        .expect("byte-budget truncation should not surface as an error");
+
+    assert_eq!(collected.len(), 1);
+}
+
+#[test]
+fn test_collect_bounded_animated_frames_propagates_decode_error_before_budget() {
+    let good_frame = Frame::new(image::RgbaImage::from_pixel(
+        4,
+        4,
+        image::Rgba([1, 0, 0, 255]),
+    ));
+    let mut yielded_first = false;
+    let frames = Frames::new(Box::new(std::iter::from_fn(move || {
+        if !yielded_first {
+            yielded_first = true;
+            Some(Ok(good_frame.clone()))
+        } else {
+            Some(Err(image::ImageError::Parameter(
+                image::error::ParameterError::from_kind(
+                    image::error::ParameterErrorKind::NoMoreData,
+                ),
+            )))
+        }
+    })));
+
+    let result = collect_bounded_animated_frames_with_limits(frames, usize::MAX, usize::MAX);
+
+    assert!(
+        result.is_err(),
+        "a decode error encountered before any budget is hit should propagate"
+    );
 }
 
 #[test]
