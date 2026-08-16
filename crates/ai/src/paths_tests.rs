@@ -1,10 +1,109 @@
-#[cfg(windows)]
 use std::path::PathBuf;
 
-#[cfg(windows)]
 use warp_terminal::shell::{ShellLaunchData, ShellType};
+use warpui_core::platform::OperatingSystem;
 
 use super::*;
+
+/// Regression tests for the web shared-session path rendering bug
+/// (APP-5438): the viewer's local/browser operating system must not
+/// override the shared session's actual path style.
+mod use_unix_paths_impl_tests {
+    use super::*;
+
+    #[test]
+    fn windows_viewer_with_unix_style_cwd_uses_forward_slashes() {
+        // A web viewer on Windows looking at a Linux/Mac shared session: the
+        // cwd's shape should win over the (viewer-derived) operating system.
+        assert!(use_unix_paths_impl(
+            OperatingSystem::Windows,
+            None,
+            ["/home/user/project"],
+        ));
+    }
+
+    #[test]
+    fn real_windows_host_uses_backslashes() {
+        // A genuine Windows host (or a web viewer correctly on Windows,
+        // viewing a Windows session) must still render backslashes.
+        assert!(!use_unix_paths_impl(
+            OperatingSystem::Windows,
+            None,
+            [r"C:\Users\username\project"],
+        ));
+    }
+
+    #[test]
+    fn ambiguous_cwd_falls_back_to_operating_system() {
+        assert!(use_unix_paths_impl(
+            OperatingSystem::Linux,
+            None,
+            ["relative/path"]
+        ));
+        assert!(!use_unix_paths_impl(
+            OperatingSystem::Windows,
+            None,
+            ["relative/path"],
+        ));
+    }
+
+    #[test]
+    fn no_hints_falls_back_to_operating_system() {
+        assert!(use_unix_paths_impl(OperatingSystem::Mac, None, []));
+        assert!(!use_unix_paths_impl(OperatingSystem::Windows, None, []));
+    }
+
+    #[test]
+    fn wsl_is_always_unix_regardless_of_operating_system_or_cwd() {
+        let wsl = ShellLaunchData::WSL {
+            distro: "Ubuntu".to_string(),
+        };
+        assert!(use_unix_paths_impl(
+            OperatingSystem::Windows,
+            Some(&wsl),
+            [r"C:\Users\username"],
+        ));
+    }
+
+    #[test]
+    fn msys2_is_always_unix_regardless_of_operating_system_or_cwd() {
+        let msys2 = ShellLaunchData::MSYS2 {
+            executable_path: PathBuf::from(r"C:\Program Files\Git\usr\bin\bash.exe"),
+            shell_type: ShellType::Bash,
+        };
+        assert!(use_unix_paths_impl(
+            OperatingSystem::Windows,
+            Some(&msys2),
+            [r"C:\Users\username"],
+        ));
+    }
+
+    #[test]
+    fn docker_sandbox_is_always_unix_regardless_of_operating_system_or_cwd() {
+        let docker_sandbox = ShellLaunchData::DockerSandbox {
+            sbx_path: PathBuf::from("/usr/local/bin/sbx"),
+            base_image: None,
+        };
+        assert!(use_unix_paths_impl(
+            OperatingSystem::Windows,
+            Some(&docker_sandbox),
+            [r"C:\Users\username"],
+        ));
+    }
+}
+
+#[test]
+fn windows_viewer_renders_read_files_style_path_with_forward_slashes_for_unix_session() {
+    // End-to-end regression check through the public API used by read_files
+    // display: a Unix-style cwd must produce forward slashes, independent of
+    // the local/viewer operating system reported by `OperatingSystem::get()`
+    // (which on web is the browser's OS, not the shared session's).
+    let cwd = Some("/home/user/project".to_string());
+    assert_eq!(
+        shell_native_absolute_path("file.txt", None, cwd.as_ref()),
+        "/home/user/project/file.txt"
+    );
+}
 
 #[cfg(unix)]
 #[test]
