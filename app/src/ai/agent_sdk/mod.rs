@@ -859,8 +859,6 @@ impl AgentDriverRunner {
             .await
     }
 
-    /// Fetches server-minted git credentials for `task_id_str` via `ai_client`, then applies
-    /// the result. See [`Self::apply_fetched_git_credentials`] for the fetch-outcome handling.
     async fn configure_task_git_credentials(
         ai_client: Arc<dyn AIClient>,
         task_id_str: String,
@@ -870,14 +868,6 @@ impl AgentDriverRunner {
         Self::apply_fetched_git_credentials(fetch_result, tolerate_fetch_failures)
     }
 
-    /// Applies the outcome of a server-minted git credentials fetch: writes the credentials to
-    /// the local credential store, or decides how to handle a fetch failure.
-    ///
-    /// On a host with a detected isolation platform, a fetch failure other than
-    /// `NoIsolationPlatformDetected` is fatal, since the isolation platform is the only route to
-    /// git credentials there. When `tolerate_fetch_failures` is set, the same failure is instead
-    /// logged and swallowed: this covers hosts with no isolation platform where `gh` credentials
-    /// were already configured, so the run remains viable without the server-minted credentials.
     fn apply_fetched_git_credentials(
         fetch_result: anyhow::Result<Vec<GitCredential>>,
         tolerate_fetch_failures: bool,
@@ -894,6 +884,8 @@ impl AgentDriverRunner {
                 log::debug!("Skipping git credentials bootstrap: {err}");
                 return Ok(());
             }
+            // Working gh credentials are already in place here, so a missing Factory identity
+            // does not make the run non-viable.
             Err(err) if tolerate_fetch_failures => {
                 log::warn!(
                     "Failed to fetch server-minted git credentials; continuing with the gh \
@@ -936,6 +928,15 @@ impl AgentDriverRunner {
         Ok(())
     }
 
+    /// A failed or skipped `gh` setup must not enable fetch-failure tolerance below, since there
+    /// is then no working `gh` fallback in place.
+    fn gh_credentials_are_configured(
+        attempting_gh_credentials: bool,
+        gh_setup_succeeded: bool,
+    ) -> bool {
+        attempting_gh_credentials && gh_setup_succeeded
+    }
+
     async fn bootstrap_git_credentials_for_task(
         foreground: &ModelSpawner<Self>,
         task_id_str: &str,
@@ -944,23 +945,27 @@ impl AgentDriverRunner {
         // A host with no isolation platform may still carry a generic `WARP_WORKLOAD_TOKEN`
         // (e.g. injected by oz-agent-worker), so server-minted per-task credentials (like
         // GitLab Factory identities) can apply on top of the gh credentials configured below.
-        let gh_credentials_configured = warp_isolation_platform::detect().is_none()
+        let attempting_gh_credentials = warp_isolation_platform::detect().is_none()
             && args.configure_git_credentials_with_github;
-        if gh_credentials_configured {
+        let gh_setup_succeeded = if attempting_gh_credentials {
             foreground
                 .spawn(|_, _| {
                     command::blocking::Command::new("gh")
                         .args(["auth", "setup-git"])
-                        .spawn()
+                        .status()
                         .map_err(|err| {
                             AgentDriverError::ConfigBuildFailed(anyhow::anyhow!(
                                 "gh auth setup-git failed: {err:?}"
                             ))
                         })
                 })
-                .await?
-                .map(|_| ())?;
-        }
+                .await??
+                .success()
+        } else {
+            false
+        };
+        let gh_credentials_configured =
+            Self::gh_credentials_are_configured(attempting_gh_credentials, gh_setup_succeeded);
 
         if !FeatureFlag::GitCredentialRefresh.is_enabled() {
             return Ok(());

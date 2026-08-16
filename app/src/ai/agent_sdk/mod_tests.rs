@@ -219,16 +219,6 @@ fn run_message_watch_telemetry_defaults_to_unknown_harness() {
 }
 
 // ── apply_fetched_git_credentials ───────────────────────────────────────────
-//
-// These cover `bootstrap_git_credentials_for_task`'s fetch-outcome handling, factored out into
-// `apply_fetched_git_credentials` specifically so it can be tested without depending on the
-// real, process-wide isolation-platform detection (`warp_isolation_platform::detect()` is
-// memoized for the life of the process and reflects the actual host, which in a cloud sandbox
-// can itself be an isolation platform). A missing workload token surfaces from the real fetch
-// path as `IsolationPlatformError::NoIsolationPlatformDetected`, which these tests construct
-// directly. All cases use an empty or erroring credential result, so
-// `driver::git_credentials::configure_git_credentials` (which mutates the real git config and
-// credential files) is never reached.
 
 fn workload_token_missing_error() -> anyhow::Error {
     IsolationPlatformError::NoIsolationPlatformDetected.into()
@@ -260,8 +250,6 @@ fn missing_workload_token_skips_on_the_gh_configured_path() {
 
 #[test]
 fn empty_credential_response_is_a_no_op_success() {
-    // Represents a successful fetch (e.g. via the env-token fallback) that simply had no
-    // credentials to apply.
     let result = AgentDriverRunner::apply_fetched_git_credentials(Ok(Vec::new()), false);
 
     assert!(
@@ -272,9 +260,6 @@ fn empty_credential_response_is_a_no_op_success() {
 
 #[test]
 fn gh_configured_host_tolerates_a_credentials_fetch_failure() {
-    // The regression this covers: before this change, a non-isolation-platform host with gh
-    // credentials already configured never attempted this fetch. Now that it does, a fetch
-    // failure here must not fail a run that is otherwise viable on the gh credentials alone.
     let result = AgentDriverRunner::apply_fetched_git_credentials(
         Err(anyhow::anyhow!("server rejected workload token")),
         true,
@@ -288,8 +273,6 @@ fn gh_configured_host_tolerates_a_credentials_fetch_failure() {
 
 #[test]
 fn isolation_platform_host_still_fails_hard_on_a_credentials_fetch_failure() {
-    // The isolation-platform path has no gh fallback, so a fetch failure there must remain
-    // fatal; this guards against the task-1 leniency accidentally widening to that path.
     let result = AgentDriverRunner::apply_fetched_git_credentials(
         Err(anyhow::anyhow!("server rejected workload token")),
         false,
@@ -301,4 +284,25 @@ fn isolation_platform_host_still_fails_hard_on_a_credentials_fetch_failure() {
         }
         other => panic!("expected a fatal SkillResolutionFailed error, got {other:?}"),
     }
+}
+
+// ── gh_credentials_are_configured ─────────────────────────────────────────
+
+#[test]
+fn gh_credentials_are_configured_when_setup_attempted_and_succeeded() {
+    assert!(AgentDriverRunner::gh_credentials_are_configured(true, true));
+}
+
+#[test]
+fn gh_credentials_are_not_configured_when_setup_attempted_but_failed() {
+    assert!(!AgentDriverRunner::gh_credentials_are_configured(
+        true, false
+    ));
+}
+
+#[test]
+fn gh_credentials_are_not_configured_when_setup_was_not_attempted() {
+    assert!(!AgentDriverRunner::gh_credentials_are_configured(
+        false, false
+    ));
 }
