@@ -1597,9 +1597,10 @@ fn manual_axis_wheel_scroll_eventually_matches_immediate_scroll_distance() {
         // is only advanced lazily, as further events are dispatched to the scrollable.
         view.read(app, |view, _| assert_eq!(view.scroll_top, 0.));
 
-        // Wait past the animation's duration, then dispatch another event (standing in for the
-        // synthetic MouseMoved the app replays after each scheduled repaint) to drain it.
-        std::thread::sleep(Duration::from_millis(150));
+        // Wait past the animation's duration (up to 200ms at the slow end of the inverse-delta
+        // ramp), then dispatch another event (standing in for the synthetic MouseMoved the app
+        // replays after each scheduled repaint) to drain it.
+        std::thread::sleep(Duration::from_millis(300));
         app.update(|ctx| {
             ctx.simulate_window_event(
                 Event::MouseMoved {
@@ -1740,8 +1741,8 @@ fn dual_axis_notches_animate_each_axis_independently_to_completion() {
         });
 
         // Once both tweens finish, each axis lands exactly on its own target, independent of
-        // the other.
-        std::thread::sleep(Duration::from_millis(150));
+        // the other. 300ms comfortably exceeds the 200ms slow end of the inverse-delta ramp.
+        std::thread::sleep(Duration::from_millis(300));
         app.update(|ctx| render(&mut presenter.borrow_mut(), view_id, ctx));
 
         view.read(app, |view, _| {
@@ -1751,6 +1752,136 @@ fn dual_axis_notches_animate_each_axis_independently_to_completion() {
             assert_eq!(horizontal.scroll_start().as_f32(), 40.);
             assert_eq!(vertical.scroll_start().as_f32(), 40.);
         });
+
+        app.update(|ctx| {
+            ctx.windows()
+                .close_window(window_id, TerminationMode::ForceTerminate)
+        });
+    })
+}
+
+/// A single-axis element that records how many times it's painted, in an `Rc<Cell<usize>>`
+/// shared with the test, used to measure the actual repaint cadence achieved over the course of
+/// a smooth-scroll animation.
+struct PaintCountingElement {
+    size: Vector2F,
+    paint_count: Rc<Cell<usize>>,
+}
+
+impl Element for PaintCountingElement {
+    fn layout(
+        &mut self,
+        _constraint: SizeConstraint,
+        _ctx: &mut LayoutContext,
+        _app: &AppContext,
+    ) -> Vector2F {
+        self.size
+    }
+
+    fn after_layout(&mut self, _ctx: &mut AfterLayoutContext, _app: &AppContext) {}
+
+    fn paint(&mut self, _origin: Vector2F, _ctx: &mut PaintContext, _app: &AppContext) {
+        self.paint_count.set(self.paint_count.get() + 1);
+    }
+
+    fn size(&self) -> Option<Vector2F> {
+        Some(self.size)
+    }
+
+    fn origin(&self) -> Option<Point> {
+        Some(Point::new(0., 0., ZIndex::new(0)))
+    }
+
+    fn dispatch_event(
+        &mut self,
+        _event: &DispatchedEvent,
+        _ctx: &mut EventContext,
+        _app: &AppContext,
+    ) -> bool {
+        false
+    }
+}
+
+#[derive(Default)]
+struct PaintCountingScrollView {
+    handle: ClippedScrollStateHandle,
+    paint_count: Rc<Cell<usize>>,
+}
+
+impl Entity for PaintCountingScrollView {
+    type Event = ();
+}
+
+impl View for PaintCountingScrollView {
+    fn render(&self, _: &AppContext) -> Box<dyn Element> {
+        let axis_config = SingleAxisConfig::Clipped {
+            handle: self.handle.clone(),
+            child: Box::new(PaintCountingElement {
+                size: vec2f(SCROLLABLE_VIEWPORT_SIZE, 500.),
+                paint_count: self.paint_count.clone(),
+            })
+            .finish(),
+        };
+        let scrollable = NewScrollable::vertical(axis_config, Fill::None, Fill::None, Fill::None);
+        ConstrainedBox::new(scrollable.finish())
+            .with_height(SCROLLABLE_VIEWPORT_SIZE)
+            .with_width(SCROLLABLE_VIEWPORT_SIZE)
+            .finish()
+    }
+
+    fn ui_name() -> &'static str {
+        "PaintCountingScrollView"
+    }
+}
+
+impl TypedActionView for PaintCountingScrollView {
+    type Action = ();
+}
+
+/// Measures how many distinct frames the smooth-scroll animation's own self-scheduling chain
+/// (`PaintContext::repaint_after` -> `manage_delayed_repaint_timers` -> a real async timer ->
+/// `request_redraw`) actually drives over one full animation, in the absence of any
+/// display/vsync throttling (there is no real display in this test; the harness eagerly builds
+/// the scene on every invalidation). This answers "is our own scheduling code the bottleneck":
+/// if this count is healthy, any remaining steppiness on a real display is downstream of the
+/// platform's actual redraw cadence, not of this code requesting repaints too infrequently.
+#[test]
+fn smooth_scroll_animation_drives_many_distinct_repaints_over_its_duration() {
+    let _flag = FeatureFlag::SmoothScrolling.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        let app = &mut app;
+        let paint_count = Rc::new(Cell::new(0usize));
+        let (window_id, _view) = app.add_window(WindowStyle::NotStealFocus, {
+            let paint_count = paint_count.clone();
+            move |_| PaintCountingScrollView {
+                handle: Default::default(),
+                paint_count,
+            }
+        });
+
+        let presenter = Rc::new(RefCell::new(Presenter::new(window_id)));
+        let view_id = app.root_view_id(window_id).unwrap();
+        app.update(|ctx| render(&mut presenter.borrow_mut(), view_id, ctx));
+        let paints_before_scroll = paint_count.get();
+
+        app.update(|ctx| dispatch_non_precise_wheel_down(ctx, window_id, presenter.clone()));
+
+        // Let the animation's self-scheduled repaints run for comfortably longer than its
+        // duration (this awaits real wall-clock time, letting the spawned repaint-timer tasks
+        // actually fire, same as the pre-existing hover-delay tests in `hoverable_tests.rs`).
+        crate::r#async::Timer::after(Duration::from_millis(200)).await;
+
+        let paints_during_animation = paint_count.get() - paints_before_scroll;
+        // At an 8ms self-requested interval over a 120ms animation, the code's own scheduling
+        // asks for on the order of a dozen repaints; require a healthy fraction of that so a
+        // regression that throttles or drops requests is caught, without being so strict that
+        // ordinary test-timing jitter fails it.
+        assert!(
+            paints_during_animation >= 6,
+            "expected the animation to have driven at least 6 distinct repaints via its own \
+             self-scheduling, got {paints_during_animation}"
+        );
 
         app.update(|ctx| {
             ctx.windows()
@@ -1935,7 +2066,8 @@ fn long_rapid_same_direction_burst_through_wheel_dispatch_clamps_without_losing_
         // exactly -- no movement was silently swallowed by the burst. Read `scroll_start()`
         // first: it's what settles any expired contribution into the committed baseline (as it
         // would be during a real paint), so `is_animating()` reflects the post-settle state.
-        std::thread::sleep(Duration::from_millis(150));
+        // 300ms comfortably exceeds the 200ms slow end of the inverse-delta duration ramp.
+        std::thread::sleep(Duration::from_millis(300));
         view.read(app, |view, _| {
             let handle = vertical_handle(view);
             assert_eq!(handle.scroll_start().as_f32(), 250.);

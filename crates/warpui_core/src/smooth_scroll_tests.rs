@@ -2,16 +2,32 @@ use std::time::Duration;
 
 use instant::Instant;
 
-use super::{SMOOTH_SCROLL_DURATION, SmoothScrollController};
+use super::{
+    CubicBezier, INVERSE_DELTA_MAX_DURATION, INVERSE_DELTA_MIN_DURATION,
+    INVERSE_DELTA_REFERENCE_LARGE, INVERSE_DELTA_REFERENCE_SMALL, SmoothScrollController,
+    inverse_delta_duration, velocity_preserving_duration,
+};
+
+// NOTE: this suite replaces the previous ease-out-cubic / additive-independent-contributions
+// model's tests wholesale, rather than deleting coverage quietly. The two models make
+// incompatible promises about what a same-direction composition looks like:
+//   - Old model: each notch eased independently; the displayed position was the sum of every
+//     active contribution's own eased progress, and `target()` was simply the sum of deltas.
+//   - New model (this file): a single running segment is *retargeted* on each same-direction
+//     notch, reshaping its curve to preserve the outgoing velocity instead of layering another
+//     independent ease on top.
+// Tests below pin the new contract's equivalents of the old guarantees (exact landing on
+// target, no lost movement across a burst) plus its new one (velocity continuity across a
+// retarget), rather than the old "sum of independently-eased contributions" behavior.
 
 #[test]
-fn ease_out_cubic_reaches_exact_target_without_overshoot() {
+fn ease_in_out_reaches_exact_target_without_overshoot() {
     let start = Instant::now();
     let mut controller = SmoothScrollController::new(0.0);
     controller.add_delta(100.0, start);
+    let duration = inverse_delta_duration(100.0);
 
-    // Never overshoots the target at any sampled point along the way.
-    for millis in [0, 15, 30, 60, 90, 119] {
+    for millis in [0, 15, 30, 60, 90] {
         let displayed = controller.displayed_position(start + Duration::from_millis(millis));
         assert!(
             (0.0..=100.0).contains(&displayed),
@@ -19,37 +35,32 @@ fn ease_out_cubic_reaches_exact_target_without_overshoot() {
         );
     }
 
-    // Reaches the exact target once the duration elapses, and stops animating.
-    let displayed = controller.displayed_position(start + SMOOTH_SCROLL_DURATION);
+    let displayed = controller.displayed_position(start + duration);
     assert_eq!(displayed, 100.0);
-    assert!(!controller.is_animating(start + SMOOTH_SCROLL_DURATION));
+    assert!(!controller.is_animating(start + duration));
 }
 
 #[test]
-fn same_direction_inputs_compose_without_restarting_existing_progress() {
+fn fresh_segment_eases_in_from_zero_velocity() {
+    // A defining difference from the old ease-out-only model: motion starts slow and ramps up,
+    // rather than launching at peak velocity. Early in the animation, displayed progress should
+    // be well behind the halfway point of elapsed *time* progress.
     let start = Instant::now();
     let mut controller = SmoothScrollController::new(0.0);
-    controller.add_delta(40.0, start);
+    controller.add_delta(120.0, start);
+    let duration = inverse_delta_duration(120.0);
 
-    let midpoint = start + Duration::from_millis(60);
-    let progress_before_second_notch = controller.displayed_position(midpoint);
-    assert!(progress_before_second_notch > 0.0);
-
-    // A second same-direction notch arrives mid-flight.
-    controller.add_delta(40.0, midpoint);
-
-    // The already-visible motion isn't restarted: displayed position doesn't regress.
-    let just_after = controller.displayed_position(midpoint);
-    assert!(just_after >= progress_before_second_notch);
-
-    // The eventual target is the sum of both contributions.
-    assert_eq!(controller.target(), 80.0);
-    let final_position = controller.displayed_position(midpoint + SMOOTH_SCROLL_DURATION);
-    assert_eq!(final_position, 80.0);
+    let ten_percent_in = start + duration.mul_f32(0.1);
+    let progress_fraction = controller.displayed_position(ten_percent_in) / 120.0;
+    assert!(
+        progress_fraction < 0.1,
+        "expected an eased-in start to lag behind linear progress at 10% elapsed time, got \
+         progress fraction {progress_fraction}"
+    );
 }
 
 #[test]
-fn opposing_input_discards_unrendered_remainder() {
+fn opposing_input_discards_unrendered_remainder_and_reverses_immediately() {
     let start = Instant::now();
     let mut controller = SmoothScrollController::new(0.0);
     controller.add_delta(100.0, start);
@@ -58,7 +69,7 @@ fn opposing_input_discards_unrendered_remainder() {
     let displayed_at_reversal = controller.displayed_position(reversal_time);
     assert!(displayed_at_reversal > 0.0 && displayed_at_reversal < 100.0);
 
-    // Reverse direction before the first contribution finishes.
+    // Reverse direction before the first segment finishes.
     controller.add_delta(-30.0, reversal_time);
 
     // Reversal starts from the currently displayed position, not from 0 or from the old target.
@@ -68,23 +79,69 @@ fn opposing_input_discards_unrendered_remainder() {
     );
     assert_eq!(controller.target(), displayed_at_reversal - 30.0);
 
-    // The old (discarded) target of 100 is never reached.
-    let far_future = reversal_time + SMOOTH_SCROLL_DURATION;
+    // The old (discarded) target of 100 is never reached; the new one is, exactly.
+    let far_future = reversal_time + inverse_delta_duration(30.0);
     let final_position = controller.displayed_position(far_future);
     assert_eq!(final_position, displayed_at_reversal - 30.0);
+    assert!(!controller.is_animating(far_future));
 }
 
 #[test]
-fn late_frame_emits_exact_remaining_distance() {
+fn same_direction_retarget_lands_exactly_on_the_combined_target() {
     let start = Instant::now();
-    let mut controller = SmoothScrollController::new(10.0);
-    controller.add_delta(50.0, start);
+    let mut controller = SmoothScrollController::new(0.0);
+    controller.add_delta(120.0, start);
 
-    // A frame arrives long after the animation should have finished (e.g. the app was
-    // suspended). The exact remaining distance is still applied, with no error accumulation.
-    let displayed = controller.displayed_position(start + Duration::from_secs(5));
-    assert_eq!(displayed, 60.0);
-    assert!(!controller.is_animating(start + Duration::from_secs(5)));
+    let midpoint = start + Duration::from_millis(60);
+    let progress_before_second_notch = controller.displayed_position(midpoint);
+    assert!(progress_before_second_notch > 0.0);
+
+    // A second same-direction notch arrives mid-flight and retargets the running segment.
+    controller.add_delta(120.0, midpoint);
+
+    // The already-visible motion isn't discarded: displayed position doesn't regress.
+    let just_after = controller.displayed_position(midpoint);
+    assert!(just_after >= progress_before_second_notch);
+
+    // The eventual target is the sum of both contributions, same promise as before.
+    assert_eq!(controller.target(), 240.0);
+    let far_future = midpoint + Duration::from_secs(1);
+    let final_position = controller.displayed_position(far_future);
+    assert_eq!(final_position, 240.0);
+    assert!(!controller.is_animating(far_future));
+}
+
+#[test]
+fn same_direction_retarget_preserves_velocity_across_the_seam() {
+    // The new model's central promise, replacing the old "independent stacked eases" behavior:
+    // a retarget must not create a velocity discontinuity. Sample displayed position on a fine
+    // grid straddling the retarget instant and check the local slope (an approximation of
+    // velocity) doesn't jump abruptly.
+    let start = Instant::now();
+    let mut controller = SmoothScrollController::new(0.0);
+    controller.add_delta(480.0, start);
+
+    let retarget_at = start + Duration::from_millis(40);
+    let step = Duration::from_micros(200);
+
+    let before_retarget = controller.displayed_position(retarget_at - step);
+    let at_retarget = controller.displayed_position(retarget_at);
+    let velocity_before = (at_retarget - before_retarget) / step.as_secs_f32();
+
+    controller.add_delta(480.0, retarget_at);
+
+    let just_after = controller.displayed_position(retarget_at + step);
+    let velocity_after = (just_after - at_retarget) / step.as_secs_f32();
+
+    // Velocity right after the retarget should be close to velocity right before it -- not
+    // reset to zero (which the old independent-contribution model didn't do either, but which a
+    // naive "always restart at rest" retarget would) and not discontinuously larger.
+    let relative_difference = (velocity_after - velocity_before).abs() / velocity_before.abs();
+    assert!(
+        relative_difference < 0.15,
+        "expected velocity to stay roughly continuous across the retarget, got {velocity_before} \
+         before vs {velocity_after} after (relative difference {relative_difference})"
+    );
 }
 
 #[test]
@@ -102,7 +159,7 @@ fn cancel_settles_at_displayed_position_and_stops_animation() {
     assert_eq!(controller.target(), displayed_at_cancel);
 
     // No further motion happens once cancelled, even much later.
-    let later = cancel_time + SMOOTH_SCROLL_DURATION;
+    let later = cancel_time + Duration::from_secs(1);
     assert_eq!(controller.displayed_position(later), displayed_at_cancel);
 }
 
@@ -133,9 +190,8 @@ fn zero_delta_is_a_no_op() {
 }
 
 /// Regression test for a rapid burst of clicky-wheel notches (the reported input pattern is a
-/// trackball spun fast, producing dozens of same-direction notches within the 120ms window).
-/// Many overlapping active contributions must sum exactly, never cancel, saturate, or drop to
-/// zero net movement.
+/// trackball spun fast, producing dozens of same-direction notches within a short window). Many
+/// consecutive retargets must sum exactly, never cancel, saturate, or drop to zero net movement.
 #[test]
 fn long_rapid_same_direction_burst_reaches_exact_sum_of_deltas() {
     let start = Instant::now();
@@ -144,8 +200,6 @@ fn long_rapid_same_direction_burst_reaches_exact_sum_of_deltas() {
     let notch_count = 25_u32;
     let spacing = Duration::from_millis(3);
 
-    // All 25 notches land inside the 120ms window (the last one starts 72ms after the first),
-    // so every contribution is simultaneously active at once -- the stress case in question.
     for i in 0..notch_count {
         controller.add_delta(per_notch, start + spacing * i);
     }
@@ -156,17 +210,81 @@ fn long_rapid_same_direction_burst_reaches_exact_sum_of_deltas() {
     assert!(controller.is_animating(burst_end));
 
     // Sampling mid-burst never regresses or exceeds the running target: no cancellation or
-    // saturation from having many contributions active at once.
+    // saturation from having retargeted many times in quick succession.
     let mid_burst = start + spacing * (notch_count / 2);
     let displayed_mid_burst = controller.displayed_position(mid_burst);
     assert!(displayed_mid_burst > 0.0);
     assert!(displayed_mid_burst <= controller.target());
 
-    // Once every contribution has fully eased in (settling any that expired mid-burst along the
-    // way), the displayed position lands on the exact total, with no accumulated error and no
-    // lost movement.
-    let long_after =
-        start + spacing * (notch_count - 1) + SMOOTH_SCROLL_DURATION + Duration::from_millis(50);
+    // Once the final segment fully eases in, the displayed position lands on the exact total,
+    // with no accumulated error and no lost movement.
+    let long_after = burst_end + Duration::from_secs(1);
     assert_eq!(controller.displayed_position(long_after), expected_total);
     assert!(!controller.is_animating(long_after));
+}
+
+#[test]
+fn inverse_delta_duration_ramps_between_the_two_reference_points() {
+    // Below or at the small reference point: the slow, gentle end.
+    assert_eq!(
+        inverse_delta_duration(INVERSE_DELTA_REFERENCE_SMALL),
+        INVERSE_DELTA_MAX_DURATION
+    );
+    assert_eq!(inverse_delta_duration(10.0), INVERSE_DELTA_MAX_DURATION);
+
+    // At or above the large reference point: the fast, snappy end.
+    assert_eq!(
+        inverse_delta_duration(INVERSE_DELTA_REFERENCE_LARGE),
+        INVERSE_DELTA_MIN_DURATION
+    );
+    assert_eq!(inverse_delta_duration(2000.0), INVERSE_DELTA_MIN_DURATION);
+
+    // Strictly between the two references, duration strictly decreases as delta grows.
+    let mid_low = inverse_delta_duration(200.0);
+    let mid_high = inverse_delta_duration(350.0);
+    assert!(mid_low < INVERSE_DELTA_MAX_DURATION);
+    assert!(mid_high > INVERSE_DELTA_MIN_DURATION);
+    assert!(mid_high < mid_low);
+}
+
+#[test]
+fn velocity_preserving_duration_bound_shrinks_when_moving_fast_toward_a_small_remaining_delta() {
+    // A large remaining delta at a modest velocity: the bound shouldn't kick in, so the
+    // duration matches the plain inverse-delta duration for that remaining distance.
+    let unconstrained = velocity_preserving_duration(480.0, 50.0);
+    assert_eq!(unconstrained, inverse_delta_duration(480.0));
+
+    // The same velocity, but only a tiny remaining delta left: without a bound, the reshaped
+    // curve's starting slope would need to be enormous to reach the target in the "natural"
+    // inverse-delta duration for such a small distance (which is already at the *max*, slowest,
+    // end -- exactly the scenario that would rubber-band). The bound must shrink the duration
+    // well below that unconstrained value instead.
+    let bounded = velocity_preserving_duration(5.0, 500.0);
+    assert!(
+        bounded < inverse_delta_duration(5.0),
+        "expected the velocity-based bound to shrink the duration below the unconstrained \
+         inverse-delta value, got {bounded:?} vs {:?}",
+        inverse_delta_duration(5.0)
+    );
+}
+
+#[test]
+fn cubic_bezier_ease_in_out_matches_known_reference_values() {
+    // Cross-check our Newton-Raphson solver against known sampled values of CSS's standard
+    // `ease-in-out` (`cubic-bezier(0.42, 0, 0.58, 1)`) at a few round inputs.
+    let curve = CubicBezier {
+        x1: 0.42,
+        y1: 0.0,
+        x2: 0.58,
+        y2: 1.0,
+    };
+
+    assert_eq!(curve.ease(0.0), 0.0);
+    assert_eq!(curve.ease(1.0), 1.0);
+    // The curve is symmetric about (0.5, 0.5).
+    assert!((curve.ease(0.5) - 0.5).abs() < 1e-4);
+    // Ease-in-out starts and ends slow: progress at 25% elapsed time is well under 25%, and
+    // progress at 75% elapsed time is well over 75%.
+    assert!(curve.ease(0.25) < 0.2);
+    assert!(curve.ease(0.75) > 0.8);
 }
