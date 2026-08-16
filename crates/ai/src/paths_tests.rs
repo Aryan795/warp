@@ -105,6 +105,101 @@ fn windows_viewer_renders_read_files_style_path_with_forward_slashes_for_unix_se
     );
 }
 
+/// Regression tests for the corrected root cause of APP-5438: `read_files` execution stores an
+/// absolute path in the *host's* native encoding (see `host_native_absolute_path`), which is a
+/// Windows-style path for WSL/MSYS2 sessions on a Windows host. Display must normalize that
+/// stored string back to the shell's native (Unix) form, independent of who renders it.
+mod display_normalizes_host_native_paths_tests {
+    use super::*;
+
+    fn wsl_shell() -> Option<ShellLaunchData> {
+        Some(ShellLaunchData::WSL {
+            distro: "Ubuntu".to_string(),
+        })
+    }
+
+    fn msys2_shell() -> Option<ShellLaunchData> {
+        Some(ShellLaunchData::MSYS2 {
+            executable_path: PathBuf::from(r"C:\Program Files\Git\usr\bin\bash.exe"),
+            shell_type: ShellType::Bash,
+        })
+    }
+
+    #[test]
+    fn wsl_unc_path_renders_as_unix_path() {
+        // A stored `\\WSL$\<distro>\...` UNC path (what `host_native_absolute_path` produces on
+        // a Windows host by default) must render with forward slashes, matching the WSL shell's
+        // own view of the file.
+        let cwd = Some("/home/user".to_string());
+        assert_eq!(
+            shell_native_absolute_path(
+                r"\\WSL$\Ubuntu\home\user\file.txt",
+                wsl_shell().as_ref(),
+                cwd.as_ref()
+            ),
+            "/home/user/file.txt"
+        );
+    }
+
+    #[test]
+    fn wsl_drive_letter_path_renders_as_mnt_path() {
+        // A stored drive-letter path (what `host_native_absolute_path` produces for a WSL path
+        // under `/mnt/<drive>`) must render back in its `/mnt/<drive>` form.
+        let cwd = Some("/home/user".to_string());
+        assert_eq!(
+            shell_native_absolute_path(
+                r"C:\Users\alice\file.txt",
+                wsl_shell().as_ref(),
+                cwd.as_ref()
+            ),
+            "/mnt/c/Users/alice/file.txt"
+        );
+    }
+
+    #[test]
+    fn msys2_windows_path_renders_as_unix_path() {
+        // A stored Windows-native drive path (what `host_native_absolute_path` produces for an
+        // MSYS2/Git Bash session) must render with forward slashes.
+        let cwd = Some("/c/Users/username".to_string());
+        assert_eq!(
+            shell_native_absolute_path(
+                r"C:\Users\username\project\file.txt",
+                msys2_shell().as_ref(),
+                cwd.as_ref()
+            ),
+            "/c/Users/username/project/file.txt"
+        );
+    }
+
+    #[test]
+    fn native_windows_session_still_renders_windows_paths() {
+        // A genuine Windows session (no WSL/MSYS2 shell) must be unaffected: the stored path is
+        // already host-native and correctly Windows-style, so it must not be converted.
+        let cwd = Some(r"C:\current\dir".to_string());
+        assert_eq!(
+            shell_native_absolute_path(r"C:\home\user\file.txt", None, cwd.as_ref()),
+            r"C:\home\user\file.txt"
+        );
+    }
+
+    #[test]
+    fn pending_and_complete_read_files_rendering_agree() {
+        // The "pending" branch renders the request's shell-native location directly, while the
+        // "complete" branch renders the stored (potentially host-native) result string. Both must
+        // agree once the file has actually been read.
+        let cwd = Some("/home/user".to_string());
+        let pending =
+            shell_native_absolute_path("/home/user/file.txt", wsl_shell().as_ref(), cwd.as_ref());
+        let complete = shell_native_absolute_path(
+            r"\\WSL$\Ubuntu\home\user\file.txt",
+            wsl_shell().as_ref(),
+            cwd.as_ref(),
+        );
+        assert_eq!(pending, complete);
+        assert_eq!(pending, "/home/user/file.txt");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn test_host_native_absolute_path() {

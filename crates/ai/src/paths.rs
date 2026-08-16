@@ -1,8 +1,13 @@
+use std::borrow::Cow;
+use std::path::Path;
+
 use typed_path::{TypedPath, TypedPathBuf, WindowsPath};
 use warp_errors::report_error;
 use warp_terminal::shell::ShellLaunchData;
 use warp_util::path::{
-    convert_msys2_to_windows_native_path, convert_wsl_to_windows_host_path, msys2_exe_to_root,
+    convert_msys2_to_windows_native_path, convert_windows_path_to_msys2,
+    convert_windows_path_to_wsl, convert_wsl_to_windows_host_path, msys2_exe_to_root,
+    parse_wsl_unc_path,
 };
 use warpui_core::platform::OperatingSystem;
 
@@ -96,6 +101,43 @@ pub fn join_paths(paths: &[&str], shell: Option<&ShellLaunchData>) -> String {
         .into_owned()
 }
 
+/// Reverses a *host-native* path back into the shell's native (Unix) form, for shells whose
+/// paths are always Unix-style.
+///
+/// Actions like `read_files` execute via [`host_native_absolute_path`], which converts a
+/// WSL/MSYS2 shell path into a Windows-native path so the host filesystem can actually open it
+/// (e.g. a `\\wsl$\<distro>\...` UNC path, or a Git-Bash-style drive path). That host-native
+/// string is what ends up stored in the action result and later displayed. Rendering it verbatim
+/// shows Windows-style backslashes even though the session itself is Unix-style — and does so
+/// independent of whoever renders it, since for a shared session viewed on the web, the renderer
+/// isn't even the session's host. This reverses that conversion so display always matches what
+/// the shell itself would show. A path that's already shell-native (the common case, e.g. fresh
+/// out of a shell command, or a WSL/MSYS2 path that was never host-converted) passes through
+/// unchanged.
+fn to_shell_native_display_path<'a>(
+    path: &'a str,
+    shell: Option<&ShellLaunchData>,
+) -> Cow<'a, str> {
+    match shell {
+        Some(ShellLaunchData::WSL { .. }) => {
+            if let Some(unc) = parse_wsl_unc_path(Path::new(path)) {
+                return Cow::Owned(unc.linux_path);
+            }
+            if detect_path_style(path) == Some(PathStyle::Windows) {
+                return Cow::Owned(convert_windows_path_to_wsl(path));
+            }
+            Cow::Borrowed(path)
+        }
+        Some(ShellLaunchData::MSYS2 { .. }) => {
+            if detect_path_style(path) == Some(PathStyle::Windows) {
+                return Cow::Owned(convert_windows_path_to_msys2(path));
+            }
+            Cow::Borrowed(path)
+        }
+        _ => Cow::Borrowed(path),
+    }
+}
+
 fn shell_native_absolute_path_internal(
     file_path: &str,
     shell: Option<&ShellLaunchData>,
@@ -132,10 +174,11 @@ pub fn shell_native_absolute_path(
     shell: Option<&ShellLaunchData>,
     current_working_directory: Option<&String>,
 ) -> String {
+    let file_path = to_shell_native_display_path(file_path, shell);
     let Some(cwd) = current_working_directory else {
-        return shellexpand::tilde(file_path).into_owned();
+        return shellexpand::tilde(&file_path).into_owned();
     };
-    shell_native_absolute_path_internal(file_path, shell, cwd)
+    shell_native_absolute_path_internal(&file_path, shell, cwd)
         .to_string_lossy()
         .into_owned()
 }
