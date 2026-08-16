@@ -361,7 +361,9 @@ impl<T: Item> SumTree<T> {
     }
 
     /// Walk the tree counting nodes, for measuring how densely items are packed into leaves.
-    #[cfg(any(test, feature = "test-util"))]
+    ///
+    /// Deliberately not behind `test-util`: that feature also drops `TREE_BASE` to 2, so gating
+    /// this on it would force every consumer that wants the stats onto a 4-slot leaf.
     pub fn node_stats(&self) -> NodeStats {
         let mut stats = NodeStats {
             slots_per_leaf: 2 * TREE_BASE,
@@ -371,7 +373,6 @@ impl<T: Item> SumTree<T> {
         stats
     }
 
-    #[cfg(any(test, feature = "test-util"))]
     fn accumulate_node_stats(&self, stats: &mut NodeStats) {
         match self.0.as_ref() {
             Node::Internal { child_trees, .. } => {
@@ -466,7 +467,6 @@ impl<T: KeyedItem> SumTree<T> {
 ///
 /// A leaf allocation is the size of the whole `Node` enum whatever it holds, so the ratio of
 /// `items` to `leaves * slots_per_leaf` is the fraction of allocated item slots actually in use.
-#[cfg(any(test, feature = "test-util"))]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NodeStats {
     pub leaves: usize,
@@ -476,7 +476,6 @@ pub struct NodeStats {
     pub slots_per_leaf: usize,
 }
 
-#[cfg(any(test, feature = "test-util"))]
 impl NodeStats {
     pub fn nodes(&self) -> usize {
         self.leaves + self.internal_nodes
