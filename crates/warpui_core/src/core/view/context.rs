@@ -503,6 +503,7 @@ impl<'a, T: Entity> ViewContext<'a, T> {
     ///
     /// TODO(vorporeal): Determine how best to eliminate this function and move
     ///     the relevant logic into `spawn()`.
+    #[track_caller]
     fn spawn_local<S, F, U>(
         &mut self,
         future: S,
@@ -555,6 +556,7 @@ impl<'a, T: Entity> ViewContext<'a, T> {
     ///
     /// See [`Self::spawn_abortable`] for an alternative version of this function that accepts an
     /// `on_abort` function that is called when the future is aborted.
+    #[track_caller]
     pub fn spawn<S, F, U>(&mut self, future: S, callback: F) -> SpawnedFutureHandle
     where
         S: crate::r#async::Spawnable,
@@ -589,6 +591,7 @@ impl<'a, T: Entity> ViewContext<'a, T> {
     ///
     /// See [`Self::spawn`] for an alternative version of this function that doesn't
     /// require a callback if/when the future is aborted.
+    #[track_caller]
     pub fn spawn_abortable<S, F, A>(
         &mut self,
         future: S,
