@@ -9634,7 +9634,7 @@ impl TerminalView {
             // `Self::drive_smooth_scroll`).
             self.smooth_scroll.add_delta(delta, Instant::now());
             if self.smooth_scroll.try_start_driving() {
-                Self::drive_smooth_scroll(ctx);
+                Self::drive_smooth_scroll(self.smooth_scroll.clone(), ctx);
             }
         }
         ctx.notify();
@@ -9666,20 +9666,28 @@ impl TerminalView {
     /// nothing would ever call `advance_smooth_scroll`, leaving the animation registered but
     /// permanently unapplied while `is_animating()` keeps requesting repaints forever.
     ///
-    /// This instead schedules its own advance via `ctx.spawn` + `Timer::after`, independent of
-    /// any cached pointer state, and re-schedules itself for as long as the controller reports
-    /// it's still animating.
-    fn drive_smooth_scroll(ctx: &mut ViewContext<Self>) {
-        ctx.spawn(
-            Timer::after(SMOOTH_SCROLL_FRAME_INTERVAL),
-            |view, _, ctx| {
-                view.advance_smooth_scroll(ctx);
-                if view.smooth_scroll.is_animating(Instant::now()) {
-                    Self::drive_smooth_scroll(ctx);
-                } else {
-                    view.smooth_scroll.mark_driving_stopped();
-                }
-            },
+    /// This instead drives its own advance via a single long-lived stream
+    /// (`ctx.spawn_stream_local`), independent of any cached pointer state, that ticks every
+    /// `SMOOTH_SCROLL_FRAME_INTERVAL` and ends itself once the controller reports it's settled.
+    /// A single stream is spawned onto the background executor once (here) and left running for
+    /// the duration of the animation, rather than a self-rescheduling `ctx.spawn(Timer::after
+    /// (...), ...)` per tick, which would pay a fresh background-task-spawn-and-channel-bridge
+    /// round trip on every single tick -- acceptable for the occasional one-shot delayed actions
+    /// elsewhere in this file, but disproportionate overhead for a tight ~8ms cadence.
+    ///
+    /// `handle` is a clone of `self.smooth_scroll`, captured by value into the stream (which
+    /// polls on a background thread via `Timer::after`, checking `is_animating` directly on the
+    /// thread-safe handle) rather than reaching back into `self`, since the stream must be
+    /// `'static` and cannot borrow the view.
+    fn drive_smooth_scroll(handle: SmoothScrollHandle, ctx: &mut ViewContext<Self>) {
+        let stream = futures::stream::unfold(handle, |handle| async move {
+            Timer::after(SMOOTH_SCROLL_FRAME_INTERVAL).await;
+            handle.is_animating(Instant::now()).then_some(((), handle))
+        });
+        ctx.spawn_stream_local(
+            stream,
+            |view, (), ctx| view.advance_smooth_scroll(ctx),
+            |view, _ctx| view.smooth_scroll.mark_driving_stopped(),
         );
     }
 

@@ -4444,6 +4444,92 @@ fn test_smooth_scroll_advances_on_its_own_without_any_cached_mouse_position() {
     })
 }
 
+/// Measures real wall-clock settle latency through the actual `drive_smooth_scroll` timer-loop
+/// path -- polling `scroll_position` from outside via small real sleeps, the same way an
+/// external observer (a screenshot, a human) would, rather than calling `advance_smooth_scroll`
+/// manually. The controller's own modeled duration tops out at ~200ms; this asserts the animation
+/// is visibly done well within that, with slack for scheduling overhead but nowhere near the
+/// ~1-second gliding the visual pass reported for a terminal burst.
+#[test]
+fn test_smooth_scroll_drive_loop_settles_within_modeled_duration_via_real_polling() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let _smooth_scrolling = FeatureFlag::SmoothScrolling.override_enabled(true);
+
+        let terminal = add_window_with_terminal(&mut app, None);
+        terminal.update(&mut app, |view, _ctx| {
+            let mut model = view.model.lock();
+            for _ in 0..100 {
+                model.simulate_block("ls", "foo");
+            }
+        });
+        warpui::r#async::Timer::after(std::time::Duration::from_millis(50)).await;
+
+        // A rapid burst of several same-direction notches, mirroring a clicky-wheel spin,
+        // dispatched back to back with no intervening await -- exactly what a real burst of
+        // wheel events looks like from this view's perspective.
+        let expected_final_position = terminal.update(&mut app, |view, ctx| {
+            for _ in 0..8 {
+                view.scroll(1.0.into_lines(), false /* precise */, ctx);
+            }
+            let input_mode = *InputModeSettings::as_ref(ctx).input_mode.value();
+            let model = view.model.lock();
+            view.viewport_state(model.block_list(), input_mode, ctx)
+                .next_scroll_position(
+                    ScrollPositionUpdate::AfterScrollEvent {
+                        scroll_delta: 8.0.into_lines(),
+                    },
+                    ctx,
+                )
+        });
+
+        // Poll via real sleeps (not one long wait, not a manual `advance_smooth_scroll` call)
+        // until the position matches the expected final target, timing out generously past any
+        // plausible modeled duration if it never arrives. Uses approximate equality: the
+        // animation normalizes through pixel-equivalent units and back (an extra `f32`
+        // round-trip an immediate scroll doesn't take), so it can differ from the
+        // independently-computed expected position by a sub-visual amount of floating-point
+        // noise -- see the identical reasoning in
+        // `test_smooth_scroll_wheel_animates_and_settles_to_exact_target`.
+        fn positions_approx_eq(a: ScrollPosition, b: ScrollPosition) -> bool {
+            match (a, b) {
+                (
+                    ScrollPosition::FixedAtPosition {
+                        scroll_lines: ScrollLines::ScrollTop(a),
+                    },
+                    ScrollPosition::FixedAtPosition {
+                        scroll_lines: ScrollLines::ScrollTop(b),
+                    },
+                ) => heights_approx_eq(a, b),
+                (a, b) => a == b,
+            }
+        }
+        let start = Instant::now();
+        let poll_interval = std::time::Duration::from_millis(10);
+        let timeout = std::time::Duration::from_millis(600);
+        let mut settled_at = None;
+        while start.elapsed() < timeout {
+            warpui::r#async::Timer::after(poll_interval).await;
+            let position = terminal.read(&app, |view, _ctx| view.scroll_position());
+            if positions_approx_eq(position, expected_final_position) {
+                settled_at = Some(start.elapsed());
+                break;
+            }
+        }
+
+        let settled_at = settled_at.expect(
+            "the animation should have reached its exact final position via the drive loop \
+             alone within the timeout, driven purely by real polling with no manual poke",
+        );
+        assert!(
+            settled_at < std::time::Duration::from_millis(300),
+            "the drive loop should settle within ~300ms of real wall-clock time (the \
+             controller's own modeled duration tops out at ~200ms) for an 8-notch burst, but \
+             took {settled_at:?}"
+        );
+    })
+}
+
 /// Regression coverage for a leak across the alternate-screen boundary: an animation already in
 /// flight when alt screen is entered must be cancelled at its currently displayed position, not
 /// left to keep silently advancing (or worse, dumped as a single jump once the user returns).
