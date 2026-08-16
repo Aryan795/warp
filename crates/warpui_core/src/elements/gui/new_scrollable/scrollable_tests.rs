@@ -13,9 +13,10 @@ use super::{
     NewScrollableElement, ScrollableAppearance, ScrollableAxis, SingleAxisConfig,
 };
 use crate::elements::{
-    Axis, ClippedScrollStateHandle, ConstrainedBox, DispatchEventResult, EventHandler, Fill,
-    ParentElement, Point, Rect, SavePosition, ScrollData, ScrollStateHandle, ScrollTarget,
-    ScrollToPositionMode, ScrollbarWidth, SelectableElement, SelectionFragment, Stack, ZIndex,
+    Axis, ClippedScrollStateHandle, ConstrainedBox, DispatchEventResult, EventHandler, Fill, Flex,
+    Hoverable, MouseStateHandle, ParentElement, Point, Rect, SavePosition, ScrollData,
+    ScrollStateHandle, ScrollTarget, ScrollToPositionMode, ScrollbarWidth, SelectableElement,
+    SelectionFragment, Stack, ZIndex,
 };
 use crate::event::{DispatchedEvent, ModifiersState};
 use crate::platform::{TerminationMode, WindowStyle};
@@ -2188,6 +2189,349 @@ fn test_scroll_position_top_into_view_does_not_alternate() {
                 scroll_after_settled,
                 "scroll position should remain stable on third call"
             );
+        });
+    })
+}
+
+const HOVER_TRACKING_ROW_HEIGHT: f32 = 40.;
+const HOVER_TRACKING_ROW_COUNT: usize = 20;
+const HOVER_TRACKING_VIEWPORT_HEIGHT: f32 = 200.;
+/// Screen-space Y of the stationary pointer used by the live-tracking tests below. At
+/// scroll_start = 0, this lands inside row 2 (content y in [80, 120)); at scroll_start = 40 (one
+/// notch later), it lands inside row 3 (content y in [120, 160)), crossing the row-2/row-3
+/// boundary at scroll_start = 20 -- the exact midpoint of a single notch's distance.
+const HOVER_TRACKING_MOUSE_Y: f32 = 100.;
+
+/// A thin wrapper that records the Y origin it was actually painted at on every paint, so a test
+/// can compare hover state against exactly what was last rendered -- distinguishing "hover is
+/// wrong relative to what's on screen" from "hover matches the last paint, but a fresh poll of
+/// `scroll_start()` has moved on since, because painting is discrete and time is continuous".
+struct PaintOffsetRecorder {
+    child: Box<dyn Element>,
+    last_painted_origin_y: Rc<Cell<f32>>,
+}
+
+impl Element for PaintOffsetRecorder {
+    fn layout(
+        &mut self,
+        constraint: SizeConstraint,
+        ctx: &mut LayoutContext,
+        app: &AppContext,
+    ) -> Vector2F {
+        self.child.layout(constraint, ctx, app)
+    }
+
+    fn after_layout(&mut self, ctx: &mut AfterLayoutContext, app: &AppContext) {
+        self.child.after_layout(ctx, app);
+    }
+
+    fn paint(&mut self, origin: Vector2F, ctx: &mut PaintContext, app: &AppContext) {
+        self.last_painted_origin_y.set(origin.y());
+        self.child.paint(origin, ctx, app);
+    }
+
+    fn size(&self) -> Option<Vector2F> {
+        self.child.size()
+    }
+
+    fn origin(&self) -> Option<Point> {
+        self.child.origin()
+    }
+
+    fn dispatch_event(
+        &mut self,
+        event: &DispatchedEvent,
+        ctx: &mut EventContext,
+        app: &AppContext,
+    ) -> bool {
+        self.child.dispatch_event(event, ctx, app)
+    }
+}
+
+#[derive(Default)]
+struct HoverTrackingScrollView {
+    handle: ClippedScrollStateHandle,
+    row_states: Vec<MouseStateHandle>,
+    last_painted_origin_y: Rc<Cell<f32>>,
+    /// If set, each row's `Hoverable` build_child closure snapshots `state.is_hovered()` into
+    /// this per-row cell *at construction time* (mirroring real call sites like
+    /// `app/src/settings_view/keybindings.rs`'s `KeybindingRow::render`, which computes its
+    /// background fill once from `state.is_hovered()` inside the closure, rather than reading
+    /// hover state fresh on every paint). Rebuilding the row (via `ctx.notify()` on the owning
+    /// view) is required for this snapshot to reflect a later hover-state change; a plain
+    /// re-paint of an already-constructed row does not.
+    baked_in_hover_snapshots: Option<Rc<RefCell<Vec<bool>>>>,
+}
+
+impl Entity for HoverTrackingScrollView {
+    type Event = ();
+}
+
+impl View for HoverTrackingScrollView {
+    fn render(&self, _: &AppContext) -> Box<dyn Element> {
+        let rows = self.row_states.iter().enumerate().map(|(index, state)| {
+            let baked_in = self.baked_in_hover_snapshots.clone();
+            Hoverable::new(state.clone(), move |state| {
+                if let Some(baked_in) = baked_in {
+                    baked_in.borrow_mut()[index] = state.is_hovered();
+                }
+                ConstrainedBox::new(Rect::new().finish())
+                    .with_height(HOVER_TRACKING_ROW_HEIGHT)
+                    .with_width(200.)
+                    .finish()
+            })
+            .finish()
+        });
+        let axis_config = SingleAxisConfig::Clipped {
+            handle: self.handle.clone(),
+            child: Box::new(PaintOffsetRecorder {
+                child: Flex::column().with_children(rows).finish(),
+                last_painted_origin_y: self.last_painted_origin_y.clone(),
+            }),
+        };
+        let scrollable = NewScrollable::vertical(axis_config, Fill::None, Fill::None, Fill::None);
+        ConstrainedBox::new(scrollable.finish())
+            .with_height(HOVER_TRACKING_VIEWPORT_HEIGHT)
+            .with_width(200.)
+            .finish()
+    }
+
+    fn ui_name() -> &'static str {
+        "HoverTrackingScrollView"
+    }
+}
+
+impl TypedActionView for HoverTrackingScrollView {
+    type Action = ();
+}
+
+/// Which row's `Hoverable` should be considered hovered given the stationary pointer at
+/// [`HOVER_TRACKING_MOUSE_Y`] and the current `scroll_start`.
+fn hover_tracking_expected_row(scroll_start: f32) -> usize {
+    ((HOVER_TRACKING_MOUSE_Y + scroll_start) / HOVER_TRACKING_ROW_HEIGHT).floor() as usize
+}
+
+fn hover_tracking_hovered_rows(row_states: &[MouseStateHandle]) -> Vec<usize> {
+    row_states
+        .iter()
+        .enumerate()
+        .filter(|(_, state)| state.lock().unwrap().is_hovered())
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Regression test for the reported "hover still lags" bug: unlike a settled-state-only check
+/// (which cannot distinguish a real fix from a highlight that is wrong throughout the motion and
+/// only self-corrects once the animation stops), this samples which row is hovered at several
+/// points *during* an in-flight animation, for a pointer that never moves, and compares that
+/// against the row the currently *displayed* (not target, not pre-animation) scroll offset
+/// actually places under the pointer at that same instant.
+#[test]
+fn hover_tracks_the_displayed_offset_at_intermediate_animation_frames() {
+    let _flag = FeatureFlag::SmoothScrolling.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        let app = &mut app;
+        let row_states: Vec<MouseStateHandle> = (0..HOVER_TRACKING_ROW_COUNT)
+            .map(|_| MouseStateHandle::default())
+            .collect();
+        let handle = ClippedScrollStateHandle::default();
+        let last_painted_origin_y = Rc::new(Cell::new(0.0f32));
+        let (window_id, _view) = app.add_window(WindowStyle::NotStealFocus, {
+            let handle = handle.clone();
+            let row_states = row_states.clone();
+            let last_painted_origin_y = last_painted_origin_y.clone();
+            move |_| HoverTrackingScrollView {
+                handle,
+                row_states,
+                last_painted_origin_y,
+                baked_in_hover_snapshots: None,
+            }
+        });
+
+        let presenter = Rc::new(RefCell::new(Presenter::new(window_id)));
+        let view_id = app.root_view_id(window_id).unwrap();
+        app.update(|ctx| render(&mut presenter.borrow_mut(), view_id, ctx));
+
+        let pointer = vec2f(100., HOVER_TRACKING_MOUSE_Y);
+        let real_mouse_move = Event::MouseMoved {
+            position: pointer,
+            cmd: false,
+            shift: false,
+            is_synthetic: false,
+        };
+
+        // Establish initial hover with a real (non-synthetic) mouse move, and record it as the
+        // "last" mouse position so the app's redraw-driven synthetic-MouseMoved replay uses it
+        // on every subsequent repaint, exactly as it would for a truly stationary physical mouse.
+        app.update(|ctx| {
+            ctx.simulate_window_event(real_mouse_move.clone(), window_id, presenter.clone());
+            ctx.set_last_mouse_move_event(window_id, real_mouse_move);
+        });
+
+        assert_eq!(
+            hover_tracking_hovered_rows(&row_states),
+            vec![hover_tracking_expected_row(0.)],
+            "row 2 should be hovered before any scrolling"
+        );
+
+        // One non-precise notch (40px, matching NUM_PIXELS_PER_LINE with no app-level
+        // multiplier in this test harness) animates scroll_start from 0 to 40, crossing the
+        // row-2/row-3 boundary at scroll_start = 20 -- the animation's exact midpoint.
+        app.update(|ctx| {
+            ctx.simulate_window_event(
+                Event::ScrollWheel {
+                    position: pointer,
+                    delta: vec2f(0., -1.),
+                    precise: false,
+                    modifiers: ModifiersState::default(),
+                },
+                window_id,
+                presenter.clone(),
+            );
+        });
+
+        // Sample at several points strictly *during* the animation (not settled). Each time,
+        // compare hover state against the offset that was actually used for the *last paint*
+        // (recorded by `PaintOffsetRecorder`), not a freshly-polled `scroll_start()` -- polling
+        // the controller independently always reads a slightly more-advanced position than
+        // whatever was last rendered, since painting is discrete (repaint-timer-driven) while
+        // the controller's position is a continuous function of wall-clock time. Comparing
+        // against the true poll would conflate that expected, harmless skew with a real bug.
+        for _ in 0..10 {
+            crate::r#async::Timer::after(Duration::from_millis(25)).await;
+
+            let painted_offset = -last_painted_origin_y.get();
+            let expected_row = hover_tracking_expected_row(painted_offset);
+            let hovered_rows = hover_tracking_hovered_rows(&row_states);
+
+            assert_eq!(
+                hovered_rows,
+                vec![expected_row],
+                "at last-painted scroll offset={painted_offset} (scroll_start() polled \
+                 independently reads {}), expected only row {expected_row} to be hovered \
+                 (pointer is stationary at y={HOVER_TRACKING_MOUSE_Y}), got {hovered_rows:?}",
+                handle.scroll_start().as_f32()
+            );
+        }
+
+        // Once fully settled, the same invariant holds trivially (this alone would not have
+        // caught the reported bug, since a wrong-throughout-then-self-correcting highlight looks
+        // identical to a correct one at this point).
+        assert!(!handle.is_animating());
+        let settled_row = hover_tracking_expected_row(-last_painted_origin_y.get());
+        assert_eq!(hover_tracking_hovered_rows(&row_states), vec![settled_row]);
+
+        app.update(|ctx| {
+            ctx.windows()
+                .close_window(window_id, TerminationMode::ForceTerminate)
+        });
+    })
+}
+
+/// Regression test mirroring the *real* pattern used by settings-page rows (e.g.
+/// `app/src/settings_view/keybindings.rs`'s `KeybindingRow::render`): the row's background is
+/// computed once, inside the `Hoverable` `build_child` closure, from `state.is_hovered()` at
+/// *construction* time -- not read fresh on every paint. Making that background visually
+/// up to date therefore additionally depends on the row actually getting *rebuilt* (via
+/// `ctx.notify()` on the owning view triggering `View::render()` again), not merely on the
+/// underlying `MouseState.is_hovered()` flag being correct (which the previous test already
+/// confirms it is). This test checks the *baked-in* snapshot instead of the raw flag, at the
+/// same intermediate animation instants.
+#[test]
+fn hover_background_baked_in_at_construction_tracks_the_displayed_offset() {
+    let _flag = FeatureFlag::SmoothScrolling.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        let app = &mut app;
+        let row_states: Vec<MouseStateHandle> = (0..HOVER_TRACKING_ROW_COUNT)
+            .map(|_| MouseStateHandle::default())
+            .collect();
+        let handle = ClippedScrollStateHandle::default();
+        let last_painted_origin_y = Rc::new(Cell::new(0.0f32));
+        let baked_in_hover_snapshots = Rc::new(RefCell::new(vec![false; HOVER_TRACKING_ROW_COUNT]));
+        let (window_id, _view) = app.add_window(WindowStyle::NotStealFocus, {
+            let handle = handle.clone();
+            let row_states = row_states.clone();
+            let last_painted_origin_y = last_painted_origin_y.clone();
+            let baked_in_hover_snapshots = baked_in_hover_snapshots.clone();
+            move |_| HoverTrackingScrollView {
+                handle,
+                row_states,
+                last_painted_origin_y,
+                baked_in_hover_snapshots: Some(baked_in_hover_snapshots),
+            }
+        });
+
+        let presenter = Rc::new(RefCell::new(Presenter::new(window_id)));
+        let view_id = app.root_view_id(window_id).unwrap();
+        app.update(|ctx| render(&mut presenter.borrow_mut(), view_id, ctx));
+
+        let pointer = vec2f(100., HOVER_TRACKING_MOUSE_Y);
+        let real_mouse_move = Event::MouseMoved {
+            position: pointer,
+            cmd: false,
+            shift: false,
+            is_synthetic: false,
+        };
+        app.update(|ctx| {
+            ctx.simulate_window_event(real_mouse_move.clone(), window_id, presenter.clone());
+            ctx.set_last_mouse_move_event(window_id, real_mouse_move);
+        });
+
+        let baked_in_hovered_rows = || -> Vec<usize> {
+            baked_in_hover_snapshots
+                .borrow()
+                .iter()
+                .enumerate()
+                .filter(|&(_, &hovered)| hovered)
+                .map(|(index, _)| index)
+                .collect()
+        };
+
+        assert_eq!(
+            baked_in_hovered_rows(),
+            vec![hover_tracking_expected_row(0.)],
+            "row 2's baked-in background should reflect hover before any scrolling"
+        );
+
+        app.update(|ctx| {
+            ctx.simulate_window_event(
+                Event::ScrollWheel {
+                    position: pointer,
+                    delta: vec2f(0., -1.),
+                    precise: false,
+                    modifiers: ModifiersState::default(),
+                },
+                window_id,
+                presenter.clone(),
+            );
+        });
+
+        for _ in 0..10 {
+            crate::r#async::Timer::after(Duration::from_millis(25)).await;
+
+            let painted_offset = -last_painted_origin_y.get();
+            let expected_row = hover_tracking_expected_row(painted_offset);
+            let baked_in = baked_in_hovered_rows();
+            let raw_flags = hover_tracking_hovered_rows(&row_states);
+
+            assert_eq!(
+                baked_in,
+                vec![expected_row],
+                "at last-painted scroll offset={painted_offset}, expected only row \
+                 {expected_row}'s baked-in background to show hovered (raw MouseState flags \
+                 currently say {raw_flags:?}), got baked-in={baked_in:?}"
+            );
+        }
+
+        assert!(!handle.is_animating());
+        let settled_row = hover_tracking_expected_row(-last_painted_origin_y.get());
+        assert_eq!(baked_in_hovered_rows(), vec![settled_row]);
+
+        app.update(|ctx| {
+            ctx.windows()
+                .close_window(window_id, TerminationMode::ForceTerminate)
         });
     })
 }
