@@ -3,12 +3,14 @@ use std::time::Duration;
 use super::{
     SHARED_SESSION_INACTIVITY_MAX_MINUTES, clamp_shared_session_end_minutes,
     clamp_shared_session_revoke_minutes, clamp_shared_session_warning_minutes,
-    parse_shared_session_inactivity_minutes, shared_session_inactivity_minutes,
+    parse_shared_session_inactivity_minutes, shared_session_inactivity_display_text,
+    shared_session_inactivity_minutes,
 };
 
+/// Zero means "disable this phase" and must be enterable, per APP-5313's zero semantics.
 #[test]
-fn parse_rejects_zero() {
-    assert_eq!(parse_shared_session_inactivity_minutes("0"), None);
+fn parse_accepts_zero_as_disabled() {
+    assert_eq!(parse_shared_session_inactivity_minutes("0"), Some(0));
 }
 
 #[test]
@@ -57,7 +59,12 @@ fn parse_rejects_values_that_would_overflow_when_converted_to_seconds() {
 }
 
 #[test]
-fn minutes_rounds_up_and_never_reports_zero() {
+fn minutes_reports_zero_for_a_zero_duration() {
+    assert_eq!(shared_session_inactivity_minutes(Duration::ZERO), 0);
+}
+
+#[test]
+fn minutes_rounds_up_for_a_nonzero_duration() {
     assert_eq!(
         shared_session_inactivity_minutes(Duration::from_secs(60)),
         1
@@ -70,7 +77,13 @@ fn minutes_rounds_up_and_never_reports_zero() {
         shared_session_inactivity_minutes(Duration::from_secs(119)),
         2
     );
-    assert_eq!(shared_session_inactivity_minutes(Duration::from_secs(0)), 1);
+}
+
+#[test]
+fn display_text_reads_off_for_zero_and_a_plain_number_otherwise() {
+    assert_eq!(shared_session_inactivity_display_text(0), "Off");
+    assert_eq!(shared_session_inactivity_display_text(1), "1");
+    assert_eq!(shared_session_inactivity_display_text(30), "30");
 }
 
 #[test]
@@ -124,4 +137,47 @@ fn clamping_is_idempotent_once_ordering_holds() {
         warning
     );
     assert_eq!(clamp_shared_session_end_minutes(end, revoke, warning), end);
+}
+
+// ---------------------------------------------------------------------------
+// Zero (disabled) semantics matrix: a disabled neighbor is exempt from being a bound,
+// and zero is always accepted unconditionally in every field regardless of the others.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn zero_is_always_accepted_unconditionally_in_every_field() {
+    // Disabling revoke is allowed no matter what warn/end currently are.
+    assert_eq!(clamp_shared_session_revoke_minutes(0, 25, 30), 0);
+    assert_eq!(clamp_shared_session_revoke_minutes(0, 0, 0), 0);
+    // Disabling warn is allowed no matter what revoke/end currently are.
+    assert_eq!(clamp_shared_session_warning_minutes(0, 10, 30), 0);
+    assert_eq!(clamp_shared_session_warning_minutes(0, 0, 0), 0);
+    // Disabling end is allowed no matter what revoke/warn currently are.
+    assert_eq!(clamp_shared_session_end_minutes(0, 10, 25), 0);
+    assert_eq!(clamp_shared_session_end_minutes(0, 0, 0), 0);
+}
+
+#[test]
+fn a_disabled_neighbor_does_not_bound_a_non_zero_value() {
+    // Revoke disabled: warn's non-zero value isn't bounded below by it.
+    assert_eq!(clamp_shared_session_warning_minutes(5, 0, 30), 5);
+    // End disabled: warn's non-zero value isn't bounded above by it.
+    assert_eq!(clamp_shared_session_warning_minutes(50, 10, 0), 50);
+    // Both disabled: warn's non-zero value is left completely alone.
+    assert_eq!(clamp_shared_session_warning_minutes(15, 0, 0), 15);
+
+    // Warn and end disabled: revoke's non-zero value has no upper bound.
+    assert_eq!(clamp_shared_session_revoke_minutes(999, 0, 0), 999);
+    // Revoke and warn disabled: end's non-zero value has no lower bound.
+    assert_eq!(clamp_shared_session_end_minutes(1, 0, 0), 1);
+}
+
+#[test]
+fn re_enabling_a_disabled_field_is_never_blocked_by_its_neighbors() {
+    // Starting from all-zero (every phase disabled), typing a positive value into any one
+    // field must be accepted outright, since there are no non-zero neighbors to clamp
+    // against.
+    assert_eq!(clamp_shared_session_revoke_minutes(5, 0, 0), 5);
+    assert_eq!(clamp_shared_session_warning_minutes(5, 0, 0), 5);
+    assert_eq!(clamp_shared_session_end_minutes(5, 0, 0), 5);
 }

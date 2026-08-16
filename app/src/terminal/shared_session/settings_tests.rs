@@ -255,6 +255,178 @@ fn cloud_sync_update_producing_bad_ordering_gets_corrected() {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Zero-disables-a-phase matrix (APP-5313 follow-up)
+// ---------------------------------------------------------------------------
+
+/// Builds a `SharedSessionSettings` group directly with the given (revoke, warn, end)
+/// durations, bypassing storage/registration entirely so the ladder-gating matrix can be
+/// tested as pure logic.
+fn settings_with(revoke: Duration, warn: Duration, end: Duration) -> SharedSessionSettings {
+    SharedSessionSettings {
+        onboarding_block_shown: SessionSharingOnboardingBlockShown::new(None),
+        inactivity_period_before_ending_session: InactivityPeriodBeforeEndingSession::new(Some(
+            end,
+        )),
+        inactivity_period_before_warning: InactivityPeriodBeforeWarning::new(Some(warn)),
+        inactivity_period_before_revoking_roles: InactivityPeriodBeforeRevokingRoles::new(Some(
+            revoke,
+        )),
+        viewer_driven_sizing_enabled: ViewerDrivenSizingEnabled::new(None),
+    }
+}
+
+const SECS_10: Duration = Duration::from_secs(10);
+const SECS_25: Duration = Duration::from_secs(25);
+const SECS_30: Duration = Duration::from_secs(30);
+
+#[test]
+fn all_zero_arms_nothing() {
+    let settings = settings_with(Duration::ZERO, Duration::ZERO, Duration::ZERO);
+    assert_eq!(settings.next_inactivity_phase(), None);
+}
+
+#[test]
+fn full_ladder_unaffected_when_nothing_is_zero() {
+    let settings = settings_with(SECS_10, SECS_25, SECS_30);
+    assert_eq!(
+        settings.next_inactivity_phase(),
+        Some((InactivityPhase::RevokeEditorRoles, SECS_10))
+    );
+    assert_eq!(
+        settings.next_phase_after_revoke(),
+        Some((InactivityPhase::ShowWarning, SECS_25 - SECS_10))
+    );
+}
+
+#[test]
+fn revoke_disabled_jumps_straight_to_warning() {
+    let settings = settings_with(Duration::ZERO, SECS_25, SECS_30);
+    assert_eq!(
+        settings.next_inactivity_phase(),
+        Some((InactivityPhase::ShowWarning, SECS_25)),
+        "with revoke off, the first armed phase should be the full warning duration, not an \
+         offset from a skipped revoke"
+    );
+}
+
+#[test]
+fn revoke_and_warning_disabled_jumps_straight_to_end() {
+    let settings = settings_with(Duration::ZERO, Duration::ZERO, SECS_30);
+    assert_eq!(
+        settings.next_inactivity_phase(),
+        Some((InactivityPhase::EndSession, SECS_30))
+    );
+}
+
+#[test]
+fn end_disabled_folds_the_warning_phase_off_too() {
+    // Warn has a non-zero value of its own, but end=0 means there's nothing to warn about.
+    let settings = settings_with(SECS_10, SECS_25, Duration::ZERO);
+    assert!(!settings.is_warning_phase_enabled());
+    assert_eq!(
+        settings.next_phase_after_revoke(),
+        None,
+        "warning is disabled (end=0) and end is disabled, so nothing should arm after revoke"
+    );
+}
+
+#[test]
+fn revoke_only_enabled_stays_read_only_indefinitely() {
+    // revoke on, warning and end both off: after revoking, nothing further should arm.
+    let settings = settings_with(SECS_10, Duration::ZERO, Duration::ZERO);
+    assert_eq!(
+        settings.next_inactivity_phase(),
+        Some((InactivityPhase::RevokeEditorRoles, SECS_10))
+    );
+    assert_eq!(settings.next_phase_after_revoke(), None);
+}
+
+#[test]
+fn revoke_enabled_with_only_end_enabled_skips_the_warning() {
+    let settings = settings_with(SECS_10, Duration::ZERO, SECS_30);
+    assert_eq!(
+        settings.next_phase_after_revoke(),
+        Some((InactivityPhase::EndSession, SECS_30 - SECS_10)),
+        "warning is disabled by its own zero value, so end should arm directly after revoke"
+    );
+}
+
+#[test]
+fn zero_is_exempt_from_the_ordering_comparison() {
+    // A disabled (zero) phase in either position never violates ordering.
+    assert!(SharedSessionSettings::ladder_phase_order_ok(
+        Duration::ZERO,
+        SECS_10
+    ));
+    assert!(SharedSessionSettings::ladder_phase_order_ok(
+        SECS_10,
+        Duration::ZERO
+    ));
+    assert!(SharedSessionSettings::ladder_phase_order_ok(
+        Duration::ZERO,
+        Duration::ZERO
+    ));
+    // Ordinary non-zero comparisons are unaffected.
+    assert!(SharedSessionSettings::ladder_phase_order_ok(
+        SECS_10, SECS_25
+    ));
+    assert!(!SharedSessionSettings::ladder_phase_order_ok(
+        SECS_25, SECS_10
+    ));
+}
+
+#[test]
+fn ordering_enforcement_leaves_zeros_alone() {
+    App::test((), |mut app| async move {
+        let _guard = FeatureFlag::SettingsFile.override_enabled(true);
+        app.update(init_test_app);
+
+        // A TOML file (or cloud update) disabling revoke and warning, with end enabled --
+        // an internally consistent all-but-end-disabled configuration that must not be
+        // "corrected" into something else just because zero is numerically the smallest
+        // value.
+        app.update(|ctx| {
+            write_public(
+                ctx,
+                InactivityPeriodBeforeRevokingRoles::storage_key(),
+                Duration::ZERO,
+            );
+            write_public(
+                ctx,
+                InactivityPeriodBeforeWarning::storage_key(),
+                Duration::ZERO,
+            );
+            write_public(
+                ctx,
+                InactivityPeriodBeforeEndingSession::storage_key(),
+                SECS_30,
+            );
+        });
+
+        app.update(|ctx| {
+            SharedSessionSettings::register_and_enforce_inactivity_ordering(ctx);
+        });
+
+        app.read(|ctx| {
+            let settings = SharedSessionSettings::as_ref(ctx);
+            assert_eq!(
+                *settings.inactivity_period_before_revoking_roles.value(),
+                Duration::ZERO
+            );
+            assert_eq!(
+                *settings.inactivity_period_before_warning.value(),
+                Duration::ZERO
+            );
+            assert_eq!(
+                *settings.inactivity_period_before_ending_session.value(),
+                SECS_30,
+                "end must be left untouched -- a disabled revoke/warning is not a bound on it"
+            );
+        });
+    });
+}
+
 #[test]
 fn derived_intervals_never_panic_on_out_of_order_values() {
     // Directly construct an inconsistent group (bypassing the ordering enforcement entirely)

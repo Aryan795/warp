@@ -62,6 +62,14 @@ define_settings_group!(SharedSessionSettings, settings: [
     },
 ]);
 
+/// A phase of the sharer inactivity ladder, in the order it can fire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InactivityPhase {
+    RevokeEditorRoles,
+    ShowWarning,
+    EndSession,
+}
+
 impl SharedSessionSettings {
     /// Returns time between showing the inactivity warning modal and ending the session.
     ///
@@ -69,7 +77,10 @@ impl SharedSessionSettings {
     /// keeps these durations in `revoke <= warn <= end` order at every point they become
     /// authoritative (initial load, cloud sync, disk hot-reload), but a plain `Duration`
     /// subtraction still panics on underflow if that invariant is ever violated by some
-    /// path this doesn't cover.
+    /// path this doesn't cover. Callers must only reach this once they've confirmed (via
+    /// [`Self::next_inactivity_phase`] or [`Self::next_phase_after_revoke`]) that both the
+    /// warning and end phases are enabled -- a zero `end` disables the warning phase
+    /// entirely, so this is never a meaningful duration to compute in that case.
     pub fn inactivity_period_between_warning_and_ending_session(&self) -> Duration {
         self.inactivity_period_before_ending_session
             .value()
@@ -79,11 +90,53 @@ impl SharedSessionSettings {
     /// Returns time between revoking roles and showing the inactivity warning modal.
     ///
     /// See [`Self::inactivity_period_between_warning_and_ending_session`] for why this
-    /// uses `saturating_sub`.
+    /// uses `saturating_sub` and must only be called once the warning phase is confirmed
+    /// enabled.
     pub fn inactivity_period_between_revoking_roles_and_warning(&self) -> Duration {
         self.inactivity_period_before_warning
             .value()
             .saturating_sub(*self.inactivity_period_before_revoking_roles.value())
+    }
+
+    /// Whether the warning phase is enabled: it needs both a non-zero warning duration of
+    /// its own, and a non-zero end duration -- a countdown to an end that will never come
+    /// would be misleading, so disabling the end phase disables the warning too.
+    fn is_warning_phase_enabled(&self) -> bool {
+        !self.inactivity_period_before_warning.value().is_zero()
+            && !self
+                .inactivity_period_before_ending_session
+                .value()
+                .is_zero()
+    }
+
+    /// Determines which phase of the inactivity ladder should be armed next, and how long
+    /// from *now* (the point activity was last observed) it should fire after, skipping any
+    /// disabled (zero-duration) phase. Returns `None` when every phase is disabled, meaning
+    /// no idle timeout should be armed at all.
+    pub fn next_inactivity_phase(&self) -> Option<(InactivityPhase, Duration)> {
+        let revoke = *self.inactivity_period_before_revoking_roles.value();
+        if !revoke.is_zero() {
+            return Some((InactivityPhase::RevokeEditorRoles, revoke));
+        }
+        self.next_phase_after_revoke()
+    }
+
+    /// Determines which phase should be armed after the revoke phase has already happened
+    /// (or was itself disabled), and how long from *that point* it should fire after.
+    /// Returns `None` when both the warning and end phases are disabled, meaning the ladder
+    /// should stop advancing (the session stays shared, permanently read-only if roles were
+    /// revoked, until the sharer changes these settings or ends it explicitly).
+    pub fn next_phase_after_revoke(&self) -> Option<(InactivityPhase, Duration)> {
+        let revoke = *self.inactivity_period_before_revoking_roles.value();
+        let end = *self.inactivity_period_before_ending_session.value();
+        if self.is_warning_phase_enabled() {
+            let warn = *self.inactivity_period_before_warning.value();
+            return Some((InactivityPhase::ShowWarning, warn.saturating_sub(revoke)));
+        }
+        if !end.is_zero() {
+            return Some((InactivityPhase::EndSession, end.saturating_sub(revoke)));
+        }
+        None
     }
 
     /// Registers this settings group, migrates any legacy private-store values for the
@@ -122,12 +175,11 @@ impl SharedSessionSettings {
 
     /// Whether `earlier` is allowed to occur at or before `later` in the inactivity ladder.
     ///
-    /// This is currently a plain numeric comparison. If a duration of zero is later used to
-    /// mean "this phase is disabled" (a proposed APP-5313 follow-up), this is the one place
-    /// that needs to change: a disabled (zero) phase should be exempt from the comparison
-    /// rather than treated as the smallest legal duration.
+    /// A zero duration means that phase is disabled, not "immediately" -- it isn't a point
+    /// on the same numeric axis as an enabled phase, so it's exempt from the comparison in
+    /// either position rather than treated as the smallest legal duration.
     fn ladder_phase_order_ok(earlier: Duration, later: Duration) -> bool {
-        earlier <= later
+        earlier.is_zero() || later.is_zero() || earlier <= later
     }
 
     /// Corrects the inactivity durations in place if they violate the required

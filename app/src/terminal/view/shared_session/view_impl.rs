@@ -1,5 +1,7 @@
 //! [`TerminalView`]-specific implementation for shared sessions.
 
+use std::time::Duration;
+
 use chrono::{DateTime, Local};
 use itertools::Itertools;
 use session_sharing_protocol::common::{
@@ -57,7 +59,7 @@ use crate::terminal::shared_session::presence_manager::{
 use crate::terminal::shared_session::role_change_modal::{
     RoleChangeCloseSource, RoleChangeOpenSource,
 };
-use crate::terminal::shared_session::settings::SharedSessionSettings;
+use crate::terminal::shared_session::settings::{InactivityPhase, SharedSessionSettings};
 use crate::terminal::shared_session::{
     COPY_LINK_TEXT, SharedSessionActionSource, SharedSessionScrollbackType, SharedSessionSource,
     SharedSessionStatus, join_link,
@@ -1045,17 +1047,29 @@ impl TerminalView {
         }
     }
 
-    fn set_inactivity_timer_to_show_warning(&mut self, ctx: &mut ViewContext<Self>) {
+    /// Arms a timer for `phase` to fire after `duration`, dispatching to the right handler
+    /// when it expires. Shared by [`Self::reset_sharer_inactivity_timer`] (arming the first
+    /// enabled phase from a fresh activity reset) and
+    /// [`Self::revoke_roles_on_inactivity_period_expired`] (arming the next enabled phase
+    /// after revoking roles).
+    fn arm_inactivity_timer(
+        &mut self,
+        phase: InactivityPhase,
+        duration: Duration,
+        ctx: &mut ViewContext<Self>,
+    ) {
         let Some(sharer) = self.shared_session_sharer_mut() else {
             return;
         };
-
-        // After the second interval of inactivity, we display a warning modal
-        let inactivity_period = SharedSessionSettings::as_ref(ctx)
-            .inactivity_period_between_revoking_roles_and_warning();
         let timer_handler = ctx.spawn_abortable(
-            Timer::after(inactivity_period),
-            move |me, _, ctx| me.show_warning_on_inactivity_period_expired(ctx),
+            Timer::after(duration),
+            move |me, _, ctx| match phase {
+                InactivityPhase::RevokeEditorRoles => {
+                    me.revoke_roles_on_inactivity_period_expired(ctx)
+                }
+                InactivityPhase::ShowWarning => me.show_warning_on_inactivity_period_expired(ctx),
+                InactivityPhase::EndSession => me.end_session_on_inactivity_period_expired(ctx),
+            },
             |_, _| {},
         );
         sharer.inactivity_timer_abort_handle = Some(timer_handler);
@@ -1085,14 +1099,23 @@ impl TerminalView {
             );
         }
 
-        // Set timer for second interval
-        self.set_inactivity_timer_to_show_warning(ctx);
+        // Arm the next enabled phase (warning, or end if warning is disabled). If both are
+        // disabled, the session stays shared and read-only indefinitely.
+        if let Some((phase, duration)) =
+            SharedSessionSettings::as_ref(ctx).next_phase_after_revoke()
+        {
+            self.arm_inactivity_timer(phase, duration, ctx);
+        }
     }
 
-    /// Resets sharer's inactivity timer
+    /// Resets sharer's inactivity timer to arm whichever ladder phase is next enabled:
     /// (1) After the first interval, we revoke all executor permissions
     /// (2) After the second interval, we show a warning modal
     /// (3) After the third interval, we end the session
+    ///
+    /// Each phase with a duration of zero is disabled and skipped (see
+    /// `SharedSessionSettings::next_inactivity_phase`); if every phase is disabled, no timer
+    /// is armed at all and the session never times out due to inactivity.
     pub fn reset_sharer_inactivity_timer(&mut self, ctx: &mut ViewContext<Self>) {
         // For ambient agent shared sessions, we do not auto-revoke roles or end the
         // session due to inactivity. Clear any existing timer and return early so
@@ -1120,16 +1143,12 @@ impl TerminalView {
             old_abort_handle.abort();
         }
 
-        // After the first interval of inactivity, we revoke all executor permissions
-        let inactivity_period = SharedSessionSettings::as_ref(ctx)
-            .inactivity_period_before_revoking_roles
-            .value();
-        let timer_handler = ctx.spawn_abortable(
-            Timer::after(*inactivity_period),
-            move |me, _, ctx| me.revoke_roles_on_inactivity_period_expired(ctx),
-            |_, _| {},
-        );
-        sharer.inactivity_timer_abort_handle = Some(timer_handler);
+        let Some((phase, duration)) = SharedSessionSettings::as_ref(ctx).next_inactivity_phase()
+        else {
+            // Every phase is disabled -- no idle timeout at all.
+            return;
+        };
+        self.arm_inactivity_timer(phase, duration, ctx);
     }
 
     pub fn get_shared_session_presence_selection(
