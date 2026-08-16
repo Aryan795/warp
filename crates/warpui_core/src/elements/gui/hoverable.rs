@@ -95,10 +95,13 @@ pub struct MouseState {
     /// invocation to prevent the potential infinite loop. Note that
     /// any non-synthetic event should reset this state to false.
     ///
-    /// Shared with the TUI `TuiHoverable`, which applies the same guard. The GUI `Hoverable`
-    /// no longer reads or writes this field -- see [`Self::last_synthetic_hover_change_at`] --
-    /// but it stays here for the TUI, which has no continuous, time-based animation and so has
-    /// no need for a time-windowed version of the same guard.
+    /// Used only by the TUI `TuiHoverable`, which applies the same guard but, unlike the GUI
+    /// `Hoverable` (see [`Self::last_synthetic_hover_change_at`]), has no continuous, time-based
+    /// animation and so has no need for a time-windowed version of it. Gated behind the `tui`
+    /// feature (rather than left always-compiled): `elements::gui` is always compiled, so
+    /// without this gate the field is genuinely dead code whenever `tui` is off, which
+    /// `-D warnings` turns into a hard build failure.
+    #[cfg(feature = "tui")]
     pub(crate) last_event_is_synthetic_hover: bool,
 
     /// The instant of the most recent hover-state change caused by a *synthetic* MouseMoved
