@@ -4274,12 +4274,13 @@ fn hydrate_remote_child_placeholder_with_cloud_transcript_preserves_placeholder_
         )
         .expect("cloud conversation should build");
 
-        let merged = history_model.update(&mut app, |model, _| {
+        let merged = history_model.update(&mut app, |model, ctx| {
             model
                 .hydrate_remote_child_placeholder_with_cloud_transcript(
                     placeholder_id,
                     cloud_tasks,
                     cloud_conversation,
+                    ctx,
                 )
                 .expect("hydration must succeed when placeholder is loaded")
         });
@@ -4352,18 +4353,150 @@ fn hydrate_remote_child_placeholder_with_cloud_transcript_preserves_placeholder_
             None,
         )
         .expect("second cloud conversation should build");
-        let err = history_model.update(&mut app, |model, _| {
+        let err = history_model.update(&mut app, |model, ctx| {
             model
                 .hydrate_remote_child_placeholder_with_cloud_transcript(
                     unknown_placeholder,
                     vec![cloud_root_again],
                     cloud_again,
+                    ctx,
                 )
                 .expect_err("hydration must error when placeholder is not loaded")
         });
         assert!(
             format!("{err:#}").contains("not found in conversations_by_id"),
             "error must surface the missing-placeholder reason; got: {err:#}",
+        );
+    });
+}
+
+/// QUALITY-1702 finding 2: hydrating a remote-child placeholder from the
+/// cloud transcript must notify rollup subscribers even when the
+/// authoritative total is *lower* than a prior live credit estimate —
+/// otherwise an already-open orchestration footer keeps the stale estimate
+/// forever, since it only re-renders on `ConversationUsageMetadataUpdated`
+/// (PRODUCT invariant 7).
+#[test]
+fn hydrate_remote_child_placeholder_with_cloud_transcript_emits_usage_updated_on_downward_correction()
+ {
+    use crate::ai::agent::conversation::AIConversation;
+    use crate::ai::ambient_agents::AmbientAgentTaskId;
+    use crate::persistence::model::{AgentConversationData, ConversationUsageMetadata};
+    use crate::test_util::ai_agent_tasks::create_api_task;
+
+    App::test((), |mut app| async move {
+        initialize_settings_for_tests(&mut app);
+
+        let history_model =
+            app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
+        let terminal_view_id = EntityId::new();
+
+        let placeholder_id = AIConversationId::new();
+        let placeholder_task_id: AmbientAgentTaskId = Uuid::new_v4().to_string().parse().unwrap();
+        let placeholder_root = create_api_task("placeholder-root", vec![]);
+        let placeholder = AIConversation::new_restored(
+            placeholder_id,
+            vec![placeholder_root],
+            Some(AgentConversationData {
+                server_conversation_token: None,
+                conversation_usage_metadata: None,
+                reverted_action_ids: None,
+                forked_from_server_conversation_token: None,
+                artifacts_json: None,
+                parent_agent_id: None,
+                agent_name: Some("worker".to_string()),
+                orchestration_harness_type: None,
+                parent_conversation_id: None,
+                is_remote_child: true,
+                root_task_is_optimistic: Some(true),
+                run_id: Some(placeholder_task_id.to_string()),
+                autoexecute_override: None,
+                last_event_sequence: None,
+                pinned: false,
+            }),
+        )
+        .expect("placeholder conversation should build");
+
+        history_model.update(&mut app, |model, ctx| {
+            model.restore_conversations(terminal_view_id, vec![placeholder], ctx);
+            // Simulate the live task-derived estimate (QUALITY-1702) already
+            // having pushed a higher, provisional total onto the
+            // placeholder before the cloud transcript ever loaded.
+            model.apply_remote_child_task_credit_estimate(placeholder_id, 20.0, ctx);
+        });
+        history_model.read(&app, |model, _| {
+            assert_eq!(
+                model.conversation(&placeholder_id).unwrap().credits_spent(),
+                20.0,
+                "precondition: the live estimate must have applied before hydration",
+            );
+        });
+
+        let captured_events = Arc::new(Mutex::new(Vec::new()));
+        app.update(|ctx| {
+            let captured_events = captured_events.clone();
+            ctx.subscribe_to_model(&history_model, move |_, event, _| {
+                captured_events.lock().unwrap().push(event.clone());
+            });
+        });
+
+        // The server's authoritative total is *lower* than the live
+        // estimate — e.g. the estimate over-counted a since-cancelled
+        // sub-step. Hydration must win regardless of direction.
+        let cloud_root = create_api_task("cloud-root-task", vec![]);
+        let cloud_conversation = AIConversation::new_restored(
+            AIConversationId::new(),
+            vec![cloud_root.clone()],
+            Some(AgentConversationData {
+                server_conversation_token: Some("cloud-token".to_string()),
+                conversation_usage_metadata: Some(ConversationUsageMetadata {
+                    credits_spent: 12.0,
+                    ..Default::default()
+                }),
+                reverted_action_ids: None,
+                forked_from_server_conversation_token: None,
+                artifacts_json: None,
+                parent_agent_id: None,
+                agent_name: None,
+                orchestration_harness_type: None,
+                parent_conversation_id: None,
+                is_remote_child: false,
+                root_task_is_optimistic: None,
+                run_id: None,
+                autoexecute_override: None,
+                last_event_sequence: None,
+                pinned: false,
+            }),
+        )
+        .expect("cloud conversation should build");
+
+        history_model.update(&mut app, |model, ctx| {
+            model
+                .hydrate_remote_child_placeholder_with_cloud_transcript(
+                    placeholder_id,
+                    vec![cloud_root],
+                    cloud_conversation,
+                    ctx,
+                )
+                .expect("hydration must succeed when placeholder is loaded");
+        });
+
+        history_model.read(&app, |model, _| {
+            assert_eq!(
+                model.conversation(&placeholder_id).unwrap().credits_spent(),
+                12.0,
+                "the authoritative cloud total must win even though it is lower than the prior live estimate",
+            );
+        });
+
+        let events = captured_events.lock().unwrap().clone();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                BlocklistAIHistoryEvent::ConversationUsageMetadataUpdated { conversation_id }
+                    if *conversation_id == placeholder_id
+            )),
+            "hydration must notify rollup subscribers so an already-open footer re-renders",
         );
     });
 }
