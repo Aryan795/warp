@@ -4,6 +4,8 @@
 
 Replace the hand-written command-input parser with Arborium tree-sitter grammars for Bash, Fish, and PowerShell. Parse Zsh with the Bash grammar and a Zsh compatibility guard. Keep tree-sitter private to `warp_completer`. Expose a Warp-owned hierarchical command model to completions, Describe/X-Ray, input decorations, alias expansion, agent permissions, and other consumers. Migrate one consumer at a time, then delete `crates/warp_completer/src/parsers/simple/`.
 
+**Scope note:** the requester narrowed this project to parse robustness for the ordinary consumers (completions, Describe/X-Ray, decorations, alias expansion). Agent-permissions migration (Phase 5) and the hand-written parser's deletion (Phase 6, which depends on Phase 5) are deferred to a later command-execution-policy project; see those phases below for what stays out of scope and why.
+
 This spec uses **nested command** to mean a command inside command substitution or process substitution. For example, `pwd` is nested in `echo "$(pwd)"`. Signature subcommands such as `git commit` are not the accuracy target of this refactor.
 
 ## Context
@@ -227,13 +229,9 @@ pub enum QuoteMode {
     GroupQuotedText,
     PreserveQuotesAsLiterals,
 }
-
-pub struct PermissionDecomposition {
-    pub commands: Vec<String>,
-    pub contains_redirection: bool,
-    pub status: ShellParseStatus,
-}
 ```
+
+This is the model Phase 1 builds and this implementation ships. It does not include `PermissionDecomposition`: agent-permissions migration (Phase 5) is deferred out of this project's scope (see "Phase 5: agent permissions" below), and that type has no consumer until Phase 5 resumes. The escaped-backtick nested-group hierarchy that `NestedCommandGroup`/`ParsedCommand` expose is not permissions-specific — completions and Describe/X-Ray need the same inner-command reachability when a cursor lands inside a nested substitution, escaped or not — so it stays in this model; only the deny-rule-decomposition convenience API is deferred.
 
 All spans are zero-based UTF-8 byte ranges into the original input. Synthetic recovery bytes never appear in spans or returned strings. `ParsedCommand` nesting follows lexical containment. A substitution containing a pipeline or statement list has multiple child commands in source order.
 
@@ -254,13 +252,14 @@ impl ParsedShellInput {
     pub fn top_level_commands(&self) -> impl Iterator<Item = &ParsedCommand>;
     pub fn commands_depth_first(&self) -> impl Iterator<Item = &ParsedCommand>;
     pub fn first_executable(&self) -> Option<&Spanned<String>>;
-    pub fn decompose_for_permissions(&self, source: &str) -> PermissionDecomposition;
 }
 
 impl ParsedCommand {
     pub fn to_lite_command(&self) -> LiteCommand;
 }
 ```
+
+`decompose_for_permissions` is not part of this entry point. Phase 5 adds it (and `PermissionDecomposition`) when agent-permissions migration resumes.
 
 `parse_shell_input` is total. It does not panic on user input. A grammar load failure or input above 64 KiB returns `Rejected`. There is no final legacy-parser fallback. Consumers degrade as follows:
 
@@ -336,16 +335,18 @@ Do not log input text, command names, or parse trees. Record only dialect, durat
 
 Input decorations continue to use `SuggestionType` and signature classification. Tree-sitter provides structure and spans only. It does not choose input colors. The existing command-token error underline remains a consumer decision.
 
-### Permissions contract
+### Permissions contract (deferred, Phase 5)
 
-`PermissionDecomposition` contains:
+**Out of scope for this project.** The requester narrowed this project's scope to parse robustness for the ordinary consumers (completions, Describe/X-Ray, decorations, alias expansion); command-execution policy is later work. This section specifies the contract Phase 5 must satisfy whenever that later work resumes; nothing here is built by this implementation.
+
+`PermissionDecomposition` (not present in this implementation's model; Phase 5 adds it) must contain:
 
 - Every executable command at every nesting depth in source order.
 - Recomposed command strings for each nested group and outer group when current deny semantics require them.
 - A recursive `contains_redirection` value.
 - `status`, so recovered or rejected parses can fail closed.
 
-Permissions do not migrate until the new decomposition passes every legacy safety case and the new escaped-backtick case. Do not accept a mismatch because it is “more correct.” Review each mismatch as a safety policy change. Process substitution remains redirection-positive during this refactor.
+Permissions do not migrate until the new decomposition passes every legacy safety case and the new escaped-backtick case, **and** the escaped-backtick nesting model handles the depth Phase 5 requires. [APP-5437](https://linear.app/warpdotdev/issue/APP-5437) tracks a confirmed, live gap in the current (legacy, shipped) fix: `until_backtick` only closes the deny-rule bypass for one level of escaped-backtick nesting, not three or more (Bash's real convention roughly doubles the required backslash count per level). Depth-3-plus escaped nesting still bypasses an explicit `rm` deny rule today; two tests pin this exact boundary (`observed_legacy_escaped_nested_backtick_depth_3_is_not_fixed` and `test_can_autoexecute_command_denylist_does_not_catch_escaped_nested_backtick_at_depth_3`). Phase 5 must resolve APP-5437 (by fixing the depth limit or making a deliberate, reviewed decision to accept the residual risk) before permissions migrates, not silently inherit it. Do not accept a mismatch because it is “more correct.” Review each mismatch as a safety policy change. Process substitution remains redirection-positive during this refactor.
 
 ## Phased migration
 
@@ -389,20 +390,24 @@ Move input decorations, alias and abbreviation expansion, top-level command look
 
 Exit condition: semantic color and error-underline snapshots are unchanged except for approved span fixes. Alias expansion never targets a nested or non-executable word.
 
-### Phase 5: agent permissions
+### Phase 5: agent permissions (deferred)
+
+**Deferred out of this project's scope.** The requester's exact words: “I don't really care about fixing the command execution policies in this work. All I really wanted in this scope was removing our bad parser with treesitter and benefiting from treesitter's robustness around parsing. Let's do the command execution policy stuff later.” Command-execution-policy work moves to a later project. [APP-5437](https://linear.app/warpdotdev/issue/APP-5437) (the depth-3 escaped-backtick gap) and [APP-5434](https://linear.app/warpdotdev/issue/APP-5434/zsh-constructs-that-parse-silently-wrong-under-the-bash-grammar) (exhaustive Zsh silent-divergence coverage) are its tracked prerequisites. This phase's original plan is preserved below for whenever that later project resumes; none of it is built now.
 
 Move `decompose_command` to `decompose_for_permissions`. Run denylist, allowlist, redirect, assignment, pipeline, nested-command, recovered-input, and over-limit tests. Roll out permissions per dialect after all other consumers are stable.
 
-Exit condition: APP-5434 is closed. The permissions suite is fail-closed for every mismatch. Escaped nested backticks expose the complete inner command. Security review approves any intentional difference.
+Exit condition: APP-5434 and APP-5437 are both closed. The permissions suite is fail-closed for every mismatch. Escaped nested backticks expose the complete inner command at the depth the security review requires. Security review approves any intentional difference.
 
 ### Phase 6: delete the hand-written parser
+
+**Blocked on Phase 5, which is deferred.** Phase 6 requires every parser consumer to have migrated, and agent permissions (`app/src/ai/blocklist/permissions.rs`) is a consumer that has not. Deferring Phase 5 means `crates/warp_completer/src/parsers/simple/` survives this project for that one remaining path — it is not deleted, and this project does not reach the “every consumer migrated” state below. This is a deliberate, stated consequence of the scope narrowing, not a silent redefinition of what “done” means: the hand-written parser's deletion criterion is unchanged; this project simply does not attempt to satisfy it for the permissions consumer.
 
 - Remove `simple/lexer.rs`, `simple/parser.rs`, token types, converters, and legacy-only tests.
 - Remove the legacy rollout path and comparison telemetry.
 - Keep the Warp adapter, `LiteCommand`, signature HIR, `ShellFamily`, and `EscapeChar`.
 - Keep the failure corpus as permanent adapter regression tests.
 
-Done means every parser consumer uses the Warp adapter for Bash, Zsh, Fish, and PowerShell; the performance and WASM gates pass; and `crates/warp_completer/src/parsers/simple/` no longer exists.
+Done means every parser consumer uses the Warp adapter for Bash, Zsh, Fish, and PowerShell; the performance and WASM gates pass; and `crates/warp_completer/src/parsers/simple/` no longer exists. This project does not reach that state: it ships Phase 0 and Phase 1 (adapter, grammar readiness, and the ordinary-consumer parse model), leaves Phases 2–4 (Describe/X-Ray, completions, semantic/editing consumers) for future work, and defers Phase 5 outright, so Phase 6 stays blocked until a later project migrates permissions and completes the remaining consumer migrations.
 
 ## Decisions and trade-offs
 
@@ -413,7 +418,7 @@ Done means every parser consumer uses the Warp adapter for Bash, Zsh, Fish, and 
 - **Incremental parse immediately versus benchmark first:** start with bounded parser reuse and full parse. Add private incremental edits only if the approved latency budget requires them.
 - **Fallback above 64 KiB versus deletion:** reject parser-derived automation above the cap. Do not retain the hand-written parser as a hidden permanent fallback.
 - **Grammar highlighting versus semantic highlighting:** preserve semantic highlighting. Grammar node kinds do not encode Warp signature meaning.
-- **Permissions early versus last:** migrate permissions last. A parser improvement can still change an allow/deny decision, so safety parity has a higher bar than UX parity.
+- **Permissions early versus last versus deferred:** migrate permissions last, and this project defers it entirely rather than attempting it last. A parser improvement can still change an allow/deny decision, so safety parity has a higher bar than UX parity; that bar, plus the requester's explicit scope narrowing to parse robustness, is why Phase 5 moves to a later project instead of closing out this one.
 
 ## Out of scope
 
@@ -442,8 +447,8 @@ Done means every parser consumer uses the Warp adapter for Bash, Zsh, Fish, and 
   - Runs the measured Zsh-only corpus, asserts loud grammar failures reject, asserts `repeat` rejects despite a clean Bash parse, and protects accepted common syntax.
 - `cargo test -p warp_completer shell_adapter_no_backend_types_in_public_api`
   - Verifies the public adapter surface is Warp-owned.
-- `cargo test -p warp permissions_nested_shell_commands`
-  - Verifies complete nested commands, escaped backticks, assignments, redirect policy, recovery rejection, and 64 KiB rejection against real predicates.
+- `cargo test -p warp permissions_nested_shell_commands` (deferred, Phase 5; not part of this implementation)
+  - Verifies complete nested commands, escaped backticks, assignments, redirect policy, recovery rejection, and 64 KiB rejection against real predicates. Until Phase 5, the checked-in `test_can_autoexecute_command_denylist_does_not_catch_escaped_nested_backtick_at_depth_3` and `observed_legacy_escaped_nested_backtick_depth_3_is_not_fixed` tests pin the known APP-5437 boundary against the legacy predicate instead.
 
 ### Performance and memory
 
@@ -473,7 +478,7 @@ Parallel work is useful after Phase 0 establishes the shared model.
 - **adapter-core** — Local worktree `../warp-app5430-adapter`, branch `factory/app5430-adapter-core`. Owns `warp_completer` types, Bash/Fish/PowerShell mapping, recovery, corpus tests, and benchmarks.
 - **zsh-compatibility** — Remote environment with the Warp repository, branch `factory/app5430-zsh-compatibility`. Owns the Zsh compatibility detector, Zsh-only conformance corpus, and failure-mode tests. Returns a pushed branch and probe results.
 - **consumer-migration** — Local worktree `../warp-app5430-consumers`, branch `factory/app5430-consumers`. Starts only after adapter-core API stabilization. Owns Describe, completions, decorations, aliases, and helpers.
-- **permissions-migration** — Local worktree `../warp-app5430-permissions`, branch `factory/app5430-permissions`. Starts after adapter-core and consumer-migration. Owns permission decomposition and safety tests.
+- **permissions-migration** (deferred with Phase 5) — Local worktree `../warp-app5430-permissions`, branch `factory/app5430-permissions`. Not started in this project; owns permission decomposition and safety tests whenever the later command-execution-policy project resumes Phase 5.
 - **cross-platform-validation** — Remote native and WASM runners. Starts after integration. Owns platform builds, latency comparison, heap evidence, and artifact-size results.
 
-The lead integrates in that order into one implementation PR. File ownership stays disjoint until the adapter API is stable. Permissions remains the final code merge before deletion.
+The lead integrates in that order into one implementation PR. File ownership stays disjoint until the adapter API is stable. Permissions was planned as the final code merge before deletion; with Phase 5 deferred, this project's implementation PR does not include that track, and deletion (Phase 6) does not happen here.

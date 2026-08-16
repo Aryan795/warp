@@ -1,9 +1,14 @@
 //! Phase 1 shadow comparison (`specs/APP-5430/TECH.md`): runs both the legacy `simple::` parser
 //! and the new tree-sitter adapter over the checked-in corpus and compares a canonical normalized
-//! snapshot of each backend's output. The Phase 1 exit condition is "no unexplained mismatch": a
-//! mismatch is fine only when it is captured explicitly as an `ApprovedDelta` in the relevant
-//! test's ledger, so that a regression anywhere else fails loudly rather than being silently
-//! tolerated by a spot-check.
+//! snapshot of each backend's output. This is a parse-robustness comparison for the ordinary
+//! consumers (completions, Describe/X-Ray, decorations, alias expansion): command count,
+//! top-level spans/texts, cursor-based command selection, and redirect presence. It deliberately
+//! does not compare permissions-style deny-rule decomposition (`decompose_command` on the legacy
+//! side); that comparison, and permissions migration generally, is out of scope for this project
+//! (see APP-5437 and APP-5434, and the "Phase 5: agent permissions" section of the spec, which is
+//! deferred). The Phase 1 exit condition is "no unexplained mismatch": a mismatch is fine only
+//! when it is captured explicitly as an `ApprovedDelta` in the relevant test's ledger, so that a
+//! regression anywhere else fails loudly rather than being silently tolerated by a spot-check.
 //!
 //! `simple::`'s internal `Command`/`Part` tree is private even to sibling modules in this crate,
 //! so the snapshot is built entirely from each backend's public API. Rather than comparing only a
@@ -85,13 +90,14 @@ fn adapter_snapshot(source: &str) -> Snapshot {
                 })
         })
         .collect();
+    let contains_redirection = result
+        .commands_depth_first()
+        .any(|c| !c.redirections.is_empty());
     Snapshot {
         top_level_spans,
         top_level_texts,
         cursor_selection,
-        contains_redirection: result
-            .decompose_for_permissions(source)
-            .contains_redirection,
+        contains_redirection,
     }
 }
 
@@ -407,25 +413,10 @@ fn process_substitution_diverges_in_top_level_command_count_too() {
     assert_cursor_sweep_matches_ledger(source, &legacy, &adapter, &deltas);
 }
 
-/// APP-5433: safety-critical, so both backends are required to independently expose `rm -rf /`,
-/// not merely "not regress" relative to each other. Cursor-selection is not compared here (the
-/// grammar-level hierarchy differs by construction between the two backends for this input), but
-/// `decompose_for_permissions`/`decompose_command` -- the actual deny-rule-facing API -- must
-/// agree on the safety-relevant fact.
-#[test]
-fn escaped_nested_backticks_app_5433_both_backends_expose_the_inner_command() {
-    let source = "echo `echo \\`rm -rf /\\``";
-    let (legacy_commands, _) = simple::decompose_command(source, EscapeChar::Backslash);
-    let adapter_commands =
-        parse_shell_input(source, ShellDialect::Bash, ShellParseOptions::default())
-            .decompose_for_permissions(source)
-            .commands;
-    assert!(
-        legacy_commands.contains(&"rm -rf /".to_string()),
-        "legacy regressed on APP-5433: {legacy_commands:?}"
-    );
-    assert!(
-        adapter_commands.contains(&"rm -rf /".to_string()),
-        "adapter missed APP-5433: {adapter_commands:?}"
-    );
-}
+// APP-5433 (the escaped-nested-backtick deny-rule bypass) is a permissions/deny-rule concern,
+// not a parse-robustness one -- `decompose_command`/`decompose_for_permissions`-style comparison
+// belongs to the deferred Phase 5 (see APP-5437, APP-5434), not this suite. The equivalent
+// parse-robustness property -- that the adapter's general hierarchy makes the escaped inner
+// command reachable via `commands_depth_first`, which completions/Describe use -- is covered by
+// `shell_adapter_legacy_failure_corpus::escaped_nested_backticks_expose_inner_command_app_5433`
+// in `adapter_tests.rs`.

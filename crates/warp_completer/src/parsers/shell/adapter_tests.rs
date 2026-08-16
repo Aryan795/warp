@@ -17,6 +17,17 @@ fn executable(command: &ParsedCommand) -> Option<&str> {
     command.executable.as_ref().map(|e| e.item.as_str())
 }
 
+/// The recomposed text of every command reachable via the general-purpose hierarchy traversal
+/// (depth-first, including nested commands), which is what completions/Describe use to find a
+/// command anywhere in the parse tree -- not the permissions-specific deny-rule decomposition
+/// (removed; see `specs/APP-5430/TECH.md`'s deferred "Phase 5: agent permissions").
+fn depth_first_texts(result: &super::ParsedShellInput) -> Vec<String> {
+    result
+        .commands_depth_first()
+        .map(|c| c.to_lite_command().joined_by_space())
+        .collect()
+}
+
 mod shell_adapter_complete_corpus {
     use super::*;
 
@@ -203,11 +214,12 @@ mod shell_adapter_legacy_failure_corpus {
     fn escaped_nested_backticks_expose_inner_command_app_5433() {
         let source = "echo `echo \\`rm -rf /\\``";
         let result = parse(ShellDialect::Bash, source);
-        let decomposed = result.decompose_for_permissions(source);
+        let texts = depth_first_texts(&result);
         assert!(
-            decomposed.commands.contains(&"rm -rf /".to_string()),
-            "expected the innermost `rm -rf /` to be exposed, got {:?}",
-            decomposed.commands
+            texts.contains(&"rm -rf /".to_string()),
+            "expected the innermost `rm -rf /` to be reachable via the general hierarchy \
+             traversal (completions/Describe use this to target a command anywhere in the tree), \
+             got {texts:?}"
         );
     }
 }
@@ -250,11 +262,10 @@ mod shell_adapter_known_good_parity {
     fn unescaped_nesting_exposes_inner_command() {
         for source in ["echo $(echo `rm -rf /`)", "echo `echo $(rm -rf /)`"] {
             let result = parse(ShellDialect::Bash, source);
-            let decomposed = result.decompose_for_permissions(source);
+            let texts = depth_first_texts(&result);
             assert!(
-                decomposed.commands.contains(&"rm -rf /".to_string()),
-                "expected {source:?} to expose `rm -rf /`, got {:?}",
-                decomposed.commands
+                texts.contains(&"rm -rf /".to_string()),
+                "expected {source:?} to expose `rm -rf /` via the general hierarchy traversal, got {texts:?}"
             );
         }
     }
@@ -263,23 +274,25 @@ mod shell_adapter_known_good_parity {
     fn single_quoted_substitution_is_literal() {
         let source = "echo '$(pwd)'";
         let result = parse(ShellDialect::Bash, source);
-        assert!(result.commands[0].nested_groups.is_empty());
-        let decomposed = result.decompose_for_permissions(source);
-        assert_eq!(decomposed.commands, vec![source.to_string()]);
+        assert_eq!(result.commands.len(), 1);
+        assert!(
+            result.commands[0].nested_groups.is_empty(),
+            "single-quoted text must not be recognized as a nested command substitution"
+        );
     }
 
     #[test]
-    fn pipeline_inside_substitution_decomposes() {
+    fn pipeline_inside_substitution_produces_two_sibling_commands() {
         let source = "ls $(foo | echo)";
         let result = parse(ShellDialect::Bash, source);
-        let decomposed = result.decompose_for_permissions(source);
-        for expected in ["foo", "echo", "foo | echo", "ls $(foo | echo)"] {
-            assert!(
-                decomposed.commands.contains(&expected.to_string()),
-                "expected {expected:?} in {:?}",
-                decomposed.commands
-            );
-        }
+        let group = &result.commands[0].nested_groups[0];
+        assert_eq!(
+            group.commands.len(),
+            2,
+            "expected `foo` and `echo` as two sibling commands within the pipeline group"
+        );
+        assert_eq!(executable(&group.commands[0]), Some("foo"));
+        assert_eq!(executable(&group.commands[1]), Some("echo"));
     }
 }
 
@@ -303,11 +316,10 @@ mod shell_adapter_escaped_backtick_context_and_parity {
             result.commands[0].nested_groups.is_empty(),
             "a literal escaped backtick outside backtick-substitution context must not become a nested group"
         );
-        let decomposed = result.decompose_for_permissions(source);
         assert_eq!(
-            decomposed.commands,
-            vec![source.to_string()],
-            "must not fabricate a `rm -rf /` command that Bash would not execute as one"
+            result.commands_depth_first().count(),
+            1,
+            "must not fabricate a nested `rm -rf /` command that Bash would not execute as one"
         );
     }
 
@@ -319,11 +331,10 @@ mod shell_adapter_escaped_backtick_context_and_parity {
         let source = r"echo `echo \`rm";
         let result = parse(ShellDialect::Bash, source);
         assert!(matches!(result.status, ShellParseStatus::Recovered { .. }));
-        let decomposed = result.decompose_for_permissions(source);
+        let texts = depth_first_texts(&result);
         assert!(
-            decomposed.commands.contains(&"rm".to_string()),
-            "expected the unclosed inner `rm` to be exposed, got {:?}",
-            decomposed.commands
+            texts.contains(&"rm".to_string()),
+            "expected the unclosed inner `rm` to be reachable via the general hierarchy traversal, got {texts:?}"
         );
         let cursor = result
             .completion_command_at(ByteOffset::from(source.len()))
@@ -338,8 +349,7 @@ mod shell_adapter_escaped_backtick_context_and_parity {
         let source = r"echo `echo \`rm -rf /\`";
         let result = parse(ShellDialect::Bash, source);
         assert!(matches!(result.status, ShellParseStatus::Recovered { .. }));
-        let decomposed = result.decompose_for_permissions(source);
-        assert!(decomposed.commands.contains(&"rm -rf /".to_string()));
+        assert!(depth_first_texts(&result).contains(&"rm -rf /".to_string()));
     }
 
     /// A 2+ backslash run before a backtick represents a third nesting level and deeper, which is

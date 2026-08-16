@@ -185,13 +185,6 @@ pub enum QuoteMode {
     PreserveQuotesAsLiterals,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PermissionDecomposition {
-    pub commands: Vec<String>,
-    pub contains_redirection: bool,
-    pub status: ShellParseStatus,
-}
-
 /// Parses `source` as `dialect` command input. Total: never panics on user input. Input above
 /// [`MAX_INPUT_LEN`] is rejected without parsing.
 pub fn parse_shell_input(
@@ -243,49 +236,6 @@ impl ParsedShellInput {
     pub fn first_executable(&self) -> Option<&Spanned<String>> {
         self.commands.first()?.executable.as_ref()
     }
-
-    /// Decomposes the input into every executable command at every nesting depth, in source
-    /// order, for the agent-permissions deny/allow predicates. Fails closed: a recovered or
-    /// rejected parse still returns whatever commands were found, but callers must consult
-    /// `status` and treat anything other than `Complete` as inconclusive.
-    ///
-    /// Includes both each individual nested command *and* the recomposed text of each nested
-    /// group as a whole (e.g. for `ls $(foo | echo)`, both `foo`, `echo`, and `foo | echo` are
-    /// returned), matching the legacy parser's `decompose_command` so an anchored deny rule can
-    /// match whichever granularity the pipeline/statement-list was written at.
-    pub fn decompose_for_permissions(&self, source: &str) -> PermissionDecomposition {
-        let mut commands = Vec::new();
-        let mut contains_redirection = false;
-        for command in &self.commands {
-            decompose_command_into(command, source, &mut commands, &mut contains_redirection);
-        }
-        PermissionDecomposition {
-            commands,
-            contains_redirection,
-            status: self.status.clone(),
-        }
-    }
-}
-
-fn decompose_command_into(
-    command: &ParsedCommand,
-    source: &str,
-    out: &mut Vec<String>,
-    contains_redirection: &mut bool,
-) {
-    *contains_redirection |= !command.redirections.is_empty();
-    for group in &command.nested_groups {
-        let text = group.content_span.slice(source).trim();
-        if !text.is_empty() {
-            out.push(text.to_string());
-        }
-        for nested in &group.commands {
-            decompose_command_into(nested, source, out, contains_redirection);
-        }
-    }
-    if let Some(text) = command.span_text(source) {
-        out.push(text);
-    }
 }
 
 fn deepest_command_at(commands: &[ParsedCommand], cursor: usize) -> Option<&ParsedCommand> {
@@ -323,13 +273,6 @@ fn deepest_open_command_at(commands: &[ParsedCommand], cursor: usize) -> Option<
 }
 
 impl ParsedCommand {
-    /// Returns the source text spanned by this command, trimmed of trailing whitespace already
-    /// excluded via `post_whitespace`.
-    fn span_text(&self, source: &str) -> Option<String> {
-        let range: std::ops::Range<usize> = self.span.into();
-        source.get(range).map(|s| s.trim().to_string())
-    }
-
     fn depth_first(&self) -> Box<dyn Iterator<Item = &ParsedCommand> + '_> {
         Box::new(
             std::iter::once(self).chain(
