@@ -1,6 +1,9 @@
 # Smooth Scrolling for Discrete Mouse-Wheel Input — Tech Spec
 
-See [`PRODUCT.md`](./PRODUCT.md) for user-visible behavior.
+See [`PRODUCT.md`](./PRODUCT.md) for user-visible behavior, including the amendment that
+supersedes the flat 120ms ease-out cubic described in this Tech Spec's original "Decisions" and
+"Proposed changes" sections below. See "Amendment: Chrome-style easing and duration" further down
+for what actually shipped for Phase 1, and why.
 
 Base commit:
 [`5fb3144db9638c6c43371b566e1d0a89ae69236c`](https://github.com/warpdotdev/warp/tree/5fb3144db9638c6c43371b566e1d0a89ae69236c)
@@ -68,6 +71,9 @@ Use a target tween. Each input contributes a fixed destination. Cubic ease-out p
 response without adding momentum.
 
 ### Compose additive contributions, not animation restarts
+**Superseded by the amendment below.** This section is kept for history; Phase 1 did not ship
+with additive contributions.
+
 Options:
 - Restart one 120-millisecond tween after every notch. This makes rapid input feel delayed because
   progress repeatedly returns to the start of the easing curve.
@@ -89,6 +95,50 @@ fn ease_out_cubic(t: f32) -> f32 {
 At each frame, emit only the difference between the contribution's new eased amount and the amount
 already emitted. At `t == 1`, emit any floating-point remainder and remove the contribution.
 
+### Amendment: retarget a single running animation, preserving velocity
+Hands-on feedback after the Phase 1 implementation was that the additive-contributions model
+above, combined with a flat 120ms ease-out-only cubic, did not feel smooth enough. The requester
+asked for Chromium's `cc::ScrollOffsetAnimationCurve` model instead. This section replaces
+"Compose additive contributions" and its ease-out snippet above.
+
+Options considered (costed for the requester before they decided):
+1. Duration change alone (flat longer value, or Chrome-style inverse-delta ramping).
+2. Velocity-preserving retarget of a single running curve, replacing stacked contributions.
+3. A full mass-spring-damper model.
+
+The requester chose to adopt (1) and (2) together, matching Chromium's actual behavior, rather
+than (3) (Chromium itself does not use a spring model for wheel scrolling, despite that being a
+common assumption).
+
+Use one running segment per axis instead of a list of independent contributions:
+- **Easing**: cubic bezier ease-in-out, control points `(0.42, 0)` and `(0.58, 1)` -- the same
+  curve as CSS's `ease-in-out` keyword -- evaluated by solving `x(t) = elapsed_fraction` for the
+  bezier parameter `t` (Newton-Raphson, falling back to bisection), then returning `y(t)`, the
+  same technique browsers use for `cubic-bezier()` timing functions.
+- **Duration**: inversely proportional to the notch's delta magnitude
+  (`DurationBehavior::kInverseDelta`). Chromium's published reference points are
+  `kInverseDeltaMaxDuration` = 200ms at a 120px delta and `kInverseDeltaMinDuration` = 100ms at
+  480px, clamped at both ends; Chromium's exact interpolation between them is not available to
+  us, so fit a simple `A / delta + B` hyperbola through those two points instead.
+- **Retarget**: on a same-direction notch arriving mid-flight, reshape the curve so its starting
+  slope (in normalized time/progress space) matches the outgoing segment's velocity at that
+  instant, rather than starting a fresh, independent, zero-velocity contribution. Implement this
+  by holding the bezier's first control point's `x`-coordinate fixed and solving for its
+  `y`-coordinate from the desired starting slope (`y1 = slope * x1`, clamped to avoid visible
+  overshoot), keeping the second control point fixed so every curve still eases out to a stop at
+  its target. This is the same curve-reshaping Chromium's `EaseInOutWithInitialSlope` describes
+  doing, though its exact reshaping formula is not published, so this is our own derivation of an
+  equivalent construction.
+- **Velocity-based duration bound**: cap a retarget's duration so its reshaped starting slope
+  cannot exceed a safe threshold when the controller is already moving fast toward a small
+  remaining distance -- Chromium's `VelocityBasedDurationBound`, which exists specifically to
+  stop a rubber-banding overshoot in that scenario.
+- Opposite-direction input keeps the existing behavior unchanged: cancel at the currently
+  displayed position (zero velocity), then ease in fresh toward the new target.
+
+Every other approved behavior (exact landing on target, cancellation semantics, unchanged
+multiplier and 40px-per-line conversion, independent axes) is unaffected.
+
 ### Keep animation ownership at the scroll consumer
 Options:
 - Rewrite all non-precise wheel events in the winit event loop. This is simple, but it also rewrites
@@ -107,34 +157,59 @@ or a second per-phase flag.
 
 ## Proposed changes
 ### Shared animation controller
-Add a small, deterministic controller under `crates/warpui_core/src/smooth_scroll.rs`. Keep it
-outside the GUI element module because Phase 2 reuses it from `TerminalView`.
+**Implemented with one running segment per axis, per the amendment above, not a list of additive
+contributions.** Added a small, deterministic controller under
+`crates/warpui_core/src/smooth_scroll.rs`. Kept it outside the GUI element module because Phase 2
+will reuse it from `TerminalView`.
 
-The controller stores logical offsets as `Vector2F`/`f32`. The consumer converts those values to
-`Pixels` or `Lines` at its existing boundary. The controller owns:
-- The displayed offset for each participating axis.
-- The clamped target offset for each axis.
-- Active additive contributions with monotonic start times.
-- The amount already emitted by each contribution.
-- An animation generation token used to ignore stale frame callbacks after cancellation.
+The controller (`SmoothScrollController`) stores logical offsets as `f32`; the consumer creates
+one instance per axis and converts to `Pixels` or `Lines` at its existing boundary. It owns:
+- `committed`: the settled position, used whenever there's no active segment.
+- An optional single `Segment { start, start_position, start_velocity, target, duration }`: the
+  one in-flight motion, if any.
 
-The controller API must support:
-- `add_discrete_delta`: add a same-direction contribution to the current target.
-- `reverse_with_delta`: materialize the current displayed position, clear old contributions, and
-  start the opposite direction.
-- `advance(now)`: return the incremental delta for this frame and whether another frame is needed.
-- `cancel`: clear contributions and make target equal displayed position.
-- `set_position_immediately`: cancel, then update displayed and target positions together.
-- Independent horizontal and vertical state.
+The controller API, as implemented:
+- `add_delta(delta, now)`: retargets the running segment (same direction) or cancels and starts a
+  fresh one (opposite direction, or starting from rest). See the amendment above.
+- `displayed_position(now)`: the position that should currently be painted; settles a completed
+  segment into `committed` as a side effect.
+- `target()`: the exact position the controller is animating toward, ignoring progress. Used for
+  bounds/propagation decisions instead of `displayed_position`.
+- `is_animating(now)`: whether a segment is still easing in; also settles a completed segment.
+- `cancel(now)`: settles at the currently displayed position and clears the active segment.
+- `set_position_immediately(position)`: jumps directly to `position`, clearing any active segment.
 
-Inject `now` into controller methods. Do not read wall-clock time inside deterministic controller
-tests. Use `instant::Instant` at the integration boundary.
+Every method that depends on "now" takes an explicit `Instant` rather than reading the wall clock,
+keeping the controller a pure, deterministic function of injected time -- this part of the
+original proposal was implemented as designed.
 
-Clamp the target before adding a contribution. Bounds checks and nested propagation must use the
-target position, not only the lagging displayed position. This prevents an inner scrollable from
-accepting input that belongs to its parent while an animation is still catching up.
+Bounds and nested-propagation decisions use `target()`, not `displayed_position()`, so an inner
+scrollable doesn't accept wheel input that belongs to its parent while its own animation is still
+catching up -- also implemented as originally proposed.
 
 ### Frame driving
+**Implemented differently from what this section originally proposed.** The
+`EventContext`/`presenter::DispatchResult`/`windowing::EventDispatchResult` plumbing described
+below was not built. Phase 1 instead reuses the existing `PaintContext::repaint_after` self
+-scheduling mechanism already used by `LiveElement` and `ShimmeringTextElement`: every paint of an
+animating axis calls `ctx.repaint_after(SMOOTH_SCROLL_FRAME_INTERVAL)`, which re-arms a repaint
+timer for as long as the controller reports `is_animating()`. This produces the same visible
+behavior (an axis keeps repainting at the target cadence until its animation settles) with far
+less new plumbing, since the controller is a pure function of injected time and needs no
+per-frame "emit" bookkeeping, generation token, or new event type to route.
+
+Measured cadence: a dedicated test
+(`smooth_scroll_animation_drives_many_distinct_repaints_over_its_duration`) drives a real
+wheel-triggered animation through this self-scheduling chain (the real async timer, not a mock)
+and counts distinct paints; it observed on the order of a dozen or more distinct paints over one
+animation's duration, consistent with the 8ms request interval not itself throttling below what
+a real display could provide. Actual on-screen cadence is bounded by the platform's vsync/redraw
+cadence, the same as every other continuous animation already in the app.
+
+The original proposal below is kept for context on why frame driving needed to exist at all, but
+its specific mechanism (a routable `SmoothScrollFrame` event with a controller ID and generation)
+is not what shipped:
+
 Add a view-scoped smooth-scroll frame request to `EventContext` and carry it through
 `presenter::DispatchResult` and `windowing::EventDispatchResult`. A request contains:
 - The requesting view ID from the current event-context stack.
@@ -256,13 +331,21 @@ but does not block Phase 1 release.
 
 ## Testing and validation
 ### Automated tests
-Add deterministic controller tests in a separate `smooth_scroll_tests.rs`:
-- `ease_out_cubic_reaches_exact_target_without_overshoot`
-- `same_direction_inputs_compose_without_restarting_existing_progress`
-- `opposing_input_discards_unrendered_remainder`
-- `late_frame_emits_exact_remaining_distance`
-- `cancel_ignores_stale_generation`
-- `horizontal_and_vertical_contributions_advance_independently`
+Deterministic controller tests live in `smooth_scroll_tests.rs`, pinning the model described in
+the amendment above (this list supersedes the original one, which named tests for the additive
+-contributions model that was not shipped):
+- `ease_in_out_reaches_exact_target_without_overshoot`
+- `fresh_segment_eases_in_from_zero_velocity`
+- `opposing_input_discards_unrendered_remainder_and_reverses_immediately`
+- `same_direction_retarget_lands_exactly_on_the_combined_target`
+- `same_direction_retarget_preserves_velocity_across_the_seam`
+- `cancel_settles_at_displayed_position_and_stops_animation`
+- `set_position_immediately_overrides_in_flight_animation`
+- `zero_delta_is_a_no_op`
+- `long_rapid_same_direction_burst_reaches_exact_sum_of_deltas`
+- `inverse_delta_duration_ramps_between_the_two_reference_points`
+- `velocity_preserving_duration_bound_shrinks_when_moving_fast_toward_a_small_remaining_delta`
+- `cubic_bezier_ease_in_out_matches_known_reference_values`
 
 Extend `new_scrollable/scrollable_tests.rs`, legacy `scrollable_tests.rs`, and
 `clipped_scrollable_tests.rs`:
