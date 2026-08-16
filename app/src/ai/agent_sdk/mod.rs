@@ -879,7 +879,10 @@ impl AgentDriverRunner {
                 })
                 .await?
                 .map(|_| ())?;
-            return Ok(());
+            // Deliberately no early return: server-minted per-task credentials
+            // (e.g. GitLab Factory identities) still apply outside isolation
+            // platforms when a generic workload token is available. Hosts
+            // without one skip below via NoIsolationPlatformDetected.
         }
 
         if !FeatureFlag::GitCredentialRefresh.is_enabled() {
