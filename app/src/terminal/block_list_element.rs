@@ -7,7 +7,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use enum_iterator::Sequence;
-use instant::Instant;
 use itertools::Itertools;
 use parking_lot::FairMutex;
 use pathfinder_color::ColorU;
@@ -30,7 +29,6 @@ use warpui::geometry::rect::RectF;
 use warpui::geometry::vector::{Vector2F, vec2f};
 use warpui::platform::Cursor;
 use warpui::platform::keyboard::KeyCode;
-use warpui::smooth_scroll::SMOOTH_SCROLL_FRAME_INTERVAL;
 use warpui::text::SelectionType;
 use warpui::ui_components::components::UiComponent;
 use warpui::units::{IntoLines, IntoPixels, Lines, Pixels};
@@ -39,9 +37,7 @@ use warpui::{
     LayoutContext, ModelHandle, PaintContext, SingletonEntity as _, SizeConstraint,
 };
 
-use super::block_list_viewport::{
-    ClampingMode, InputMode, ScrollPosition, SmoothScrollHandle, ViewportState,
-};
+use super::block_list_viewport::{ClampingMode, InputMode, ScrollPosition, ViewportState};
 use super::blockgrid_renderer::GridRenderParams;
 use super::find::{BlockFindRenderData, TerminalFindModel};
 use super::grid_renderer::CellGlyphCache;
@@ -731,10 +727,6 @@ pub struct BlockListElement {
 
     horizontal_clipped_scroll_state: ClippedScrollStateHandle,
 
-    /// Animates discrete (non-precise) wheel input for the block list's vertical scrollback.
-    /// See `SmoothScrollHandle`.
-    vertical_smooth_scroll: SmoothScrollHandle,
-
     /// Information about blocks and AI blocks used to render blocklist AI-specific decoration.
     ai_render_context: Rc<RefCell<BlocklistAIRenderContext>>,
 
@@ -975,7 +967,6 @@ impl BlockListElement {
             presence_avatars: HashMap::new(),
             horizontal_clipped_scroll_state: terminal_view_render_context
                 .horizontal_clipped_scroll_state,
-            vertical_smooth_scroll: terminal_view_render_context.vertical_smooth_scroll,
             ai_render_context: terminal_view_render_context.ai_render_context,
             input_size_at_last_frame,
             block_footer_elements: HashMap::new(),
@@ -997,17 +988,6 @@ impl BlockListElement {
     pub fn with_ligature_rendering(mut self) -> Self {
         self.use_ligature_rendering = true;
         self
-    }
-
-    /// Dispatches an action so `TerminalView` can apply the next pending increment of an
-    /// in-flight smooth-scroll animation, if any. Called unconditionally on every event this
-    /// element receives (mirroring the generic WarpUI `Manual`-axis scrollable pattern exactly):
-    /// gating this on `is_animating()` first would race with a segment completing between the
-    /// gate check and the actual `take_increment` call, silently dropping the final increment
-    /// and landing short of the exact target. `TerminalView::advance_smooth_scroll` cheaply
-    /// no-ops when there's nothing pending.
-    fn advance_smooth_scroll(&self, ctx: &mut EventContext) {
-        ctx.dispatch_typed_action(TerminalAction::AdvanceSmoothScroll);
     }
 
     pub fn with_hide_cursor_cell(mut self) -> Self {
@@ -4427,12 +4407,6 @@ impl Element for BlockListElement {
 
         ctx.scene.stop_layer();
         self.child_max_z_index = Some(ctx.scene.max_active_z_index());
-
-        // Keep repainting while a smooth-scroll animation is easing in, so the displayed
-        // position keeps advancing without further input.
-        if self.vertical_smooth_scroll.is_animating(Instant::now()) {
-            ctx.repaint_after(SMOOTH_SCROLL_FRAME_INTERVAL);
-        }
     }
 
     fn size(&self) -> Option<Vector2F> {
@@ -4445,8 +4419,6 @@ impl Element for BlockListElement {
         ctx: &mut EventContext,
         app: &AppContext,
     ) -> bool {
-        self.advance_smooth_scroll(ctx);
-
         let z_index = self.child_max_z_index.expect("Z-index should exist.");
 
         // During an active text selection, bypass the z-index coverage check for

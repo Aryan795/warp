@@ -105,11 +105,6 @@ pub enum TerminalAction {
         /// `false` is the only case eligible for `SmoothScrolling`'s animation.
         precise: bool,
     },
-    /// Applies the next pending increment of an in-flight smooth-scroll animation, if any.
-    /// Dispatched by `BlockListElement` on every event it receives (mirroring the generic
-    /// WarpUI `Manual`-axis scrollable pattern), since the app's redraw machinery replays a
-    /// synthetic `MouseMoved` event after every repaint the animation requests.
-    AdvanceSmoothScroll,
     AltScroll {
         delta: i32,
         point: Point,
@@ -488,7 +483,6 @@ impl fmt::Debug for TerminalAction {
             Scroll { delta, precise } => {
                 write!(f, "Scroll {{ delta: {delta}, precise: {precise} }}")
             }
-            AdvanceSmoothScroll => f.write_str("AdvanceSmoothScroll"),
             AltScroll { delta, .. } => write!(f, "AltScroll {{ delta: {delta} }}"),
             SharedSessionViewerAltScroll { new_scroll_top } => write!(
                 f,

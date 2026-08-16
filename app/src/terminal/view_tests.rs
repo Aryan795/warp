@@ -4146,12 +4146,8 @@ fn test_stable_scrolling_during_grid_truncation() {
 
 /// Regression coverage for the terminal-scrollback smooth-scroll wiring (CSAT-6046 phase 2).
 /// Unlike the generic WarpUI scrollables (phase 1), these drive `TerminalView::scroll` and
-/// `TerminalView::advance_smooth_scroll` directly rather than through a full `BlockListElement`
-/// paint/dispatch cycle -- the animation-frame-driving mechanism itself (`PaintContext::
-/// repaint_after` scheduling a synthetic-`MouseMoved`-triggered `advance_smooth_scroll` call) is
-/// structurally identical to phase 1's already-tested `Manual`-axis pattern, so these tests focus
-/// on what's actually new here: `TerminalView::scroll`'s precise/flag branching, and the
-/// `ScrollPositionUpdate` cancellation guard in `update_scroll_position_locking`.
+/// `TerminalView::advance_smooth_scroll` directly rather than exercising the full
+/// `BlockListElement` paint/dispatch cycle or `TerminalView::drive_smooth_scroll`'s timer loop.
 #[test]
 fn test_smooth_scroll_wheel_animates_and_settles_to_exact_target() {
     App::test((), |mut app| async move {
@@ -4220,11 +4216,29 @@ fn test_smooth_scroll_wheel_animates_and_settles_to_exact_target() {
         warpui::r#async::Timer::after(std::time::Duration::from_millis(250)).await;
         terminal.update(&mut app, |view, ctx| {
             view.advance_smooth_scroll(ctx);
-            assert_eq!(
-                view.scroll_position(),
-                expected_final_position,
-                "the animation must land exactly where an immediate scroll of the same delta \
-                 would have"
+            // Approximate rather than exact equality: the animation normalizes `Lines` into
+            // pixel-equivalent units and back (see `NUM_PIXELS_PER_LINE` in
+            // `block_list_viewport.rs`), an extra `f32` round-trip an immediate scroll doesn't
+            // take, so the two can differ by a sub-visual amount of floating-point noise.
+            let (
+                ScrollPosition::FixedAtPosition {
+                    scroll_lines: ScrollLines::ScrollTop(actual),
+                },
+                ScrollPosition::FixedAtPosition {
+                    scroll_lines: ScrollLines::ScrollTop(expected),
+                },
+            ) = (view.scroll_position(), expected_final_position)
+            else {
+                panic!(
+                    "expected both positions to be FixedAtPosition/ScrollTop, got {:?} and {:?}",
+                    view.scroll_position(),
+                    expected_final_position
+                );
+            };
+            assert!(
+                heights_approx_eq(actual, expected),
+                "the animation must land (within floating-point tolerance) where an immediate \
+                 scroll of the same delta would have: got {actual:?}, expected {expected:?}"
             );
         });
     })
@@ -4379,6 +4393,263 @@ fn test_smooth_scroll_animation_settles_into_follows_bottom_of_most_recent_block
                 ScrollPosition::FollowsBottomOfMostRecentBlock,
                 "an animated scroll that overshoots the bottom must settle into sticky-bottom \
                  mode, exactly like an immediate scroll of the same delta would"
+            );
+        });
+    })
+}
+
+/// Regression coverage for a real stall: `advance_smooth_scroll` used to be driven only by
+/// `BlockListElement::dispatch_event`, reached via the app's synthetic-`MouseMoved` replay after
+/// each repaint -- which only fires once a *real* `MouseMoved` has been cached for the window.
+/// This test deliberately never dispatches any mouse event to the window and never calls
+/// `advance_smooth_scroll` manually, so it can only pass if `TerminalView::drive_smooth_scroll`'s
+/// independent timer loop is what's actually moving the position.
+#[test]
+fn test_smooth_scroll_advances_on_its_own_without_any_cached_mouse_position() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let _smooth_scrolling = FeatureFlag::SmoothScrolling.override_enabled(true);
+
+        let terminal = add_window_with_terminal(&mut app, None);
+        terminal.update(&mut app, |view, _ctx| {
+            let mut model = view.model.lock();
+            for _ in 0..100 {
+                model.simulate_block("ls", "foo");
+            }
+        });
+        warpui::r#async::Timer::after(std::time::Duration::from_millis(50)).await;
+
+        let before = terminal.update(&mut app, |view, ctx| {
+            let before = view.scroll_position();
+            // This window has never received a real `Event::MouseMoved`, so
+            // `AppContext::window_last_mouse_moved_event` is `None` for it and the app's
+            // synthetic-replay mechanism can never fire here.
+            view.scroll(1.0.into_lines(), false /* precise */, ctx);
+            before
+        });
+
+        // Real time passes -- long enough for the animation to fully settle -- with nothing
+        // else touching the view and no manual `advance_smooth_scroll` call. If the drive loop
+        // depended on the hover-replay mechanism, this would stay stuck at `before` forever.
+        warpui::r#async::Timer::after(std::time::Duration::from_millis(300)).await;
+
+        terminal.read(&app, |view, _ctx| {
+            assert_ne!(
+                view.scroll_position(),
+                before,
+                "the drive loop should advance the animation on its own, with no dispatched \
+                 mouse event and no manual poke"
+            );
+        });
+    })
+}
+
+/// Regression coverage for a leak across the alternate-screen boundary: an animation already in
+/// flight when alt screen is entered must be cancelled at its currently displayed position, not
+/// left to keep silently advancing (or worse, dumped as a single jump once the user returns).
+#[test]
+fn test_smooth_scroll_cancels_when_entering_alt_screen_before_animation_settles() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let _smooth_scrolling = FeatureFlag::SmoothScrolling.override_enabled(true);
+
+        let (window_id, terminal) = add_window_with_id_and_terminal(&mut app, None);
+        terminal.update(&mut app, |view, _ctx| {
+            let mut model = view.model.lock();
+            for _ in 0..100 {
+                model.simulate_block("ls", "foo");
+            }
+        });
+        warpui::r#async::Timer::after(std::time::Duration::from_millis(50)).await;
+
+        let size_info = terminal.update(&mut app, |view, ctx| {
+            view.scroll(1.0.into_lines(), false /* precise */, ctx);
+
+            // Enter alt screen immediately, well before the animation (100-200ms) would have
+            // settled on its own.
+            view.model.lock().set_mode(ansi::Mode::SwapScreen {
+                save_cursor_and_clear_screen: true,
+            });
+            *view.size_info
+        });
+        // Render once through the app's normal machinery -- exercising the same cancellation
+        // this view performs on every render while alt screen is active. `view.render` can't
+        // be called directly from inside `update()` on the same view (the view is temporarily
+        // removed from the window's view map for the duration of `update()`, so a nested
+        // `render()` call can't look itself back up by its own weak handle), so this drives a
+        // real scene build the same way `test_alt_screen_select_with_sgr_mouse` does.
+        let root_view_id = app
+            .root_view_id(window_id)
+            .expect("window should have a root view");
+        let mut presenter = Presenter::new(window_id);
+        let invalidation = WindowInvalidation {
+            updated: [root_view_id].into_iter().collect(),
+            ..Default::default()
+        };
+        app.update(|ctx| {
+            presenter.invalidate(invalidation, ctx);
+            presenter.build_scene(
+                vec2f(size_info.pane_width_px, size_info.pane_height_px),
+                1.,
+                None,
+                ctx,
+            );
+        });
+        let cancelled_position = terminal.read(&app, |view, _ctx| view.scroll_position());
+
+        // Enough real time for the animation would have fully completed had it not been
+        // cancelled. The position must not have moved any further.
+        warpui::r#async::Timer::after(std::time::Duration::from_millis(300)).await;
+        terminal.read(&app, |view, _ctx| {
+            assert_eq!(
+                view.scroll_position(),
+                cancelled_position,
+                "entering alt screen must cancel the in-flight animation outright, not merely \
+                 pause it -- the position must not keep advancing afterward"
+            );
+        });
+    })
+}
+
+/// The mirror-image case: an animation that has already fully settled before alt screen is
+/// entered must not be disturbed by a subsequent entry/exit round trip.
+#[test]
+fn test_smooth_scroll_settled_position_survives_alt_screen_round_trip() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let _smooth_scrolling = FeatureFlag::SmoothScrolling.override_enabled(true);
+
+        let (window_id, terminal) = add_window_with_id_and_terminal(&mut app, None);
+        terminal.update(&mut app, |view, _ctx| {
+            let mut model = view.model.lock();
+            for _ in 0..100 {
+                model.simulate_block("ls", "foo");
+            }
+        });
+        warpui::r#async::Timer::after(std::time::Duration::from_millis(50)).await;
+
+        let size_info = terminal.update(&mut app, |view, ctx| {
+            view.scroll(1.0.into_lines(), false /* precise */, ctx);
+            *view.size_info
+        });
+
+        // Let the animation fully settle before alt screen ever enters the picture.
+        warpui::r#async::Timer::after(std::time::Duration::from_millis(300)).await;
+        let settled_position = terminal.read(&app, |view, _ctx| view.scroll_position());
+
+        // Enter, then exit, alt screen, rendering through the app's normal machinery after
+        // each transition (see the comment in the sibling entry test for why `view.render`
+        // can't be called directly from inside `update()` on the same view).
+        let root_view_id = app
+            .root_view_id(window_id)
+            .expect("window should have a root view");
+        let mut presenter = Presenter::new(window_id);
+        macro_rules! rerender {
+            () => {
+                let invalidation = WindowInvalidation {
+                    updated: [root_view_id].into_iter().collect(),
+                    ..Default::default()
+                };
+                app.update(|ctx| {
+                    presenter.invalidate(invalidation, ctx);
+                    presenter.build_scene(
+                        vec2f(size_info.pane_width_px, size_info.pane_height_px),
+                        1.,
+                        None,
+                        ctx,
+                    );
+                });
+            };
+        }
+        terminal.update(&mut app, |view, _ctx| {
+            view.model.lock().set_mode(ansi::Mode::SwapScreen {
+                save_cursor_and_clear_screen: true,
+            });
+        });
+        rerender!();
+        terminal.update(&mut app, |view, _ctx| {
+            view.model.lock().set_mode(ansi::Mode::SwapScreen {
+                save_cursor_and_clear_screen: false,
+            });
+        });
+        rerender!();
+
+        terminal.read(&app, |view, _ctx| {
+            assert_eq!(
+                view.scroll_position(),
+                settled_position,
+                "an alt-screen entry/exit round trip after the animation already settled must \
+                 not move the scroll position"
+            );
+        });
+    })
+}
+
+/// New output arriving mid-animation must not derail an in-flight scroll: since increments are
+/// small, relative deltas re-resolved against the block list's *current* state every frame
+/// (rather than a captured absolute target), content growing underneath an animation is handled
+/// by the same clamping logic that already handles it for an immediate scroll.
+#[test]
+fn test_smooth_scroll_handles_content_growing_mid_animation() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let _smooth_scrolling = FeatureFlag::SmoothScrolling.override_enabled(true);
+
+        let terminal = add_window_with_terminal(&mut app, None);
+        terminal.update(&mut app, |view, _ctx| {
+            let mut model = view.model.lock();
+            for _ in 0..100 {
+                model.simulate_block("ls", "foo");
+            }
+        });
+        warpui::r#async::Timer::after(std::time::Duration::from_millis(50)).await;
+
+        terminal.update(&mut app, |view, ctx| {
+            // Scroll away from the bottom first, immediately, so a subsequent animated notch
+            // has somewhere to travel toward without immediately hitting a boundary.
+            view.scroll(20.0.into_lines(), true /* precise */, ctx);
+            // Start an animated notch. Its duration (100-200ms) gives the next step room to
+            // land while it's still in flight.
+            view.scroll(3.0.into_lines(), false /* precise */, ctx);
+        });
+
+        // Roughly midway through the animation, more content arrives -- growing the block
+        // list's total height, and with it `max_scroll_top`, while the tween is still running.
+        warpui::r#async::Timer::after(std::time::Duration::from_millis(60)).await;
+        terminal.update(&mut app, |view, _ctx| {
+            let mut model = view.model.lock();
+            for _ in 0..20 {
+                model.simulate_block("ls", "more output");
+            }
+        });
+
+        // Let the animation finish advancing past the point where the new content arrived.
+        warpui::r#async::Timer::after(std::time::Duration::from_millis(250)).await;
+        terminal.update(&mut app, |view, ctx| {
+            view.advance_smooth_scroll(ctx);
+            let input_mode = *InputModeSettings::as_ref(ctx).input_mode.value();
+            let max_scroll_top = {
+                let model = view.model.lock();
+                view.viewport_state(model.block_list(), input_mode, ctx)
+                    .max_scroll_top_in_lines()
+            };
+            let ScrollPosition::FixedAtPosition {
+                scroll_lines: ScrollLines::ScrollTop(actual),
+            } = view.scroll_position()
+            else {
+                panic!(
+                    "expected FixedAtPosition/ScrollTop, got {:?}",
+                    view.scroll_position()
+                );
+            };
+            assert!(
+                heights_approx_gte(max_scroll_top, actual),
+                "the final position must stay within the new (larger) bounds after content \
+                 grew mid-animation: position {actual:?}, max_scroll_top {max_scroll_top:?}"
+            );
+            assert!(
+                !view.smooth_scroll.is_animating(Instant::now()),
+                "the animation should have fully settled by now despite the content growth"
             );
         });
     })
