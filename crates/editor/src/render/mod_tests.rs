@@ -398,6 +398,29 @@ Trailing Newline (1 characters, 1 lines, 24.00px tall)
     });
 }
 
+#[test]
+fn laying_out_many_lines_packs_the_content_tree() {
+    init_logging();
+    App::test((), |mut app| async move {
+        let app = &mut app;
+        let state = TestState::new(app);
+        let many_lines = (0..200)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        state.markdown(&many_lines, app).await;
+
+        // Laying the replacement blocks out one `SumTree::push` at a time leaves roughly one item
+        // per leaf, and a leaf allocation is the full size of a `Node` whatever it holds.
+        let stats = state.content_node_stats(app);
+        assert!(
+            stats.leaf_occupancy() > 0.9,
+            "the content tree should pack its leaves, got {stats:?}"
+        );
+    });
+}
+
 /// Helper for testing edits end-to-end. This is essentially a stripped-down editor model.
 struct TestState {
     content: ModelHandle<Buffer>,
@@ -495,6 +518,12 @@ impl TestState {
             app,
         )
         .await
+    }
+
+    /// How densely the render model's content tree packs its items into leaves.
+    fn content_node_stats(&self, ctx: &impl ReadModel) -> sum_tree::NodeStats {
+        self.render
+            .read(ctx, |render_state, _| render_state.content_node_stats())
     }
 
     /// Assert that the render state has the expected contents, as produced by describing its

@@ -1472,6 +1472,82 @@ fn test_first_hidden_section_line_range_none_without_hidden_sections() {
     );
 }
 
+/// Pushing items one at a time gives each item a leaf of its own once the tree is taller than a
+/// single leaf, which is what `layout_pending_edit` batches away.
+#[test]
+fn extend_packs_leaves_that_per_item_push_leaves_nearly_empty() {
+    let items: Vec<BlockItem> = (0..1000).map(|_| mock_paragraph(24., 1., 5)).collect();
+
+    let mut pushed = SumTree::new();
+    for item in items.iter().cloned() {
+        pushed.push(item);
+    }
+    let mut extended = SumTree::new();
+    extended.extend(items.iter().cloned());
+
+    let pushed_stats = pushed.node_stats();
+    let extended_stats = extended.node_stats();
+
+    assert_eq!(pushed_stats.items, extended_stats.items);
+    assert!(
+        extended_stats.leaf_occupancy() > 0.9,
+        "extend should fill leaves, got {extended_stats:?}"
+    );
+    assert!(
+        pushed_stats.nodes() > 3 * extended_stats.nodes(),
+        "per-item push should cost far more nodes: push {pushed_stats:?} vs extend {extended_stats:?}"
+    );
+}
+
+#[test]
+fn every_replacement_item_is_retained_without_hidden_ranges() {
+    let items = vec![mock_paragraph(24., 1., 5), mock_paragraph(24., 1., 5)];
+
+    let retained = RenderState::retained_replacement_items(items, CharOffset::from(1), None);
+
+    assert_eq!(retained.len(), 2);
+}
+
+#[test]
+fn a_dropped_replacement_item_does_not_advance_the_offset() {
+    // Three 5-character items starting at offset 1 would occupy offsets 1, 6 and 11. Hiding
+    // offset 6 drops the second item, and since a dropped item never enters the tree, the third
+    // one takes offset 6 in its place and is dropped as well. An implementation that advanced the
+    // offset past the dropped item would place the third at 11 and keep it.
+    let items = vec![
+        mock_paragraph(24., 1., 5),
+        mock_paragraph(24., 1., 5),
+        mock_paragraph(24., 1., 5),
+    ];
+    let mut hidden_ranges = RangeSet::new();
+    hidden_ranges.insert(CharOffset::from(6)..CharOffset::from(7));
+
+    let retained =
+        RenderState::retained_replacement_items(items, CharOffset::from(1), Some(&hidden_ranges));
+
+    assert_eq!(
+        retained.len(),
+        1,
+        "only the item before the hidden offset should survive"
+    );
+}
+
+#[test]
+fn a_hidden_block_survives_a_hidden_range_that_covers_it() {
+    let items = vec![BlockItem::Hidden(HiddenBlockConfig::new(
+        LineCount(3),
+        CharOffset::from(5),
+        BlockLocation::Middle,
+    ))];
+    let mut hidden_ranges = RangeSet::new();
+    hidden_ranges.insert(CharOffset::from(1)..CharOffset::from(50));
+
+    let retained =
+        RenderState::retained_replacement_items(items, CharOffset::from(1), Some(&hidden_ranges));
+
+    assert_eq!(retained.len(), 1);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CharCell (TUI) layout helper tests
 // ─────────────────────────────────────────────────────────────────────────────

@@ -2751,6 +2751,12 @@ impl RenderState {
         self.content().block_items().count()
     }
 
+    /// How densely the content tree packs its items into leaves.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn content_node_stats(&self) -> sum_tree::NodeStats {
+        self.content.borrow().node_stats()
+    }
+
     pub fn markdown_table_count(&self) -> usize {
         self.content()
             .block_items()
@@ -3472,6 +3478,34 @@ impl RenderState {
         *self.content.borrow_mut() = new_tree;
     }
 
+    /// The replacement items to keep, in the order they were laid out.
+    ///
+    /// An item is dropped when the hidden ranges cover the offset it would occupy, unless it is
+    /// already a [`BlockItem::Hidden`] block. `start_offset` is the offset the first item would
+    /// occupy; every kept item advances that by its own content length, and a dropped item does
+    /// not, because it never enters the tree — so a drop shifts the items after it earlier.
+    fn retained_replacement_items(
+        items: Vec<BlockItem>,
+        start_offset: CharOffset,
+        hidden_ranges: Option<&RangeSet<CharOffset>>,
+    ) -> Vec<BlockItem> {
+        let mut offset = start_offset;
+        let mut retained = Vec::with_capacity(items.len());
+        for item in items {
+            // If the item should be hidden (but it's not labelled as hidden), don't push it to the sumtree.
+            let covered_by_hidden_range = hidden_ranges
+                .map(|ranges| ranges.contains(&offset))
+                .unwrap_or(false);
+            if covered_by_hidden_range && !matches!(item, BlockItem::Hidden(_)) {
+                continue;
+            }
+
+            offset += item.content_length();
+            retained.push(item);
+        }
+        retained
+    }
+
     /// Update the render state with laid out new edits.
     fn layout_pending_edit(
         &self,
@@ -3490,7 +3524,6 @@ impl RenderState {
             &pending_edit.laid_out_line
         );
 
-        let hidden_range_clone = hidden_ranges.clone();
         let mut new_tree = SumTree::new();
         {
             let content = self.content.borrow();
@@ -3513,19 +3546,16 @@ impl RenderState {
                 new_tree.describe()
             );
 
-            for item in pending_edit.laid_out_line {
-                let offset = new_tree.extent::<CharOffset>() + 1;
-                // If the item should be hidden (but it's not labelled as hidden), don't push it to the sumtree.
-                if !matches!(item, BlockItem::Hidden(_))
-                    && hidden_range_clone
-                        .as_ref()
-                        .map(|hr| hr.contains(&offset))
-                        .unwrap_or(false)
-                {
-                    continue;
-                }
-                new_tree.push(item);
-            }
+            // Insert the replacement items in one `extend` rather than pushing them one at a
+            // time. Once the tree is taller than a single leaf, `SumTree::push` gives every item a
+            // leaf of its own, so pushing per item leaves the content tree holding roughly one
+            // item per leaf; `extend` fills a leaf before starting the next (APP-5439).
+            let replacement_items = Self::retained_replacement_items(
+                pending_edit.laid_out_line,
+                new_tree.extent::<CharOffset>() + 1,
+                hidden_ranges.as_ref(),
+            );
+            new_tree.extend(replacement_items);
 
             // TODO(CLD-558): Ideally, we'd use the content-level offset as is.
             let effective_end = pending_edit
