@@ -301,6 +301,18 @@ pub struct Team {
     pub members: Vec<TeamMember>,
     pub settings: TeamSettings,
     pub color: Option<String>,
+    pub visibility: TeamVisibility,
+}
+
+/// Governs which workspace members can discover and join a team. Orthogonal to
+/// workspace-level discoverability (`WorkspaceSettings::is_discoverable`).
+#[derive(cynic::Enum, Clone, Debug)]
+pub enum TeamVisibility {
+    Open,
+    Private,
+    Hidden,
+    #[cynic(fallback)]
+    Other(String),
 }
 
 /// The effective settings that apply to a team, combining the workspace layer
