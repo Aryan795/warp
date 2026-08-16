@@ -39,7 +39,7 @@ use super::selection::{Selection, TextStyleBias};
 use super::text::{
     BlockCount, BlockLineBreakBehavior, BlockType, BufferBlockItem, BufferBlockStyle,
     BufferSummary, BufferText, BufferTextStyle, Bytes, CodeBlockType, IndentBehavior, LineCount,
-    LinkCount, LinkMarker, MarkerDir, StyleSummary, SyntaxColorId, TextStyles,
+    LinkCount, LinkMarker, MarkerDir, StyleSummary, SyntaxColorId, TEXT_FRAGMENT_SIZE, TextStyles,
     TextStylesWithMetadata, TextSummary, inline_to_text,
 };
 use super::undo::{NonAtomicType, UndoActionType, UndoArg, UndoStack};
@@ -4940,6 +4940,9 @@ impl Buffer {
             // Characters are batched here and flushed with a single `append_str` call rather than
             // appended one at a time, since each `SumTree` write allocates: batching means a run of
             // unchanged text between two color markers costs one allocation instead of one per char.
+            // The buffer is also flushed once it reaches `TEXT_FRAGMENT_SIZE` (the chunk size
+            // `append_str` itself splits text into) so a long run of unstyled text can't stage an
+            // allocation proportional to the whole block.
             let mut pending_text = String::new();
             let mut byte_index = ByteOffset::from(0);
             let mut active_color = None;
@@ -4991,6 +4994,10 @@ impl Buffer {
                 if let Some(c) = buffer_cursor.char() {
                     byte_index += c.len_utf8();
                     pending_text.push(c);
+                    if pending_text.len() >= TEXT_FRAGMENT_SIZE {
+                        new_content.append_str(&pending_text);
+                        pending_text.clear();
+                    }
                     buffer_cursor.next_char_position()
                 } else {
                     if !pending_text.is_empty() {

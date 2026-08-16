@@ -11521,6 +11521,67 @@ fn test_color_code_block_started_colored_no_op() {
     );
 }
 
+// Regression test for the batched-text-write staging buffer: a single color range spanning a
+// block with no internal marker transitions must not stage the whole block as one `String`
+// before flushing it into the `SumTree`, since that would allocate proportionally to the
+// block's size (the case this fix targets).
+#[test]
+fn test_color_code_block_large_run_without_color_transitions() {
+    App::test((), |mut app| async move {
+        let buffer = app.add_model(|_| Buffer::new(Box::new(|_, _| IndentBehavior::Ignore)));
+        let selection = app.add_model(|_| BufferSelectionModel::new(buffer.clone()));
+
+        // Long enough to cross several `TEXT_FRAGMENT_SIZE`-sized staging-buffer flushes (test
+        // builds use `TEXT_FRAGMENT_SIZE == 64`) with no color transition in between.
+        let body: String = (0..500).map(|i| (b'a' + (i % 26) as u8) as char).collect();
+        let markdown = format!("Test\n{body}\nLine");
+        let style_start = CharOffset::from(6);
+        let style_end = CharOffset::from(6 + body.chars().count());
+
+        buffer.update(&mut app, |buffer, ctx| {
+            buffer.edit_internal_first_selection(
+                CharOffset::from(1)..CharOffset::from(1),
+                &markdown,
+                Default::default(),
+                selection.clone(),
+                ctx,
+            );
+
+            buffer.block_style_range(
+                style_start..style_end,
+                BufferBlockStyle::CodeBlock {
+                    code_block_type: CodeBlockType::Shell,
+                },
+                selection.clone(),
+                ctx,
+            );
+
+            // A single color range spanning the entire block: no marker transitions occur
+            // within the run, so before this fix it would all be staged in one `String` before
+            // being flushed into the block's content.
+            let colors = [(
+                ByteOffset::from(0)..ByteOffset::from(body.len()),
+                ColorU::white(),
+            )];
+
+            let edit_result = buffer.color_code_block_ranges_internal(style_start, &colors);
+            assert!(edit_result.delta.is_some());
+            assert_eq!(
+                buffer.content.debug(),
+                format!("<text>Test<code:Shell><c_#ffffff>{body}<c><text>Line")
+            );
+
+            // Re-applying the same single-range coloring is a no-op.
+            let edit_result = buffer.color_code_block_ranges_internal(style_start, &colors);
+            assert!(edit_result.delta.is_none());
+            assert_eq!(
+                buffer.content.debug(),
+                format!("<text>Test<code:Shell><c_#ffffff>{body}<c><text>Line")
+            );
+        });
+    });
+}
+
 #[test]
 fn test_remove_coloring_in_middle_of_block() {
     App::test((), |mut app| async move {
