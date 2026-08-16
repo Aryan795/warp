@@ -1027,12 +1027,26 @@ impl UserWorkspaces {
         !self.workspaces.is_empty()
     }
 
-    /// Whether the desktop client supports creating a team for the current user.
+    /// The current workspace when native workspaces are enabled for it.
     ///
-    /// Creating new teams within a workspace is only available in the web client today.
-    /// TODO(isaiah): Allow workspace admins to `createTeamInWorkspace` in the desktop too.
+    /// A native workspace owns its teams and is administered from the web admin panel,
+    /// so it governs which team surfaces the desktop can offer. `None` covers everyone
+    /// else, including users whose only workspace was implicitly created by the
+    /// desktop's own create-team flow.
+    ///
+    /// The desktop can only call `createTeam`, which always spins up a fresh workspace
+    /// for the new team; targeting an existing workspace needs `createTeamInWorkspace`,
+    /// which is web-only today. That is why create-team is withheld inside a native
+    /// workspace from members and admins alike.
+    pub fn current_native_workspace(&self) -> Option<&Workspace> {
+        self.current_workspace()
+            .filter(|workspace| workspace.is_native_workspaces_enabled())
+    }
+
+    /// Whether the client's own create-team flow is a valid offer for the current user.
+    /// See [`Self::current_native_workspace`] for why a native workspace withholds it.
     pub fn should_offer_team_creation(&self) -> bool {
-        !self.has_workspaces()
+        self.current_native_workspace().is_none()
     }
 
     pub fn update_workspaces(&mut self, workspaces: Vec<Workspace>, ctx: &mut ModelContext<Self>) {

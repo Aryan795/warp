@@ -121,17 +121,48 @@ const INVALID_EMAILS_INSTRUCTIONS: &str =
 
 const OFFLINE_TEXT: &str = "You are offline.";
 
+const WORKSPACE_SECTION_HEADER: &str = "Workspace";
 const WORKSPACE_MANAGED_TEAMS_HEADER: &str = "You're not on a team";
-const WORKSPACE_MANAGED_TEAMS_DESCRIPTION: &str =
-    "Teams in your workspace are created and managed by a workspace admin.";
-const WORKSPACE_MANAGED_TEAMS_ASK_ADMIN: &str = "Ask an admin to add you to a team.";
 const JOIN_TEAM_WITHOUT_CREATE_HEADER: &str = "Join an existing team within your company";
+const OPEN_WORKSPACE_ADMIN_PANEL_LABEL: &str = "Open admin panel";
 
-fn workspace_managed_teams_description(has_discoverable_teams: bool) -> String {
-    if has_discoverable_teams {
-        WORKSPACE_MANAGED_TEAMS_DESCRIPTION.to_string()
-    } else {
-        format!("{WORKSPACE_MANAGED_TEAMS_DESCRIPTION} {WORKSPACE_MANAGED_TEAMS_ASK_ADMIN}")
+/// How the current user stands in their native workspace. Native workspaces own their
+/// teams and are administered on the web, so this is what the Teams page can act on when
+/// the user has no team of their own yet.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum WorkspaceRole {
+    Member,
+    Admin,
+}
+
+fn workspace_membership_description(workspace_name: &str, role: WorkspaceRole) -> String {
+    match role {
+        WorkspaceRole::Member => format!(
+            "You're part of the {workspace_name} workspace. Teams here are created and managed by a workspace admin, so you don't have permissions to perform workspace-level actions."
+        ),
+        WorkspaceRole::Admin => format!(
+            "You're an admin of the {workspace_name} workspace. Teams that belong to a workspace are created and managed from the admin panel on the web."
+        ),
+    }
+}
+
+fn teamless_in_workspace_description(
+    role: WorkspaceRole,
+    has_discoverable_teams: bool,
+) -> &'static str {
+    match (role, has_discoverable_teams) {
+        (WorkspaceRole::Member, true) => {
+            "Join one of your workspace's open teams below, or ask an admin to add you to another one."
+        }
+        (WorkspaceRole::Member, false) => {
+            "Your workspace has no teams open to join. Ask an admin to add you to one."
+        }
+        (WorkspaceRole::Admin, true) => {
+            "Join one of your workspace's open teams below, or create a new one from the admin panel."
+        }
+        (WorkspaceRole::Admin, false) => {
+            "Your workspace has no teams open to join. Create one from the admin panel and add yourself to it."
+        }
     }
 }
 
@@ -197,6 +228,9 @@ pub enum TeamsPageAction {
     OpenAdminPanel {
         team_uid: ServerId,
     },
+    /// Opens the web admin panel for the workspace, the only surface that can create a
+    /// team inside an existing workspace.
+    OpenWorkspaceAdminPanel,
     ContactSupport,
     ContactSales,
     /// This action is for toggling the discoverability checkbox before a team is created.
@@ -242,6 +276,7 @@ impl TeamsPageAction {
                 | GenerateUpgradeLink { .. }
                 | GenerateStripeBillingPortalLink { .. }
                 | OpenAdminPanel { .. }
+                | OpenWorkspaceAdminPanel
                 | ContactSupport
                 | ContactSales
                 | ToggleTeamDiscoverabilityBeforeCreation
@@ -266,6 +301,7 @@ impl From<&TeamsPageAction> for LoginGatedFeature {
             GenerateUpgradeLink { .. } => "Generate Upgrade Link",
             GenerateStripeBillingPortalLink { .. } => "Generate Stripe Billing Portal Link",
             OpenAdminPanel { .. } => "Open Admin Panel",
+            OpenWorkspaceAdminPanel => "Open Workspace Admin Panel",
             ContactSupport => "Contact Support",
             ContactSales => "Contact Sales",
             ToggleTeamDiscoverability { .. } | ToggleTeamDiscoverabilityBeforeCreation => {
@@ -322,6 +358,7 @@ struct TeamsWidgetMouseHandles {
     discoverable_team_toggle_state: SwitchStateHandle,
     checkbox_mouse_state: MouseStateHandle,
     admin_panel_button: MouseStateHandle,
+    workspace_admin_panel_button: MouseStateHandle,
     grow_team_warning_cta_button: MouseStateHandle,
     team_members_count_tooltip: MouseStateHandle,
     outgrow_upgrade_link: MouseStateHandle,
@@ -600,6 +637,9 @@ impl TypedActionView for TeamsPageView {
             }
             TeamsPageAction::OpenAdminPanel { team_uid } => {
                 AdminActions::open_admin_panel(*team_uid, ctx);
+            }
+            TeamsPageAction::OpenWorkspaceAdminPanel => {
+                AdminActions::open_workspace_admin_panel(ctx);
             }
             TeamsPageAction::ContactSupport => {
                 AdminActions::contact_support(ctx);
@@ -4000,22 +4040,57 @@ impl TeamsWidget {
             .finish()
     }
 
-    fn render_workspace_managed_teams_page(
+    /// The Teams page for a user who belongs to a native workspace but has no team of
+    /// their own. Leads with the workspace itself so the page never reads as empty, then
+    /// explains the teamless state and offers whatever teams are open to join.
+    fn render_workspace_teams_page(
         &self,
         view: &TeamsPageView,
+        workspace_name: &str,
+        role: WorkspaceRole,
         appearance: &Appearance,
     ) -> Box<dyn Element> {
         let mut page = Flex::column();
         let has_discoverable_teams = !view.discoverable_teams_states.is_empty();
 
         page.add_child(render_sub_header(appearance, "Teams".to_string(), None));
+
+        page.add_child(self.render_sub_header_with_subtext_color(
+            appearance,
+            WORKSPACE_SECTION_HEADER.to_string(),
+        ));
+        page.add_child(
+            Container::new(self.render_description(
+                workspace_membership_description(workspace_name, role),
+                appearance,
+            ))
+            .with_padding_top(6.)
+            .finish(),
+        );
+        if role == WorkspaceRole::Admin {
+            page.add_child(
+                Container::new(
+                    Align::new(self.render_workspace_admin_panel_button(appearance))
+                        .left()
+                        .finish(),
+                )
+                .with_padding_top(6.)
+                .finish(),
+            );
+        }
+
+        page.add_child(
+            Container::new(render_separator(appearance))
+                .with_padding_top(CONTENT_SEPARATION_PADDING)
+                .finish(),
+        );
         page.add_child(self.render_sub_header_with_subtext_color(
             appearance,
             WORKSPACE_MANAGED_TEAMS_HEADER.to_string(),
         ));
         page.add_child(
             Container::new(self.render_description(
-                workspace_managed_teams_description(has_discoverable_teams),
+                teamless_in_workspace_description(role, has_discoverable_teams).to_string(),
                 appearance,
             ))
             .with_padding_top(6.)
@@ -4023,7 +4098,11 @@ impl TeamsWidget {
         );
 
         if has_discoverable_teams {
-            page.add_child(render_separator(appearance));
+            page.add_child(
+                Container::new(render_separator(appearance))
+                    .with_padding_top(CONTENT_SEPARATION_PADDING)
+                    .finish(),
+            );
             page.add_child(self.render_sub_header_with_subtext_color(
                 appearance,
                 JOIN_TEAM_WITHOUT_CREATE_HEADER.to_string(),
@@ -4032,6 +4111,34 @@ impl TeamsWidget {
         }
 
         page.finish()
+    }
+
+    fn render_workspace_admin_panel_button(&self, appearance: &Appearance) -> Box<dyn Element> {
+        appearance
+            .ui_builder()
+            .button(
+                ButtonVariant::Link,
+                self.mouse_state_handles
+                    .workspace_admin_panel_button
+                    .clone(),
+            )
+            .with_text_and_icon_label(
+                TextAndIcon::new(
+                    TextAndIconAlignment::IconFirst,
+                    OPEN_WORKSPACE_ADMIN_PANEL_LABEL,
+                    Icon::Users.to_warpui_icon(appearance.theme().accent()),
+                    MainAxisSize::Min,
+                    MainAxisAlignment::Center,
+                    vec2f(14., 14.),
+                )
+                .with_inner_padding(4.),
+            )
+            .build()
+            .with_cursor(Cursor::PointingHand)
+            .on_click(move |ctx, _, _| {
+                ctx.dispatch_typed_action(TeamsPageAction::OpenWorkspaceAdminPanel);
+            })
+            .finish()
     }
 
     fn render_create_team_page(
@@ -4444,10 +4551,21 @@ impl SettingsWidget for TeamsWidget {
                     appearance,
                     app,
                 ),
-                None if !teams.should_offer_team_creation() => {
-                    self.render_workspace_managed_teams_page(view, appearance)
-                }
-                None => self.render_create_team_page(view, appearance, app),
+                None => match teams.current_native_workspace() {
+                    Some(workspace) => {
+                        let role = if view
+                            .auth_state
+                            .user_email()
+                            .is_some_and(|email| workspace.is_workspace_admin(&email))
+                        {
+                            WorkspaceRole::Admin
+                        } else {
+                            WorkspaceRole::Member
+                        };
+                        self.render_workspace_teams_page(view, &workspace.name, role, appearance)
+                    }
+                    None => self.render_create_team_page(view, appearance, app),
+                },
             }
         } else {
             appearance
@@ -4507,14 +4625,47 @@ pub fn test_valid_domains() {
 
 #[cfg(test)]
 #[test]
-fn test_workspace_managed_teams_description_drops_ask_admin_when_teams_are_joinable() {
-    let with_discovery = workspace_managed_teams_description(true);
-    assert!(!with_discovery.contains(WORKSPACE_MANAGED_TEAMS_ASK_ADMIN));
-    assert_eq!(with_discovery, WORKSPACE_MANAGED_TEAMS_DESCRIPTION);
+fn test_workspace_membership_description_names_the_workspace_and_reflects_the_role() {
+    let member = workspace_membership_description("Acme", WorkspaceRole::Member);
+    assert!(member.contains("Acme"));
+    assert!(
+        member.contains("don't have permissions"),
+        "a plain member should be told they can't act at the workspace level: {member}"
+    );
 
-    let without_discovery = workspace_managed_teams_description(false);
-    assert!(without_discovery.starts_with(WORKSPACE_MANAGED_TEAMS_DESCRIPTION));
-    assert!(without_discovery.ends_with(WORKSPACE_MANAGED_TEAMS_ASK_ADMIN));
+    let admin = workspace_membership_description("Acme", WorkspaceRole::Admin);
+    assert!(admin.contains("Acme"));
+    assert!(
+        admin.contains("admin panel"),
+        "an admin should be pointed at the only surface that can create a team in a workspace: {admin}"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn test_teamless_in_workspace_description_covers_every_role_and_discovery_combination() {
+    // A member never gets told to create a team, since they cannot.
+    for has_discoverable_teams in [true, false] {
+        let member =
+            teamless_in_workspace_description(WorkspaceRole::Member, has_discoverable_teams);
+        assert!(member.contains("admin"));
+        assert!(!member.contains("Create"), "{member}");
+    }
+
+    // Without teams to join, the page's only remaining content must still say what to do
+    // next — this is the state that would otherwise render near-empty.
+    let stranded_member = teamless_in_workspace_description(WorkspaceRole::Member, false);
+    assert!(
+        stranded_member.contains("Ask an admin"),
+        "{stranded_member}"
+    );
+    let stranded_admin = teamless_in_workspace_description(WorkspaceRole::Admin, false);
+    assert!(stranded_admin.contains("admin panel"), "{stranded_admin}");
+
+    // With teams to join, both roles are pointed at the list below.
+    for role in [WorkspaceRole::Member, WorkspaceRole::Admin] {
+        assert!(teamless_in_workspace_description(role, true).contains("below"));
+    }
 }
 
 #[cfg(test)]

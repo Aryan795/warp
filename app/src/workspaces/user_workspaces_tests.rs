@@ -5,6 +5,7 @@ use settings::{PrivatePreferences, PublicPreferences};
 use warp_graphql::billing::{
     BillingMetadata as GqlBillingMetadata, BonusGrantsInfo as GqlBonusGrantsInfo,
     CustomerType as GqlCustomerType, DelinquencyStatus as GqlDelinquencyStatus,
+    NativeWorkspacesPolicy as GqlNativeWorkspacesPolicy,
     PurchaseAddOnCreditsPolicy as GqlPurchaseAddOnCreditsPolicy, Tier as GqlTier,
 };
 use warp_graphql::queries::get_workspaces_metadata_for_user::{
@@ -2310,8 +2311,19 @@ fn gql_workspace_member(uid: &str, role: GqlMembershipRole) -> GqlWorkspaceMembe
     }
 }
 
+/// A workspace whose plan has native workspaces turned on, with the current test user as
+/// a member at the given role.
+fn gql_native_workspace(role: GqlMembershipRole) -> GqlWorkspace {
+    let mut workspace = gql_workspace("workspace_uid123456789", None);
+    workspace.name = "Acme".to_string();
+    workspace.billing_metadata.tier.native_workspaces_policy =
+        Some(GqlNativeWorkspacesPolicy { enabled: true });
+    workspace.members = vec![gql_workspace_member("test-user", role)];
+    workspace
+}
+
 #[test]
-fn test_only_a_user_outside_a_workspace_is_offered_team_creation() {
+fn test_a_user_outside_any_workspace_has_no_native_workspace() {
     App::test((), |mut app| async move {
         initialize_window_team_test_app(&mut app, vec![]);
         register_ai_usage_model(&mut app);
@@ -2325,21 +2337,48 @@ fn test_only_a_user_outside_a_workspace_is_offered_team_creation() {
             let user_workspaces = UserWorkspaces::as_ref(ctx);
             assert!(!user_workspaces.has_teams());
             assert!(
-                user_workspaces.should_offer_team_creation(),
-                "a solo user is the only one the client can create a team for"
+                user_workspaces.current_native_workspace().is_none(),
+                "a solo user keeps the client's own create-team flow"
             );
         });
     })
 }
 
 #[test]
-fn test_workspace_member_without_a_team_is_not_offered_team_creation() {
+fn test_a_workspace_without_the_native_policy_keeps_create_team_available() {
     App::test((), |mut app| async move {
         initialize_window_team_test_app(&mut app, vec![]);
         register_ai_usage_model(&mut app);
 
+        // The implicit workspace behind a desktop-created team: a workspace exists, but
+        // it does not own teams, so the create-team flow still applies.
         let mut workspace = gql_workspace("workspace_uid123456789", None);
         workspace.members = vec![gql_workspace_member("test-user", GqlMembershipRole::User)];
+        workspace.teams = vec![gql_team("other-team", "Other Team", &["someone-else"])];
+
+        apply_workspaces_metadata(&mut app, gql_user(None, vec![workspace]).into());
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert!(
+                user_workspaces.current_workspace().is_some(),
+                "the user should be in a workspace"
+            );
+            assert!(
+                user_workspaces.current_native_workspace().is_none(),
+                "only a native workspace should withhold create-team"
+            );
+        });
+    })
+}
+
+#[test]
+fn test_native_workspace_member_is_not_a_workspace_admin() {
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![]);
+        register_ai_usage_model(&mut app);
+
+        let mut workspace = gql_native_workspace(GqlMembershipRole::User);
         workspace.teams = vec![gql_team("other-team", "Other Team", &["someone-else"])];
 
         apply_workspaces_metadata(&mut app, gql_user(None, vec![workspace]).into());
@@ -2350,55 +2389,60 @@ fn test_workspace_member_without_a_team_is_not_offered_team_creation() {
                 !user_workspaces.has_teams(),
                 "the workspace's other team is not a membership of this user"
             );
+            let workspace = user_workspaces
+                .current_native_workspace()
+                .expect("the native policy should mark this workspace native");
+            assert_eq!(workspace.name, "Acme");
             assert!(
-                !user_workspaces.should_offer_team_creation(),
-                "a workspace member has no client-side path to a new team"
+                !workspace.is_workspace_admin("test-user@example.com"),
+                "a plain member must not be treated as a workspace admin"
             );
         });
     })
 }
 
 #[test]
-fn test_workspace_admin_without_a_team_is_not_offered_team_creation() {
+fn test_native_workspace_admin_is_recognized_as_a_workspace_admin() {
     App::test((), |mut app| async move {
         initialize_window_team_test_app(&mut app, vec![]);
         register_ai_usage_model(&mut app);
 
-        let mut workspace = gql_workspace("workspace_uid123456789", None);
-        workspace.members = vec![gql_workspace_member("test-user", GqlMembershipRole::Admin)];
-
-        apply_workspaces_metadata(&mut app, gql_user(None, vec![workspace]).into());
+        apply_workspaces_metadata(
+            &mut app,
+            gql_user(None, vec![gql_native_workspace(GqlMembershipRole::Admin)]).into(),
+        );
 
         app.read(|ctx| {
             let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert!(!user_workspaces.has_teams());
             assert!(
                 user_workspaces
-                    .current_workspace()
+                    .current_native_workspace()
                     .is_some_and(|workspace| workspace.is_workspace_admin("test-user@example.com")),
                 "the fixture should make this user a workspace admin"
             );
-            assert!(!user_workspaces.has_teams());
-            assert!(!user_workspaces.should_offer_team_creation());
         });
     })
 }
 
 #[test]
-fn test_workspace_member_with_a_team_is_not_offered_team_creation() {
+fn test_native_workspace_member_with_a_team_sees_their_team() {
     App::test((), |mut app| async move {
         initialize_window_team_test_app(&mut app, vec![]);
         register_ai_usage_model(&mut app);
 
-        let mut workspace = gql_workspace("workspace_uid123456789", None);
-        workspace.members = vec![gql_workspace_member("test-user", GqlMembershipRole::User)];
+        let mut workspace = gql_native_workspace(GqlMembershipRole::User);
         workspace.teams = vec![gql_team("member-team", "Member Team", &["test-user"])];
 
         apply_workspaces_metadata(&mut app, gql_user(None, vec![workspace]).into());
 
         app.read(|ctx| {
             let user_workspaces = UserWorkspaces::as_ref(ctx);
-            assert!(user_workspaces.has_teams());
-            assert!(!user_workspaces.should_offer_team_creation());
+            assert!(
+                user_workspaces.has_teams(),
+                "a member with a team should reach the team management page instead"
+            );
+            assert!(user_workspaces.current_native_workspace().is_some());
         });
     })
 }
