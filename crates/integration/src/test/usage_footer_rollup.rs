@@ -123,10 +123,12 @@ fn orchestrator_conversation_data() -> api::ConversationData {
 /// video of the usage footer. Run with:
 /// `WARPUI_USE_REAL_DISPLAY_IN_INTEGRATION_TESTS=1 cargo run -p integration --bin integration -- test_orchestration_usage_rollup_aggregates_diffs_applied`
 ///
-/// Records the whole flow (opening the usage summary, expanding the
-/// "Diffs applied" per-agent breakdown, then collapsing it again) to
-/// `recording.mp4` in the test's artifacts directory, in addition to still
-/// screenshots of the collapsed and expanded states.
+/// Records the whole flow (expanding the "Diffs applied" per-agent
+/// breakdown, then collapsing it again) to `recording.mp4` in the test's
+/// artifacts directory. The collapsed and expanded stills are captured
+/// immediately before recording starts and immediately after it stops,
+/// respectively — an explicit frame-capture request racing the video
+/// recorder's own concurrent capture loop is unreliable.
 pub fn test_orchestration_usage_rollup_aggregates_diffs_applied() -> Builder {
     new_builder()
         .with_real_display()
@@ -158,36 +160,39 @@ pub fn test_orchestration_usage_rollup_aggregates_diffs_applied() -> Builder {
             }),
         )
         .with_step(
-            TestStep::new("Start recording the usage footer rollup flow")
-                .with_start_recording()
-                .set_post_step_pause(Duration::from_millis(300)),
-        )
-        .with_step(
-            TestStep::new("Open the usage summary footer")
+            // Captured before recording starts: an explicit frame-capture
+            // request racing the video recorder's own concurrent capture
+            // loop is unreliable (observed both a mistimed frame and an
+            // outright capture timeout in earlier revisions of this test).
+            TestStep::new("Open the usage summary footer and capture it collapsed")
                 .with_click_on_saved_position("usage_footer:open_button")
-                .set_post_step_pause(Duration::from_millis(800)),
-        )
-        .with_step(
-            TestStep::new("Capture usage footer with aggregated totals collapsed")
                 .set_timeout(Duration::from_secs(10))
                 .set_post_step_pause(Duration::from_secs(1))
                 .with_take_screenshot("usage_footer_rollup_collapsed.png"),
         )
         .with_step(
-            TestStep::new("Expand the diffs-applied per-agent breakdown")
-                .with_click_on_saved_position("usage_footer:diffs_details_toggle")
-                .set_post_step_pause(Duration::from_millis(800)),
+            TestStep::new("Start recording the usage footer rollup flow")
+                .with_start_recording()
+                .set_post_step_pause(Duration::from_millis(300)),
         )
         .with_step(
-            TestStep::new("Capture usage footer with diffs breakdown expanded")
-                .set_timeout(Duration::from_secs(10))
-                .set_post_step_pause(Duration::from_secs(1))
-                .with_take_screenshot("usage_footer_rollup_diffs_expanded.png"),
+            TestStep::new("Expand the diffs-applied per-agent breakdown")
+                .with_click_on_saved_position("usage_footer:diffs_details_toggle")
+                .set_post_step_pause(Duration::from_millis(900)),
         )
         .with_step(
             TestStep::new("Collapse the diffs-applied per-agent breakdown")
                 .with_click_on_saved_position("usage_footer:diffs_details_toggle")
-                .set_post_step_pause(Duration::from_millis(800)),
+                .set_post_step_pause(Duration::from_millis(900)),
         )
         .with_step(TestStep::new("Stop recording").with_stop_recording())
+        .with_step(
+            // Captured after recording stops, for the same reason the
+            // collapsed capture happens before recording starts.
+            TestStep::new("Re-expand the diffs-applied per-agent breakdown and capture it")
+                .with_click_on_saved_position("usage_footer:diffs_details_toggle")
+                .set_timeout(Duration::from_secs(10))
+                .set_post_step_pause(Duration::from_secs(1))
+                .with_take_screenshot("usage_footer_rollup_diffs_expanded.png"),
+        )
 }
