@@ -247,6 +247,16 @@ fn workspace_admin_does_not_get_pending_invite_cancellation() {
 }
 
 #[test]
+fn team_name_to_create_trims_whitespace_and_rejects_a_blank_field() {
+    assert_eq!(
+        TeamsPageView::team_name_to_create("  Platform  "),
+        Some("Platform".to_string())
+    );
+    assert_eq!(TeamsPageView::team_name_to_create(""), None);
+    assert_eq!(TeamsPageView::team_name_to_create("   "), None);
+}
+
+#[test]
 fn create_team_in_workspace_seeds_the_creator_as_a_plain_member() {
     let user_uid = UserUid::new(MEMBER_EMAIL);
 

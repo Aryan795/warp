@@ -73,7 +73,9 @@ use crate::view_components::{
 };
 use crate::word_block_editor::{ChipEditorState, WordBlockEditorView, WordBlockEditorViewEvent};
 use crate::workspace::WorkspaceAction;
-use crate::workspaces::team::{DiscoverableTeam, MembershipRole, Team, TeamDeleteDisabledReason};
+use crate::workspaces::team::{
+    DiscoverableTeam, MembershipRole, Team, TeamDeleteDisabledReason, TeamVisibility,
+};
 use crate::workspaces::update_manager::{TeamUpdateManager, TeamUpdateManagerEvent};
 use crate::workspaces::user_workspaces::{TeamlessOffer, UserWorkspaces, UserWorkspacesEvent};
 use crate::workspaces::workspace::{
@@ -135,6 +137,10 @@ pub const JOIN_A_TEAM_LIST_POSITION_ID: &str = "team_settings:join_a_team_list";
 pub const CREATE_TEAM_FORM_POSITION_ID: &str = "team_settings:create_team_form";
 pub const WORKSPACE_UNRESOLVED_POSITION_ID: &str = "team_settings:workspace_unresolved";
 pub const WORKSPACE_CREATE_TEAM_FORM_POSITION_ID: &str = "team_settings:workspace_create_team_form";
+pub const WORKSPACE_CREATE_TEAM_NAME_EDITOR_POSITION_ID: &str =
+    "team_settings:workspace_create_team_name_editor";
+pub const WORKSPACE_CREATE_TEAM_BUTTON_POSITION_ID: &str =
+    "team_settings:workspace_create_team_button";
 
 const WORKSPACE_PENDING_DESCRIPTION: &str = "Checking which workspace you're in\u{2026}";
 const WORKSPACE_UNAVAILABLE_DESCRIPTION: &str = "We couldn't reach Warp to check which workspace you're in. Check your connection, then reopen this page.";
@@ -550,6 +556,10 @@ pub struct TeamsPageView {
     checkbox_value: bool,
     member_actions_menu: ViewHandle<Menu<TeamsPageAction>>,
     open_member_actions_menu_index: Option<usize>,
+    /// Set for the duration of an in-flight `createTeamInWorkspace` request, so a second
+    /// click before the response lands can't submit a duplicate create (the mutation is
+    /// not idempotent). Cleared on both the success and the error completion events.
+    is_creating_team_in_workspace: bool,
 }
 
 impl Entity for TeamsPageView {
@@ -947,7 +957,16 @@ impl TeamsPageView {
             checkbox_value: true,
             member_actions_menu,
             open_member_actions_menu_index: None,
+            is_creating_team_in_workspace: false,
         }
+    }
+
+    /// Whether an in-workspace create-team request is currently in flight. Exposed for
+    /// integration tests to prove the create button actually dispatched, since the flag
+    /// otherwise only shows up as a disabled button.
+    #[cfg(feature = "integration_tests")]
+    pub(crate) fn is_creating_team_in_workspace(&self) -> bool {
+        self.is_creating_team_in_workspace
     }
 
     fn open_member_actions_menu_for_item(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
@@ -1258,6 +1277,7 @@ impl TeamsPageView {
                 self.show_error("Failed to rename team", None, ctx)
             }
             TeamUpdateManagerEvent::CreateTeamInWorkspaceSuccess => {
+                self.is_creating_team_in_workspace = false;
                 self.create_team_in_workspace_editor
                     .update(ctx, |editor, ctx| {
                         editor.clear_buffer_and_reset_undo_stack(ctx);
@@ -1283,8 +1303,9 @@ impl TeamsPageView {
                     );
                 }
             }
-            TeamUpdateManagerEvent::CreateTeamInWorkspaceError => {
-                self.show_error("Failed to create team", None, ctx)
+            TeamUpdateManagerEvent::CreateTeamInWorkspaceError(message) => {
+                self.is_creating_team_in_workspace = false;
+                self.show_error(message.clone(), None, ctx)
             }
         }
     }
@@ -1617,16 +1638,20 @@ impl TeamsPageView {
     /// Creates a team inside the current native workspace. Seeds the acting admin as a
     /// member so they land on the team they just created, rather than staying teamless:
     /// the server only adds the members the caller explicitly lists.
+    ///
+    /// No-ops while a previous call is still in flight: the mutation is not idempotent,
+    /// so a second click before the response lands would create a duplicate team.
     fn create_team_in_workspace(&mut self, ctx: &mut ViewContext<Self>) {
-        let team_name = self
-            .create_team_in_workspace_editor
-            .as_ref(ctx)
-            .buffer_text(ctx)
-            .trim()
-            .to_string();
-        if team_name.is_empty() {
+        if self.is_creating_team_in_workspace {
             return;
         }
+        let raw_name = self
+            .create_team_in_workspace_editor
+            .as_ref(ctx)
+            .buffer_text(ctx);
+        let Some(team_name) = Self::team_name_to_create(&raw_name) else {
+            return;
+        };
         let user_workspaces = self.user_workspaces.as_ref(ctx);
         let Some(workspace_uid) = user_workspaces
             .current_workspace()
@@ -1641,9 +1666,28 @@ impl TeamsPageView {
             user_uid,
             user_workspaces.is_user_on_any_team(user_uid),
         );
+        self.is_creating_team_in_workspace = true;
         TeamUpdateManager::handle(ctx).update(ctx, move |manager, ctx| {
-            manager.create_team_in_workspace(workspace_uid, team_name, members, ctx);
+            manager.create_team_in_workspace(
+                workspace_uid,
+                team_name,
+                TeamVisibility::Open,
+                members,
+                ctx,
+            );
         });
+        ctx.notify();
+    }
+
+    /// The trimmed team name to submit for an in-workspace create, or `None` when the
+    /// field is effectively empty after trimming.
+    fn team_name_to_create(raw_input: &str) -> Option<String> {
+        let trimmed = raw_input.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
     }
 
     /// The member to seed a new in-workspace team with, on behalf of the admin creating
@@ -4649,12 +4693,15 @@ impl TeamsWidget {
 
     /// Shared body for the create-team buttons: the personal create-team page and the
     /// in-workspace create form both need the same disabled-while-empty accent button,
-    /// wired to their own name editor and dispatched action.
+    /// wired to their own name editor and dispatched action. `disabled_while_submitting`
+    /// additionally disables the button regardless of the editor's contents, for a form
+    /// that tracks its own in-flight request.
     fn render_create_team_button_for(
         &self,
         editor: &ViewHandle<EditorView>,
         mouse_state_handle: MouseStateHandle,
         action: TeamsPageAction,
+        disabled_while_submitting: bool,
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
@@ -4676,7 +4723,7 @@ impl TeamsWidget {
                 ..Default::default()
             });
 
-        if editor.as_ref(app).buffer_text(app).trim().is_empty() {
+        if disabled_while_submitting || editor.as_ref(app).buffer_text(app).trim().is_empty() {
             button = button
                 .with_style(UiComponentStyles {
                     font_color: Some(
@@ -4707,6 +4754,7 @@ impl TeamsWidget {
             &view.create_team_editor,
             self.mouse_state_handles.create_team_button.clone(),
             TeamsPageAction::CreateTeam,
+            false,
             appearance,
             app,
         )
@@ -4724,6 +4772,7 @@ impl TeamsWidget {
                 .create_team_in_workspace_button
                 .clone(),
             TeamsPageAction::CreateTeamInWorkspace,
+            view.is_creating_team_in_workspace,
             appearance,
             app,
         )
@@ -4740,18 +4789,30 @@ impl TeamsWidget {
             .with_child(
                 Shrinkable::new(
                     1.,
-                    self.render_editor(
-                        appearance,
-                        view.create_team_in_workspace_editor.clone(),
-                        None,
-                    ),
+                    SavePosition::new(
+                        self.render_editor(
+                            appearance,
+                            view.create_team_in_workspace_editor.clone(),
+                            None,
+                        ),
+                        WORKSPACE_CREATE_TEAM_NAME_EDITOR_POSITION_ID,
+                    )
+                    .for_single_frame()
+                    .finish(),
                 )
                 .finish(),
             )
             .with_child(
-                Container::new(self.render_create_team_in_workspace_button(view, appearance, app))
-                    .with_padding_left(CREATE_TEAM_BUTTON_LEFT_PADDING)
+                Container::new(
+                    SavePosition::new(
+                        self.render_create_team_in_workspace_button(view, appearance, app),
+                        WORKSPACE_CREATE_TEAM_BUTTON_POSITION_ID,
+                    )
+                    .for_single_frame()
                     .finish(),
+                )
+                .with_padding_left(CREATE_TEAM_BUTTON_LEFT_PADDING)
+                .finish(),
             )
             .finish()
     }

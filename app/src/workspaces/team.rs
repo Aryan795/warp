@@ -13,6 +13,16 @@ pub enum MembershipRole {
     User,
 }
 
+/// Who can see and join a team created inside a native workspace. Orthogonal to a team's
+/// domain-based discoverability (`Team::is_eligible_for_discovery`), which is set only by
+/// the legacy no-workspace create path.
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
+pub enum TeamVisibility {
+    Open,
+    Private,
+    Hidden,
+}
+
 impl MembershipRole {
     pub fn is_admin_or_owner(&self) -> bool {
         matches!(self, MembershipRole::Admin | MembershipRole::Owner)

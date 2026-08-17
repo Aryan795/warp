@@ -60,14 +60,13 @@ use warp_graphql::queries::get_discoverable_teams::{
 use warp_graphql::queries::get_workspaces_metadata_for_user::{
     GetWorkspacesMetadataForUser, GetWorkspacesMetadataForUserVariables, PricingInfoResult,
 };
-use warp_graphql::workspace::TeamVisibility;
 
 use super::ServerApi;
 use crate::auth::UserUid;
 use crate::cloud_object::CloudObjectEventEntrypoint;
 use crate::server::graphql::{get_request_context, get_user_facing_error_message};
 use crate::server::ids::ServerId;
-use crate::workspaces::team::{DiscoverableTeam, MembershipRole};
+use crate::workspaces::team::{DiscoverableTeam, MembershipRole, TeamVisibility};
 use crate::workspaces::user_workspaces::{CreateTeamResponse, WorkspacesMetadataWithPricing};
 use crate::workspaces::workspace::{Workspace, WorkspaceUid};
 
@@ -97,14 +96,14 @@ pub trait TeamClient: 'static + Send + Sync {
         discoverable: Option<bool>,
     ) -> Result<CreateTeamResponse>;
 
-    /// Creates a team inside an existing native workspace, defaulting to OPEN visibility,
-    /// and returns the refreshed workspaces metadata (rather than the created team alone),
-    /// so the caller can apply the same handling as any other workspace-metadata-affecting
-    /// mutation.
+    /// Creates a team inside an existing native workspace, and returns the refreshed
+    /// workspaces metadata (rather than the created team alone), so the caller can apply
+    /// the same handling as any other workspace-metadata-affecting mutation.
     async fn create_team_in_workspace(
         &self,
         workspace_uid: WorkspaceUid,
         name: String,
+        visibility: TeamVisibility,
         members: Vec<(UserUid, MembershipRole)>,
     ) -> Result<WorkspacesMetadataWithPricing>;
 
@@ -333,13 +332,14 @@ impl TeamClient for ServerApi {
         &self,
         workspace_uid: WorkspaceUid,
         name: String,
+        visibility: TeamVisibility,
         members: Vec<(UserUid, MembershipRole)>,
     ) -> Result<WorkspacesMetadataWithPricing> {
         let variables = CreateTeamInWorkspaceVariables {
             input: CreateTeamInWorkspaceInput {
                 workspace_uid: String::from(workspace_uid).into(),
                 name,
-                visibility: TeamVisibility::Open,
+                visibility: visibility.into(),
                 color: None,
                 members: members
                     .into_iter()

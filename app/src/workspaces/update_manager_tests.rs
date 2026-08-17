@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use chrono::Utc;
 use cloud_object_client::MockObjectClient;
 use itertools::Itertools;
@@ -214,31 +217,27 @@ fn test_leaving_team_removes_objects() {
 }
 
 #[test]
-fn test_create_team_in_workspace_refreshes_current_workspace_without_pushing_a_new_one() {
+fn test_create_team_in_workspace_sends_the_right_arguments_and_refreshes_without_pushing_a_new_one()
+{
     App::test((), |mut app| async move {
         let workspace_uid: WorkspaceUid = WorkspaceUid::from(ServerId::from(987));
         let created_team_uid: ServerId = ServerId::from(456);
         let admin_uid = UserUid::new("admin_uid");
 
-        let team_client = Arc::new(MockTeamClient::new());
-        initialize_app(
-            team_client.clone(),
-            Arc::new(MockWorkspaceClient::new()),
-            vec![Workspace::from_local_cache(
-                workspace_uid,
-                "Acme".to_owned(),
-                Some(vec![]),
-            )],
-            &mut app,
-        );
-
-        let team_update_manager =
-            app.add_singleton_model(|ctx| TeamUpdateManager::new(team_client, None, ctx));
-
-        // Simulate the server response to creating a team in the workspace, seeded with
-        // the acting admin, the way `TeamsPageView::create_team_in_workspace` calls it.
-        team_update_manager.update(&mut app, |manager, ctx| {
-            manager.on_team_created_in_workspace(
+        let mut team_client = MockTeamClient::new();
+        // Asserting on the exact call the mutation makes — rather than handing the
+        // response straight to the completion handler — is what would actually catch a
+        // wrong workspace, an un-trimmed name, a non-OPEN visibility, or a missing/wrong
+        // seed reaching the server.
+        team_client
+            .expect_create_team_in_workspace()
+            .withf(move |uid, name, visibility, members| {
+                *uid == workspace_uid
+                    && name == "Platform"
+                    && *visibility == TeamVisibility::Open
+                    && *members == vec![(admin_uid, MembershipRole::User)]
+            })
+            .returning(move |_, _, _, _| {
                 Ok(WorkspacesMetadataWithPricing {
                     metadata: WorkspacesMetadataResponse {
                         workspaces: vec![Workspace::from_local_cache(
@@ -263,10 +262,40 @@ fn test_create_team_in_workspace_refreshes_current_workspace_without_pushing_a_n
                         user_purchase_policy: None,
                     },
                     pricing_info: None,
-                }),
+                })
+            });
+        let team_client = Arc::new(team_client);
+        initialize_app(
+            team_client.clone(),
+            Arc::new(MockWorkspaceClient::new()),
+            vec![Workspace::from_local_cache(
+                workspace_uid,
+                "Acme".to_owned(),
+                Some(vec![]),
+            )],
+            &mut app,
+        );
+
+        let team_update_manager =
+            app.add_singleton_model(|ctx| TeamUpdateManager::new(team_client, None, ctx));
+
+        // Drive the real dispatch, not the completion handler directly: if the mock's
+        // `withf` predicate above doesn't match, this call panics before the response
+        // (and the rest of this test) is ever reached.
+        let handle = team_update_manager.update(&mut app, |manager, ctx| {
+            manager.create_team_in_workspace(
+                workspace_uid,
+                "Platform".to_string(),
+                TeamVisibility::Open,
+                vec![(admin_uid, MembershipRole::User)],
                 ctx,
-            );
+            )
         });
+        team_update_manager
+            .update(&mut app, |_, ctx| {
+                ctx.await_spawned_future(handle.future_id())
+            })
+            .await;
 
         UserWorkspaces::handle(&app).read(&app, |user_workspaces, _| {
             let workspace = user_workspaces
@@ -286,6 +315,68 @@ fn test_create_team_in_workspace_refreshes_current_workspace_without_pushing_a_n
                 "the acting admin should be a member of the newly created team"
             );
         });
+    });
+}
+
+#[test]
+fn test_create_team_in_workspace_error_carries_the_servers_user_facing_message() {
+    App::test((), |mut app| async move {
+        const USER_FACING_MESSAGE: &str =
+            "Native workspaces aren't available on your plan. Contact sales.";
+        let workspace_uid: WorkspaceUid = WorkspaceUid::from(ServerId::from(987));
+        let admin_uid = UserUid::new("admin_uid");
+
+        let mut team_client = MockTeamClient::new();
+        team_client
+            .expect_create_team_in_workspace()
+            .returning(|_, _, _, _| Err(anyhow::anyhow!(USER_FACING_MESSAGE)));
+        let team_client = Arc::new(team_client);
+        initialize_app(
+            team_client.clone(),
+            Arc::new(MockWorkspaceClient::new()),
+            vec![Workspace::from_local_cache(
+                workspace_uid,
+                "Acme".to_owned(),
+                Some(vec![]),
+            )],
+            &mut app,
+        );
+
+        let team_update_manager =
+            app.add_singleton_model(|ctx| TeamUpdateManager::new(team_client, None, ctx));
+
+        let captured_message: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        {
+            let captured_message = captured_message.clone();
+            app.update(|ctx| {
+                ctx.subscribe_to_model(&team_update_manager, move |_handle, event, _ctx| {
+                    if let TeamUpdateManagerEvent::CreateTeamInWorkspaceError(message) = event {
+                        *captured_message.borrow_mut() = Some(message.clone());
+                    }
+                });
+            });
+        }
+
+        let handle = team_update_manager.update(&mut app, |manager, ctx| {
+            manager.create_team_in_workspace(
+                workspace_uid,
+                "Platform".to_string(),
+                TeamVisibility::Open,
+                vec![(admin_uid, MembershipRole::User)],
+                ctx,
+            )
+        });
+        team_update_manager
+            .update(&mut app, |_, ctx| {
+                ctx.await_spawned_future(handle.future_id())
+            })
+            .await;
+
+        assert_eq!(
+            captured_message.borrow().as_deref(),
+            Some(USER_FACING_MESSAGE),
+            "the error event should carry the server's user-facing message verbatim"
+        );
     });
 }
 

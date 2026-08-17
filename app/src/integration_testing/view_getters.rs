@@ -15,8 +15,8 @@ use crate::pane_group::{PaneGroup, PaneView};
 use crate::root_view::RootView;
 use crate::search::command_palette::{self};
 use crate::search::command_search::view::CommandSearchView;
-use crate::settings_view::SettingsView;
 use crate::settings_view::keybindings::KeybindingsView;
+use crate::settings_view::{SettingsView, TeamsPageView};
 use crate::terminal::TerminalView;
 use crate::terminal::input::Input;
 use crate::themes::theme_chooser::ThemeChooser;
@@ -220,6 +220,11 @@ pub fn keybindings_view(app: &App, window_id: WindowId) -> ViewHandle<Keybinding
 
 /// Panics if there isn't a single settings view in the view hierarchy.
 pub fn settings_view(app: &App, window_id: WindowId) -> ViewHandle<SettingsView> {
+    singleton_view_of_type(app, window_id)
+}
+
+/// Panics if there isn't a single settings Teams page view in the view hierarchy.
+pub fn teams_page_view(app: &App, window_id: WindowId) -> ViewHandle<TeamsPageView> {
     singleton_view_of_type(app, window_id)
 }
 

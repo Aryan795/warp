@@ -26,7 +26,8 @@ use settings_page::{
     SettingsPageViewHandle,
 };
 use show_blocks_view::{ShowBlocksEvent, ShowBlocksView};
-use teams_page::{TeamsPageView, TeamsPageViewEvent};
+pub(crate) use teams_page::TeamsPageView;
+use teams_page::TeamsPageViewEvent;
 use warp_agent_page::{WarpAgentPageAction, WarpAgentPageEvent, WarpAgentPageView};
 use warp_core::channel::ChannelState;
 use warp_core::context_flag::ContextFlag;
@@ -138,7 +139,8 @@ pub use settings_page::{
 pub use teams_page::{
     CREATE_TEAM_FORM_POSITION_ID, JOIN_A_TEAM_LIST_POSITION_ID, OpenTeamsSettingsModalArgs,
     TeamsInviteOption, WORKSPACE_ADMIN_PANEL_BUTTON_POSITION_ID,
-    WORKSPACE_CREATE_TEAM_FORM_POSITION_ID, WORKSPACE_SECTION_POSITION_ID,
+    WORKSPACE_CREATE_TEAM_BUTTON_POSITION_ID, WORKSPACE_CREATE_TEAM_FORM_POSITION_ID,
+    WORKSPACE_CREATE_TEAM_NAME_EDITOR_POSITION_ID, WORKSPACE_SECTION_POSITION_ID,
     WORKSPACE_UNRESOLVED_POSITION_ID,
 };
 pub(crate) use warp_agent_page::custom_model_routers_widget_id;

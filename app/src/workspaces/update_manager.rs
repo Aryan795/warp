@@ -5,12 +5,12 @@ use anyhow::{Context, Result};
 use futures::channel::oneshot::{self, Receiver};
 use futures::stream::AbortHandle;
 use warp_errors::{report_error, report_if_error};
-use warpui::r#async::Timer;
+use warpui::r#async::{SpawnedFutureHandle, Timer};
 use warpui::{
     Entity, ModelContext, ModelHandle, RequestState, SingletonEntity, duration_with_jitter,
 };
 
-use super::team::MembershipRole;
+use super::team::{MembershipRole, TeamVisibility};
 use super::team_tester::{TeamTesterStatus, TeamTesterStatusEvent};
 use super::user_workspaces::{
     CreateTeamResponse, UserWorkspaces, WorkspacesMetadataResponse, WorkspacesMetadataWithPricing,
@@ -37,7 +37,10 @@ pub enum TeamUpdateManagerEvent {
     RenameTeamSuccess,
     RenameTeamError,
     CreateTeamInWorkspaceSuccess,
-    CreateTeamInWorkspaceError,
+    /// Carries the user-facing message from the failed mutation (a plan-policy rejection,
+    /// a lost admin authorization, a name validation error, ...), so the toast can say
+    /// something more specific than a generic failure.
+    CreateTeamInWorkspaceError(String),
 }
 
 /// TeamUpdateManager is a singleton model responsible for communicating with the server and local
@@ -320,19 +323,19 @@ impl TeamUpdateManager {
         &mut self,
         workspace_uid: WorkspaceUid,
         team_name: String,
+        visibility: TeamVisibility,
         members: Vec<(UserUid, MembershipRole)>,
         ctx: &mut ModelContext<Self>,
-    ) {
+    ) -> SpawnedFutureHandle {
         let team_client = self.team_client.clone();
-        let _ = ctx.spawn(
+        ctx.spawn(
             async move {
                 team_client
-                    .create_team_in_workspace(workspace_uid, team_name, members)
+                    .create_team_in_workspace(workspace_uid, team_name, visibility, members)
                     .await
-                    .context("Error creating team in workspace")
             },
             Self::on_team_created_in_workspace,
-        );
+        )
     }
 
     fn on_team_created_in_workspace(
@@ -342,8 +345,11 @@ impl TeamUpdateManager {
     ) {
         match result {
             Err(e) => {
-                report_error!(e);
-                ctx.emit(TeamUpdateManagerEvent::CreateTeamInWorkspaceError);
+                let user_facing_message = e.to_string();
+                report_error!(e.context("Error creating team in workspace"));
+                ctx.emit(TeamUpdateManagerEvent::CreateTeamInWorkspaceError(
+                    user_facing_message,
+                ));
             }
             Ok(response) => {
                 if let Some(pricing_info) = response.pricing_info.clone() {
