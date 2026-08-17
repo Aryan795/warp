@@ -123,7 +123,7 @@ fn test_operating_system_prefers_linux_distribution() {
 }
 
 #[test]
-fn test_operating_system_uses_unknown_fallback_for_unsupported_distro() {
+fn test_operating_system_uses_linux_fallback_for_unsupported_distro() {
     let session = Session::new(
         SessionInfo::new_for_test().with_host_info(HostInfo {
             os_category: Some("Linux".to_string()),
@@ -143,7 +143,7 @@ fn test_operating_system_uses_unknown_fallback_for_unsupported_distro() {
         panic!("expected operating system chip value");
     };
     assert_eq!(info.name(), "Red Hat Enterprise Linux");
-    assert_eq!(info.logo(), OperatingSystemLogo::Unknown);
+    assert_eq!(info.logo(), OperatingSystemLogo::Linux);
 }
 
 #[test]

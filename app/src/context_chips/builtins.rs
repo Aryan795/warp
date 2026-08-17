@@ -50,7 +50,7 @@ fn operating_system_info_from_parts(
     if let Some(linux_name) = linux_name {
         return OperatingSystemInfo::new(
             linux_name.to_string(),
-            linux_distribution_logo(linux_name),
+            linux_distribution_logo(linux_name).unwrap_or(OperatingSystemLogo::Linux),
         );
     }
 
@@ -74,20 +74,20 @@ fn operating_system_info_from_parts(
     OperatingSystemInfo::new("Unknown OS", OperatingSystemLogo::Unknown)
 }
 
-fn linux_distribution_logo(name: &str) -> OperatingSystemLogo {
+fn linux_distribution_logo(name: &str) -> Option<OperatingSystemLogo> {
     let normalized = normalized_os_name(name);
     if normalized.contains("ubuntu") {
-        OperatingSystemLogo::Ubuntu
+        Some(OperatingSystemLogo::Ubuntu)
     } else if normalized.contains("debian") {
-        OperatingSystemLogo::Debian
+        Some(OperatingSystemLogo::Debian)
     } else if normalized.contains("kali") {
-        OperatingSystemLogo::Kali
+        Some(OperatingSystemLogo::Kali)
     } else if normalized.contains("arch") {
-        OperatingSystemLogo::Arch
+        Some(OperatingSystemLogo::Arch)
     } else if normalized.contains("fedora") {
-        OperatingSystemLogo::Fedora
+        Some(OperatingSystemLogo::Fedora)
     } else {
-        OperatingSystemLogo::Unknown
+        None
     }
 }
 

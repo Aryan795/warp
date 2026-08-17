@@ -3,9 +3,10 @@
 use pathfinder_color::ColorU;
 use pathfinder_geometry::vector::vec2f;
 use warp_core::ui::theme::Fill;
+use warpui::assets::asset_cache::AssetSource;
 use warpui::elements::{
-    ConstrainedBox, Container, CrossAxisAlignment, DraggableState, Flex, Hoverable,
-    MouseStateHandle, OffsetPositioning, ParentElement, ParentOffsetBounds, Stack, Text,
+    CacheOption, ConstrainedBox, Container, CrossAxisAlignment, DraggableState, Flex, Hoverable,
+    Image, MouseStateHandle, OffsetPositioning, ParentElement, ParentOffsetBounds, Stack, Text,
 };
 use warpui::fonts::{Properties, Weight};
 use warpui::platform::Cursor;
@@ -13,7 +14,7 @@ use warpui::ui_components::components::UiComponent;
 use warpui::{Action, Element};
 
 use super::context_chip::ContextChip;
-use super::display_chip::{chip_container, udi_font_size};
+use super::display_chip::{OperatingSystemLogo, chip_container, udi_font_size};
 use super::{ChipAvailability, ChipValue, ContextChipKind, spacing};
 use crate::appearance::Appearance;
 use crate::ui_components::icons;
@@ -155,12 +156,31 @@ impl Renderer {
 
         let mut content = Flex::row().with_cross_axis_alignment(CrossAxisAlignment::Center);
 
-        let icon = self
+        let os_logo = self
             .value
             .as_operating_system_info()
-            .map(|info| info.logo().icon())
-            .or_else(|| self.kind.udi_icon());
-        if let Some(icon) = icon {
+            .map(|info| info.logo());
+        if let Some(image_path) = os_logo.and_then(OperatingSystemLogo::image_path) {
+            content.add_child(
+                Container::new(
+                    ConstrainedBox::new(
+                        Image::new(
+                            AssetSource::Bundled { path: image_path },
+                            CacheOption::BySize,
+                        )
+                        .finish(),
+                    )
+                    .with_height(font_size)
+                    .with_width(font_size)
+                    .finish(),
+                )
+                .with_margin_right(spacing::UDI_CHIP_ICON_GAP)
+                .finish(),
+            );
+        } else if let Some(icon) = os_logo
+            .map(OperatingSystemLogo::icon)
+            .or_else(|| self.kind.udi_icon())
+        {
             content.add_child(
                 Container::new(
                     ConstrainedBox::new(icon.to_warpui_icon(Fill::Solid(color)).finish())

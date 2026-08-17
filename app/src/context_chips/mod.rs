@@ -533,6 +533,7 @@ impl ContextChipKind {
             Self::KubernetesContext => format!("⎈ {text}"),
             Self::SvnBranch => format!("svn:({text})"),
             Self::SvnDirtyItems => format!("±{text}"),
+            Self::OperatingSystemLogo => String::new(),
             _ => text,
         }
     }

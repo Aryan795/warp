@@ -8,10 +8,12 @@ use serde::{Deserialize, Serialize};
 use warp_core::features::FeatureFlag;
 use warp_core::ui::theme::Fill;
 use warp_core::ui::theme::color::internal_colors;
+use warpui::assets::asset_cache::AssetSource;
 use warpui::elements::{
-    Border, ChildAnchor, ChildView, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
-    DEFAULT_UI_LINE_HEIGHT_RATIO, Empty, Flex, Hoverable, MouseStateHandle, OffsetPositioning,
-    ParentAnchor, ParentElement, ParentOffsetBounds, Radius, Stack, Text,
+    Border, CacheOption, ChildAnchor, ChildView, ConstrainedBox, Container, CornerRadius,
+    CrossAxisAlignment, DEFAULT_UI_LINE_HEIGHT_RATIO, Empty, Flex, Hoverable, Image,
+    MouseStateHandle, OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds, Radius,
+    Stack, Text,
 };
 use warpui::fonts::{Cache, FamilyId, Properties, Weight};
 use warpui::keymap::Keystroke;
@@ -257,6 +259,7 @@ fn udi_tooltip_positioning() -> OffsetPositioning {
 pub(crate) struct UdiChipConfig {
     /// The icon to display
     icon: Option<Icon>,
+    image_path: Option<&'static str>,
     keystroke: Option<Keystroke>,
     /// The color for both icon and text
     color: ColorU,
@@ -277,6 +280,7 @@ impl UdiChipConfig {
     pub(crate) fn new(color: ColorU, text: String) -> Self {
         Self {
             icon: None,
+            image_path: None,
             keystroke: None,
             color,
             text,
@@ -290,6 +294,21 @@ impl UdiChipConfig {
     pub(crate) fn new_with_icon(icon: Icon, color: ColorU, text: String) -> Self {
         Self {
             icon: Some(icon),
+            image_path: None,
+            keystroke: None,
+            color,
+            text,
+            truncate_text: true,
+            border_override: None,
+            is_in_agent_view: false,
+            hovered: false,
+        }
+    }
+
+    pub(crate) fn new_with_image(image_path: &'static str, color: ColorU, text: String) -> Self {
+        Self {
+            icon: None,
+            image_path: Some(image_path),
             keystroke: None,
             color,
             text,
@@ -303,6 +322,7 @@ impl UdiChipConfig {
     fn new_with_keystroke(color: ColorU, text: String, keystroke: Keystroke) -> Self {
         Self {
             icon: None,
+            image_path: None,
             keystroke: Some(keystroke),
             color,
             text,
@@ -403,6 +423,19 @@ pub enum OperatingSystemLogo {
 }
 
 impl OperatingSystemLogo {
+    pub(crate) fn image_path(self) -> Option<&'static str> {
+        match self {
+            Self::Ubuntu => Some("bundled/images/os/ubuntu.png"),
+            Self::Debian => Some("bundled/images/os/debian.png"),
+            Self::Arch => Some("bundled/images/os/arch.png"),
+            Self::Fedora => Some("bundled/images/os/fedora.png"),
+            Self::Linux => Some("bundled/images/os/linux.png"),
+            Self::MacOS => Some("bundled/images/os/macos.png"),
+            Self::Windows => Some("bundled/images/os/windows.png"),
+            Self::Kali | Self::Unknown => None,
+        }
+    }
+
     pub(crate) fn icon(self) -> Icon {
         match self {
             Self::Ubuntu => Icon::Ubuntu,
@@ -2002,7 +2035,11 @@ impl DisplayChip {
         } else {
             String::new()
         };
-        let mut config = UdiChipConfig::new_with_icon(logo.icon(), color, text);
+        let mut config = if let Some(image_path) = logo.image_path() {
+            UdiChipConfig::new_with_image(image_path, color, text)
+        } else {
+            UdiChipConfig::new_with_icon(logo.icon(), color, text)
+        };
         if self.is_in_agent_view {
             config = config.for_agent_view();
         }
@@ -2487,6 +2524,27 @@ pub(crate) fn render_udi_chip(config: UdiChipConfig, appearance: &Appearance) ->
             icon.with_margin_right(spacing::UDI_CHIP_ICON_GAP)
         };
         content.add_child(icon.finish());
+    }
+
+    if let Some(image_path) = config.image_path {
+        let image = Container::new(
+            ConstrainedBox::new(
+                Image::new(
+                    AssetSource::Bundled { path: image_path },
+                    CacheOption::BySize,
+                )
+                .finish(),
+            )
+            .with_height(icon_size)
+            .with_width(icon_size)
+            .finish(),
+        );
+        let image = if display_text.is_empty() && config.keystroke.is_none() {
+            image
+        } else {
+            image.with_margin_right(spacing::UDI_CHIP_ICON_GAP)
+        };
+        content.add_child(image.finish());
     }
 
     let font_family = if config.is_in_agent_view || !FeatureFlag::AgentView.is_enabled() {
