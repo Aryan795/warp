@@ -145,8 +145,9 @@ pub fn assert_team_creation_is_offered(offered: bool) -> TestStep {
     TestStep::new(&format!("Assert team creation is offered: {offered}")).add_named_assertion(
         format!("team creation offered is {offered}"),
         move |app, _| {
+            let is_logged_in = app.read(|ctx| AuthStateProvider::as_ref(ctx).get().is_logged_in());
             UserWorkspaces::handle(app).read(app, |user_workspaces, _| {
-                let actual = user_workspaces.should_offer_team_creation();
+                let actual = user_workspaces.should_offer_team_creation(is_logged_in);
                 async_assert!(
                     actual == offered,
                     "team creation offered should be {offered}, was {actual}"

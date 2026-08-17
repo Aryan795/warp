@@ -13,7 +13,7 @@ use warp::integration_testing::assertions::go_online;
 use warp::integration_testing::settings::{
     assert_teams_create_team_form_visible, assert_teams_join_a_team_list_visible,
     assert_teams_workspace_admin_panel_visible, assert_teams_workspace_section_visible,
-    open_settings_page,
+    assert_teams_workspace_unresolved_visible, open_settings_page,
 };
 use warp::integration_testing::terminal::wait_until_bootstrapped_single_pane_for_tab;
 use warp::integration_testing::user_workspaces::{
@@ -105,7 +105,9 @@ pub fn test_settings_teams_page_states_for_a_teamless_user() -> Builder {
         .with_step(open_settings_page(SettingsSection::Teams));
 
     for state in teamless_states() {
-        builder = builder.with_steps(state.steps);
+        builder = builder
+            .with_steps(state.steps)
+            .with_step(assert_teams_workspace_unresolved_visible(false));
     }
     builder
 }
@@ -129,9 +131,13 @@ pub fn test_settings_teams_page_captures() -> Builder {
 
     for state in teamless_states() {
         let label = state.label;
-        builder = builder.with_steps(state.steps).with_step(
-            TestStep::new(&format!("Capture {label}")).with_take_screenshot(format!("{label}.png")),
-        );
+        builder = builder
+            .with_steps(state.steps)
+            .with_step(assert_teams_workspace_unresolved_visible(false))
+            .with_step(
+                TestStep::new(&format!("Capture {label}"))
+                    .with_take_screenshot(format!("{label}.png")),
+            );
     }
     builder.with_step(TestStep::new("Stop recording").with_stop_recording())
 }

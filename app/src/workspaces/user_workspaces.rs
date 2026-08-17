@@ -98,6 +98,35 @@ pub enum UserWorkspacesEvent {
     SunsettedToBuildDataUpdated,
 }
 
+/// Whether the server has described the user's workspaces yet during this session.
+///
+/// Workspaces restored from SQLite carry only identity and per-team data —
+/// [`Workspace::from_local_cache`] defaults the billing metadata — so before the first
+/// response the client cannot tell a native workspace from a personal one, and must not
+/// act on the difference.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum WorkspacesMetadataState {
+    #[default]
+    Pending,
+    Loaded,
+    /// A fetch exhausted its retries and none has succeeded since launch.
+    Unavailable,
+}
+
+/// What a user who is on no team can be offered, on the Teams page and in the Warp Drive
+/// sidebar. Resolved by [`UserWorkspaces::teamless_offer`].
+pub enum TeamlessOffer<'a> {
+    /// Still waiting on the first authoritative response. Nothing that depends on the
+    /// workspace's plan may be offered yet, team creation included.
+    WorkspacePending,
+    /// The fetch gave up, so the client still cannot tell what the user is entitled to.
+    WorkspaceUnavailable,
+    /// The user is in a native workspace, which owns its teams.
+    NativeWorkspace(&'a Workspace),
+    /// The client's own create-team flow applies.
+    CreateTeam,
+}
+
 /// UserWorkspaces is a singleton model that holds workspace metadata (name, members, etc).
 /// It should be used for getting information about the workspaces, teams, current teams,
 /// and all other things related to operating on workspace and team data.
@@ -105,6 +134,7 @@ pub enum UserWorkspacesEvent {
 pub struct UserWorkspaces {
     current_workspace_uid: Tracked<Option<WorkspaceUid>>,
     workspaces: Tracked<Vec<Workspace>>,
+    workspaces_metadata_state: WorkspacesMetadataState,
     window_team_uids: HashMap<WindowId, Option<ServerId>>,
     joinable_teams: Vec<DiscoverableTeam>,
     /// The user-level add-on credits purchase policy from the latest
@@ -166,6 +196,7 @@ impl UserWorkspaces {
         Self {
             current_workspace_uid: cached_workspaces.first().map(|w| w.uid).into(),
             workspaces: cached_workspaces.into(),
+            workspaces_metadata_state: WorkspacesMetadataState::default(),
             window_team_uids: Default::default(),
             joinable_teams: Default::default(),
             user_purchase_policy: None,
@@ -216,6 +247,7 @@ impl UserWorkspaces {
         Self {
             current_workspace_uid: current_workspace_uid.into(),
             workspaces: cached_workspaces.into(),
+            workspaces_metadata_state: WorkspacesMetadataState::default(),
             window_team_uids: Default::default(),
             joinable_teams: Default::default(),
             user_purchase_policy: None,
@@ -1038,21 +1070,66 @@ impl UserWorkspaces {
     /// for the new team; targeting an existing workspace needs `createTeamInWorkspace`,
     /// which is web-only today. That is why create-team is withheld inside a native
     /// workspace from members and admins alike.
+    ///
+    /// This can only answer for workspaces the server has described. A workspace restored
+    /// from the local cache carries no plan, so consult
+    /// [`Self::workspaces_metadata_state`] before treating a `None` as authoritative.
     pub fn current_native_workspace(&self) -> Option<&Workspace> {
         self.current_workspace()
             .filter(|workspace| workspace.is_native_workspaces_enabled())
     }
 
+    pub fn workspaces_metadata_state(&self) -> WorkspacesMetadataState {
+        self.workspaces_metadata_state
+    }
+
+    /// Records that a workspaces-metadata fetch gave up after exhausting its retries, so
+    /// surfaces waiting on authoritative data can stop waiting and say so.
+    ///
+    /// Only meaningful before the first success: once the server has described the user's
+    /// workspaces, a later failed refresh leaves that answer standing.
+    pub fn note_workspaces_metadata_unavailable(&mut self, ctx: &mut ModelContext<Self>) {
+        if self.workspaces_metadata_state == WorkspacesMetadataState::Pending {
+            self.workspaces_metadata_state = WorkspacesMetadataState::Unavailable;
+            ctx.notify();
+        }
+    }
+
+    /// What a user with no team of their own can be offered.
+    ///
+    /// `is_logged_in` is taken rather than read from the auth singleton so callers that
+    /// already hold a context borrow do not need a second one.
+    pub fn teamless_offer(&self, is_logged_in: bool) -> TeamlessOffer<'_> {
+        // A workspace can only report itself native once the server has described it, so
+        // this answer never depends on metadata readiness.
+        if let Some(workspace) = self.current_native_workspace() {
+            return TeamlessOffer::NativeWorkspace(workspace);
+        }
+        // Metadata is never fetched for a logged-out user, so there is nothing to wait
+        // for: they have no workspace, and create-team is their path into having one.
+        if !is_logged_in {
+            return TeamlessOffer::CreateTeam;
+        }
+        match self.workspaces_metadata_state {
+            WorkspacesMetadataState::Loaded => TeamlessOffer::CreateTeam,
+            WorkspacesMetadataState::Pending => TeamlessOffer::WorkspacePending,
+            WorkspacesMetadataState::Unavailable => TeamlessOffer::WorkspaceUnavailable,
+        }
+    }
+
     /// Whether the client's own create-team flow is a valid offer for the current user.
     /// See [`Self::current_native_workspace`] for why a native workspace withholds it.
-    pub fn should_offer_team_creation(&self) -> bool {
-        self.current_native_workspace().is_none()
+    pub fn should_offer_team_creation(&self, is_logged_in: bool) -> bool {
+        matches!(self.teamless_offer(is_logged_in), TeamlessOffer::CreateTeam)
     }
 
     pub fn update_workspaces(&mut self, workspaces: Vec<Workspace>, ctx: &mut ModelContext<Self>) {
         // Check if sunsetted_to_build_ts changed for any workspace
         let sunsetted_to_build_changed = self.has_sunsetted_to_build_data_changed(&workspaces);
 
+        // Every caller is applying a server response, so this is the one choke point where
+        // the client learns the authoritative shape of the user's workspaces.
+        self.workspaces_metadata_state = WorkspacesMetadataState::Loaded;
         *self.workspaces = workspaces;
         let reassigned_windows = self.reconcile_window_team_assignments();
         self.notify_and_emit_teams_changed(ctx);
@@ -1175,6 +1252,7 @@ impl UserWorkspaces {
                 }
             }
             Err(e) => {
+                self.note_workspaces_metadata_unavailable(ctx);
                 report_error!(e.context("Failed to load user workspaces"));
             }
         }

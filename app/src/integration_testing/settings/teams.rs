@@ -12,6 +12,7 @@ use super::step::assert_element_painted;
 use crate::settings_view::{
     CREATE_TEAM_FORM_POSITION_ID, JOIN_A_TEAM_LIST_POSITION_ID,
     WORKSPACE_ADMIN_PANEL_BUTTON_POSITION_ID, WORKSPACE_SECTION_POSITION_ID,
+    WORKSPACE_UNRESOLVED_POSITION_ID,
 };
 
 /// The "Workspace" section, which only a user in a native workspace sees.
@@ -46,6 +47,15 @@ pub fn assert_teams_create_team_form_visible(visible: bool) -> TestStep {
     assert_element_painted(
         CREATE_TEAM_FORM_POSITION_ID.to_string(),
         "Teams page create-team form".to_string(),
+        visible,
+    )
+}
+
+/// The placeholder shown while the client cannot yet say which workspace the user is in.
+pub fn assert_teams_workspace_unresolved_visible(visible: bool) -> TestStep {
+    assert_element_painted(
+        WORKSPACE_UNRESOLVED_POSITION_ID.to_string(),
+        "Teams page unresolved-workspace placeholder".to_string(),
         visible,
     )
 }

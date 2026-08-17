@@ -465,6 +465,9 @@ impl TeamUpdateManager {
                 log::info!(
                     "get_workspaces_metadata_for_user: request failed with error {err:#}. Retries exhausted."
                 );
+                UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
+                    user_workspaces.note_workspaces_metadata_unavailable(ctx);
+                });
             }
         }
     }

@@ -75,7 +75,7 @@ use crate::word_block_editor::{ChipEditorState, WordBlockEditorView, WordBlockEd
 use crate::workspace::WorkspaceAction;
 use crate::workspaces::team::{DiscoverableTeam, MembershipRole, Team, TeamDeleteDisabledReason};
 use crate::workspaces::update_manager::{TeamUpdateManager, TeamUpdateManagerEvent};
-use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
+use crate::workspaces::user_workspaces::{TeamlessOffer, UserWorkspaces, UserWorkspacesEvent};
 use crate::workspaces::workspace::{
     BillingMetadata, CustomerType, DelinquencyStatus, Workspace, WorkspaceSizePolicy,
 };
@@ -124,15 +124,19 @@ const WORKSPACE_MANAGED_TEAMS_HEADER: &str = "You're not on a team";
 const JOIN_TEAM_WITHOUT_CREATE_HEADER: &str = "Join an existing team within your company";
 const OPEN_WORKSPACE_ADMIN_PANEL_LABEL: &str = "Open admin panel";
 
-/// Saved-position ids for the four sections whose presence distinguishes what a teamless
-/// user sees on this page. They are saved for a single frame so integration tests can
-/// assert against what the current frame actually painted, rather than re-deriving the
-/// conditions in [`TeamsWidget::render`] and risking drift from it.
+/// Saved-position ids for the sections whose presence distinguishes what a teamless user
+/// sees on this page. They are saved for a single frame so integration tests can assert
+/// against what the current frame actually painted, rather than re-deriving the conditions
+/// in [`TeamsWidget::render_teamless_page`] and risking drift from it.
 pub const WORKSPACE_SECTION_POSITION_ID: &str = "team_settings:workspace_section";
 pub const WORKSPACE_ADMIN_PANEL_BUTTON_POSITION_ID: &str =
     "team_settings:workspace_admin_panel_button";
 pub const JOIN_A_TEAM_LIST_POSITION_ID: &str = "team_settings:join_a_team_list";
 pub const CREATE_TEAM_FORM_POSITION_ID: &str = "team_settings:create_team_form";
+pub const WORKSPACE_UNRESOLVED_POSITION_ID: &str = "team_settings:workspace_unresolved";
+
+const WORKSPACE_PENDING_DESCRIPTION: &str = "Checking which workspace you're in\u{2026}";
+const WORKSPACE_UNAVAILABLE_DESCRIPTION: &str = "We couldn't reach Warp to check which workspace you're in. Check your connection, then reopen this page.";
 
 /// How the current user stands in their native workspace. Native workspaces own their
 /// teams and are administered on the web, so this is what the Teams page can act on when
@@ -4073,6 +4077,65 @@ impl TeamsWidget {
             .finish()
     }
 
+    /// The Teams page for a user with no team of their own. Which page that is depends on
+    /// the workspace they turn out to be in, which the client does not always know yet.
+    fn render_teamless_page(
+        &self,
+        view: &TeamsPageView,
+        teams: &UserWorkspaces,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let is_logged_in = AuthStateProvider::as_ref(app).get().is_logged_in();
+        match teams.teamless_offer(is_logged_in) {
+            TeamlessOffer::NativeWorkspace(workspace) => {
+                let role = if view
+                    .auth_state
+                    .user_email()
+                    .is_some_and(|email| workspace.is_native_workspaces_admin(&email))
+                {
+                    WorkspaceRole::Admin
+                } else {
+                    WorkspaceRole::Member
+                };
+                self.render_workspace_teams_page(view, &workspace.name, role, appearance)
+            }
+            TeamlessOffer::CreateTeam => self.render_create_team_page(view, appearance, app),
+            TeamlessOffer::WorkspacePending => {
+                self.render_workspace_unresolved_page(WORKSPACE_PENDING_DESCRIPTION, appearance)
+            }
+            TeamlessOffer::WorkspaceUnavailable => {
+                self.render_workspace_unresolved_page(WORKSPACE_UNAVAILABLE_DESCRIPTION, appearance)
+            }
+        }
+    }
+
+    /// The Teams page while the client cannot yet say which workspace the user is in.
+    ///
+    /// Create-team is withheld here rather than shown optimistically: a cached workspace
+    /// carries no plan, so a native-workspace member is indistinguishable from a solo user
+    /// until the first metadata response lands, and offering them the form would hand them
+    /// a second workspace instead of a team in theirs.
+    fn render_workspace_unresolved_page(
+        &self,
+        description: &'static str,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
+        let mut page = Flex::column();
+        page.add_child(render_sub_header(appearance, "Teams".to_string(), None));
+        page.add_child(
+            SavePosition::new(
+                Container::new(self.render_description(description.to_string(), appearance))
+                    .with_padding_top(6.)
+                    .finish(),
+                WORKSPACE_UNRESOLVED_POSITION_ID,
+            )
+            .for_single_frame()
+            .finish(),
+        );
+        page.finish()
+    }
+
     /// The Teams page for a user who belongs to a native workspace but has no team of
     /// their own. Leads with the workspace itself so the page never reads as empty, then
     /// explains the teamless state and offers whatever teams are open to join.
@@ -4600,21 +4663,7 @@ impl SettingsWidget for TeamsWidget {
                 Some((team, workspace)) => {
                     self.render_team_management_page(team, workspace, view, appearance, app)
                 }
-                None => match teams.current_native_workspace() {
-                    Some(workspace) => {
-                        let role = if view
-                            .auth_state
-                            .user_email()
-                            .is_some_and(|email| workspace.is_native_workspaces_admin(&email))
-                        {
-                            WorkspaceRole::Admin
-                        } else {
-                            WorkspaceRole::Member
-                        };
-                        self.render_workspace_teams_page(view, &workspace.name, role, appearance)
-                    }
-                    None => self.render_create_team_page(view, appearance, app),
-                },
+                None => self.render_teamless_page(view, teams, appearance, app),
             }
         } else {
             appearance

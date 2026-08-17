@@ -666,8 +666,10 @@ impl DriveIndex {
             .collect::<Vec<_>>();
 
         if !user_workspaces.as_ref(ctx).has_teams() {
-            let should_offer_team_creation =
-                user_workspaces.as_ref(ctx).should_offer_team_creation();
+            let is_logged_in = AuthStateProvider::as_ref(ctx).get().is_logged_in();
+            let should_offer_team_creation = user_workspaces
+                .as_ref(ctx)
+                .should_offer_team_creation(is_logged_in);
             if user_workspaces
                 .as_ref(ctx)
                 .total_teammates_in_joinable_teams()

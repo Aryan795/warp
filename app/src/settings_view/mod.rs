@@ -138,6 +138,7 @@ pub use settings_page::{
 pub use teams_page::{
     CREATE_TEAM_FORM_POSITION_ID, JOIN_A_TEAM_LIST_POSITION_ID, OpenTeamsSettingsModalArgs,
     TeamsInviteOption, WORKSPACE_ADMIN_PANEL_BUTTON_POSITION_ID, WORKSPACE_SECTION_POSITION_ID,
+    WORKSPACE_UNRESOLVED_POSITION_ID,
 };
 pub(crate) use warp_agent_page::custom_model_routers_widget_id;
 

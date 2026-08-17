@@ -2421,6 +2421,132 @@ fn test_native_workspace_admin_is_recognized_as_a_workspace_admin() {
     })
 }
 
+/// A workspace restored from SQLite: identity only, no plan. This is what the client has
+/// on launch, before the first workspaces-metadata response.
+fn cached_workspace() -> Workspace {
+    Workspace::from_local_cache(
+        "workspace_uid123456789".to_string().into(),
+        "Acme".to_string(),
+        None,
+    )
+}
+
+#[test]
+fn test_a_cached_workspace_withholds_team_creation_until_metadata_arrives() {
+    App::test((), |mut app| async move {
+        // The launch state of a native-workspace member. `from_local_cache` defaults the
+        // billing metadata, so the cached workspace looks non-native and would otherwise
+        // hand the user a form that creates a second workspace.
+        initialize_window_team_test_app(&mut app, vec![cached_workspace()]);
+        register_ai_usage_model(&mut app);
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert_eq!(
+                user_workspaces.workspaces_metadata_state(),
+                WorkspacesMetadataState::Pending
+            );
+            assert!(
+                user_workspaces.current_native_workspace().is_none(),
+                "a cached workspace cannot report its plan"
+            );
+            assert!(
+                !user_workspaces.should_offer_team_creation(true),
+                "create-team must wait for the server to describe the workspace"
+            );
+        });
+
+        let mut workspace = gql_native_workspace(GqlMembershipRole::User);
+        workspace.uid = "workspace_uid123456789".into();
+        apply_workspaces_metadata(&mut app, gql_user(None, vec![workspace]).into());
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert_eq!(
+                user_workspaces.workspaces_metadata_state(),
+                WorkspacesMetadataState::Loaded
+            );
+            assert!(
+                user_workspaces.current_native_workspace().is_some(),
+                "the response should reveal the workspace as native"
+            );
+            assert!(!user_workspaces.should_offer_team_creation(true));
+        });
+    })
+}
+
+#[test]
+fn test_exhausted_metadata_retries_keep_team_creation_withheld() {
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![cached_workspace()]);
+        register_ai_usage_model(&mut app);
+
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.note_workspaces_metadata_unavailable(ctx);
+        });
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert_eq!(
+                user_workspaces.workspaces_metadata_state(),
+                WorkspacesMetadataState::Unavailable
+            );
+            assert!(
+                !user_workspaces.should_offer_team_creation(true),
+                "giving up on the fetch does not make the workspace knowable"
+            );
+        });
+    })
+}
+
+#[test]
+fn test_a_failed_refresh_does_not_unsettle_an_answer_already_received() {
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![]);
+        register_ai_usage_model(&mut app);
+
+        apply_workspaces_metadata(
+            &mut app,
+            gql_user(None, vec![gql_workspace(PLACEHOLDER_WORKSPACE_UID, None)]).into(),
+        );
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.note_workspaces_metadata_unavailable(ctx);
+        });
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert_eq!(
+                user_workspaces.workspaces_metadata_state(),
+                WorkspacesMetadataState::Loaded
+            );
+            assert!(
+                user_workspaces.should_offer_team_creation(true),
+                "a later failed refresh leaves the authoritative answer standing"
+            );
+        });
+    })
+}
+
+#[test]
+fn test_a_logged_out_user_is_offered_team_creation_without_waiting() {
+    App::test((), |mut app| async move {
+        // Metadata is never fetched while logged out, so waiting on it would withhold the
+        // form forever from the users it exists to invite.
+        initialize_window_team_test_app(&mut app, vec![]);
+        register_ai_usage_model(&mut app);
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert_eq!(
+                user_workspaces.workspaces_metadata_state(),
+                WorkspacesMetadataState::Pending
+            );
+            assert!(user_workspaces.should_offer_team_creation(false));
+            assert!(!user_workspaces.should_offer_team_creation(true));
+        });
+    })
+}
+
 #[test]
 fn test_native_workspace_member_with_a_team_sees_their_team() {
     App::test((), |mut app| async move {
