@@ -306,13 +306,13 @@ pub struct Team {
 
 /// Governs which workspace members can discover and join a team. Orthogonal to
 /// workspace-level discoverability (`WorkspaceSettings::is_discoverable`).
-#[derive(cynic::Enum, Clone, Debug)]
+#[derive(cynic::Enum, Clone, Debug, PartialEq, Eq, Copy)]
 pub enum TeamVisibility {
     Open,
     Private,
     Hidden,
     #[cynic(fallback)]
-    Other(String),
+    Unknown,
 }
 
 /// The effective settings that apply to a team, combining the workspace layer

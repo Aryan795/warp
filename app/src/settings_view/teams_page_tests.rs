@@ -246,3 +246,61 @@ fn workspace_admin_does_not_get_pending_invite_cancellation() {
     // it's out of scope for the workspace-admin override.
     assert!(action_labels(&items, "invitee@example.com").is_empty());
 }
+
+#[test]
+fn open_team_admin_sees_toggle_instructions_and_available_links() {
+    let presentation = invite_by_link_presentation(TeamVisibility::Open, true);
+
+    assert_eq!(
+        presentation.admin_subtext,
+        Some(INVITE_LINK_TOGGLE_INSTRUCTIONS)
+    );
+    assert!(presentation.invite_links_available);
+}
+
+#[test]
+fn open_team_non_admin_sees_no_subtext_but_links_are_available() {
+    let presentation = invite_by_link_presentation(TeamVisibility::Open, false);
+
+    assert_eq!(presentation.admin_subtext, None);
+    assert!(presentation.invite_links_available);
+}
+
+#[test]
+fn private_and_hidden_teams_disable_links_and_explain_why_to_admins() {
+    for visibility in [TeamVisibility::Private, TeamVisibility::Hidden] {
+        let presentation = invite_by_link_presentation(visibility, true);
+
+        assert_eq!(
+            presentation.admin_subtext,
+            Some(INVITE_LINK_DISABLED_FOR_NON_OPEN_TEAM_INSTRUCTIONS),
+            "{visibility:?} should explain that invite links are disabled"
+        );
+        assert!(
+            !presentation.invite_links_available,
+            "{visibility:?} team should never expose the invite-link toggle or a live link"
+        );
+    }
+}
+
+#[test]
+fn private_and_hidden_teams_show_nothing_to_non_admins() {
+    for visibility in [TeamVisibility::Private, TeamVisibility::Hidden] {
+        let presentation = invite_by_link_presentation(visibility, false);
+
+        assert_eq!(presentation.admin_subtext, None);
+        assert!(!presentation.invite_links_available);
+    }
+}
+
+#[test]
+fn unknown_visibility_renders_non_committal_state_even_for_admins() {
+    // A team hydrated from the local cache before the server's authoritative
+    // visibility arrives must never show the toggle (which could be wrong for
+    // a private/hidden team), and must never claim links are disabled either
+    // (which could be wrong for an open team).
+    let presentation = invite_by_link_presentation(TeamVisibility::Unknown, true);
+
+    assert_eq!(presentation.admin_subtext, None);
+    assert!(!presentation.invite_links_available);
+}

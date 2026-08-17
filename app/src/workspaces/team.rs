@@ -82,6 +82,11 @@ pub enum TeamVisibility {
     Open,
     Private,
     Hidden,
+    /// The team's visibility hasn't been loaded from the server yet (e.g. a
+    /// team hydrated from the local cache before the authoritative value
+    /// arrives). Callers must render a non-committal state for this rather
+    /// than assuming `Open` or a specific non-open state.
+    Unknown,
 }
 
 #[derive(Clone, Debug)]
@@ -125,9 +130,10 @@ impl Team {
             settings: settings.unwrap_or_default(),
             is_eligible_for_discovery: false,
             has_billing_history: false,
-            // Visibility is not persisted to the local cache; it is refreshed from the
-            // server on the next sync.
-            visibility: TeamVisibility::Open,
+            // Visibility is not persisted to the local cache. Default to `Unknown`
+            // rather than `Open` so a cached private/hidden team never briefly shows
+            // the invite-link toggle before the authoritative value arrives.
+            visibility: TeamVisibility::Unknown,
         }
     }
 

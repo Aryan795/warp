@@ -201,11 +201,11 @@ impl From<GqlTeamVisibility> for TeamVisibility {
             GqlTeamVisibility::Open => TeamVisibility::Open,
             GqlTeamVisibility::Private => TeamVisibility::Private,
             GqlTeamVisibility::Hidden => TeamVisibility::Hidden,
-            GqlTeamVisibility::Other(_) => {
+            GqlTeamVisibility::Unknown => {
                 report_error!(anyhow!(
-                    "Invalid TeamVisibility from server; treating as Open"
+                    "Unrecognized TeamVisibility from server; treating as Unknown"
                 ));
-                TeamVisibility::Open
+                TeamVisibility::Unknown
             }
         }
     }
