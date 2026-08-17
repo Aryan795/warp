@@ -1,4 +1,3 @@
-use std::io;
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
@@ -10,10 +9,19 @@ pub async fn run_git_command(repo_path: &Path, args: &[&str]) -> Result<String> 
     run_git_command_with_env(repo_path, args, None).await
 }
 
-/// Chunk size used when incrementally reading a subprocess's stdout in
+/// Chunk size used when incrementally reading a subprocess's stdout/stderr in
 /// [`run_git_command_capped`].
 #[cfg(not(target_family = "wasm"))]
 const CAPPED_READ_CHUNK_SIZE: usize = 64 * 1024;
+
+/// Diagnostic cap on a capped git command's stderr capture (see
+/// [`run_git_command_capped`]). Git's own error output is normally a few
+/// hundred bytes; this budget is generous for unusually verbose failures
+/// while still bounding a misbehaving diff driver (e.g. a `textconv` helper,
+/// which `--no-ext-diff` does not disable) that writes to stderr without
+/// limit — the same unbounded-growth hazard this file fixes for stdout.
+#[cfg(not(target_family = "wasm"))]
+const STDERR_CAPTURE_CAP: usize = 256 * 1024;
 
 /// Outcome of [`run_git_command_capped`].
 #[derive(Debug)]
@@ -27,11 +35,127 @@ pub enum CappedGitOutput {
     Exceeded,
 }
 
-/// Like [`run_git_command`], but bounds the subprocess's stdout capture at
-/// `max_bytes` instead of buffering it in full before deciding whether it's
-/// usable. Reads stdout incrementally in fixed-size chunks and kills the
-/// child as soon as the budget is exceeded, rather than waiting for it to
-/// finish writing an arbitrarily large diff (see APP-5462).
+/// Outcome of reading a single pipe up to a byte budget via [`read_capped`]
+/// or [`read_two_capped`].
+#[cfg(not(target_family = "wasm"))]
+enum CappedReadOutcome {
+    /// The pipe reached EOF within the budget; carries everything read.
+    Complete(Vec<u8>),
+    /// Accumulated bytes exceeded the budget before EOF, so reading stopped
+    /// immediately instead of continuing to EOF. Carries what was read up to
+    /// the overshoot (bounded by `max_bytes + CAPPED_READ_CHUNK_SIZE`), kept
+    /// only for diagnostics — callers must not treat this as complete output.
+    Exceeded(Vec<u8>),
+}
+
+/// Reads `reader` in fixed-size chunks, stopping as soon as the accumulated
+/// length exceeds `max_bytes` rather than continuing on to EOF. This is the
+/// core guarantee behind [`run_git_command_capped`]'s memory bound: the cap
+/// is enforced incrementally during the read, not by checking a
+/// fully-buffered length afterward (see APP-5462).
+#[cfg(not(target_family = "wasm"))]
+async fn read_capped<R>(reader: &mut R, max_bytes: usize) -> std::io::Result<CappedReadOutcome>
+where
+    R: futures_lite::io::AsyncRead + Unpin,
+{
+    use futures_lite::io::AsyncReadExt;
+
+    let mut buf = Vec::with_capacity(CAPPED_READ_CHUNK_SIZE);
+    let mut chunk = [0u8; CAPPED_READ_CHUNK_SIZE];
+    loop {
+        let n = reader.read(&mut chunk).await?;
+        if n == 0 {
+            return Ok(CappedReadOutcome::Complete(buf));
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.len() > max_bytes {
+            return Ok(CappedReadOutcome::Exceeded(buf));
+        }
+    }
+}
+
+/// Reads two pipes concurrently, each bounded by its own byte budget, and
+/// stops as soon as *either* pipe exceeds its budget — without waiting for
+/// the other to reach EOF. That matters for both directions: an oversized
+/// diff overflows stdout, and a misbehaving diff driver (e.g. `textconv`)
+/// can hold stderr open indefinitely even after the main child has exited,
+/// so waiting for stderr's own EOF is not safe once stdout (or stderr) has
+/// already blown its budget.
+///
+/// Returns each pipe's outcome, or `None` for a pipe that was still
+/// mid-read when the other pipe's overflow ended the operation.
+#[cfg(not(target_family = "wasm"))]
+async fn read_two_capped<R1, R2>(
+    mut first: R1,
+    first_budget: usize,
+    mut second: R2,
+    second_budget: usize,
+) -> std::io::Result<(Option<CappedReadOutcome>, Option<CappedReadOutcome>)>
+where
+    R1: futures_lite::io::AsyncRead + Unpin,
+    R2: futures_lite::io::AsyncRead + Unpin,
+{
+    use std::future::Future;
+    use std::pin::pin;
+    use std::task::Poll;
+
+    // Built directly on `read_capped` — each pipe's future *is* the same
+    // incremental-stop logic the single-pipe path uses and tests, driven
+    // manually here only to interleave the two pipes.
+    let mut first_fut = pin!(read_capped(&mut first, first_budget));
+    let mut second_fut = pin!(read_capped(&mut second, second_budget));
+    let mut first_result: Option<std::io::Result<CappedReadOutcome>> = None;
+    let mut second_result: Option<std::io::Result<CappedReadOutcome>> = None;
+
+    // Poll both futures on every tick, not just the first until it blocks,
+    // so a pipe that's always immediately ready (e.g. a descendant that
+    // never blocks) can't stall progress on the other. Stop as soon as
+    // either pipe errors or exceeds its budget, without waiting for the
+    // other to reach EOF: a misbehaving diff driver (e.g. `textconv`) can
+    // hold a pipe open indefinitely even after the main child has exited.
+    futures_lite::future::poll_fn(|cx| {
+        if first_result.is_none()
+            && let Poll::Ready(result) = first_fut.as_mut().poll(cx)
+        {
+            first_result = Some(result);
+        }
+        if matches!(
+            first_result,
+            Some(Err(_)) | Some(Ok(CappedReadOutcome::Exceeded(_)))
+        ) {
+            return Poll::Ready(());
+        }
+
+        if second_result.is_none()
+            && let Poll::Ready(result) = second_fut.as_mut().poll(cx)
+        {
+            second_result = Some(result);
+        }
+        if matches!(
+            second_result,
+            Some(Err(_)) | Some(Ok(CappedReadOutcome::Exceeded(_)))
+        ) {
+            return Poll::Ready(());
+        }
+
+        if first_result.is_some() && second_result.is_some() {
+            return Poll::Ready(());
+        }
+        Poll::Pending
+    })
+    .await;
+
+    let first_outcome = first_result.transpose()?;
+    let second_outcome = second_result.transpose()?;
+    Ok((first_outcome, second_outcome))
+}
+
+/// Like [`run_git_command`], but bounds both the subprocess's stdout *and*
+/// stderr capture instead of buffering either in full before deciding
+/// whether it's usable. Reads both incrementally in fixed-size chunks and
+/// kills the child as soon as either budget is exceeded, rather than
+/// waiting for it to finish writing arbitrarily large output on either pipe
+/// (see APP-5462).
 ///
 /// Only meant for commands whose output can legitimately be enormous (e.g.
 /// `git diff` on a single huge file). Silently truncating output would be a
@@ -45,7 +169,6 @@ pub async fn run_git_command_capped(
     max_bytes: usize,
 ) -> Result<CappedGitOutput> {
     use command::Stdio;
-    use futures_lite::io::AsyncReadExt;
 
     log::debug!(
         "[GIT OPERATION] git.rs run_git_command_capped git {}",
@@ -62,59 +185,62 @@ pub async fn run_git_command_capped(
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow!("Failed to execute git command: {}", e))?;
-    let mut stdout = child
+    let stdout = child
         .stdout
         .take()
         .expect("stdout is configured as piped above");
-    let mut stderr = child
+    let stderr = child
         .stderr
         .take()
         .expect("stderr is configured as piped above");
 
-    // Read stdout incrementally, in fixed-size chunks, so a single enormous
-    // diff never gets buffered in full before we notice it's oversized.
-    // stderr is drained concurrently: with both pipes piped, a child that
-    // fills the stderr pipe while we only read stdout would otherwise block
-    // forever. Git error output is always small, so it's read unbounded.
-    let stdout_fut = async {
-        let mut buf = Vec::with_capacity(CAPPED_READ_CHUNK_SIZE);
-        let mut chunk = [0u8; CAPPED_READ_CHUNK_SIZE];
-        loop {
-            let n = stdout.read(&mut chunk).await?;
-            if n == 0 {
-                return io::Result::Ok(Some(buf));
-            }
-            buf.extend_from_slice(&chunk[..n]);
-            if buf.len() > max_bytes {
-                // Stop reading and kill the child instead of waiting for it
-                // to finish writing an arbitrarily large diff. Killing here
-                // also unblocks the stderr drain below by closing its pipe.
+    let (stdout_outcome, stderr_outcome) =
+        match read_two_capped(stdout, max_bytes, stderr, STDERR_CAPTURE_CAP).await {
+            Ok(outcomes) => outcomes,
+            Err(e) => {
                 let _ = child.kill();
-                return io::Result::Ok(None);
+                let _ = child.status().await;
+                return Err(anyhow!("Failed to read git command output: {}", e));
             }
-        }
-    };
-    let stderr_fut = async {
-        let mut buf = Vec::new();
-        let _ = stderr.read_to_end(&mut buf).await;
-        buf
-    };
-    let (stdout_result, stderr_buf) = futures_lite::future::zip(stdout_fut, stderr_fut).await;
+        };
 
-    let stdout_bytes = match stdout_result {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => {
-            // Reap the killed child so it doesn't linger as a zombie. Its exit
-            // status reflects our own kill (e.g. SIGKILL), not a real git
-            // error, so it's discarded rather than checked.
-            let _ = child.status().await;
-            return Ok(CappedGitOutput::Exceeded);
-        }
-        Err(e) => {
-            let _ = child.kill();
-            let _ = child.status().await;
-            return Err(anyhow!("Failed to read git command output: {}", e));
-        }
+    if let Some(CappedReadOutcome::Exceeded(partial_stderr)) = stderr_outcome {
+        // A misbehaving diff driver (e.g. textconv) can write unbounded
+        // stderr; kill and reap rather than waiting for the pipe to close on
+        // its own, which a still-running descendant could delay
+        // indefinitely. The full error text is only preserved while it fits
+        // the diagnostic cap; here it doesn't, so this is truncated by
+        // construction (`partial_stderr` is bounded by
+        // `STDERR_CAPTURE_CAP + CAPPED_READ_CHUNK_SIZE`).
+        let _ = child.kill();
+        let _ = child.status().await;
+        return Err(anyhow!(
+            "Git command failed: stderr exceeded {} bytes and was truncated: {}",
+            STDERR_CAPTURE_CAP,
+            String::from_utf8_lossy(&partial_stderr)
+        ));
+    }
+    if matches!(stdout_outcome, Some(CappedReadOutcome::Exceeded(_))) {
+        // Stop reading and kill the child instead of waiting for it to
+        // finish writing an arbitrarily large diff.
+        let _ = child.kill();
+        let _ = child.status().await;
+        return Ok(CappedGitOutput::Exceeded);
+    }
+
+    let (
+        Some(CappedReadOutcome::Complete(stdout_bytes)),
+        Some(CappedReadOutcome::Complete(stderr_bytes)),
+    ) = (stdout_outcome, stderr_outcome)
+    else {
+        // Unreachable in practice: read_two_capped only leaves a pipe's
+        // outcome as anything other than `Complete` when it (or the other
+        // pipe) exceeded its budget, both of which are handled above.
+        let _ = child.kill();
+        let _ = child.status().await;
+        return Err(anyhow!(
+            "Failed to read git command output: incomplete capture"
+        ));
     };
 
     let status = child
@@ -122,7 +248,7 @@ pub async fn run_git_command_capped(
         .await
         .map_err(|e| anyhow!("Failed to wait for git command: {}", e))?;
     let stdout_str = String::from_utf8_lossy(&stdout_bytes).to_string();
-    let stderr_str = String::from_utf8_lossy(&stderr_buf);
+    let stderr_str = String::from_utf8_lossy(&stderr_bytes);
 
     // Mirrors run_git_command_with_env's git-diff-specific exit code handling.
     if status.success() || (status.code() == Some(1) && !stdout_str.is_empty()) {
