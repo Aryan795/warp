@@ -27,6 +27,12 @@ Launch Warp from the repository root. The exact command depends on which environ
   cargo run --bin warp -- --api-key $STAGING_USER_WARP_API_KEY
   ```
 
+- If `WARP_API_KEY` holds a *service-account* key, the GUI rejects it — it requires a user account. Pass a user-account key explicitly and take the service key out of the environment so the env-bound flag cannot shadow it:
+
+  ```bash
+  env -u WARP_API_KEY cargo run --bin warp -- --api-key "$YOUR_USER_ACCOUNT_KEY"
+  ```
+
 Always pass `--bin warp` explicitly. That target is the local internal channel (`app/src/bin/local.rs`, `Channel::Local` — it carries dogfood feature flags but is not the dogfood channel). A plain `cargo run` builds `warp-oss`, the workspace `default-run`, whose server config is baked to production (`app/src/bin/oss.rs`), so a staging key cannot authenticate it. The key itself is not channel-gated: `--api-key` is bound to `WARP_API_KEY` unconditionally (`crates/warp_cli/src/lib.rs`) and passed straight through on every channel (`app/src/lib.rs`). What differs is the server on the other end.
 
 Key-based startup authentication is not known to work in a cloud sandbox. Read "If the app is logged out" below before you plan a verification that needs a logged-in GUI there.
@@ -35,9 +41,12 @@ Initial builds may take several minutes; subsequent incremental builds are faste
 
 ### Verify the launch is authenticated
 
-The rendered window is the only reliable signal. Authenticated Warp opens straight to the terminal; unauthenticated Warp shows the logged-out onboarding/sign-in screen. Look at the window before you test anything.
+Check both of these on the running app before you test anything. Each is an observable state, so each can actually fail.
 
-The log distinguishes nothing. `Authenticating via pending API key` (`app/src/auth/auth_manager.rs`) is logged *before* the attempt, and neither outcome is logged after it; the IAP cache fast path (`crates/warp_server_client/src/iap.rs`) is silent on success as well. An absence of errors is not a successful login.
+- **The window.** Authenticated Warp opens straight to the terminal. The logged-out onboarding/sign-in screen means the login did not happen — go to "If the app is logged out" below rather than driving the session anyway.
+- **The target.** Startup logs `Starting warp with channel state ChannelState { channel: Local, ... }` (`app/src/lib.rs`), and that state carries the server root URL the app will talk to. `channel: Oss`, or a `server_root_url` of `https://app.warp.dev`, means the OSS/production binary came up and no staging key can authenticate it — stop and relaunch with `--bin warp`.
+
+The log distinguishes nothing about the login itself. `Authenticating via pending API key` (`app/src/auth/auth_manager.rs`) is logged *before* the attempt, and neither outcome is logged after it; the IAP cache fast path (`crates/warp_server_client/src/iap.rs`) is silent on success as well. An absence of errors is not a successful login, which is why the window is the signal.
 
 ### If the app is logged out
 
@@ -52,7 +61,7 @@ Settings > Account carries a "Staging IAP credentials" status widget (`app/src/s
 
 A non-API-key path does authenticate a GUI in a cloud sandbox: the `gui-onboarding-verification-skill` drives Warp's own Paste Auth Token flow with a Firebase refresh token, which never touches API-key auth or the IAP gate above. Two limits before you reach for it — it runs against an installed *stable* build, so it cannot show an unmerged diff, and its secret is not provisioned in every sandbox. Untested for verification work, but it is the first alternative to try.
 
-Once a real launch attempt has landed on onboarding, falling back to the hardcode/mock path below is appropriate. Never describe a capture made against a mocked or hardcoded state as a live Cloud Mode (or other authenticated-surface) verification — say plainly that it's mocked.
+Once a real launch attempt has landed on onboarding, capture the surface without a login rather than abandoning the proof: the integration-test harness (`crates/integration`) boots a real Warp app with no account and can construct the state under test. Author or extend a test that renders the surface with the `gui-integration-test` skill, and record it with `gui-integration-test-video`. The hardcode/mock path below is the last resort, after that one does not fit. Never describe a capture made against a mocked or hardcoded state as a live Cloud Mode (or other authenticated-surface) verification — say plainly that it's mocked.
 
 ## Testing Workflow
 
