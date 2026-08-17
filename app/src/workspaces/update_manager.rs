@@ -309,6 +309,42 @@ impl TeamUpdateManager {
         });
     }
 
+    pub fn create_team_in_workspace(
+        &mut self,
+        team_name: String,
+        workspace_uid: WorkspaceUid,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let team_client = self.team_client.clone();
+        let _ = ctx.spawn(
+            async move {
+                team_client
+                    .create_team_in_workspace(workspace_uid, team_name)
+                    .await
+                    .context("Error creating team in workspace")
+            },
+            Self::on_team_created_in_workspace,
+        );
+    }
+
+    fn on_team_created_in_workspace(
+        &mut self,
+        result: Result<WorkspacesMetadataWithPricing>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        report_if_error!(result);
+        let Ok(response) = result else {
+            return;
+        };
+
+        if let Some(pricing_info) = response.pricing_info {
+            PricingInfoModel::handle(ctx).update(ctx, |model, ctx| {
+                model.update_pricing_info(pricing_info, ctx);
+            });
+        }
+        self.on_workspaces_updated(Ok(response.metadata), ctx);
+    }
+
     pub fn leave_team(
         &mut self,
         team_uid: ServerId,

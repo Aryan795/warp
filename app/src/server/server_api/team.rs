@@ -10,6 +10,10 @@ use warp_graphql::mutations::add_invite_link_domain_restriction::{
 use warp_graphql::mutations::create_team::{
     CreateTeam, CreateTeamInput, CreateTeamResult, CreateTeamVariables,
 };
+use warp_graphql::mutations::create_team_in_workspace::{
+    CreateTeamInWorkspace, CreateTeamInWorkspaceInput, CreateTeamInWorkspaceResult,
+    CreateTeamInWorkspaceVariables,
+};
 use warp_graphql::mutations::delete_invite_link_domain_restriction::{
     DeleteInviteLinkDomainRestriction, DeleteInviteLinkDomainRestrictionInput,
     DeleteInviteLinkDomainRestrictionResult, DeleteInviteLinkDomainRestrictionVariables,
@@ -64,7 +68,7 @@ use crate::server::graphql::{get_request_context, get_user_facing_error_message}
 use crate::server::ids::ServerId;
 use crate::workspaces::team::{DiscoverableTeam, MembershipRole};
 use crate::workspaces::user_workspaces::{CreateTeamResponse, WorkspacesMetadataWithPricing};
-use crate::workspaces::workspace::Workspace;
+use crate::workspaces::workspace::{Workspace, WorkspaceUid};
 
 #[cfg_attr(test, automock)]
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
@@ -91,6 +95,14 @@ pub trait TeamClient: 'static + Send + Sync {
         entrypoint: CloudObjectEventEntrypoint,
         discoverable: Option<bool>,
     ) -> Result<CreateTeamResponse>;
+
+    /// Creates a team inside an existing (native) workspace and returns the refreshed
+    /// workspaces metadata.
+    async fn create_team_in_workspace(
+        &self,
+        workspace_uid: WorkspaceUid,
+        name: String,
+    ) -> Result<WorkspacesMetadataWithPricing>;
 
     /// Removes the user from the selected team and returns a list of all teams that a user is
     /// still a member of (including updated team members).
@@ -310,6 +322,38 @@ impl TeamClient for ServerApi {
                 Err(anyhow!(get_user_facing_error_message(user_facing_error)))
             }
             CreateTeamResult::Unknown => Err(anyhow!("unknown error while creating team")),
+        }
+    }
+
+    async fn create_team_in_workspace(
+        &self,
+        workspace_uid: WorkspaceUid,
+        name: String,
+    ) -> Result<WorkspacesMetadataWithPricing> {
+        let variables = CreateTeamInWorkspaceVariables {
+            input: CreateTeamInWorkspaceInput {
+                workspace_uid: cynic::Id::new(String::from(workspace_uid)),
+                name,
+            },
+            request_context: get_request_context(),
+        };
+
+        let operation = CreateTeamInWorkspace::build(variables);
+        let result = self
+            .send_graphql_request(operation, None)
+            .await?
+            .create_team_in_workspace;
+
+        match result {
+            CreateTeamInWorkspaceResult::CreateTeamInWorkspaceOutput(_) => {
+                self.workspaces_metadata().await
+            }
+            CreateTeamInWorkspaceResult::UserFacingError(user_facing_error) => {
+                Err(anyhow!(get_user_facing_error_message(user_facing_error)))
+            }
+            CreateTeamInWorkspaceResult::Unknown => {
+                Err(anyhow!("unknown error while creating team in workspace"))
+            }
         }
     }
 

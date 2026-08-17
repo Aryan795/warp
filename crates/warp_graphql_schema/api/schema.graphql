@@ -1075,6 +1075,31 @@ type CreateTeamOutput implements Response {
 
 union CreateTeamResult = CreateTeamOutput | UserFacingError
 
+"""
+A workspace member to seed a newly created team with, along with the team-level role
+they should be granted. Only USER and ADMIN are accepted; native-workspace teams do not
+have a team-level OWNER.
+"""
+input CreateTeamInWorkspaceMemberInput {
+  role: MembershipRole!
+  userUid: ID!
+}
+
+input CreateTeamInWorkspaceInput {
+  color: String
+  members: [CreateTeamInWorkspaceMemberInput!]! = []
+  name: String!
+  visibility: TeamVisibility! = OPEN
+  workspaceUid: ID!
+}
+
+type CreateTeamInWorkspaceOutput implements Response {
+  responseContext: ResponseContext!
+  team: Team!
+}
+
+union CreateTeamInWorkspaceResult = CreateTeamInWorkspaceOutput | UserFacingError
+
 type CreateUploadTarget {
   fields: [UploadField!]!
   headers: [CreateUploadTargetHeader!]!
@@ -3126,6 +3151,7 @@ type RootMutation {
   createNotebook(input: CreateNotebookInput!, requestContext: RequestContext!): CreateNotebookResult!
   createSimpleIntegration(input: CreateSimpleIntegrationInput!, requestContext: RequestContext!): CreateSimpleIntegrationResult!
   createTeam(input: CreateTeamInput!, requestContext: RequestContext!): CreateTeamResult!
+  createTeamInWorkspace(input: CreateTeamInWorkspaceInput!, requestContext: RequestContext!): CreateTeamInWorkspaceResult!
   createWorkflow(input: CreateWorkflowInput!, requestContext: RequestContext!): CreateWorkflowResult!
   deleteConversation(input: DeleteConversationInput!, requestContext: RequestContext!): DeleteConversationResult!
   deleteRunner(input: DeleteRunnerInput!, requestContext: RequestContext!): DeleteRunnerResult!
@@ -3796,6 +3822,15 @@ type Team {
   """
   settings: TeamSettings!
   uid: ID!
+}
+
+"""
+Team visibility governs which workspace members can discover and join a team.
+"""
+enum TeamVisibility {
+  HIDDEN
+  OPEN
+  PRIVATE
 }
 
 """

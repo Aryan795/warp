@@ -1497,13 +1497,31 @@ impl TeamsPageView {
 
     fn create_team(&mut self, ctx: &mut ViewContext<Self>) {
         let team_name = self.create_team_editor.as_ref(ctx).buffer_text(ctx);
-        TeamUpdateManager::handle(ctx).update(ctx, |manager, ctx| {
-            manager.create_team(
-                team_name,
-                CloudObjectEventEntrypoint::TeamSettings,
-                Some(self.checkbox_value),
-                ctx,
-            );
+        // Admins of a native workspace create the team inside that workspace; everyone
+        // else goes through the standalone flow, which creates a new workspace server-side.
+        let current_user_email = self.auth_state.user_email();
+        let native_workspace_uid = self
+            .user_workspaces
+            .as_ref(ctx)
+            .current_workspace()
+            .filter(|workspace| {
+                current_user_email
+                    .as_deref()
+                    .is_some_and(|email| workspace.is_native_workspaces_admin(email))
+            })
+            .map(|workspace| workspace.uid);
+        TeamUpdateManager::handle(ctx).update(ctx, |manager, ctx| match native_workspace_uid {
+            Some(workspace_uid) => {
+                manager.create_team_in_workspace(team_name, workspace_uid, ctx);
+            }
+            None => {
+                manager.create_team(
+                    team_name,
+                    CloudObjectEventEntrypoint::TeamSettings,
+                    Some(self.checkbox_value),
+                    ctx,
+                );
+            }
         });
         ctx.dispatch_typed_action(&WorkspaceAction::OpenWarpDrive);
     }
