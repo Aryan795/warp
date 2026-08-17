@@ -1,8 +1,8 @@
 //! Unit tests for the agent permission prompt's command x-ray helpers.
 
 use super::{
-    CommandXRayHoverState, byte_index_to_char_index, char_index_to_byte_index, token_char_range,
-    token_start_byte_offset,
+    CommandXRayHoverState, byte_index_to_char_index, char_index_to_byte_index,
+    describable_title_chars, token_char_range, token_start_byte_offset,
 };
 
 #[test]
@@ -138,6 +138,41 @@ fn clearing_the_described_token_leaves_no_token_bounds() {
 
     state.set_described_token_range(None);
     assert!(!state.is_pointer_within_described_token());
+}
+
+#[test]
+fn a_single_line_command_is_describable_end_to_end_in_the_header() {
+    // The header renders the command unchanged, so every character maps onto the command.
+    let command = "git commit --amend";
+
+    assert_eq!(describable_title_chars(command), command.chars().count());
+}
+
+#[test]
+fn only_the_first_line_of_a_multi_line_command_is_describable_in_the_header() {
+    // `format_command_text` keeps the first line and appends an ellipsis, which has no counterpart
+    // in the command, so the describable prefix stops at the newline.
+    let command = "git commit --amend\ngit push --force";
+
+    assert_eq!(describable_title_chars(command), "git commit --amend".len());
+}
+
+#[test]
+fn a_trailing_newline_leaves_the_whole_first_line_describable() {
+    // A command whose remainder is only whitespace renders without an ellipsis, but the
+    // describable prefix is the same either way.
+    let command = "ls -la\n";
+
+    assert_eq!(describable_title_chars(command), 6);
+}
+
+#[test]
+fn describable_prefix_counts_characters_not_bytes() {
+    let command = "echo 🚀 done\nsecond line";
+
+    // "echo 🚀 done" is 12 characters and 15 bytes; the prefix must be measured in characters,
+    // because that is what the hit test reports.
+    assert_eq!(describable_title_chars(command), 12);
 }
 
 #[test]

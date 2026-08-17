@@ -427,7 +427,10 @@ impl Text {
 
     /// Given a position, returns the index of the character the position is over.
     /// Returns None if the position is not over any character.
-    fn get_char_index(&self, position: &Vector2F) -> Option<usize> {
+    ///
+    /// Public so that callers outside this crate can hit-test their own hover behavior against
+    /// laid-out text (for example command x-ray over a command rendered as a `Text`).
+    pub fn get_char_index(&self, position: &Vector2F) -> Option<usize> {
         let origin = self.origin?;
         let distance_x = position.x() - origin.x();
         match self.laid_out_text.clone() {
@@ -454,8 +457,11 @@ impl Text {
         }
     }
 
-    // Returns the bounding box of the character at the given index.
-    fn get_char_bounding_box(&self, char_index: usize) -> Option<RectF> {
+    /// Returns the bounding box of the character at the given index, in absolute coordinates.
+    ///
+    /// Public for the same reason as [`Self::get_char_index`]: an external caller anchoring UI to
+    /// a specific character needs the character's painted rect.
+    pub fn get_char_bounding_box(&self, char_index: usize) -> Option<RectF> {
         let origin = self.origin?.xy();
         match &self.laid_out_text {
             LaidOutText::None => None,

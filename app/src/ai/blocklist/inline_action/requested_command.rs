@@ -36,7 +36,8 @@ use warpui::{
 use super::inline_action_icons::{self, icon_size};
 use super::requested_command_x_ray::{
     CommandXRayHoverElement, CommandXRayHoverState, CommandXRayHoverStateHandle,
-    byte_index_to_char_index, token_char_range, token_start_byte_offset,
+    CommandXRayTitleElement, byte_index_to_char_index, describable_title_chars, token_char_range,
+    token_start_byte_offset,
 };
 use crate::ai::agent::conversation::ConversationStatus;
 use crate::ai::agent::{
@@ -1066,6 +1067,37 @@ impl RequestedCommandView {
         format!("RequestedCommandView-{prefix}-accept-split")
     }
 
+    /// The anchor the x-ray tooltip is positioned from when the command is being hovered in the
+    /// collapsed header rather than in the expanded body. The header host caches the described
+    /// token's first character under this id while painting.
+    fn command_x_ray_title_anchor_id(&self) -> String {
+        format!(
+            "RequestedCommandView-{}-command-x-ray-title",
+            self.position_id_prefix
+        )
+    }
+
+    /// Whether the collapsed header is currently showing the command itself, which is the state
+    /// where hovering it should describe tokens. While the action is blocked the title is the
+    /// "OK if I run this command?" prompt, and while expanded it is a detail message - neither has
+    /// anything to describe.
+    fn header_title_is_hoverable_command(
+        &self,
+        action_status: Option<&AIActionStatus>,
+        requested_command_block: Option<&Block>,
+    ) -> bool {
+        let command_started = matches!(
+            action_status,
+            Some(AIActionStatus::RunningAsync) | Some(AIActionStatus::Finished(..))
+        ) || requested_command_block
+            .is_some_and(|block| block.finished() || block.is_executing());
+
+        self.action_type.is_requested_command()
+            && !self.is_header_expanded
+            && !self.command_text.is_empty()
+            && command_started
+    }
+
     pub fn is_header_expanded(&self) -> bool {
         self.is_header_expanded
     }
@@ -1656,6 +1688,28 @@ impl RequestedCommandView {
                     app,
                 )
             });
+
+        // Command x-ray on the collapsed header: the title is the command here, so the title text
+        // becomes the hover host. The decorator keeps that wiring on this side rather than in the
+        // shared header.
+        if self.header_title_is_hoverable_command(action_status.as_ref(), requested_command_block) {
+            let hover_state = self.command_x_ray_hover.clone();
+            let describable_chars = describable_title_chars(&self.command_text);
+            let anchor_position_id = self.command_x_ray_title_anchor_id();
+            let anchor_char_index = self.command_x_ray_description.as_ref().map(|description| {
+                byte_index_to_char_index(&self.command_text, description.token.span.start())
+            });
+            config = config.with_title_decorator(Rc::new(move |title| {
+                CommandXRayTitleElement::new(
+                    title,
+                    hover_state.clone(),
+                    describable_chars,
+                    anchor_position_id.clone(),
+                    anchor_char_index,
+                )
+                .finish()
+            }));
+        }
 
         if should_round_bottom_corners {
             config = config.with_corner_radius_override(CornerRadius::with_all(Radius::Pixels(7.)));
@@ -2314,6 +2368,22 @@ impl View for RequestedCommandView {
 
         let mut root_stack = Stack::new();
         root_stack.add_child(container);
+
+        // When the command is hovered in the collapsed header rather than in the expanded body,
+        // the tooltip is anchored off the position the header host cached for the described
+        // token's first character.
+        if !should_render_editor && let Some(description) = &self.command_x_ray_description {
+            root_stack.add_positioned_overlay_child(
+                render_command_token_description(description, appearance),
+                OffsetPositioning::offset_from_save_position_element(
+                    self.command_x_ray_title_anchor_id(),
+                    vec2f(0., 0.),
+                    PositionedElementOffsetBounds::WindowByPosition,
+                    PositionedElementAnchor::TopLeft,
+                    ChildAnchor::BottomLeft,
+                ),
+            );
+        }
 
         if self.is_accept_split_button_menu_open {
             root_stack.add_positioned_child(

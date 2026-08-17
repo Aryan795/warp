@@ -106,6 +106,11 @@ pub enum InteractionMode {
     RightClickable(RightClickConfig),
 }
 
+/// Wraps the laid-out title text before it is placed in the header row, so a caller can attach
+/// behavior to the title itself (hover, for instance) without this shared header having to know
+/// what the behavior is for.
+pub type TitleDecorator = Rc<dyn Fn(Text) -> Box<dyn Element>>;
+
 #[derive(Clone)]
 pub struct HeaderConfig {
     pub title: Cow<'static, str>,
@@ -119,6 +124,9 @@ pub struct HeaderConfig {
     pub font_color_override: Option<ColorU>,
     pub corner_radius_override: Option<CornerRadius>,
     pub soft_wrap_title: bool,
+    /// Applied to the plain-text title, when set. Ignored for markdown titles, whose element is
+    /// not a [`Text`].
+    pub title_decorator: Option<TitleDecorator>,
 }
 
 impl HeaderConfig {
@@ -134,11 +142,18 @@ impl HeaderConfig {
             font_color_override: None,
             corner_radius_override: None,
             soft_wrap_title: false,
+            title_decorator: None,
         }
     }
 
     pub fn with_soft_wrap_title(mut self) -> Self {
         self.soft_wrap_title = true;
+        self
+    }
+
+    /// Wraps the title text with `decorator` when the title is rendered as plain text.
+    pub fn with_title_decorator(mut self, decorator: TitleDecorator) -> Self {
+        self.title_decorator = Some(decorator);
         self
     }
 
@@ -218,15 +233,19 @@ impl HeaderConfig {
             .font_color_override
             .unwrap_or_else(|| blended_colors::text_main(appearance.theme(), header_background));
 
-        let mut title_element = Text::new_inline(
+        let title_text = Text::new_inline(
             self.title.clone(),
             self.font_family,
             appearance.monospace_font_size(),
         )
         .soft_wrap(self.soft_wrap_title)
         .with_selectable(self.is_text_selectable)
-        .with_color(text_color)
-        .finish();
+        .with_color(text_color);
+
+        let mut title_element = match &self.title_decorator {
+            Some(decorator) => decorator(title_text),
+            None => title_text.finish(),
+        };
 
         if self.use_markdown
             && let Ok(formatted_text) = markdown_parser::parse_markdown(&self.title)
