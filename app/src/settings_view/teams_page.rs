@@ -3091,8 +3091,10 @@ impl TeamsWidget {
             self.render_item_list(
                 TeamsPageView::team_to_item_list(team, user_email, workspace),
                 view.team_members_mouse_state_handles.clone(),
-                view.team_members_disabled_tooltip_mouse_state_handles
-                    .clone(),
+                Some(
+                    view.team_members_disabled_tooltip_mouse_state_handles
+                        .clone(),
+                ),
                 view,
                 appearance,
             ),
@@ -3318,14 +3320,13 @@ impl TeamsWidget {
             .collect();
 
         if !domains_as_items.is_empty() {
-            // Domain items are never disabled, so the tooltip-hover handles
-            // are unused; reuse the action-icon handles rather than
-            // allocating a second unused vector.
+            // Domain items are never disabled, so there's no tooltip-hover
+            // list to pass.
             section.add_child(
                 Container::new(self.render_item_list(
                     domains_as_items,
                     view.team_approved_domains_mouse_state_handles.clone(),
-                    view.team_approved_domains_mouse_state_handles.clone(),
+                    None,
                     view,
                     appearance,
                 ))
@@ -3621,7 +3622,7 @@ impl TeamsWidget {
         &self,
         items: Vec<Item>,
         mouse_state_handles: Vec<MouseStateHandle>,
-        disabled_tooltip_mouse_state_handles: Vec<MouseStateHandle>,
+        disabled_tooltip_mouse_state_handles: Option<Vec<MouseStateHandle>>,
         view: &TeamsPageView,
         appearance: &Appearance,
     ) -> Box<dyn Element> {
@@ -3629,9 +3630,8 @@ impl TeamsWidget {
             .iter()
             .sorted()
             .zip(mouse_state_handles.iter())
-            .zip(disabled_tooltip_mouse_state_handles.iter())
             .enumerate()
-            .map(|(idx, ((item, handle), tooltip_handle))| {
+            .map(|(idx, (item, handle))| {
                 let text_color = if item.is_disabled {
                     appearance.theme().disabled_ui_text_color()
                 } else {
@@ -3645,9 +3645,24 @@ impl TeamsWidget {
                 .with_color(text_color.into())
                 .finish();
                 let text_element = if item.is_disabled {
+                    // Lists that never mark an item disabled (e.g. approved
+                    // domains) pass `None` here rather than a real handle
+                    // vector. Fall back to a fresh handle and report the
+                    // mismatch instead of panicking or aliasing another
+                    // element's hover state.
+                    let tooltip_handle = disabled_tooltip_mouse_state_handles
+                        .as_ref()
+                        .and_then(|handles| handles.get(idx))
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            report_error!(anyhow::anyhow!(
+                                "disabled team member row rendered without a tooltip mouse-state handle"
+                            ));
+                            MouseStateHandle::default()
+                        });
                     appearance.ui_builder().tool_tip_on_element(
                         DISABLED_MEMBER_TOOLTIP_TEXT.to_string(),
-                        tooltip_handle.clone(),
+                        tooltip_handle,
                         text_element,
                         ParentAnchor::TopLeft,
                         ChildAnchor::BottomLeft,
