@@ -1086,12 +1086,18 @@ impl TypedActionView for CodeEditorView {
             }
             NewCommentOnLine { line: line_info } => {
                 if FeatureFlag::InlineCodeReview.is_enabled() {
+                    // Construct before emitting the model event below: the composer's draft
+                    // state is initialized from the one-shot `NewPendingComment` event, which
+                    // only a currently-subscribed composer receives.
+                    self.ensure_active_comment_editor(ctx);
                     self.model.update(ctx, |model: &mut CodeEditorModel, ctx| {
                         model.open_comment_line(line_info, ctx);
                     });
                     ctx.emit(CodeEditorEvent::CommentEditorOpened);
 
-                    ctx.focus(&self.active_comment_editor);
+                    if let Some(active_comment_editor) = &self.active_comment_editor {
+                        ctx.focus(active_comment_editor);
+                    }
                     ctx.notify();
                 }
             }
