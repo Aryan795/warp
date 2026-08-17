@@ -705,6 +705,14 @@ impl CodeEditorModel {
         ctx.notify();
     }
 
+    /// Test-only accessor for the externally computed highlight colors, so callers (e.g. the
+    /// `RequestedCommandView` permission-prompt editor) can assert on the colors it pushed
+    /// without exposing the field itself.
+    #[cfg(test)]
+    pub(crate) fn external_highlight_colors_for_test(&self) -> RangeMap<CharOffset, ColorU> {
+        self.external_highlight_colors.clone()
+    }
+
     pub fn maybe_click_on_hovered_link(&self, offset: &CharOffset, ctx: &mut ModelContext<Self>) {
         if let Some(link) = self.hovered_symbol_range()
             && link.range().contains(offset)

@@ -374,3 +374,123 @@ fn syntax_highlighting_setting_toggle_updates_header_highlighting() {
         );
     });
 }
+
+#[test]
+fn editing_the_permission_prompt_reparses_the_live_buffer() {
+    use std::rc::Rc;
+
+    use vec1::vec1;
+    use warpui::elements::{Empty, MouseStateHandle};
+    use warpui::platform::WindowStyle;
+    use warpui::{App, Element, Entity, EntityId, TypedActionView, View, ViewHandle};
+
+    use super::{RequestedActionViewType, RequestedCommandView};
+    use crate::ai::agent::conversation::AIConversationId;
+    use crate::ai::agent::{AIAgentActionId, AIAgentExchangeId};
+    use crate::ai::blocklist::block::AutonomySettingSpeedbump;
+    use crate::ai::blocklist::model::AIBlockModel;
+    use crate::ai::blocklist::{AIBlock, ClientIdentifiers, FakeAIBlockModel};
+    use crate::test_util::assert_eventually;
+    use crate::test_util::terminal::{add_window_with_terminal, initialize_app_for_terminal_view};
+
+    /// Minimal host view so `RequestedCommandView` can be constructed via
+    /// `ctx.add_typed_action_view` without pulling in the full `AIBlock` stack.
+    struct Host {
+        view: ViewHandle<RequestedCommandView>,
+    }
+    impl Entity for Host {
+        type Event = ();
+    }
+    impl View for Host {
+        fn ui_name() -> &'static str {
+            "RequestedCommandViewEditModeTestHost"
+        }
+        fn render(&self, _app: &warpui::AppContext) -> Box<dyn Element> {
+            Empty::new().finish()
+        }
+    }
+    impl TypedActionView for Host {
+        type Action = ();
+    }
+
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        app.add_singleton_model(crate::notebooks::editor::keys::NotebookKeybindings::new);
+
+        // Reuse a real `TerminalView`'s already-fully-wired `BlocklistAIActionModel` and
+        // `TerminalModel` rather than reconstructing that dependency graph from scratch.
+        let terminal = add_window_with_terminal(&mut app, None);
+        let (action_model, terminal_model) = terminal.read(&app, |view, _| {
+            (view.ai_action_model().clone(), view.model.clone())
+        });
+
+        let (_window_id, host) = app.add_window(WindowStyle::NotStealFocus, move |ctx| {
+            let view = ctx.add_typed_action_view(move |ctx| {
+                let block_model: Rc<dyn AIBlockModel<View = AIBlock>> =
+                    Rc::new(FakeAIBlockModel::new_streaming(vec![]));
+                let mut view = RequestedCommandView::new(
+                    AIAgentActionId::from("test-action".to_owned()),
+                    ClientIdentifiers {
+                        conversation_id: AIConversationId::new(),
+                        client_exchange_id: AIAgentExchangeId::new(),
+                        response_stream_id: None,
+                    },
+                    RequestedActionViewType::Command,
+                    block_model,
+                    &action_model,
+                    terminal_model,
+                    AutonomySettingSpeedbump::None,
+                    MouseStateHandle::default(),
+                    EntityId::new(),
+                    ctx,
+                );
+                view.apply_streamed_update("git status", ctx);
+                view.ensure_editor(ctx);
+                view
+            });
+            Host { view }
+        });
+        let view = host.read(&app, |host, _| host.view.clone());
+
+        // Wait for the initial background parse of "git status" to complete and push colors
+        // into the editor.
+        assert_eventually!(
+            view.read(&app, |view, ctx| {
+                view.editor.as_ref().is_some_and(|editor| {
+                    !editor
+                        .as_ref(ctx)
+                        .model
+                        .as_ref(ctx)
+                        .external_highlight_colors_for_test()
+                        .is_empty()
+                })
+            }),
+            "expected initial highlight colors on the editor"
+        );
+
+        // Enter edit mode (mirrors clicking "Edit" on the permission prompt) and simulate a user
+        // edit appending " && pwd" past the original 10-character "git status" text.
+        view.update(&mut app, |view, ctx| view.open_edit_mode(ctx));
+        let editor = view.read(&app, |view, _| view.editor.clone().expect("editor exists"));
+        editor.update(&mut app, |editor, ctx| {
+            let end = editor.model.as_ref(ctx).max_character_offset(ctx);
+            editor.apply_edits(vec1![(" && pwd".to_string(), end..end)], ctx);
+        });
+
+        // The reparse triggered by the user edit should eventually produce a highlight range past
+        // the original text's length, proving it reflects the live edited buffer (e.g. `pwd`
+        // getting colored as a command) rather than staying stale at the pre-edit offsets.
+        assert_eventually!(
+            editor.read(&app, |editor, ctx| {
+                editor
+                    .model
+                    .as_ref(ctx)
+                    .external_highlight_colors_for_test()
+                    .iter()
+                    .any(|(range, _)| range.end.as_usize() > 10)
+            }),
+            "editing the permission prompt should reparse the live buffer, not just the original \
+             command_text"
+        );
+    });
+}
