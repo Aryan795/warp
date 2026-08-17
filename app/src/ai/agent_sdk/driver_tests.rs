@@ -31,7 +31,7 @@ use super::{
     AgentDriver, AgentDriverError, CLIAgentSessionStatus, IdleTimeoutSender,
     LEGACY_OZ_PARENT_LISTENER_MANAGED_EXTERNALLY_ENV, LEGACY_OZ_PARENT_STATE_ROOT_ENV,
     OZ_MESSAGE_LISTENER_MANAGED_EXTERNALLY_ENV, OZ_MESSAGE_LISTENER_STATE_ROOT_ENV,
-    PlatformErrorCode, SDKConversationOutputStatus, build_secret_env_vars,
+    PlatformErrorCode, SDKConversationOutputStatus, absolute_skill_dirs_env, build_secret_env_vars,
     idle_window_for_cli_session_status, idle_window_for_terminal_status,
     setup_failure_status_update, terminal_status_log_outcome,
 };
@@ -966,6 +966,63 @@ fn task_env_vars_propagate_message_listener_state_root_with_legacy_alias() {
         env_vars.get(&OsString::from(LEGACY_OZ_PARENT_STATE_ROOT_ENV)),
         Some(&OsString::from("/tmp/message-listener-root"))
     );
+}
+
+#[test]
+#[serial_test::serial]
+fn absolute_skill_dirs_env_makes_relative_entries_absolute() {
+    // Regression for the factory skill-resolution bug: WARP_SKILL_DIRS arrives
+    // relative to the environment working directory, so a skill snippet that
+    // reads it from the shell resolves to nothing once the agent cd's into a
+    // product repo. The driver must hand the agent an absolute value instead.
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe {
+        std::env::set_var(
+            ai::skills::WARP_SKILL_DIRS_ENV,
+            "factory-dev/frank/agents/implementation/skills,factory-dev/frank/skills",
+        )
+    };
+    let resolved = absolute_skill_dirs_env(Path::new("/workspace"));
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var(ai::skills::WARP_SKILL_DIRS_ENV) };
+
+    assert_eq!(
+        resolved,
+        Some(OsString::from(
+            "/workspace/factory-dev/frank/agents/implementation/skills,/workspace/factory-dev/frank/skills"
+        ))
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn absolute_skill_dirs_env_passes_absolute_entries_through() {
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe {
+        std::env::set_var(
+            ai::skills::WARP_SKILL_DIRS_ENV,
+            "/abs/agents/impl/skills,relative/skills",
+        )
+    };
+    let resolved = absolute_skill_dirs_env(Path::new("/workspace"));
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var(ai::skills::WARP_SKILL_DIRS_ENV) };
+
+    // Absolute entries are untouched; only the relative one is joined onto the base.
+    assert_eq!(
+        resolved,
+        Some(OsString::from(
+            "/abs/agents/impl/skills,/workspace/relative/skills"
+        ))
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn absolute_skill_dirs_env_unset_is_none() {
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var(ai::skills::WARP_SKILL_DIRS_ENV) };
+    assert_eq!(absolute_skill_dirs_env(Path::new("/workspace")), None);
 }
 
 #[test]
