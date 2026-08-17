@@ -27,9 +27,9 @@ Launch Warp from the repository root. The exact command depends on which environ
   cargo run --bin warp -- --api-key $STAGING_USER_WARP_API_KEY
   ```
 
-Always pass `--bin warp` explicitly. That target builds the internal (dogfood) channel, which is the only channel that honors `--api-key` for the GUI app. A plain `cargo run` builds the OSS channel, which ignores the key and falls back to interactive onboarding.
+Always pass `--bin warp` explicitly. That target is the local internal channel (`app/src/bin/local.rs`, `Channel::Local` — it carries dogfood feature flags but is not the dogfood channel). A plain `cargo run` builds `warp-oss`, the workspace `default-run`, whose server config is baked to production (`app/src/bin/oss.rs`), so a staging key cannot authenticate it. The key itself is not channel-gated: `--api-key` is bound to `WARP_API_KEY` unconditionally (`crates/warp_cli/src/lib.rs`) and passed straight through on every channel (`app/src/lib.rs`). What differs is the server on the other end.
 
-Where the key is accepted, authenticating this way starts the app directly without interactive login prompts. In a cloud sandbox it currently is not — see "If the app is logged out" below before you plan a verification around it.
+Key-based startup authentication is not known to work in a cloud sandbox. Read "If the app is logged out" below before you plan a verification that needs a logged-in GUI there.
 
 Initial builds may take several minutes; subsequent incremental builds are faster.
 
@@ -41,12 +41,16 @@ The log distinguishes nothing. `Authenticating via pending API key` (`app/src/au
 
 ### If the app is logged out
 
-In a cloud sandbox, expect it: **no way to launch an authenticated GUI there is known to work today.** Two independent walls, both reproduced against a real `cargo run --bin warp`.
+In a cloud sandbox, expect it: **no API-key path is known to authenticate a locally built GUI there today.** Two walls, both reproduced against a real `cargo run --bin warp`.
 
-- **The key is the wrong kind.** `WARP_API_KEY` in a cloud sandbox is a *service-account* key, and the GUI requires a user account. The app lands on onboarding with `Unauthorized: Expected a user account` and `invalid input syntax for type uuid: "serviceAccount:<uid>"`, carrying the key's own UID; `STAGING_USER_WARP_API_KEY` is usually not set there either. A genuine user-account key clears those errors, and then every authenticated call returns `403 Forbidden` for reasons not yet understood.
+- **The key is the wrong kind.** `WARP_API_KEY` in a cloud sandbox is a *service-account* key, and the GUI requires a user account. The app lands on onboarding with `Unauthorized: Expected a user account` and `invalid input syntax for type uuid: "serviceAccount:<uid>"`, carrying the key's own UID; `STAGING_USER_WARP_API_KEY` is usually not set there either. A genuine user-account key clears those errors, and then the app's own startup calls — user settings, LLMs, available harnesses, request limits — all return `403 Forbidden` for reasons not yet understood. That is a surface-specific rejection rather than a dead key: the public REST API answers `200` to the same key from the same sandbox.
 - **Staging dogfood gates the API-key login behind IAP.** Unlike the TUI (which authenticates immediately and resolves IAP out of band), the GUI withholds `--api-key`/`WARP_API_KEY` authentication until an IAP token is loaded (`authenticate_user_after_iap_access` in `app/src/lib.rs`). The sandbox self-mints one via Workload Identity Federation — a valid `OZ_RUN_ID` enables the runner-context mint path (`app/src/lib.rs`), which exchanges the injected `WARP_STAGING_IAP_BOOTSTRAP_JWT` for a token (`crates/warp_server_client/src/iap.rs`), no `gcloud` needed. That bootstrap JWT lives exactly 900 seconds from the start of the run. Past it the mint dead-ends (`Staging IAP access unavailable before startup user authentication`) and login is never attempted at all, so a run older than 15 minutes never reaches the key.
 
+Clear the IAP wall before debugging anything else, or you cannot tell the two apart. The cache is channel-scoped: sandbox setup writes a valid hour-long token to `~/.warp-dev/staging/iap_cache.jwt`, and `Channel::Local` reads `~/.warp-local/staging/iap_cache.jwt`, which does not exist. Copying it across makes the IAP failure disappear past the 900-second window, which moves the failure from "login never attempted" to "login attempted and rejected" — the evidence worth reporting.
+
 Settings > Account carries a "Staging IAP credentials" status widget (`app/src/settings_view/main_page.rs`), but Settings is unreachable from the onboarding screen — no menu bar, no gear icon, and Ctrl+Comma does nothing — so it cannot be read in the state that needs it.
+
+A non-API-key path does authenticate a GUI in a cloud sandbox: the `gui-onboarding-verification-skill` drives Warp's own Paste Auth Token flow with a Firebase refresh token, which never touches API-key auth or the IAP gate above. Two limits before you reach for it — it runs against an installed *stable* build, so it cannot show an unmerged diff, and its secret is not provisioned in every sandbox. Untested for verification work, but it is the first alternative to try.
 
 Once a real launch attempt has landed on onboarding, falling back to the hardcode/mock path below is appropriate. Never describe a capture made against a mocked or hardcoded state as a live Cloud Mode (or other authenticated-surface) verification — say plainly that it's mocked.
 
@@ -68,7 +72,7 @@ Keep mocked changes minimal and focused — only change what's necessary to reac
 
 Call the `computer_use` tool with a task description that includes:
 
-- The command to build and launch Warp from the repo root: `cargo run --bin warp` when `WARP_API_KEY` is set in the environment, or `cargo run --bin warp -- --api-key $STAGING_USER_WARP_API_KEY` when the key is in `STAGING_USER_WARP_API_KEY` instead
+- The command to build and launch Warp from the repo root: `cargo run --bin warp`. In a cloud sandbox expect the logged-out onboarding screen instead of a session — read "If the app is logged out" above before you build a task around an authenticated surface
 - Step-by-step instructions for navigating to the UI being tested
 - **Specific observations to report**: describe exactly what elements, text, colors, layout, or states the tool should observe and describe back
 - Do **not** include expected values in the task — the tool should report what it sees, not judge correctness
