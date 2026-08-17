@@ -24,15 +24,17 @@ pub(super) fn build_mcp_servers_from_specs(
 
     for spec in specs {
         match spec {
-            MCPSpec::Uuid(uuid) => {
-                // TODO: Look up and use the real MCP server name from MCP managers instead of using the UUID.
-                let name = uuid.to_string();
+            MCPSpec::Uuid { uuid, name } => {
+                let uuid = uuid.to_string();
+                // TODO: When the spec carries no name, look up the real MCP server name
+                // from MCP managers instead of falling back to the UUID.
+                let name = name.clone().unwrap_or_else(|| uuid.clone());
                 insert_unique(
                     &mut merged,
-                    name.clone(),
+                    name,
                     Value::Object({
                         let mut obj = Map::new();
-                        obj.insert("warp_id".to_string(), Value::String(name));
+                        obj.insert("warp_id".to_string(), Value::String(uuid));
                         obj
                     }),
                 )?;
