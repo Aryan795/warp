@@ -1020,6 +1020,11 @@ impl RequestedCommandView {
         }
         self.is_header_expanded = value;
 
+        // Expanding and collapsing swaps which element hosts the command, and the outgoing host
+        // is dropped without getting a chance to close its own tooltip - so close it here, or a
+        // card opened on the collapsed header outlives the header it was describing.
+        self.hide_command_x_ray(ctx);
+
         ctx.emit(RequestedCommandViewEvent::UpdatedExpansionState {
             is_expanded: self.is_header_expanded,
         });
@@ -1982,6 +1987,17 @@ impl View for RequestedCommandView {
             && self.action_type.is_mcp_tool()
             && !self.command_text.is_empty();
 
+        // Whether the collapsed header is currently hosting command x-ray. Its cached anchor
+        // outlives the element, so the tooltip below is gated on the host actually being mounted;
+        // otherwise a card could be left floating over whatever replaced the header.
+        let is_title_host_mounted = {
+            let terminal_model = self.terminal_model.lock();
+            let requested_command_block = terminal_model
+                .block_list()
+                .block_for_ai_action_id(&self.action_id);
+            self.header_title_is_hoverable_command(action_status.as_ref(), requested_command_block)
+        };
+
         let has_citations_footer =
             !self.derived_from_citations.is_empty() && !self.block_model.status(app).is_streaming();
         let header_element = self.render_header(
@@ -2372,7 +2388,10 @@ impl View for RequestedCommandView {
         // When the command is hovered in the collapsed header rather than in the expanded body,
         // the tooltip is anchored off the position the header host cached for the described
         // token's first character.
-        if !should_render_editor && let Some(description) = &self.command_x_ray_description {
+        if !should_render_editor
+            && is_title_host_mounted
+            && let Some(description) = &self.command_x_ray_description
+        {
             root_stack.add_positioned_overlay_child(
                 render_command_token_description(description, appearance),
                 OffsetPositioning::offset_from_save_position_element(
