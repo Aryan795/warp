@@ -48,7 +48,6 @@ use crate::auth::auth_manager::{AuthManager, LoginGatedFeature};
 use crate::auth::auth_state::AuthState;
 use crate::auth::auth_view_modal::AuthViewVariant;
 use crate::auth::{AuthStateProvider, UserUid};
-use crate::channel::ChannelState;
 use crate::cloud_object::model::persistence::CloudModel;
 use crate::cloud_object::{CloudObjectEventEntrypoint, Space};
 use crate::drive::cloud_action_confirmation_dialog::{
@@ -78,7 +77,7 @@ use crate::workspaces::team::{DiscoverableTeam, MembershipRole, Team, TeamDelete
 use crate::workspaces::update_manager::{TeamUpdateManager, TeamUpdateManagerEvent};
 use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
 use crate::workspaces::workspace::{
-    BillingMetadata, CustomerType, DelinquencyStatus, WorkspaceSizePolicy,
+    BillingMetadata, CustomerType, DelinquencyStatus, Workspace, WorkspaceSizePolicy,
 };
 
 const TEAM_MEMBERS_HEADER_POSITION_ID: &str = "team_settings:team_members_header";
@@ -108,7 +107,6 @@ const SUBSECTION_HEADER_FONT_SIZE: f32 = 18.;
 const SUBSUBSECTION_HEADER_FONT_SIZE: f32 = 14.;
 const OWNER_STATE_CHIP_ACCENT_OPACITY: u8 = 30;
 
-const INVITE_LINK_PREFIX: &str = "/team/";
 const INVALID_DOMAINS_INSTRUCTIONS: &str =
     "Some of the provided domains are invalid, or have already been added.";
 
@@ -238,8 +236,8 @@ pub enum TeamsPageAction {
     OpenAdminPanel {
         team_uid: ServerId,
     },
-    /// Opens the web admin panel for the workspace, the only surface that can create a
-    /// team inside an existing workspace.
+    /// Opens the workspace-level admin panel on the web, where a native workspace's teams
+    /// are administered. It is the only surface that can create a team inside a workspace.
     OpenWorkspaceAdminPanel,
     ContactSupport,
     ContactSales,
@@ -310,8 +308,7 @@ impl From<&TeamsPageAction> for LoginGatedFeature {
             SendEmailInvites { .. } => "Send Email Invites",
             GenerateUpgradeLink { .. } => "Generate Upgrade Link",
             GenerateStripeBillingPortalLink { .. } => "Generate Stripe Billing Portal Link",
-            OpenAdminPanel { .. } => "Open Admin Panel",
-            OpenWorkspaceAdminPanel => "Open Workspace Admin Panel",
+            OpenAdminPanel { .. } | OpenWorkspaceAdminPanel => "Open Admin Panel",
             ContactSupport => "Contact Support",
             ContactSales => "Contact Sales",
             ToggleTeamDiscoverability { .. } | ToggleTeamDiscoverabilityBeforeCreation => {
@@ -935,13 +932,17 @@ impl TeamsPageView {
     }
 
     fn open_member_actions_menu_for_item(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
-        let Some(team) = self.user_workspaces.as_ref(ctx).team_for_view(ctx) else {
+        let user_workspaces = self.user_workspaces.as_ref(ctx);
+        let Some(team) = user_workspaces.team_for_view(ctx) else {
+            return;
+        };
+        let Some(workspace) = user_workspaces.current_workspace() else {
             return;
         };
         let Some(current_user_email) = self.auth_state.user_email() else {
             return;
         };
-        let items = self.team_to_item_list(team, &current_user_email);
+        let items = Self::team_to_item_list(team, &current_user_email, workspace);
         let items_sorted = items.iter().sorted().collect_vec();
 
         let Some(item) = items_sorted.get(index) else {
@@ -1776,22 +1777,29 @@ impl TeamsPageView {
     fn focus_on_next_input(&mut self, ctx: &mut ViewContext<Self>) {
         let workspaces: &UserWorkspaces = self.user_workspaces.as_ref(ctx);
 
-        if workspaces.team_for_view(ctx).is_some() {
-            if workspaces.is_invite_link_enabled() {
+        match workspaces.team_for_view(ctx) {
+            Some(team) if team.invite_link.is_some() => {
                 ctx.focus(&self.approve_domains_block_editor);
-            } else {
-                ctx.focus(&self.email_invites_block_editor);
             }
-        } else {
-            ctx.focus(&self.create_team_editor);
+            Some(_) => ctx.focus(&self.email_invites_block_editor),
+            None => ctx.focus(&self.create_team_editor),
         }
         ctx.notify();
     }
 
-    fn team_to_item_list(&self, team: &Team, current_user_email: &str) -> Vec<Item> {
+    fn team_to_item_list(
+        team: &Team,
+        current_user_email: &str,
+        workspace: &Workspace,
+    ) -> Vec<Item> {
         let mut combined = Vec::new();
         let current_user_has_admin_permissions = team.has_admin_permissions(current_user_email);
         let current_user_has_owner_permissions = team.has_owner_permissions(current_user_email);
+        // Admins of the team's native workspace can manage team membership roles even without
+        // an explicit team-admin role. Ownership transfer stays gated on team-owner permissions
+        // only, and is unaffected by this.
+        let current_user_can_manage_team_members = current_user_has_admin_permissions
+            || workspace.is_native_workspaces_admin(current_user_email);
 
         // pending email invites
         team.pending_email_invites.iter().for_each(|email_invite| {
@@ -1852,7 +1860,7 @@ impl TeamsPageView {
 
                 // Admins can promote and demote other admins
                 if team.is_multi_admin_enabled()
-                    && current_user_has_admin_permissions
+                    && current_user_can_manage_team_members
                     && !team_member_has_owner_permissions
                 {
                     if team_member_has_admin_permissions {
@@ -1879,7 +1887,7 @@ impl TeamsPageView {
                 }
 
                 // Admins can remove non-owner members
-                if current_user_has_admin_permissions && !team_member_has_owner_permissions {
+                if current_user_can_manage_team_members && !team_member_has_owner_permissions {
                     actions.push(ItemAction {
                         icon: Icon::X,
                         label: "Remove from team".to_string(),
@@ -2292,12 +2300,13 @@ impl TeamsWidget {
     fn render_team_management_page(
         &self,
         team_metadata: &Team,
-        cloud_model: &CloudModel,
-        ai_request_usage_model: &AIRequestUsageModel,
+        workspace: &Workspace,
         view: &TeamsPageView,
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
+        let cloud_model = view.cloud_model.as_ref(app);
+        let ai_request_usage_model = view.ai_request_usage_model.as_ref(app);
         let current_user_email = view.auth_state.user_email().unwrap_or_default();
         let has_admin_permissions = team_metadata.has_admin_permissions(&current_user_email);
         let is_owner = team_metadata.has_owner_permissions(&current_user_email);
@@ -2314,10 +2323,13 @@ impl TeamsWidget {
             .set_border_color(appearance.theme().foreground().with_opacity(20).into())
             .set_padding(Coords::uniform(0.).top(4.).right(5.));
 
+        let use_workspace_admin_panel = workspace.is_native_workspaces_admin(&current_user_email);
+
         // 1) Team name header
         main_content.add_child(self.render_header(
             has_admin_permissions,
             team_metadata,
+            use_workspace_admin_panel,
             view,
             appearance,
         ));
@@ -2375,6 +2387,7 @@ impl TeamsWidget {
         // 5) Team members
         main_content.add_child(self.render_team_members_section(
             team_metadata,
+            workspace,
             &current_user_email,
             view,
             appearance,
@@ -2437,6 +2450,7 @@ impl TeamsWidget {
         &self,
         has_admin_permissions: bool,
         team: &Team,
+        use_workspace_admin_panel: bool,
         view: &TeamsPageView,
         appearance: &Appearance,
     ) -> Box<dyn Element> {
@@ -2503,7 +2517,11 @@ impl TeamsWidget {
 
         // Upgrade / billing links
         if has_admin_permissions {
-            team_name_header.add_child(self.render_billing_links(team, appearance));
+            team_name_header.add_child(self.render_billing_links(
+                team,
+                use_workspace_admin_panel,
+                appearance,
+            ));
         }
 
         team_name_header.finish()
@@ -2568,6 +2586,7 @@ impl TeamsWidget {
     fn render_admin_panel_button(
         &self,
         team_uid: ServerId,
+        use_workspace_admin_panel: bool,
         appearance: &Appearance,
     ) -> Box<dyn Element> {
         appearance
@@ -2589,12 +2608,21 @@ impl TeamsWidget {
             )
             .build()
             .on_click(move |ctx, _, _| {
-                ctx.dispatch_typed_action(TeamsPageAction::OpenAdminPanel { team_uid });
+                if use_workspace_admin_panel {
+                    ctx.dispatch_typed_action(TeamsPageAction::OpenWorkspaceAdminPanel);
+                } else {
+                    ctx.dispatch_typed_action(TeamsPageAction::OpenAdminPanel { team_uid });
+                }
             })
             .finish()
     }
 
-    fn render_billing_links(&self, team: &Team, appearance: &Appearance) -> Box<dyn Element> {
+    fn render_billing_links(
+        &self,
+        team: &Team,
+        use_workspace_admin_panel: bool,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
         let mut billing_links = Flex::row()
             .with_main_axis_alignment(MainAxisAlignment::End)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
@@ -2642,9 +2670,13 @@ impl TeamsWidget {
         }
 
         billing_links.add_child(
-            Container::new(self.render_admin_panel_button(team_uid, appearance))
-                .with_margin_left(12.)
-                .finish(),
+            Container::new(self.render_admin_panel_button(
+                team_uid,
+                use_workspace_admin_panel,
+                appearance,
+            ))
+            .with_margin_left(12.)
+            .finish(),
         );
 
         billing_links.finish()
@@ -2731,10 +2763,8 @@ impl TeamsWidget {
     ) -> Box<dyn Element> {
         let mut invitation_section = Flex::column();
 
-        // Invite-link enablement and discoverability are workspace-level settings,
-        // read from the current workspace rather than the Team struct.
         let user_workspaces = UserWorkspaces::as_ref(app);
-        let is_invite_link_enabled = user_workspaces.is_invite_link_enabled();
+        let is_invite_link_enabled = team_metadata.invite_link.is_some();
         let is_discoverable = user_workspaces.is_discoverable();
 
         // "team is full" or "billing issue" or some other alert thats restricting you from adding team members
@@ -2994,6 +3024,7 @@ impl TeamsWidget {
     fn render_team_members_section(
         &self,
         team: &Team,
+        workspace: &Workspace,
         user_email: &str,
         view: &TeamsPageView,
         appearance: &Appearance,
@@ -3018,7 +3049,7 @@ impl TeamsWidget {
 
         // 2) List of team members
         section.add_child(self.render_item_list(
-            view.team_to_item_list(team, user_email),
+            TeamsPageView::team_to_item_list(team, user_email, workspace),
             view.team_members_mouse_state_handles.clone(),
             view,
             appearance,
@@ -3767,16 +3798,8 @@ impl TeamsWidget {
     ) -> Box<dyn Element> {
         let mut section = Flex::row().with_cross_axis_alignment(CrossAxisAlignment::Center);
 
-        let (link_text, button_enabled) = match &team_metadata.invite_code {
-            Some(invite_code) => {
-                let link = format!(
-                    "{}{}{}",
-                    ChannelState::server_root_url(),
-                    INVITE_LINK_PREFIX,
-                    invite_code.code
-                );
-                (link, true)
-            }
+        let (link_text, button_enabled) = match &team_metadata.invite_link {
+            Some(invite_link) => (invite_link.clone(), true),
             None => ("Failed to load invite link.".into(), false),
         };
         let theme = appearance.theme();
@@ -4567,24 +4590,22 @@ impl SettingsWidget for TeamsWidget {
         // related to team administration when offline.
         let content = if NetworkStatus::as_ref(app).is_online() {
             let teams = view.user_workspaces.as_ref(app);
-            let cloud_model = view.cloud_model.as_ref(app);
-            let ai_request_usage_model = view.ai_request_usage_model.as_ref(app);
 
-            match teams.team_for_view_handle(&view.self_handle, app) {
-                Some(team) => self.render_team_management_page(
-                    team,
-                    cloud_model,
-                    ai_request_usage_model,
-                    view,
-                    appearance,
-                    app,
-                ),
+            // A resolved team always lives in the current workspace, so both are
+            // present or one of the teamless pages is shown.
+            match teams
+                .team_for_view_handle(&view.self_handle, app)
+                .zip(teams.current_workspace())
+            {
+                Some((team, workspace)) => {
+                    self.render_team_management_page(team, workspace, view, appearance, app)
+                }
                 None => match teams.current_native_workspace() {
                     Some(workspace) => {
                         let role = if view
                             .auth_state
                             .user_email()
-                            .is_some_and(|email| workspace.is_workspace_admin(&email))
+                            .is_some_and(|email| workspace.is_native_workspaces_admin(&email))
                         {
                             WorkspaceRole::Admin
                         } else {
@@ -4722,3 +4743,7 @@ pub fn test_owner_state_chip_text_contrasts_with_accent_overlay() {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "teams_page_tests.rs"]
+mod teams_page_tests;
