@@ -170,9 +170,9 @@ fn a_trailing_newline_leaves_the_whole_first_line_describable() {
 fn describable_prefix_counts_characters_not_bytes() {
     let command = "echo 🚀 done\nsecond line";
 
-    // "echo 🚀 done" is 12 characters and 15 bytes; the prefix must be measured in characters,
+    // "echo 🚀 done" is 11 characters and 14 bytes; the prefix must be measured in characters,
     // because that is what the hit test reports.
-    assert_eq!(describable_title_chars(command), 12);
+    assert_eq!(describable_title_chars(command), 11);
 }
 
 #[test]
