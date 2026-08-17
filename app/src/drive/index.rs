@@ -176,6 +176,16 @@ const OFFLINE_BANNER_TEXT: &str = "You are offline. Some files will be read only
 
 pub const DRIVE_INDEX_VIEW_POSITION_ID: &str = "drive_index_view_id";
 
+/// Saved-position ids for the parts of the sidebar whose presence distinguishes what a
+/// teamless user is offered. Saved for a single frame so integration tests can assert
+/// against what the current frame actually painted, rather than re-deriving the conditions
+/// in [`DriveIndex::initialize_section_states`] and risking drift from them.
+pub const DRIVE_CREATE_A_TEAM_SECTION_POSITION_ID: &str = "warp_drive:create_a_team_section";
+pub const DRIVE_JOIN_A_TEAM_SECTION_POSITION_ID: &str = "warp_drive:join_a_team_section";
+/// The "Or" that leads from the join button into the create-team button below it, and so
+/// has nothing to lead into once create-team is withheld.
+pub const DRIVE_JOIN_A_TEAM_OR_POSITION_ID: &str = "warp_drive:join_a_team_or";
+
 // Sets the speed of the autoscroll that occurs when you drag an item near the Warp Drive border.
 pub const AUTOSCROLL_SPEED_MULTIPLIER: f32 = 10.;
 // Sets the distance from a border at which scroll events start to occur.
@@ -2200,12 +2210,17 @@ impl DriveIndex {
                 .finish()
         };
 
-        Container::new(create_button)
-            .with_margin_top(16.)
-            .with_margin_left(INDEX_CONTENT_MARGIN_LEFT)
-            .with_margin_right(INDEX_CONTENT_MARGIN_LEFT)
-            .with_margin_bottom(20.)
-            .finish()
+        SavePosition::new(
+            Container::new(create_button)
+                .with_margin_top(16.)
+                .with_margin_left(INDEX_CONTENT_MARGIN_LEFT)
+                .with_margin_right(INDEX_CONTENT_MARGIN_LEFT)
+                .with_margin_bottom(20.)
+                .finish(),
+            DRIVE_CREATE_A_TEAM_SECTION_POSITION_ID,
+        )
+        .for_single_frame()
+        .finish()
     }
 
     fn render_join_discoverable_team_section(
@@ -2265,19 +2280,29 @@ impl DriveIndex {
             .finish();
 
             column.add_child(
-                Flex::row()
-                    .with_main_axis_size(MainAxisSize::Max)
-                    .with_main_axis_alignment(MainAxisAlignment::Center)
-                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                    .with_child(or_text)
-                    .finish(),
+                SavePosition::new(
+                    Flex::row()
+                        .with_main_axis_size(MainAxisSize::Max)
+                        .with_main_axis_alignment(MainAxisAlignment::Center)
+                        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                        .with_child(or_text)
+                        .finish(),
+                    DRIVE_JOIN_A_TEAM_OR_POSITION_ID,
+                )
+                .for_single_frame()
+                .finish(),
             );
         }
 
-        Container::new(column.finish())
-            .with_margin_left(INDEX_CONTENT_MARGIN_LEFT)
-            .with_margin_right(INDEX_CONTENT_MARGIN_LEFT)
-            .finish()
+        SavePosition::new(
+            Container::new(column.finish())
+                .with_margin_left(INDEX_CONTENT_MARGIN_LEFT)
+                .with_margin_right(INDEX_CONTENT_MARGIN_LEFT)
+                .finish(),
+            DRIVE_JOIN_A_TEAM_SECTION_POSITION_ID,
+        )
+        .for_single_frame()
+        .finish()
     }
 
     /// Renders the given space header as well as all the included items

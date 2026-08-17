@@ -433,6 +433,10 @@ fn register_tests() -> HashMap<&'static str, BoxedBuilderFn> {
     register_test!(test_settings_teams_page_workspace_admin_creates_a_team_and_lands_on_it);
     register_test!(test_settings_teams_page_captures);
 
+    // Warp Drive sidebar, for a user with no team of their own
+    register_test!(test_warp_drive_teams_sections_for_a_teamless_user);
+    register_test!(test_warp_drive_teams_sections_captures);
+
     register_test!(test_middle_click_paste);
 
     register_test!(test_copy_selection_within_ai_block);

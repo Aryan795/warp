@@ -8,7 +8,7 @@
 
 use warpui::integration::TestStep;
 
-use super::step::assert_element_painted;
+use crate::integration_testing::step::assert_element_painted;
 use crate::settings_view::{
     CREATE_TEAM_FORM_POSITION_ID, JOIN_A_TEAM_LIST_POSITION_ID,
     WORKSPACE_ADMIN_PANEL_BUTTON_POSITION_ID, WORKSPACE_CREATE_TEAM_FORM_POSITION_ID,

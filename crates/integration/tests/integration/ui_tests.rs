@@ -295,6 +295,11 @@ integration_tests! {
     #[ignore = "Manual test: requires real display for frame capture"]
     test_settings_teams_page_captures,
 
+    // Warp Drive sidebar, for a user with no team of their own.
+    test_warp_drive_teams_sections_for_a_teamless_user,
+    #[ignore = "Manual test: requires real display for frame capture"]
+    test_warp_drive_teams_sections_captures,
+
     test_copy_selection_within_ai_block,
     #[ignore = "Affected by agent_view feature flag UI changes"]
     test_selection_first_to_last_through_ai_simple,

@@ -38,6 +38,7 @@ mod subshell;
 mod sync_inputs;
 mod typeahead;
 mod video_recording;
+mod warp_drive_teams;
 mod websockets;
 mod workflows;
 mod workspace;
@@ -190,6 +191,7 @@ use warp::workspace::{
     NEW_SESSION_MENU_BUTTON_POSITION_ID, NEW_TAB_BUTTON_POSITION_ID, Workspace, WorkspaceAction,
 };
 use warp::{AgentModeEntrypoint, cmd_or_ctrl_shift};
+pub use warp_drive_teams::*;
 use warpui_core::event::KeyState;
 use warpui_core::integration::{AssertionOutcome, StepData, TestStep};
 use warpui_core::keymap::{Keystroke, PerPlatformKeystroke, Trigger};
