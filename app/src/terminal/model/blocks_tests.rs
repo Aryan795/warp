@@ -2233,6 +2233,110 @@ pub fn test_emits_after_block_completed_event() {
     ));
 }
 
+// Hidden in-band generator command blocks are removed once their completion event has
+// fired, so they don't accumulate in the block list over a long session.
+#[test]
+fn test_in_band_command_blocks_are_not_retained_when_hidden() {
+    let mut block_list =
+        new_bootstrapped_block_list(None, None, ChannelEventListener::new_for_test());
+    assert!(!block_list.show_in_band_command_blocks);
+
+    let baseline_block_count = block_list.blocks().len();
+
+    for _ in 0..50 {
+        block_list.start_active_block_for_in_band_command();
+        block_list.preexec(PreexecValue {
+            command: "warp_run_generator_command 1234 foo".to_owned(),
+            session_id: None,
+        });
+        command_finished_and_precmd(&mut block_list);
+    }
+
+    assert_eq!(block_list.blocks().len(), baseline_block_count);
+    assert_eq!(
+        block_list
+            .blocks()
+            .iter()
+            .filter(|block| block.is_for_in_band_command)
+            .count(),
+        0
+    );
+    assert_eq!(
+        block_list.block_id_to_block_index.len(),
+        block_list.blocks().len()
+    );
+}
+
+// In-band command blocks remain resident when the user has opted into showing them.
+#[test]
+fn test_in_band_command_blocks_are_retained_when_shown() {
+    let mut block_list =
+        new_bootstrapped_block_list(None, None, ChannelEventListener::new_for_test());
+    block_list.set_show_in_band_command_blocks(true);
+
+    let baseline_block_count = block_list.blocks().len();
+
+    block_list.start_active_block_for_in_band_command();
+    block_list.preexec(PreexecValue {
+        command: "warp_run_generator_command 1234 foo".to_owned(),
+        session_id: None,
+    });
+    command_finished_and_precmd(&mut block_list);
+
+    // The baseline already counted an active block, so the retained in-band block adds one.
+    assert_eq!(block_list.blocks().len(), baseline_block_count + 1);
+    let in_band_blocks: Vec<_> = block_list
+        .blocks()
+        .iter()
+        .filter(|block| block.is_for_in_band_command)
+        .collect();
+    assert_eq!(in_band_blocks.len(), 1);
+    assert!(!in_band_blocks[0].should_hide_block(&TranscriptScope::Terminal));
+}
+
+// Removing the hidden in-band block shifts the active block's index down by one, so the
+// `BlockMetadataReceived` emitted for the active block must carry its post-removal index.
+#[test]
+fn test_active_block_metadata_index_valid_after_in_band_removal() {
+    let (events_tx, events_rx) = async_channel::unbounded();
+    let mut block_list = new_bootstrapped_block_list(
+        None,
+        None,
+        ChannelEventListener::builder_for_test()
+            .with_terminal_events_tx(events_tx)
+            .build(),
+    );
+    while events_rx.try_recv().is_ok() {}
+
+    block_list.start_active_block_for_in_band_command();
+    block_list.preexec(PreexecValue {
+        command: "warp_run_generator_command 1234 foo".to_owned(),
+        session_id: None,
+    });
+    command_finished_and_precmd(&mut block_list);
+
+    let active_block_index = block_list.active_block_index();
+    let block_count = block_list.blocks().len();
+
+    let mut saw_active_metadata = false;
+    while let Ok(event) = events_rx.try_recv() {
+        if let Event::BlockMetadataReceived(event) = event {
+            assert!(
+                event.block_index.0 < block_count,
+                "BlockMetadataReceived carried out-of-bounds block_index {:?} (len {block_count})",
+                event.block_index
+            );
+            if event.block_index == active_block_index {
+                saw_active_metadata = true;
+            }
+        }
+    }
+    assert!(
+        saw_active_metadata,
+        "expected BlockMetadataReceived for the active block at {active_block_index:?}"
+    );
+}
+
 #[test]
 fn test_background_blocks_finished() {
     let (events_tx, events_rx) = async_channel::unbounded();
@@ -2295,9 +2399,10 @@ fn test_background_blocks_finished() {
     // There's now a completion event for the first user block, one for the
     // background block, and one for the second user block. Likewise, the block
     // list now contains the bootstrap blocks, the first user block, the background
-    // block, the in-band generator block, the second user block, and the active block.
+    // block, the second user block, and the active block. The hidden in-band generator
+    // block was removed from the list once its completion event fired.
     assert_eq!(block_completed_events.len(), 3);
-    assert_eq!(block_list.blocks().len(), 8);
+    assert_eq!(block_list.blocks().len(), 7);
 
     match &block_completed_events[1].block_type {
         BlockType::Background(block) => {

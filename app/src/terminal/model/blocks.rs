@@ -3349,6 +3349,39 @@ impl BlockList {
             self.early_output.precmd();
         }
 
+        // Depending on whether or not there's a background block active, the previous
+        // completed block is at blocks.len - 2 or blocks.len - 3.
+        let previous_block_index = [2usize, 3usize]
+            .into_iter()
+            .flat_map(|offset| self.blocks.len().checked_sub(offset))
+            .find(|&index| !self.blocks[index].is_background());
+
+        // Hidden in-band command blocks are never rendered, and their output reaches the
+        // generator that requested it through a DCS payload rather than being read back from
+        // the block, so retaining one past its completion event only grows memory without
+        // bound over a long session. Remove it before precmd is applied to the active block
+        // below: `apply_precmd` emits `BlockMetadataReceived` carrying the active block's
+        // index, and removing an earlier block shifts that index down by one.
+        let in_band_block_to_remove = previous_block_index.filter(|&index| {
+            !self.show_in_band_command_blocks && self.blocks[index].is_for_in_band_command
+        });
+
+        if self.skip_next_after_block_completed_event {
+            self.skip_next_after_block_completed_event = false;
+        } else if let Some(previous_block_index) = previous_block_index {
+            self.send_after_block_completed_event(
+                &self.blocks[previous_block_index],
+                block_finished_to_precmd_delay,
+            );
+        } else {
+            self.event_proxy
+                .send_terminal_event(TerminalEvent::BootstrapPrecmdDone);
+        }
+
+        if let Some(index) = in_band_block_to_remove {
+            self.remove_block_at_index(BlockIndex(index));
+        }
+
         // If this is the Precmd following an in-band command, the payload is not populated. If the payload
         // is not populated, use the last populated Precmd payload to initialize the new active block.
         //
@@ -3363,22 +3396,6 @@ impl BlockList {
         } else {
             self.active_block_mut().apply_precmd(data.clone());
             self.last_populated_precmd_payload = Some(data);
-        }
-
-        // Depending on whether or not there's a background block active, the previous
-        // completed block is at blocks.len - 2 or blocks.len - 3.
-        let previous_block = [2usize, 3usize]
-            .into_iter()
-            .flat_map(|offset| self.blocks.len().checked_sub(offset))
-            .map(|idx| &self.blocks[idx])
-            .find(|block| !block.is_background());
-        if self.skip_next_after_block_completed_event {
-            self.skip_next_after_block_completed_event = false;
-        } else if let Some(previous_block) = previous_block {
-            self.send_after_block_completed_event(previous_block, block_finished_to_precmd_delay);
-        } else {
-            self.event_proxy
-                .send_terminal_event(TerminalEvent::BootstrapPrecmdDone);
         }
     }
 
