@@ -3709,6 +3709,7 @@ impl TeamsWidget {
                                     .into(),
                                 appearance.ui_font_size() - 1.,
                                 Weight::Normal,
+                                item.is_disabled,
                             ),
                         );
                     }
@@ -3729,6 +3730,7 @@ impl TeamsWidget {
                                     .into(),
                                 appearance.ui_font_size() - 1.,
                                 Weight::Normal,
+                                item.is_disabled,
                             ),
                         );
                     }

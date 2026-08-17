@@ -1817,6 +1817,7 @@ fn test_remove_user_from_team_success_emits_success_event_and_refreshes_members(
         uid: user_uid,
         email: "member@example.com".to_string(),
         role: MembershipRole::User,
+        is_disabled: false,
     });
     let team_uid = team.uid;
     let workspace = workspace_for_test(&team);
