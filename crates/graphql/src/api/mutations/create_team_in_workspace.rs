@@ -2,6 +2,7 @@ use crate::error::UserFacingError;
 use crate::request_context::RequestContext;
 use crate::response_context::ResponseContext;
 use crate::schema;
+use crate::workspace::MembershipRole;
 
 /*
 mutation CreateTeamInWorkspace($input: CreateTeamInWorkspaceInput!, $request_context: RequestContext!) {
@@ -36,6 +37,22 @@ pub struct CreateTeamInWorkspaceVariables {
 pub struct CreateTeamInWorkspaceInput {
     pub workspace_uid: cynic::Id,
     pub name: String,
+    pub visibility: TeamVisibility,
+    pub color: Option<String>,
+    pub members: Vec<CreateTeamInWorkspaceMemberInput>,
+}
+
+#[derive(cynic::Enum, Clone, Copy, Debug)]
+pub enum TeamVisibility {
+    Open,
+    Private,
+    Hidden,
+}
+
+#[derive(cynic::InputObject, Debug)]
+pub struct CreateTeamInWorkspaceMemberInput {
+    pub user_uid: cynic::Id,
+    pub role: MembershipRole,
 }
 
 #[derive(cynic::QueryFragment, Debug)]

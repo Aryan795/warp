@@ -12,7 +12,7 @@ use warp_graphql::mutations::create_team::{
 };
 use warp_graphql::mutations::create_team_in_workspace::{
     CreateTeamInWorkspace, CreateTeamInWorkspaceInput, CreateTeamInWorkspaceResult,
-    CreateTeamInWorkspaceVariables,
+    CreateTeamInWorkspaceVariables, TeamVisibility,
 };
 use warp_graphql::mutations::delete_invite_link_domain_restriction::{
     DeleteInviteLinkDomainRestriction, DeleteInviteLinkDomainRestrictionInput,
@@ -332,6 +332,9 @@ impl TeamClient for ServerApi {
             input: CreateTeamInWorkspaceInput {
                 workspace_uid: cynic::Id::new(String::from(workspace_uid)),
                 name,
+                visibility: TeamVisibility::Open,
+                color: None,
+                members: Vec::new(),
             },
             request_context: get_request_context(),
         };
