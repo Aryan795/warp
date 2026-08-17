@@ -70,6 +70,7 @@ use crate::render::model::debug::Describe;
 pub mod bounds;
 mod char_cell_display;
 pub(crate) mod debug;
+pub mod diagnostics;
 mod location;
 mod offset_map;
 mod positioned;
@@ -2464,6 +2465,8 @@ impl RenderState {
         let (layout_tx, layout_rx) = async_channel::unbounded();
         ctx.spawn_stream_local(layout_rx, Self::handle_layout_action, |_, _| {});
 
+        diagnostics::register(ctx.handle());
+
         Self::new_internal(
             ctx.model_id(),
             element_tx,
@@ -2504,6 +2507,8 @@ impl RenderState {
 
         let (layout_tx, layout_rx) = async_channel::unbounded();
         ctx.spawn_stream_local(layout_rx, Self::handle_layout_action, |_, _| {});
+
+        diagnostics::register(ctx.handle());
 
         // In CharCell mode the SumTree<BlockItem> is never queried for layout, so
         // we create an empty tree rather than the usual style-dependent trailing newline.
@@ -2749,6 +2754,12 @@ impl RenderState {
     #[cfg(any(test, feature = "test-util"))]
     pub fn blocks(&self) -> usize {
         self.content().block_items().count()
+    }
+
+    /// The number of items in the content tree, read from the tree's own summary rather than by
+    /// walking it. Always zero in [`LayoutMode::CharCell`], which never populates the tree.
+    pub fn content_item_count(&self) -> usize {
+        self.content.borrow().summary().item_count
     }
 
     pub fn markdown_table_count(&self) -> usize {
