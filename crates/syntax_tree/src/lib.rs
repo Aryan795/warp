@@ -111,6 +111,13 @@ impl SyntaxTreeState {
         });
     }
 
+    /// Clears any configured language, so the editor stops highlighting (e.g. when a caller
+    /// wants to turn tree-sitter highlighting off at runtime rather than only ever setting it).
+    pub fn clear_language(&mut self) {
+        self.language_queries = None;
+        *self.highlight_cache.borrow_mut() = None;
+    }
+
     pub fn has_supported_highlighting(&self) -> bool {
         self.language_queries.is_some()
     }
@@ -397,4 +404,32 @@ fn point_to_syntax_point(point: Point) -> arborium::tree_sitter::Point {
         row: point.row.saturating_sub(1) as usize,
         column: point.column as usize,
     }
+}
+
+/// Parses `text` from scratch with `language`'s tree-sitter grammar and returns its highlighted
+/// character ranges. For callers with raw text that has no backing editor `Buffer` to associate
+/// a parsed tree with — e.g. a plain command string with no open document — unlike
+/// [`SyntaxTreeState`], which requires one.
+pub fn highlight_text(
+    text: &str,
+    language: &Language,
+    color_map: ColorMap,
+) -> RangeMap<CharOffset, ColorU> {
+    if text.is_empty() {
+        return RangeMap::new();
+    }
+
+    let tree = PARSER.with(|parser| {
+        let mut parser = parser.borrow_mut();
+        parser
+            .set_language(&language.grammar)
+            .expect("incompatible grammar");
+        parser.parse(text, None)
+    });
+    let Some(tree) = tree else {
+        return RangeMap::new();
+    };
+
+    let highlight_query = HighlightQuery::new(&language.highlight_query, color_map);
+    highlight_query.get_highlighted_chunks_for_text(text, &language.highlight_query, &tree)
 }

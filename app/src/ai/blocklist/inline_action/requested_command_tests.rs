@@ -1,6 +1,37 @@
 //! Unit tests for format_command_text in requested_command.rs
 
-use super::{format_command_text, mcp_blocked_title_text, mcp_viewing_detail_title_text};
+use pathfinder_color::ColorU;
+use rangemap::RangeMap;
+use string_offset::CharOffset;
+use warp_core::ui::theme::{AnsiColor, AnsiColors};
+
+use super::{
+    format_command_text, header_highlight_ranges, mcp_blocked_title_text,
+    mcp_viewing_detail_title_text, shell_highlight_color_ranges,
+};
+
+/// Distinct-per-channel `AnsiColors` fixture so tests can assert exact colors without depending
+/// on any real theme.
+fn test_terminal_colors() -> AnsiColors {
+    AnsiColors::new(
+        AnsiColor {
+            r: 10,
+            g: 10,
+            b: 10,
+        },
+        AnsiColor { r: 20, g: 0, b: 0 },
+        AnsiColor { r: 0, g: 30, b: 0 },
+        AnsiColor { r: 40, g: 40, b: 0 },
+        AnsiColor { r: 0, g: 0, b: 50 },
+        AnsiColor { r: 60, g: 0, b: 60 },
+        AnsiColor { r: 0, g: 70, b: 70 },
+        AnsiColor {
+            r: 80,
+            g: 80,
+            b: 80,
+        },
+    )
+}
 
 #[test]
 fn single_line_without_newline_is_unchanged_ascii() {
@@ -117,4 +148,80 @@ fn mcp_viewing_detail_title_falls_back_to_generic_message_when_tool_name_empty()
         mcp_viewing_detail_title_text("", Some("github")),
         "Viewing MCP tool call detail"
     );
+}
+
+#[test]
+fn shell_highlight_color_ranges_colors_the_command_name() {
+    let colors = test_terminal_colors();
+    let ranges = shell_highlight_color_ranges("echo hello", &colors);
+
+    let (range, color) = ranges
+        .iter()
+        .next()
+        .expect("expected the command name to be highlighted");
+    assert_eq!(*range, CharOffset::from(0)..CharOffset::from(4));
+    assert_eq!(*color, ColorU::from(colors.blue));
+}
+
+#[test]
+fn shell_highlight_color_ranges_colors_quoted_strings() {
+    let colors = test_terminal_colors();
+    let ranges = shell_highlight_color_ranges("echo \"hello\"", &colors);
+
+    let (range, _) = ranges
+        .iter()
+        .find(|(_, color)| **color == ColorU::from(colors.green))
+        .expect("expected the quoted string to be highlighted green");
+    assert_eq!(*range, CharOffset::from(5)..CharOffset::from(12));
+}
+
+#[test]
+fn shell_highlight_color_ranges_leaves_flags_uncolored() {
+    // Unlike the completer's own highlighting (which colors options distinctly, see PR #15171),
+    // the bundled bash grammar's highlights query captures flags as `@constant`, which has no
+    // mapped color in `ansi_syntax_highlighting_color_map`/`convert_capture_name_to_color`.
+    let colors = test_terminal_colors();
+    let text = "git commit -m \"fix\"";
+    let ranges = shell_highlight_color_ranges(text, &colors);
+
+    let flag_start = CharOffset::from(text.find("-m").expect("fixture contains -m"));
+    assert!(
+        !ranges.iter().any(|(range, _)| range.contains(&flag_start)),
+        "expected -m to remain uncolored, got {ranges:?}"
+    );
+}
+
+#[test]
+fn shell_highlight_color_ranges_is_empty_for_empty_text() {
+    let colors = test_terminal_colors();
+    assert!(shell_highlight_color_ranges("", &colors).is_empty());
+}
+
+#[test]
+fn header_highlight_ranges_passes_through_when_untruncated() {
+    let mut color_ranges = RangeMap::new();
+    color_ranges.insert(CharOffset::from(0)..CharOffset::from(4), ColorU::black());
+    let highlighted = header_highlight_ranges(&color_ranges, None);
+
+    assert_eq!(highlighted.len(), 1);
+    assert_eq!(highlighted[0].highlight_indices, vec![0, 1, 2, 3]);
+}
+
+#[test]
+fn header_highlight_ranges_clips_range_straddling_the_truncation_boundary() {
+    let mut color_ranges = RangeMap::new();
+    color_ranges.insert(CharOffset::from(2)..CharOffset::from(8), ColorU::black());
+    let highlighted = header_highlight_ranges(&color_ranges, Some(5));
+
+    assert_eq!(highlighted.len(), 1);
+    assert_eq!(highlighted[0].highlight_indices, vec![2, 3, 4]);
+}
+
+#[test]
+fn header_highlight_ranges_drops_range_entirely_past_the_truncation_boundary() {
+    let mut color_ranges = RangeMap::new();
+    color_ranges.insert(CharOffset::from(6)..CharOffset::from(9), ColorU::black());
+    let highlighted = header_highlight_ranges(&color_ranges, Some(5));
+
+    assert!(highlighted.is_empty());
 }

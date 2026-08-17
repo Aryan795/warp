@@ -74,7 +74,7 @@ use crate::code::editor::line_iterator::LineIterator;
 use crate::code_review::comments::{CommentId, CommentOrigin, LineDiffContent};
 use crate::editor::InteractionState;
 use crate::notebooks::editor::model::word_unit;
-use crate::themes::theme::AnsiColorIdentifier;
+use crate::themes::theme::{AnsiColorIdentifier, AnsiColors};
 use crate::util::link_detection::get_word_range_at_offset;
 
 /// An opaque handle to a stable line in the editor content, suitable for scroll
@@ -279,6 +279,40 @@ impl DelayRendering {
     /// are notified.
     fn skip(self, ctx: &mut ModelContext<CodeEditorModel>) {
         ctx.emit(CodeEditorModelEvent::DelayedRenderingFlushed);
+    }
+}
+
+/// Maps ANSI-identified syntax highlighting buckets (keyword, string, etc.) onto the terminal's
+/// own ANSI palette. Shared by `CodeEditorModel`'s own tree-sitter-backed highlighting and by
+/// callers that highlight raw text with no backing editor `Buffer` (e.g. a static command
+/// string), so both surfaces render tree-sitter captures with the same color scheme.
+// TODO: This mapping is not finalized. We still need to double check with design.
+pub fn ansi_syntax_highlighting_color_map(terminal_color: &AnsiColors) -> ColorMap {
+    ColorMap {
+        keyword_color: AnsiColorIdentifier::Magenta
+            .to_ansi_color(terminal_color)
+            .into(),
+        function_color: AnsiColorIdentifier::Blue
+            .to_ansi_color(terminal_color)
+            .into(),
+        string_color: AnsiColorIdentifier::Green
+            .to_ansi_color(terminal_color)
+            .into(),
+        type_color: AnsiColorIdentifier::Red
+            .to_ansi_color(terminal_color)
+            .into(),
+        number_color: AnsiColorIdentifier::Green
+            .to_ansi_color(terminal_color)
+            .into(),
+        comment_color: AnsiColorIdentifier::Yellow
+            .to_ansi_color(terminal_color)
+            .into(),
+        property_color: AnsiColorIdentifier::Cyan
+            .to_ansi_color(terminal_color)
+            .into(),
+        tag_color: AnsiColorIdentifier::Red
+            .to_ansi_color(terminal_color)
+            .into(),
     }
 }
 
@@ -1337,6 +1371,16 @@ impl CodeEditorModel {
         }
     }
 
+    /// Clears any previously configured language, turning off tree-sitter highlighting. Unlike
+    /// `set_language_with_*`, this is meaningful to call at runtime on an editor that already has
+    /// a language set (e.g. to respect a setting toggled off after the editor was created).
+    pub fn clear_language(&mut self, ctx: &mut ModelContext<Self>) {
+        self.syntax_tree.update(ctx, |syntax_tree, _ctx| {
+            syntax_tree.clear_language();
+        });
+        self.rebuild_layout(ctx);
+    }
+
     fn set_language(&mut self, language: Arc<Language>, ctx: &mut ModelContext<Self>) {
         let unit = language.indent_unit;
         self.content.update(ctx, |buffer, _ctx| {
@@ -1402,34 +1446,7 @@ impl CodeEditorModel {
     fn syntax_highlighting_color_map(ctx: &mut ModelContext<Self>) -> ColorMap {
         let appearance = Appearance::as_ref(ctx);
         let terminal_color = appearance.theme().terminal_colors().normal;
-
-        // TODO: This mapping is not finalized. We still need to double check with design.
-        ColorMap {
-            keyword_color: AnsiColorIdentifier::Magenta
-                .to_ansi_color(&terminal_color)
-                .into(),
-            function_color: AnsiColorIdentifier::Blue
-                .to_ansi_color(&terminal_color)
-                .into(),
-            string_color: AnsiColorIdentifier::Green
-                .to_ansi_color(&terminal_color)
-                .into(),
-            type_color: AnsiColorIdentifier::Red
-                .to_ansi_color(&terminal_color)
-                .into(),
-            number_color: AnsiColorIdentifier::Green
-                .to_ansi_color(&terminal_color)
-                .into(),
-            comment_color: AnsiColorIdentifier::Yellow
-                .to_ansi_color(&terminal_color)
-                .into(),
-            property_color: AnsiColorIdentifier::Cyan
-                .to_ansi_color(&terminal_color)
-                .into(),
-            tag_color: AnsiColorIdentifier::Red
-                .to_ansi_color(&terminal_color)
-                .into(),
-        }
+        ansi_syntax_highlighting_color_map(&terminal_color)
     }
 
     pub fn text_decoration_for_ranges<'a>(

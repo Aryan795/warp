@@ -38,6 +38,40 @@ impl HighlightQuery {
         Self { highlight_map }
     }
 
+    /// Given raw `text` with no backing editor `Buffer`, returns its highlighted character
+    /// ranges via this query and the already-parsed `tree`. Used by static-text callers (e.g. a
+    /// plain command string) that have no `Buffer`/`BufferVersion` to associate a tree with.
+    pub fn get_highlighted_chunks_for_text(
+        &self,
+        text: &str,
+        query: &Query,
+        tree: &Tree,
+    ) -> RangeMap<CharOffset, ColorU> {
+        let mut range_map = RangeMap::new();
+        let mut cursor = QueryCursor::new();
+        let mut captures = cursor.captures(query, tree.root_node(), TextSlice(text.as_bytes()));
+
+        while let Some(matches) = captures.next() {
+            for cap in matches.0.captures {
+                let byte_range = cap.node.byte_range();
+                let color = self
+                    .highlight_map
+                    .get(cap.index as usize)
+                    .and_then(|inner| *inner);
+
+                if let Some(color) = color {
+                    let char_start = CharOffset::from(text[..byte_range.start].chars().count());
+                    let char_end = CharOffset::from(text[..byte_range.end].chars().count());
+                    if char_start < char_end {
+                        range_map.insert(char_start..char_end, color);
+                    }
+                }
+            }
+        }
+
+        range_map
+    }
+
     /// Given the a character range, return its corresponding highlight colors.
     pub fn get_highlighted_chunks(
         &self,

@@ -1,26 +1,32 @@
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::cmp::{Ordering, PartialEq};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use languages::language_by_name;
 use lazy_static::lazy_static;
 use parking_lot::FairMutex;
+use pathfinder_color::ColorU;
 use pathfinder_geometry::vector::vec2f;
+use rangemap::RangeMap;
 use settings::Setting as _;
+use string_offset::CharOffset;
 use uuid::Uuid;
 use warp_core::features::FeatureFlag;
 use warp_core::ui::Icon;
 use warp_core::ui::appearance::Appearance;
+use warp_core::ui::theme::AnsiColors;
 use warp_editor::render::element::VerticalExpansionBehavior;
 use warpui::clipboard::ClipboardContent;
 use warpui::elements::new_scrollable::{NewScrollable, ScrollableAppearance, SingleAxisConfig};
 use warpui::elements::{
     Align, Border, ChildAnchor, ChildView, Clipped, ClippedScrollStateHandle, ConstrainedBox,
-    Container, CornerRadius, CrossAxisAlignment, Dismiss, Empty, Expanded, Flex, MainAxisSize,
-    MouseStateHandle, OffsetPositioning, ParentElement, PositionedElementAnchor,
-    PositionedElementOffsetBounds, Radius, ScrollbarWidth, SelectableArea, SelectionHandle, Stack,
-    Text,
+    Container, CornerRadius, CrossAxisAlignment, Dismiss, Empty, Expanded, Flex, Highlight,
+    HighlightedRange, MainAxisSize, MouseStateHandle, OffsetPositioning, ParentElement,
+    PositionedElementAnchor, PositionedElementOffsetBounds, Radius, ScrollbarWidth, SelectableArea,
+    SelectionHandle, Stack, Text,
 };
 use warpui::keymap::{Context, EditableBinding, FixedBinding, Keystroke};
 use warpui::ui_components::components::UiComponent as _;
@@ -57,10 +63,11 @@ use crate::ai::blocklist::{
 };
 use crate::ai::mcp::TemplatableMCPServerManager;
 use crate::cmd_or_ctrl_shift;
+use crate::code::editor::model::ansi_syntax_highlighting_color_map;
 use crate::code::editor::view::{CodeEditorEvent, CodeEditorRenderOptions, CodeEditorView};
 use crate::editor::InteractionState;
 use crate::menu::{Event as MenuEvent, Menu, MenuItem, MenuItemFields, MenuVariant};
-use crate::settings::InputModeSettings;
+use crate::settings::{InputModeSettings, InputSettings, InputSettingsChangedEvent};
 use crate::terminal::TerminalModel;
 use crate::terminal::block_list_viewport::InputMode;
 use crate::terminal::model::block::Block;
@@ -105,6 +112,10 @@ const REQUESTED_ACTION_BLOCKED_KEYMAP_CONTEXT: &str = "RequestedActionBlocked";
 
 const SCROLLBAR_WIDTH: ScrollbarWidth = ScrollbarWidth::Auto;
 const MAX_EDITOR_HEIGHT: f32 = 500.0;
+
+/// Language name (see `languages::SUPPORTED_LANGUAGES`) used to tree-sitter-highlight requested
+/// commands, both in the permission-prompt editor and the collapsed header.
+const SHELL_LANGUAGE_NAME: &str = "shell";
 
 lazy_static! {
     pub static ref CANCEL_REQUESTED_COMMAND_KEYSTROKE: Keystroke = Keystroke {
@@ -373,6 +384,22 @@ pub struct RequestedCommandView {
     // The MCP tool name is kept separately from the formatted command text so
     // headers never need to parse a presentation label to recover identity.
     mcp_tool_name: Option<String>,
+
+    // Tree-sitter-based syntax highlighting for the collapsed header's title, matching the
+    // permission-prompt editor's own tree-sitter highlighting (set via
+    // `CodeEditorView::set_language_with_name`). Cache of the most recently computed header
+    // highlight ranges, to avoid re-parsing (and the per-range allocations that follow) on every
+    // render — including while merely scrolling through history. `render_header` takes `&self`,
+    // hence the `RefCell`.
+    header_highlight_cache: RefCell<Option<CachedHeaderHighlight>>,
+}
+
+/// Cache key + result for [`RequestedCommandView::command_highlighted_ranges_for_header`].
+struct CachedHeaderHighlight {
+    command_text: String,
+    terminal_colors: AnsiColors,
+    max_char: Option<usize>,
+    ranges: Vec<HighlightedRange>,
 }
 
 impl RequestedCommandView {
@@ -562,6 +589,18 @@ impl RequestedCommandView {
             );
         }
 
+        // Both directions of `InputSettings.syntax_highlighting` need to be reflected on an
+        // already-open card: turning it on should highlight a card that was created while it was
+        // off, and turning it off should clear an editor that already has a language set (the
+        // header re-reads the setting live at render time, but the editor's language is applied
+        // imperatively and would otherwise go stale).
+        ctx.subscribe_to_model(&InputSettings::handle(ctx), |me, _, event, ctx| {
+            if let InputSettingsChangedEvent::SyntaxHighlighting { .. } = event {
+                me.apply_editor_language(ctx);
+                ctx.notify();
+            }
+        });
+
         let accept_menu = ctx.add_typed_action_view(|ctx| {
             let theme = Appearance::as_ref(ctx).theme();
             Menu::new()
@@ -629,6 +668,7 @@ impl RequestedCommandView {
             mcp_context_menu_anchor_id: None,
             mcp_server_id: None,
             mcp_tool_name: None,
+            header_highlight_cache: RefCell::new(None),
         }
     }
 
@@ -641,8 +681,9 @@ impl RequestedCommandView {
         }
 
         let command_text = self.command_text.clone();
+        let should_highlight = self.should_highlight_command(ctx);
         let editor = ctx.add_typed_action_view(|ctx| {
-            let view = CodeEditorView::new(
+            let mut view = CodeEditorView::new(
                 None,
                 None,
                 CodeEditorRenderOptions::new(VerticalExpansionBehavior::GrowToMaxHeight),
@@ -657,12 +698,81 @@ impl RequestedCommandView {
                 view.system_append_autoscroll_vertical_only("", ctx);
             }
 
+            // Setting the language after the content is inserted lets the editor bootstrap the
+            // initial parse from what's already there, matching e.g. `create_static_diff_content_editor`.
+            // From here, tree-sitter highlighting keeps itself up to date for free as the buffer is
+            // streamed into or edited — no further reparse triggers are needed.
+            if should_highlight {
+                view.set_language_with_name(SHELL_LANGUAGE_NAME, ctx);
+            }
+
             view
         });
         ctx.subscribe_to_view(&editor, |me, view, event, ctx| {
             me.handle_editor_event(event, view, ctx);
         });
         self.editor = Some(editor);
+    }
+
+    /// Whether tree-sitter-based syntax highlighting should be shown for this requested command.
+    /// Mirrors the terminal input's own `InputSettings::syntax_highlighting` setting, so toggling
+    /// it off leaves both the collapsed header and the permission-prompt editor plain.
+    fn should_highlight_command(&self, app: &AppContext) -> bool {
+        self.action_type.is_requested_command()
+            && *InputSettings::as_ref(app).syntax_highlighting.value()
+    }
+
+    /// Applies (or clears) tree-sitter syntax highlighting on the permission-prompt editor, per
+    /// `should_highlight_command`. A no-op if the editor doesn't currently exist. Meaningful to
+    /// call both when the editor is first created and whenever `InputSettings.syntax_highlighting`
+    /// is toggled on an already-open card.
+    fn apply_editor_language(&self, ctx: &mut ViewContext<Self>) {
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        if self.should_highlight_command(ctx) {
+            editor.update(ctx, |editor, ctx| {
+                editor.set_language_with_name(SHELL_LANGUAGE_NAME, ctx);
+            });
+        } else {
+            editor.update(ctx, |editor, ctx| {
+                editor.clear_language(ctx);
+            });
+        }
+    }
+
+    /// Computes the tree-sitter-based highlighted ranges for the collapsed header's title,
+    /// clipped to the (possibly truncated) text that `format_command_text` actually renders.
+    /// Cached per `(command_text, terminal_colors, max_char)` since this is recomputed on every
+    /// render of the header, including while scrolling through history.
+    fn command_highlighted_ranges_for_header(&self, app: &AppContext) -> Vec<HighlightedRange> {
+        if !self.should_highlight_command(app) {
+            return Vec::new();
+        }
+
+        let terminal_colors = Appearance::as_ref(app).theme().terminal_colors().normal;
+        let max_char = self
+            .command_text
+            .find('\n')
+            .map(|byte_idx| self.command_text[..byte_idx].chars().count());
+
+        if let Some(cached) = self.header_highlight_cache.borrow().as_ref()
+            && cached.command_text == self.command_text
+            && cached.terminal_colors == terminal_colors
+            && cached.max_char == max_char
+        {
+            return cached.ranges.clone();
+        }
+
+        let color_ranges = shell_highlight_color_ranges(&self.command_text, &terminal_colors);
+        let ranges = header_highlight_ranges(&color_ranges, max_char);
+        *self.header_highlight_cache.borrow_mut() = Some(CachedHeaderHighlight {
+            command_text: self.command_text.clone(),
+            terminal_colors,
+            max_char,
+            ranges: ranges.clone(),
+        });
+        ranges
     }
 
     /// Drops the editor view. Does not sync editor contents back to `command_text`;
@@ -1317,8 +1427,18 @@ impl RequestedCommandView {
             }
         };
 
+        // Highlighting only applies when `title` is actually showing raw (possibly truncated)
+        // command text, i.e. not one of the status messages set in the branches above.
+        let title_str: &str = title.as_ref();
+        let highlighted_ranges = if title_str == self.get_header_title_text(app) {
+            self.command_highlighted_ranges_for_header(app)
+        } else {
+            Vec::new()
+        };
+
         let mut config = HeaderConfig::new(title, app)
             .with_selectable_text()
+            .with_highlighted_ranges(highlighted_ranges)
             .with_icon(if let Some(block) = requested_command_block {
                 if !block.finished() {
                     if let Some(long_running_command_control_state) =
@@ -2193,6 +2313,53 @@ pub fn format_command_text(text: &str) -> String {
     } else {
         text.to_string()
     }
+}
+
+/// Tree-sitter-highlights `text` as shell syntax, returning colored character ranges. Returns an
+/// empty map if the `shell` grammar/language can't be resolved (defensive; it's always bundled).
+/// Extracted for unit testing.
+pub fn shell_highlight_color_ranges(
+    text: &str,
+    terminal_colors: &AnsiColors,
+) -> RangeMap<CharOffset, ColorU> {
+    let Some(language) = language_by_name(SHELL_LANGUAGE_NAME) else {
+        return RangeMap::new();
+    };
+    syntax_tree::highlight_text(
+        text,
+        &language,
+        ansi_syntax_highlighting_color_map(terminal_colors),
+    )
+}
+
+/// Clips tree-sitter-derived color ranges to a maximum char offset (used to respect the
+/// collapsed header's single-line, possibly-truncated title; see `format_command_text`) and
+/// converts them into [`HighlightedRange`]s for `Text::with_highlights`. Extracted for unit
+/// testing.
+pub fn header_highlight_ranges(
+    color_ranges: &RangeMap<CharOffset, ColorU>,
+    max_char: Option<usize>,
+) -> Vec<HighlightedRange> {
+    color_ranges
+        .iter()
+        .filter_map(|(range, color)| {
+            let start = range.start.as_usize();
+            let mut end = range.end.as_usize();
+            if let Some(max_char) = max_char {
+                if start >= max_char {
+                    return None;
+                }
+                end = end.min(max_char);
+            }
+            if start >= end {
+                return None;
+            }
+            Some(HighlightedRange {
+                highlight: Highlight::new().with_foreground_color(*color),
+                highlight_indices: (start..end).collect(),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
