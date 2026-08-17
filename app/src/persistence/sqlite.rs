@@ -2754,6 +2754,9 @@ fn read_sqlite_data(
                     email: row.email,
                     role: serde_json::from_str(&row.role)
                         .unwrap_or(crate::workspaces::team::MembershipRole::User),
+                    // Not persisted locally: it's a live-refreshed hint, not
+                    // core membership data, so the next metadata poll corrects it.
+                    is_disabled: false,
                 };
                 acc.entry(row.team_id).or_default().push(member);
                 acc

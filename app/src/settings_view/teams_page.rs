@@ -121,6 +121,8 @@ const INVITE_BY_EMAIL_EXPIRY_INSTRUCTIONS: &str = "Email invitations are valid f
 const INVALID_EMAILS_INSTRUCTIONS: &str =
     "Some of the provided email addresses are invalid, already invited, or members of the team.";
 
+const DISABLED_MEMBER_TOOLTIP_TEXT: &str = "This user's account is disabled";
+
 const OFFLINE_TEXT: &str = "You are offline.";
 
 const MAX_CHIP_WIDTH: f32 = 280.;
@@ -405,6 +407,9 @@ pub struct Item {
     text: String,
     actions: Vec<ItemAction>,
     state: ItemState,
+    /// Whether this item represents a team member whose account has been
+    /// disabled server-side. Never set for pending email invites.
+    is_disabled: bool,
 }
 
 impl PartialEq for Item {
@@ -482,6 +487,7 @@ pub struct TeamsPageView {
     cloud_model: ModelHandle<CloudModel>,
     invite_view: TeamsInviteOption,
     team_members_mouse_state_handles: Vec<MouseStateHandle>,
+    team_members_disabled_tooltip_mouse_state_handles: Vec<MouseStateHandle>,
     team_approved_domains_mouse_state_handles: Vec<MouseStateHandle>,
     team_action_confirmation_dialog: ViewHandle<CloudActionConfirmationDialog>,
     show_team_action_confirmation_dialog: bool,
@@ -779,6 +785,15 @@ impl TeamsPageView {
                     .collect()
             });
 
+        let team_members_disabled_tooltip_mouse_state_handles =
+            current_user_team.map_or_else(Vec::new, |user_team| {
+                user_team
+                    .members
+                    .iter()
+                    .map(|_| Default::default())
+                    .collect()
+            });
+
         let team_approved_domains_mouse_state_handles =
             current_user_team.map_or_else(Vec::new, |user_team| {
                 user_team
@@ -871,6 +886,7 @@ impl TeamsPageView {
             cloud_model,
             invite_view: TeamsInviteOption::default(),
             team_members_mouse_state_handles,
+            team_members_disabled_tooltip_mouse_state_handles,
             team_approved_domains_mouse_state_handles,
             clipped_scroll_state: Default::default(),
             team_action_confirmation_dialog,
@@ -1393,6 +1409,8 @@ impl TeamsPageView {
             let total_length = team.pending_email_invites.len() + team.members.len();
             self.team_members_mouse_state_handles =
                 (0..total_length).map(|_| Default::default()).collect();
+            self.team_members_disabled_tooltip_mouse_state_handles =
+                (0..total_length).map(|_| Default::default()).collect();
         }
         ctx.notify();
     }
@@ -1787,6 +1805,7 @@ impl TeamsPageView {
                 text: email_invite.invitee_email.clone(),
                 actions,
                 state,
+                is_disabled: false,
             });
         });
 
@@ -1873,6 +1892,7 @@ impl TeamsPageView {
                 text: member.email.clone(),
                 actions,
                 state,
+                is_disabled: member.is_disabled,
             });
         });
 
@@ -3067,12 +3087,16 @@ impl TeamsWidget {
         );
 
         // 2) List of team members
-        section.add_child(self.render_item_list(
-            TeamsPageView::team_to_item_list(team, user_email, workspace),
-            view.team_members_mouse_state_handles.clone(),
-            view,
-            appearance,
-        ));
+        section.add_child(
+            self.render_item_list(
+                TeamsPageView::team_to_item_list(team, user_email, workspace),
+                view.team_members_mouse_state_handles.clone(),
+                view.team_members_disabled_tooltip_mouse_state_handles
+                    .clone(),
+                view,
+                appearance,
+            ),
+        );
 
         section.finish()
     }
@@ -3288,14 +3312,19 @@ impl TeamsWidget {
                     text: domain_restriction.domain.clone(),
                     actions,
                     state: ItemState::Valid,
+                    is_disabled: false,
                 }
             })
             .collect();
 
         if !domains_as_items.is_empty() {
+            // Domain items are never disabled, so the tooltip-hover handles
+            // are unused; reuse the action-icon handles rather than
+            // allocating a second unused vector.
             section.add_child(
                 Container::new(self.render_item_list(
                     domains_as_items,
+                    view.team_approved_domains_mouse_state_handles.clone(),
                     view.team_approved_domains_mouse_state_handles.clone(),
                     view,
                     appearance,
@@ -3592,6 +3621,7 @@ impl TeamsWidget {
         &self,
         items: Vec<Item>,
         mouse_state_handles: Vec<MouseStateHandle>,
+        disabled_tooltip_mouse_state_handles: Vec<MouseStateHandle>,
         view: &TeamsPageView,
         appearance: &Appearance,
     ) -> Box<dyn Element> {
@@ -3599,25 +3629,39 @@ impl TeamsWidget {
             .iter()
             .sorted()
             .zip(mouse_state_handles.iter())
+            .zip(disabled_tooltip_mouse_state_handles.iter())
             .enumerate()
-            .map(|(idx, (item, handle))| {
+            .map(|(idx, ((item, handle), tooltip_handle))| {
+                let text_color = if item.is_disabled {
+                    appearance.theme().disabled_ui_text_color()
+                } else {
+                    appearance.theme().active_ui_text_color()
+                };
+                let text_element = Text::new_inline(
+                    item.text.clone(),
+                    appearance.ui_font_family(),
+                    appearance.ui_font_size() - 1.,
+                )
+                .with_color(text_color.into())
+                .finish();
+                let text_element = if item.is_disabled {
+                    appearance.ui_builder().tool_tip_on_element(
+                        DISABLED_MEMBER_TOOLTIP_TEXT.to_string(),
+                        tooltip_handle.clone(),
+                        text_element,
+                        ParentAnchor::TopLeft,
+                        ChildAnchor::BottomLeft,
+                        vec2f(0., 5.),
+                    )
+                } else {
+                    text_element
+                };
+
                 let mut row = Flex::row()
                     .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
                     .with_cross_axis_alignment(CrossAxisAlignment::Center)
                     .with_main_axis_size(MainAxisSize::Max)
-                    .with_child(
-                        Shrinkable::new(
-                            1.,
-                            Text::new_inline(
-                                item.text.clone(),
-                                appearance.ui_font_family(),
-                                appearance.ui_font_size() - 1.,
-                            )
-                            .with_color(appearance.theme().active_ui_text_color().into())
-                            .finish(),
-                        )
-                        .finish(),
-                    );
+                    .with_child(Shrinkable::new(1., text_element).finish());
 
                 let mut pending_and_close_row = Flex::row()
                     .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
