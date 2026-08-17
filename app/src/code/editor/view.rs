@@ -2161,9 +2161,7 @@ impl CodeEditorView {
             return;
         }
 
-        // Construct before touching the model: `reopen_comment_line` below emits the one-shot
-        // `ReopenPendingComment` event that only a currently-subscribed composer receives, so
-        // constructing afterwards would leave a visible but uninitialized composer.
+        // Built on demand: most files in a review never have a comment reopened on them.
         self.ensure_active_comment_editor(ctx);
 
         if let Some(active_comment_editor) = &self.active_comment_editor {
