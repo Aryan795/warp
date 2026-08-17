@@ -7,6 +7,8 @@
 //! the frame that came out is the only way to pin the routing down end to end — a unit test
 //! can reach the copy and the predicate, but not the page they add up to.
 
+use std::time::Duration;
+
 use warp::integration_testing::assertions::go_online;
 use warp::integration_testing::settings::{
     assert_teams_create_team_form_visible, assert_teams_join_a_team_list_visible,
@@ -25,6 +27,12 @@ use super::{Builder, new_builder};
 
 const WORKSPACE_NAME: &str = "Acme";
 const JOINABLE_TEAMS: &[&str] = &["Platform", "Design Systems"];
+
+/// Whoever runs the capture test to look at the result is the same person likely to set
+/// `WARPUI_PAUSE_INTEGRATION_TEST_AT_EVERY_STEP`, which adds three seconds per step and
+/// pushes the walk past the default two-minute watchdog. That watchdog kills the process
+/// before the recording is finalized, so the run loses the video it was for.
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// A state of the page, with the steps that seed it and assert what it rendered.
 struct TeamlessState {
@@ -113,6 +121,7 @@ pub fn test_settings_teams_page_states_for_a_teamless_user() -> Builder {
 pub fn test_settings_teams_page_captures() -> Builder {
     let mut builder = new_builder()
         .with_real_display()
+        .with_timeout(CAPTURE_TIMEOUT)
         .with_step(wait_until_bootstrapped_single_pane_for_tab(0))
         .with_step(go_online())
         .with_step(TestStep::new("Start recording").with_start_recording())
