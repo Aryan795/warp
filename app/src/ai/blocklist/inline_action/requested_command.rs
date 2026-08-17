@@ -240,15 +240,16 @@ struct HeaderXRayHit {
 /// That ellipsis is not part of the command, so it must never be described, and nothing past the
 /// first line is reachable. For a single-line command the whole string is addressable.
 ///
-/// Derived from [`format_command_text`] rather than reimplementing its rules, so the two cannot
-/// drift apart: the ellipsis is the only character the formatter adds that the command does not
-/// contain.
+/// Deliberately computed from the command rather than by inspecting the formatted title. Deriving
+/// it from the title instead requires guessing whether a trailing ellipsis is the formatter's or
+/// the user's, and that guess is not decidable from the title alone: for `"echo …\n   "` the
+/// formatter appends nothing (the remainder trims empty) yet the title still ends in an ellipsis,
+/// so subtracting one would hide a character the user actually typed.
 fn describable_title_char_len(command_text: &str) -> usize {
-    let title = format_command_text(command_text);
-    // Only treat a trailing ellipsis as the formatter's own when it actually dropped content, so a
-    // command that genuinely ends in one stays fully describable.
-    let has_appended_ellipsis = command_text.contains('\n') && title.ends_with('…');
-    title.chars().count() - usize::from(has_appended_ellipsis)
+    match command_text.find('\n') {
+        Some(newline_pos) => command_text[..newline_pos].chars().count(),
+        None => command_text.chars().count(),
+    }
 }
 
 /// What the code editor's hit test last reported about the pointer, shared between the view and

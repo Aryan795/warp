@@ -190,3 +190,19 @@ fn mcp_viewing_detail_title_falls_back_to_generic_message_when_tool_name_empty()
         "Viewing MCP tool call detail"
     );
 }
+
+#[test]
+fn ellipsis_the_user_typed_stays_describable_when_the_formatter_appends_none() {
+    // `format_command_text` appends nothing here, because everything after the newline trims
+    // empty — yet the title still ends in an ellipsis, because the command itself does. The
+    // describable length must therefore cover that final character: it is the user's, not the
+    // formatter's. Deriving the length by looking for a trailing ellipsis in the title cannot
+    // tell the two apart and would wrongly hide it.
+    let command = "echo …\n   ";
+    let title = format_command_text(command);
+    assert_eq!(title, "echo …", "formatter appends no ellipsis here");
+
+    let describable = describable_title_char_len(command);
+    assert_eq!(describable, title.chars().count());
+    assert_eq!(describable, 6);
+}
