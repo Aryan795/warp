@@ -32,6 +32,10 @@ pub fn add_command_x_ray_overlay(
     description: &Arc<Description>,
     appearance: &Appearance,
 ) {
+    // The anchors are conditional: a host's element caches the token's position while it paints,
+    // so on the frame where a description exists but its token is not (yet) laid out there is no
+    // cached position. Conditional anchoring skips the tooltip for that frame instead of
+    // asserting.
     stack.add_positioned_overlay_child(
         render_command_token_description(description, appearance),
         OffsetPositioning::from_axes(
@@ -40,13 +44,15 @@ pub fn add_command_x_ray_overlay(
                 PositionedElementOffsetBounds::ParentByPosition,
                 OffsetType::Pixel(0.),
                 AnchorPair::new(XAxisAnchor::Left, XAxisAnchor::Left),
-            ),
+            )
+            .with_conditional_anchor(),
             PositioningAxis::relative_to_stack_child(
                 anchor.position_id,
                 PositionedElementOffsetBounds::Unbounded,
                 anchor.y_offset,
                 anchor.y_anchor,
-            ),
+            )
+            .with_conditional_anchor(),
         ),
     );
 }

@@ -140,6 +140,9 @@ pub struct Text {
     /// Contains the hoverable char ranges and the corresponding hover
     /// handler for each char range
     hover_handlers: Vec<HoverableCharRange>,
+    /// Reports the char index under the pointer on each mouse move, for hosts that need the
+    /// position itself rather than membership of a known range.
+    hovered_char_index_reporter: Option<Box<dyn Fn(Option<usize>)>>,
     saved_char_positions: Vec<SavedCharPositionIds>,
     /// Optional override on the baseline position computation.
     compute_baseline_position_fn: Option<ComputeBaselinePositionFn>,
@@ -286,6 +289,7 @@ impl Text {
             clip_config: ClipConfig::default(),
             click_handlers: vec![],
             hover_handlers: vec![],
+            hovered_char_index_reporter: None,
             saved_char_positions: vec![],
             compute_baseline_position_fn: None,
             is_selectable: true,
@@ -360,6 +364,21 @@ impl Text {
             })
             .collect();
 
+        self
+    }
+
+    /// Registers a callback invoked on every mouse move with the char index under the pointer, or
+    /// `None` when the pointer is not over a character.
+    ///
+    /// [`Self::with_hoverable_char_range`] answers "is the pointer inside *this* range", which
+    /// requires knowing the range up front. Use this instead when the range is not known in
+    /// advance — command x-ray, for example, has to resolve the position before it can work out
+    /// which token is under it.
+    pub fn with_hovered_char_index_reporter<F>(mut self, reporter: F) -> Self
+    where
+        F: 'static + Fn(Option<usize>),
+    {
+        self.hovered_char_index_reporter = Some(Box::new(reporter));
         self
     }
 
@@ -498,6 +517,9 @@ impl Text {
         ));
         let mut handled = false;
         let hovered_char_index = self.get_char_index(mouse_pos);
+        if let Some(reporter) = &self.hovered_char_index_reporter {
+            reporter(hovered_char_index);
+        }
         let Some(z_index) = self.z_index() else {
             return false;
         };

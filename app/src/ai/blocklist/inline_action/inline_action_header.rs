@@ -29,6 +29,24 @@ pub const ICON_MARGIN: f32 = 8.;
 
 pub type OnToggleExpandedCallback = Rc<dyn Fn(&mut EventContext) + 'static>;
 pub type OnRightClickCallback = Rc<dyn Fn(&mut EventContext) + 'static>;
+pub type OnHoveredTitleCharCallback = Rc<dyn Fn(Option<usize>) + 'static>;
+
+/// Optional instrumentation for the header's title text, for callers that need to address
+/// individual characters in it: resolving the character under the pointer, and anchoring an
+/// overlay to a particular one.
+///
+/// Deliberately generic — the header does not need to know what a caller does with a character
+/// index. Only applies when the title is rendered as plain text; a markdown title is a different
+/// element and is not instrumented.
+#[derive(Clone, Default)]
+pub struct TitleCharAddressing {
+    /// Called on every mouse move with the char index under the pointer, or `None` when the
+    /// pointer is not over a character.
+    pub on_hovered_char: Option<OnHoveredTitleCharCallback>,
+    /// Records the on-screen bounds of the character at this index under this position id, so an
+    /// overlay can be positioned against it.
+    pub anchor: Option<(usize, String)>,
+}
 
 /// Configuration for manual expansion behavior
 #[derive(Clone)]
@@ -119,6 +137,7 @@ pub struct HeaderConfig {
     pub font_color_override: Option<ColorU>,
     pub corner_radius_override: Option<CornerRadius>,
     pub soft_wrap_title: bool,
+    pub title_char_addressing: Option<TitleCharAddressing>,
 }
 
 impl HeaderConfig {
@@ -134,6 +153,7 @@ impl HeaderConfig {
             font_color_override: None,
             corner_radius_override: None,
             soft_wrap_title: false,
+            title_char_addressing: None,
         }
     }
 
@@ -183,6 +203,13 @@ impl HeaderConfig {
         self
     }
 
+    /// Instruments the title so the caller can address individual characters in it. See
+    /// [`TitleCharAddressing`].
+    pub fn with_title_char_addressing(mut self, addressing: TitleCharAddressing) -> Self {
+        self.title_char_addressing = Some(addressing);
+        self
+    }
+
     pub fn render_header(
         self,
         app: &AppContext,
@@ -218,15 +245,26 @@ impl HeaderConfig {
             .font_color_override
             .unwrap_or_else(|| blended_colors::text_main(appearance.theme(), header_background));
 
-        let mut title_element = Text::new_inline(
+        let mut title_text = Text::new_inline(
             self.title.clone(),
             self.font_family,
             appearance.monospace_font_size(),
         )
         .soft_wrap(self.soft_wrap_title)
         .with_selectable(self.is_text_selectable)
-        .with_color(text_color)
-        .finish();
+        .with_color(text_color);
+
+        if let Some(addressing) = &self.title_char_addressing {
+            if let Some(on_hovered_char) = addressing.on_hovered_char.clone() {
+                title_text =
+                    title_text.with_hovered_char_index_reporter(move |index| on_hovered_char(index));
+            }
+            if let Some((char_index, position_id)) = addressing.anchor.clone() {
+                title_text = title_text.with_saved_char_position(char_index, position_id);
+            }
+        }
+
+        let mut title_element = title_text.finish();
 
         if self.use_markdown
             && let Ok(formatted_text) = markdown_parser::parse_markdown(&self.title)

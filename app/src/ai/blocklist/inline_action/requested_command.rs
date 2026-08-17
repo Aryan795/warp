@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::cmp::{Ordering, PartialEq};
 use std::collections::HashMap;
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -51,7 +52,7 @@ use crate::ai::blocklist::block::view_impl::{
 use crate::ai::blocklist::block::{AIBlockAction, AutonomySettingSpeedbump};
 use crate::ai::blocklist::inline_action::inline_action_header::{
     ExpandedConfig, HeaderConfig, INLINE_ACTION_HORIZONTAL_PADDING, InteractionMode,
-    RightClickConfig,
+    RightClickConfig, TitleCharAddressing,
 };
 use crate::ai::blocklist::model::{AIBlockModel, AIBlockModelHelper};
 use crate::ai::blocklist::{
@@ -207,6 +208,44 @@ pub fn init(app: &mut AppContext) {
     )]);
 }
 
+/// Which surface a command x-ray description belongs to.
+///
+/// The two are mutually exclusive by construction: the expanded editor is only rendered while the
+/// action awaits permission, and the header title only *is* the command once it no longer does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CommandXRaySurface {
+    /// The expanded command body, while the action awaits permission.
+    Editor,
+    /// The collapsed header title, for a command that has already run.
+    Header,
+}
+
+/// What the header title's hit test last reported, shared between the view and the
+/// [`CommandXRayHoverArea`] wrapping the header.
+///
+/// Two writers: the `Text` element's reporter sets `hovered_char` on every pointer move, and the
+/// view sets `token_chars` whenever the description changes. The probe reads both, so it can
+/// answer the state machine's questions without reaching into the view.
+#[derive(Clone, Default)]
+struct HeaderXRayHit {
+    /// Char index under the pointer within the rendered title.
+    hovered_char: Option<usize>,
+    /// Char range of the token currently described, in the same coordinates.
+    token_chars: Option<Range<usize>>,
+}
+
+/// The number of leading characters of the header title that are a verbatim prefix of the command.
+///
+/// [`format_command_text`] reduces a multi-line command to its first line and appends an ellipsis.
+/// That ellipsis is not part of the command, so it must never be described, and nothing past the
+/// first line is reachable. For a single-line command the whole string is addressable.
+fn describable_title_char_len(command_text: &str) -> usize {
+    match command_text.find('\n') {
+        Some(newline_pos) => command_text[..newline_pos].chars().count(),
+        None => command_text.chars().count(),
+    }
+}
+
 /// What the code editor's hit test last reported about the pointer, shared between the view and
 /// the [`CommandXRayHoverArea`] wrapping it.
 ///
@@ -342,8 +381,10 @@ pub enum RequestedCommandViewAction {
     CopyMcpSelection,
     /// Dismiss the MCP JSON tree right-click context menu.
     CloseMcpContextMenu,
-    /// The pointer has rested over a token long enough to describe it.
+    /// The pointer has rested over a token in the expanded command body long enough to describe it.
     TryToShowCommandXRay,
+    /// The pointer has rested over a token in the collapsed header title long enough to describe it.
+    TryToShowHeaderCommandXRay,
     /// Close the command x-ray tooltip.
     HideCommandXRay,
     /// Toggle the command x-ray at the editor's cursor. This is the keyboard path.
@@ -423,10 +464,20 @@ pub struct RequestedCommandView {
     /// command x-ray host; the shared flow in [`crate::command_x_ray::host`] reads and writes it
     /// through [`CommandXRayHost`].
     command_x_ray_description: Option<Arc<Description>>,
-    /// The shared hover state machine: delay, movement threshold, and dismissal.
+    /// The shared hover state machine for the expanded editor: delay, movement threshold, and
+    /// dismissal.
     command_x_ray_hover: CommandXRayHover,
     /// What the editor's hit test last reported, shared with the hover area element.
     command_x_ray_hit: Arc<Mutex<CommandXRayHit>>,
+    /// Which surface [`Self::command_x_ray_description`] belongs to.
+    command_x_ray_surface: CommandXRaySurface,
+    /// A second, independent hover state machine for the collapsed header title. Separate from the
+    /// editor's so neither surface can inherit the other's pending timer or dismissal.
+    header_x_ray_hover: CommandXRayHover,
+    /// What the header title's hit test last reported, shared with the hover area element.
+    header_x_ray_hit: Arc<Mutex<HeaderXRayHit>>,
+    /// The title char the header tooltip anchors to, consumed while rendering the header.
+    header_x_ray_anchor_char: Option<usize>,
 }
 
 impl RequestedCommandView {
@@ -686,6 +737,10 @@ impl RequestedCommandView {
             command_x_ray_description: None,
             command_x_ray_hover: Default::default(),
             command_x_ray_hit: Default::default(),
+            command_x_ray_surface: CommandXRaySurface::Editor,
+            header_x_ray_hover: Default::default(),
+            header_x_ray_hit: Default::default(),
+            header_x_ray_anchor_char: None,
         }
     }
 
@@ -696,6 +751,10 @@ impl RequestedCommandView {
         if self.editor.is_some() {
             return;
         }
+
+        // The header is about to stop showing the command (it becomes the "OK if I run this?"
+        // prompt), so any x-ray anchored to it has to go.
+        self.clear_header_x_ray(ctx);
 
         let command_text = self.command_text.clone();
         let editor = ctx.add_typed_action_view(|ctx| {
@@ -786,10 +845,23 @@ impl RequestedCommandView {
         }
     }
 
-    /// The text that command x-ray offsets index into. Offsets come from the editor's own hit
-    /// test, so they must be resolved against the editor's buffer rather than `command_text`,
-    /// which only catches up with user edits when they are committed.
-    fn x_ray_text(&self, ctx: &AppContext) -> String {
+    /// The text that command x-ray offsets index into, for whichever surface currently owns the
+    /// description.
+    ///
+    /// For the editor this is the editor's own buffer, not `command_text`, which only catches up
+    /// with user edits when they are committed. For the header it is the full `command_text`: the
+    /// rendered title is a prefix of it (see [`describable_title_char_len`]), so offsets agree,
+    /// and handing the completer the whole line lets it parse a command the title only shows part
+    /// of.
+    fn x_ray_host_text(&self, ctx: &AppContext) -> String {
+        match self.command_x_ray_surface {
+            CommandXRaySurface::Editor => self.editor_text(ctx),
+            CommandXRaySurface::Header => self.command_text.clone(),
+        }
+    }
+
+    /// The editor's live buffer, falling back to `command_text` when there is no editor.
+    fn editor_text(&self, ctx: &AppContext) -> String {
         match &self.editor {
             Some(editor) => editor.as_ref(ctx).text(ctx).into_string(),
             None => self.command_text.clone(),
@@ -808,37 +880,60 @@ impl RequestedCommandView {
 
     /// Whether `offset` falls inside the span of the token currently described.
     fn is_within_described_token(&self, offset: CharOffset, ctx: &AppContext) -> bool {
-        let Some(description) = &self.command_x_ray_description else {
+        let Some(range) = self.described_token_char_range(ctx) else {
             return false;
         };
-        let text = self.x_ray_text(ctx);
-        let Some(byte_offset) = byte_offset_for_char(&text, offset) else {
-            return false;
-        };
-        let byte_offset = byte_offset.as_usize();
-        byte_offset >= description.token.span.start() && byte_offset < description.token.span.end()
+        range.contains(&offset.as_usize())
     }
 
-    /// The character offset of the start of the described token, which the editor element turns
-    /// into an on-screen position for the tooltip to anchor to.
+    /// The char range of the token currently described, in the coordinates of the surface that
+    /// owns it.
+    fn described_token_char_range(&self, ctx: &AppContext) -> Option<Range<usize>> {
+        let description = self.command_x_ray_description.as_ref()?;
+        let text = self.x_ray_host_text(ctx);
+        let start = char_offset_for_byte(&text, description.token.span.start())?;
+        let end = char_offset_for_byte(&text, description.token.span.end())?;
+        Some(start.as_usize()..end.as_usize())
+    }
+
+    /// The character offset of the start of the described token, which the owning surface's element
+    /// turns into an on-screen position for the tooltip to anchor to.
     fn described_token_start(&self, ctx: &AppContext) -> Option<CharOffset> {
         let description = self.command_x_ray_description.as_ref()?;
-        let text = self.x_ray_text(ctx);
+        let text = self.x_ray_host_text(ctx);
         char_offset_for_byte(&text, description.token.span.start())
     }
 
-    /// Keeps the editor's tooltip anchor in step with the description being shown.
+    /// Keeps the owning surface's tooltip anchor in step with the description being shown.
     fn sync_command_x_ray_anchor(&mut self, ctx: &mut ViewContext<Self>) {
-        let Some(editor) = self.editor.clone() else {
-            return;
-        };
         let offset = self.described_token_start(ctx);
-        editor.update(ctx, |editor, ctx| {
-            editor.set_command_x_ray_anchor_offset(offset, ctx);
-        });
-        // The description changing also changes whether the pointer is inside it.
-        let hovered = self.command_x_ray_hit.lock().offset;
-        self.set_command_x_ray_hit(hovered, ctx);
+        match self.command_x_ray_surface {
+            CommandXRaySurface::Editor => {
+                if let Some(editor) = self.editor.clone() {
+                    editor.update(ctx, |editor, ctx| {
+                        editor.set_command_x_ray_anchor_offset(offset, ctx);
+                    });
+                }
+                // The description changing also changes whether the pointer is inside it.
+                let hovered = self.command_x_ray_hit.lock().offset;
+                self.set_command_x_ray_hit(hovered, ctx);
+            }
+            CommandXRaySurface::Header => {
+                self.header_x_ray_anchor_char = offset.map(CharOffset::as_usize);
+                self.header_x_ray_hit.lock().token_chars =
+                    self.described_token_char_range(ctx);
+            }
+        }
+    }
+
+    /// Clears any header x-ray, for transitions where the header stops showing the command —
+    /// entering the blocked state, or the command text being restreamed under it.
+    fn clear_header_x_ray(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.command_x_ray_surface == CommandXRaySurface::Header
+            && self.command_x_ray_description.is_some()
+        {
+            command_x_ray::host::hide(self, ctx);
+        }
     }
 
     fn set_is_header_expanded(&mut self, value: bool, ctx: &mut ViewContext<Self>) {
@@ -1173,6 +1268,10 @@ impl RequestedCommandView {
     ///
     /// If the command length is shorter than the previous update, then the command is truncated to the given byte length.
     pub fn apply_streamed_update(&mut self, command: &str, ctx: &mut ViewContext<Self>) {
+        // A description computed against the old text would be stale, and its span could point
+        // past the new one. This is the header's counterpart to the editor's dismiss-on-edit.
+        self.clear_header_x_ray(ctx);
+
         match command.len().cmp(&self.command_text.len()) {
             Ordering::Greater => {
                 // Check if the existing length falls on a valid UTF-8 character boundary.
@@ -1311,6 +1410,11 @@ impl RequestedCommandView {
         let mut title: Cow<'static, str>;
         let mut font_override = None;
         let mut font_color_override = None;
+        // Whether `title` ends up being the command itself rather than a status message. Command
+        // x-ray only attaches to the header when it is: while blocked the title is the "OK if I run
+        // this command?" constant, and while expanded it is a "viewing detail" constant, neither of
+        // which has tokens to describe.
+        let mut title_is_command = false;
 
         let terminal_model = self.terminal_model.lock();
         let requested_command_block = match &self.action_type {
@@ -1323,6 +1427,7 @@ impl RequestedCommandView {
         match action_status {
             Some(AIActionStatus::Preprocessing) => {
                 title = self.get_header_title_text(app).into();
+                title_is_command = true;
                 font_override = Some(appearance.monospace_font_family());
                 if !self
                     .block_model
@@ -1336,6 +1441,7 @@ impl RequestedCommandView {
             }
             Some(AIActionStatus::Queued) => {
                 title = self.get_header_title_text(app).into();
+                title_is_command = true;
                 font_override = Some(appearance.monospace_font_family());
                 font_color_override = Some(blended_colors::text_disabled(
                     appearance.theme(),
@@ -1404,6 +1510,7 @@ impl RequestedCommandView {
                     // If a finished command block exists but there's no action status,
                     // treat the same as a finished command (normal text styling).
                     title = self.get_header_title_text(app).into();
+                    title_is_command = true;
                     font_override = Some(appearance.monospace_font_family());
                 } else {
                     // If there is no action status and response is not streaming, it was cancelled
@@ -1412,6 +1519,7 @@ impl RequestedCommandView {
                     title = if title_str.trim().is_empty() {
                         LOADING_MESSAGE.into()
                     } else {
+                        title_is_command = true;
                         title_str.into()
                     };
                     if self.action_type.is_requested_command() {
@@ -1435,6 +1543,7 @@ impl RequestedCommandView {
                         appearance.theme().surface_2(),
                     ));
                 } else {
+                    title_is_command = true;
                     // Only use monospace font for actual command text
                     font_override = Some(appearance.monospace_font_family());
                 }
@@ -1591,7 +1700,58 @@ impl RequestedCommandView {
             }
         };
 
-        config.render(app)
+        // The collapsed header is the second x-ray host. It supplies only a hit test (the char
+        // index the title's `Text` resolves), an anchor (that char's cached on-screen position),
+        // and the pointer stream; the delay, threshold, dismissal, describe flow and tooltip all
+        // come from `crate::command_x_ray` unchanged.
+        let attach_x_ray = title_is_command && self.action_type.is_requested_command();
+        if !attach_x_ray {
+            return config.render(app);
+        }
+
+        let hit = self.header_x_ray_hit.clone();
+        let reporter_hit = hit.clone();
+        config = config.with_title_char_addressing(TitleCharAddressing {
+            on_hovered_char: Some(Rc::new(move |char_index| {
+                reporter_hit.lock().hovered_char = char_index;
+            })),
+            anchor: self
+                .header_x_ray_anchor_char
+                .map(|char_index| (char_index, self.header_x_ray_position_id())),
+        });
+
+        CommandXRayHoverArea::new(
+            config.render(app),
+            self.header_x_ray_hover.clone(),
+            Box::new(move |_app| {
+                let hit = hit.lock().clone();
+                HoverProbe {
+                    is_clamped: hit.hovered_char.is_none(),
+                    is_within_token: hit.hovered_char.is_some_and(|char_index| {
+                        hit.token_chars
+                            .as_ref()
+                            .is_some_and(|range| range.contains(&char_index))
+                    }),
+                }
+            }),
+            Box::new(|outcome, ctx| match outcome {
+                HoverOutcome::Show => {
+                    ctx.dispatch_typed_action(
+                        RequestedCommandViewAction::TryToShowHeaderCommandXRay,
+                    );
+                }
+                HoverOutcome::Hide => {
+                    ctx.dispatch_typed_action(RequestedCommandViewAction::HideCommandXRay);
+                }
+                HoverOutcome::Idle => {}
+            }),
+        )
+        .finish()
+    }
+
+    /// The saved-position id the collapsed header's tooltip anchors to.
+    fn header_x_ray_position_id(&self) -> String {
+        format!("requested_command:header_x_ray_{}", self.position_id_prefix)
     }
 
     fn get_header_title_text(&self, app: &AppContext) -> String {
@@ -1715,7 +1875,7 @@ impl Entity for RequestedCommandView {
 
 impl CommandXRayHost for RequestedCommandView {
     fn x_ray_command_text(&self, ctx: &AppContext) -> String {
-        self.x_ray_text(ctx)
+        self.x_ray_host_text(ctx)
     }
 
     fn x_ray_context(&self, _ctx: &AppContext) -> Option<CommandXRayContext> {
@@ -1741,7 +1901,10 @@ impl CommandXRayHost for RequestedCommandView {
             }
             CommandXRayUpdate::Dismiss => {
                 self.command_x_ray_description = None;
-                self.command_x_ray_hover.mark_user_dismissed();
+                match self.command_x_ray_surface {
+                    CommandXRaySurface::Editor => self.command_x_ray_hover.mark_user_dismissed(),
+                    CommandXRaySurface::Header => self.header_x_ray_hover.mark_user_dismissed(),
+                }
             }
         }
         self.sync_command_x_ray_anchor(ctx);
@@ -2207,19 +2370,28 @@ impl View for RequestedCommandView {
         let mut root_stack = Stack::new();
         root_stack.add_child(container);
 
-        // The same tooltip the terminal input shows, anchored the same way, against the position
-        // the code editor's element cached for the described token.
-        if let (Some(description), Some(editor)) = (&self.command_x_ray_description, &self.editor) {
-            add_command_x_ray_overlay(
-                &mut root_stack,
-                CommandXRayTooltipAnchor {
-                    position_id: editor.as_ref(app).command_x_ray_position_id(app),
-                    y_anchor: AnchorPair::new(YAxisAnchor::Top, YAxisAnchor::Bottom),
-                    y_offset: OffsetType::Pixel(0.),
-                },
-                description,
-                appearance,
-            );
+        // The same tooltip the terminal input shows, anchored the same way, against whichever
+        // surface cached the described token's position while it painted.
+        if let Some(description) = &self.command_x_ray_description {
+            let position_id = match self.command_x_ray_surface {
+                CommandXRaySurface::Editor => self
+                    .editor
+                    .as_ref()
+                    .map(|editor| editor.as_ref(app).command_x_ray_position_id(app)),
+                CommandXRaySurface::Header => Some(self.header_x_ray_position_id()),
+            };
+            if let Some(position_id) = position_id {
+                add_command_x_ray_overlay(
+                    &mut root_stack,
+                    CommandXRayTooltipAnchor {
+                        position_id,
+                        y_anchor: AnchorPair::new(YAxisAnchor::Top, YAxisAnchor::Bottom),
+                        y_offset: OffsetType::Pixel(0.),
+                    },
+                    description,
+                    appearance,
+                );
+            }
         }
 
         if self.is_accept_split_button_menu_open {
@@ -2303,8 +2475,32 @@ impl TypedActionView for RequestedCommandView {
                 let Some(offset) = self.command_x_ray_hit.lock().offset else {
                     return;
                 };
-                let text = self.x_ray_text(ctx);
+                self.command_x_ray_surface = CommandXRaySurface::Editor;
+                let text = self.x_ray_host_text(ctx);
                 if let Some(byte_offset) = byte_offset_for_char(&text, offset) {
+                    command_x_ray::host::start_at_offset(
+                        self,
+                        byte_offset,
+                        CommandXRayTrigger::Hover,
+                        ctx,
+                    );
+                }
+            }
+            RequestedCommandViewAction::TryToShowHeaderCommandXRay => {
+                let Some(char_index) = self.header_x_ray_hit.lock().hovered_char else {
+                    return;
+                };
+                // Only the portion of the title that is a verbatim prefix of the command is
+                // describable: never the ellipsis `format_command_text` appends, and nothing past
+                // the first line of a multi-line command.
+                if char_index >= describable_title_char_len(&self.command_text) {
+                    return;
+                }
+                self.command_x_ray_surface = CommandXRaySurface::Header;
+                let text = self.x_ray_host_text(ctx);
+                if let Some(byte_offset) =
+                    byte_offset_for_char(&text, CharOffset::from(char_index))
+                {
                     command_x_ray::host::start_at_offset(
                         self,
                         byte_offset,
@@ -2321,7 +2517,8 @@ impl TypedActionView for RequestedCommandView {
                     return;
                 };
                 let cursor = editor.as_ref(ctx).cursor_head_offset(ctx);
-                let text = self.x_ray_text(ctx);
+                self.command_x_ray_surface = CommandXRaySurface::Editor;
+                let text = self.x_ray_host_text(ctx);
                 if let Some(byte_offset) = byte_offset_for_char(&text, cursor) {
                     command_x_ray::host::toggle_at_offset(self, byte_offset, ctx);
                 }
