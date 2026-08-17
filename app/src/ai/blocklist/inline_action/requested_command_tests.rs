@@ -1,6 +1,9 @@
 //! Unit tests for format_command_text in requested_command.rs
 
-use super::{format_command_text, mcp_blocked_title_text, mcp_viewing_detail_title_text};
+use super::{
+    describable_title_char_len, format_command_text, mcp_blocked_title_text,
+    mcp_viewing_detail_title_text,
+};
 
 #[test]
 fn single_line_without_newline_is_unchanged_ascii() {
@@ -69,6 +72,75 @@ fn newline_then_multibyte_results_in_ellipsis_only() {
     // Sanity: output remains valid UTF-8
     let reconstructed: String = output.chars().collect();
     assert_eq!(reconstructed, output);
+}
+
+/// The whole title is a verbatim prefix of a single-line command, so every character in it can be
+/// described.
+#[test]
+fn whole_single_line_title_is_describable() {
+    let input = "echo hello world";
+    let title = format_command_text(input);
+
+    assert_eq!(title, input);
+    assert_eq!(describable_title_char_len(input), title.chars().count());
+}
+
+/// Only the first line of a multi-line command reaches the title, and the ellipsis standing in for
+/// the rest is not part of the command, so its index must land outside the describable length.
+#[test]
+fn multi_line_title_stops_before_the_appended_ellipsis() {
+    let input = "cargo build\n--release";
+    let describable = describable_title_char_len(input);
+    let title = format_command_text(input);
+
+    assert_eq!(title, "cargo build…");
+    assert_eq!(describable, "cargo build".chars().count());
+
+    let ellipsis_index = title
+        .chars()
+        .position(|c| c == '…')
+        .expect("an ellipsis is appended when content follows the first line");
+    assert!(
+        ellipsis_index >= describable,
+        "ellipsis at char {ellipsis_index} must not be describable (length {describable})"
+    );
+}
+
+/// A command whose only remaining content is a trailing newline gets no ellipsis from
+/// [`format_command_text`], so the entire rendered title stays describable.
+#[test]
+fn trailing_newline_only_title_is_fully_describable() {
+    let input = "git status\n";
+    let title = format_command_text(input);
+
+    assert_eq!(title, "git status");
+    assert!(!title.contains('…'));
+    assert_eq!(describable_title_char_len(input), title.chars().count());
+}
+
+/// The describable length is counted in characters, not bytes, so a multi-byte command must not
+/// report the larger byte length — that would let the ellipsis, or text past the first line, be
+/// treated as describable.
+#[test]
+fn describable_length_counts_characters_not_bytes() {
+    let first_line = "echo 🚀✨";
+    let input = format!("{first_line}\nrm -rf /");
+    let describable = describable_title_char_len(&input);
+    let title = format_command_text(&input);
+
+    assert_eq!(title, "echo 🚀✨…");
+    assert_eq!(describable, 7);
+    assert_eq!(describable, first_line.chars().count());
+    assert_ne!(describable, first_line.len());
+
+    let ellipsis_index = title
+        .chars()
+        .position(|c| c == '…')
+        .expect("an ellipsis is appended when content follows the first line");
+    assert_eq!(ellipsis_index, describable);
+
+    // The same character-counting holds with no newline to truncate at.
+    assert_eq!(describable_title_char_len(first_line), 7);
 }
 
 #[test]
