@@ -29,26 +29,26 @@ Launch Warp from the repository root. The exact command depends on which environ
 
 Always pass `--bin warp` explicitly. That target builds the internal (dogfood) channel, which is the only channel that honors `--api-key` for the GUI app. A plain `cargo run` builds the OSS channel, which ignores the key and falls back to interactive onboarding.
 
-Authenticating this way starts the app directly without interactive login prompts.
+Where the key is accepted, authenticating this way starts the app directly without interactive login prompts. In a cloud sandbox it currently is not — see "If the app is logged out" below before you plan a verification around it.
 
 Initial builds may take several minutes; subsequent incremental builds are faster.
 
 ### Verify the launch is authenticated
 
-After launching, confirm both of the following before testing:
+The rendered window is the only reliable signal. Authenticated Warp opens straight to the terminal; unauthenticated Warp shows the logged-out onboarding/sign-in screen. Look at the window before you test anything.
 
-- Warp is **authenticated** — it opens straight to the terminal, NOT the logged-out onboarding/sign-in screen.
-- The `cargo run` stderr/terminal output does **not** contain the substring `provided but IGNORED`.
+The log distinguishes nothing. `Authenticating via pending API key` (`app/src/auth/auth_manager.rs`) is logged *before* the attempt, and neither outcome is logged after it; the IAP cache fast path (`crates/warp_server_client/src/iap.rs`) is silent on success as well. An absence of errors is not a successful login.
 
-If that warning appears (or the app is logged out), the wrong binary/channel was launched — stop and relaunch with `cargo run --bin warp`.
+### If the app is logged out
 
-### If the app is still logged out: staging IAP
+In a cloud sandbox, expect it: **no way to launch an authenticated GUI there is known to work today.** Two independent walls, both reproduced against a real `cargo run --bin warp`.
 
-Staging dogfood gates the API-key login behind IAP: unlike the TUI (which authenticates immediately and resolves IAP out of band), the GUI withholds `--api-key`/`WARP_API_KEY` authentication until an IAP token is loaded (`authenticate_user_after_iap_access` in `app/src/lib.rs`). A correctly-launched `cargo run --bin warp` that still shows the logged-out onboarding screen is usually this, not a missing account.
+- **The key is the wrong kind.** `WARP_API_KEY` in a cloud sandbox is a *service-account* key, and the GUI requires a user account. The app lands on onboarding with `Unauthorized: Expected a user account` and `invalid input syntax for type uuid: "serviceAccount:<uid>"`, carrying the key's own UID; `STAGING_USER_WARP_API_KEY` is usually not set there either. A genuine user-account key clears those errors, and then every authenticated call returns `403 Forbidden` for reasons not yet understood.
+- **Staging dogfood gates the API-key login behind IAP.** Unlike the TUI (which authenticates immediately and resolves IAP out of band), the GUI withholds `--api-key`/`WARP_API_KEY` authentication until an IAP token is loaded (`authenticate_user_after_iap_access` in `app/src/lib.rs`). The sandbox self-mints one via Workload Identity Federation — a valid `OZ_RUN_ID` enables the runner-context mint path (`app/src/lib.rs`), which exchanges the injected `WARP_STAGING_IAP_BOOTSTRAP_JWT` for a token (`crates/warp_server_client/src/iap.rs`), no `gcloud` needed. That bootstrap JWT lives exactly 900 seconds from the start of the run. Past it the mint dead-ends (`Staging IAP access unavailable before startup user authentication`) and login is never attempted at all, so a run older than 15 minutes never reaches the key.
 
-- The sandbox is expected to self-mint an IAP token via Workload Identity Federation: a valid `OZ_RUN_ID` enables the runner-context mint path (`app/src/lib.rs`), which then exchanges the injected `WARP_STAGING_IAP_BOOTSTRAP_JWT` for a token (`crates/warp_server_client/src/iap.rs`) — no `gcloud` needed.
-- Check Settings > Account for the "Staging IAP credentials" status widget (`app/src/settings_view/main_page.rs`): `Loaded (refreshes in ~Nm)` means the token minted; `Failed: <message>` shows the actual error (e.g. a failed WIF token exchange).
-- Only once a real launch attempt shows a `Failed` status is falling back to the hardcode/mock path below appropriate. Never describe a capture made against a mocked or hardcoded state as a live Cloud Mode (or other authenticated-surface) verification — say plainly that it's mocked.
+Settings > Account carries a "Staging IAP credentials" status widget (`app/src/settings_view/main_page.rs`), but Settings is unreachable from the onboarding screen — no menu bar, no gear icon, and Ctrl+Comma does nothing — so it cannot be read in the state that needs it.
+
+Once a real launch attempt has landed on onboarding, falling back to the hardcode/mock path below is appropriate. Never describe a capture made against a mocked or hardcoded state as a live Cloud Mode (or other authenticated-surface) verification — say plainly that it's mocked.
 
 ## Testing Workflow
 
