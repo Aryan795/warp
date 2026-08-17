@@ -139,8 +139,10 @@ pub fn mcp_specs_from_mcp_servers(
         }
     }
 
-    // A server referenced under two names is still one server: dedupe by UUID and
-    // keep the first name for it.
+    // A server referenced under two names is still one server: dedupe by UUID,
+    // keeping the name that sorts first. `mcp_servers` is key-ordered rather than
+    // insertion-ordered, so that is the lexicographically smallest of its aliases,
+    // not the one the user wrote first.
     uuids.sort_by(|(left, _), (right, _)| left.cmp(right));
     uuids.dedup_by_key(|(uuid, _)| *uuid);
     well_known.sort();

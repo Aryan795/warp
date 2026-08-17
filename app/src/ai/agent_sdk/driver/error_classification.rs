@@ -101,12 +101,16 @@ pub fn classify_driver_error(error: &AgentDriverError) -> (AgentTaskState, TaskS
                 PlatformErrorCode::EnvironmentSetupFailed,
             ),
         ),
-        AgentDriverError::ManagedMcpResolutionFailed { uid, name, message } => (
+        AgentDriverError::ManagedMcpResolutionFailed {
+            uuid,
+            name,
+            message,
+        } => (
             AgentTaskState::Failed,
             TaskStatusUpdate::with_error_code(
                 format!(
                     "Managed MCP server {} could not be resolved: {message}",
-                    describe_mcp_server(uid, name.as_deref())
+                    describe_mcp_server(uuid, name.as_deref())
                 ),
                 PlatformErrorCode::EnvironmentSetupFailed,
             ),

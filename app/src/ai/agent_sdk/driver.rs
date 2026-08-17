@@ -624,10 +624,10 @@ pub enum AgentDriverError {
     },
     #[error(
         "Failed to resolve managed MCP server {}: {message}",
-        describe_mcp_server(uid, name.as_deref())
+        describe_mcp_server(uuid, name.as_deref())
     )]
     ManagedMcpResolutionFailed {
-        uid: Uuid,
+        uuid: Uuid,
         /// Name the run configured for this server, when one is known.
         name: Option<String>,
         message: String,
@@ -768,19 +768,24 @@ register_error!(AgentDriverError);
 /// the run configured a name for it, and the bare UID otherwise.
 ///
 /// The UID always stays in the message so support and debugging can still
-/// identify the server. A name equal to the UID is dropped rather than rendered
-/// twice, which is the `--mcp <uuid>` case: that reference makes the UUID its
-/// own `mcp_servers` key.
-pub(crate) fn describe_mcp_server(uuid: &Uuid, name: Option<&str>) -> String {
-    match name {
-        Some(name) if name != uuid.to_string() => format!("'{name}' ({uuid})"),
+/// identify the server. A name that is blank, or that is just the UID again, is
+/// dropped rather than rendered alongside it: `--mcp <uuid>` makes the UUID its
+/// own `mcp_servers` key, and nothing rejects an empty key. The UID case is
+/// matched by parsing rather than by bytes, so a non-canonical spelling of the
+/// same UUID (uppercase, or without hyphens - both accepted as a `warp_id`)
+/// is caught too.
+fn describe_mcp_server(uuid: &Uuid, name: Option<&str>) -> String {
+    match name.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) if !Uuid::parse_str(name).is_ok_and(|parsed| parsed == *uuid) => {
+            format!("'{name}' ({uuid})")
+        }
         _ => uuid.to_string(),
     }
 }
 
 /// A managed MCP server the run references by UUID.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct McpServerRef {
+struct McpServerRef {
     uuid: Uuid,
     /// Name the run configured for this server (its `mcp_servers` map key).
     /// `None` when the reference carried no name, as with a profile allowlist
@@ -1463,7 +1468,7 @@ impl AgentDriver {
                         .create_managed_mcp_client_config(uuid.to_string())
                         .await
                         .map_err(|err| AgentDriverError::ManagedMcpResolutionFailed {
-                            uid: *uuid,
+                            uuid: *uuid,
                             name: name.clone(),
                             message: format!("{err:#}"),
                         })?;
@@ -1472,7 +1477,7 @@ impl AgentDriver {
                     )
                     .map_err(|err| {
                         AgentDriverError::ManagedMcpResolutionFailed {
-                            uid: *uuid,
+                            uuid: *uuid,
                             name: name.clone(),
                             message: err.to_string(),
                         }

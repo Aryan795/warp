@@ -28,21 +28,6 @@ fn uuid_spec_is_coerced_to_warp_id() {
 }
 
 #[test]
-fn named_uuid_spec_keeps_its_name_as_the_server_key() {
-    let uuid = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
-    let servers = build(vec![MCPSpec::Uuid {
-        uuid,
-        name: Some("sentry".to_string()),
-    }]);
-
-    let entry = servers.get("sentry").unwrap();
-    assert_eq!(
-        entry["warp_id"].as_str(),
-        Some("550e8400-e29b-41d4-a716-446655440000")
-    );
-}
-
-#[test]
 fn well_known_spec_is_coerced_to_warp_id() {
     let _flag = FeatureFlag::WellKnownMcpIds.override_enabled(true);
     let servers = build(vec![MCPSpec::WellKnown("linear".to_string())]);

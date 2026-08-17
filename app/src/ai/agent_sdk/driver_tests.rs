@@ -525,8 +525,12 @@ fn managed_resolution_failure_includes_uid_name_and_message() {
     .unwrap_err();
 
     match err {
-        AgentDriverError::ManagedMcpResolutionFailed { uid, name, message } => {
-            assert_eq!(uid, uuid);
+        AgentDriverError::ManagedMcpResolutionFailed {
+            uuid: failed_uuid,
+            name,
+            message,
+        } => {
+            assert_eq!(failed_uuid, uuid);
             assert_eq!(name.as_deref(), Some("sentry"));
             assert!(message.contains("not active"));
         }
