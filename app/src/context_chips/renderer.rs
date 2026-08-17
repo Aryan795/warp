@@ -155,7 +155,12 @@ impl Renderer {
 
         let mut content = Flex::row().with_cross_axis_alignment(CrossAxisAlignment::Center);
 
-        if let Some(icon) = self.kind.udi_icon() {
+        let icon = self
+            .value
+            .as_operating_system_info()
+            .map(|info| info.logo().icon())
+            .or_else(|| self.kind.udi_icon());
+        if let Some(icon) = icon {
             content.add_child(
                 Container::new(
                     ConstrainedBox::new(icon.to_warpui_icon(Fill::Solid(color)).finish())
@@ -168,16 +173,19 @@ impl Renderer {
             );
         }
 
-        let text = Text::new_inline(
-            self.value.to_string(),
-            appearance.ui_font_family(),
-            font_size,
-        )
-        .with_color(color)
-        .with_line_height_ratio(appearance.line_height_ratio())
-        .with_style(Properties::default().weight(Weight::Semibold))
-        .finish();
-        content.add_child(text);
+        let display_text = if matches!(self.kind, ContextChipKind::OperatingSystemLogo) {
+            String::new()
+        } else {
+            self.value.to_string()
+        };
+        if !display_text.is_empty() {
+            let text = Text::new_inline(display_text, appearance.ui_font_family(), font_size)
+                .with_color(color)
+                .with_line_height_ratio(appearance.line_height_ratio())
+                .with_style(Properties::default().weight(Weight::Semibold))
+                .finish();
+            content.add_child(text);
+        }
 
         if let Some(remove_button) = remove_button {
             content.add_child(
