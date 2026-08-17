@@ -1,30 +1,17 @@
 use settings::Setting;
 use warpui::integration::{AssertionOutcome, TestStep};
-use warpui::windowing::WindowManager;
 use warpui::{App, SingletonEntity, WindowId, async_assert};
 
-use crate::integration_testing::step::new_step_with_default_assertions;
+use crate::integration_testing::step::{
+    assert_element_painted, dispatch_workspace_action, new_step_with_default_assertions,
+};
 use crate::integration_testing::view_getters::{settings_view, theme_chooser_view};
 use crate::settings_view::{
     SEARCH_EDITOR_POSITION_ID, SettingsAction, SettingsSection, nav_page_position_id,
     nav_subpage_position_id, nav_umbrella_position_id,
 };
 use crate::window_settings::WindowSettings;
-use crate::workspace::{Workspace, WorkspaceAction};
-
-/// Dispatches a [`WorkspaceAction`] against the active window's workspace view.
-fn dispatch_workspace_action(app: &mut App, action: WorkspaceAction) {
-    let window_id = app.read(|ctx| {
-        WindowManager::as_ref(ctx)
-            .active_window()
-            .expect("no active window")
-    });
-    let workspace_view_id = app
-        .views_of_type::<Workspace>(window_id)
-        .and_then(|views| views.first().map(|view| view.id()))
-        .expect("no workspace view");
-    app.dispatch_typed_action(window_id, &[workspace_view_id], &action);
-}
+use crate::workspace::WorkspaceAction;
 
 /// Builds a step that will toggle a setting by [`SettingsAction`]. This can
 /// only update settings with a corresponding action on the settings view.
@@ -115,36 +102,6 @@ pub fn assert_settings_section(section: SettingsSection) -> TestStep {
     TestStep::new(&format!("Assert settings section is {section:?}")).add_named_assertion(
         format!("Selected section is {section:?}"),
         move |app, window_id| assert_section_selected(app, window_id, section),
-    )
-}
-
-/// Asserts whether the element saved under `position_id` was painted in the
-/// most recent frame.
-///
-/// An element that saves its position for a single frame is only in the
-/// position cache while it is currently rendered. Reading visibility this way
-/// means the assertion is checking what was actually drawn, rather than
-/// re-deriving the conditions behind it and risking drift from `render`.
-pub(super) fn assert_element_painted(
-    position_id: String,
-    description: String,
-    visible: bool,
-) -> TestStep {
-    TestStep::new(&format!("Assert {description} visible is {visible}")).add_named_assertion(
-        format!("{description} visible is {visible}"),
-        move |app: &mut App, window_id| {
-            let painted = app.presenter(window_id).is_some_and(|presenter| {
-                presenter
-                    .borrow()
-                    .position_cache()
-                    .get_position(&position_id)
-                    .is_some()
-            });
-            async_assert!(
-                painted == visible,
-                "{description} visible should be {visible}, was {painted}"
-            )
-        },
     )
 }
 
