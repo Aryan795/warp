@@ -19,7 +19,7 @@ use crate::settings::PrivacySettings;
 use crate::system::SystemStats;
 use crate::workflows::workflow::Workflow;
 use crate::workflows::{CloudWorkflow, CloudWorkflowModel, WorkflowId};
-use crate::workspaces::team::Team;
+use crate::workspaces::team::{Team, TeamMember};
 use crate::workspaces::user_profiles::UserProfiles;
 use crate::workspaces::workspace::{PurchaseAddOnCreditsPolicy, Workspace, WorkspaceUid};
 
@@ -208,6 +208,82 @@ fn test_leaving_team_removes_objects() {
                     personal_workflow_id.to_string(),
                     shared_workflow_id.to_string()
                 ]
+            );
+        });
+    });
+}
+
+#[test]
+fn test_create_team_in_workspace_refreshes_current_workspace_without_pushing_a_new_one() {
+    App::test((), |mut app| async move {
+        let workspace_uid: WorkspaceUid = WorkspaceUid::from(ServerId::from(987));
+        let created_team_uid: ServerId = ServerId::from(456);
+        let admin_uid = UserUid::new("admin_uid");
+
+        let team_client = Arc::new(MockTeamClient::new());
+        initialize_app(
+            team_client.clone(),
+            Arc::new(MockWorkspaceClient::new()),
+            vec![Workspace::from_local_cache(
+                workspace_uid,
+                "Acme".to_owned(),
+                Some(vec![]),
+            )],
+            &mut app,
+        );
+
+        let team_update_manager =
+            app.add_singleton_model(|ctx| TeamUpdateManager::new(team_client, None, ctx));
+
+        // Simulate the server response to creating a team in the workspace, seeded with
+        // the acting admin, the way `TeamsPageView::create_team_in_workspace` calls it.
+        team_update_manager.update(&mut app, |manager, ctx| {
+            manager.on_team_created_in_workspace(
+                Ok(WorkspacesMetadataWithPricing {
+                    metadata: WorkspacesMetadataResponse {
+                        workspaces: vec![Workspace::from_local_cache(
+                            workspace_uid,
+                            "Acme".to_owned(),
+                            Some(vec![Team::from_local_cache(
+                                created_team_uid,
+                                "Platform".to_owned(),
+                                None,
+                                None,
+                                Some(vec![TeamMember {
+                                    uid: admin_uid,
+                                    email: "admin@acme.com".to_owned(),
+                                    role: MembershipRole::User,
+                                }]),
+                            )]),
+                        )],
+                        joinable_teams: vec![],
+                        experiments: None,
+                        feature_model_choices: None,
+                        ai_credit_availability: None,
+                        user_purchase_policy: None,
+                    },
+                    pricing_info: None,
+                }),
+                ctx,
+            );
+        });
+
+        UserWorkspaces::handle(&app).read(&app, |user_workspaces, _| {
+            let workspace = user_workspaces
+                .current_workspace()
+                .expect("the current workspace should still be set");
+            assert_eq!(
+                workspace.uid, workspace_uid,
+                "creating a team in the workspace must not push a second workspace"
+            );
+            let team = workspace
+                .teams
+                .iter()
+                .find(|team| team.uid == created_team_uid)
+                .expect("the created team should be present in the refreshed workspace");
+            assert!(
+                team.members.iter().any(|member| member.uid == admin_uid),
+                "the acting admin should be a member of the newly created team"
             );
         });
     });

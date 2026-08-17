@@ -10,6 +10,7 @@ use warpui::{
     Entity, ModelContext, ModelHandle, RequestState, SingletonEntity, duration_with_jitter,
 };
 
+use super::team::MembershipRole;
 use super::team_tester::{TeamTesterStatus, TeamTesterStatusEvent};
 use super::user_workspaces::{
     CreateTeamResponse, UserWorkspaces, WorkspacesMetadataResponse, WorkspacesMetadataWithPricing,
@@ -17,7 +18,7 @@ use super::user_workspaces::{
 use super::workspace::WorkspaceUid;
 use crate::ai::llms::LLMPreferences;
 use crate::ai::request_usage_model::AIRequestUsageModel;
-use crate::auth::AuthStateProvider;
+use crate::auth::{AuthStateProvider, UserUid};
 use crate::cloud_object::CloudObjectEventEntrypoint;
 use crate::network::{NetworkStatus, NetworkStatusEvent, NetworkStatusKind};
 use crate::persistence::ModelEvent;
@@ -35,6 +36,8 @@ pub enum TeamUpdateManagerEvent {
     LeaveError,
     RenameTeamSuccess,
     RenameTeamError,
+    CreateTeamInWorkspaceSuccess,
+    CreateTeamInWorkspaceError,
 }
 
 /// TeamUpdateManager is a singleton model responsible for communicating with the server and local
@@ -307,6 +310,59 @@ impl TeamUpdateManager {
         UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
             user_workspaces.team_created(&create_team_response, ctx);
         });
+    }
+
+    /// Creates a team inside the caller's own native workspace, seeded with the given
+    /// members. Unlike [`Self::create_team`], this never creates a new workspace, so on
+    /// success it refreshes the current workspace's metadata rather than calling
+    /// [`UserWorkspaces::team_created`], which would incorrectly push a second workspace.
+    pub fn create_team_in_workspace(
+        &mut self,
+        workspace_uid: WorkspaceUid,
+        team_name: String,
+        members: Vec<(UserUid, MembershipRole)>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let team_client = self.team_client.clone();
+        let _ = ctx.spawn(
+            async move {
+                team_client
+                    .create_team_in_workspace(workspace_uid, team_name, members)
+                    .await
+                    .context("Error creating team in workspace")
+            },
+            Self::on_team_created_in_workspace,
+        );
+    }
+
+    fn on_team_created_in_workspace(
+        &mut self,
+        result: Result<WorkspacesMetadataWithPricing>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        match result {
+            Err(e) => {
+                report_error!(e);
+                ctx.emit(TeamUpdateManagerEvent::CreateTeamInWorkspaceError);
+            }
+            Ok(response) => {
+                if let Some(pricing_info) = response.pricing_info.clone() {
+                    PricingInfoModel::handle(ctx).update(ctx, |model, ctx| {
+                        model.update_pricing_info(pricing_info, ctx);
+                    });
+                }
+
+                self.on_workspaces_updated(Ok(response.metadata.clone()), ctx);
+
+                // Update sqlite
+                self.save_to_db([ModelEvent::UpsertWorkspaces {
+                    workspaces: response.metadata.workspaces,
+                }]);
+
+                ctx.emit(TeamUpdateManagerEvent::CreateTeamInWorkspaceSuccess);
+            }
+        }
+        ctx.notify();
     }
 
     pub fn leave_team(

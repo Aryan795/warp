@@ -134,6 +134,7 @@ pub const WORKSPACE_ADMIN_PANEL_BUTTON_POSITION_ID: &str =
 pub const JOIN_A_TEAM_LIST_POSITION_ID: &str = "team_settings:join_a_team_list";
 pub const CREATE_TEAM_FORM_POSITION_ID: &str = "team_settings:create_team_form";
 pub const WORKSPACE_UNRESOLVED_POSITION_ID: &str = "team_settings:workspace_unresolved";
+pub const WORKSPACE_CREATE_TEAM_FORM_POSITION_ID: &str = "team_settings:workspace_create_team_form";
 
 const WORKSPACE_PENDING_DESCRIPTION: &str = "Checking which workspace you're in\u{2026}";
 const WORKSPACE_UNAVAILABLE_DESCRIPTION: &str = "We couldn't reach Warp to check which workspace you're in. Check your connection, then reopen this page.";
@@ -153,7 +154,7 @@ fn workspace_membership_description(workspace_name: &str, role: WorkspaceRole) -
             "You're part of the {workspace_name} workspace. Teams here are created and managed by a workspace admin, so you don't have permissions to perform workspace-level actions."
         ),
         WorkspaceRole::Admin => format!(
-            "You're an admin of the {workspace_name} workspace. Teams that belong to a workspace are created and managed from the admin panel on the web."
+            "You're an admin of the {workspace_name} workspace. Create a team below, or manage teams further from the admin panel on the web."
         ),
     }
 }
@@ -170,10 +171,10 @@ fn teamless_in_workspace_description(
             "Your workspace has no teams open to join. Ask an admin to add you to one."
         }
         (WorkspaceRole::Admin, true) => {
-            "Join one of your workspace's open teams below, or create a new one from the admin panel."
+            "Join one of your workspace's open teams below, or create a new one above."
         }
         (WorkspaceRole::Admin, false) => {
-            "Your workspace has no teams open to join. Create one from the admin panel and add yourself to it."
+            "Your workspace has no teams open to join. Create one above."
         }
     }
 }
@@ -204,6 +205,7 @@ pub enum TeamsPageAction {
     ShowDeleteTeamConfirmationDialog,
     CopyLink(String),
     CreateTeam,
+    CreateTeamInWorkspace,
     ChangeInviteViewOption(TeamsInviteOption),
     DeletePendingEmailInvitation {
         team_uid: ServerId,
@@ -241,7 +243,8 @@ pub enum TeamsPageAction {
         team_uid: ServerId,
     },
     /// Opens the workspace-level admin panel on the web, where a native workspace's teams
-    /// are administered. It is the only surface that can create a team inside a workspace.
+    /// are administered beyond what the desktop's in-app create form can do (color,
+    /// visibility, member picker, and so on).
     OpenWorkspaceAdminPanel,
     ContactSupport,
     ContactSales,
@@ -280,6 +283,7 @@ impl TeamsPageAction {
                 | ShowLeaveTeamConfirmationDialog
                 | ShowDeleteTeamConfirmationDialog
                 | CreateTeam
+                | CreateTeamInWorkspace
                 | DeletePendingEmailInvitation { .. }
                 | RemoveUserFromTeam { .. }
                 | AddDomainRestrictions { .. }
@@ -305,6 +309,7 @@ impl From<&TeamsPageAction> for LoginGatedFeature {
             LeaveTeam => "Leave Team",
             ShowDeleteTeamConfirmationDialog => "Delete Team",
             CreateTeam => "Create Team",
+            CreateTeamInWorkspace => "Create Team",
             DeletePendingEmailInvitation { .. } => "Delete Pending Email Invitation",
             RemoveUserFromTeam { .. } => "Remove User From Team",
             AddDomainRestrictions { .. } => "Add Domain Restrictions",
@@ -370,6 +375,7 @@ struct TeamsWidgetMouseHandles {
     checkbox_mouse_state: MouseStateHandle,
     admin_panel_button: MouseStateHandle,
     workspace_admin_panel_button: MouseStateHandle,
+    create_team_in_workspace_button: MouseStateHandle,
     grow_team_warning_cta_button: MouseStateHandle,
     team_members_count_tooltip: MouseStateHandle,
     outgrow_upgrade_link: MouseStateHandle,
@@ -520,6 +526,7 @@ pub struct TeamsPageView {
     page: PageType<Self>,
     auth_state: Arc<AuthState>,
     create_team_editor: ViewHandle<EditorView>,
+    create_team_in_workspace_editor: ViewHandle<EditorView>,
     approve_domains_block_editor: ViewHandle<WordBlockEditorView>,
     approve_domains_block_editor_state: ChipEditorState,
     email_invites_block_editor: ViewHandle<WordBlockEditorView>,
@@ -573,6 +580,7 @@ impl TypedActionView for TeamsPageView {
             TeamsPageAction::CopyLink(link) => self.copy_invite_link(link, ctx),
             TeamsPageAction::LeaveTeam => self.leave_team(ctx),
             TeamsPageAction::CreateTeam => self.create_team(ctx),
+            TeamsPageAction::CreateTeamInWorkspace => self.create_team_in_workspace(ctx),
             TeamsPageAction::RemoveUserFromTeam { user_uid, team_uid } => {
                 if FeatureFlag::BillingAndUsagePageV2.is_enabled() {
                     self.show_team_action_confirmation(
@@ -789,6 +797,12 @@ impl TeamsPageView {
             font_size,
             ctx,
         );
+        let create_team_in_workspace_editor = Self::editor(
+            |me, event, ctx| me.handle_editor_event(event, ctx),
+            TEAM_NAME_EDITOR_PLACEHOLDER_TEXT,
+            font_size,
+            ctx,
+        );
 
         let approve_domains_block_editor = ctx.add_typed_action_view(|ctx| {
             WordBlockEditorView::new(
@@ -903,6 +917,7 @@ impl TeamsPageView {
             page,
             auth_state: AuthStateProvider::as_ref(ctx).get().clone(),
             create_team_editor,
+            create_team_in_workspace_editor,
             approve_domains_block_editor,
             approve_domains_block_editor_state: ChipEditorState {
                 is_valid: false,
@@ -1242,6 +1257,35 @@ impl TeamsPageView {
             TeamUpdateManagerEvent::RenameTeamError => {
                 self.show_error("Failed to rename team", None, ctx)
             }
+            TeamUpdateManagerEvent::CreateTeamInWorkspaceSuccess => {
+                self.create_team_in_workspace_editor
+                    .update(ctx, |editor, ctx| {
+                        editor.clear_buffer_and_reset_undo_stack(ctx);
+                    });
+                // The refreshed workspace metadata has already landed by the time this
+                // fires (see `TeamUpdateManager::on_team_created_in_workspace`), so
+                // `team_for_view` tells us whether the create actually seeded this admin
+                // onto the team it just made. It stays `None` only in the edge case where
+                // the seed was withheld because the admin already belongs to a team in
+                // another workspace — without a distinct message here, that outcome would
+                // look indistinguishable from the button doing nothing.
+                if self
+                    .user_workspaces
+                    .as_ref(ctx)
+                    .team_for_view(ctx)
+                    .is_some()
+                {
+                    self.show_success("Successfully created team", ctx);
+                } else {
+                    self.show_success(
+                        "Team created, but you weren't added to it because you're already on a team in another workspace. Manage its membership from the admin panel.",
+                        ctx,
+                    );
+                }
+            }
+            TeamUpdateManagerEvent::CreateTeamInWorkspaceError => {
+                self.show_error("Failed to create team", None, ctx)
+            }
         }
     }
 
@@ -1568,6 +1612,62 @@ impl TeamsPageView {
             );
         });
         ctx.dispatch_typed_action(&WorkspaceAction::OpenWarpDrive);
+    }
+
+    /// Creates a team inside the current native workspace. Seeds the acting admin as a
+    /// member so they land on the team they just created, rather than staying teamless:
+    /// the server only adds the members the caller explicitly lists.
+    fn create_team_in_workspace(&mut self, ctx: &mut ViewContext<Self>) {
+        let team_name = self
+            .create_team_in_workspace_editor
+            .as_ref(ctx)
+            .buffer_text(ctx)
+            .trim()
+            .to_string();
+        if team_name.is_empty() {
+            return;
+        }
+        let user_workspaces = self.user_workspaces.as_ref(ctx);
+        let Some(workspace_uid) = user_workspaces
+            .current_workspace()
+            .map(|workspace| workspace.uid)
+        else {
+            return;
+        };
+        let Some(user_uid) = self.auth_state.user_id() else {
+            return;
+        };
+        let members = Self::create_team_in_workspace_seed_members(
+            user_uid,
+            user_workspaces.is_user_on_any_team(user_uid),
+        );
+        TeamUpdateManager::handle(ctx).update(ctx, move |manager, ctx| {
+            manager.create_team_in_workspace(workspace_uid, team_name, members, ctx);
+        });
+    }
+
+    /// The member to seed a new in-workspace team with, on behalf of the admin creating
+    /// it.
+    ///
+    /// Stays empty when the admin already belongs to a team in some workspace: the server
+    /// seeds team memberships inside the same transaction that creates the team, and (when
+    /// multi-team-per-user is disabled) rejects seeding a user who is already on a team,
+    /// failing the whole create rather than just the membership. "Teamless in the current
+    /// workspace" — the precondition for this form to even render — is not the same as
+    /// "teamless everywhere", since a user can belong to more than one workspace.
+    ///
+    /// The role is always `User`, never `Admin`: seeding an `Admin` team role requires the
+    /// workspace's multi-admin plan, and this admin's workspace-level permissions already
+    /// let them manage the team without a team-level admin role.
+    fn create_team_in_workspace_seed_members(
+        user_uid: UserUid,
+        user_already_on_a_team: bool,
+    ) -> Vec<(UserUid, MembershipRole)> {
+        if user_already_on_a_team {
+            Vec::new()
+        } else {
+            vec![(user_uid, MembershipRole::User)]
+        }
     }
 
     fn set_team_member_role(
@@ -4098,7 +4198,7 @@ impl TeamsWidget {
                 } else {
                     WorkspaceRole::Member
                 };
-                self.render_workspace_teams_page(view, &workspace.name, role, appearance)
+                self.render_workspace_teams_page(view, &workspace.name, role, appearance, app)
             }
             TeamlessOffer::CreateTeam => self.render_create_team_page(view, appearance, app),
             TeamlessOffer::WorkspacePending => {
@@ -4145,6 +4245,7 @@ impl TeamsWidget {
         workspace_name: &str,
         role: WorkspaceRole,
         appearance: &Appearance,
+        app: &AppContext,
     ) -> Box<dyn Element> {
         let mut page = Flex::column();
         let has_discoverable_teams = !view.discoverable_teams_states.is_empty();
@@ -4165,6 +4266,18 @@ impl TeamsWidget {
             .finish(),
         );
         if role == WorkspaceRole::Admin {
+            workspace_section.add_child(
+                SavePosition::new(
+                    Container::new(
+                        self.render_create_team_in_workspace_actions(view, appearance, app),
+                    )
+                    .with_padding_top(12.)
+                    .finish(),
+                    WORKSPACE_CREATE_TEAM_FORM_POSITION_ID,
+                )
+                .for_single_frame()
+                .finish(),
+            );
             workspace_section.add_child(
                 Container::new(
                     Align::new(self.render_workspace_admin_panel_button(appearance))
@@ -4534,18 +4647,20 @@ impl TeamsWidget {
         }
     }
 
-    fn render_create_team_button(
+    /// Shared body for the create-team buttons: the personal create-team page and the
+    /// in-workspace create form both need the same disabled-while-empty accent button,
+    /// wired to their own name editor and dispatched action.
+    fn render_create_team_button_for(
         &self,
-        view: &TeamsPageView,
+        editor: &ViewHandle<EditorView>,
+        mouse_state_handle: MouseStateHandle,
+        action: TeamsPageAction,
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
         let mut button = appearance
             .ui_builder()
-            .button(
-                ButtonVariant::Accent,
-                self.mouse_state_handles.create_team_button.clone(),
-            )
+            .button(ButtonVariant::Accent, mouse_state_handle)
             .with_centered_text_label(CREATE_TEAM_BUTTON_LABEL.to_owned())
             .with_style(UiComponentStyles {
                 font_color: Some(
@@ -4561,13 +4676,7 @@ impl TeamsWidget {
                 ..Default::default()
             });
 
-        if view
-            .create_team_editor
-            .as_ref(app)
-            .buffer_text(app)
-            .trim()
-            .is_empty()
-        {
+        if editor.as_ref(app).buffer_text(app).trim().is_empty() {
             button = button
                 .with_style(UiComponentStyles {
                     font_color: Some(
@@ -4584,7 +4693,66 @@ impl TeamsWidget {
         button
             .build()
             .with_cursor(Cursor::PointingHand)
-            .on_click(move |ctx, _, _| ctx.dispatch_typed_action(TeamsPageAction::CreateTeam))
+            .on_click(move |ctx, _, _| ctx.dispatch_typed_action(action.clone()))
+            .finish()
+    }
+
+    fn render_create_team_button(
+        &self,
+        view: &TeamsPageView,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        self.render_create_team_button_for(
+            &view.create_team_editor,
+            self.mouse_state_handles.create_team_button.clone(),
+            TeamsPageAction::CreateTeam,
+            appearance,
+            app,
+        )
+    }
+
+    fn render_create_team_in_workspace_button(
+        &self,
+        view: &TeamsPageView,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        self.render_create_team_button_for(
+            &view.create_team_in_workspace_editor,
+            self.mouse_state_handles
+                .create_team_in_workspace_button
+                .clone(),
+            TeamsPageAction::CreateTeamInWorkspace,
+            appearance,
+            app,
+        )
+    }
+
+    fn render_create_team_in_workspace_actions(
+        &self,
+        view: &TeamsPageView,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_child(
+                Shrinkable::new(
+                    1.,
+                    self.render_editor(
+                        appearance,
+                        view.create_team_in_workspace_editor.clone(),
+                        None,
+                    ),
+                )
+                .finish(),
+            )
+            .with_child(
+                Container::new(self.render_create_team_in_workspace_button(view, appearance, app))
+                    .with_padding_left(CREATE_TEAM_BUTTON_LEFT_PADDING)
+                    .finish(),
+            )
             .finish()
     }
 
@@ -4735,7 +4903,7 @@ fn test_workspace_membership_description_names_the_workspace_and_reflects_the_ro
     assert!(admin.contains("Acme"));
     assert!(
         admin.contains("admin panel"),
-        "an admin should be pointed at the only surface that can create a team in a workspace: {admin}"
+        "an admin should still be pointed at the admin panel for what the in-app form can't do: {admin}"
     );
 }
 
@@ -4758,7 +4926,7 @@ fn test_teamless_in_workspace_description_covers_every_role_and_discovery_combin
         "{stranded_member}"
     );
     let stranded_admin = teamless_in_workspace_description(WorkspaceRole::Admin, false);
-    assert!(stranded_admin.contains("admin panel"), "{stranded_admin}");
+    assert!(stranded_admin.contains("above"), "{stranded_admin}");
 
     // With teams to join, both roles are pointed at the list below.
     for role in [WorkspaceRole::Member, WorkspaceRole::Admin] {

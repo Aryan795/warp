@@ -2421,6 +2421,58 @@ fn test_native_workspace_admin_is_recognized_as_a_workspace_admin() {
     })
 }
 
+#[test]
+fn test_is_user_on_any_team_checks_every_known_workspace() {
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![]);
+        register_ai_usage_model(&mut app);
+
+        // Teamless in the current (native) workspace, but a member of a team in a second
+        // workspace the client also knows about — the case that must still block seeding
+        // this user into a brand-new team.
+        let current_workspace = gql_native_workspace(GqlMembershipRole::Admin);
+        let mut other_workspace = gql_workspace("other_workspace_uid007", None);
+        other_workspace.teams = vec![gql_team("other-team", "Other Team", &["test-user"])];
+
+        apply_workspaces_metadata(
+            &mut app,
+            gql_user(None, vec![current_workspace, other_workspace]).into(),
+        );
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert!(
+                !user_workspaces.has_teams(),
+                "the current workspace should still leave the user teamless"
+            );
+            assert!(
+                user_workspaces.is_user_on_any_team(UserUid::new("test-user")),
+                "a team in another known workspace should still count"
+            );
+        });
+    })
+}
+
+#[test]
+fn test_is_user_on_any_team_is_false_when_teamless_everywhere() {
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![]);
+        register_ai_usage_model(&mut app);
+
+        apply_workspaces_metadata(
+            &mut app,
+            gql_user(None, vec![gql_native_workspace(GqlMembershipRole::Admin)]).into(),
+        );
+
+        app.read(|ctx| {
+            assert!(
+                !UserWorkspaces::as_ref(ctx).is_user_on_any_team(UserUid::new("test-user")),
+                "a teamless admin should not appear on any team"
+            );
+        });
+    })
+}
+
 /// A workspace restored from SQLite: identity only, no plan. This is what the client has
 /// on launch, before the first workspaces-metadata response.
 fn cached_workspace() -> Workspace {

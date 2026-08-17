@@ -427,6 +427,15 @@ pub enum MembershipRole {
     Unknown,
 }
 
+#[derive(cynic::Enum, Clone, Debug, PartialEq, Eq, Copy)]
+pub enum TeamVisibility {
+    Open,
+    Private,
+    Hidden,
+    #[cynic(fallback)]
+    Unknown,
+}
+
 #[derive(cynic::Enum, Clone, Debug)]
 pub enum LlmModelHost {
     AwsBedrock,

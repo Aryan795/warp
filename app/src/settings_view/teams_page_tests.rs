@@ -245,3 +245,26 @@ fn workspace_admin_does_not_get_pending_invite_cancellation() {
     // it's out of scope for the workspace-admin override.
     assert!(action_labels(&items, "invitee@example.com").is_empty());
 }
+
+#[test]
+fn create_team_in_workspace_seeds_the_creator_as_a_plain_member() {
+    let user_uid = UserUid::new(MEMBER_EMAIL);
+
+    let members = TeamsPageView::create_team_in_workspace_seed_members(user_uid, false);
+
+    // USER, never ADMIN: seeding an ADMIN team role requires the workspace's multi-admin
+    // plan, and this admin's workspace-level permissions already cover managing the team.
+    assert_eq!(members, vec![(user_uid, MembershipRole::User)]);
+}
+
+#[test]
+fn create_team_in_workspace_withholds_the_seed_when_already_on_a_team_elsewhere() {
+    let user_uid = UserUid::new(MEMBER_EMAIL);
+
+    let members = TeamsPageView::create_team_in_workspace_seed_members(user_uid, true);
+
+    // An empty seed avoids the server's "already a member of a team" rejection, which
+    // (when multi-team-per-user is disabled) fails the whole create, not just the
+    // membership.
+    assert!(members.is_empty());
+}

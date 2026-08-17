@@ -430,6 +430,7 @@ fn register_tests() -> HashMap<&'static str, BoxedBuilderFn> {
 
     // Settings Teams page
     register_test!(test_settings_teams_page_states_for_a_teamless_user);
+    register_test!(test_settings_teams_page_workspace_admin_creates_a_team_and_lands_on_it);
     register_test!(test_settings_teams_page_captures);
 
     register_test!(test_middle_click_paste);

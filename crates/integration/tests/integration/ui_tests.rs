@@ -291,6 +291,7 @@ integration_tests! {
 
     // Settings Teams page, for a user with no team of their own.
     test_settings_teams_page_states_for_a_teamless_user,
+    test_settings_teams_page_workspace_admin_creates_a_team_and_lands_on_it,
     #[ignore = "Manual test: requires real display for frame capture"]
     test_settings_teams_page_captures,
 

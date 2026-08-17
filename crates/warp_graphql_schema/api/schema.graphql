@@ -1068,6 +1068,31 @@ input CreateTeamInput {
   name: String!
 }
 
+input CreateTeamInWorkspaceInput {
+  color: String
+  members: [CreateTeamInWorkspaceMemberInput!]! = []
+  name: String!
+  visibility: TeamVisibility! = OPEN
+  workspaceUid: ID!
+}
+
+"""
+A workspace member to seed a newly created team with, along with the team-level role
+they should be granted. Only USER and ADMIN are accepted; native-workspace teams do not
+have a team-level OWNER.
+"""
+input CreateTeamInWorkspaceMemberInput {
+  role: MembershipRole!
+  userUid: ID!
+}
+
+type CreateTeamInWorkspaceOutput implements Response {
+  responseContext: ResponseContext!
+  team: Team!
+}
+
+union CreateTeamInWorkspaceResult = CreateTeamInWorkspaceOutput | UserFacingError
+
 type CreateTeamOutput implements Response {
   responseContext: ResponseContext!
   workspace: Workspace!
@@ -3126,6 +3151,7 @@ type RootMutation {
   createNotebook(input: CreateNotebookInput!, requestContext: RequestContext!): CreateNotebookResult!
   createSimpleIntegration(input: CreateSimpleIntegrationInput!, requestContext: RequestContext!): CreateSimpleIntegrationResult!
   createTeam(input: CreateTeamInput!, requestContext: RequestContext!): CreateTeamResult!
+  createTeamInWorkspace(input: CreateTeamInWorkspaceInput!, requestContext: RequestContext!): CreateTeamInWorkspaceResult!
   createWorkflow(input: CreateWorkflowInput!, requestContext: RequestContext!): CreateWorkflowResult!
   deleteConversation(input: DeleteConversationInput!, requestContext: RequestContext!): DeleteConversationResult!
   deleteRunner(input: DeleteRunnerInput!, requestContext: RequestContext!): DeleteRunnerResult!
@@ -3922,6 +3948,18 @@ type TeamSizePolicy {
   isUnlimited: Boolean!
   limit: Int!
 }
+
+"""
+Team visibility governs which workspace members can discover and join a team.
+It is a new axis, orthogonal to workspace-level discoverability (is_discoverable).
+Existing teams default to OPEN.
+"""
+enum TeamVisibility {
+  HIDDEN
+  OPEN
+  PRIVATE
+}
+
 type TeamByoSettings {
   allowUserEndpoints: Boolean!
   allowUserKeys: Boolean!

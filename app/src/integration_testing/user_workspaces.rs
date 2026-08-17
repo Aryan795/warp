@@ -7,7 +7,8 @@ use warpui::integration::TestStep;
 use warpui::{SingletonEntity, async_assert};
 
 use crate::auth::{AuthStateProvider, UserUid};
-use crate::workspaces::team::{DiscoverableTeam, MembershipRole};
+use crate::server::ids::ServerId;
+use crate::workspaces::team::{DiscoverableTeam, MembershipRole, Team, TeamMember};
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::workspaces::workspace::{
     NativeWorkspacesPolicy, Workspace, WorkspaceMember, WorkspaceMemberUsageInfo,
@@ -151,6 +152,65 @@ pub fn assert_team_creation_is_offered(offered: bool) -> TestStep {
                 async_assert!(
                     actual == offered,
                     "team creation offered should be {offered}, was {actual}"
+                )
+            })
+        },
+    )
+}
+
+/// Simulates the effect of a successful `createTeamInWorkspace` mutation: the caller's
+/// workspace now has one more team, seeded with the caller as a member, and nothing else
+/// about the workspace changed. This mirrors exactly what
+/// `TeamUpdateManager::on_team_created_in_workspace` does with the server's response —
+/// the network round trip itself is covered by unit tests in `workspaces::update_manager`
+/// — so it exercises the real window/team reconciliation that decides which page renders
+/// next, without a network layer to fake.
+pub fn simulate_team_created_in_workspace(team_name: &'static str) -> TestStep {
+    TestStep::new(&format!(
+        "Create the {team_name} team in the current workspace"
+    ))
+    .with_action(move |app, _, _| {
+        let (user_uid, user_email) = app.read(|ctx| {
+            let auth_state = AuthStateProvider::as_ref(ctx).get();
+            (
+                auth_state.user_id().unwrap_or_default(),
+                auth_state.user_email().unwrap_or_default(),
+            )
+        });
+        UserWorkspaces::handle(app).update(app, |user_workspaces, ctx| {
+            let workspace = user_workspaces
+                .current_workspace()
+                .expect("a native workspace should already be seeded");
+            let workspace_uid = workspace.uid;
+            let workspace_name = workspace.name.clone();
+            // `ServerId` rejects anything but a 22-character id.
+            let raw_team_uid = format!("{team_name}_team_uid");
+            let team = Team::from_local_cache(
+                ServerId::from_string_lossy(format!("{raw_team_uid:0>22}")),
+                team_name.to_string(),
+                None,
+                None,
+                Some(vec![TeamMember {
+                    uid: user_uid,
+                    email: user_email,
+                    role: MembershipRole::User,
+                }]),
+            );
+            let workspace =
+                Workspace::from_local_cache(workspace_uid, workspace_name, Some(vec![team]));
+            user_workspaces.update_workspaces(vec![workspace], ctx);
+        });
+    })
+    .add_named_assertion(
+        format!("{team_name} is now the current window's team"),
+        move |app, window_id| {
+            UserWorkspaces::handle(app).read(app, |user_workspaces, _| {
+                let name = user_workspaces
+                    .team_for_window(window_id)
+                    .map(|team| team.name.clone());
+                async_assert!(
+                    name.as_deref() == Some(team_name),
+                    "expected the current window's team to be {team_name:?}, was {name:?}"
                 )
             })
         },

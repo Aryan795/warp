@@ -1055,6 +1055,20 @@ impl UserWorkspaces {
         }
     }
 
+    /// Whether `user_uid` is a member of any team in any workspace the client knows about,
+    /// not just the current one. A user can belong to more than one workspace, and
+    /// `createTeamInWorkspace` seeds team memberships inside the same transaction that
+    /// creates the team; when multi-team-per-user is disabled server-side, seeding a user
+    /// already on a team anywhere fails the whole create. Callers that seed a new team's
+    /// creator must check this first rather than assuming "teamless in the current
+    /// workspace" is the same as "teamless everywhere".
+    pub fn is_user_on_any_team(&self, user_uid: UserUid) -> bool {
+        self.workspaces
+            .iter()
+            .flat_map(|workspace| workspace.teams.iter())
+            .any(|team| team.members.iter().any(|member| member.uid == user_uid))
+    }
+
     pub fn has_workspaces(&self) -> bool {
         !self.workspaces.is_empty()
     }

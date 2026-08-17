@@ -16,6 +16,7 @@ const clientMutations = [
   'createManagedSecret',
   'createNotebook',
   'createTeam',
+  'createTeamInWorkspace',
   'createWorkflow',
   'deleteConversation',
   'deleteInviteLinkDomainRestriction',

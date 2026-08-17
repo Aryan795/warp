@@ -12,13 +12,15 @@ use std::time::Duration;
 use warp::integration_testing::assertions::go_online;
 use warp::integration_testing::settings::{
     assert_teams_create_team_form_visible, assert_teams_join_a_team_list_visible,
-    assert_teams_workspace_admin_panel_visible, assert_teams_workspace_section_visible,
-    assert_teams_workspace_unresolved_visible, open_settings_page,
+    assert_teams_workspace_admin_panel_visible, assert_teams_workspace_create_team_form_visible,
+    assert_teams_workspace_section_visible, assert_teams_workspace_unresolved_visible,
+    open_settings_page,
 };
 use warp::integration_testing::terminal::wait_until_bootstrapped_single_pane_for_tab;
 use warp::integration_testing::user_workspaces::{
     assert_team_creation_is_offered, join_a_native_workspace_as_admin,
     join_a_native_workspace_as_member, leave_every_workspace, set_joinable_teams,
+    simulate_team_created_in_workspace,
 };
 use warp::settings_view::SettingsSection;
 use warpui_core::integration::TestStep;
@@ -70,8 +72,10 @@ fn teamless_states() -> Vec<TeamlessState> {
                 assert_teams_create_team_form_visible(false),
             ],
         },
-        // An admin gets the link to the web admin panel, the only surface that can create
-        // a team inside an existing workspace, but still not the client's create form.
+        // An admin gets the in-app form that creates a team inside their own workspace,
+        // plus the link to the web admin panel for what that form can't do (color,
+        // visibility, member picker). This is not the personal create-team form, which
+        // would hand them a second workspace instead of a team in this one.
         TeamlessState {
             label: "workspace_admin",
             steps: vec![
@@ -79,6 +83,7 @@ fn teamless_states() -> Vec<TeamlessState> {
                 assert_team_creation_is_offered(false),
                 assert_teams_workspace_section_visible(true),
                 assert_teams_workspace_admin_panel_visible(true),
+                assert_teams_workspace_create_team_form_visible(true),
                 assert_teams_create_team_form_visible(false),
             ],
         },
@@ -94,6 +99,23 @@ fn teamless_states() -> Vec<TeamlessState> {
             ],
         },
     ]
+}
+
+/// A native-workspace admin creates a team using the in-app form and lands on that
+/// team's management page, rather than staying on the (now stale) teamless workspace
+/// page. `createTeamInWorkspace` itself, and seeding the caller as a member of the team
+/// it creates, are covered by unit tests in `workspaces::update_manager`; this test
+/// covers the page transition that response drives once it lands.
+pub fn test_settings_teams_page_workspace_admin_creates_a_team_and_lands_on_it() -> Builder {
+    new_builder()
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(0))
+        .with_step(go_online())
+        .with_step(open_settings_page(SettingsSection::Teams))
+        .with_step(join_a_native_workspace_as_admin(WORKSPACE_NAME))
+        .with_step(assert_teams_workspace_create_team_form_visible(true))
+        .with_step(simulate_team_created_in_workspace("Platform"))
+        .with_step(assert_teams_workspace_section_visible(false))
+        .with_step(assert_teams_workspace_create_team_form_visible(false))
 }
 
 /// Walks every page a teamless user can land on, asserting what each one rendered.
