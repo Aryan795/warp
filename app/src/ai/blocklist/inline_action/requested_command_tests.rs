@@ -494,3 +494,95 @@ fn editing_the_permission_prompt_reparses_the_live_buffer() {
         );
     });
 }
+
+/// Diagnostic for a disputed cross-branch comparison report: does the collapsed-header code path
+/// (`command_highlighted_ranges_for_header`, the function `render_header` calls for an
+/// executed-and-collapsed command) actually produce highlight ranges for a command containing a
+/// value-taking flag and a quoted argument, not just for simple commands like "git status"?
+#[test]
+fn header_highlights_a_command_with_a_flag_value_and_quoted_argument() {
+    use std::rc::Rc;
+
+    use warpui::elements::{Empty, MouseStateHandle};
+    use warpui::platform::WindowStyle;
+    use warpui::{App, Element, Entity, EntityId, TypedActionView, View, ViewHandle};
+
+    use super::{RequestedActionViewType, RequestedCommandView};
+    use crate::ai::agent::conversation::AIConversationId;
+    use crate::ai::agent::{AIAgentActionId, AIAgentExchangeId};
+    use crate::ai::blocklist::block::AutonomySettingSpeedbump;
+    use crate::ai::blocklist::model::AIBlockModel;
+    use crate::ai::blocklist::{AIBlock, ClientIdentifiers, FakeAIBlockModel};
+    use crate::test_util::assert_eventually;
+    use crate::test_util::terminal::{add_window_with_terminal, initialize_app_for_terminal_view};
+
+    struct Host {
+        view: ViewHandle<RequestedCommandView>,
+    }
+    impl Entity for Host {
+        type Event = ();
+    }
+    impl View for Host {
+        fn ui_name() -> &'static str {
+            "RequestedCommandViewQuotedArgTestHost"
+        }
+        fn render(&self, _app: &warpui::AppContext) -> Box<dyn Element> {
+            Empty::new().finish()
+        }
+    }
+    impl TypedActionView for Host {
+        type Action = ();
+    }
+
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        app.add_singleton_model(crate::notebooks::editor::keys::NotebookKeybindings::new);
+
+        let terminal = add_window_with_terminal(&mut app, None);
+        let (action_model, terminal_model) = terminal.read(&app, |view, _| {
+            (view.ai_action_model().clone(), view.model.clone())
+        });
+
+        let (_window_id, host) = app.add_window(WindowStyle::NotStealFocus, move |ctx| {
+            let view = ctx.add_typed_action_view(move |ctx| {
+                let block_model: Rc<dyn AIBlockModel<View = AIBlock>> =
+                    Rc::new(FakeAIBlockModel::new_streaming(vec![]));
+                let mut view = RequestedCommandView::new(
+                    AIAgentActionId::from("test-action".to_owned()),
+                    ClientIdentifiers {
+                        conversation_id: AIConversationId::new(),
+                        client_exchange_id: AIAgentExchangeId::new(),
+                        response_stream_id: None,
+                    },
+                    RequestedActionViewType::Command,
+                    block_model,
+                    &action_model,
+                    terminal_model,
+                    AutonomySettingSpeedbump::None,
+                    MouseStateHandle::default(),
+                    EntityId::new(),
+                    ctx,
+                );
+                // Mirrors `command_highlighted_ranges_for_header`'s only preconditions: a
+                // completed parse whose `buffer_text` matches `command_text`. This is exactly
+                // what `render_header` calls once the header is showing raw command text
+                // (i.e. executed-and-collapsed), independent of the actual action-status
+                // transition machinery.
+                view.apply_streamed_update(r#"git commit -m "fix""#, ctx);
+                view.ensure_editor(ctx);
+                view
+            });
+            Host { view }
+        });
+        let view = host.read(&app, |host, _| host.view.clone());
+
+        assert_eventually!(
+            !view
+                .read(&app, |view, ctx| view
+                    .command_highlighted_ranges_for_header(ctx))
+                .is_empty(),
+            "expected the collapsed header to highlight `git commit -m \"fix\"`, matching the \
+             other commands this code path already covers"
+        );
+    });
+}

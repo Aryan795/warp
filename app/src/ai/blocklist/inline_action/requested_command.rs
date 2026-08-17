@@ -831,6 +831,13 @@ impl RequestedCommandView {
     /// (Re-)parses `command_text` so completer-based syntax highlighting — matching the
     /// terminal input's own highlighting — can be applied to the collapsed header and, if
     /// present, the permission-prompt editor.
+    ///
+    /// Because this parse is async, a command that finishes and collapses into history faster
+    /// than the parse spawned here can resolve (e.g. one that fails near-instantly) can render
+    /// its collapsed header uncolored for a beat before this callback lands. This is most
+    /// visible when the command is accepted and finishes before the parse spawned while it was
+    /// still blocked ever completes, since that in-flight parse is aborted and restarted here
+    /// rather than being reused.
     fn request_command_highlighting(&mut self, ctx: &mut ViewContext<Self>) {
         let command_text = self.command_text.clone();
         self.spawn_highlight_parse(command_text, ctx, |me, parsed_tokens, ctx| {
