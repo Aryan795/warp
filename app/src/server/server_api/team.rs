@@ -96,8 +96,6 @@ pub trait TeamClient: 'static + Send + Sync {
         discoverable: Option<bool>,
     ) -> Result<CreateTeamResponse>;
 
-    /// Creates a team inside an existing (native) workspace and returns the refreshed
-    /// workspaces metadata.
     async fn create_team_in_workspace(
         &self,
         workspace_uid: WorkspaceUid,

@@ -1497,8 +1497,6 @@ impl TeamsPageView {
 
     fn create_team(&mut self, ctx: &mut ViewContext<Self>) {
         let team_name = self.create_team_editor.as_ref(ctx).buffer_text(ctx);
-        // Admins of a native workspace create the team inside that workspace; everyone
-        // else goes through the standalone flow, which creates a new workspace server-side.
         let current_user_email = self.auth_state.user_email();
         let native_workspace_uid = self
             .user_workspaces

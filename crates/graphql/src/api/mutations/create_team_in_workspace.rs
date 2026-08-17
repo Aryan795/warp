@@ -32,8 +32,6 @@ pub struct CreateTeamInWorkspaceVariables {
     pub request_context: RequestContext,
 }
 
-/// Fields with server-side defaults (visibility, members) and the optional color
-/// are omitted; the client currently only creates open, member-less teams.
 #[derive(cynic::InputObject, Debug)]
 pub struct CreateTeamInWorkspaceInput {
     pub workspace_uid: cynic::Id,
@@ -67,8 +65,6 @@ pub struct CreateTeamInWorkspaceOutput {
     pub response_context: ResponseContext,
 }
 
-/// Minimal selection on `Team`: the caller refetches full workspaces metadata
-/// after a successful create, so only the uid is needed here.
 #[derive(cynic::QueryFragment, Debug)]
 #[cynic(graphql_type = "Team")]
 pub struct CreateTeamInWorkspaceTeam {
