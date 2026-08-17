@@ -238,8 +238,12 @@ impl SystemInfo {
             serde_json::json!({
                 "live_pixel_models": stats.live_pixel_models,
                 "live_char_cell_models": stats.live_char_cell_models,
+                "unresolved_entries": stats.unresolved_entries,
                 "total_items": stats.total_items,
+                "total_lines": stats.total_lines,
+                "total_chars": stats.total_chars,
                 "largest_model_items": stats.largest_model_items,
+                "largest_model_lines": stats.largest_model_lines,
                 "models_by_item_count": {
                     "bucket_upper_bounds": RenderStateStats::bucket_upper_bounds(),
                     "models": stats.models_by_item_count,

@@ -1310,6 +1310,18 @@ impl TableStyle {
     }
 }
 
+/// How much content a render model holds, along the dimensions the memory analysis uses. One item
+/// can span many lines or collapse a whole region into one, so these are not interchangeable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ContentSize {
+    /// `BlockItem`s, which is what the content tree's nodes hold.
+    pub items: usize,
+    /// Laid-out lines.
+    pub lines: usize,
+    /// Characters of buffer content.
+    pub chars: usize,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LayoutSummary {
     content_length: CharOffset,
@@ -2756,10 +2768,15 @@ impl RenderState {
         self.content().block_items().count()
     }
 
-    /// The number of items in the content tree, read from the tree's own summary rather than by
-    /// walking it. Always zero in [`LayoutMode::CharCell`], which never populates the tree.
-    pub fn content_item_count(&self) -> usize {
-        self.content.borrow().summary().item_count
+    /// The size of the content tree, read from the tree's own summary rather than by walking it.
+    /// All zero in [`LayoutMode::CharCell`], which never populates the tree.
+    pub fn content_size(&self) -> ContentSize {
+        let summary = self.content.borrow().summary();
+        ContentSize {
+            items: summary.item_count,
+            lines: summary.lines.as_usize(),
+            chars: summary.content_length.as_usize(),
+        }
     }
 
     pub fn markdown_table_count(&self) -> usize {
