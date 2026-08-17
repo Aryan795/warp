@@ -2456,8 +2456,8 @@ fn test_a_cached_workspace_withholds_team_creation_until_metadata_arrives() {
             );
         });
 
-        let mut workspace = gql_native_workspace(GqlMembershipRole::User);
-        workspace.uid = "workspace_uid123456789".into();
+        // Same uid as the cached workspace, so this describes the one already in hand.
+        let workspace = gql_native_workspace(GqlMembershipRole::User);
         apply_workspaces_metadata(&mut app, gql_user(None, vec![workspace]).into());
 
         app.read(|ctx| {
