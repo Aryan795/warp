@@ -279,12 +279,12 @@ fn disabled_member_is_flagged_but_keeps_removal_action() {
         disabled_item.is_disabled,
         "a member whose account is disabled should be flagged for the dimmed/tooltip treatment"
     );
-    assert!(
-        disabled_item
-            .actions
-            .iter()
-            .any(|action| action.label == "Remove from team"),
-        "removal must stay available for disabled members"
+    // Same action set as an equivalent active member (see
+    // `team_admin_can_promote_and_remove_without_workspace_admin_role`):
+    // disabling an account must not change which actions are offered.
+    assert_eq!(
+        action_labels(&items, MEMBER_EMAIL),
+        vec!["Promote to admin", "Remove from team"]
     );
 }
 
