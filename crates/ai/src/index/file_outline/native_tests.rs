@@ -18,61 +18,74 @@ fn create_test_file(dir: &TempDir, filename: &str, content: &str) -> PathBuf {
 
 /// `TargetFile::is_ignored` is only computed against a repo's root and global gitignores (see
 /// `Repository::check_gitignore_status`), so it can't see exclusions from a nested `.gitignore`.
-/// A file added under one must still be kept out of the outline.
+/// This is the real watcher regression: a `subdir/.gitignore` already exists when the outline is
+/// built, then a file matching it is added afterward and tagged `is_ignored: false`, exactly as
+/// `Repository::check_gitignore_status` would tag it.
 #[test]
-fn update_excludes_nested_gitignored_and_git_internal_files() {
+fn update_excludes_files_under_nested_gitignore() {
     let temp_dir = TempDir::new().unwrap();
     let repo_path = temp_dir.path();
 
     fs::create_dir(repo_path.join("subdir")).unwrap();
     fs::write(repo_path.join("subdir/.gitignore"), "ignored.txt\n").unwrap();
-    fs::write(repo_path.join("subdir/ignored.txt"), "secret").unwrap();
-    fs::create_dir(repo_path.join(".git")).unwrap();
 
     let mut outline = block_on(build_outline(repo_path, None)).unwrap();
-    let ignored_path = repo_path.join("subdir/ignored.txt");
-    let files_before = outline.to_symbols_by_file(None);
-    assert!(
-        !files_before.contains_key(&ignored_path),
-        "nested-gitignored file must be excluded from the initial scan: {:?}",
-        files_before.keys().collect::<Vec<_>>()
-    );
 
-    let git_internal_path = repo_path.join(".git/COMMIT_EDITMSG");
+    let ignored_path = repo_path.join("subdir/ignored.txt");
     let kept_path = repo_path.join("kept.rs");
-    fs::write(&git_internal_path, "message").unwrap();
+    fs::write(&ignored_path, "secret").unwrap();
     fs::write(&kept_path, "fn kept() {}\n").unwrap();
 
-    // None of these are flagged as ignored by the watcher (it only knows about the repo's root
-    // and global gitignores), matching how a real filesystem-watcher event would tag them.
     let mut update = RepositoryUpdate::default();
     update
         .added
         .insert(TargetFile::new(ignored_path.clone(), false));
     update
         .added
-        .insert(TargetFile::new(git_internal_path.clone(), false));
-    update
-        .added
         .insert(TargetFile::new(kept_path.clone(), false));
 
     block_on(outline.update(update));
 
-    let files_after = outline.to_symbols_by_file(None);
+    let files = outline.to_symbols_by_file(None);
     assert!(
-        files_after.contains_key(&kept_path),
+        files.contains_key(&kept_path),
         "non-ignored file should be added: {:?}",
-        files_after.keys().collect::<Vec<_>>()
+        files.keys().collect::<Vec<_>>()
     );
     assert!(
-        !files_after.contains_key(&ignored_path),
-        "nested-gitignored file must stay excluded: {:?}",
-        files_after.keys().collect::<Vec<_>>()
+        !files.contains_key(&ignored_path),
+        "file under a nested .gitignore must stay excluded: {:?}",
+        files.keys().collect::<Vec<_>>()
     );
+}
+
+/// `find_or_insert_path_to_file_tree` also guards against `.git`-internal paths directly. In
+/// practice the watcher never produces a `TargetFile` for one of these (it routes them through
+/// `record_git_internal_path_update` instead), so this feeds one in synthetically to exercise the
+/// guard on its own.
+#[test]
+fn find_or_insert_path_to_file_tree_excludes_git_internal_paths() {
+    let temp_dir = TempDir::new().unwrap();
+    let repo_path = temp_dir.path();
+    fs::create_dir(repo_path.join(".git")).unwrap();
+
+    let mut outline = block_on(build_outline(repo_path, None)).unwrap();
+
+    let git_internal_path = repo_path.join(".git/COMMIT_EDITMSG");
+    fs::write(&git_internal_path, "message").unwrap();
+
+    let mut update = RepositoryUpdate::default();
+    update
+        .added
+        .insert(TargetFile::new(git_internal_path.clone(), false));
+
+    block_on(outline.update(update));
+
+    let files = outline.to_symbols_by_file(None);
     assert!(
-        !files_after.contains_key(&git_internal_path),
+        !files.contains_key(&git_internal_path),
         ".git-internal file must stay excluded: {:?}",
-        files_after.keys().collect::<Vec<_>>()
+        files.keys().collect::<Vec<_>>()
     );
 }
 
