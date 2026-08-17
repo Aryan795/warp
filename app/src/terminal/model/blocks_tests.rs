@@ -2233,8 +2233,6 @@ pub fn test_emits_after_block_completed_event() {
     ));
 }
 
-// Hidden in-band generator command blocks are removed once their completion event has
-// fired, so they don't accumulate in the block list over a long session.
 #[test]
 fn test_in_band_command_blocks_are_not_retained_when_hidden() {
     let mut block_list =
@@ -2267,7 +2265,6 @@ fn test_in_band_command_blocks_are_not_retained_when_hidden() {
     );
 }
 
-// In-band command blocks remain resident when the user has opted into showing them.
 #[test]
 fn test_in_band_command_blocks_are_retained_when_shown() {
     let mut block_list =
