@@ -1,6 +1,26 @@
 use std::path::Path;
 
-use super::{WslGitCommand, build_wslenv, translate_for_wsl_unc_cwd};
+use futures_lite::future;
+
+use super::{
+    CappedGitOutput, WslGitCommand, build_wslenv, run_git_command, run_git_command_capped,
+    translate_for_wsl_unc_cwd,
+};
+
+/// Initializes a git repo at `repo_path` with `file_name` staged (but not
+/// committed) containing `contents`, so `git show :<file_name>` returns the
+/// exact staged blob content with no diff formatting overhead.
+fn init_repo_with_staged_file(repo_path: &Path, file_name: &str, contents: &[u8]) {
+    future::block_on(async {
+        run_git_command(repo_path, &["init", "-q"])
+            .await
+            .expect("git init");
+        std::fs::write(repo_path.join(file_name), contents).expect("write staged file");
+        run_git_command(repo_path, &["add", file_name])
+            .await
+            .expect("git add");
+    });
+}
 
 /// Translates a git command in `cwd`, asserting that the working directory qualified for the WSL
 /// rewrite.
@@ -219,4 +239,56 @@ fn routes_through_login_shell_when_no_path() {
         ]
     );
     assert_eq!(translated.wslenv, "GIT_OPTIONAL_LOCKS/u");
+}
+
+#[test]
+fn capped_command_returns_complete_output_under_budget() {
+    let repo_dir = tempfile::tempdir().expect("create temp repo dir");
+    let contents = b"hello world\n".repeat(10);
+    init_repo_with_staged_file(repo_dir.path(), "file.txt", &contents);
+
+    let output = future::block_on(run_git_command_capped(
+        repo_dir.path(),
+        &["show", ":file.txt"],
+        contents.len() + 1,
+    ))
+    .expect("run_git_command_capped should succeed under budget");
+
+    match output {
+        CappedGitOutput::Complete(text) => assert_eq!(text.as_bytes(), contents.as_slice()),
+        CappedGitOutput::Exceeded => panic!("expected Complete output under budget"),
+    }
+}
+
+#[test]
+fn capped_command_reports_exceeded_over_budget_without_full_payload() {
+    let repo_dir = tempfile::tempdir().expect("create temp repo dir");
+    let contents = vec![b'a'; 10_000];
+    init_repo_with_staged_file(repo_dir.path(), "big.txt", &contents);
+
+    let output = future::block_on(run_git_command_capped(
+        repo_dir.path(),
+        &["show", ":big.txt"],
+        1_000,
+    ))
+    .expect("run_git_command_capped should succeed even when the budget is exceeded");
+
+    assert!(matches!(output, CappedGitOutput::Exceeded));
+}
+
+#[test]
+fn capped_command_preserves_git_error_semantics() {
+    let repo_dir = tempfile::tempdir().expect("create temp repo dir");
+    future::block_on(run_git_command(repo_dir.path(), &["init", "-q"])).expect("git init");
+
+    // No such path has ever been staged, so `git show` exits non-zero with no
+    // stdout — the capped path must classify this as an error exactly like
+    // the unbounded `run_git_command`, not as a successful empty capture.
+    let result = future::block_on(run_git_command_capped(
+        repo_dir.path(),
+        &["show", ":missing.txt"],
+        1_000,
+    ));
+
+    assert!(result.is_err());
 }
