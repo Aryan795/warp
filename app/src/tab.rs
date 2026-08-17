@@ -1359,12 +1359,10 @@ impl<'a> TabComponent<'a> {
     }
 
     /// Renders the switch-to-tab keyboard shortcut hint next to the title, when
-    /// there is one to show (see [`TabComponent::shortcut_hint`]). Hidden while the
-    /// tab is being renamed, since the title is replaced by an editor in that case.
+    /// there is one to show (see [`TabComponent::shortcut_hint`]). Stays visible
+    /// beside the rename editor while the tab is being renamed, per the setting's
+    /// always-visible-while-enabled behavior.
     fn render_tab_shortcut_hint(&self) -> Option<Box<dyn Element>> {
-        if self.is_tab_being_renamed() {
-            return None;
-        }
         let hint = self.shortcut_hint.as_ref()?;
         let styles = if self.is_active_tab() {
             self.styles.default.merge(self.styles.active)
@@ -1722,17 +1720,26 @@ impl<'a> TabComponent<'a> {
             if let Some(indicator) = self.render_indicator() {
                 flex_row.add_child(indicator);
             }
+            // Title and shortcut hint are grouped into a single row so they shrink
+            // together and are wrapped in `Clipped` so an overly-narrow tab clips the
+            // pair instead of letting the hint overflow past the tab's bounds.
+            let mut title_and_hint = Flex::row()
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_child(Shrinkable::new(1.0, self.render_tab_content()).finish());
+            if let Some(shortcut_hint) = self.render_tab_shortcut_hint() {
+                title_and_hint.add_child(shortcut_hint);
+            }
             flex_row.add_child(
                 Shrinkable::new(
                     1.0,
-                    SavePosition::new(self.render_tab_content(), &self.tab_text_position_id())
-                        .finish(),
+                    Clipped::new(
+                        SavePosition::new(title_and_hint.finish(), &self.tab_text_position_id())
+                            .finish(),
+                    )
+                    .finish(),
                 )
                 .finish(),
             );
-            if let Some(shortcut_hint) = self.render_tab_shortcut_hint() {
-                flex_row.add_child(shortcut_hint);
-            }
             // Equal padding on both sides so the title stays centered; the pin
             // vanishes before it can reach the title.
             let horizontal_padding = if reserve_pin_space {

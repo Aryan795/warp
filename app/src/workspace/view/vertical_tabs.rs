@@ -27,7 +27,7 @@ use warpui::elements::{
     ScrollTarget, ScrollToPositionMode, ScrollbarWidth, Shrinkable, Stack, Text,
     resizable_state_handle,
 };
-use warpui::fonts::{Properties, Weight};
+use warpui::fonts::{FamilyId, Properties, Weight};
 use warpui::platform::Cursor;
 use warpui::prelude::Align;
 use warpui::text_layout::ClipConfig;
@@ -973,6 +973,9 @@ struct GroupHeaderProps<'a> {
     is_being_renamed: bool,
     rename_editor: ViewHandle<EditorView>,
     header_mouse_state: MouseStateHandle,
+    /// Switch-to-tab shortcut hint text, when the setting is on and this tab's
+    /// position has one. Rendered next to the title, including while renaming.
+    shortcut_hint: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -2311,11 +2314,19 @@ fn render_tab_group_internal(
             rows.finish()
         };
 
+        // In Panes granularity a single-pane tab with no custom title normally
+        // omits the header (its one row already shows the title). But that's
+        // also the only place in this granularity that could carry the
+        // switch-to-tab hint, since individual pane rows deliberately don't
+        // show it (see `PaneProps::renamable_tab_index`). So a hint being
+        // available for this position forces the header to appear too, giving
+        // every tab a hint-carrying row regardless of pane count.
+        let header_shortcut_hint = tab_shortcut_hint_text(tab_index, app);
         let show_header = should_show_tab_group_header(
             has_custom_title,
             is_being_renamed,
             visible_pane_ids.len(),
-        );
+        ) || header_shortcut_hint.is_some();
         let group_content = if uses_outer_group_container {
             let mut group = Flex::column()
                 .with_main_axis_size(MainAxisSize::Min)
@@ -2328,6 +2339,7 @@ fn render_tab_group_internal(
                         is_being_renamed,
                         rename_editor: rename_editor.clone(),
                         header_mouse_state: group_header_mouse_state.clone(),
+                        shortcut_hint: header_shortcut_hint.clone(),
                     },
                     app,
                 ));
@@ -3232,6 +3244,7 @@ fn render_group_header(props: GroupHeaderProps<'_>, app: &AppContext) -> Box<dyn
         is_being_renamed,
         rename_editor,
         header_mouse_state,
+        shortcut_hint,
     } = props;
     let appearance = Appearance::as_ref(app);
     let theme = appearance.theme();
@@ -3245,7 +3258,7 @@ fn render_group_header(props: GroupHeaderProps<'_>, app: &AppContext) -> Box<dyn
     let title_color = theme.sub_text_color(theme.background());
 
     Hoverable::new(header_mouse_state, move |_header_state| {
-        Container::new(if is_being_renamed {
+        let title_element: Box<dyn Element> = if is_being_renamed {
             TextInput::new(
                 rename_editor.clone(),
                 UiComponentStyles::default()
@@ -3260,15 +3273,37 @@ fn render_group_header(props: GroupHeaderProps<'_>, app: &AppContext) -> Box<dyn
                 .with_clip(ClipConfig::ellipsis())
                 .with_color(title_color.into())
                 .finish()
-        })
-        .with_padding(
-            Padding::uniform(0.)
-                .with_left(GROUP_HORIZONTAL_PADDING)
-                .with_right(GROUP_HORIZONTAL_PADDING)
-                .with_top(GROUP_HEADER_VERTICAL_PADDING)
-                .with_bottom(GROUP_HEADER_VERTICAL_PADDING),
-        )
-        .finish()
+        };
+        // The hint stays visible next to the rename editor too: decision 1 keeps it
+        // shown whenever the setting is on, regardless of rename state.
+        let content: Box<dyn Element> = match shortcut_hint.clone() {
+            Some(hint) => Flex::row()
+                .with_main_axis_size(MainAxisSize::Max)
+                .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_child(Shrinkable::new(1., title_element).finish())
+                .with_child(
+                    Container::new(render_vertical_tab_shortcut_hint_text(
+                        hint,
+                        font_family,
+                        title_color,
+                    ))
+                    .with_margin_left(4.)
+                    .finish(),
+                )
+                .finish(),
+            None => title_element,
+        };
+
+        Container::new(content)
+            .with_padding(
+                Padding::uniform(0.)
+                    .with_left(GROUP_HORIZONTAL_PADDING)
+                    .with_right(GROUP_HORIZONTAL_PADDING)
+                    .with_top(GROUP_HEADER_VERTICAL_PADDING)
+                    .with_bottom(GROUP_HEADER_VERTICAL_PADDING),
+            )
+            .finish()
     })
     .on_click(move |ctx, _, _| {
         if !is_being_renamed {
@@ -3414,6 +3449,30 @@ fn row_shows_synced_inputs_indicator(props: &PaneProps<'_>, app: &AppContext) ->
     )
 }
 
+/// Returns the switch-to-tab shortcut hint text for `tab_index` (the tab's
+/// position in `workspace.tabs`), when the "Show tab shortcuts" setting is on.
+/// `None` when the setting is off, the position has no fixed shortcut, the
+/// binding is unassigned, or it can't be shown as a single keystroke.
+fn tab_shortcut_hint_text(tab_index: usize, app: &AppContext) -> Option<String> {
+    if !*TabSettings::as_ref(app).show_tab_shortcuts.value() {
+        return None;
+    }
+    tab_switch_shortcut_hint(tab_index, app)
+}
+
+/// Renders a resolved shortcut-hint string with the muted metadata styling
+/// shared by every vertical-tabs surface that shows it (pane rows and the
+/// pane-group header).
+fn render_vertical_tab_shortcut_hint_text(
+    hint: String,
+    font_family: FamilyId,
+    text_color: WarpThemeFill,
+) -> Box<dyn Element> {
+    Text::new_inline(hint, font_family, 11.)
+        .with_color(text_color.into())
+        .finish()
+}
+
 /// Returns the switch-to-tab shortcut hint element for a row, when the row
 /// represents a whole tab (as opposed to an individual pane row shown in Panes
 /// granularity — see [`PaneProps::renamable_tab_index`]) and the "Show tab
@@ -3424,16 +3483,13 @@ fn vertical_tab_switch_shortcut_hint(
     app: &AppContext,
 ) -> Option<Box<dyn Element>> {
     let tab_index = renamable_tab_index?;
-    if !*TabSettings::as_ref(app).show_tab_shortcuts.value() {
-        return None;
-    }
-    let hint = tab_switch_shortcut_hint(tab_index, app)?;
+    let hint = tab_shortcut_hint_text(tab_index, app)?;
     let theme = appearance.theme();
-    Some(
-        Text::new_inline(hint, appearance.ui_font_family(), 11.)
-            .with_color(theme.sub_text_color(theme.background()).into())
-            .finish(),
-    )
+    Some(render_vertical_tab_shortcut_hint_text(
+        hint,
+        appearance.ui_font_family(),
+        theme.sub_text_color(theme.background()),
+    ))
 }
 
 /// Link icon marking a row whose tab has synchronized inputs enabled. Uses the
@@ -4026,7 +4082,10 @@ fn uses_outer_group_container(display_granularity: VerticalTabsDisplayGranularit
 /// looked identical for every tab and made the bar appear "nameless".
 /// Single-pane groups in `Panes` mode still omit the header because the
 /// single row already shows the pane title (avoids duplicating the same
-/// text immediately above itself).
+/// text immediately above itself) — *unless* a switch-to-tab shortcut hint
+/// needs to show for this position (see the caller in
+/// `render_tab_group_internal`), since individual pane rows in `Panes`
+/// granularity never carry that hint themselves.
 fn should_show_tab_group_header(
     has_custom_title: bool,
     is_being_renamed: bool,

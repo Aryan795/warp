@@ -258,3 +258,48 @@ fn test_tab_switch_shortcut_hint_is_none_for_a_multi_keystroke_chord() {
         });
     });
 }
+
+#[test]
+fn test_tab_switch_shortcut_hint_reflects_a_remap_to_a_different_single_keystroke() {
+    App::test((), |mut app| async move {
+        app.update(|ctx| {
+            register_tab_switch_shortcut_bindings(ctx);
+
+            let default_expected = if OperatingSystem::get().is_mac() {
+                "⌘3".to_owned()
+            } else {
+                "Ctrl 3".to_owned()
+            };
+            assert_eq!(Some(default_expected), tab_switch_shortcut_hint(2, ctx));
+
+            // The user remaps the third tab's shortcut away from `cmdorctrl-3` to a
+            // different single keystroke: the displayed hint must follow the remap
+            // immediately (the same lookup is redone on every render), and other
+            // positions must stay on their own bindings.
+            ctx.set_custom_trigger(
+                TAB_SWITCH_SHORTCUT_BINDING_NAMES[2].to_owned(),
+                Trigger::Keystrokes(vec![Keystroke::parse("cmd-shift-9").unwrap()]),
+            );
+
+            let remapped_expected = if OperatingSystem::get().is_mac() {
+                "⇧⌘9"
+            } else {
+                "Shift Logo 9"
+            };
+            assert_eq!(
+                Some(remapped_expected.to_owned()),
+                tab_switch_shortcut_hint(2, ctx)
+            );
+
+            let position_four_expected = if OperatingSystem::get().is_mac() {
+                "⌘4"
+            } else {
+                "Ctrl 4"
+            };
+            assert_eq!(
+                Some(position_four_expected.to_owned()),
+                tab_switch_shortcut_hint(3, ctx)
+            );
+        });
+    });
+}
