@@ -3770,6 +3770,7 @@ impl Workspace {
                 ctx.notify();
             }
             TabSettingsChangedEvent::ShowIndicatorsButton { .. }
+            | TabSettingsChangedEvent::ShowTabShortcuts { .. }
             | TabSettingsChangedEvent::NewTabPlacement { .. }
             | TabSettingsChangedEvent::TabCloseButtonPosition { .. }
             | TabSettingsChangedEvent::PreserveActiveTabColor { .. } => {

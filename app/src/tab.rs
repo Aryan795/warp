@@ -44,6 +44,7 @@ use crate::themes::theme::{AnsiColorIdentifier, Fill as ThemeFill, VerticalGradi
 use crate::ui_components::buttons::icon_button;
 use crate::ui_components::color_dot::{TAB_COLOR_OPTIONS, render_color_dot};
 use crate::ui_components::icons::{ICON_DIMENSIONS, Icon};
+use crate::util::bindings::tab_switch_shortcut_hint;
 use crate::util::color::{Opacity, coloru_with_opacity};
 use crate::util::truncation::truncate_from_end;
 use crate::window_settings::WindowSettings;
@@ -932,6 +933,11 @@ pub struct TabComponent<'a> {
     /// both the in-selection highlight and the right-click menu dispatch
     /// (multi-tab menu vs single-tab menu).
     is_in_multi_tab_selection: bool,
+    /// Display string for the switch-to-tab keyboard shortcut bound to this tab's
+    /// position (e.g. "⌘3"), when the "Show tab shortcuts" setting is on and the
+    /// binding can be shown. `None` hides the hint (setting off, position past the
+    /// 8th tab, unbound, or rebound to something that isn't a single keystroke).
+    shortcut_hint: Option<String>,
 }
 
 /// Structure that holds TabComponent styles.
@@ -1072,6 +1078,9 @@ impl<'a> TabComponent<'a> {
             pane_group_id,
             pane_id,
         };
+        let shortcut_hint = (*TabSettings::as_ref(ctx).show_tab_shortcuts.value())
+            .then(|| tab_switch_shortcut_hint(tab_index, ctx))
+            .flatten();
         Self {
             tab: tab.clone(),
             tab_bar,
@@ -1094,6 +1103,7 @@ impl<'a> TabComponent<'a> {
             sole_grouped_member: false,
             locator,
             is_in_multi_tab_selection: false,
+            shortcut_hint,
         }
     }
 
@@ -1346,6 +1356,35 @@ impl<'a> TabComponent<'a> {
             .with_color(font_color)
             .finish()
         }
+    }
+
+    /// Renders the switch-to-tab keyboard shortcut hint next to the title, when
+    /// there is one to show (see [`TabComponent::shortcut_hint`]). Hidden while the
+    /// tab is being renamed, since the title is replaced by an editor in that case.
+    fn render_tab_shortcut_hint(&self) -> Option<Box<dyn Element>> {
+        if self.is_tab_being_renamed() {
+            return None;
+        }
+        let hint = self.shortcut_hint.as_ref()?;
+        let styles = if self.is_active_tab() {
+            self.styles.default.merge(self.styles.active)
+        } else {
+            self.styles.default
+        };
+        let font_color = styles.font_color.expect("Font color is set");
+        Some(
+            Container::new(
+                Text::new_inline(
+                    hint.clone(),
+                    styles.font_family_id.expect("Font family defined"),
+                    styles.font_size.expect("Font size defined"),
+                )
+                .with_color(coloru_with_opacity(font_color, 60))
+                .finish(),
+            )
+            .with_margin_left(6.)
+            .finish(),
+        )
     }
 
     /// Renders the close-button slot for the tab: the close button when
@@ -1691,6 +1730,9 @@ impl<'a> TabComponent<'a> {
                 )
                 .finish(),
             );
+            if let Some(shortcut_hint) = self.render_tab_shortcut_hint() {
+                flex_row.add_child(shortcut_hint);
+            }
             // Equal padding on both sides so the title stays centered; the pin
             // vanishes before it can reach the title.
             let horizontal_padding = if reserve_pin_space {

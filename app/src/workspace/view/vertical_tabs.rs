@@ -65,7 +65,7 @@ use crate::ui_components::agent_icon::terminal_view_agent_icon_variant;
 use crate::ui_components::buttons::combo_inner_button;
 use crate::ui_components::icon_with_status::{IconWithStatusVariant, render_icon_with_status};
 use crate::ui_components::icons::Icon as UiIcon;
-use crate::util::bindings::keybinding_name_to_display_string;
+use crate::util::bindings::{keybinding_name_to_display_string, tab_switch_shortcut_hint};
 use crate::util::color::Opacity;
 use crate::workspace::action::{NewSessionMenuAnchor, WorkspaceAction};
 use crate::workspace::cross_window_tab_drag::CrossWindowTabDrag;
@@ -3414,6 +3414,28 @@ fn row_shows_synced_inputs_indicator(props: &PaneProps<'_>, app: &AppContext) ->
     )
 }
 
+/// Returns the switch-to-tab shortcut hint element for a row, when the row
+/// represents a whole tab (as opposed to an individual pane row shown in Panes
+/// granularity — see [`PaneProps::renamable_tab_index`]) and the "Show tab
+/// shortcuts" setting is on. Mirrors the horizontal tab bar's equivalent hint.
+fn vertical_tab_switch_shortcut_hint(
+    renamable_tab_index: Option<usize>,
+    appearance: &Appearance,
+    app: &AppContext,
+) -> Option<Box<dyn Element>> {
+    let tab_index = renamable_tab_index?;
+    if !*TabSettings::as_ref(app).show_tab_shortcuts.value() {
+        return None;
+    }
+    let hint = tab_switch_shortcut_hint(tab_index, app)?;
+    let theme = appearance.theme();
+    Some(
+        Text::new_inline(hint, appearance.ui_font_family(), 11.)
+            .with_color(theme.sub_text_color(theme.background()).into())
+            .finish(),
+    )
+}
+
 /// Link icon marking a row whose tab has synchronized inputs enabled. Uses the
 /// same icon and color as the horizontal tab bar's `Indicator::Synced`.
 fn render_synced_inputs_indicator() -> Box<dyn Element> {
@@ -3427,16 +3449,17 @@ fn render_synced_inputs_indicator() -> Box<dyn Element> {
     .finish()
 }
 
-/// Row title line with its trailing indicators — the synchronized-inputs link
-/// icon followed by the unread-activity dot — pinned to the right edge. Returns
-/// `title` untouched when the row has no indicator to show.
+/// Row title line with its trailing indicators — an optional switch-to-tab shortcut
+/// hint, the synchronized-inputs link icon, then the unread-activity dot — pinned to
+/// the right edge. Returns `title` untouched when the row has nothing to show.
 fn render_row_title_line(
     title: Box<dyn Element>,
     shows_synced_inputs: bool,
     shows_activity_indicator: bool,
+    shortcut_hint: Option<Box<dyn Element>>,
     theme: &WarpTheme,
 ) -> Box<dyn Element> {
-    if !shows_synced_inputs && !shows_activity_indicator {
+    if !shows_synced_inputs && !shows_activity_indicator && shortcut_hint.is_none() {
         return title;
     }
 
@@ -3444,6 +3467,9 @@ fn render_row_title_line(
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
         .with_spacing(4.);
+    if let Some(shortcut_hint) = shortcut_hint {
+        indicators.add_child(shortcut_hint);
+    }
     if shows_synced_inputs {
         indicators.add_child(render_synced_inputs_indicator());
     }
@@ -4484,6 +4510,7 @@ fn render_terminal_row_content(
         first_line,
         row_shows_synced_inputs_indicator(props, app),
         has_unread_activity(&props.typed, app),
+        vertical_tab_switch_shortcut_hint(props.renamable_tab_index, appearance, app),
         theme,
     );
 
@@ -4774,6 +4801,7 @@ fn render_summary_tab_item(
         title_region.finish(),
         row_shows_synced_inputs_indicator(&props, app),
         summary.has_unread_activity,
+        vertical_tab_switch_shortcut_hint(props.renamable_tab_index, appearance, app),
         theme,
     ));
 
@@ -7360,6 +7388,7 @@ fn render_compact_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn El
         title_element,
         row_shows_synced_inputs_indicator(&props, app),
         has_indicator,
+        vertical_tab_switch_shortcut_hint(props.renamable_tab_index, appearance, app),
         theme,
     );
 
