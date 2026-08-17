@@ -3718,12 +3718,17 @@ impl PaneGroup {
             #[cfg(not(feature = "local_fs"))]
             let _ = (has_restored_command_blocks, has_conversation_restoration);
 
-            // The tab-bar title fallback used while pending is only needed until
-            // the real blocks land; drop it so a later, unrelated no-match doesn't
-            // resurface stale text.
-            terminal_view.update(ctx, |view, _| {
-                view.set_pending_restoration_title_hint(None);
-            });
+            // Only drop the tab-bar title fallback once real blocks actually
+            // landed in the live model. `apply_deferred_restored_blocks` can
+            // decline to apply (e.g. the session is no longer pristine) without
+            // that being visible here except through this same bool; clearing
+            // the hint unconditionally would leave the tab with neither a real
+            // title nor a fallback, on top of the scrollback it already lost.
+            if has_restored_command_blocks {
+                terminal_view.update(ctx, |view, _| {
+                    view.set_pending_restoration_title_hint(None);
+                });
+            }
         }
 
         // Tab titles/subtitles are computed from this pane group's live state at
@@ -7974,11 +7979,16 @@ impl PaneGroup {
 
     // When user clicked on the close tab button, we should wind down the existing panes
     // by deleting all the saved blocks in each pane from the database.
-    pub fn clean_up_panes(&self, ctx: &mut ViewContext<Self>) {
+    pub fn clean_up_panes(&mut self, ctx: &mut ViewContext<Self>) {
         for pane in self.pane_contents.values() {
             let pane = pane.as_pane();
             pane.detach(self, DetachType::Closed, ctx);
         }
+        // This is the real permanent-discard path for a closed tab (reached from
+        // `UndoCloseStack` once its grace period expires); `cleanup_closed_pane`
+        // covers per-pane undo instead. Any pane never activated before this
+        // point still holds its deferred restoration payload.
+        self.pending_lazy_terminal_restorations.clear();
     }
 
     fn clean_up_pane(&self, pane_id: PaneId, ctx: &mut ViewContext<Self>) {

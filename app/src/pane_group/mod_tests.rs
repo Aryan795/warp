@@ -4250,3 +4250,81 @@ fn test_closing_pending_pane_drops_its_lazy_restoration() {
         });
     });
 }
+
+/// APP-5257: `clean_up_panes` (not `cleanup_closed_pane`) is the real
+/// teardown path a closed tab reaches once `UndoCloseStack` discards it
+/// (its grace period expired, or the user disabled undo-close entirely).
+/// It must also release any never-activated pane's pending restoration.
+#[test]
+fn test_clean_up_panes_drops_pending_lazy_restorations() {
+    use crate::terminal::model::block::SerializedBlock;
+
+    let _flag = FeatureFlag::LazyBackgroundTabScrollbackRestore.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let uuid = Uuid::new_v4().as_bytes().to_vec();
+        let restored_block =
+            SerializedBlock::new_for_test(b"echo restored".to_vec(), b"restored\n".to_vec());
+        let mut block_lists = HashMap::new();
+        block_lists.insert(
+            PaneUuid(uuid.clone()),
+            vec![SerializedBlockListItem::Command {
+                block: Box::new(restored_block),
+            }],
+        );
+
+        let root = PaneNodeSnapshot::Leaf(LeafSnapshot {
+            is_focused: true,
+            custom_vertical_tabs_title: None,
+            contents: LeafContents::Terminal(TerminalPaneSnapshot {
+                uuid: uuid.clone(),
+                cwd: None,
+                shell_launch_data: None,
+                is_active: true,
+                is_read_only: false,
+                input_config: None,
+                llm_model_override: None,
+                active_profile_id: None,
+                conversation_ids_to_restore: Vec::new(),
+                active_conversation_id: None,
+            }),
+        });
+
+        let tips_model = app.add_model(|_| TipsCompleted::default());
+        let (_, pane_group) =
+            app.add_window_with_bounds(WindowStyle::NotStealFocus, WindowBounds::Default, |ctx| {
+                let banner = ctx.add_model(|_| BannerState::default());
+                PaneGroup::new_with_panes_layout(
+                    tips_model,
+                    banner,
+                    ServerApiProvider::as_ref(ctx).get(),
+                    PanesLayout::Snapshot(Box::new(root)),
+                    Arc::new(block_lists),
+                    None,
+                    false, // is_active_tab: simulates a background tab at startup.
+                    ctx,
+                )
+            });
+
+        pane_group.read(&app, |panes, _| {
+            assert!(
+                !panes.pending_lazy_terminal_restorations.is_empty(),
+                "restoring a background tab should stash a pending entry for its pane"
+            );
+        });
+
+        pane_group.update(&mut app, |panes, ctx| {
+            panes.clean_up_panes(ctx);
+        });
+
+        pane_group.read(&app, |panes, _| {
+            assert!(
+                panes.pending_lazy_terminal_restorations.is_empty(),
+                "the real tab-close teardown path must drop pending restorations for panes \
+                 that were never activated, not just cleanup_closed_pane's per-pane path"
+            );
+        });
+    });
+}
