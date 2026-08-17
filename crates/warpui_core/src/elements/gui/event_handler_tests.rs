@@ -7,9 +7,12 @@ use pathfinder_geometry::vector::vec2f;
 use super::*;
 use crate::elements::{
     ChildAnchor, ConstrainedBox, OffsetPositioning, ParentAnchor, ParentElement,
-    ParentOffsetBounds, Rect, SelectableArea, SelectionHandle, SmartSelectFn, Stack,
+    ParentOffsetBounds, Rect, SelectableArea, Selection, SelectionFragment, SelectionHandle,
+    SmartSelectFn, Stack,
 };
 use crate::platform::WindowStyle;
+use crate::text::word_boundaries::WordBoundariesPolicy;
+use crate::text::{IsRect, SelectionDirection, SelectionType};
 use crate::{
     App, AppContext, Entity, EntityId, EntityIdSet, Presenter, TypedActionView, ViewContext,
     WindowInvalidation,
