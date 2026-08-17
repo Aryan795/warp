@@ -118,13 +118,18 @@ pub fn assert_settings_section(section: SettingsSection) -> TestStep {
     )
 }
 
-/// Asserts whether a sidebar row was painted in the most recent frame.
+/// Asserts whether the element saved under `position_id` was painted in the
+/// most recent frame.
 ///
-/// Nav rows cache their position for a single frame, so a row's presence in
-/// the position cache means it is currently rendered. Reading visibility this
-/// way means the assertion is checking what was actually drawn, rather than
-/// re-deriving the sidebar's filter rules and risking drift from `render`.
-fn assert_row_painted(position_id: String, description: String, visible: bool) -> TestStep {
+/// An element that saves its position for a single frame is only in the
+/// position cache while it is currently rendered. Reading visibility this way
+/// means the assertion is checking what was actually drawn, rather than
+/// re-deriving the conditions behind it and risking drift from `render`.
+pub(super) fn assert_element_painted(
+    position_id: String,
+    description: String,
+    visible: bool,
+) -> TestStep {
     TestStep::new(&format!("Assert {description} visible is {visible}")).add_named_assertion(
         format!("{description} visible is {visible}"),
         move |app: &mut App, window_id| {
@@ -145,7 +150,7 @@ fn assert_row_painted(position_id: String, description: String, visible: bool) -
 
 /// Asserts whether a top-level sidebar row is currently rendered.
 pub fn assert_settings_nav_page_visible(section: SettingsSection, visible: bool) -> TestStep {
-    assert_row_painted(
+    assert_element_painted(
         nav_page_position_id(section),
         format!("nav row {section:?}"),
         visible,
@@ -154,7 +159,7 @@ pub fn assert_settings_nav_page_visible(section: SettingsSection, visible: bool)
 
 /// Asserts whether a subpage row nested under an umbrella is currently rendered.
 pub fn assert_settings_nav_subpage_visible(section: SettingsSection, visible: bool) -> TestStep {
-    assert_row_painted(
+    assert_element_painted(
         nav_subpage_position_id(section),
         format!("subpage row {section:?}"),
         visible,
@@ -163,7 +168,7 @@ pub fn assert_settings_nav_subpage_visible(section: SettingsSection, visible: bo
 
 /// Asserts whether an umbrella header row is currently rendered.
 pub fn assert_settings_umbrella_visible(label: &'static str, visible: bool) -> TestStep {
-    assert_row_painted(
+    assert_element_painted(
         nav_umbrella_position_id(label),
         format!("umbrella header \"{label}\""),
         visible,
@@ -178,7 +183,7 @@ pub fn assert_settings_umbrella_visible(label: &'static str, visible: bool) -> T
 /// it useful for proving a page's content rendered for the first time, but not
 /// for observing that content later disappeared.
 pub fn assert_settings_widget_rendered(widget_id: &'static str, rendered: bool) -> TestStep {
-    assert_row_painted(
+    assert_element_painted(
         widget_id.to_string(),
         format!("settings widget {widget_id}"),
         rendered,

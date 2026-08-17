@@ -126,6 +126,16 @@ const WORKSPACE_MANAGED_TEAMS_HEADER: &str = "You're not on a team";
 const JOIN_TEAM_WITHOUT_CREATE_HEADER: &str = "Join an existing team within your company";
 const OPEN_WORKSPACE_ADMIN_PANEL_LABEL: &str = "Open admin panel";
 
+/// Saved-position ids for the four sections whose presence distinguishes what a teamless
+/// user sees on this page. They are saved for a single frame so integration tests can
+/// assert against what the current frame actually painted, rather than re-deriving the
+/// conditions in [`TeamsWidget::render`] and risking drift from it.
+pub const WORKSPACE_SECTION_POSITION_ID: &str = "team_settings:workspace_section";
+pub const WORKSPACE_ADMIN_PANEL_BUTTON_POSITION_ID: &str =
+    "team_settings:workspace_admin_panel_button";
+pub const JOIN_A_TEAM_LIST_POSITION_ID: &str = "team_settings:join_a_team_list";
+pub const CREATE_TEAM_FORM_POSITION_ID: &str = "team_settings:create_team_form";
+
 /// How the current user stands in their native workspace. Native workspaces own their
 /// teams and are administered on the web, so this is what the Teams page can act on when
 /// the user has no team of their own yet.
@@ -4055,11 +4065,12 @@ impl TeamsWidget {
 
         page.add_child(render_sub_header(appearance, "Teams".to_string(), None));
 
-        page.add_child(self.render_sub_header_with_subtext_color(
+        let mut workspace_section = Flex::column();
+        workspace_section.add_child(self.render_sub_header_with_subtext_color(
             appearance,
             WORKSPACE_SECTION_HEADER.to_string(),
         ));
-        page.add_child(
+        workspace_section.add_child(
             Container::new(self.render_description(
                 workspace_membership_description(workspace_name, role),
                 appearance,
@@ -4068,7 +4079,7 @@ impl TeamsWidget {
             .finish(),
         );
         if role == WorkspaceRole::Admin {
-            page.add_child(
+            workspace_section.add_child(
                 Container::new(
                     Align::new(self.render_workspace_admin_panel_button(appearance))
                         .left()
@@ -4078,6 +4089,11 @@ impl TeamsWidget {
                 .finish(),
             );
         }
+        page.add_child(
+            SavePosition::new(workspace_section.finish(), WORKSPACE_SECTION_POSITION_ID)
+                .for_single_frame()
+                .finish(),
+        );
 
         page.add_child(
             Container::new(render_separator(appearance))
@@ -4114,7 +4130,7 @@ impl TeamsWidget {
     }
 
     fn render_workspace_admin_panel_button(&self, appearance: &Appearance) -> Box<dyn Element> {
-        appearance
+        let button = appearance
             .ui_builder()
             .button(
                 ButtonVariant::Link,
@@ -4138,6 +4154,10 @@ impl TeamsWidget {
             .on_click(move |ctx, _, _| {
                 ctx.dispatch_typed_action(TeamsPageAction::OpenWorkspaceAdminPanel);
             })
+            .finish();
+
+        SavePosition::new(button, WORKSPACE_ADMIN_PANEL_BUTTON_POSITION_ID)
+            .for_single_frame()
             .finish()
     }
 
@@ -4201,10 +4221,15 @@ impl TeamsWidget {
 
         // Team name editor
         page.add_child(
-            Container::new(self.render_create_team_actions(view, appearance, app))
-                .with_padding_top(12.)
-                .with_padding_bottom(12.)
-                .finish(),
+            SavePosition::new(
+                Container::new(self.render_create_team_actions(view, appearance, app))
+                    .with_padding_top(12.)
+                    .with_padding_bottom(12.)
+                    .finish(),
+                CREATE_TEAM_FORM_POSITION_ID,
+            )
+            .for_single_frame()
+            .finish(),
         );
 
         if !view.discoverable_teams_states.is_empty() {
@@ -4275,7 +4300,10 @@ impl TeamsWidget {
                     .finish(),
             );
         }
-        team_discovery.finish()
+
+        SavePosition::new(team_discovery.finish(), JOIN_A_TEAM_LIST_POSITION_ID)
+            .for_single_frame()
+            .finish()
     }
 
     fn render_single_team_in_team_discovery(

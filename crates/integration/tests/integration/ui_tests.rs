@@ -293,6 +293,11 @@ integration_tests! {
     #[ignore = "Blocked on unifying the settings page model"]
     test_settings_agent_mcp_servers_renders_standalone_page,
 
+    // Settings Teams page, for a user with no team of their own.
+    test_settings_teams_page_states_for_a_teamless_user,
+    #[ignore = "Manual test: requires real display for frame capture"]
+    test_settings_teams_page_captures,
+
     test_copy_selection_within_ai_block,
     #[ignore = "Affected by agent_view feature flag UI changes"]
     test_selection_first_to_last_through_ai_simple,

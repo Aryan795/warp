@@ -427,6 +427,10 @@ fn register_tests() -> HashMap<&'static str, BoxedBuilderFn> {
     register_test!(test_settings_search_preserved_on_sidebar_click);
     register_test!(test_settings_agent_mcp_servers_renders_standalone_page);
 
+    // Settings Teams page
+    register_test!(test_settings_teams_page_states_for_a_teamless_user);
+    register_test!(test_settings_teams_page_captures);
+
     register_test!(test_middle_click_paste);
 
     register_test!(test_copy_selection_within_ai_block);

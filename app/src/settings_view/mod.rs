@@ -131,7 +131,10 @@ pub use settings_page::{
     AdditionalInfo, InputListItem, LocalOnlyIconState, ToggleState, render_body_item_label,
     render_info_icon, render_input_list, render_separator,
 };
-pub use teams_page::{OpenTeamsSettingsModalArgs, TeamsInviteOption};
+pub use teams_page::{
+    CREATE_TEAM_FORM_POSITION_ID, JOIN_A_TEAM_LIST_POSITION_ID, OpenTeamsSettingsModalArgs,
+    TeamsInviteOption, WORKSPACE_ADMIN_PANEL_BUTTON_POSITION_ID, WORKSPACE_SECTION_POSITION_ID,
+};
 
 /// Original sidebar width used when the settings-file footer is not
 /// enabled. Preserved for Preview/Stable until `FeatureFlag::SettingsFile`
