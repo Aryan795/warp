@@ -848,6 +848,19 @@ impl RequestedCommandView {
         self.start_command_x_ray_at(cursor_char_index, CommandXRayTrigger::Keystroke, ctx);
     }
 
+    /// The command text the x-ray must be computed against.
+    ///
+    /// In edit mode the user can change the command, and `command_text` only catches up when the
+    /// command is accepted (`commit_editor_contents`). The hovered offset always comes from the
+    /// live editor, so the text has to come from there too - otherwise the two disagree after an
+    /// edit and we describe the wrong token.
+    fn current_command_text(&self, ctx: &AppContext) -> String {
+        match &self.editor {
+            Some(editor) => editor.as_ref(ctx).text(ctx).into_string(),
+            None => self.command_text.clone(),
+        }
+    }
+
     /// Describes the token containing `char_index` and shows the result.
     fn start_command_x_ray_at(
         &mut self,
@@ -855,12 +868,15 @@ impl RequestedCommandView {
         trigger: CommandXRayTrigger,
         ctx: &mut ViewContext<Self>,
     ) {
-        let command_text = self.command_text.clone();
+        let command_text = self.current_command_text(ctx);
         if command_text.is_empty() {
             return;
         }
         let position = token_start_byte_offset(&command_text, char_index);
         let completion_context = self.completion_context(ctx);
+        // The token range is resolved against the same snapshot `describe` ran on, so an edit
+        // that lands while the description is in flight can't shift it.
+        let described_text = command_text.clone();
 
         let _ = ctx.spawn(
             async move {
@@ -874,7 +890,7 @@ impl RequestedCommandView {
                 }
             },
             move |me, description, ctx| {
-                me.show_command_x_ray(description, trigger, ctx);
+                me.show_command_x_ray(description, &described_text, trigger, ctx);
             },
         );
     }
@@ -905,9 +921,13 @@ impl RequestedCommandView {
     }
 
     /// Shows the tooltip for a described token, or hides it when the token has no description.
+    ///
+    /// `described_text` is the snapshot the description was computed from, so the token range
+    /// lines up with it even if the editor has changed since.
     fn show_command_x_ray(
         &mut self,
         description: Option<Description>,
+        described_text: &str,
         trigger: CommandXRayTrigger,
         ctx: &mut ViewContext<Self>,
     ) {
@@ -917,7 +937,7 @@ impl RequestedCommandView {
         };
 
         let token_range = token_char_range(
-            &self.command_text,
+            described_text,
             description.token.span.start()..description.token.span.end(),
         );
         self.command_x_ray_hover
@@ -964,10 +984,10 @@ impl RequestedCommandView {
         app: &AppContext,
     ) -> Option<(Arc<Description>, OffsetPositioning)> {
         let description = self.command_x_ray_description.clone()?;
+        let command_text = self.current_command_text(app);
         let editor = self.editor.as_ref()?.as_ref(app);
 
-        let token_start =
-            byte_index_to_char_index(&self.command_text, description.token.span.start());
+        let token_start = byte_index_to_char_index(&command_text, description.token.span.start());
         let token_bounds =
             editor.character_bounds_in_viewport(CharOffset::from(token_start), app)?;
 
