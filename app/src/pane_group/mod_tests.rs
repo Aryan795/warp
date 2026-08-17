@@ -4076,6 +4076,96 @@ fn test_lazy_background_tab_scrollback_restore() {
     });
 }
 
+/// APP-5257: a background tab's title must not fall back to a generic
+/// placeholder just because its scrollback restoration is deferred, and the
+/// real command-derived title must take over once the tab is activated and
+/// materialization applies the deferred blocks.
+#[test]
+fn test_lazy_background_tab_reports_a_title_while_pending_and_after_materializing() {
+    use crate::terminal::model::block::SerializedBlock;
+
+    let _flag = FeatureFlag::LazyBackgroundTabScrollbackRestore.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let uuid = Uuid::new_v4().as_bytes().to_vec();
+        let restored_block =
+            SerializedBlock::new_for_test(b"uname -a".to_vec(), b"Darwin\n".to_vec());
+        let mut block_lists = HashMap::new();
+        block_lists.insert(
+            PaneUuid(uuid.clone()),
+            vec![SerializedBlockListItem::Command {
+                block: Box::new(restored_block),
+            }],
+        );
+
+        let root = PaneNodeSnapshot::Leaf(LeafSnapshot {
+            is_focused: true,
+            custom_vertical_tabs_title: None,
+            contents: LeafContents::Terminal(TerminalPaneSnapshot {
+                uuid: uuid.clone(),
+                cwd: None,
+                shell_launch_data: None,
+                is_active: true,
+                is_read_only: false,
+                input_config: None,
+                llm_model_override: None,
+                active_profile_id: None,
+                conversation_ids_to_restore: Vec::new(),
+                active_conversation_id: None,
+            }),
+        });
+
+        let tips_model = app.add_model(|_| TipsCompleted::default());
+        let (_, pane_group) =
+            app.add_window_with_bounds(WindowStyle::NotStealFocus, WindowBounds::Default, |ctx| {
+                let banner = ctx.add_model(|_| BannerState::default());
+                PaneGroup::new_with_panes_layout(
+                    tips_model,
+                    banner,
+                    ServerApiProvider::as_ref(ctx).get(),
+                    PanesLayout::Snapshot(Box::new(root)),
+                    Arc::new(block_lists),
+                    None,
+                    false, // is_active_tab: simulates a background tab at startup.
+                    ctx,
+                )
+            });
+
+        let pane_id = pane_group.read(&app, |panes, _| {
+            panes.pane_ids().next().expect("should have one pane")
+        });
+        let title = |app: &App| {
+            pane_group.read(app, |panes, ctx| {
+                panes
+                    .terminal_view_from_pane_id(pane_id, ctx)
+                    .expect("terminal pane should have a view")
+                    .as_ref(ctx)
+                    .last_completed_command_text()
+            })
+        };
+
+        assert_eq!(
+            title(&app).as_deref(),
+            Some("uname -a"),
+            "a pending background tab should report a command-derived title, not a generic \
+             placeholder, sourced from its still-deferred blocks"
+        );
+
+        pane_group.update(&mut app, |panes, ctx| {
+            panes.materialize_lazy_tab_restorations(ctx);
+        });
+
+        assert_eq!(
+            title(&app).as_deref(),
+            Some("uname -a"),
+            "after materializing, the title must be sourced from the real restored block, not \
+             remain stuck on stale/placeholder data"
+        );
+    });
+}
+
 /// APP-5257: permanently closing a background pane before it was ever
 /// activated must drop its pending lazy restoration entry, rather than
 /// leaking the stashed blocks/conversation payload.

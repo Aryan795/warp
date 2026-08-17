@@ -1773,6 +1773,19 @@ impl PaneGroup {
                     };
                 let deferred_original_snapshot =
                     defer_scrollback_restoration.then(|| terminal_snapshot.clone());
+                // Give a still-pending pane a usable tab title/subtitle before its
+                // blocks are ever fed into the live model, sourced from the same
+                // deferred data `materialize_lazy_tab_restorations` will apply later.
+                let pending_title_hint = deferred_restored_blocks.as_ref().and_then(|items| {
+                    items.iter().rev().find_map(|item| match item {
+                        SerializedBlockListItem::Command { block }
+                            if block.start_ts.is_some() && block.completed_ts.is_some() =>
+                        {
+                            block.plain_text_command_preview()
+                        }
+                        _ => None,
+                    })
+                });
 
                 let (terminal_view, terminal_manager) = PaneGroup::create_session(
                     startup_directory,
@@ -1789,6 +1802,12 @@ impl PaneGroup {
                     terminal_snapshot.input_config,
                     ctx,
                 );
+
+                if let Some(hint) = pending_title_hint {
+                    terminal_view.update(ctx, |view, _| {
+                        view.set_pending_restoration_title_hint(Some(hint));
+                    });
+                }
 
                 let terminal_view_id = terminal_view.id();
 
@@ -3698,7 +3717,21 @@ impl PaneGroup {
             }
             #[cfg(not(feature = "local_fs"))]
             let _ = (has_restored_command_blocks, has_conversation_restoration);
+
+            // The tab-bar title fallback used while pending is only needed until
+            // the real blocks land; drop it so a later, unrelated no-match doesn't
+            // resurface stale text.
+            terminal_view.update(ctx, |view, _| {
+                view.set_pending_restoration_title_hint(None);
+            });
         }
+
+        // Tab titles/subtitles are computed from this pane group's live state at
+        // render time (e.g. `TerminalView::last_completed_command_text`), but
+        // nothing above notifies the workspace to re-render with it — emit the
+        // same events every other state-changing method on this type emits.
+        ctx.emit(Event::TerminalViewStateChanged);
+        ctx.emit(Event::AppStateChanged);
     }
 
     pub fn new_from_existing_pane(
