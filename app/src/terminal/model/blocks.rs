@@ -3356,16 +3356,6 @@ impl BlockList {
             .flat_map(|offset| self.blocks.len().checked_sub(offset))
             .find(|&index| !self.blocks[index].is_background());
 
-        // Hidden in-band command blocks are never rendered, and their output reaches the
-        // generator that requested it through a DCS payload rather than being read back from
-        // the block, so retaining one past its completion event only grows memory without
-        // bound over a long session. Remove it before precmd is applied to the active block
-        // below: `apply_precmd` emits `BlockMetadataReceived` carrying the active block's
-        // index, and removing an earlier block shifts that index down by one.
-        let in_band_block_to_remove = previous_block_index.filter(|&index| {
-            !self.show_in_band_command_blocks && self.blocks[index].is_for_in_band_command
-        });
-
         if self.skip_next_after_block_completed_event {
             self.skip_next_after_block_completed_event = false;
         } else if let Some(previous_block_index) = previous_block_index {
@@ -3378,8 +3368,36 @@ impl BlockList {
                 .send_terminal_event(TerminalEvent::BootstrapPrecmdDone);
         }
 
-        if let Some(index) = in_band_block_to_remove {
-            self.remove_block_at_index(BlockIndex(index));
+        // Hidden in-band command blocks are never rendered, and their output reaches the
+        // generator that requested it through a DCS payload rather than being read back from
+        // the block, so retaining one past its completion event only grows memory without
+        // bound over a long session. `AwaitingPrecmd` accepts another command's completion
+        // before the first one's precmd (see `lifecycle/transition.rs`), so more than one
+        // hidden in-band block can be stacked ahead of the active block by now -- walk back
+        // past all of them (tolerating at most one interposed background block, matching
+        // `previous_block_index` above) rather than assuming there's only one. Do this before
+        // precmd is applied to the active block below: `apply_precmd` emits
+        // `BlockMetadataReceived` carrying the active block's index, and removing an earlier
+        // block shifts that index down. Removing from the highest index down keeps each
+        // removal's reindexing from invalidating the next.
+        if !self.show_in_band_command_blocks {
+            let mut index = self.blocks.len() - 1;
+            let mut skipped_background = false;
+            let mut hidden_in_band_indices = Vec::new();
+            while let Some(previous) = index.checked_sub(1) {
+                if self.blocks[previous].is_for_in_band_command {
+                    hidden_in_band_indices.push(previous);
+                    index = previous;
+                } else if !skipped_background && self.blocks[previous].is_background() {
+                    skipped_background = true;
+                    index = previous;
+                } else {
+                    break;
+                }
+            }
+            for index in hidden_in_band_indices {
+                self.remove_block_at_index(BlockIndex(index));
+            }
         }
 
         // If this is the Precmd following an in-band command, the payload is not populated. If the payload

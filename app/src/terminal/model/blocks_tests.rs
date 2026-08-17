@@ -2291,6 +2291,52 @@ fn test_in_band_command_blocks_are_retained_when_shown() {
     assert!(!in_band_blocks[0].should_hide_block(&TranscriptScope::Terminal));
 }
 
+// `AwaitingPrecmd` accepts another command's completion before the first one's precmd (see
+// `lifecycle/transition.rs`), so a burst of in-band completions can stack more than one
+// hidden block ahead of the active block before a single precmd finally runs.
+#[test]
+fn test_in_band_command_blocks_are_swept_after_a_burst_of_completions() {
+    let mut block_list =
+        new_bootstrapped_block_list(None, None, ChannelEventListener::new_for_test());
+    assert!(!block_list.show_in_band_command_blocks);
+
+    let baseline_block_count = block_list.blocks().len();
+
+    for _ in 0..2 {
+        block_list.start_active_block_for_in_band_command();
+        block_list.preexec(PreexecValue {
+            command: "warp_run_generator_command 1234 foo".to_owned(),
+            session_id: None,
+        });
+        block_list.command_finished(CommandFinishedValue {
+            completion_metadata: ansi::CompletionMetadata::default(),
+            ..Default::default()
+        });
+    }
+    block_list.precmd_with_completion_metadata(PrecmdValue {
+        completion_metadata: ansi::CompletionMetadata::default(),
+        prompt_metadata: PromptMetadata::default(),
+    });
+
+    assert_eq!(block_list.blocks().len(), baseline_block_count);
+    assert_eq!(
+        block_list
+            .blocks()
+            .iter()
+            .filter(|block| block.is_for_in_band_command)
+            .count(),
+        0
+    );
+    assert_eq!(
+        block_list.block_id_to_block_index.len(),
+        block_list.blocks().len()
+    );
+    assert_eq!(
+        block_list.active_block_index(),
+        BlockIndex(block_list.blocks().len() - 1)
+    );
+}
+
 // Removing the hidden in-band block shifts the active block's index down by one, so the
 // `BlockMetadataReceived` emitted for the active block must carry its post-removal index.
 #[test]
