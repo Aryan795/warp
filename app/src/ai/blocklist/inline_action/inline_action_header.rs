@@ -256,8 +256,8 @@ impl HeaderConfig {
 
         if let Some(addressing) = &self.title_char_addressing {
             if let Some(on_hovered_char) = addressing.on_hovered_char.clone() {
-                title_text =
-                    title_text.with_hovered_char_index_reporter(move |index| on_hovered_char(index));
+                title_text = title_text
+                    .with_hovered_char_index_reporter(move |index| on_hovered_char(index));
             }
             if let Some((char_index, position_id)) = addressing.anchor.clone() {
                 title_text = title_text.with_saved_char_position(char_index, position_id);

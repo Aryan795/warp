@@ -920,8 +920,7 @@ impl RequestedCommandView {
             }
             CommandXRaySurface::Header => {
                 self.header_x_ray_anchor_char = offset.map(CharOffset::as_usize);
-                self.header_x_ray_hit.lock().token_chars =
-                    self.described_token_char_range(ctx);
+                self.header_x_ray_hit.lock().token_chars = self.described_token_char_range(ctx);
             }
         }
     }
@@ -2498,8 +2497,7 @@ impl TypedActionView for RequestedCommandView {
                 }
                 self.command_x_ray_surface = CommandXRaySurface::Header;
                 let text = self.x_ray_host_text(ctx);
-                if let Some(byte_offset) =
-                    byte_offset_for_char(&text, CharOffset::from(char_index))
+                if let Some(byte_offset) = byte_offset_for_char(&text, CharOffset::from(char_index))
                 {
                     command_x_ray::host::start_at_offset(
                         self,
