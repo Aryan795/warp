@@ -72,6 +72,16 @@ $null = New-Module -Name Warp-Module -ScriptBlock {
             [BitConverter]::ToString([System.Text.Encoding]::UTF8.GetBytes($str)).Replace('-', '')
         }
 
+        # Reverses Warp-Encode-HexString: decodes a hex-encoded string back to its original
+        # UTF-8 text. Lets the Rust app pass arbitrary argument text (e.g. the in-progress
+        # command line) as a plain, unquoted hex string, without needing any shell quoting.
+        function Warp-Decode-HexString([string]$hex) {
+            $bytes = for ($i = 0; $i -lt $hex.Length; $i += 2) {
+                [Convert]::ToByte($hex.Substring($i, 2), 16)
+            }
+            [System.Text.Encoding]::UTF8.GetString($bytes)
+        }
+
         # Hex-encodes the given argument and writes it to the PTY, wrapped in the OSC
         # sequences for generator output.
         #
@@ -804,6 +814,44 @@ $null = New-Module -Name Warp-Module -ScriptBlock {
 
     }
 
+    # Computes native shell completions for the given (hex-encoded) command line and emits
+    # them via the completions OSC protocol (see zsh_body.sh's compadd shim for the wire
+    # format: "<ESC>]9280;A;incrementally_typed<BEL>", then "<ESC>]9280;C;<match><BEL>" and
+    # optionally "<ESC>]9280;D?description;<description><BEL>" per match, then
+    # "<ESC>]9280;B<BEL>"). Runs synchronously in the foreground -- like native completions
+    # in the other shells, there is no async cancel-by-PID for this request.
+    #
+    # Usage:
+    #   Warp-Run-GeneratorCommand-NativeCompletions <hex-encoded line>
+    function Warp-Run-GeneratorCommand-NativeCompletions {
+        [CmdletBinding()]
+        param([string]$hexEncodedLine)
+
+        # Setting this variable prevents Warp-Precmd from emitting the 'Block started'
+        # hook to the Rust app, matching Warp-Run-GeneratorCommand.
+        $script:generatorCommand = $true
+
+        $line = Warp-Decode-HexString $hexEncodedLine
+
+        Write-Host -NoNewline "$([char]0x1b)]9280;A;incrementally_typed$oscEnd"
+        try {
+            $completion = [System.Management.Automation.CommandCompletion]::CompleteInput(
+                $line, $line.Length, $null)
+            foreach ($match in $completion.CompletionMatches) {
+                Write-Host -NoNewline "$([char]0x1b)]9280;C;$($match.CompletionText)$oscEnd"
+                if (-not [string]::IsNullOrEmpty($match.ToolTip) -and $match.ToolTip -ne $match.CompletionText) {
+                    # Cmdlet/parameter tooltips can span multiple lines (e.g. one syntax set
+                    # per parameter combination); collapse to a single line for display.
+                    $description = ($match.ToolTip -split '\r?\n' | Where-Object { $_.Trim() -ne '' }) -join ' '
+                    Write-Host -NoNewline "$([char]0x1b)]9280;D?description;$description$oscEnd"
+                }
+            }
+        } catch {
+            Write-Verbose "Native completions failed: $($_.Exception.Message)"
+        }
+        Write-Host -NoNewline "$([char]0x1b)]9280;B$oscEnd"
+    }
+
     function Warp-Render-Prompt {
         param([bool]$status, [int]$code, [bool]$isGeneratorCommand)
 
@@ -1001,7 +1049,7 @@ $null = New-Module -Name Warp-Module -ScriptBlock {
     # bootstrap logic pasted into the PTY and the output of shell startup files.
     Warp-Precmd -status $global:? -code $global:LASTEXITCODE
 
-    Export-ModuleMember -Function clear, Clear-Host, Get-EpochTime, Warp-Finish-Update, Warp-Handle-DistUpgrade, Warp-Run-GeneratorCommand, Warp-Finish-Bootstrap
+    Export-ModuleMember -Function clear, Clear-Host, Get-EpochTime, Warp-Finish-Update, Warp-Handle-DistUpgrade, Warp-Run-GeneratorCommand, Warp-Run-GeneratorCommand-NativeCompletions, Warp-Finish-Bootstrap
 }
 
 # Finally, get ready to source the user's RC files. This must be done in the global scope (not

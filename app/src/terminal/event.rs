@@ -130,7 +130,6 @@ pub enum Event {
     FinishUpdate(FinishUpdateValue),
     TextSelectionChanged,
     ShellSpawned(ShellType),
-    SendCompletionsPrompt,
     ImageReceived {
         image_id: u32,
         image_data: Vec<u8>,
@@ -472,7 +471,6 @@ impl Debug for Event {
             Event::FinishUpdate(data) => write!(f, "FinishUpdate({})", data.update_id),
             Event::TextSelectionChanged => write!(f, "TextSelectionChanged"),
             Event::ShellSpawned(shell_type) => write!(f, "ShellSpawned({shell_type:?})"),
-            Event::SendCompletionsPrompt => write!(f, "SendCompletionsPrompt"),
             Event::ImageReceived { image_id, .. } => {
                 write!(f, "ImageReceived(image_id: {image_id})")
             }

@@ -68,6 +68,21 @@ function warp_hex_encode_string
   echo "$argv" | od -An -v -tx1 | command tr -d ' \n'
 end
 
+# Reverses warp_hex_encode_string: decodes a hex-encoded string back to its original bytes.
+# Lets the Rust app pass arbitrary argument text (e.g. the in-progress command line) as a
+# plain, unquoted hex string, without needing any shell quoting.
+function warp_hex_decode_string
+    set -l hex $argv[1]
+    set -l escaped ''
+    set -l i 1
+    while test $i -le (string length -- $hex)
+        set -l pair (string sub -s $i -l 2 -- $hex)
+        set escaped "$escaped\\x$pair"
+        set i (math $i + 2)
+    end
+    command printf -- '%b' $escaped
+end
+
 # A list of PIDs for running in-band command(s). This is used to kill running
 # in-band commands in preexec for a user command, so they do not interfere with
 # user command output.
@@ -154,6 +169,33 @@ function warp_run_generator_command
     # command or a user command has just completed.
     set -g _WARP_GENERATOR_COMMAND 1
     _warp_run_generator_command_internal $argv
+end
+
+# Computes native shell completions for the given (hex-encoded) command line and emits
+# them via the completions OSC protocol (see zsh_body.sh's compadd shim for the wire
+# format: "\e]9280;A;incrementally_typed\a", then "\e]9280;C;<match>\a" and optionally
+# "\e]9280;D?description;<description>\a" per match, then "\e]9280;B\a"). Runs
+# synchronously in the foreground -- like native completions in the other shells, there
+# is no async cancel-by-PID for this request.
+#
+# Usage:
+#   warp_run_generator_command_native_completions <hex-encoded line>
+function warp_run_generator_command_native_completions
+    set -g _WARP_GENERATOR_COMMAND 1
+    set -l line (warp_hex_decode_string $argv[1])
+
+    printf '\e]9280;A;incrementally_typed\a'
+    # `complete -C "<line>"` computes completions for an arbitrary line -- the same
+    # entry point already used elsewhere in Warp's bootstrap for executable discovery --
+    # returning one "match\tdescription" pair per line.
+    for entry in (complete -C "$line")
+        set -l parts (string split -m 1 \t -- $entry)
+        printf '\e]9280;C;%s\a' $parts[1]
+        if test (count $parts) -gt 1 -a -n "$parts[2]"
+            printf '\e]9280;D?description;%s\a' $parts[2]
+        end
+    end
+    printf '\e]9280;B\a'
 end
 
 # Run before a command is executed.

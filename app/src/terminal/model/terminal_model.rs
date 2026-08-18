@@ -3386,11 +3386,6 @@ impl ansi::Handler for TerminalModel {
         }
     }
 
-    fn send_completions_prompt(&mut self) {
-        self.event_proxy
-            .send_terminal_event(Event::SendCompletionsPrompt);
-    }
-
     fn start_iterm_image_receiving(&mut self, metadata: ITermImageMetadata) {
         let pending = ITermImage {
             metadata,

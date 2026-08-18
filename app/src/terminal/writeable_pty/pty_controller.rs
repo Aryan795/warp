@@ -21,7 +21,7 @@ use crate::terminal::model::completions::ShellCompletion;
 use crate::terminal::model::session::{
     ExecutorCommandEvent, InBandCommandCancelledEvent, SessionInfo, Sessions,
 };
-use crate::terminal::model::{StartCommandOutcome, escape_sequences};
+use crate::terminal::model::{StartCommandOutcome, escape_sequences, native_shell_completions};
 use crate::terminal::model_events::{AnsiHandlerEvent, ModelEvent, ModelEventDispatcher};
 use crate::terminal::shell::ShellType;
 use crate::terminal::view::LINEFEED_REGEX;
@@ -59,23 +59,13 @@ enum PtyWrite {
         /// The `mode` for the agent's write.
         mode: AIAgentPtyWriteMode,
     },
-    RunNativeShellCompletions(NativeShellCompletionsState),
-}
-
-enum NativeShellCompletionsState {
-    AwaitingPrompt {
-        buffer_text: String,
+    RunNativeShellCompletions {
+        /// The command line to write to the PTY, computed by
+        /// `native_shell_completions::generator_command_for`.
+        command: String,
+        shell_type: ShellType,
         results_tx: async_channel::Sender<Vec<ShellCompletion>>,
     },
-    AwaitingResults {
-        results_tx: async_channel::Sender<Vec<ShellCompletion>>,
-    },
-}
-
-impl NativeShellCompletionsState {
-    fn is_awaiting_prompt(&self) -> bool {
-        matches!(self, Self::AwaitingPrompt { .. })
-    }
 }
 
 /// Controller for writes to the PTY.
@@ -97,7 +87,7 @@ pub struct PtyController<T: EventLoopSender> {
     /// complete, it will be dropped to clean up the temporary file.
     #[cfg(not(target_family = "wasm"))]
     bootstrap_file: Option<TempBootstrapFile>,
-    in_flight_native_completions_state: Option<NativeShellCompletionsState>,
+    in_flight_native_completions_results_tx: Option<async_channel::Sender<Vec<ShellCompletion>>>,
 }
 
 impl<T: EventLoopSender> PtyController<T> {
@@ -139,39 +129,11 @@ impl<T: EventLoopSender> PtyController<T> {
                 }
             }
             ModelEvent::CompletionsFinished(data) => {
-                let Some(NativeShellCompletionsState::AwaitingResults { results_tx }) = me.in_flight_native_completions_state.take() else {
+                let Some(results_tx) = me.in_flight_native_completions_results_tx.take() else {
                     log::warn!("Received CompletionsFinished event but didn't have a channel to send results over!");
                     return;
                 };
                 let _ = block_on(results_tx.send(data.clone()));
-            }
-            ModelEvent::SendCompletionsPrompt => {
-                let Some(NativeShellCompletionsState::AwaitingPrompt {
-                    buffer_text,
-                    results_tx,
-                }) = me.in_flight_native_completions_state.take() else {
-                    log::warn!("Received SendCompletionsPrompt event but didn't have a prompt to send!");
-                    return;
-                };
-                me.in_flight_native_completions_state = Some(NativeShellCompletionsState::AwaitingResults { results_tx });
-
-                let mut bytes = buffer_text.into_bytes();
-                // We use the EOT character to signal the end of the prompt.
-                bytes.push(escape_sequences::C0::EOT);
-
-                // We send the write directly to the event loop without
-                // queueing, as we currently have exclusive control over pty
-                // writes.
-                me.send_write_to_event_loop(
-                    PtyWrite::Bytes {
-                        bytes: bytes.into(),
-                    },
-                    ctx,
-                );
-
-                // Now that we've provided the prompt, we can start executing
-                // other queued writes.
-                me.execute_next_queued_write(ctx);
             }
             _ => (),
         });
@@ -223,7 +185,7 @@ impl<T: EventLoopSender> PtyController<T> {
             is_bracketed_paste_enabled: false,
             #[cfg(not(target_family = "wasm"))]
             bootstrap_file: None,
-            in_flight_native_completions_state: None,
+            in_flight_native_completions_results_tx: None,
         }
     }
 
@@ -335,9 +297,6 @@ impl<T: EventLoopSender> PtyController<T> {
     /// enqueue writes for later.
     fn can_write_to_pty(&self, ctx: &mut ModelContext<Self>) -> bool {
         self.line_editor_status.as_ref(ctx).is_line_editor_active()
-            // If we're in the middle of a native completions request, we should not send any more
-            // writes to the shell until we've sent the string to complete.
-            && !self.in_flight_native_completions_state.as_ref().is_some_and(|state| state.is_awaiting_prompt())
     }
 
     /// Executes the next queued `PtyWrite`, if able.
@@ -673,14 +632,29 @@ impl<T: EventLoopSender> PtyController<T> {
                 (decorated_bytes.into(), false, None)
             }
             PtyWrite::Bytes { bytes } => (bytes, false, None),
-            PtyWrite::RunNativeShellCompletions(state) => {
-                self.in_flight_native_completions_state = Some(state);
+            PtyWrite::RunNativeShellCompletions {
+                command,
+                shell_type,
+                results_tx,
+            } => {
+                self.in_flight_native_completions_results_tx = Some(results_tx);
 
-                // Send a ^Y control code to trigger the right bindkey.  We
-                // then wait for an OSC-based signal from the shell before we
-                // send the text that needs to be completed.
-                let bytes = vec![0x19_u8];
-                (bytes.into(), false, None)
+                // Write the generator command exactly as any other in-band command: the shell's
+                // own bootstrap logic (matched by name, see `native_shell_completions`) hides it
+                // from history and treats its output as in-band rather than a new block.
+                let terminal_model = self.terminal_model.clone();
+                (
+                    Cow::Owned(bytes_to_execute_command(
+                        command.as_str(),
+                        shell_type,
+                        self.is_bracketed_paste_enabled,
+                    )),
+                    true,
+                    Some(
+                        Box::new(move || terminal_model.lock().start_in_band_command_execution())
+                            as Box<dyn Fn() -> StartCommandOutcome + Send + 'static>,
+                    ),
+                )
             }
         };
 
@@ -726,18 +700,29 @@ impl<T: EventLoopSender> PtyController<T> {
         results_tx: async_channel::Sender<Vec<ShellCompletion>>,
         ctx: &mut ModelContext<Self>,
     ) {
+        let Some(shell_type) = self
+            .model_event_dispatcher
+            .as_ref(ctx)
+            .active_session_id()
+            .and_then(|id| self.sessions.as_ref(ctx).get(id))
+            .map(|session| session.shell().shell_type())
+        else {
+            let _ = results_tx.try_send(Vec::new());
+            return;
+        };
+        let command = native_shell_completions::generator_command_for(shell_type, &buffer_text);
+
         // Make sure we only have a single pending native shell completions
         // request at a time by dropping any existing ones from the queue.
         self.pending_writes
-            .retain(|write| !matches!(write, PtyWrite::RunNativeShellCompletions(_)));
+            .retain(|write| !matches!(write, PtyWrite::RunNativeShellCompletions { .. }));
 
         self.pending_writes
-            .push_back(PtyWrite::RunNativeShellCompletions(
-                NativeShellCompletionsState::AwaitingPrompt {
-                    buffer_text,
-                    results_tx,
-                },
-            ));
+            .push_back(PtyWrite::RunNativeShellCompletions {
+                command,
+                shell_type,
+                results_tx,
+            });
         self.execute_next_queued_write(ctx);
     }
 }
