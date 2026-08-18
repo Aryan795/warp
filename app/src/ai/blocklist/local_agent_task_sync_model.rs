@@ -583,9 +583,11 @@ fn map_cli_session_status(
             AgentTaskState::Blocked,
             message.as_ref().map(TaskStatusUpdate::message),
         ),
+        // The enum stays `Cancelled` (matches the GraphQL wire value), but the
+        // user-facing message uses the American spelling per product request.
         CLIAgentSessionStatus::Cancelled => (
             AgentTaskState::Cancelled,
-            Some(TaskStatusUpdate::message("Cancelled by user")),
+            Some(TaskStatusUpdate::message("Canceled by user")),
         ),
     }
 }

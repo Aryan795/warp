@@ -457,11 +457,11 @@ fn cli_blocked_without_message() {
 }
 
 #[test]
-fn cli_cancelled_maps_to_cancelled_by_user() {
+fn cli_cancelled_maps_to_canceled_by_user() {
     let (state, update) = map_cli_session_status(&CLIAgentSessionStatus::Cancelled);
     assert_eq!(state, AgentTaskState::Cancelled);
     let update = update.expect("should have status update");
-    assert_eq!(update.message, "Cancelled by user");
+    assert_eq!(update.message, "Canceled by user");
 }
 
 // --- Model-level tests ---
