@@ -115,6 +115,14 @@ pub struct HiddenComputerUseArgs {
     /// Disable computer use capabilities for this agent run.
     #[arg(long = "no-computer-use", conflicts_with = "computer_use", hide = true)]
     pub no_computer_use: bool,
+
+    /// Model to use for the computer use subagent, overriding the agent profile's
+    /// computer use model for this run.
+    ///
+    /// Only applies to the built-in Oz harness, and is ignored when computer use
+    /// is disabled for the run.
+    #[arg(long = "computer-use-model", value_name = "MODEL", hide = true)]
+    pub computer_use_model: Option<String>,
 }
 
 impl HiddenComputerUseArgs {
@@ -124,6 +132,14 @@ impl HiddenComputerUseArgs {
             (false, true) => Some(false),
             _ => None,
         }
+    }
+
+    /// Returns the computer use model override, if a non-blank one was given.
+    pub fn computer_use_model_override(&self) -> Option<&str> {
+        self.computer_use_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
     }
 }
 const HARNESS_VALUE_VARIANTS: [Harness; 5] = [

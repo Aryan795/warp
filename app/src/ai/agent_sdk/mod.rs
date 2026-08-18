@@ -462,6 +462,7 @@ fn build_merged_config_and_task(
     let task = Task {
         prompt: AgentRunPrompt::Local(resolve_prompt(&local_prompt, ctx)?),
         model: model_override,
+        computer_use_model: computer_use_model_override(args),
         profile: args.profile.clone(),
         mcp_specs: runtime_mcp_specs,
         harness: harness_kind(args.harness)?,
@@ -534,12 +535,25 @@ fn build_server_side_task(
             attachments_dir: None,
         },
         model: model_override,
+        computer_use_model: computer_use_model_override(args),
         profile,
         mcp_specs: runtime_mcp_specs,
         harness: harness_kind(args.harness)?,
     };
 
     Ok((config, task))
+}
+
+/// The run's computer use model override, which only applies to the Oz harness:
+/// third-party harnesses run their own computer use (if any) and never consume
+/// Warp's `ModelConfig`.
+fn computer_use_model_override(args: &RunAgentArgs) -> Option<LLMId> {
+    if args.harness != Harness::Oz {
+        return None;
+    }
+    args.computer_use
+        .computer_use_model_override()
+        .map(LLMId::from)
 }
 
 fn reconcile_task_harness(
