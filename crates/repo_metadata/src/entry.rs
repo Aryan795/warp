@@ -142,16 +142,19 @@ impl Entry {
         }
     }
 
-    /// Total number of directory entries in this subtree, including `self` if it is a directory.
-    pub fn count_directories(&self) -> usize {
+    /// Number of directories in this subtree that will add a key to a
+    /// parent-to-children map when inserted (i.e. directories with at least
+    /// one child; a childless directory contributes no children-set entry).
+    pub fn count_populated_directories(&self) -> usize {
         match self {
             Self::File(_) => 0,
             Self::Directory(directory) => {
-                1 + directory
-                    .children
-                    .iter()
-                    .map(Entry::count_directories)
-                    .sum::<usize>()
+                usize::from(!directory.children.is_empty())
+                    + directory
+                        .children
+                        .iter()
+                        .map(Entry::count_populated_directories)
+                        .sum::<usize>()
             }
         }
     }

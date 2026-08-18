@@ -208,10 +208,20 @@ impl FileTreeMapStore {
         // fills, and then `extend()` can resize `self`'s maps again on top of
         // that, doubling the hashbrown resize cost for a large subtree.
         self.state_map.reserve(entry.count_entries());
-        self.parent_to_child_map.reserve(entry.count_directories());
+
+        // `parent_to_child_map` only gains a key per *populated* directory
+        // (see `insert_entry` below) plus, at most, one more for the fix-up
+        // that links `path` into its own parent's children below.
+        let parent = self.parent_directory(&path);
+        let gains_parent_key = parent
+            .as_ref()
+            .is_some_and(|p| !self.parent_to_child_map.contains_key(p));
+        self.parent_to_child_map
+            .reserve(entry.count_populated_directories() + usize::from(gains_parent_key));
+
         Self::insert_entry(&mut self.state_map, &mut self.parent_to_child_map, entry);
 
-        if let Some(parent) = self.parent_directory(&path) {
+        if let Some(parent) = parent {
             self.parent_to_child_map
                 .entry(parent)
                 .or_default()
