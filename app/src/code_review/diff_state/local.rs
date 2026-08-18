@@ -3002,10 +3002,7 @@ impl RepositorySubscriber for LocalDiffStateModelRepositorySubscriber {
 
 #[cfg(test)]
 impl LocalDiffStateModel {
-    /// Test-only: force the model into the `Loaded` state with an empty diff,
-    /// so consumers (e.g. `CodeReviewView::invalidate_all`) can be driven
-    /// through their normal "diff state is Loaded" branch without a real
-    /// repository or diff computation.
+    /// Forces an empty loaded diff state for tests.
     pub fn set_loaded_for_test(&mut self) {
         self.state = InternalDiffState::Loaded(Diffs {
             changes: Ok(GitDiffData {

@@ -311,6 +311,22 @@ fn file_status_changed_deleted_state(
     false
 }
 
+/// Whether an editor can be constructed for `file`: binary files never get
+/// one, and (outside wasm) a file also needs base content to diff against.
+fn expects_editor(file: &FileDiffAndContent) -> bool {
+    if file.file_diff.is_binary {
+        return false;
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        file.content_at_head.is_some()
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        true
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum CodeReviewAction {
     OpenInNewTab {
@@ -2525,13 +2541,7 @@ impl CodeReviewView {
             return;
         };
 
-        // Take the previous loaded state (if any) so files whose deleted-status
-        // hasn't changed and which have no unsaved edits can reuse their
-        // existing editor/buffer instead of being torn down and rebuilt --
-        // rebuilding every file on every diff recomputation multiplies the
-        // expensive first-computation full-buffer layout by the file count.
-        // This mirrors the reuse condition already used by the single-file
-        // update path above (`update_from_single_file_diff_result`).
+        // Retain reusable file states to avoid recreating their initial layouts.
         let mut old_file_states = self
             .active_repo
             .as_mut()
@@ -2552,10 +2562,11 @@ impl CodeReviewView {
                 !file_status_changed_deleted_state(
                     &existing.file_diff.status,
                     &file.file_diff.status,
-                ) && !existing
-                    .editor_state
-                    .as_ref()
-                    .is_some_and(|state| state.has_unsaved_changes(ctx))
+                ) && existing.editor_state.is_some() == expects_editor(file)
+                    && !existing
+                        .editor_state
+                        .as_ref()
+                        .is_some_and(|state| state.has_unsaved_changes(ctx))
             });
 
             if can_reuse {
@@ -3087,7 +3098,7 @@ impl CodeReviewView {
     ) -> Option<CodeReviewEditorState> {
         let repo_path = self.repo_path()?.clone();
         // Skip editor creation for binary files or files without content (e.g., pure renames)
-        if file.file_diff.is_binary || file.content_at_head.is_none() {
+        if !expects_editor(file) {
             None
         } else if matches!(file.file_diff.status, GitFileStatus::Deleted) {
             // For deleted files, the file doesn't exist on disk anymore, so we can't use
@@ -3189,7 +3200,7 @@ impl CodeReviewView {
     ) -> Option<CodeReviewEditorState> {
         let repo_path = self.repo_path()?.clone();
 
-        if file.file_diff.is_binary {
+        if !expects_editor(file) {
             None
         } else {
             let self_handle = ctx.handle();
