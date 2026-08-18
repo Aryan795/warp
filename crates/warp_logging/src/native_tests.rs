@@ -78,16 +78,29 @@ fn tui_bundle_uses_resolved_state_and_ignores_legacy_oz_logs() {
 }
 
 #[test]
+fn needs_zip64_respects_margin_below_threshold() {
+    // The margin means the switch to ZIP64 happens slightly before the raw threshold, not
+    // exactly at it — check the boundary sits where `ZIP64_THRESHOLD_MARGIN_BYTES` puts it.
+    let boundary = zip::ZIP64_BYTES_THR - ZIP64_THRESHOLD_MARGIN_BYTES;
+    assert!(!needs_zip64(boundary - 1));
+    assert!(needs_zip64(boundary));
+    assert!(needs_zip64(boundary + 1));
+}
+
+#[test]
+#[ignore = "writes a 4 GiB entry; run manually or in a nightly job"]
 fn bundle_zip_supports_entries_over_4gib() {
-    // A sparse file lets this exercise the >4 GiB (ZIP64) code path cheaply: its logical
-    // length crosses `ZIP64_BYTES_THR` without writing real data, and `io::copy` reads back
-    // the resulting hole as zeroes.
+    // A sparse file lets this exercise the >4 GiB (ZIP64) code path on Linux without writing
+    // real data: its logical length crosses `ZIP64_BYTES_THR`, and `io::copy` reads back the
+    // resulting hole as zeroes. Still slow enough (real compression work over a multi-GiB
+    // entry) to keep out of the default `cargo nextest` run, and not sparse on Windows/NTFS.
     let tmp = tempfile::tempdir().unwrap();
     let state = log_state(tmp.path(), LogFrontend::Gui, "warp.log");
     fs::create_dir_all(&state.log_directory).unwrap();
     touch(&state.log_directory, "warp.log");
+    let huge_len = zip::ZIP64_BYTES_THR + 1;
     let huge_log = File::create(state.log_directory.join("warp.log.old.0")).unwrap();
-    huge_log.set_len(zip::ZIP64_BYTES_THR + 1).unwrap();
+    huge_log.set_len(huge_len).unwrap();
     drop(huge_log);
 
     let zip_path = state.create_log_bundle_zip().unwrap();
@@ -96,10 +109,17 @@ fn bundle_zip_supports_entries_over_4gib() {
         zip_entry_names(&zip_path),
         vec!["warp.log", "warp.log.old.0"]
     );
+    let file = File::open(&zip_path).unwrap();
+    let mut archive = zip::ZipArchive::new(file).unwrap();
+    assert_eq!(archive.by_name("warp.log.old.0").unwrap().size(), huge_len);
 }
 
 #[test]
 fn create_log_bundle_zip_rejects_concurrent_exports_and_recovers_after_failure() {
+    // `LOG_STATE` is process-global and can only be `set` once, so this is the crate's one
+    // test that exercises the module-level `create_log_bundle_zip` (rather than
+    // `LogState::create_log_bundle_zip` directly). Safe under `cargo nextest`, which runs each
+    // test in its own process; would conflict with a second such test under plain `cargo test`.
     let tmp = tempfile::tempdir().unwrap();
     let state = log_state(tmp.path(), LogFrontend::Gui, "warp_guard_test.log");
     fs::create_dir_all(&state.log_directory).unwrap();
@@ -119,8 +139,10 @@ fn create_log_bundle_zip_rejects_concurrent_exports_and_recovers_after_failure()
     assert!(err.to_string().contains("already in progress"));
     LOG_BUNDLE_EXPORT_IN_PROGRESS.store(false, Ordering::Release);
 
-    // Once the in-progress export finishes, the next request goes through.
+    // Once the in-progress export finishes, the next request goes through, and releases the
+    // guard in turn rather than leaving it stuck on the success path.
     create_log_bundle_zip().unwrap();
+    assert!(!LOG_BUNDLE_EXPORT_IN_PROGRESS.load(Ordering::Acquire));
 }
 
 #[test]
