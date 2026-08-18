@@ -42,15 +42,13 @@ use warp_graphql::workspace::{
     WriteToPtyAutonomyValue as GqlWriteToPtyAutonomyValue,
     WriteToPtySettingInfo as GqlWriteToPtySettingInfo,
 };
-use warpui::{AddSingletonModel, App, WindowId};
+use warpui::{AddSingletonModel, App};
 use warpui_extras::user_preferences;
 
 use super::*;
 use crate::ai::llms::LLMModelHost;
 use crate::auth::AuthManager;
 use crate::cloud_object::model::persistence::CloudModel;
-use crate::cloud_object::{CloudObject, CloudObjectGuest};
-use crate::drive::sharing::{SharingAccessLevel, Subject, UserKind};
 use crate::features::FeatureFlag;
 use crate::network::NetworkStatus;
 use crate::server::cloud_objects::update_manager::UpdateManager;
@@ -136,18 +134,6 @@ fn initialize_app_with_auth(
     // we need to do it manually for tests.
     TeamTesterStatus::handle(app).update(app, |team_tester, ctx| {
         team_tester.initiate_data_pollers(false, ctx);
-    });
-}
-
-fn initialize_window_team_test_app(app: &mut App, workspaces: Vec<Workspace>) {
-    app.add_singleton_model(PrivacySettings::mock);
-    app.add_singleton_model(|ctx| {
-        UserWorkspaces::mock(
-            Arc::new(MockTeamClient::new()),
-            Arc::new(MockWorkspaceClient::new()),
-            workspaces,
-            ctx,
-        )
     });
 }
 
