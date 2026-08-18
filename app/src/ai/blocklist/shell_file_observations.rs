@@ -5,10 +5,10 @@
 //! Two command shapes are recognized: whole-file reads (`cat <path>`) and
 //! single-target writes (`> path`, `cat > path << EOF`, `| tee path`). Parsing
 //! alone never credits anything: the file's on-disk content must be verifiably
-//! known to the model — byte-equal to the command output for reads, and either
-//! byte-equal to the output or contained verbatim in the command text for
-//! writes — so partial reads, transformed output, and writes of computed
-//! content are never credited.
+//! known to the model — byte-equal to the command output for reads, and for
+//! writes byte-equal to the output or contained in the heredoc body the model
+//! wrote — so partial reads, transformed output, and writes of computed content
+//! are never credited.
 
 use std::borrow::Cow;
 
@@ -19,9 +19,8 @@ use crate::ai::blocklist::observed_file_contents::{ContentFingerprint, ObservedF
 use crate::ai::paths::host_native_absolute_path;
 use crate::terminal::ShellLaunchData;
 
-/// Files larger than this are never credited: command output that large is
-/// truncated before it reaches the model, so the content equality invariant
-/// could not have held from the model's perspective anyway.
+/// Size cap checked against file metadata before the file is read. Skipping the read
+/// avoids slurping a large file only to run a comparison that is nearly certain to fail.
 const MAX_CREDITED_FILE_BYTES: u64 = 1024 * 1024;
 
 /// A file-content observation implied by a completed shell command.
@@ -94,14 +93,29 @@ fn confirms_disk_content(
     match observation {
         ShellFileObservation::WholeFileRead { .. } => output.trim_end_matches('\n') == trimmed_disk,
         // The model knows the written bytes when they came back out (`tee`) or
-        // when they appear verbatim in the command it authored (heredoc bodies,
-        // `echo`/`printf` literals). Content computed by the command (e.g.
-        // `ls > f`) matches neither and is never credited.
+        // when it spelled them out in a heredoc. Content computed by the
+        // command (e.g. `ls > f`) matches neither and is never credited.
         ShellFileObservation::Write { .. } => {
             output.trim_end_matches('\n') == trimmed_disk
-                || normalize_newlines(command).contains(trimmed_disk)
+                || heredoc_body(command)
+                    .is_some_and(|body| normalize_newlines(body).contains(trimmed_disk))
         }
     }
+}
+
+/// The heredoc body of a write command: every line after the first, which is
+/// the only part of a command the model spells out verbatim.
+///
+/// Searching the whole command instead would credit any file whose content
+/// coincides with a substring of it — including the redirect target itself, as
+/// in `ls > out.txt` listing only `out.txt`.
+fn heredoc_body(command: &str) -> Option<&str> {
+    let (first_line, body) = command.split_once('\n')?;
+    let tokens = tokenize(first_line)?;
+    tokens
+        .iter()
+        .any(|token| matches!(token, Token::Heredoc))
+        .then_some(body)
 }
 
 /// Normalizes CRLF to LF, mirroring [`ContentFingerprint::of`] and the

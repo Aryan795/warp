@@ -109,11 +109,11 @@ fn read_confirmation_requires_output_to_match_disk() {
 }
 
 #[test]
-fn write_confirmation_requires_content_in_command_or_output() {
+fn write_confirmation_requires_model_authored_content() {
     let observation = ShellFileObservation::Write {
         path: "f".to_owned(),
     };
-    // Heredoc: the disk content appears verbatim in the command.
+    // Heredoc: the disk content appears verbatim in the body.
     assert!(confirms_disk_content(
         &observation,
         "cat > f << 'EOF'\nprint(1)\nEOF",
@@ -133,6 +133,22 @@ fn write_confirmation_requires_content_in_command_or_output() {
         "ls > f",
         "",
         "a.txt\nb.txt\n"
+    ));
+    // Nor when the computed content coincides with the redirect target, which
+    // searching the whole command text rather than the heredoc body would miss.
+    assert!(!confirms_disk_content(
+        &observation,
+        "ls > out.txt",
+        "",
+        "out.txt\n"
+    ));
+    // Redirected literals are not credited either: only a heredoc body counts
+    // as spelled-out content, and the bytes never came back as output.
+    assert!(!confirms_disk_content(
+        &observation,
+        "echo hi > f",
+        "",
+        "hi\n"
     ));
 }
 
