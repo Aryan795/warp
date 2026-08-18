@@ -750,22 +750,6 @@ impl CommandHandle {
     pub fn block_id(&self) -> &BlockId {
         &self.block_id
     }
-
-    /// Constructs a `CommandHandle` directly from its exit-status channel and
-    /// block ID, bypassing the real `TerminalDriver::execute_command`
-    /// plumbing (bootstrap, PTY, shell). Lets tests drive a `HarnessRunner`
-    /// mock's returned handle by sending on the paired sender, without
-    /// needing a real running shell session.
-    #[cfg(test)]
-    pub(crate) fn new_for_test(
-        exit_status_rx: oneshot::Receiver<Result<ExitCode, AgentDriverError>>,
-        block_id: BlockId,
-    ) -> Self {
-        Self {
-            exit_status_rx,
-            block_id,
-        }
-    }
 }
 
 impl Future for CommandHandle {

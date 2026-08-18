@@ -65,15 +65,6 @@ fn outputs_stalled_returns_false_when_either_input_is_none() {
 }
 
 #[test]
-fn should_suppress_runtime_failure_true_for_cancelled() {
-    // A late pattern hit must not overwrite an already-reported Ctrl-C
-    // cancellation, just like it must not overwrite Success or Failed.
-    assert!(should_suppress_runtime_failure(Some(
-        &CLIAgentSessionStatus::Cancelled
-    )));
-}
-
-#[test]
 fn should_suppress_runtime_failure_false_for_in_progress() {
     assert!(!should_suppress_runtime_failure(Some(
         &CLIAgentSessionStatus::InProgress

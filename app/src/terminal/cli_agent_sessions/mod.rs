@@ -656,9 +656,7 @@ impl CLIAgentSessionsModel {
 
     /// Whether Ctrl-C cancellation has already resolved (`Cancelled`) or is
     /// still pending (the grace window is armed) for this session. Only
-    /// used by tests; production code resolves this via
-    /// `claim_ctrl_c_cancel_for_harness_exit` instead, since it also needs
-    /// to force-resolve a still-armed window rather than merely observe it.
+    /// used by tests.
     #[cfg(test)]
     pub(crate) fn has_pending_or_resolved_ctrl_c_cancel(&self, terminal_view_id: EntityId) -> bool {
         if matches!(
@@ -670,40 +668,6 @@ impl CLIAgentSessionsModel {
         self.ctrl_c_cancel_state
             .get(&terminal_view_id)
             .is_some_and(|state| state.pending_cancel.is_some())
-    }
-
-    /// Whether Ctrl-C cancellation claims this session's outcome after the
-    /// harness process has exited, forcing immediate resolution to
-    /// `Cancelled` if the grace window was still armed rather than pending
-    /// (this can happen when a double Ctrl-C kills the harness process
-    /// before the window's own timer fires).
-    ///
-    /// Resolving immediately (instead of leaving the armed timer to fire
-    /// later) matters because the driver unregisters this session's
-    /// task-sync mapping right after the harness exits: waiting for the
-    /// timer would race that teardown and could report Cancelled to a
-    /// server task nobody is listening for anymore.
-    pub fn claim_ctrl_c_cancel_for_harness_exit(
-        &mut self,
-        terminal_view_id: EntityId,
-        ctx: &mut ModelContext<Self>,
-    ) -> bool {
-        if matches!(
-            self.sessions.get(&terminal_view_id).map(|s| &s.status),
-            Some(CLIAgentSessionStatus::Cancelled)
-        ) {
-            return true;
-        }
-        let is_armed = self
-            .ctrl_c_cancel_state
-            .get(&terminal_view_id)
-            .is_some_and(|state| state.pending_cancel.is_some());
-        if !is_armed {
-            return false;
-        }
-        self.abort_pending_cancel(terminal_view_id);
-        self.force_cancel(terminal_view_id, ctx);
-        true
     }
 
     pub fn open_input(

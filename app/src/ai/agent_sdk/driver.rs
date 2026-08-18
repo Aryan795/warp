@@ -3602,34 +3602,12 @@ impl AgentDriver {
         log::debug!("Agent harness exited with status {exit_code}");
 
         if exit_code.was_successful() {
-            return Ok(());
-        }
-
-        // A double Ctrl-C can kill the harness process while the synthesized
-        // pending-cancel window is still armed, or after it has already
-        // resolved the session to `Cancelled`. Either way, the exit code
-        // carries no diagnostic value and must not overwrite the
-        // already-reported cancellation with a generic FAILED classification.
-        // A still-armed window is force-resolved here rather than left to its
-        // own timer: the driver unregisters this session's task-sync mapping
-        // right after this function returns, so a deferred resolution would
-        // race that teardown and the Cancelled report could be dropped.
-        let ctrl_c_cancelled = foreground
-            .spawn(|me, ctx| {
-                let view_id = me.terminal_driver.as_ref(ctx).terminal_view().id();
-                CLIAgentSessionsModel::handle(ctx).update(ctx, |model, ctx| {
-                    model.claim_ctrl_c_cancel_for_harness_exit(view_id, ctx)
-                })
+            Ok(())
+        } else {
+            Err(AgentDriverError::HarnessCommandFailed {
+                exit_code: exit_code.value(),
             })
-            .await
-            .unwrap_or(false);
-        if ctrl_c_cancelled {
-            return Ok(());
         }
-
-        Err(AgentDriverError::HarnessCommandFailed {
-            exit_code: exit_code.value(),
-        })
     }
 
     /// Configure the active terminal session with the specified profile.
