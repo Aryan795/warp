@@ -21,7 +21,9 @@ use warpui::r#async::{Spawnable, Timer};
 use warpui::platform::TerminationMode;
 use warpui::{AppContext, ModelContext, SingletonEntity};
 
+use super::agent_management::resolve_agent_identifier;
 use super::common::{EnvironmentChoice, ResolveConfigurationError, parse_ambient_task_id};
+use super::runner::resolve_runner;
 use crate::ServerApiProvider;
 use crate::ai::agent::{UserQueryMode, extract_user_query_mode};
 use crate::ai::agent_sdk::driver::attachments::{
@@ -406,6 +408,7 @@ impl AmbientAgentRunner {
             };
 
             let ai_client = ServerApiProvider::as_ref(ctx).get_ai_client();
+            let factory_client = ServerApiProvider::as_ref(ctx).get_factory_client();
 
             // Compute the upgrade link in case we hit capacity.
             let upgrade_link = AuthStateProvider::as_ref(ctx)
@@ -537,6 +540,27 @@ impl AmbientAgentRunner {
             let oz_root_url = ChannelState::oz_root_url();
             let ai_client_clone = ai_client.clone();
             let spawn_future = async move {
+                let mut request = request;
+                if let Some(agent_identifier) = request.agent_identity_uid.clone() {
+                    let agent =
+                        resolve_agent_identifier(ai_client_clone.as_ref(), &agent_identifier)
+                            .await?;
+                    request.agent_identity_uid = Some(agent.uid);
+                }
+                if let Some(runner_identifier) =
+                    request.config.as_ref().and_then(|config| config.runner_id.clone())
+                {
+                    let runners = factory_client.get_runners(None).await?;
+                    let resolved_uid =
+                        resolve_runner(&runners, Some(runner_identifier.as_str()), None)?
+                            .uid
+                            .inner()
+                            .to_string();
+                    if let Some(config) = request.config.as_mut() {
+                        config.runner_id = Some(resolved_uid);
+                    }
+                }
+
                 let mut stream = Box::pin(spawn_task(request, ai_client_clone, Some(TASK_STATUS_POLLING_DURATION)));
                 let mut session_join_info = None;
                 let mut spawned_task_id = None;

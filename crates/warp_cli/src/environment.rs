@@ -122,7 +122,7 @@ impl EnvironmentCommand {
 #[group(required = false, multiple = false)]
 pub struct EnvironmentCreateArgs {
     /// Cloud environment to run the agent in.
-    #[arg(long = "environment", value_name = "ENVIRONMENT_ID", short = 'e')]
+    #[arg(long = "environment", value_name = "ID|NAME", short = 'e')]
     pub environment: Option<String>,
 
     /// Do not run the agent in an environment (not recommended).
@@ -135,7 +135,7 @@ pub struct EnvironmentCreateArgs {
 #[group(required = false, multiple = false)]
 pub struct EnvironmentUpdateArgs {
     /// Cloud environment to run the agent in.
-    #[arg(long = "environment", value_name = "ENVIRONMENT_ID", short = 'e')]
+    #[arg(long = "environment", value_name = "ID|NAME", short = 'e')]
     pub environment: Option<String>,
 
     /// Do not run the agent in an environment (not recommended).

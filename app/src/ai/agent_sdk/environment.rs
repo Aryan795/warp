@@ -269,28 +269,17 @@ impl EnvironmentCommandRunner {
                 return;
             }
 
-            // Get the ServerId and check if the environment exists
-            let server_id = match ServerId::try_from(id.as_str()) {
-                Ok(sid) => sid,
-                Err(_) => {
+            match super::common::resolve_environment(&id, ctx) {
+                Ok(environment) => {
+                    Self::print_environment_details(&environment.model().string_model);
+                    ctx.terminate_app(warpui::platform::TerminationMode::ForceTerminate, None);
+                }
+                Err(err) => {
                     ctx.terminate_app(
                         warpui::platform::TerminationMode::ForceTerminate,
-                        Some(Err(anyhow::anyhow!("Environment {} not found", id))),
+                        Some(Err(anyhow::anyhow!(err))),
                     );
-                    return;
                 }
-            };
-            let sync_id = SyncId::ServerId(server_id);
-            let environment = CloudAmbientAgentEnvironment::get_by_id(&sync_id, ctx);
-
-            if let Some(environment) = environment {
-                Self::print_environment_details(&environment.model().string_model);
-                ctx.terminate_app(warpui::platform::TerminationMode::ForceTerminate, None);
-            } else {
-                ctx.terminate_app(
-                    warpui::platform::TerminationMode::ForceTerminate,
-                    Some(Err(anyhow::anyhow!("Environment {} not found", id))),
-                );
             }
         });
     }
@@ -862,21 +851,17 @@ impl EnvironmentCommandRunner {
                 return;
             }
 
-            // Get the ServerId and check if the environment exists
-            let server_id = match ServerId::try_from(id.as_str()) {
-                Ok(sid) => sid,
-                Err(_) => {
-                    let error = anyhow::anyhow!("Environment {} not found", id);
+            let environment = match super::common::resolve_environment(&id, ctx) {
+                Ok(environment) => environment,
+                Err(err) => {
                     ctx.terminate_app(
                         warpui::platform::TerminationMode::ForceTerminate,
-                        Some(Err(error)),
+                        Some(Err(anyhow::anyhow!(err))),
                     );
                     return;
                 }
             };
-            let sync_id = SyncId::ServerId(server_id);
-            let environment = CloudAmbientAgentEnvironment::get_by_id(&sync_id, ctx);
-            let Some(environment) = environment else {
+            let SyncId::ServerId(server_id) = environment.sync_id() else {
                 let error = anyhow::anyhow!("Environment {} not found", id);
                 ctx.terminate_app(
                     warpui::platform::TerminationMode::ForceTerminate,
@@ -911,12 +896,12 @@ impl EnvironmentCommandRunner {
                 Self::auth_repos_then_execute(add_repos, 1, "update", execute_update, ctx);
             };
 
-            // Check if any integrations are using this environment
+            // Check if any integrations are using this environment.
             if force {
                 auth_repos_before_update(ctx);
             } else {
                 Self::confirm_if_integrations_using_environment(
-                    id,
+                    server_id.to_string(),
                     "update",
                     auth_repos_before_update,
                     ctx,
@@ -1037,21 +1022,17 @@ impl EnvironmentCommandRunner {
                 return;
             }
 
-            // Get the ServerId and check if the environment exists
-            let server_id = match ServerId::try_from(id.as_str()) {
-                Ok(sid) => sid,
-                Err(_) => {
-                    let error = anyhow::anyhow!("Environment {} not found", id);
+            let environment = match super::common::resolve_environment(&id, ctx) {
+                Ok(environment) => environment,
+                Err(err) => {
                     ctx.terminate_app(
                         warpui::platform::TerminationMode::ForceTerminate,
-                        Some(Err(error)),
+                        Some(Err(anyhow::anyhow!(err))),
                     );
                     return;
                 }
             };
-            let sync_id = SyncId::ServerId(server_id);
-            let environment = CloudAmbientAgentEnvironment::get_by_id(&sync_id, ctx);
-            let Some(environment) = environment else {
+            let SyncId::ServerId(server_id) = environment.sync_id() else {
                 let error = anyhow::anyhow!("Environment {} not found", id);
                 ctx.terminate_app(
                     warpui::platform::TerminationMode::ForceTerminate,
@@ -1061,12 +1042,12 @@ impl EnvironmentCommandRunner {
             };
             let type_and_id = environment.cloud_object_type_and_id();
 
-            // Check if any integrations are using this environment
+            // Check if any integrations are using this environment.
             if force {
                 Self::execute_delete(type_and_id, ctx);
             } else {
                 Self::confirm_if_integrations_using_environment(
-                    id,
+                    server_id.to_string(),
                     "delete",
                     move |ctx| {
                         Self::execute_delete(type_and_id, ctx);

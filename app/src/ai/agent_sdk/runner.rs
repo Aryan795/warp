@@ -186,10 +186,15 @@ impl RunnerCommandRunner {
         }
 
         let factory = ServerApiProvider::as_ref(ctx).get_factory_client();
-        let uid = args.identifier;
+        let identifier = args.identifier;
 
         ctx.spawn(
             async move {
+                let runners = factory.get_runners(None).await?;
+                let uid = resolve_runner(&runners, Some(identifier.as_str()), None)?
+                    .uid
+                    .inner()
+                    .to_string();
                 let deleted_uid = factory.delete_runner(uid).await?;
                 println!("Runner deleted successfully: {deleted_uid}");
                 Ok(())
@@ -222,20 +227,28 @@ fn confirm_delete(uid: &str, is_terminal: bool) -> Result<bool> {
         .unwrap_or_default())
 }
 
-/// Resolve a runner by UID or (unambiguous) name from a fetched list.
-fn resolve_runner<'a>(
+/// Resolve a runner by UID or name from a fetched list.
+pub(super) fn resolve_runner<'a>(
     runners: &'a [Runner],
-    id: Option<&str>,
+    identifier: Option<&str>,
     name: Option<&str>,
 ) -> Result<&'a Runner> {
-    if let Some(id) = id {
-        return runners
+    if let Some(identifier) = identifier {
+        if let Some(runner) = runners
             .iter()
-            .find(|runner| runner.uid.inner() == id)
-            .ok_or_else(|| anyhow!("Runner '{id}' not found"));
+            .find(|runner| runner.uid.inner() == identifier)
+        {
+            return Ok(runner);
+        }
+        return resolve_runner_by_name(runners, identifier);
     }
 
-    let name = name.ok_or_else(|| anyhow!("A runner UID or --name is required"))?;
+    let name = name.ok_or_else(|| anyhow!("A runner UID or name is required"))?;
+    resolve_runner_by_name(runners, name)
+}
+
+/// Resolve a runner by an unambiguous name match.
+fn resolve_runner_by_name<'a>(runners: &'a [Runner], name: &str) -> Result<&'a Runner> {
     let matches: Vec<&Runner> = runners
         .iter()
         .filter(|runner| runner.config.name == name)

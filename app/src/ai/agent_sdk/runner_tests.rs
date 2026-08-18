@@ -1,7 +1,33 @@
+use warp_graphql::object::Space;
+use warp_graphql::scalars::Time;
+
 use super::{
-    RunnerArch, RunnerArchArg, RunnerOsArg, confirm_delete, merge_instance_shape, resolve_arch,
-    resolve_updated_name,
+    Runner, RunnerArch, RunnerArchArg, RunnerConfig, RunnerOs, RunnerOsArg, SpaceType,
+    confirm_delete, merge_instance_shape, resolve_arch, resolve_runner, resolve_updated_name,
 };
+
+fn make_runner(uid: &str, name: &str) -> Runner {
+    Runner {
+        uid: cynic::Id::new(uid),
+        config: RunnerConfig {
+            name: name.to_string(),
+            description: None,
+            setup_commands: None,
+            instance_shape: None,
+            os: RunnerOs::Linux,
+            arch: RunnerArch::X8664,
+            mac: None,
+            linux: None,
+        },
+        last_updated: Time::new(chrono::Utc::now()),
+        scope: Space {
+            uid: cynic::Id::new("space-uid"),
+            type_: SpaceType::User,
+        },
+        creator: None,
+        last_editor: None,
+    }
+}
 
 #[test]
 fn confirm_delete_refuses_non_interactive_without_force() {
@@ -77,4 +103,56 @@ fn resolve_updated_name_renames_only_with_uid() {
     assert_eq!(resolve_updated_name(true, None, "old"), "old");
     // No UID: --name is the selector, so the name is unchanged.
     assert_eq!(resolve_updated_name(false, Some("old"), "old"), "old");
+}
+
+#[test]
+fn resolve_runner_matches_exact_uid() {
+    let runners = vec![make_runner("uid-1", "alpha"), make_runner("uid-2", "beta")];
+    let resolved = resolve_runner(&runners, Some("uid-2"), None).unwrap();
+    assert_eq!(resolved.uid.inner(), "uid-2");
+}
+
+#[test]
+fn resolve_runner_falls_back_to_name_when_identifier_is_not_a_uid() {
+    let runners = vec![make_runner("uid-1", "alpha"), make_runner("uid-2", "beta")];
+    let resolved = resolve_runner(&runners, Some("beta"), None).unwrap();
+    assert_eq!(resolved.uid.inner(), "uid-2");
+}
+
+#[test]
+fn resolve_runner_prefers_uid_match_over_name_param() {
+    let runners = vec![make_runner("uid-1", "alpha"), make_runner("uid-2", "beta")];
+    let resolved = resolve_runner(&runners, Some("uid-1"), Some("new-name")).unwrap();
+    assert_eq!(resolved.uid.inner(), "uid-1");
+}
+
+#[test]
+fn resolve_runner_uses_name_arg_when_identifier_is_absent() {
+    let runners = vec![make_runner("uid-1", "alpha")];
+    let resolved = resolve_runner(&runners, None, Some("alpha")).unwrap();
+    assert_eq!(resolved.uid.inner(), "uid-1");
+}
+
+#[test]
+fn resolve_runner_errors_when_name_is_ambiguous() {
+    let runners = vec![make_runner("uid-1", "dup"), make_runner("uid-2", "dup")];
+    let err = resolve_runner(&runners, Some("dup"), None).unwrap_err();
+    assert!(
+        err.to_string().contains("Multiple runners match"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn resolve_runner_errors_when_not_found() {
+    let runners = vec![make_runner("uid-1", "alpha")];
+    let err = resolve_runner(&runners, Some("missing"), None).unwrap_err();
+    assert!(err.to_string().contains("not found"), "got: {err}");
+}
+
+#[test]
+fn resolve_runner_errors_when_neither_identifier_nor_name_given() {
+    let runners = vec![make_runner("uid-1", "alpha")];
+    let err = resolve_runner(&runners, None, None).unwrap_err();
+    assert!(err.to_string().contains("required"), "got: {err}");
 }
