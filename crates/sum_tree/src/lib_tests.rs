@@ -15,6 +15,44 @@ fn test_extend_and_push_tree() {
 }
 
 #[test]
+fn test_push_matches_extend_for_same_items() {
+    // TREE_BASE is 2 under the "test-util" feature (leaves hold up to 4 items), so 25 items
+    // forces multiple levels of the tree and several leaf splits.
+    let items: Vec<u8> = (0..25).collect();
+
+    let mut pushed = SumTree::new();
+    for item in items.iter().copied() {
+        pushed.push(item);
+    }
+
+    let mut extended = SumTree::new();
+    extended.extend(items.clone());
+
+    assert_eq!(pushed.items(), items);
+    assert_eq!(pushed.items(), extended.items());
+}
+
+#[test]
+fn test_repeated_push_packs_leaves_as_densely_as_extend() {
+    // Before the fix, `push` inserted every item as its own permanent one-item leaf once the
+    // tree grew past a single leaf, so tree height (and leaf/node count) grew linearly with the
+    // number of pushed items instead of logarithmically. Pushing one at a time should produce a
+    // tree exactly as densely packed - i.e. the same height - as building the same items via
+    // `extend`, which already batches items into full leaves.
+    let items: Vec<u8> = (0..25).collect();
+
+    let mut pushed = SumTree::new();
+    for item in items.iter().copied() {
+        pushed.push(item);
+    }
+
+    let mut extended = SumTree::new();
+    extended.extend(items);
+
+    assert_eq!(pushed.0.height(), extended.0.height());
+}
+
+#[test]
 fn test_random() {
     for seed in 0..100 {
         use rand::distributions;
