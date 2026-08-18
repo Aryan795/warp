@@ -226,7 +226,7 @@ fn warn_if_pprof_missing_build_ids(gzipped_profile: &[u8]) {
     }
 }
 
-#[cfg(all(feature = "jemalloc_pprof", target_os = "linux"))]
+#[cfg(any(test, all(feature = "jemalloc_pprof", target_os = "linux")))]
 fn ungzip_and_count_pprof_mappings_missing_build_id(
     gzipped_profile: &[u8],
 ) -> anyhow::Result<(usize, usize)> {

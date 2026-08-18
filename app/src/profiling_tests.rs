@@ -1,134 +1,73 @@
+use std::io::Read as _;
+
 use super::*;
 
-fn encode_varint(mut value: u64, out: &mut Vec<u8>) {
-    loop {
-        let byte = (value & 0x7f) as u8;
-        value >>= 7;
-        if value == 0 {
-            out.push(byte);
-            break;
-        }
-        out.push(byte | 0x80);
-    }
-}
+/// Real jemalloc heap profiles captured from a standalone binary linking the
+/// same `jemalloc_pprof` version this workspace resolves (0.8.2), so these
+/// exercise the actual wire format `dump_pprof()` produces rather than a
+/// hand-rolled re-encoding of it.
+///
+/// Captured from a normal `x86_64-unknown-linux-gnu` build, whose linker
+/// embeds a GNU build-id by default.
+const FIXTURE_WITH_BUILD_ID: &[u8] = include_bytes!("profiling_fixture_with_build_id.pb.gz");
+/// Captured from an `x86_64-unknown-linux-musl` build using this repo's
+/// vendored musl-cross-make toolchain (`script/linux/configure_musl_toolchain`)
+/// without an explicit `--build-id` flag -- the same toolchain and
+/// configuration that produced the daemon's pre-fix degenerate mapping table.
+const FIXTURE_WITHOUT_BUILD_ID: &[u8] = include_bytes!("profiling_fixture_without_build_id.pb.gz");
+/// The first 4 bytes of [`FIXTURE_WITH_BUILD_ID`]'s ungzipped protobuf: a tag
+/// and length prefix declaring 4 bytes of payload for the profile's first
+/// field, with only 2 of those bytes actually present.
+const FIXTURE_TRUNCATED: &[u8] = include_bytes!("profiling_fixture_truncated.pb");
 
-fn encode_varint_field(field_number: u64, value: u64, out: &mut Vec<u8>) {
-    encode_varint(field_number << 3, out);
-    encode_varint(value, out);
-}
-
-fn encode_bytes_field(field_number: u64, value: &[u8], out: &mut Vec<u8>) {
-    encode_varint((field_number << 3) | 2, out);
-    encode_varint(value.len() as u64, out);
-    out.extend_from_slice(value);
-}
-
-/// Encodes a `Mapping` submessage with an `id` field (to exercise skipping
-/// unrelated fields) and, when given, a `build_id` field pointing at the
-/// given string-table index.
-fn mapping_bytes(build_id_string_table_index: Option<u64>) -> Vec<u8> {
-    let mut out = Vec::new();
-    const MAPPING_ID_FIELD_NUMBER: u64 = 1;
-    const MAPPING_BUILD_ID_FIELD_NUMBER: u64 = 6;
-    encode_varint_field(MAPPING_ID_FIELD_NUMBER, 42, &mut out);
-    if let Some(index) = build_id_string_table_index {
-        encode_varint_field(MAPPING_BUILD_ID_FIELD_NUMBER, index, &mut out);
-    }
-    out
-}
-
-#[test]
-fn round_trips_varints() {
-    for value in [0u64, 1, 127, 128, 300, 16384, u64::MAX] {
-        let mut buf = Vec::new();
-        encode_varint(value, &mut buf);
-        let mut pos = 0;
-        assert_eq!(read_protobuf_varint(&buf, &mut pos).unwrap(), value);
-        assert_eq!(pos, buf.len());
-    }
-}
-
-#[test]
-fn truncated_varint_is_an_error() {
-    let buf = [0x80]; // Continuation bit set, but no following byte.
-    let mut pos = 0;
-    assert!(read_protobuf_varint(&buf, &mut pos).is_err());
-}
-
-#[test]
-fn mapping_with_nonzero_build_id_is_detected() {
-    assert!(mapping_has_build_id(&mapping_bytes(Some(7))).unwrap());
-}
-
-#[test]
-fn mapping_with_no_build_id_field_has_no_build_id() {
-    assert!(!mapping_has_build_id(&mapping_bytes(None)).unwrap());
-}
-
-#[test]
-fn mapping_with_build_id_explicitly_zero_has_no_build_id() {
-    // Index 0 always refers to the pprof string table's mandatory empty
-    // first entry, so this is indistinguishable from "no build-id".
-    assert!(!mapping_has_build_id(&mapping_bytes(Some(0))).unwrap());
-}
-
-#[test]
-fn counts_mappings_missing_build_id() {
-    const PROFILE_MAPPING_FIELD_NUMBER: u64 = 3;
-    const PROFILE_STRING_TABLE_FIELD_NUMBER: u64 = 6;
-
+fn ungzip(gzipped: &[u8]) -> Vec<u8> {
     let mut profile = Vec::new();
-    encode_bytes_field(
-        PROFILE_MAPPING_FIELD_NUMBER,
-        &mapping_bytes(Some(7)),
-        &mut profile,
-    );
-    // A field of a different type interleaved between the two mappings, to
-    // confirm the walker skips fields it isn't looking for.
-    encode_bytes_field(PROFILE_STRING_TABLE_FIELD_NUMBER, b"", &mut profile);
-    encode_bytes_field(
-        PROFILE_MAPPING_FIELD_NUMBER,
-        &mapping_bytes(None),
-        &mut profile,
-    );
-
-    let (total, missing_build_id) = count_pprof_mappings_missing_build_id(&profile).unwrap();
-    assert_eq!(total, 2);
-    assert_eq!(missing_build_id, 1);
+    flate2::read::GzDecoder::new(gzipped)
+        .read_to_end(&mut profile)
+        .expect("fixture is valid gzip");
+    profile
 }
 
 #[test]
-fn profile_with_no_mappings_reports_zero() {
-    let (total, missing_build_id) = count_pprof_mappings_missing_build_id(&[]).unwrap();
-    assert_eq!(total, 0);
+fn detects_mapping_with_a_real_build_id() {
+    let profile = ungzip(FIXTURE_WITH_BUILD_ID);
+    let (total, missing_build_id) = count_pprof_mappings_missing_build_id(&profile).unwrap();
+    assert!(total > 0);
     assert_eq!(missing_build_id, 0);
 }
 
 #[test]
-fn all_mappings_missing_build_id_are_all_counted() {
-    const PROFILE_MAPPING_FIELD_NUMBER: u64 = 3;
-
-    let mut profile = Vec::new();
-    for _ in 0..4 {
-        encode_bytes_field(
-            PROFILE_MAPPING_FIELD_NUMBER,
-            &mapping_bytes(None),
-            &mut profile,
-        );
-    }
-
+fn detects_mappings_with_no_build_id() {
+    let profile = ungzip(FIXTURE_WITHOUT_BUILD_ID);
     let (total, missing_build_id) = count_pprof_mappings_missing_build_id(&profile).unwrap();
-    assert_eq!(total, 4);
-    assert_eq!(missing_build_id, 4);
+    assert!(total > 0);
+    assert_eq!(missing_build_id, total);
 }
 
 #[test]
-fn truncated_length_delimited_field_is_an_error() {
-    let mut profile = Vec::new();
-    const PROFILE_MAPPING_FIELD_NUMBER: u64 = 3;
-    encode_varint((PROFILE_MAPPING_FIELD_NUMBER << 3) | 2, &mut profile);
-    // Claim a length far longer than the (missing) payload that follows.
-    encode_varint(100, &mut profile);
+fn truncated_profile_is_an_error() {
+    assert!(count_pprof_mappings_missing_build_id(FIXTURE_TRUNCATED).is_err());
+}
 
-    assert!(count_pprof_mappings_missing_build_id(&profile).is_err());
+#[test]
+fn end_to_end_through_gzip_detects_missing_build_id() {
+    let (total, missing_build_id) =
+        ungzip_and_count_pprof_mappings_missing_build_id(FIXTURE_WITHOUT_BUILD_ID).unwrap();
+    assert!(total > 0);
+    assert_eq!(missing_build_id, total);
+}
+
+#[test]
+fn end_to_end_through_gzip_reports_zero_when_build_id_present() {
+    let (total, missing_build_id) =
+        ungzip_and_count_pprof_mappings_missing_build_id(FIXTURE_WITH_BUILD_ID).unwrap();
+    assert!(total > 0);
+    assert_eq!(missing_build_id, 0);
+}
+
+#[test]
+fn not_gzip_is_an_error() {
+    // Missing the gzip magic bytes entirely, so decompression itself must
+    // fail before any protobuf parsing runs.
+    assert!(ungzip_and_count_pprof_mappings_missing_build_id(&[0, 1, 2, 3]).is_err());
 }
