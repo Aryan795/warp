@@ -112,6 +112,12 @@ const TAB_PINNED_CONTENT_HORIZONTAL_PADDING: f32 = 26.0;
 // Width below which a pinned tab/group header drops its idle pin (shared so both
 // vanish together), early enough that the pin never overlaps the centered title/icon.
 pub(crate) const TAB_PIN_VANISH_THRESHOLD: f32 = 70.0;
+// Width below which the switch-to-tab shortcut hint is dropped so the title keeps
+// the tab's full content width instead of shrinking alongside the hint toward zero.
+// Comfortably above `TAB_PIN_VANISH_THRESHOLD` so the title still has meaningful
+// room once the hint disappears. Only relevant when "Show tab shortcuts" is on;
+// tabs without a hint to show are unaffected by this breakpoint.
+pub(crate) const TAB_SHORTCUT_HINT_HIDE_WIDTH_THRESHOLD: f32 = 140.0;
 
 /// Represents the user's manual tab-color selection state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1712,7 +1718,7 @@ impl<'a> TabComponent<'a> {
             (bg, border)
         };
 
-        let build_full_content = |reserve_pin_space: bool| -> Box<dyn Element> {
+        let build_full_content = |reserve_pin_space: bool, show_hint: bool| -> Box<dyn Element> {
             let mut flex_row = Flex::row()
                 .with_main_axis_size(MainAxisSize::Max)
                 .with_main_axis_alignment(MainAxisAlignment::Center)
@@ -1722,11 +1728,14 @@ impl<'a> TabComponent<'a> {
             }
             // Title and shortcut hint are grouped into a single row so they shrink
             // together and are wrapped in `Clipped` so an overly-narrow tab clips the
-            // pair instead of letting the hint overflow past the tab's bounds.
+            // pair instead of letting the hint overflow past the tab's bounds. Below
+            // `TAB_SHORTCUT_HINT_HIDE_WIDTH_THRESHOLD` (see the `stack` breakpoints
+            // below), `show_hint` is false so the title alone gets the full row —
+            // the hint must yield before the title starts losing legibility.
             let mut title_and_hint = Flex::row()
                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
                 .with_child(Shrinkable::new(1.0, self.render_tab_content()).finish());
-            if let Some(shortcut_hint) = self.render_tab_shortcut_hint() {
+            if show_hint && let Some(shortcut_hint) = self.render_tab_shortcut_hint() {
                 title_and_hint.add_child(shortcut_hint);
             }
             flex_row.add_child(
@@ -1859,9 +1868,10 @@ impl<'a> TabComponent<'a> {
             .finish()
         };
 
-        let build_full_stack = |is_narrow: bool| {
+        let build_full_stack = |is_narrow: bool, show_hint: bool| {
             let reserve_pin_space = self.show_pin_indicator() && !is_narrow;
-            let mut full_stack = Stack::new().with_child(build_full_content(reserve_pin_space));
+            let mut full_stack =
+                Stack::new().with_child(build_full_content(reserve_pin_space, show_hint));
             full_stack.add_positioned_child(
                 build_close_button_overlay(is_narrow, is_hovered),
                 OffsetPositioning::offset_from_parent(
@@ -1891,35 +1901,33 @@ impl<'a> TabComponent<'a> {
         }
         let compact_stack = compact_stack.finish();
 
-        let stack = if self.show_pin_indicator() {
-            // There are three cases here that conditionally render based on tab size:
-            // 1. The original tab container (displays tab name and pin icon if pinned)
-            // 2. A narrow tab container (hides pin icon)
-            // 3. A very narrow tab container (displays tab icon only)
-            SizeConstraintSwitch::new(
-                build_full_stack(false),
-                vec![
-                    (
-                        SizeConstraintCondition::WidthLessThan(COMPACT_TAB_WIDTH_THRESHOLD),
-                        compact_stack,
-                    ),
-                    (
-                        SizeConstraintCondition::WidthLessThan(TAB_PIN_VANISH_THRESHOLD),
-                        build_full_stack(true),
-                    ),
-                ],
-            )
-            .finish()
-        } else {
-            SizeConstraintSwitch::new(
-                build_full_stack(false),
-                vec![(
-                    SizeConstraintCondition::WidthLessThan(COMPACT_TAB_WIDTH_THRESHOLD),
-                    compact_stack,
-                )],
-            )
-            .finish()
-        };
+        // Breakpoints are checked in ascending-threshold order (the framework uses the
+        // first match), narrowest to widest:
+        //   1. Below `COMPACT_TAB_WIDTH_THRESHOLD`: icon only (title and hint both gone).
+        //   2. Below `TAB_PIN_VANISH_THRESHOLD` (pinned tabs only): full content, pin
+        //      icon hidden, hint hidden — there's no room for a hint at this width.
+        //   3. Below `TAB_SHORTCUT_HINT_HIDE_WIDTH_THRESHOLD` (only when this tab has a
+        //      hint to show): full content, hint hidden so the title keeps the room.
+        //   4. Default (widest): full content, hint shown when available.
+        // The title's own `Shrinkable`/`Clipped` wrapping (see `build_full_content`)
+        // still guards against the remaining edge case of an unusually long title.
+        let mut breakpoints: Vec<(SizeConstraintCondition, Box<dyn Element>)> = vec![(
+            SizeConstraintCondition::WidthLessThan(COMPACT_TAB_WIDTH_THRESHOLD),
+            compact_stack,
+        )];
+        if self.show_pin_indicator() {
+            breakpoints.push((
+                SizeConstraintCondition::WidthLessThan(TAB_PIN_VANISH_THRESHOLD),
+                build_full_stack(true, false),
+            ));
+        }
+        if self.shortcut_hint.is_some() {
+            breakpoints.push((
+                SizeConstraintCondition::WidthLessThan(TAB_SHORTCUT_HINT_HIDE_WIDTH_THRESHOLD),
+                build_full_stack(false, false),
+            ));
+        }
+        let stack = SizeConstraintSwitch::new(build_full_stack(false, true), breakpoints).finish();
 
         // Grouped member: inset rounded highlight, no side dividers. It still
         // gets its own drop target so a dragged pane can land at this member's

@@ -2177,6 +2177,17 @@ fn render_tab_group_internal(
         } else {
             GROUP_ITEM_SPACING
         };
+        // Whether the pane-group header renders above the row(s). Computed up front
+        // (rather than only where it's used below) so `build_rows` can also see it:
+        // a Panes-granularity tab only gets a header for a custom title, an active
+        // rename, or more than one pane; a single plain pane otherwise has no header
+        // at all; its own row is the only row, so that row carries the switch-to-tab
+        // shortcut hint instead (see the `renamable_tab_index` computation below).
+        let show_header = should_show_tab_group_header(
+            has_custom_title,
+            is_being_renamed,
+            visible_pane_ids.len(),
+        );
         let build_rows = || {
             let mut rows = Flex::column()
                 .with_main_axis_size(MainAxisSize::Min)
@@ -2286,7 +2297,13 @@ fn render_tab_group_internal(
                     display_granularity,
                     true,
                     displayed_tab_title_override.clone(),
-                    (!uses_outer_group_container).then_some(tab_index),
+                    // In Tabs/Summary granularity this row always represents the whole
+                    // tab. In Panes granularity it only carries the switch-to-tab hint
+                    // when there's no header to carry it instead (a lone pane with no
+                    // custom title and not being renamed) — otherwise the header shows
+                    // it, and showing it here too would duplicate it.
+                    pane_row_carries_tab_shortcut_hint(uses_outer_group_container, show_header)
+                        .then_some(tab_index),
                     uses_outer_group_container.then_some(tab_index),
                     !uses_outer_group_container && is_being_renamed,
                     (!uses_outer_group_container).then_some(rename_editor.clone()),
@@ -2314,19 +2331,12 @@ fn render_tab_group_internal(
             rows.finish()
         };
 
-        // In Panes granularity a single-pane tab with no custom title normally
-        // omits the header (its one row already shows the title). But that's
-        // also the only place in this granularity that could carry the
-        // switch-to-tab hint, since individual pane rows deliberately don't
-        // show it (see `PaneProps::renamable_tab_index`). So a hint being
-        // available for this position forces the header to appear too, giving
-        // every tab a hint-carrying row regardless of pane count.
-        let header_shortcut_hint = tab_shortcut_hint_text(tab_index, app);
-        let show_header = should_show_tab_group_header(
-            has_custom_title,
-            is_being_renamed,
-            visible_pane_ids.len(),
-        ) || header_shortcut_hint.is_some();
+        // Only resolve the header's hint when the header actually renders; a
+        // single-pane tab without one shows the hint on its own row instead (see
+        // the `renamable_tab_index` computation in `build_rows` above).
+        let header_shortcut_hint = show_header
+            .then(|| tab_shortcut_hint_text(tab_index, app))
+            .flatten();
         let group_content = if uses_outer_group_container {
             let mut group = Flex::column()
                 .with_main_axis_size(MainAxisSize::Min)
@@ -3576,43 +3586,36 @@ fn render_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
     } else {
         let has_indicator =
             props.typed.badge(app).is_some() || has_unread_activity(&props.typed, app);
-        let mut title_row = Flex::row()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
-            .with_cross_axis_alignment(CrossAxisAlignment::Center);
-        title_row.add_child(
-            Shrinkable::new(
-                1.,
-                render_pane_title_slot(
-                    &props,
-                    || {
-                        Text::new_inline(props.displayed_title().to_string(), font_family, 12.)
-                            .with_clip(ClipConfig::ellipsis())
-                            .with_color(theme.main_text_color(theme.background()).into())
-                            .finish()
-                    },
-                    12.,
-                    theme.main_text_color(theme.background()),
-                    ClipConfig::ellipsis(),
-                    appearance,
-                    app,
-                ),
-            )
-            .finish(),
+        let title = render_pane_title_slot(
+            &props,
+            || {
+                Text::new_inline(props.displayed_title().to_string(), font_family, 12.)
+                    .with_clip(ClipConfig::ellipsis())
+                    .with_color(theme.main_text_color(theme.background()).into())
+                    .finish()
+            },
+            12.,
+            theme.main_text_color(theme.background()),
+            ClipConfig::ellipsis(),
+            appearance,
+            app,
         );
-        if has_indicator {
-            title_row.add_child(
-                Container::new(render_title_indicator(theme))
-                    .with_margin_left(4.)
-                    .finish(),
-            );
-        }
+        // Route through the shared title-line helper (like the terminal branch and
+        // Compact mode already do) so non-terminal single-pane tabs in Expanded mode
+        // also carry the switch-to-tab shortcut hint on their own row.
+        let title_row = render_row_title_line(
+            title,
+            row_shows_synced_inputs_indicator(&props, app),
+            has_indicator,
+            vertical_tab_switch_shortcut_hint(props.renamable_tab_index, appearance, app),
+            theme,
+        );
 
         let mut content_col = Flex::column()
             .with_main_axis_size(MainAxisSize::Min)
             .with_cross_axis_alignment(CrossAxisAlignment::Start)
             .with_spacing(2.)
-            .with_child(title_row.finish());
+            .with_child(title_row);
 
         if !effective_subtitle.is_empty() {
             let subtitle_clip = if matches!(props.typed, TypedPane::Code(_)) {
@@ -4082,16 +4085,26 @@ fn uses_outer_group_container(display_granularity: VerticalTabsDisplayGranularit
 /// looked identical for every tab and made the bar appear "nameless".
 /// Single-pane groups in `Panes` mode still omit the header because the
 /// single row already shows the pane title (avoids duplicating the same
-/// text immediately above itself) — *unless* a switch-to-tab shortcut hint
-/// needs to show for this position (see the caller in
-/// `render_tab_group_internal`), since individual pane rows in `Panes`
-/// granularity never carry that hint themselves.
+/// text immediately above itself). When that's the case, the switch-to-tab
+/// shortcut hint (if any) is shown on that same pane row instead of forcing
+/// a header — see the `renamable_tab_index` computation in
+/// `render_tab_group_internal`'s `build_rows`.
 fn should_show_tab_group_header(
     has_custom_title: bool,
     is_being_renamed: bool,
     visible_pane_count: usize,
 ) -> bool {
     has_custom_title || is_being_renamed || visible_pane_count > 1
+}
+
+/// Whether a Panes-granularity pane row should carry the switch-to-tab shortcut
+/// hint itself, as opposed to leaving it to the tab-group header. `Tabs`/`Summary`
+/// granularity always carries it on the row (each row already represents the
+/// whole tab); `Panes` granularity only does when no header will render for this
+/// tab (see [`should_show_tab_group_header`]), since a header would otherwise
+/// show the same hint, duplicating it.
+fn pane_row_carries_tab_shortcut_hint(uses_outer_group_container: bool, show_header: bool) -> bool {
+    !(uses_outer_group_container && show_header)
 }
 
 fn search_fragments_contain_query(fragments: &[String], query_lower: &str) -> bool {
