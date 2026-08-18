@@ -9425,20 +9425,23 @@ impl TerminalView {
 
     /// Writes a shared session viewer's bytes to the pty.
     ///
-    /// A lone Ctrl-C byte is additionally observed by `CLIAgentSessionsModel`
-    /// so that an interrupt which silently kills a third-party harness turn
-    /// (no plugin hook fires on user interrupt) can still resolve the
-    /// session, and its task, to Cancelled. See
-    /// `CLIAgentSessionsModel::observe_ctrl_c_write`. Observation never
-    /// delays or drops the write itself.
+    /// A lone Ctrl-C byte that is actually forwarded to the PTY is
+    /// additionally observed by `CLIAgentSessionsModel` so that an interrupt
+    /// which silently kills a third-party harness turn (no plugin hook fires
+    /// on user interrupt) can still resolve the session, and its task, to
+    /// Cancelled. See `CLIAgentSessionsModel::observe_ctrl_c_write`.
+    /// Observation never delays or drops the write itself, and never arms a
+    /// window for a byte that `write_user_bytes_to_pty` rejected (e.g. the
+    /// active block is under agent control).
     pub fn write_viewer_bytes_to_pty(&mut self, bytes: Vec<u8>, ctx: &mut ViewContext<Self>) {
-        if FeatureFlag::CtrlCCancelsThirdPartyHarness.is_enabled() && bytes == [0x03] {
+        let is_ctrl_c = bytes == [0x03];
+        let forwarded = self.write_user_bytes_to_pty(bytes, ctx);
+        if forwarded && is_ctrl_c && FeatureFlag::CtrlCCancelsThirdPartyHarness.is_enabled() {
             let terminal_view_id = self.view_id;
             CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
                 sessions.observe_ctrl_c_write(terminal_view_id, ctx);
             });
         }
-        self.write_user_bytes_to_pty(bytes, ctx);
     }
 
     /// Ends the current line before writing the given bytes to the PTY.
@@ -9460,17 +9463,19 @@ impl TerminalView {
     }
 
     /// Writes to the PTY, resets selected blocks and updates scroll position.
-    /// Also calls logic to emit a sync event.
+    /// Also calls logic to emit a sync event. Returns whether the bytes were
+    /// actually forwarded to the PTY: `false` when the active block is under
+    /// agent control, in which case nothing is written.
     fn write_user_bytes_to_pty<B: Into<Cow<'static, [u8]>>>(
         &mut self,
         data: B,
         ctx: &mut ViewContext<Self>,
-    ) {
+    ) -> bool {
         {
             let mut terminal_model = self.model.lock();
             let active_block = terminal_model.block_list().active_block();
             if active_block.is_agent_in_control() {
-                return;
+                return false;
             }
             if active_block.is_active_and_long_running() && !active_block.has_received_user_input()
             {
@@ -9487,6 +9492,7 @@ impl TerminalView {
         self.update_scroll_position_locking(ScrollPositionUpdate::AfterWriteUserBytesToPty, ctx);
         self.write_to_pty(bytes, ctx);
         self.emit_non_editor_typed_event(bytes_vec, ctx);
+        true
     }
 
     /// Write to the PTY if the session has finished bootstrapping and

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use cloud_object_models::CodeForge;
@@ -18,6 +18,7 @@ use warp_cli::{
     SESSION_SHARING_SERVER_URL_OVERRIDE_ENV, WS_SERVER_URL_OVERRIDE_ENV,
 };
 use warp_core::channel::ChannelState;
+use warp_core::command::ExitCode;
 use warp_core::features::FeatureFlag;
 use warp_graphql::mutations::create_managed_mcp_client_config::{
     CreateManagedMcpClientConfigOutput, ManagedMcpTransportKind,
@@ -25,8 +26,10 @@ use warp_graphql::mutations::create_managed_mcp_client_config::{
 use warp_graphql::response_context::ResponseContext;
 use warp_managed_secrets::ManagedSecretValue;
 use warp_util::standardized_path::StandardizedPath;
-use warpui::{App, SingletonEntity as _};
+use warpui::{App, ModelSpawner, SingletonEntity as _};
 
+use super::harness::{HarnessRunner, SavePoint};
+use super::terminal::CommandHandle;
 use super::{
     AgentDriver, AgentDriverError, CLIAgentSessionStatus, IdleTimeoutSender,
     LEGACY_OZ_PARENT_LISTENER_MANAGED_EXTERNALLY_ENV, LEGACY_OZ_PARENT_STATE_ROOT_ENV,
@@ -41,6 +44,7 @@ use crate::ai::agent::{
     AIAgentOutputMessage, ArtifactCreatedData, CancellationReason, MessageId, RenderableAIError,
     UploadArtifactResult,
 };
+use crate::ai::agent_sdk::setup_observability::SetupClientEventReporter;
 use crate::ai::agent_sdk::task_env_vars;
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::cloud_environments::{GithubRepo, SourceRepo};
@@ -49,7 +53,16 @@ use crate::ai::mcp::builtin::{FACTORY_MCP_INSTALLATION_UUID, FACTORY_MCP_SERVER_
 use crate::ai::mcp::parsing::normalize_mcp_json;
 use crate::ai::skills::SkillManager;
 use crate::auth::credentials::Credentials;
+use crate::server::server_api::ai::{AIClient, MockAIClient};
 use crate::server::server_api::managed_mcp::MockManagedMcpClient;
+use crate::terminal::CLIAgent;
+use crate::terminal::cli_agent_sessions::event::{
+    CLIAgentEvent, CLIAgentEventPayload, CLIAgentEventSource, CLIAgentEventType,
+};
+use crate::terminal::cli_agent_sessions::{
+    CLIAgentInputState, CLIAgentSession, CLIAgentSessionContext, CLIAgentSessionsModel,
+};
+use crate::terminal::model::block::BlockId;
 use crate::test_util::terminal::{add_window_with_terminal, initialize_app_for_terminal_view};
 
 #[test]
@@ -1695,4 +1708,178 @@ fn openai_api_key_exports_only_api_key_not_base_url() {
         !env_vars.contains_key(&OsString::from("OPENAI_BASE_URL")),
         "OPENAI_BASE_URL should NOT be exported as an env var"
     );
+}
+
+// ── Ctrl-C cancellation guard on harness exit-code classification ───────────
+
+/// A `HarnessRunner` whose `start()` returns a test-controlled `CommandHandle`
+/// (via `CommandHandle::new_for_test`) instead of driving a real terminal
+/// command, so `run_harness`'s exit-code classification can be exercised
+/// deterministically without a live shell/PTY.
+struct MockHarnessRunner {
+    command_handle: StdMutex<Option<CommandHandle>>,
+}
+
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+impl HarnessRunner for MockHarnessRunner {
+    fn harness_name(&self) -> &str {
+        "mock"
+    }
+
+    async fn start(
+        &self,
+        _foreground: &ModelSpawner<AgentDriver>,
+        _setup_events: &SetupClientEventReporter,
+    ) -> Result<CommandHandle, AgentDriverError> {
+        Ok(self
+            .command_handle
+            .lock()
+            .unwrap()
+            .take()
+            .expect("start should only be called once in this test"))
+    }
+
+    async fn save_conversation(
+        &self,
+        _save_point: SavePoint,
+        _foreground: &ModelSpawner<AgentDriver>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn exit(&self, _foreground: &ModelSpawner<AgentDriver>) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+/// Registers a rich-status-capable, `InProgress` CLI agent session that has
+/// already observed a `prompt_submit` (the state a real working third-party
+/// harness turn is in), then arms a real Ctrl-C pending-cancel window via
+/// `observe_ctrl_c_write`, mirroring the shared-session viewer input path.
+fn arm_ctrl_c_cancel_window(app: &mut App, view_id: warpui::EntityId) {
+    let cli_sessions = CLIAgentSessionsModel::handle(app);
+    cli_sessions.update(app, |sessions, ctx| {
+        sessions.set_session(
+            view_id,
+            CLIAgentSession {
+                agent: CLIAgent::Claude,
+                status: CLIAgentSessionStatus::InProgress,
+                session_context: CLIAgentSessionContext::default(),
+                input_state: CLIAgentInputState::Closed,
+                should_auto_toggle_input: false,
+                listener: None,
+                plugin_version: None,
+                remote_host: None,
+                draft_text: None,
+                custom_command_prefix: None,
+                received_rich_notification: true,
+            },
+            ctx,
+        );
+    });
+    cli_sessions.update(app, |sessions, ctx| {
+        sessions.update_from_event(
+            view_id,
+            &CLIAgentEvent {
+                v: 1,
+                agent: CLIAgent::Claude,
+                event: CLIAgentEventType::PromptSubmit,
+                session_id: None,
+                cwd: None,
+                project: None,
+                payload: CLIAgentEventPayload::default(),
+                source: CLIAgentEventSource::RichPlugin,
+            },
+            ctx,
+        );
+    });
+    cli_sessions.update(app, |sessions, ctx| {
+        sessions.observe_ctrl_c_write(view_id, ctx);
+    });
+}
+
+/// A double Ctrl-C can kill the harness process while the pending-cancel
+/// window is still armed (not yet fired). The exit-code guard in
+/// `run_harness` must force-resolve that window to `Cancelled` and suppress
+/// the FAILED classification, rather than returning `Ok(())` and leaving the
+/// resolution to the window's own timer -- which would race the driver's own
+/// teardown of the CLI session's task-sync mapping.
+#[test]
+fn ctrl_c_pending_window_survives_nonzero_harness_exit_as_cancelled_not_failed() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+
+        let terminal_view = add_window_with_terminal(&mut app, None);
+        let view_id = terminal_view.id();
+        let driver_handle = app.add_model(|ctx| {
+            let terminal_driver =
+                super::terminal::TerminalDriver::create_from_existing_view(terminal_view, ctx);
+            AgentDriver::new_for_test(std::env::temp_dir(), terminal_driver, ctx)
+        });
+
+        arm_ctrl_c_cancel_window(&mut app, view_id);
+        let armed_status = CLIAgentSessionsModel::handle(&app).read(&app, |sessions, _| {
+            sessions.session(view_id).map(|s| s.status.clone())
+        });
+        assert_eq!(
+            armed_status,
+            Some(CLIAgentSessionStatus::InProgress),
+            "the Ctrl-C window should still be pending, not yet resolved to Cancelled"
+        );
+
+        // Drive `run_harness` against the mock runner. Its `CommandHandle` is
+        // resolved directly (bypassing any real terminal/shell) with a
+        // nonzero, non-SIGINT exit code -- what a harness process killed by a
+        // double Ctrl-C looks like to the driver -- while the window above is
+        // still armed.
+        let (exit_tx, exit_status_rx) = oneshot::channel();
+        let command_handle = CommandHandle::new_for_test(exit_status_rx, BlockId::new());
+        let runner: Arc<dyn HarnessRunner> = Arc::new(MockHarnessRunner {
+            command_handle: StdMutex::new(Some(command_handle)),
+        });
+        let (_harness_exit_tx, harness_exit_rx) = oneshot::channel();
+        let (done_tx, done_rx) = oneshot::channel();
+
+        driver_handle.update(&mut app, |_, ctx| {
+            let spawner = ctx.spawner();
+            let ai_client: Arc<dyn AIClient> = Arc::new(MockAIClient::new());
+            let background = ctx.background_executor();
+            ctx.spawn(
+                async move {
+                    let setup_events = SetupClientEventReporter::noop(ai_client, background);
+                    let result = AgentDriver::run_harness(
+                        runner,
+                        &[],
+                        &spawner,
+                        harness_exit_rx,
+                        &setup_events,
+                    )
+                    .await;
+                    let _ = done_tx.send(result);
+                },
+                |_, _, _| {},
+            );
+        });
+
+        exit_tx
+            .send(Ok(ExitCode::from(1)))
+            .expect("run_harness should still be awaiting the command handle");
+
+        let result = done_rx.await.expect("run_harness should complete");
+        assert!(
+            result.is_ok(),
+            "a pending Ctrl-C window must suppress the FAILED classification, got {result:?}"
+        );
+
+        let final_status = CLIAgentSessionsModel::handle(&app).read(&app, |sessions, _| {
+            sessions.session(view_id).map(|s| s.status.clone())
+        });
+        assert_eq!(
+            final_status,
+            Some(CLIAgentSessionStatus::Cancelled),
+            "the pending window must be force-resolved to Cancelled before run_harness returns, \
+             so LocalAgentTaskSyncModel can still see it before the task-sync mapping is torn down"
+        );
+    });
 }

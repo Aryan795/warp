@@ -341,6 +341,13 @@ struct CtrlCCancelState {
     has_seen_prompt_submit: bool,
     /// Abort handle for the in-flight grace-window timer, if armed.
     pending_cancel: Option<SpawnedFutureHandle>,
+    /// Identifies the window `pending_cancel` belongs to. `SpawnedFutureHandle::abort`
+    /// only takes effect the next time the future is polled, so a timer that has
+    /// already completed (and queued its resolve callback) can still run after
+    /// `abort()` is called. The callback captures this token and only acts if it
+    /// still matches when it fires, so a stale callback racing a disarming event
+    /// is a no-op instead of overwriting that event's status with `Cancelled`.
+    armed_token: Option<u64>,
 }
 
 /// Singleton model that tracks pane-scoped CLI agent state and plugin-enriched session context.
@@ -351,6 +358,9 @@ pub struct CLIAgentSessionsModel {
     plugin_auto_failures: HashSet<(CLIAgent, Option<String>)>,
     /// Ctrl-C pending-cancel state, keyed by terminal view. See `observe_ctrl_c_write`.
     ctrl_c_cancel_state: HashMap<EntityId, CtrlCCancelState>,
+    /// Source of `CtrlCCancelState::armed_token` values. Monotonically increasing;
+    /// never reused, so a stale callback can never alias a newer window.
+    next_ctrl_c_token: u64,
 }
 
 impl Entity for CLIAgentSessionsModel {
@@ -365,6 +375,7 @@ impl CLIAgentSessionsModel {
             sessions: HashMap::new(),
             plugin_auto_failures: HashSet::new(),
             ctrl_c_cancel_state: HashMap::new(),
+            next_ctrl_c_token: 0,
         }
     }
 
@@ -447,6 +458,7 @@ impl CLIAgentSessionsModel {
 
     pub fn remove_session(&mut self, terminal_view_id: EntityId, ctx: &mut ModelContext<Self>) {
         self.abort_pending_cancel(terminal_view_id);
+        self.ctrl_c_cancel_state.remove(&terminal_view_id);
         if let Some(session) = self.sessions.remove(&terminal_view_id) {
             ctx.emit(CLIAgentSessionsModelEvent::Ended {
                 terminal_view_id,
@@ -553,31 +565,74 @@ impl CLIAgentSessionsModel {
         if !can_arm {
             return;
         }
+        if self
+            .ctrl_c_cancel_state
+            .get(&terminal_view_id)
+            .is_some_and(|state| state.pending_cancel.is_some())
+        {
+            return;
+        }
 
+        let token = self.next_ctrl_c_token;
+        self.next_ctrl_c_token += 1;
         let state = self
             .ctrl_c_cancel_state
             .entry(terminal_view_id)
             .or_default();
-        if state.pending_cancel.is_some() {
-            return;
-        }
-
         let handle = ctx.spawn_abortable(
             async move { warpui::r#async::Timer::after(window).await },
-            move |model, _, ctx| model.resolve_pending_cancel(terminal_view_id, ctx),
+            move |model, _, ctx| model.resolve_pending_cancel(terminal_view_id, token, ctx),
             |_, _| {},
         );
         state.pending_cancel = Some(handle);
+        state.armed_token = Some(token);
     }
 
     /// Called when a session's pending-cancel window lapses with no
     /// disarming plugin event. Transitions the session to `Cancelled` unless
-    /// it has already moved on (disarmed and lost the abort race, ended, or
-    /// been replaced).
-    fn resolve_pending_cancel(&mut self, terminal_view_id: EntityId, ctx: &mut ModelContext<Self>) {
-        if let Some(state) = self.ctrl_c_cancel_state.get_mut(&terminal_view_id) {
-            state.pending_cancel = None;
+    /// `token` no longer matches the currently armed window — meaning this
+    /// callback was already queued (post `Timer::after` completion, pre-poll)
+    /// when the window was disarmed, replaced, or removed, and
+    /// `SpawnedFutureHandle::abort` did not take effect in time to stop it.
+    fn resolve_pending_cancel(
+        &mut self,
+        terminal_view_id: EntityId,
+        token: u64,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let owns_current_window = self
+            .ctrl_c_cancel_state
+            .get_mut(&terminal_view_id)
+            .is_some_and(|state| {
+                if state.armed_token != Some(token) {
+                    return false;
+                }
+                state.pending_cancel = None;
+                state.armed_token = None;
+                true
+            });
+        if !owns_current_window {
+            return;
         }
+        self.force_cancel(terminal_view_id, ctx);
+    }
+
+    /// Aborts and clears any armed pending-cancel window for this terminal.
+    /// Invalidates the token so a callback already queued when the abort
+    /// fires too late to matter (see `resolve_pending_cancel`) is a no-op.
+    fn abort_pending_cancel(&mut self, terminal_view_id: EntityId) {
+        if let Some(state) = self.ctrl_c_cancel_state.get_mut(&terminal_view_id) {
+            state.armed_token = None;
+            if let Some(handle) = state.pending_cancel.take() {
+                handle.abort();
+            }
+        }
+    }
+
+    /// Sets `status` to `Cancelled` and emits `StatusChanged`, unless the
+    /// session has already moved past `InProgress`/`Blocked` or no longer
+    /// exists.
+    fn force_cancel(&mut self, terminal_view_id: EntityId, ctx: &mut ModelContext<Self>) {
         let Some(session) = self.sessions.get_mut(&terminal_view_id) else {
             return;
         };
@@ -599,24 +654,13 @@ impl CLIAgentSessionsModel {
         });
     }
 
-    /// Aborts and clears any armed pending-cancel window for this terminal.
-    fn abort_pending_cancel(&mut self, terminal_view_id: EntityId) {
-        if let Some(handle) = self
-            .ctrl_c_cancel_state
-            .get_mut(&terminal_view_id)
-            .and_then(|state| state.pending_cancel.take())
-        {
-            handle.abort();
-        }
-    }
-
     /// Whether Ctrl-C cancellation has already resolved (`Cancelled`) or is
-    /// still pending (the grace window is armed) for this session. Used to
-    /// stop a harness exit-code classification from overwriting a
-    /// user-initiated cancellation with a generic failure — a double Ctrl-C
-    /// can kill the harness process while the window is armed, or after it
-    /// has already resolved.
-    pub fn has_pending_or_resolved_ctrl_c_cancel(&self, terminal_view_id: EntityId) -> bool {
+    /// still pending (the grace window is armed) for this session. Only
+    /// used by tests; production code resolves this via
+    /// `claim_ctrl_c_cancel_for_harness_exit` instead, since it also needs
+    /// to force-resolve a still-armed window rather than merely observe it.
+    #[cfg(test)]
+    pub(crate) fn has_pending_or_resolved_ctrl_c_cancel(&self, terminal_view_id: EntityId) -> bool {
         if matches!(
             self.sessions.get(&terminal_view_id).map(|s| &s.status),
             Some(CLIAgentSessionStatus::Cancelled)
@@ -626,6 +670,40 @@ impl CLIAgentSessionsModel {
         self.ctrl_c_cancel_state
             .get(&terminal_view_id)
             .is_some_and(|state| state.pending_cancel.is_some())
+    }
+
+    /// Whether Ctrl-C cancellation claims this session's outcome after the
+    /// harness process has exited, forcing immediate resolution to
+    /// `Cancelled` if the grace window was still armed rather than pending
+    /// (this can happen when a double Ctrl-C kills the harness process
+    /// before the window's own timer fires).
+    ///
+    /// Resolving immediately (instead of leaving the armed timer to fire
+    /// later) matters because the driver unregisters this session's
+    /// task-sync mapping right after the harness exits: waiting for the
+    /// timer would race that teardown and could report Cancelled to a
+    /// server task nobody is listening for anymore.
+    pub fn claim_ctrl_c_cancel_for_harness_exit(
+        &mut self,
+        terminal_view_id: EntityId,
+        ctx: &mut ModelContext<Self>,
+    ) -> bool {
+        if matches!(
+            self.sessions.get(&terminal_view_id).map(|s| &s.status),
+            Some(CLIAgentSessionStatus::Cancelled)
+        ) {
+            return true;
+        }
+        let is_armed = self
+            .ctrl_c_cancel_state
+            .get(&terminal_view_id)
+            .is_some_and(|state| state.pending_cancel.is_some());
+        if !is_armed {
+            return false;
+        }
+        self.abort_pending_cancel(terminal_view_id);
+        self.force_cancel(terminal_view_id, ctx);
+        true
     }
 
     pub fn open_input(
