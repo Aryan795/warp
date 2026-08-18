@@ -480,11 +480,20 @@ impl CLIAgentSessionsModel {
             return;
         }
 
-        // Any plugin event is evidence the CLI agent process is still alive —
-        // an interrupt produces silence instead. Disarm a pending Ctrl-C
-        // cancellation window so this event's own status transition drives
-        // the session, even if that transition is a no-op (e.g. IdlePrompt).
-        self.abort_pending_cancel(terminal_view_id);
+        // Any plugin event other than `IdlePrompt` is evidence the CLI agent
+        // process is still alive — an interrupt produces silence instead.
+        // Disarm a pending Ctrl-C cancellation window so this event's own
+        // status transition drives the session. `IdlePrompt` is excluded:
+        // it means the CLI is sitting idle at its interactive prompt, which
+        // is evidence of idleness rather than aliveness, so treating it as
+        // disarming would let an idle notification that arrives instead of
+        // a genuine `stop`/`stop_failure` after an interrupt silently defeat
+        // the grace window, leaving the session stuck exactly like the bug
+        // this feature exists to fix. `apply_event` still treats `IdlePrompt`
+        // as a no-op for status, independent of this.
+        if !matches!(event.event, CLIAgentEventType::IdlePrompt) {
+            self.abort_pending_cancel(terminal_view_id);
+        }
         if matches!(event.event, CLIAgentEventType::PromptSubmit) {
             self.ctrl_c_cancel_state
                 .entry(terminal_view_id)
@@ -534,9 +543,10 @@ impl CLIAgentSessionsModel {
     /// and has seen at least one `prompt_submit` (guarding against the
     /// optimistic `InProgress` set at registration, before any turn has
     /// started) — arms a grace window after which the session resolves to
-    /// `Cancelled` if no plugin activity disarms it first (see
-    /// `update_from_event`). A second Ctrl-C while a window is already armed
-    /// reuses it rather than resetting the clock.
+    /// `Cancelled` if no disarming plugin activity arrives first (any event
+    /// except `IdlePrompt`, which is evidence of idleness rather than
+    /// aliveness; see `update_from_event`). A second Ctrl-C while a window
+    /// is already armed reuses it rather than resetting the clock.
     pub fn observe_ctrl_c_write(
         &mut self,
         terminal_view_id: EntityId,

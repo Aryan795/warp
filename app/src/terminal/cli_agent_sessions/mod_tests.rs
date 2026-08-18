@@ -1005,6 +1005,57 @@ fn tool_complete_event_disarms_pending_cancel() {
 }
 
 #[test]
+fn idle_prompt_does_not_disarm_pending_cancel() {
+    // Unlike other plugin events, `IdlePrompt` means the CLI is sitting
+    // idle at its interactive prompt -- evidence of idleness, not
+    // aliveness. If it disarmed the window, an idle notification arriving
+    // instead of a genuine `stop`/`stop_failure` after an interrupt would
+    // leave the session stuck exactly like the bug this feature exists to
+    // fix, so the window must survive it and still resolve to `Cancelled`
+    // once it lapses.
+    App::test((), |mut app| async move {
+        let model = app.add_singleton_model(|_| CLIAgentSessionsModel::new());
+        let view_id = EntityId::new();
+        model.update(&mut app, |m, ctx| {
+            m.set_session(
+                view_id,
+                cli_agent_session(CLIAgentSessionStatus::InProgress, true),
+                ctx,
+            );
+        });
+        model.update(&mut app, |m, ctx| {
+            m.update_from_event(view_id, &rich_event(CLIAgentEventType::PromptSubmit), ctx);
+        });
+        model.update(&mut app, |m, ctx| {
+            m.observe_ctrl_c_write_with_window(view_id, TEST_WINDOW, ctx);
+        });
+        assert!(model.read(&app, |m, _| {
+            m.has_pending_or_resolved_ctrl_c_cancel(view_id)
+        }));
+
+        model.update(&mut app, |m, ctx| {
+            m.update_from_event(view_id, &rich_event(CLIAgentEventType::IdlePrompt), ctx);
+        });
+        assert!(
+            model.read(&app, |m, _| {
+                m.has_pending_or_resolved_ctrl_c_cancel(view_id)
+            }),
+            "an IdlePrompt must not disarm the pending-cancel window"
+        );
+
+        Timer::after(TEST_WINDOW + TEST_WINDOW_BUFFER).await;
+
+        model.read(&app, |m, _| {
+            assert_eq!(
+                m.session(view_id).map(|s| &s.status),
+                Some(&CLIAgentSessionStatus::Cancelled),
+                "an IdlePrompt must not prevent the lapsed window from cancelling the session"
+            );
+        });
+    });
+}
+
+#[test]
 fn late_stop_after_cancelled_flips_status_to_success() {
     App::test((), |mut app| async move {
         let model = app.add_singleton_model(|_| CLIAgentSessionsModel::new());
