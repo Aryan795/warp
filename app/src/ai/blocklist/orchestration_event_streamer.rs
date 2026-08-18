@@ -863,9 +863,20 @@ impl OrchestrationEventStreamer {
             "[orch-drain] parking descendant placeholder child_run_id={child_run_id} until \
              family parent {family_run_id} materializes"
         );
+        // Re-kick BEFORE the dedupe return: a re-park of an already-parked
+        // child is exactly the retry path after a failed family fetch. The
+        // in-flight guard bounds this to one fetch per family at a time, so
+        // even a corrupt parent cycle costs at most one fetch per drain
+        // tick.
+        self.ensure_missing_family_placeholder(
+            anchor_conversation_id,
+            family_run_id.clone(),
+            mode,
+            ctx,
+        );
         let parked = self
             .descendants_waiting_on_family
-            .entry(family_run_id.clone())
+            .entry(family_run_id)
             .or_default();
         if parked.iter().any(|p| {
             p.child_run_id == child_run_id && p.anchor_conversation_id == anchor_conversation_id
@@ -877,7 +888,6 @@ impl OrchestrationEventStreamer {
             child_run_id,
             mode,
         });
-        self.ensure_missing_family_placeholder(anchor_conversation_id, family_run_id, mode, ctx);
     }
 
     /// Fetches a missing family parent's task row and creates its

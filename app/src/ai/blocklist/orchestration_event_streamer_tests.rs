@@ -3935,3 +3935,81 @@ fn parked_descendants_drain_when_their_family_placeholder_materializes() {
         });
     });
 }
+
+#[test]
+fn reparking_a_deduped_descendant_rekicks_the_family_fetch() {
+    App::test((), |mut app| async move {
+        initialize_settings_for_tests(&mut app);
+        let (sender, _receiver) = std::sync::mpsc::sync_channel::<ModelEvent>(16);
+        let mut global_resource_handles = GlobalResourceHandles::mock(&mut app);
+        global_resource_handles.model_event_sender = Some(sender);
+        app.add_singleton_model(|_| GlobalResourceHandlesProvider::new(global_resource_handles));
+
+        let history_model =
+            app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
+
+        let root_run_id = make_parent_task_id_for_test(0xca).to_string();
+        let mid_run_id = make_parent_task_id_for_test(0xcb).to_string();
+        let leaf_run_id = make_parent_task_id_for_test(0xcc).to_string();
+
+        let mut conversation = AIConversation::new(false, false);
+        conversation.set_run_id(root_run_id.clone());
+        let conversation_id = conversation.id();
+        let terminal_view_id = warpui::EntityId::new();
+        history_model.update(&mut app, |model, ctx| {
+            model.restore_conversations(terminal_view_id, vec![conversation], ctx);
+        });
+
+        let mut mock = MockAIClient::new();
+        // Each park kick issues a family metadata fetch; the spawned futures
+        // are never driven here, so fetch completion is simulated by clearing
+        // the in-flight guard directly (what the failure callback does).
+        mock.expect_get_ambient_agent_task()
+            .returning(|_| Err(anyhow::anyhow!("metadata fetch not under test")));
+        let ai_client: Arc<dyn AIClient> = Arc::new(mock);
+        let server_api = ServerApiProvider::new_for_test().get();
+        let streamer = app.add_singleton_model(|ctx| {
+            OrchestrationEventStreamer::new_with_clients_for_test(ai_client, server_api, ctx)
+        });
+
+        streamer.update(&mut app, |me, ctx| {
+            me.park_descendant_placeholder(
+                mid_run_id.clone(),
+                conversation_id,
+                leaf_run_id.clone(),
+                FamilyDrainMode::Primary,
+                ctx,
+            );
+            assert!(
+                me.family_placeholder_fetches_in_flight
+                    .contains(&mid_run_id),
+                "the first park must kick the missing family's fetch"
+            );
+            assert_eq!(me.descendants_waiting_on_family[&mid_run_id].len(), 1);
+
+            // Simulate the fetch failing: the spawn callback clears the
+            // in-flight guard and leaves the descendant parked.
+            me.family_placeholder_fetches_in_flight.remove(&mid_run_id);
+
+            // A later drain re-parks the same (anchor, child): the dedupe
+            // must not swallow the re-kick of the family fetch.
+            me.park_descendant_placeholder(
+                mid_run_id.clone(),
+                conversation_id,
+                leaf_run_id.clone(),
+                FamilyDrainMode::Primary,
+                ctx,
+            );
+            assert!(
+                me.family_placeholder_fetches_in_flight
+                    .contains(&mid_run_id),
+                "a re-park after a failed fetch must re-kick the family fetch"
+            );
+            assert_eq!(
+                me.descendants_waiting_on_family[&mid_run_id].len(),
+                1,
+                "the re-parked descendant must still dedupe"
+            );
+        });
+    });
+}
