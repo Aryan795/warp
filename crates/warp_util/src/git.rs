@@ -61,7 +61,17 @@ where
     use futures_lite::io::AsyncReadExt;
 
     let mut buf = Vec::with_capacity(CAPPED_READ_CHUNK_SIZE);
-    let mut chunk = [0u8; CAPPED_READ_CHUNK_SIZE];
+    // Heap-allocated rather than a `[u8; CAPPED_READ_CHUNK_SIZE]` stack array:
+    // a fixed-size array crossing an `.await` point is embedded inline in
+    // this function's generated future, and that future is itself embedded
+    // in every caller's future all the way up (`get_file_diff` ->
+    // `diff_state_against_head` -> the spawned diff-load task). A 64KB
+    // array there adds 64KB to every one of those stack frames whenever the
+    // combined future is polled on a real (non-boxed) call stack, which is
+    // exactly the kind of bloat that can overflow a worker thread's stack
+    // deep inside the real app, well before it would show up in a shallow
+    // unit test.
+    let mut chunk = vec![0u8; CAPPED_READ_CHUNK_SIZE];
     loop {
         let n = reader.read(&mut chunk).await?;
         if n == 0 {

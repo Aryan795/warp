@@ -33,6 +33,27 @@ fn translate(args: &[&str], cwd: &str, env: &[(&str, &str)]) -> WslGitCommand {
     translate_for_wsl_unc_cwd(args, Path::new(cwd), env).expect("expected translation")
 }
 
+/// Regression guard for the stack-overflow bug this fix addresses: a
+/// `[u8; CAPPED_READ_CHUNK_SIZE]` stack array crossing an `.await` point
+/// used to make this future ~129KB, all embedded inline in every caller's
+/// future up through the real app's diff-loading task — large enough to
+/// overflow a worker thread's stack deep in a real UI integration test,
+/// even though the same code never overflowed a shallow unit test's stack.
+/// Heap-allocating the chunk buffer keeps the future small; this asserts it
+/// stays that way rather than silently regressing.
+#[test]
+fn run_git_command_capped_future_stays_small() {
+    let repo = Path::new("/tmp");
+    let fut = run_git_command_capped(repo, &["status"], 10);
+    let size = std::mem::size_of_val(&fut);
+    assert!(
+        size < 4096,
+        "run_git_command_capped's future grew to {size} bytes; a large stack buffer \
+         crossing an .await point here can overflow a real worker thread's stack \
+         even though it's invisible in unit tests (see APP-5462)"
+    );
+}
+
 #[test]
 fn translates_git_in_unc_cwd() {
     let translated = translate(&["status", "--short"], r"\\wsl$\Ubuntu\home\user\repo", &[]);
