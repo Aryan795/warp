@@ -267,6 +267,105 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
       (_warp_run_generator_command_internal "$@" &)
     }
 
+    # Computes native shell completions for the given (hex-encoded) command line and emits
+    # them via the completions OSC protocol (see zsh_body.sh's compadd shim for the wire
+    # format: "\e]9280;A;incrementally_typed\a", then "\e]9280;C;<match>\a" per match, then
+    # "\e]9280;B\a"). Runs synchronously in the foreground -- like native completions in the
+    # other shells, there is no async cancel-by-PID for this request.
+    #
+    # Usage:
+    #   warp_run_generator_command_native_completions <hex-encoded line>
+    warp_run_generator_command_native_completions() {
+      # Setting this environment variable prevents warp_precmd from emitting the
+      # 'Block started' hook to the Rust app, matching warp_run_generator_command.
+      _WARP_GENERATOR_COMMAND=1
+      _USER_PRECMD_FUNCTIONS=("${precmd_functions[@]}")
+      precmd_functions=(warp_precmd)
+
+      local line
+      line="$(warp_hex_decode_string "$1")"
+
+      printf '\e]9280;A;incrementally_typed\a'
+      _warp_native_bash_completions "$line"
+      printf '\e]9280;B\a'
+    }
+
+    # Populates COMPREPLY for the given line using bash's own completion machinery
+    # (resolved via `complete -p`), then prints each entry via the completions OSC.
+    # bash exposes no description channel, so entries are names only.
+    #
+    # Word-splitting here deliberately avoids `eval`, so a partially-typed, unbalanced
+    # quote or an embedded `$( )` in the line under completion can never be executed;
+    # the tradeoff is that quoted arguments containing spaces won't split the way bash's
+    # own tokenizer would.
+    _warp_native_bash_completions() {
+      local line="$1"
+      local -a words
+      read -ra words <<< "$line"
+      # A trailing space means the user is completing a new, empty word.
+      if [[ "$line" == *[[:space:]] ]]; then
+        words+=("")
+      fi
+      (( ${#words[@]} == 0 )) && return
+      local cword=$(( ${#words[@]} - 1 ))
+      local cmd="${words[0]}"
+      [[ -z "$cmd" ]] && return
+
+      local compspec
+      compspec="$(complete -p "$cmd" 2>/dev/null)"
+      if [[ -z "$compspec" ]]; then
+        # Lazily load the completion for $cmd (bash-completion's dynamic loader), then
+        # retry once. Different bash-completion versions expose this under different
+        # names, so try each one we know about.
+        if declare -F _comp_complete_load >/dev/null 2>&1; then
+          _comp_complete_load "$cmd" >/dev/null 2>&1
+        elif declare -F _comp_load >/dev/null 2>&1; then
+          _comp_load -- "$cmd" >/dev/null 2>&1
+        elif declare -F _completion_loader >/dev/null 2>&1; then
+          _completion_loader "$cmd" >/dev/null 2>&1
+        fi
+        compspec="$(complete -p "$cmd" 2>/dev/null)"
+      fi
+      [[ -z "$compspec" ]] && return
+
+      # Extract the function passed to `-F`, if any. We call it directly rather than
+      # `compgen -F`, which warns to stderr and returns unfiltered results.
+      local func=""
+      local -a compspec_words
+      read -ra compspec_words <<< "$compspec"
+      local i
+      for (( i = 0; i < ${#compspec_words[@]}; i++ )); do
+        if [[ "${compspec_words[$i]}" == "-F" ]]; then
+          func="${compspec_words[$((i + 1))]}"
+          break
+        fi
+      done
+      [[ -z "$func" ]] && return
+      declare -F "$func" >/dev/null 2>&1 || return
+
+      COMPREPLY=()
+      COMP_WORDS=("${words[@]}")
+      COMP_CWORD=$cword
+      COMP_LINE="$line"
+      COMP_POINT=${#line}
+      COMP_TYPE=9
+      COMP_KEY=9
+
+      # compopt is only meaningful while bash's own readline machinery is driving a
+      # completion; calling it here from a plain function call fails loudly to stderr, so
+      # swallow it along with the rest of the completion function's stderr.
+      "$func" "$cmd" "${words[$cword]}" "${words[$((cword > 0 ? cword - 1 : 0))]}" 2>/dev/null
+
+      local reply
+      for reply in "${COMPREPLY[@]}"; do
+        # COMPREPLY entries can carry a trailing space (bash appends one when a completion
+        # is unambiguous); trim it so the client controls spacing.
+        reply="${reply% }"
+        [[ -z "$reply" ]] && continue
+        printf '\e]9280;C;%s\a' "$reply"
+      done
+    }
+
 
     # Note that this is very performance sensitive code, so try not to
     # invoke any external commands in here.
@@ -751,6 +850,21 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
     # Accepts one argument: DCS JSON string
     warp_hex_encode_string () {
       printf '%s' "$1" | command -p od -An -v -tx1 | command -p tr -d ' \n'
+    }
+
+    # Reverses warp_hex_encode_string: decodes a hex-encoded string back to its original
+    # bytes. Lets the Rust app pass arbitrary argument text (e.g. the in-progress command
+    # line) as a plain, unquoted hex string, without needing any shell quoting.
+    warp_hex_decode_string () {
+      if command -pv xxd >/dev/null 2>&1; then
+        printf '%s' "$1" | command -p xxd -p -r
+      else
+        local hex="$1" out="" i
+        for (( i = 0; i < ${#hex}; i += 2 )); do
+          out+="\x${hex:$i:2}"
+        done
+        printf '%b' "$out"
+      fi
     }
 
     # Returns encoded InitShell hook
