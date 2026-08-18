@@ -3,6 +3,7 @@ use std::fs::{self, File};
 use std::io::{IsTerminal, Write, copy};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use chrono::Local;
@@ -468,9 +469,32 @@ fn collect_log_paths_in(log_directory: &Path, logfile_name: &str) -> Result<Vec<
     Ok(files)
 }
 
+/// Tracks whether a log bundle export is currently running, so that a second concurrent
+/// request (e.g. a repeated click, or the GUI menu action and TUI `/logs` command racing)
+/// fails fast with a clear error instead of building a second archive over the same
+/// multi-gigabyte log files at the same time.
+static LOG_BUNDLE_EXPORT_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+/// Clears [`LOG_BUNDLE_EXPORT_IN_PROGRESS`] on drop, including on early return or panic, so a
+/// failed export can't permanently block all future ones.
+struct LogBundleExportGuard;
+
+impl Drop for LogBundleExportGuard {
+    fn drop(&mut self) {
+        LOG_BUNDLE_EXPORT_IN_PROGRESS.store(false, Ordering::Release);
+    }
+}
+
 /// Creates a timestamped zip archive containing the current log file
 /// and any older logs for the active instance.
 pub fn create_log_bundle_zip() -> Result<PathBuf> {
+    if LOG_BUNDLE_EXPORT_IN_PROGRESS.swap(true, Ordering::AcqRel) {
+        return Err(anyhow::anyhow!(
+            "A log bundle export is already in progress"
+        ));
+    }
+    let _guard = LogBundleExportGuard;
+
     let state = LOG_STATE
         .get()
         .ok_or_else(|| anyhow::anyhow!("Logging not initialized"))?;
@@ -507,9 +531,16 @@ impl LogState {
                 .file_name()
                 .and_then(|file_name| file_name.to_str())
                 .ok_or_else(|| anyhow::anyhow!("Invalid log file name: {}", log_file.display()))?;
-            zip_writer.start_file(entry_name, zip_options)?;
+            // An in-session log with no size cap (`LogConfig::max_file_size_bytes == None`,
+            // the production default) can exceed `ZIP64_BYTES_THR`. Decide `large_file` from
+            // the actual size so those entries use ZIP64 instead of aborting, while small
+            // entries stay in the more widely-compatible non-ZIP64 format.
+            let large_file = log_file.metadata()?.len() >= zip::ZIP64_BYTES_THR;
+            zip_writer.start_file(entry_name, zip_options.large_file(large_file))?;
 
             let mut source = File::open(&log_file)?;
+            // `copy` streams through a fixed-size buffer, so this scales with wall time, not
+            // memory, regardless of how large `log_file` is.
             copy(&mut source, &mut zip_writer)?;
         }
 

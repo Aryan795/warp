@@ -17,7 +17,11 @@ warp_errors.workspace = true
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 dirs.workspace = true
 log-panics = { version = "2.1.0", features = ["with-backtrace"] }
-zip = "2.1"
+# Log bundles only ever write Deflate entries (see native.rs), so disable zip's other codecs
+# (bzip2/lzma/xz/zstd/aes-crypto/deflate64) and its zopfli DEFLATE backend, which compresses
+# in unbounded-size blocks and is otherwise unused since we never request quality > 9.
+zip = { version = "2.1", default-features = false, features = ["deflate-flate2", "flate2"] }
+flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 
 # Optional crash reporting integration.
 sentry = { workspace = true, optional = true }

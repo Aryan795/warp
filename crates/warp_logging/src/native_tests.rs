@@ -78,6 +78,52 @@ fn tui_bundle_uses_resolved_state_and_ignores_legacy_oz_logs() {
 }
 
 #[test]
+fn bundle_zip_supports_entries_over_4gib() {
+    // A sparse file lets this exercise the >4 GiB (ZIP64) code path cheaply: its logical
+    // length crosses `ZIP64_BYTES_THR` without writing real data, and `io::copy` reads back
+    // the resulting hole as zeroes.
+    let tmp = tempfile::tempdir().unwrap();
+    let state = log_state(tmp.path(), LogFrontend::Gui, "warp.log");
+    fs::create_dir_all(&state.log_directory).unwrap();
+    touch(&state.log_directory, "warp.log");
+    let huge_log = File::create(state.log_directory.join("warp.log.old.0")).unwrap();
+    huge_log.set_len(zip::ZIP64_BYTES_THR + 1).unwrap();
+    drop(huge_log);
+
+    let zip_path = state.create_log_bundle_zip().unwrap();
+
+    assert_eq!(
+        zip_entry_names(&zip_path),
+        vec!["warp.log", "warp.log.old.0"]
+    );
+}
+
+#[test]
+fn create_log_bundle_zip_rejects_concurrent_exports_and_recovers_after_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = log_state(tmp.path(), LogFrontend::Gui, "warp_guard_test.log");
+    fs::create_dir_all(&state.log_directory).unwrap();
+    LOG_STATE.set(state).unwrap();
+
+    // No log files exist yet, so this fails before ever touching the in-flight flag's guard
+    // scope — the flag must still be released afterward.
+    let err = create_log_bundle_zip().unwrap_err();
+    assert!(err.to_string().contains("No warp logs were found"));
+    assert!(!LOG_BUNDLE_EXPORT_IN_PROGRESS.load(Ordering::Acquire));
+
+    touch(&log_directory().unwrap(), "warp_guard_test.log");
+
+    // Simulate a second request arriving while an export is already running.
+    assert!(!LOG_BUNDLE_EXPORT_IN_PROGRESS.swap(true, Ordering::AcqRel));
+    let err = create_log_bundle_zip().unwrap_err();
+    assert!(err.to_string().contains("already in progress"));
+    LOG_BUNDLE_EXPORT_IN_PROGRESS.store(false, Ordering::Release);
+
+    // Once the in-progress export finishes, the next request goes through.
+    create_log_bundle_zip().unwrap();
+}
+
+#[test]
 fn collects_active_in_session_and_old_logs_in_expected_order() {
     let tmp = tempfile::tempdir().unwrap();
     let active = touch(tmp.path(), "warp.log");
