@@ -1,6 +1,10 @@
 use std::time::Duration;
 
-use super::{STALL_CONFIRMATION_BUDGET, STALL_POLL_INTERVAL, outputs_stalled, pattern_for_match};
+use super::{
+    STALL_CONFIRMATION_BUDGET, STALL_POLL_INTERVAL, outputs_stalled, pattern_for_match,
+    should_suppress_runtime_failure,
+};
+use crate::terminal::cli_agent_sessions::CLIAgentSessionStatus;
 
 #[test]
 fn pattern_for_match_returns_originating_needle() {
@@ -58,6 +62,22 @@ fn outputs_stalled_returns_false_when_either_input_is_none() {
     assert!(!outputs_stalled(None, Some("data")));
     assert!(!outputs_stalled(Some("data"), None));
     assert!(!outputs_stalled(None, None));
+}
+
+#[test]
+fn should_suppress_runtime_failure_true_for_cancelled() {
+    // A late pattern hit must not overwrite an already-reported Ctrl-C
+    // cancellation, just like it must not overwrite Success or Failed.
+    assert!(should_suppress_runtime_failure(Some(
+        &CLIAgentSessionStatus::Cancelled
+    )));
+}
+
+#[test]
+fn should_suppress_runtime_failure_false_for_in_progress() {
+    assert!(!should_suppress_runtime_failure(Some(
+        &CLIAgentSessionStatus::InProgress
+    )));
 }
 
 #[test]

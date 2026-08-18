@@ -9423,8 +9423,21 @@ impl TerminalView {
         });
     }
 
-    /// Writes a shared session viewer's bytes to the pty
+    /// Writes a shared session viewer's bytes to the pty.
+    ///
+    /// A lone Ctrl-C byte is additionally observed by `CLIAgentSessionsModel`
+    /// so that an interrupt which silently kills a third-party harness turn
+    /// (no plugin hook fires on user interrupt) can still resolve the
+    /// session, and its task, to Cancelled. See
+    /// `CLIAgentSessionsModel::observe_ctrl_c_write`. Observation never
+    /// delays or drops the write itself.
     pub fn write_viewer_bytes_to_pty(&mut self, bytes: Vec<u8>, ctx: &mut ViewContext<Self>) {
+        if FeatureFlag::CtrlCCancelsThirdPartyHarness.is_enabled() && bytes == [0x03] {
+            let terminal_view_id = self.view_id;
+            CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
+                sessions.observe_ctrl_c_write(terminal_view_id, ctx);
+            });
+        }
         self.write_user_bytes_to_pty(bytes, ctx);
     }
 
@@ -13550,7 +13563,8 @@ impl TerminalView {
                     }
                     CLIAgentSessionStatus::InProgress
                     | CLIAgentSessionStatus::Success
-                    | CLIAgentSessionStatus::Failed { .. } => {
+                    | CLIAgentSessionStatus::Failed { .. }
+                    | CLIAgentSessionStatus::Cancelled => {
                         // Auto-open rich input when the agent resumes or completes.
                         if !self.has_active_cli_agent_input_session(ctx) {
                             self.open_cli_agent_rich_input(CLIAgentInputEntrypoint::AutoShow, ctx);

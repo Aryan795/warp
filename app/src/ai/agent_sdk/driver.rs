@@ -359,7 +359,9 @@ fn idle_window_for_cli_session_status(
     idle_on_fail: Option<Duration>,
 ) -> Option<Duration> {
     match status {
-        CLIAgentSessionStatus::Success | CLIAgentSessionStatus::Blocked { .. } => idle_on_complete,
+        CLIAgentSessionStatus::Success
+        | CLIAgentSessionStatus::Blocked { .. }
+        | CLIAgentSessionStatus::Cancelled => idle_on_complete,
         CLIAgentSessionStatus::Failed { .. } => idle_on_fail,
         CLIAgentSessionStatus::InProgress => None,
     }
@@ -378,9 +380,9 @@ fn terminal_status_log_outcome(status: &SDKConversationOutputStatus) -> &'static
 /// [`terminal_status_log_outcome`] for a third-party CLI harness session.
 fn cli_session_status_log_outcome(status: &CLIAgentSessionStatus) -> &'static str {
     match status {
-        CLIAgentSessionStatus::Success | CLIAgentSessionStatus::Blocked { .. } => {
-            "non_error_completion"
-        }
+        CLIAgentSessionStatus::Success
+        | CLIAgentSessionStatus::Blocked { .. }
+        | CLIAgentSessionStatus::Cancelled => "non_error_completion",
         CLIAgentSessionStatus::Failed { .. } => "error",
         CLIAgentSessionStatus::InProgress => "in_progress",
     }
@@ -3600,12 +3602,30 @@ impl AgentDriver {
         log::debug!("Agent harness exited with status {exit_code}");
 
         if exit_code.was_successful() {
-            Ok(())
-        } else {
-            Err(AgentDriverError::HarnessCommandFailed {
-                exit_code: exit_code.value(),
-            })
+            return Ok(());
         }
+
+        // A double Ctrl-C can kill the harness process while the synthesized
+        // pending-cancel window is still armed, or after it has already
+        // resolved the session to `Cancelled`. Either way, the exit code
+        // carries no diagnostic value and must not overwrite the
+        // already-reported cancellation with a generic FAILED classification.
+        let ctrl_c_cancelled = foreground
+            .spawn(|me, ctx| {
+                let view_id = me.terminal_driver.as_ref(ctx).terminal_view().id();
+                CLIAgentSessionsModel::handle(ctx)
+                    .as_ref(ctx)
+                    .has_pending_or_resolved_ctrl_c_cancel(view_id)
+            })
+            .await
+            .unwrap_or(false);
+        if ctrl_c_cancelled {
+            return Ok(());
+        }
+
+        Err(AgentDriverError::HarnessCommandFailed {
+            exit_code: exit_code.value(),
+        })
     }
 
     /// Configure the active terminal session with the specified profile.
@@ -4123,7 +4143,8 @@ impl AgentDriver {
                     match status {
                         CLIAgentSessionStatus::Success
                         | CLIAgentSessionStatus::Failed { .. }
-                        | CLIAgentSessionStatus::Blocked { .. } => {
+                        | CLIAgentSessionStatus::Blocked { .. }
+                        | CLIAgentSessionStatus::Cancelled => {
                             let idle_window = idle_window_for_cli_session_status(
                                 status,
                                 me.idle_on_complete,

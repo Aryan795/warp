@@ -4,13 +4,20 @@ pub mod listener;
 pub(crate) mod plugin_manager;
 
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use event::{CLIAgentEvent, CLIAgentEventSource, CLIAgentEventType};
+use warpui::r#async::SpawnedFutureHandle;
 use warpui::{Entity, EntityId, ModelContext, ModelHandle, SingletonEntity};
 
 use self::listener::CLIAgentSessionListener;
 use super::CLIAgent;
 use crate::ai::blocklist::InputConfig;
+
+/// How long to wait, after observing a synthesized Ctrl-C write to a working
+/// CLI agent session's PTY, for further plugin activity before concluding the
+/// interrupt silently cancelled the session. See `observe_ctrl_c_write`.
+pub const CTRL_C_CANCEL_WINDOW: Duration = Duration::from_secs(2);
 
 /// Status of a tracked CLI agent session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +31,11 @@ pub enum CLIAgentSessionStatus {
     Blocked {
         message: Option<String>,
     },
+    /// The user interrupted the session with Ctrl-C and no further plugin
+    /// activity was observed within the grace window (see
+    /// `observe_ctrl_c_write`). Not terminal: a later `prompt_submit`
+    /// returns the session to `InProgress` like any other resumed turn.
+    Cancelled,
 }
 
 impl CLIAgentSessionStatus {
@@ -36,6 +48,7 @@ impl CLIAgentSessionStatus {
             CLIAgentSessionStatus::Blocked { message } => ConversationStatus::Blocked {
                 blocked_action: message.clone().unwrap_or_default(),
             },
+            CLIAgentSessionStatus::Cancelled => ConversationStatus::Cancelled,
         }
     }
 }
@@ -316,12 +329,28 @@ impl CLIAgentSessionsModelEvent {
     }
 }
 
+/// Per-session state for a Ctrl-C-initiated pending cancellation. Kept
+/// separate from `CLIAgentSession` because it is synthesized entirely
+/// client-side (see `observe_ctrl_c_write`) rather than reported by the
+/// plugin protocol.
+#[derive(Default)]
+struct CtrlCCancelState {
+    /// Whether a `prompt_submit` has been seen for this session. Guards
+    /// against arming on the optimistic `InProgress` status set when a
+    /// session is first registered, before any turn has actually started.
+    has_seen_prompt_submit: bool,
+    /// Abort handle for the in-flight grace-window timer, if armed.
+    pending_cancel: Option<SpawnedFutureHandle>,
+}
+
 /// Singleton model that tracks pane-scoped CLI agent state and plugin-enriched session context.
 pub struct CLIAgentSessionsModel {
     sessions: HashMap<EntityId, CLIAgentSession>,
     /// Tracks (agent, remote_host) pairs where an auto plugin operation (install or update) has failed.
     /// Shared across all views so failure in one tab is reflected everywhere.
     plugin_auto_failures: HashSet<(CLIAgent, Option<String>)>,
+    /// Ctrl-C pending-cancel state, keyed by terminal view. See `observe_ctrl_c_write`.
+    ctrl_c_cancel_state: HashMap<EntityId, CtrlCCancelState>,
 }
 
 impl Entity for CLIAgentSessionsModel {
@@ -335,6 +364,7 @@ impl CLIAgentSessionsModel {
         Self {
             sessions: HashMap::new(),
             plugin_auto_failures: HashSet::new(),
+            ctrl_c_cancel_state: HashMap::new(),
         }
     }
 
@@ -416,6 +446,7 @@ impl CLIAgentSessionsModel {
     }
 
     pub fn remove_session(&mut self, terminal_view_id: EntityId, ctx: &mut ModelContext<Self>) {
+        self.abort_pending_cancel(terminal_view_id);
         if let Some(session) = self.sessions.remove(&terminal_view_id) {
             ctx.emit(CLIAgentSessionsModelEvent::Ended {
                 terminal_view_id,
@@ -433,9 +464,26 @@ impl CLIAgentSessionsModel {
         event: &CLIAgentEvent,
         ctx: &mut ModelContext<Self>,
     ) {
-        let Some(session) = self.sessions.get_mut(&terminal_view_id) else {
+        if !self.sessions.contains_key(&terminal_view_id) {
             return;
-        };
+        }
+
+        // Any plugin event is evidence the CLI agent process is still alive —
+        // an interrupt produces silence instead. Disarm a pending Ctrl-C
+        // cancellation window so this event's own status transition drives
+        // the session, even if that transition is a no-op (e.g. IdlePrompt).
+        self.abort_pending_cancel(terminal_view_id);
+        if matches!(event.event, CLIAgentEventType::PromptSubmit) {
+            self.ctrl_c_cancel_state
+                .entry(terminal_view_id)
+                .or_default()
+                .has_seen_prompt_submit = true;
+        }
+
+        let session = self
+            .sessions
+            .get_mut(&terminal_view_id)
+            .expect("session presence checked above");
 
         if event.source == CLIAgentEventSource::RichPlugin {
             session.received_rich_notification = true;
@@ -463,6 +511,121 @@ impl CLIAgentSessionsModel {
                 agent: session.agent,
             });
         }
+    }
+
+    /// Observes a Ctrl-C byte (`0x03`) written to this session's PTY.
+    ///
+    /// This is observation only: the caller is responsible for forwarding the
+    /// byte to the PTY unchanged and immediately, regardless of what this
+    /// does. If the session is currently interruptible — `InProgress` or
+    /// `Blocked`, rich-status-capable (excludes the Codex OSC 9 fallback),
+    /// and has seen at least one `prompt_submit` (guarding against the
+    /// optimistic `InProgress` set at registration, before any turn has
+    /// started) — arms a grace window after which the session resolves to
+    /// `Cancelled` if no plugin activity disarms it first (see
+    /// `update_from_event`). A second Ctrl-C while a window is already armed
+    /// reuses it rather than resetting the clock.
+    pub fn observe_ctrl_c_write(
+        &mut self,
+        terminal_view_id: EntityId,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.observe_ctrl_c_write_with_window(terminal_view_id, CTRL_C_CANCEL_WINDOW, ctx);
+    }
+
+    fn observe_ctrl_c_write_with_window(
+        &mut self,
+        terminal_view_id: EntityId,
+        window: Duration,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let Some(session) = self.sessions.get(&terminal_view_id) else {
+            return;
+        };
+        let can_arm = matches!(
+            session.status,
+            CLIAgentSessionStatus::InProgress | CLIAgentSessionStatus::Blocked { .. }
+        ) && session.supports_rich_status()
+            && self
+                .ctrl_c_cancel_state
+                .get(&terminal_view_id)
+                .is_some_and(|state| state.has_seen_prompt_submit);
+        if !can_arm {
+            return;
+        }
+
+        let state = self
+            .ctrl_c_cancel_state
+            .entry(terminal_view_id)
+            .or_default();
+        if state.pending_cancel.is_some() {
+            return;
+        }
+
+        let handle = ctx.spawn_abortable(
+            async move { warpui::r#async::Timer::after(window).await },
+            move |model, _, ctx| model.resolve_pending_cancel(terminal_view_id, ctx),
+            |_, _| {},
+        );
+        state.pending_cancel = Some(handle);
+    }
+
+    /// Called when a session's pending-cancel window lapses with no
+    /// disarming plugin event. Transitions the session to `Cancelled` unless
+    /// it has already moved on (disarmed and lost the abort race, ended, or
+    /// been replaced).
+    fn resolve_pending_cancel(&mut self, terminal_view_id: EntityId, ctx: &mut ModelContext<Self>) {
+        if let Some(state) = self.ctrl_c_cancel_state.get_mut(&terminal_view_id) {
+            state.pending_cancel = None;
+        }
+        let Some(session) = self.sessions.get_mut(&terminal_view_id) else {
+            return;
+        };
+        if !matches!(
+            session.status,
+            CLIAgentSessionStatus::InProgress | CLIAgentSessionStatus::Blocked { .. }
+        ) {
+            return;
+        }
+
+        session.status = CLIAgentSessionStatus::Cancelled;
+        let agent = session.agent;
+        let session_context = Box::new(session.session_context.clone());
+        ctx.emit(CLIAgentSessionsModelEvent::StatusChanged {
+            terminal_view_id,
+            agent,
+            status: CLIAgentSessionStatus::Cancelled,
+            session_context,
+        });
+    }
+
+    /// Aborts and clears any armed pending-cancel window for this terminal.
+    fn abort_pending_cancel(&mut self, terminal_view_id: EntityId) {
+        if let Some(handle) = self
+            .ctrl_c_cancel_state
+            .get_mut(&terminal_view_id)
+            .and_then(|state| state.pending_cancel.take())
+        {
+            handle.abort();
+        }
+    }
+
+    /// Whether Ctrl-C cancellation has already resolved (`Cancelled`) or is
+    /// still pending (the grace window is armed) for this session. Used to
+    /// stop a harness exit-code classification from overwriting a
+    /// user-initiated cancellation with a generic failure — a double Ctrl-C
+    /// can kill the harness process while the window is armed, or after it
+    /// has already resolved.
+    pub fn has_pending_or_resolved_ctrl_c_cancel(&self, terminal_view_id: EntityId) -> bool {
+        if matches!(
+            self.sessions.get(&terminal_view_id).map(|s| &s.status),
+            Some(CLIAgentSessionStatus::Cancelled)
+        ) {
+            return true;
+        }
+        self.ctrl_c_cancel_state
+            .get(&terminal_view_id)
+            .is_some_and(|state| state.pending_cancel.is_some())
     }
 
     pub fn open_input(
@@ -528,6 +691,10 @@ impl CLIAgentSessionsModel {
         // Close any open rich input before replacing, so subscribers can
         // restore input config before the session ends.
         self.close_input(terminal_view_id, false, ctx);
+        // A fresh session must re-observe `prompt_submit` before Ctrl-C can
+        // arm, and any pending window belonged to the session being replaced.
+        self.abort_pending_cancel(terminal_view_id);
+        self.ctrl_c_cancel_state.remove(&terminal_view_id);
         if let Some(old) = self.sessions.insert(terminal_view_id, session) {
             ctx.emit(CLIAgentSessionsModelEvent::Ended {
                 terminal_view_id,
