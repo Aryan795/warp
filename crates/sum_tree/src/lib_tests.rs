@@ -34,11 +34,6 @@ fn test_push_matches_extend_for_same_items() {
 
 #[test]
 fn test_repeated_push_packs_leaves_as_densely_as_extend() {
-    // Before the fix, `push` inserted every item as its own permanent one-item leaf once the
-    // tree grew past a single leaf, so tree height (and leaf/node count) grew linearly with the
-    // number of pushed items instead of logarithmically. Pushing one at a time should produce a
-    // tree exactly as densely packed - i.e. the same height - as building the same items via
-    // `extend`, which already batches items into full leaves.
     let items: Vec<u8> = (0..25).collect();
 
     let mut pushed = SumTree::new();
