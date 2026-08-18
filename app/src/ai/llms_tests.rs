@@ -394,6 +394,7 @@ fn custom_endpoint_usage_display_label_resolves_alias_name_and_generic_fallback(
         agent_mode_models_unavailable: false,
         last_update: None,
         base_llm_for_terminal_view: HashMap::new(),
+        computer_use_llm_for_terminal_view: HashMap::new(),
         custom_llms: build_custom_llm_infos(&keys),
         custom_model_routers: Vec::new(),
     };
