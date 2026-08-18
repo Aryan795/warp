@@ -3717,18 +3717,6 @@ impl PaneGroup {
             }
             #[cfg(not(feature = "local_fs"))]
             let _ = (has_restored_command_blocks, has_conversation_restoration);
-
-            // Only drop the tab-bar title fallback once real blocks actually
-            // landed in the live model. `apply_deferred_restored_blocks` can
-            // decline to apply (e.g. the session is no longer pristine) without
-            // that being visible here except through this same bool; clearing
-            // the hint unconditionally would leave the tab with neither a real
-            // title nor a fallback, on top of the scrollback it already lost.
-            if has_restored_command_blocks {
-                terminal_view.update(ctx, |view, _| {
-                    view.set_pending_restoration_title_hint(None);
-                });
-            }
         }
 
         // Tab titles/subtitles are computed from this pane group's live state at

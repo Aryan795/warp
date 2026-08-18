@@ -4078,33 +4078,21 @@ fn test_lazy_background_tab_scrollback_restore() {
 
 /// APP-5257: a background tab's title must not fall back to a generic
 /// placeholder just because its scrollback restoration is deferred, and the
-/// real command-derived title must take over once the tab is activated and
-/// materialization applies the deferred blocks.
+/// title after activation must match what the eager (flag-off) restoration
+/// path shows for the identical block — not merely "non-empty" or "cached
+/// from before materialization", which a weaker assertion could pass on
+/// while the real tab bar (fed by a live re-scan after materialization,
+/// not by the pending hint alone) shows something else entirely.
 #[test]
 fn test_lazy_background_tab_reports_a_title_while_pending_and_after_materializing() {
     use crate::terminal::model::block::SerializedBlock;
 
-    let _flag = FeatureFlag::LazyBackgroundTabScrollbackRestore.override_enabled(true);
-
-    App::test((), |mut app| async move {
-        initialize_app(&mut app);
-
-        let uuid = Uuid::new_v4().as_bytes().to_vec();
-        let restored_block =
-            SerializedBlock::new_for_test(b"uname -a".to_vec(), b"Darwin\n".to_vec());
-        let mut block_lists = HashMap::new();
-        block_lists.insert(
-            PaneUuid(uuid.clone()),
-            vec![SerializedBlockListItem::Command {
-                block: Box::new(restored_block),
-            }],
-        );
-
-        let root = PaneNodeSnapshot::Leaf(LeafSnapshot {
+    fn restored_root(uuid: Vec<u8>) -> PaneNodeSnapshot {
+        PaneNodeSnapshot::Leaf(LeafSnapshot {
             is_focused: true,
             custom_vertical_tabs_title: None,
             contents: LeafContents::Terminal(TerminalPaneSnapshot {
-                uuid: uuid.clone(),
+                uuid,
                 cwd: None,
                 shell_launch_data: None,
                 is_active: true,
@@ -4115,8 +4103,71 @@ fn test_lazy_background_tab_reports_a_title_while_pending_and_after_materializin
                 conversation_ids_to_restore: Vec::new(),
                 active_conversation_id: None,
             }),
-        });
+        })
+    }
 
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        // The eager (flag-off, `is_active_tab: true`) reference: applies the
+        // identical block through the normal, always-worked restoration path.
+        let eager_uuid = Uuid::new_v4().as_bytes().to_vec();
+        let eager_root = restored_root(eager_uuid.clone());
+        let mut eager_block_lists = HashMap::new();
+        eager_block_lists.insert(
+            PaneUuid(eager_uuid),
+            vec![SerializedBlockListItem::Command {
+                block: Box::new(SerializedBlock::new_for_test(
+                    b"uname -a".to_vec(),
+                    b"Darwin\n".to_vec(),
+                )),
+            }],
+        );
+        let tips_model = app.add_model(|_| TipsCompleted::default());
+        let (_, eager_pane_group) =
+            app.add_window_with_bounds(WindowStyle::NotStealFocus, WindowBounds::Default, |ctx| {
+                let banner = ctx.add_model(|_| BannerState::default());
+                PaneGroup::new_with_panes_layout(
+                    tips_model,
+                    banner,
+                    ServerApiProvider::as_ref(ctx).get(),
+                    PanesLayout::Snapshot(Box::new(eager_root)),
+                    Arc::new(eager_block_lists),
+                    None,
+                    true, // is_active_tab: eager reference restores immediately.
+                    ctx,
+                )
+            });
+        let eager_pane_id = eager_pane_group.read(&app, |panes, _| {
+            panes.pane_ids().next().expect("should have one pane")
+        });
+        let eager_title = eager_pane_group.read(&app, |panes, ctx| {
+            panes
+                .terminal_view_from_pane_id(eager_pane_id, ctx)
+                .expect("terminal pane should have a view")
+                .as_ref(ctx)
+                .last_completed_command_text()
+        });
+        assert_eq!(
+            eager_title.as_deref(),
+            Some("uname -a"),
+            "sanity check: the eager reference path should show the command-derived title"
+        );
+
+        // The deferred (flag-on, `is_active_tab: false`) case under test.
+        let _flag = FeatureFlag::LazyBackgroundTabScrollbackRestore.override_enabled(true);
+        let deferred_uuid = Uuid::new_v4().as_bytes().to_vec();
+        let deferred_root = restored_root(deferred_uuid.clone());
+        let mut deferred_block_lists = HashMap::new();
+        deferred_block_lists.insert(
+            PaneUuid(deferred_uuid),
+            vec![SerializedBlockListItem::Command {
+                block: Box::new(SerializedBlock::new_for_test(
+                    b"uname -a".to_vec(),
+                    b"Darwin\n".to_vec(),
+                )),
+            }],
+        );
         let tips_model = app.add_model(|_| TipsCompleted::default());
         let (_, pane_group) =
             app.add_window_with_bounds(WindowStyle::NotStealFocus, WindowBounds::Default, |ctx| {
@@ -4125,8 +4176,8 @@ fn test_lazy_background_tab_reports_a_title_while_pending_and_after_materializin
                     tips_model,
                     banner,
                     ServerApiProvider::as_ref(ctx).get(),
-                    PanesLayout::Snapshot(Box::new(root)),
-                    Arc::new(block_lists),
+                    PanesLayout::Snapshot(Box::new(deferred_root)),
+                    Arc::new(deferred_block_lists),
                     None,
                     false, // is_active_tab: simulates a background tab at startup.
                     ctx,
@@ -4148,9 +4199,9 @@ fn test_lazy_background_tab_reports_a_title_while_pending_and_after_materializin
 
         assert_eq!(
             title(&app).as_deref(),
-            Some("uname -a"),
-            "a pending background tab should report a command-derived title, not a generic \
-             placeholder, sourced from its still-deferred blocks"
+            eager_title.as_deref(),
+            "a pending background tab should report the same command-derived title the eager \
+             path shows, not a generic placeholder"
         );
 
         pane_group.update(&mut app, |panes, ctx| {
@@ -4159,9 +4210,10 @@ fn test_lazy_background_tab_reports_a_title_while_pending_and_after_materializin
 
         assert_eq!(
             title(&app).as_deref(),
-            Some("uname -a"),
-            "after materializing, the title must be sourced from the real restored block, not \
-             remain stuck on stale/placeholder data"
+            eager_title.as_deref(),
+            "after materializing, the title must still match the eager path's title — asserting \
+             merely that a hint value survives is not enough, since the real tab bar re-derives \
+             this from the live block list after materialization"
         );
     });
 }
