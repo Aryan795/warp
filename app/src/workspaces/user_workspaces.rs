@@ -288,7 +288,7 @@ impl UserWorkspaces {
     pub fn team_uid_for_window(&self, window_id: WindowId, ctx: &AppContext) -> Option<ServerId> {
         let team_uid = crate::workspace::WorkspaceRegistry::as_ref(ctx)
             .get(window_id, ctx)
-            .and_then(|workspace| workspace.as_ref(ctx).team_uid());
+            .and_then(|workspace| workspace.as_ref(ctx).team_uid(ctx));
         #[cfg(test)]
         {
             team_uid.or_else(|| {

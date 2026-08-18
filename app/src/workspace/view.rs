@@ -1017,7 +1017,7 @@ enum TabBarSlot {
 
 pub struct Workspace {
     window_id: WindowId,
-    window_team: WindowTeam,
+    window_team: ModelHandle<WindowTeam>,
     pub(crate) tabs: Vec<TabData>,
     active_tab_index: usize,
     /// Tracks tab activation order (most-recently-used first).
@@ -2847,22 +2847,6 @@ impl Workspace {
         workspace_setting: NewWorkspaceSource,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
-        Self::new_with_window_team(
-            workspace_setting.window_team(ctx),
-            global_resource_handles,
-            server_time,
-            workspace_setting,
-            ctx,
-        )
-    }
-
-    pub(crate) fn new_with_window_team(
-        window_team: WindowTeam,
-        global_resource_handles: GlobalResourceHandles,
-        server_time: Option<Arc<ServerTime>>,
-        workspace_setting: NewWorkspaceSource,
-        ctx: &mut ViewContext<Self>,
-    ) -> Self {
         let GlobalResourceHandles {
             model_event_sender,
             tips_completed,
@@ -2874,6 +2858,14 @@ impl Workspace {
         let server_api_provider = ServerApiProvider::as_ref(ctx);
         let server_api = server_api_provider.get();
         let ai_client = server_api_provider.get_ai_client();
+
+        // Owns this window's team selection; resolved fresh here so it reflects the current
+        // team membership even when `workspace_setting` was computed earlier.
+        let initial_team_uid = workspace_setting.initial_team_uid(ctx);
+        let window_team = ctx.add_model(|ctx| WindowTeam::new(initial_team_uid, ctx));
+        ctx.subscribe_to_model(&window_team, |_, _, _, ctx| {
+            ctx.notify();
+        });
 
         // Inserting a (window, ModalSizes) pair to the ResizableData singleton. A restored window
         // reads the sizes from the window snapshot. A new window initializes with all default sizes.
@@ -3577,12 +3569,12 @@ impl Workspace {
         ws
     }
 
-    pub fn window_team(&self) -> WindowTeam {
+    pub fn window_team(&self) -> ModelHandle<WindowTeam> {
         self.window_team.clone()
     }
 
-    pub fn team_uid(&self) -> Option<ServerId> {
-        self.window_team.uid()
+    pub fn team_uid(&self, ctx: &AppContext) -> Option<ServerId> {
+        self.window_team.as_ref(ctx).uid()
     }
     #[cfg(any(test, feature = "integration_tests"))]
     pub fn command_palette_view(&self) -> ViewHandle<crate::search::command_palette::View> {
@@ -6172,7 +6164,7 @@ impl Workspace {
         let Some(workspace) = user_workspaces.current_workspace() else {
             return;
         };
-        let current_team_uid = self.team_uid();
+        let current_team_uid = self.team_uid(ctx);
         let mut items: Vec<MenuItem<WorkspaceAction>> = vec![
             MenuItemFields::new("Switch team")
                 .with_disabled(true)
@@ -6209,7 +6201,7 @@ impl Workspace {
             return None;
         }
         let current_team = self
-            .team_uid()
+            .team_uid(ctx)
             .and_then(|team_uid| user_workspaces.team_from_uid(team_uid))?;
         let team_name = current_team.name.clone();
         let team_color_hex = current_team.color.clone();
@@ -11840,7 +11832,7 @@ impl Workspace {
         WindowSnapshot {
             tabs,
             active_tab_index,
-            team_uid: self.team_uid(),
+            team_uid: self.team_uid(app),
             bounds: window_bounds,
             fullscreen_state: window_fullscreen_state,
             quake_mode,
@@ -24415,7 +24407,7 @@ impl TypedActionView for Workspace {
                 send_telemetry_from_ctx!(TelemetryEvent::UserMenuUpgradeClicked, ctx);
 
                 let auth_state = AuthStateProvider::as_ref(ctx).get();
-                let upgrade_url = if let Some(team_uid) = self.team_uid() {
+                let upgrade_url = if let Some(team_uid) = self.team_uid(ctx) {
                     UserWorkspaces::upgrade_link_for_team(team_uid)
                 } else {
                     let user_id = auth_state.user_id().unwrap_or_default();
@@ -24485,7 +24477,7 @@ impl TypedActionView for Workspace {
                 }
             }
             ImportToTeamDrive => {
-                let team_uid = self.team_uid();
+                let team_uid = self.team_uid(ctx);
                 if let Some(team_uid) = team_uid {
                     self.open_import_modal(Owner::Team { team_uid }, &None, ctx);
                 }
@@ -24505,7 +24497,7 @@ impl TypedActionView for Workspace {
                 }
             }
             CreateTeamNotebook => {
-                let team_uid = self.team_uid();
+                let team_uid = self.team_uid(ctx);
                 if let Some(team_uid) = team_uid {
                     self.update_warp_drive_view(ctx, |drive_panel, ctx| {
                         drive_panel.open_cloud_object_dialog(
@@ -24535,7 +24527,7 @@ impl TypedActionView for Workspace {
                 }
             }
             CreateTeamEnvVarCollection => {
-                let team_uid = self.team_uid();
+                let team_uid = self.team_uid(ctx);
                 if let Some(team_uid) = team_uid {
                     self.update_warp_drive_view(ctx, |drive_panel, ctx| {
                         drive_panel.open_cloud_object_dialog(
@@ -24567,7 +24559,7 @@ impl TypedActionView for Workspace {
                 }
             }
             CreateTeamWorkflow => {
-                let team_uid = self.team_uid();
+                let team_uid = self.team_uid(ctx);
                 if let Some(team_uid) = team_uid {
                     let source = WorkflowOpenSource::New {
                         title: None,
@@ -24597,7 +24589,7 @@ impl TypedActionView for Workspace {
                 ctx.notify();
             }
             CreateTeamFolder => {
-                let team_uid = self.team_uid();
+                let team_uid = self.team_uid(ctx);
                 if let Some(team_uid) = team_uid {
                     self.update_warp_drive_view(ctx, |drive_panel, ctx| {
                         drive_panel.open_cloud_object_dialog(
@@ -25722,7 +25714,7 @@ impl TypedActionView for Workspace {
                 }
             }
             CreateTeamAIPrompt => {
-                let team_uid = self.team_uid();
+                let team_uid = self.team_uid(ctx);
                 if let Some(team_uid) = team_uid {
                     let source = WorkflowOpenSource::New {
                         title: None,
@@ -26503,7 +26495,7 @@ impl View for Workspace {
             context.set.insert(flags::SHOW_HIDDEN_FILES);
         }
 
-        if self.team_uid().is_some() {
+        if self.team_uid(app).is_some() {
             context.set.insert("WarpDrive_BelongsToTeam");
         }
 

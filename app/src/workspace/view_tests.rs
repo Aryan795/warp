@@ -274,12 +274,63 @@ fn mock_workspace_with_source(
     workspace
 }
 
+/// Registers a workspace with two real teams in `UserWorkspaces`, so that `WindowTeam`
+/// reconciliation (which validates a selection against actual team membership) preserves an
+/// explicit selection of either team rather than collapsing it to `None`.
+fn register_multi_team_workspace(app: &mut App, team_uids: [ServerId; 2]) {
+    use crate::workspaces::team::{Team, TeamVisibility};
+    use crate::workspaces::workspace::Workspace as DomainWorkspace;
+
+    let make_team = |uid: ServerId, name: &str| Team {
+        uid,
+        name: name.to_string(),
+        color: None,
+        invite_link: None,
+        members: vec![],
+        pending_email_invites: vec![],
+        invite_link_domain_restrictions: vec![],
+        billing_metadata: Default::default(),
+        stripe_customer_id: None,
+        settings: Default::default(),
+        is_eligible_for_discovery: false,
+        has_billing_history: false,
+        visibility: TeamVisibility::Open,
+    };
+    let workspace_uid = "workspace_uid123456789".to_string().into();
+    let workspace = DomainWorkspace {
+        uid: workspace_uid,
+        name: "test".to_string(),
+        stripe_customer_id: None,
+        teams: vec![
+            make_team(team_uids[0], "first"),
+            make_team(team_uids[1], "second"),
+        ],
+        billing_metadata: Default::default(),
+        bonus_grants_purchased_this_month: Default::default(),
+        billing_cycle_usage: None,
+        has_billing_history: false,
+        settings: Default::default(),
+        invite_link_domain_restrictions: vec![],
+        pending_email_invites: vec![],
+        is_eligible_for_discovery: false,
+        members: vec![],
+        total_requests_used_since_last_refresh: 0,
+    };
+    UserWorkspaces::handle(app).update(app, |user_workspaces, ctx| {
+        user_workspaces.update_workspaces(vec![workspace], ctx);
+        // `update_workspaces` alone doesn't select a current workspace; teams are only visible
+        // to reconciliation once one is selected, matching the real `on_workspaces_updated` flow.
+        user_workspaces.set_current_workspace_uid(workspace_uid, ctx);
+    });
+}
+
 #[test]
 fn test_open_new_window_for_team_reuses_existing_team_window() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
 
         let team_uid: ServerId = 123.into();
+        register_multi_team_workspace(&mut app, [team_uid, 456.into()]);
         let source_workspace = mock_workspace(&mut app);
         let _existing_team_workspace =
             mock_workspace_with_source(&mut app, NewWorkspaceSource::TeamSwitched { team_uid });
@@ -298,8 +349,11 @@ fn test_open_new_window_for_team_creates_window_when_team_has_none() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
 
-        let source_workspace = mock_workspace(&mut app);
         let team_uid: ServerId = 123.into();
+        // Register `team_uid` as the second (non-default) team so the source window's own
+        // default selection doesn't already match it, and a new window is genuinely needed.
+        register_multi_team_workspace(&mut app, [456.into(), team_uid]);
+        let source_workspace = mock_workspace(&mut app);
         let initial_window_count = app.window_ids().len();
 
         source_workspace.update(&mut app, |workspace, ctx| {
@@ -326,7 +380,8 @@ fn test_new_window_inherits_source_window_team() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
 
-        let team_uid = 123.into();
+        let team_uid: ServerId = 123.into();
+        register_multi_team_workspace(&mut app, [team_uid, 456.into()]);
         let source_workspace =
             mock_workspace_with_source(&mut app, NewWorkspaceSource::TeamSwitched { team_uid });
         let source_window_id = source_workspace.update(&mut app, |_, ctx| ctx.window_id());
@@ -338,8 +393,8 @@ fn test_new_window_inherits_source_window_team() {
             },
         );
 
-        inherited_workspace.read(&app, |workspace, _| {
-            assert_eq!(workspace.team_uid(), Some(team_uid));
+        inherited_workspace.read(&app, |workspace, ctx| {
+            assert_eq!(workspace.team_uid(ctx), Some(team_uid));
         });
     });
 }

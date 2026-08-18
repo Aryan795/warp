@@ -106,9 +106,7 @@ use crate::window_settings::WindowSettings;
 use crate::workspace::hoa_onboarding::mark_hoa_onboarding_completed;
 use crate::workspace::tab_settings::TabSettings;
 use crate::workspace::view::OnboardingTutorial;
-use crate::workspace::{
-    PaneViewLocator, WindowTeam, Workspace, WorkspaceAction, WorkspaceRegistry,
-};
+use crate::workspace::{PaneViewLocator, Workspace, WorkspaceAction, WorkspaceRegistry};
 use crate::workspaces::team_tester::TeamTesterStatus;
 use crate::workspaces::update_manager::TeamUpdateManager;
 use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
@@ -1694,7 +1692,11 @@ impl NewWorkspaceSource {
         }
     }
 
-    pub fn window_team(&self, ctx: &AppContext) -> WindowTeam {
+    /// The team a new `Workspace` created from this source should be scoped to, resolved from
+    /// the current window/team state. Evaluated fresh at the point the `Workspace` is actually
+    /// constructed rather than cached, so it reflects the latest team membership even when
+    /// this source was chosen well before the workspace is created (e.g. before onboarding).
+    pub fn initial_team_uid(&self, ctx: &AppContext) -> Option<ServerId> {
         let source_window_id = match self {
             Self::Empty {
                 previous_active_window,
@@ -1712,29 +1714,24 @@ impl NewWorkspaceSource {
             | Self::WorkflowById { .. }
             | Self::AgentSession { .. }
             | Self::AmbientAgent => None,
-            Self::TeamSwitched { team_uid } => return WindowTeam::assigned(Some(*team_uid)),
+            Self::TeamSwitched { team_uid } => return Some(*team_uid),
             Self::Restored {
                 window_snapshot, ..
             } => {
                 if let Some(team_uid) = window_snapshot.team_uid {
-                    return WindowTeam::assigned(Some(team_uid));
+                    return Some(team_uid);
                 }
                 None
             }
         };
-        if let Some(window_team) = source_window_id
+        if let Some(team_uid) = source_window_id
             .and_then(|window_id| WorkspaceRegistry::as_ref(ctx).get(window_id, ctx))
-            .map(|workspace| workspace.as_ref(ctx).window_team())
+            .map(|workspace| workspace.as_ref(ctx).team_uid(ctx))
         {
-            return window_team;
+            return team_uid;
         }
 
-        let user_workspaces = UserWorkspaces::as_ref(ctx);
-        if user_workspaces.has_workspaces() {
-            WindowTeam::assigned(user_workspaces.default_team_uid())
-        } else {
-            WindowTeam::pending()
-        }
+        UserWorkspaces::as_ref(ctx).default_team_uid()
     }
 }
 
@@ -1744,7 +1741,6 @@ struct WorkspaceArgs {
     global_resource_handles: GlobalResourceHandles,
     server_time: Option<Arc<ServerTime>>,
     workspace_setting: NewWorkspaceSource,
-    window_team: WindowTeam,
 }
 
 // Some onboarding states can either contain a ref to an existing terminal view
@@ -1879,7 +1875,6 @@ pub struct RootView {
     /// in the [`Self::render`] method, but there is no [`ViewContext`] available there. So, we
     /// need to store it in a field instead.
     window_id: WindowId,
-    window_team: WindowTeam,
     /// Stores the tutorial from onboarding when the user needs to log in before
     /// the guided tour can start. Consumed after auth completes.
     pending_tutorial: Option<OnboardingTutorial>,
@@ -1898,7 +1893,6 @@ impl RootView {
         workspace_setting: NewWorkspaceSource,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
-        let window_team = workspace_setting.window_team(ctx);
         let server_api_provider = ServerApiProvider::as_ref(ctx);
         let server_api = server_api_provider.get();
         let auth_state = AuthStateProvider::as_ref(ctx).get().clone();
@@ -1931,7 +1925,6 @@ impl RootView {
             global_resource_handles,
             server_time: None,
             workspace_setting,
-            window_team: window_team.clone(),
         };
 
         let auth_onboarding_state = if auth_state.is_logged_in() {
@@ -1996,7 +1989,6 @@ impl RootView {
             model_event_sender,
             mouse_states: Default::default(),
             window_id: ctx.window_id(),
-            window_team,
             pending_tutorial: None,
             pending_post_auth_onboarding_settings: None,
             pending_account_first_settings_class: None,
@@ -2094,8 +2086,14 @@ impl RootView {
         }
     }
 
-    pub fn team_uid(&self) -> Option<ServerId> {
-        self.window_team.uid()
+    /// The team the current (or about-to-exist) workspace is scoped to. Delegates to the
+    /// `Workspace`'s own selection once one exists; before that (e.g. during onboarding), falls
+    /// back to the default team, matching what a newly created `Workspace` would resolve to.
+    pub fn team_uid(&self, ctx: &AppContext) -> Option<ServerId> {
+        match &self.auth_onboarding_state {
+            AuthOnboardingState::Terminal(workspace) => workspace.as_ref(ctx).team_uid(ctx),
+            _ => UserWorkspaces::as_ref(ctx).default_team_uid(),
+        }
     }
 
     fn polling_update_check_complete(
@@ -2145,9 +2143,7 @@ impl RootView {
         self.pending_account_first_tutorial_after_settings = false;
         self.pending_account_first_sso_login = None;
         self.account_first_refresh_in_flight = false;
-        self.window_team = WindowTeam::pending();
-        self.auth_onboarding_state
-            .log_out(self.window_team.clone(), ctx);
+        self.auth_onboarding_state.log_out(ctx);
         ctx.focus_self();
         ctx.notify();
         true
@@ -2503,8 +2499,6 @@ impl RootView {
         if !matches!(event, UserWorkspacesEvent::TeamsChanged) {
             return;
         }
-        self.window_team
-            .initialize(UserWorkspaces::as_ref(ctx).default_team_uid());
         let (account_class, upgrade_started) = match &self.auth_onboarding_state {
             AuthOnboardingState::PostAuthOnboarding {
                 account_class,
@@ -3012,7 +3006,7 @@ impl RootView {
             },
             AgentOnboardingEvent::PurchaseCreditsRequested { credits } => {
                 let credits = *credits;
-                let team_uid = self.team_uid();
+                let team_uid = self.team_uid(ctx);
                 UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
                     user_workspaces.purchase_addon_credits(team_uid, credits, ctx);
                 });
@@ -4165,8 +4159,7 @@ impl TypedActionView for RootView {
 impl WorkspaceArgs {
     fn create_workspace(self, ctx: &mut ViewContext<RootView>) -> ViewHandle<Workspace> {
         ctx.add_typed_action_view(|ctx| {
-            Workspace::new_with_window_team(
-                self.window_team,
+            Workspace::new(
                 self.global_resource_handles,
                 self.server_time,
                 self.workspace_setting,
@@ -4302,31 +4295,18 @@ impl AuthOnboardingState {
         }
     }
 
-    fn log_out(&mut self, window_team: WindowTeam, ctx: &mut ViewContext<RootView>) {
+    fn log_out(&mut self, ctx: &mut ViewContext<RootView>) {
         match self {
-            AuthOnboardingState::Auth(workspace_args) => {
-                workspace_args.window_team = window_team;
-            }
-            AuthOnboardingState::ConfirmIncomingAuth(workspace_args) => {
-                let mut workspace_args = workspace_args.clone();
-                workspace_args.window_team = window_team;
-                *self = AuthOnboardingState::Auth(workspace_args);
-                ctx.emit(RootViewEvent::AuthOnboardingStateChanged);
+            AuthOnboardingState::Auth(_) | AuthOnboardingState::ConfirmIncomingAuth(_) => {
+                // No workspace exists yet; `workspace_setting` already re-resolves its team on
+                // demand, so there is no per-window team state to reset here.
             }
             #[cfg(target_family = "wasm")]
             AuthOnboardingState::WebImport(_) => {
                 // TODO(ben): Eventually, we could support logout here by logging out of the JS
                 // Firebase client.
             }
-            AuthOnboardingState::NeedsSsoLink(needs_sso_link_mode) => match needs_sso_link_mode {
-                AuthOnboardingTarget::Workspace(args) => {
-                    let mut args = args.clone();
-                    args.window_team = window_team;
-                    *self = AuthOnboardingState::Auth(args);
-                    ctx.emit(RootViewEvent::AuthOnboardingStateChanged);
-                }
-                AuthOnboardingTarget::Terminal(_) => {}
-            },
+            AuthOnboardingState::NeedsSsoLink(_) => {}
             AuthOnboardingState::Onboarding { .. }
             | AuthOnboardingState::LoginSlide { .. }
             | AuthOnboardingState::PostAuthOnboarding { .. } => {
@@ -4350,7 +4330,6 @@ impl AuthOnboardingState {
                     global_resource_handles,
                     server_time: None,
                     workspace_setting,
-                    window_team,
                 };
 
                 // Auth no longer holds the original workspace view handle
