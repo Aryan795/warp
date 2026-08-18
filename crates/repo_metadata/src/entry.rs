@@ -128,6 +128,34 @@ impl Entry {
         }
     }
 
+    /// Total number of entries (files and directories) in this subtree, including `self`.
+    pub fn count_entries(&self) -> usize {
+        match self {
+            Self::File(_) => 1,
+            Self::Directory(directory) => {
+                1 + directory
+                    .children
+                    .iter()
+                    .map(Entry::count_entries)
+                    .sum::<usize>()
+            }
+        }
+    }
+
+    /// Total number of directory entries in this subtree, including `self` if it is a directory.
+    pub fn count_directories(&self) -> usize {
+        match self {
+            Self::File(_) => 0,
+            Self::Directory(directory) => {
+                1 + directory
+                    .children
+                    .iter()
+                    .map(Entry::count_directories)
+                    .sum::<usize>()
+            }
+        }
+    }
+
     /// Builds a tree of entries from a given path, handling gitignored files and directories.
     /// After max_depth is reached, children outside force-included paths are lazy-loaded to
     /// prevent deeply nested trees.

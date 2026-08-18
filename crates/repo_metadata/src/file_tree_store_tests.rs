@@ -28,6 +28,26 @@ fn create_dir_entry(path: &str) -> Entry {
     })
 }
 
+/// A directory subtree with a file and a nested directory (itself containing
+/// a file), built up front the way a full `AddDirectorySubtree` payload
+/// would be, rather than one path at a time.
+fn create_nested_dir_entry() -> Entry {
+    Entry::Directory(DirectoryEntry {
+        path: std_path("/repo/src"),
+        children: vec![
+            create_file_entry("/repo/src/main.rs"),
+            Entry::Directory(DirectoryEntry {
+                path: std_path("/repo/src/nested"),
+                children: vec![create_file_entry("/repo/src/nested/util.rs")],
+                ignored: false,
+                loaded: true,
+            }),
+        ],
+        ignored: false,
+        loaded: true,
+    })
+}
+
 #[test]
 fn test_remove_file() {
     let root = std_path("/repo");
@@ -167,6 +187,149 @@ fn test_remove_nested_children_recursively() {
     assert!(tree.get(&bar).is_none(), "bar should be gone");
     assert!(tree.get(&bazz).is_none(), "bazz should be gone");
     assert!(tree.get(&buzz).is_none(), "buzz.rs should be gone");
+}
+
+#[test]
+fn test_insert_full_subtree_in_one_call() {
+    let root = std_path("/repo");
+    let mut tree = FileTreeEntry::new_for_directory(Arc::new(root));
+
+    let src = std_path("/repo/src");
+    let main_rs = std_path("/repo/src/main.rs");
+    let nested = std_path("/repo/src/nested");
+    let util_rs = std_path("/repo/src/nested/util.rs");
+
+    tree.insert_entry_at_path(Arc::new(src.clone()), create_nested_dir_entry());
+
+    assert!(matches!(
+        tree.get(&src),
+        Some(FileTreeEntryState::Directory(_))
+    ));
+    assert!(matches!(
+        tree.get(&main_rs),
+        Some(FileTreeEntryState::File(_))
+    ));
+    assert!(matches!(
+        tree.get(&nested),
+        Some(FileTreeEntryState::Directory(_))
+    ));
+    assert!(matches!(
+        tree.get(&util_rs),
+        Some(FileTreeEntryState::File(_))
+    ));
+
+    let src_children: std::collections::HashSet<_> = tree
+        .child_paths(&src)
+        .map(|p| p.as_str().to_string())
+        .collect();
+    assert_eq!(
+        src_children,
+        std::collections::HashSet::from([
+            main_rs.as_str().to_string(),
+            nested.as_str().to_string()
+        ])
+    );
+
+    let nested_children: Vec<_> = tree.child_paths(&nested).collect();
+    assert_eq!(nested_children.len(), 1);
+    assert_eq!(nested_children[0].as_str(), util_rs.as_str());
+
+    // The `insert_entry_at_path` parent fix-up should have linked `src`
+    // itself into the root's children.
+    let root_children: Vec<_> = tree.child_paths(&std_path("/repo")).collect();
+    assert!(root_children.iter().any(|p| p.as_str() == src.as_str()));
+}
+
+#[test]
+fn test_insert_entry_at_path_overwrites_children_set_without_union() {
+    let root = std_path("/repo");
+    let mut tree = FileTreeEntry::new_for_directory(Arc::new(root));
+
+    let dir = std_path("/repo/dir");
+    let old_child = std_path("/repo/dir/old.txt");
+    let new_child = std_path("/repo/dir/new.txt");
+
+    tree.insert_entry_at_path(
+        Arc::new(dir.clone()),
+        Entry::Directory(DirectoryEntry {
+            path: dir.clone(),
+            children: vec![create_file_entry("/repo/dir/old.txt")],
+            ignored: false,
+            loaded: true,
+        }),
+    );
+    assert!(tree.get(&old_child).is_some());
+
+    // Insert again at the same path with a disjoint child set, without
+    // removing first. The children set for `dir` should be fully replaced
+    // by the new call, matching the overwrite (not union) semantics of the
+    // previous `extend()`-based merge.
+    tree.insert_entry_at_path(
+        Arc::new(dir.clone()),
+        Entry::Directory(DirectoryEntry {
+            path: dir.clone(),
+            children: vec![create_file_entry("/repo/dir/new.txt")],
+            ignored: false,
+            loaded: true,
+        }),
+    );
+
+    let children: Vec<_> = tree
+        .child_paths(&dir)
+        .map(|p| p.as_str().to_string())
+        .collect();
+    assert_eq!(children, vec![new_child.as_str().to_string()]);
+    // `old.txt`'s state_map entry is orphaned rather than removed, matching
+    // the previous behavior: `extend()` never touched it since the second
+    // insert's child store didn't contain that key.
+    assert!(tree.get(&old_child).is_some());
+}
+
+#[test]
+fn test_insert_childless_directory_leaves_existing_children_untouched() {
+    let root = std_path("/repo");
+    let mut tree = FileTreeEntry::new_for_directory(Arc::new(root));
+
+    let dir = std_path("/repo/dir");
+    let existing_child = std_path("/repo/dir/existing.txt");
+
+    tree.insert_entry_at_path(
+        Arc::new(dir.clone()),
+        Entry::Directory(DirectoryEntry {
+            path: dir.clone(),
+            children: vec![create_file_entry("/repo/dir/existing.txt")],
+            ignored: false,
+            loaded: true,
+        }),
+    );
+
+    // Re-insert `dir` as a childless directory. Since this entry contributes
+    // no children, `dir`'s existing children set must be left as-is instead
+    // of being cleared.
+    tree.insert_entry_at_path(Arc::new(dir.clone()), create_dir_entry("/repo/dir"));
+
+    let children: Vec<_> = tree
+        .child_paths(&dir)
+        .map(|p| p.as_str().to_string())
+        .collect();
+    assert_eq!(children, vec![existing_child.as_str().to_string()]);
+}
+
+#[test]
+fn test_entry_count_entries_and_directories() {
+    let subtree = create_nested_dir_entry();
+    // `src` + `main.rs` + `nested` + `nested/util.rs`.
+    assert_eq!(subtree.count_entries(), 4);
+    // `src` + `nested`.
+    assert_eq!(subtree.count_directories(), 2);
+
+    let file = create_file_entry("/repo/file.txt");
+    assert_eq!(file.count_entries(), 1);
+    assert_eq!(file.count_directories(), 0);
+
+    let empty_dir = create_dir_entry("/repo/empty");
+    assert_eq!(empty_dir.count_entries(), 1);
+    assert_eq!(empty_dir.count_directories(), 1);
 }
 
 #[test]
