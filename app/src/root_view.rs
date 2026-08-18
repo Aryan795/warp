@@ -4304,9 +4304,13 @@ impl AuthOnboardingState {
 
     fn log_out(&mut self, window_team: WindowTeam, ctx: &mut ViewContext<RootView>) {
         match self {
-            AuthOnboardingState::Auth(_) => (),
+            AuthOnboardingState::Auth(workspace_args) => {
+                workspace_args.window_team = window_team;
+            }
             AuthOnboardingState::ConfirmIncomingAuth(workspace_args) => {
-                *self = AuthOnboardingState::Auth(workspace_args.clone());
+                let mut workspace_args = workspace_args.clone();
+                workspace_args.window_team = window_team;
+                *self = AuthOnboardingState::Auth(workspace_args);
                 ctx.emit(RootViewEvent::AuthOnboardingStateChanged);
             }
             #[cfg(target_family = "wasm")]
@@ -4316,7 +4320,9 @@ impl AuthOnboardingState {
             }
             AuthOnboardingState::NeedsSsoLink(needs_sso_link_mode) => match needs_sso_link_mode {
                 AuthOnboardingTarget::Workspace(args) => {
-                    *self = AuthOnboardingState::Auth(args.clone());
+                    let mut args = args.clone();
+                    args.window_team = window_team;
+                    *self = AuthOnboardingState::Auth(args);
                     ctx.emit(RootViewEvent::AuthOnboardingStateChanged);
                 }
                 AuthOnboardingTarget::Terminal(_) => {}
