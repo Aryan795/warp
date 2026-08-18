@@ -1150,3 +1150,60 @@ fn depth_four_descendants_park_and_drain_bottom_up() {
         });
     });
 }
+
+#[test]
+fn parked_duplicate_keeps_the_fresher_snapshot() {
+    // A run can go terminal while parked behind its unregistered parent; the
+    // dedupe must keep the FRESHER row, otherwise the drain registers the
+    // stale InProgress snapshot and — with materialization already
+    // requested — the poll never arms to correct the pill.
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    let _multi_level = FeatureFlag::MultiLevelOrchestration.override_enabled(true);
+    App::test((), |mut app| async move {
+        let fixture = setup(&mut app);
+        register_child(
+            &mut app,
+            &fixture,
+            task_with_parent_run(
+                GRANDCHILD_TASK_ID,
+                CHILD_A_TASK_ID,
+                AmbientAgentTaskState::InProgress,
+                "Nested worker",
+            ),
+        );
+        // A fresher snapshot for the same run arrives while still parked.
+        register_child(
+            &mut app,
+            &fixture,
+            task_with_parent_run(
+                GRANDCHILD_TASK_ID,
+                CHILD_A_TASK_ID,
+                AmbientAgentTaskState::Succeeded,
+                "Nested worker",
+            ),
+        );
+        fixture.model.read(&app, |model, _| {
+            let parked = model
+                .children_waiting_on_parent
+                .get(CHILD_A_TASK_ID)
+                .expect("still parked");
+            assert_eq!(parked.len(), 1, "duplicates dedupe to a single row");
+            assert_eq!(
+                parked[0].state,
+                AmbientAgentTaskState::Succeeded,
+                "the fresher snapshot must win"
+            );
+        });
+
+        register_child(&mut app, &fixture, queued_task(CHILD_A_TASK_ID, "Worker"));
+
+        let parked_state = read_child(&app, &fixture, GRANDCHILD_TASK_ID, |entry| {
+            entry.last_state.clone()
+        });
+        assert_eq!(
+            parked_state,
+            AmbientAgentTaskState::Succeeded,
+            "the drained registration must reflect the terminal state"
+        );
+    });
+}

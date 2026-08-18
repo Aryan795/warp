@@ -1678,6 +1678,10 @@ impl OrchestrationEventStreamer {
         if remaining == 0 {
             // Last viewer closed: tear down the ancestor SSE and drop any
             // descendants still parked against this entry's placeholder.
+            // With staggered multi-pane closes, entries parked against an
+            // earlier-departing consumer's placeholder linger until that
+            // conversation's own removal prunes them — benign, since a
+            // parked entry only acts when its family materializes.
             if let Some(connection) = entry.sse_connection.take() {
                 connection.abort_handle.abort();
             }

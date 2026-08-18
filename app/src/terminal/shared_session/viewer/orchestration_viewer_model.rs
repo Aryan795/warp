@@ -466,8 +466,14 @@ impl OrchestrationViewerModel {
                             .children_waiting_on_parent
                             .entry(parent.to_string())
                             .or_default();
-                        if !parked.iter().any(|parked| parked.task_id == task_id) {
-                            parked.push(task);
+                        // On duplicate arrival keep the FRESHER snapshot: a
+                        // run can go terminal while parked, and registering
+                        // the stale row later would pin its pill on the old
+                        // status (materialization suppresses the poll that
+                        // would otherwise correct it).
+                        match parked.iter_mut().find(|p| p.task_id == task_id) {
+                            Some(stale) => *stale = task,
+                            None => parked.push(task),
                         }
                         return;
                     }
