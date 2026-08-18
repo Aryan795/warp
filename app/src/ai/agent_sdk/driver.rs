@@ -4501,21 +4501,37 @@ fn build_secret_env_vars(
 /// A relative value there silently resolves to nothing once the agent cd's into
 /// a product repo, so we hand the shell an absolute value instead.
 ///
-/// Returns `None` when `WARP_SKILL_DIRS` is unset, empty, or contains only
-/// blank entries, leaving the variable untouched. Absolute entries pass through
-/// unchanged; relative entries are joined onto `working_dir`.
+/// Thin env-reading wrapper around [`absolute_skill_dirs`]; see it for the
+/// resolution and encoding rules.
 fn absolute_skill_dirs_env(working_dir: &Path) -> Option<OsString> {
-    let dirs = parse_skills_dirs_env();
+    absolute_skill_dirs(working_dir, parse_skills_dirs_env())
+}
+
+/// Resolve `dirs` (as parsed from `WARP_SKILL_DIRS`) against `working_dir` and
+/// re-encode them as a single comma-separated value for the agent's shell.
+///
+/// Returns `None` when `dirs` is empty (an unset, empty, or all-blank
+/// variable), leaving the variable untouched. Absolute entries pass through
+/// unchanged; relative entries are joined onto `working_dir`.
+///
+/// The value is assembled directly as an [`OsString`] from each path's raw
+/// [`OsStr`] bytes rather than via `to_string_lossy`: a `working_dir` that
+/// contains non-UTF-8 bytes (possible on Unix) would otherwise be corrupted
+/// with `U+FFFD` replacement characters, exporting paths that no longer name
+/// the real skill directories.
+fn absolute_skill_dirs(working_dir: &Path, dirs: Vec<PathBuf>) -> Option<OsString> {
     if dirs.is_empty() {
         return None;
     }
     let resolved = resolve_skills_dirs(working_dir, dirs);
-    let joined = resolved
-        .iter()
-        .map(|dir| dir.to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join(",");
-    Some(OsString::from(joined))
+    let mut joined = OsString::new();
+    for (i, dir) in resolved.iter().enumerate() {
+        if i > 0 {
+            joined.push(",");
+        }
+        joined.push(dir.as_os_str());
+    }
+    Some(joined)
 }
 
 /// The env-var names that any typed auth secret in `secrets` will populate.
