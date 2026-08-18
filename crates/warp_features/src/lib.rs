@@ -965,6 +965,9 @@ pub enum FeatureFlag {
     /// rather than only uploading a workspace snapshot once at end-of-run.
     /// Requires `OzHandoff` to also be enabled; a no-op for local runs and when
     /// `--no-snapshot` is set. Off by default while the coordinator rolls out.
+    /// Temporarily removed from `DOGFOOD_FLAGS` (i.e. off on all channels,
+    /// including dogfood) while a checkpoint-commit bug is being fixed; see
+    /// https://linear.app/warpdotdev/issue/REMOTE-2557. Re-add once fixed.
     PeriodicHandoffCheckpoints,
 
     /// Observes Ctrl-C (`0x03`) written on the shared-session viewer input
@@ -1050,7 +1053,8 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::McpJsonTreeView,
     FeatureFlag::BoxDrawingGlyphs,
     FeatureFlag::PricingTransparency,
-    FeatureFlag::PeriodicHandoffCheckpoints,
+    // PeriodicHandoffCheckpoints is temporarily removed while its checkpoint-commit
+    // bug is being fixed; see https://linear.app/warpdotdev/issue/REMOTE-2557.
     FeatureFlag::CtrlCCancelsThirdPartyHarness,
 ];
 
