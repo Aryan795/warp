@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use markdown_parser::{FormattedTextStyles, Hyperlink};
@@ -924,6 +925,93 @@ fn test_multiselect_autoscroll_bounding_box() {
             1500.0.into_pixels(),
         ),
         (vec2f(200., 500.), vec2f(300., 1200.))
+    );
+}
+
+/// A temporary block, the kind `reset_temporary_block` drops and re-inserts.
+fn temporary_block() -> BlockItem {
+    BlockItem::TemporaryBlock {
+        paragraph_block: ParagraphBlock::new(vec1![layout_paragraph(
+            "\n",
+            &TEST_STYLES,
+            &BufferBlockStyle::PlainText,
+            80.
+        )]),
+        text_decoration: Vec::new(),
+        decoration: None,
+    }
+}
+
+/// Labels the item kinds in tree order, so a test can pin the interleaving.
+fn item_kinds(render_state: &RenderState) -> Vec<&'static str> {
+    render_state
+        .content()
+        .block_items()
+        .map(|item| match item {
+            BlockItem::TemporaryBlock { .. } => "temporary",
+            BlockItem::Paragraph(_) => "paragraph",
+            BlockItem::TrailingNewLine(_) => "trailing_newline",
+            _ => "other",
+        })
+        .collect()
+}
+
+#[test]
+fn reset_temporary_block_packs_the_rebuilt_tree() {
+    let mut render_state =
+        RenderState::new_for_test(TEST_STYLES.clone(), 40.0.into_pixels(), 60.0.into_pixels());
+
+    // Built with per-item pushes, so the tree going in is as unpacked as the old rebuild left it.
+    let mut content = SumTree::new();
+    for _ in 0..200 {
+        content.push(mock_paragraph(18.2, 0., 5));
+    }
+    render_state.set_content(content);
+
+    // No temporary blocks: this is the rebuild on its own.
+    render_state.reset_temporary_block(HashMap::new());
+
+    let stats = render_state.content.borrow().node_stats();
+    assert!(
+        stats.items >= stats.leaves * (stats.slots_per_leaf - 1),
+        "rebuilt tree should fill its leaves, got {stats:?}"
+    );
+}
+
+#[test]
+fn reset_temporary_block_keeps_interleaved_order() {
+    let mut render_state =
+        RenderState::new_for_test(TEST_STYLES.clone(), 40.0.into_pixels(), 60.0.into_pixels());
+
+    // One line per paragraph, and temporary blocks contribute no lines, so the line position at
+    // the end of each paragraph is its 1-based index.
+    let mut content = SumTree::new();
+    content.push(mock_paragraph(18.2, 0., 5));
+    // A stale temporary block, which the rebuild drops.
+    content.push(temporary_block());
+    content.push(mock_paragraph(18.2, 0., 6));
+    content.push(mock_paragraph(18.2, 0., 7));
+    render_state.set_content(content);
+
+    // Insert at the start, in the middle and at the end, which is where an off-by-one in the
+    // batched collection would show up.
+    let mut blocks = HashMap::new();
+    blocks.insert(LineCount::zero(), vec![temporary_block()]);
+    blocks.insert(LineCount(2), vec![temporary_block()]);
+    blocks.insert(LineCount(3), vec![temporary_block()]);
+    render_state.reset_temporary_block(blocks);
+
+    assert_eq!(
+        item_kinds(&render_state),
+        vec![
+            "temporary",
+            "paragraph",
+            "paragraph",
+            "temporary",
+            "paragraph",
+            "temporary",
+            "trailing_newline",
+        ]
     );
 }
 
