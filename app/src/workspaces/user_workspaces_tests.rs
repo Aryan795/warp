@@ -136,6 +136,17 @@ fn initialize_app_with_auth(
         team_tester.initiate_data_pollers(false, ctx);
     });
 }
+fn initialize_window_team_test_app(app: &mut App, workspaces: Vec<Workspace>) {
+    app.add_singleton_model(PrivacySettings::mock);
+    app.add_singleton_model(|ctx| {
+        UserWorkspaces::mock(
+            Arc::new(MockTeamClient::new()),
+            Arc::new(MockWorkspaceClient::new()),
+            workspaces,
+            ctx,
+        )
+    });
+}
 
 fn register_ai_usage_model(app: &mut App) {
     app.add_singleton_model(|_| ServerApiProvider::new_for_test());
