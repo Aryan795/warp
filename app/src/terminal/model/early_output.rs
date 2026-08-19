@@ -364,12 +364,12 @@ impl ansi::Handler for EarlyOutputHandler<'_> {
         }
         let session_id = self.block_list.active_block().session_id();
         if !self.inner().handle_potential_typeahead(c) {
+            let expected_echo = format!("{:?}", self.inner().expected_echo);
+            let unmatched_input = format!("{:?}", self.inner().unmatched_input);
+            let mode = format!("{:?}", self.inner().mode);
+            let active_block_started = self.block_list.active_block().started();
             log::debug!(
-                "PHANTOM_DIAG input({c:?}): fell through to background output (expected_echo_remaining={:?}, unmatched_input_remaining={:?}, mode={:?}, active_block_started={})",
-                self.inner().expected_echo,
-                self.inner().unmatched_input,
-                self.inner().mode,
-                self.block_list.active_block().started()
+                "PHANTOM_DIAG input({c:?}): fell through to background output (expected_echo_remaining={expected_echo}, unmatched_input_remaining={unmatched_input}, mode={mode}, active_block_started={active_block_started})"
             );
             self.with_background_output(|block| {
                 // We don't start background blocks until they have content because
