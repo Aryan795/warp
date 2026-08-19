@@ -67,8 +67,14 @@ pub struct EarlyOutput {
     /// Every position in `expected_echo` that could currently be "next" to match, given
     /// everything matched so far. Matched characters are never removed from `expected_echo`
     /// itself: a line editor's redraw can re-echo the same restored buffer an arbitrary number
-    /// of times per restore, using more than one way of rewinding the cursor to do it. Two
-    /// rewind shapes are handled, both measured against real sessions:
+    /// of times per restore, using more than one way of moving the cursor to do it. Which way a
+    /// given session uses is not incidental: with Warp drawing the prompt, the restored line
+    /// starts at column 0, so ZLE can rewind with a plain carriage return; with
+    /// `terminal.input.honor_ps1 = true` (the shell draws its own prompt), the line no longer
+    /// starts at column 0, so ZLE switches its rewind onto *relative* motion -- a backspace or
+    /// CUB -- instead. So `honor_ps1` is the switch between the two rewind mechanisms below,
+    /// not just a detail of one particular measured session. Four motions are handled, all
+    /// measured against real sessions:
     /// - A carriage return -- measured as either a restart of the whole line from the
     ///   beginning, or a brief mid-line return-to-column-0 that continues the same line from
     ///   wherever it left off, rather than restarting. Since it isn't known in advance which of
@@ -79,24 +85,33 @@ pub struct EarlyOutput {
     ///   (always 1 for a backspace; the escape sequence's own parameter for CUB) --
     ///   `rearm_after_rewind` shifts every existing candidate back by that exact distance and
     ///   adds the result, again without discarding the originals, since whether a redraw
-    ///   actually follows is also not known in advance. This is what a trailing-fragment-only
-    ///   redraw (e.g. re-echoing just the line's last character after a full match) turned out
-    ///   to be in every measured case: a full match leaves a candidate at the pattern's length,
-    ///   a backspace or CUB shifts it back by the rewind distance, and the fragment resolves
-    ///   from there. A wider rule that seeded every position on a carriage return to cover this
-    ///   same shape was tried and reverted once the measured cause turned out to be a rewind
-    ///   with a known distance rather than an ambiguous one -- keep the rearm rules scoped to
-    ///   what's actually been measured rather than to what would also happen to work.
-    /// Either way, each subsequent character then advances every candidate whose next expected
-    /// character matches it (dropping the rest) -- so a character counts as expected echo if
-    /// *any* live candidate predicts it, however many candidates that turns out to be. This is
-    /// scoped to the restore window regardless of rewind shape (nothing populates
-    /// `expected_echo` outside of `push_expected_echo`, each restore replaces it outright rather
-    /// than accumulating across restores, and `reset_expected_echo` clears it when a real
-    /// command starts so a stale pattern can't outlive the request it belonged to). Rewinds
-    /// other than these two -- e.g. an absolute cursor move, or other column-addressing escape
-    /// sequences -- are not handled; a redraw shape using one of those would need the same
-    /// treatment as backspace/CUB here.
+    ///   actually follows is also not known in advance.
+    /// - CUF (`move_forward`), the forward counterpart, also with a known distance from the
+    ///   escape sequence -- `advance_after_forward_move` shifts every existing candidate
+    ///   forward by that distance and adds the result. Unlike a rewind, a forward move isn't
+    ///   ambiguous about whether a redraw follows: the terminal is asserting the columns it
+    ///   just skipped over already hold the correct content, so every live candidate's
+    ///   position genuinely advances. Without this, a candidate left stranded at its pre-move
+    ///   position after a CUF would still correctly match nothing further until something
+    ///   arrives, but would mismatch (and leak) if that something turns out to be a
+    ///   continuation of the pattern past what the CUF skipped over.
+    /// A trailing-fragment-only redraw (e.g. re-echoing just the line's last character after a
+    /// full match) turned out, in every measured case, to be a full match leaving a candidate
+    /// at the pattern's length, followed by a backspace or CUB shifting it back by the rewind
+    /// distance, not an ambiguous carriage return. A wider rule that seeded every position on a
+    /// carriage return to cover this same shape was tried and reverted once the measured cause
+    /// turned out to be a rewind with a known distance -- keep the rearm rules scoped to what's
+    /// actually been measured rather than to what would also happen to work.
+    /// Every rearm/advance method here follows the same shape: each subsequent character
+    /// advances every candidate whose next expected character matches it (dropping the rest) --
+    /// so a character counts as expected echo if *any* live candidate predicts it, however many
+    /// candidates that turns out to be. This is scoped to the restore window regardless of
+    /// motion (nothing populates `expected_echo` outside of `push_expected_echo`, each restore
+    /// replaces it outright rather than accumulating across restores, and `reset_expected_echo`
+    /// clears it when a real command starts so a stale pattern can't outlive the request it
+    /// belonged to). Cursor motions other than these four -- e.g. absolute column addressing
+    /// (`\x1b[<n>G`, `\x1b[<n>;<m>H`) -- are not handled; a redraw shape using one of those
+    /// would need the same treatment as the four above.
     expected_echo_positions: BTreeSet<usize>,
     /// Whether the last potential typeahead character received on the PTY was a
     /// carriage return. We can't rely on the last character of `typeahead` for
@@ -262,6 +277,27 @@ impl EarlyOutput {
             .filter_map(|&position| position.checked_sub(distance))
             .collect();
         self.expected_echo_positions.extend(rewound);
+    }
+
+    /// Shifts every currently-live candidate position forward by `distance` and adds the
+    /// result to the set of live candidates, without discarding the originals. Called on CUF
+    /// (`move_forward`) with the column count from the escape sequence. Unlike a rewind, where
+    /// a redraw of the skipped-over content may or may not follow, a forward move is not
+    /// ambiguous: the terminal is asserting that the columns it just skipped over already hold
+    /// the correct content (moving over content without redrawing it would otherwise leave
+    /// wrong content on screen), so every live candidate's logical position genuinely advances
+    /// by `distance`. Measured case: a syntax-highlighting recolour pass that ends with a CUF
+    /// skipping over an unchanged trailing fragment of the line, after which a live candidate
+    /// left at its pre-move position would be stranded -- correctly matching nothing further
+    /// until whatever comes after the skipped fragment arrives, and mismatching (and leaking)
+    /// if that turns out to be a continuation of the pattern rather than something new.
+    fn advance_after_forward_move(&mut self, distance: usize) {
+        let advanced: BTreeSet<usize> = self
+            .expected_echo_positions
+            .iter()
+            .map(|&position| position + distance)
+            .collect();
+        self.expected_echo_positions.extend(advanced);
     }
 
     /// Check a character received on the PTY, which may be typeahead or
@@ -536,6 +572,13 @@ impl ansi::Handler for EarlyOutputHandler<'_> {
         delegate!(self.move_backward(columns));
     }
 
+    fn move_forward(&mut self, columns: usize) {
+        // CUF: the forward counterpart to move_backward/backspace. See
+        // `advance_after_forward_move`.
+        self.inner().advance_after_forward_move(columns);
+        delegate!(self.move_forward(columns));
+    }
+
     fn linefeed(&mut self) -> ScrollDelta {
         if self.inner().consume_expected_echo('\n') {
             return ScrollDelta::zero();
@@ -657,10 +700,6 @@ impl ansi::Handler for EarlyOutputHandler<'_> {
 
     fn device_status<W: std::io::Write>(&mut self, writer: &mut W, arg: usize) {
         delegate!(self.device_status(writer, arg));
-    }
-
-    fn move_forward(&mut self, columns: usize) {
-        delegate!(self.move_forward(columns));
     }
 
     fn move_down_and_cr(&mut self, rows: usize) {

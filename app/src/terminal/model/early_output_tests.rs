@@ -370,12 +370,65 @@ fn test_push_expected_echo_survives_a_cub_rewind_after_a_full_match() {
 }
 
 #[test]
+fn test_push_expected_echo_survives_a_cuf_advance_leaving_a_trailing_fragment() {
+    // Reproduces the measured redraw with `terminal.input.honor_ps1 = false` (Warp draws the
+    // prompt, so the restored line starts at column 0 and the rewind is a plain carriage
+    // return rather than a backspace/CUB): after a full match, a syntax-highlighting recolour
+    // pass rewinds with a carriage return, re-echoes just the 8-character command word
+    // ("starship"), then skips forward over the unchanged argument with a CUF (`\x1b[<n>C`)
+    // rather than re-echoing it. Without handling the CUF, the sole live candidate is left
+    // stranded at position 8 (right after the recoloured word) instead of advancing past what
+    // the CUF skipped over, which mismatches -- and leaks -- whatever arrives next. Uses a
+    // longer buffer than the exactly-measured "starship pr" (where the CUF happens to land
+    // exactly at the pattern's end) so the CUF instead lands mid-pattern, leaving a genuine
+    // trailing fragment to demonstrate the fix against.
+    let mut block_list = new_block_list(
+        ChannelEventListener::new_for_test(),
+        TypeaheadMode::ShellReported,
+    );
+
+    block_list
+        .early_output_mut()
+        .push_expected_echo("starship prompt");
+
+    for ch in "starship prompt".chars() {
+        block_list.input(ch);
+    }
+
+    block_list.carriage_return();
+    // Recolour just the 8-character command word.
+    for ch in "starship".chars() {
+        block_list.input(ch);
+    }
+    // Skip forward over the unchanged " pr" (3 columns) without re-echoing it.
+    block_list.move_forward(3);
+    // The rest of the line, starting right where the CUF left off.
+    for ch in "ompt".chars() {
+        block_list.input(ch);
+    }
+    block_list.on_finish_byte_processing(&ansi::ProcessorInput::new(&[]));
+
+    assert!(
+        block_list.background_block_mut().is_none(),
+        "a CUF-based forward skip followed by the rest of the line must not leak"
+    );
+}
+
+#[test]
 fn test_starting_a_real_command_clears_a_stale_expected_echo_registration() {
     // Without a clear on the transition that starts a real command, a pattern left over from
-    // the last restore -- plus the fact that a carriage return rearms every position in it --
-    // would otherwise persist indefinitely across every later command's own carriage returns,
-    // risking silently swallowing a character of that command's own, completely unrelated
-    // output if it happened to match something in the stale pattern.
+    // the last restore would otherwise persist indefinitely across every later command's own
+    // carriage returns/backspaces/CUB/CUF, risking silently swallowing a character of that
+    // command's own, completely unrelated output if it happened to match something in the
+    // stale pattern.
+    //
+    // Asserts on `expected_echo`/`expected_echo_positions` directly rather than inferring the
+    // reset from block routing: once `start_active_block` runs, the active block is
+    // `started()`, and `BlockList`'s own dispatch routes all further input straight to it,
+    // bypassing `EarlyOutputHandler` -- and therefore `consume_expected_echo` -- entirely. So a
+    // character fed in after `start_active_block` can never land in a background block
+    // regardless of whether the stale pattern was cleared, making that outcome unobservable
+    // and not what this test is meant to pin down.
     let mut block_list = new_block_list(
         ChannelEventListener::new_for_test(),
         TypeaheadMode::ShellReported,
@@ -393,19 +446,16 @@ fn test_starting_a_real_command_clears_a_stale_expected_echo_registration() {
     // clear the stale registration.
     block_list.start_active_block();
 
-    // A later carriage return (e.g. the command's own submission) must not rearm the stale
-    // pattern: a character that would have matched it ("s", the pattern's first character)
-    // must be treated as real, unrelated output rather than silently dropped.
-    block_list.carriage_return();
-    block_list.input('s');
-    block_list.on_finish_byte_processing(&ansi::ProcessorInput::new(&[]));
-
-    assert_eq!(
+    assert!(
+        block_list.early_output_mut().expected_echo.is_empty(),
+        "starting a real command must clear the registered text"
+    );
+    assert!(
         block_list
-            .background_block_mut()
-            .expect("the character must be treated as real output, not silently swallowed")
-            .output_to_string(),
-        "s"
+            .early_output_mut()
+            .expected_echo_positions
+            .is_empty(),
+        "starting a real command must clear the live candidate positions"
     );
 }
 
