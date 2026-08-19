@@ -142,27 +142,31 @@ $null = New-Module -Name Warp-Module -ScriptBlock {
         (Get-Variable | Select-Object -ExpandProperty Name) -join ' '
         $aliasesRaw = Get-Command -CommandType Alias | Select-Object -ExpandProperty DisplayName
         $aliases = $aliasesRaw -join [Environment]::NewLine
-        # Only query modules that ship with PowerShell itself. This keeps bootstrap fast by
-        # avoiding Windows system modules and third-party modules from the Gallery. The rest are
-        # loaded asynchronously later.
+        # Only query modules that ship with PowerShell itself and that are actually relevant to
+        # initial completions. This keeps bootstrap fast by avoiding Windows system modules and
+        # third-party modules from the Gallery. The rest are loaded asynchronously later.
         $corePsModules = @(
             'Microsoft.PowerShell.*', # All built-in PS modules (cross-platform)
-            'Microsoft.WSMan.*', # WS-Management (Windows PS)
-            'CimCmdlets', # CIM/WMI (Windows)
-            'PackageManagement', # Package management
-            'PowerShellGet', # Package get
             'PSReadLine', # Line editor bundled with PS
             'ThreadJob', # Thread jobs (PS 7)
-            'PSDiagnostics', # PS diagnostics
-            'PSDesiredStateConfiguration', # DSC (Windows PS)
-            'PSWorkflow', # Legacy workflow (Windows PS 5)
-            'PSWorkflowUtility'        # Legacy workflow utility (Windows PS 5)
+            'PSDiagnostics'        # PS diagnostics
         )
-        $functionNamesRaw = Get-Command -CommandType Function -Module $corePsModules |
-            Where-Object { -not $_.Name.StartsWith('Warp') } |
-            Select-Object -ExpandProperty Name
+        # PSModuleAutoLoadingPreference governs on-demand autoloading of modules named by a
+        # command that hasn't been imported yet. Get-Command -Module can trigger that autoloading
+        # while it resolves which commands belong to $corePsModules, which has caused this
+        # inventory query itself to hang for minutes when a large module (e.g. AWS.Tools) is on
+        # the module path. Disable autoloading for the duration of the query.
+        $previousModuleAutoLoadingPreference = $PSModuleAutoLoadingPreference
+        $PSModuleAutoLoadingPreference = 'None'
+        try {
+            $functionNamesRaw = Get-Command -CommandType Function -Module $corePsModules |
+                Where-Object { -not $_.Name.StartsWith('Warp') } |
+                Select-Object -ExpandProperty Name
+            $builtinsRaw = Get-Command -CommandType Cmdlet -Module $corePsModules | Select-Object -ExpandProperty Name
+        } finally {
+            $PSModuleAutoLoadingPreference = $previousModuleAutoLoadingPreference
+        }
         $functionNames = $functionNamesRaw -join [Environment]::NewLine
-        $builtinsRaw = Get-Command -CommandType Cmdlet -Module $corePsModules | Select-Object -ExpandProperty Name
         $builtins = $builtinsRaw -join [Environment]::NewLine
         $shellVersion = $PSVersionTable.PSVersion.ToString()
         # PowerShell wasn't cross-platform until version 6. Anything before that is definitely on Windows.
@@ -624,27 +628,53 @@ $null = New-Module -Name Warp-Module -ScriptBlock {
     $script:threadInner = @{}
     $script:threadOuter = @{}
 
-    # The inner runspace pool maintains a pool of runspaces that can execute
-    # arbitrary commands against the user's current environment without
-    # writing to the screen. Initialize to minimum of 10 runspaces
-    # to handle double the number of context chips we currently have
-    # that use in-band commands
-    $script:innerRunspacePool = [runspacefactory]::CreateRunspacePool(10, 20)
-    $script:innerRunspacePool.ApartmentState = [System.Threading.ApartmentState]::STA
-    $script:innerRunspacePool.ThreadOptions = 'ReuseThread'
-    $script:innerRunspacePool.Open() | Out-Null
+    # The inner and outer runspace pools (see Warp-Ensure-RunspacePool below) are only needed
+    # once an in-band generator command actually runs, so they are created lazily on first use
+    # rather than during module load, which happens before profiles are sourced and before
+    # Bootstrapped is emitted.
+    $script:innerRunspacePool = $null
+    $script:outerRunspacePool = $null
+    $script:runspacePoolInitLock = [System.Object]::new()
 
-    # The outer runspace pool maintains a pool of runspaces that
-    # share the same host as the user's session. This allows them
-    # to send OSC commands via Write-Host. These outer runspaces
-    # handle receiving results from the inner runspaces and formatting
-    # those results into OSCs.
-    # Initialized to minimum of 5 runspaces since we currently do not
-    # run more than one outer command at a time.
-    $script:outerRunspacePool = [runspacefactory]::CreateRunspacePool(5, 10, $Host)
-    $script:outerRunspacePool.ApartmentState = [System.Threading.ApartmentState]::STA
-    $script:outerRunspacePool.ThreadOptions = 'ReuseThread'
-    $script:outerRunspacePool.Open() | Out-Null
+    # Creates and opens the inner/outer runspace pools on first call; subsequent calls are
+    # no-ops. Always takes the lock rather than checking the pools outside of it, so that two
+    # generator commands racing to initialize on their first call can't observe one pool
+    # created and the other not yet assigned.
+    function Warp-Ensure-RunspacePool {
+        [System.Threading.Monitor]::Enter($script:runspacePoolInitLock)
+        try {
+            if ($null -ne $script:innerRunspacePool) {
+                return
+            }
+
+            # The inner runspace pool maintains a pool of runspaces that can execute
+            # arbitrary commands against the user's current environment without
+            # writing to the screen. Initialize to minimum of 10 runspaces
+            # to handle double the number of context chips we currently have
+            # that use in-band commands
+            $innerPool = [runspacefactory]::CreateRunspacePool(10, 20)
+            $innerPool.ApartmentState = [System.Threading.ApartmentState]::STA
+            $innerPool.ThreadOptions = 'ReuseThread'
+            $innerPool.Open() | Out-Null
+
+            # The outer runspace pool maintains a pool of runspaces that
+            # share the same host as the user's session. This allows them
+            # to send OSC commands via Write-Host. These outer runspaces
+            # handle receiving results from the inner runspaces and formatting
+            # those results into OSCs.
+            # Initialized to minimum of 5 runspaces since we currently do not
+            # run more than one outer command at a time.
+            $outerPool = [runspacefactory]::CreateRunspacePool(5, 10, $Host)
+            $outerPool.ApartmentState = [System.Threading.ApartmentState]::STA
+            $outerPool.ThreadOptions = 'ReuseThread'
+            $outerPool.Open() | Out-Null
+
+            $script:innerRunspacePool = $innerPool
+            $script:outerRunspacePool = $outerPool
+        } finally {
+            [System.Threading.Monitor]::Exit($script:runspacePoolInitLock)
+        }
+    }
 
     class WarpGeneratorCommand {
         [string]$CommandId
@@ -655,6 +685,8 @@ $null = New-Module -Name Warp-Module -ScriptBlock {
         param(
             [WarpGeneratorCommand[]]$commands
         )
+
+        Warp-Ensure-RunspacePool
 
         $jobNumber = $script:inBandCommandCount++
 
@@ -956,6 +988,12 @@ $null = New-Module -Name Warp-Module -ScriptBlock {
 
     function Warp-Finish-Bootstrap {
         param([decimal]$rcStartTime, [decimal]$rcEndTime)
+        # Emit Bootstrapped first. Nothing below can run before this function returns and the
+        # outer sourcing block finishes (PowerShell does not read user input while a script is
+        # still executing), so moving the remaining setup after this emit does not risk the host
+        # accepting input before that setup is in place.
+        Warp-Bootstrapped -rcStartTime $rcStartTime -rcEndTime $rcEndTime
+
         # This is the closest we can get in PowerShell to a proper preexec hook. We wrap the
         # invocation of PSConsoleHostReadline, and call our preexec hook before returning the
         # returned value. This allows us to preserve the any custom implementations of
@@ -990,7 +1028,6 @@ $null = New-Module -Name Warp-Module -ScriptBlock {
         # This sets up our wrapper around $function:prompt, which runs the precmd hook
         # and computes the user's custom prompt.
         $function:global:prompt = (Get-Command Warp-Prompt).ScriptBlock
-        Warp-Bootstrapped -rcStartTime $rcStartTime -rcEndTime $rcEndTime
     }
 
     ###########################################################
@@ -1033,11 +1070,12 @@ $null = New-Module -Name Warp-Module -ScriptBlock {
     # whole screen to clear on every command execution. It is implemented by overwriting the Enter
     # and ctrl-c key handlers. Resetting those back to default effectively disables it.
     # TODO(CORE-3234) - Find a workaround which allows transient prompt to work.
-    $enterHandler = Get-PSReadLineKeyHandler | Where-Object -Property Key -EQ -Value 'Enter'
+    $psReadLineKeyHandlers = Get-PSReadLineKeyHandler
+    $enterHandler = $psReadLineKeyHandlers | Where-Object -Property Key -EQ -Value 'Enter'
     if ($enterHandler -ne $null -and $enterHandler.Function -eq 'OhMyPoshEnterKeyHandler') {
         Set-PSReadLineKeyHandler -Chord Enter -Function AcceptLine
     }
-    $ctrlcHandler = Get-PSReadLineKeyHandler | Where-Object -Property Key -EQ -Value 'Control+c'
+    $ctrlcHandler = $psReadLineKeyHandlers | Where-Object -Property Key -EQ -Value 'Control+c'
     if ($ctrlcHandler -ne $null -and $ctrlcHandler.Function -eq 'OhMyPoshCtrlCKeyHandler') {
         Set-PSReadLineKeyHandler -Chord 'Control+c' -Function CopyOrCancelLine
     }
@@ -1049,7 +1087,7 @@ $null = New-Module -Name Warp-Module -ScriptBlock {
     $global:_warpOriginalPrompt = $function:global:prompt
 
     Warp-Finish-Bootstrap -rcStartTime $rcStartTime -rcEndTime $rcEndTime
-    Remove-Variable -Name enterHandler, ctrlcHandler, rcStartTime, rcEndTime -Scope global -ErrorAction Ignore
+    Remove-Variable -Name psReadLineKeyHandlers, enterHandler, ctrlcHandler, rcStartTime, rcEndTime -Scope global -ErrorAction Ignore
 
     # Restore the process's original execution policy now that the user's RC files have been loaded.
     if ($global:_warp_PSProcessExecPolicy -ne $null) {
