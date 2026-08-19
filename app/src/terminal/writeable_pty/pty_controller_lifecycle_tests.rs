@@ -191,11 +191,11 @@ fn native_shell_completions_reports_no_matches_without_an_active_session() {
             controller.run_native_shell_completions("git ch".to_owned(), results_tx, ctx);
         });
 
-        assert_eq!(
+        assert!(
             results_rx
                 .try_recv()
-                .expect("should immediately receive empty results"),
-            Vec::new()
+                .expect("should immediately receive empty results")
+                .is_empty()
         );
         controller.read(&app, |controller, _| {
             assert!(controller.pending_writes.is_empty());
