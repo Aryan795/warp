@@ -200,10 +200,11 @@ function warp_run_generator_command_native_completions
     end
 
     printf '\e]9280;A;incrementally_typed\a'
-    # An empty line (the input editor was empty when the request fired) has no useful
-    # completions, and `complete -C ""` would otherwise list every command on $PATH
-    # synchronously in the user's own shell.
-    if test -n "$line"
+    # An empty or whitespace-only line (the input editor was empty, or held only spaces, when
+    # the request fired) has no useful completions, and `complete -C "<whitespace>"` would
+    # otherwise list every command on $PATH synchronously in the user's own shell -- trim
+    # before checking so a whitespace-only line is caught the same as a truly empty one.
+    if test -n "$(string trim -- "$line")"
         # `complete -C "<line>"` computes completions for an arbitrary line -- the same
         # entry point already used elsewhere in Warp's bootstrap for executable discovery --
         # returning one "match\tdescription" pair per line.
