@@ -632,6 +632,15 @@ if [[ -z $WARP_BOOTSTRAPPED ]]; then
     # set the WARP_DISABLE_AUTO_TITLE flag.
     [[ "${WARP_DISABLE_AUTO_TITLE:-}" != true ]] || return
 
+    # This hook is registered before the user's RC files are sourced (so it runs before
+    # `warp_preexec`, which is registered after them), so it fires for every command
+    # including generator commands -- `_WARP_GENERATOR_COMMAND` isn't set yet at this point
+    # (that happens inside the generator function itself, which hasn't started running),
+    # so check the command text directly, the same way `warp_preexec`/`_warp_zshaddhistory`
+    # already do via `_is_warp_generator_command`. Without this, a native-completions
+    # request briefly sets the tab title to "warp_run_generator_comma...".
+    _is_warp_generator_command "$1" || return
+
     emulate -L zsh
     setopt extended_glob
 
@@ -1590,11 +1599,16 @@ esac
 
     # Restore zle-line-init to exactly what it was before, immediately -- this must happen
     # even if nothing above ran as expected, so a later real prompt read never sees our
-    # capture widget instead of the user's.
+    # capture widget instead of the user's. Check existence before the plain `zle -D
+    # zle-line-init` case (unlike `zle -A ... zle-line-init` above, which creates its target
+    # if missing): whatever fired while we owned the widget can leave it already gone by the
+    # time we get here (e.g. a chained hook that itself calls `add-zle-hook-widget` and so
+    # rebinds zle-line-init to its own dispatcher), and deleting a widget that doesn't exist
+    # is a zsh error ("No such widget `zle-line-init'"), not a no-op.
     if (( ${+widgets[_warp_saved_zle_line_init]} )); then
       zle -A _warp_saved_zle_line_init zle-line-init
       zle -D _warp_saved_zle_line_init
-    else
+    elif (( ${+widgets[zle-line-init]} )); then
       zle -D zle-line-init
     fi
 
