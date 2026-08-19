@@ -176,10 +176,9 @@ mod conversation_usage_conversion {
         let info = ConversationUsageInfo::from(&gql);
 
         assert_eq!(info.charged_usage, None);
-      
-     }
+    }
 }
-  
+
 mod pending_email_invites_conversion {
     use warp_graphql::workspace::EmailInvite as GqlEmailInvite;
 
