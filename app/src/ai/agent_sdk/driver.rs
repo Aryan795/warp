@@ -381,6 +381,10 @@ fn idle_window_for_terminal_status(
         | SDKConversationOutputStatus::Blocked { .. }
         | SDKConversationOutputStatus::Cancelled { .. } => idle_on_complete,
         SDKConversationOutputStatus::Error { .. } => idle_on_fail,
+        // Hibernation is the point: never hold the sandbox open for a
+        // follow-up window after the first no-event wait timeout.
+        SDKConversationOutputStatus::YieldedForEvents
+        | SDKConversationOutputStatus::YieldedForEventsCheckpointFailed => None,
     }
 }
 
@@ -410,6 +414,10 @@ fn terminal_status_log_outcome(status: &SDKConversationOutputStatus) -> &'static
         | SDKConversationOutputStatus::Blocked { .. }
         | SDKConversationOutputStatus::Cancelled { .. } => "non_error_completion",
         SDKConversationOutputStatus::Error { .. } => "error",
+        SDKConversationOutputStatus::YieldedForEvents => "yielded_for_events",
+        SDKConversationOutputStatus::YieldedForEventsCheckpointFailed => {
+            "yielded_for_events_checkpoint_failed"
+        }
     }
 }
 
@@ -596,15 +604,31 @@ pub struct AgentDriver {
 #[derive(Clone)]
 pub(crate) enum SDKConversationOutputStatus {
     Success,
-    Error { error: RenderableAIError },
-    Cancelled { reason: CancellationReason },
-    Blocked { blocked_action: String },
+    Error {
+        error: RenderableAIError,
+    },
+    Cancelled {
+        reason: CancellationReason,
+    },
+    Blocked {
+        blocked_action: String,
+    },
+    /// A `wait_for_events` warm wait window expired with no inbound event.
+    /// The execution ends cleanly without another model turn; server
+    /// finalization projects the durable BLOCKED task state from the
+    /// yield marker persisted on the closed tool call.
+    YieldedForEvents,
+    /// Same trigger as `YieldedForEvents`, but the final checkpoint upload
+    /// failed. Reported as an execution error rather than a clean yield,
+    /// since resumability from the checkpoint isn't proven.
+    YieldedForEventsCheckpointFailed,
 }
 
 impl SDKConversationOutputStatus {
     pub fn into_result(self) -> Result<(), AgentDriverError> {
         match self {
-            SDKConversationOutputStatus::Success => Ok(()),
+            SDKConversationOutputStatus::Success
+            | SDKConversationOutputStatus::YieldedForEvents => Ok(()),
             SDKConversationOutputStatus::Error { error } => {
                 Err(AgentDriverError::ConversationError { error })
             }
@@ -614,6 +638,9 @@ impl SDKConversationOutputStatus {
             }
             SDKConversationOutputStatus::Blocked { blocked_action } => {
                 Err(AgentDriverError::ConversationBlocked { blocked_action })
+            }
+            SDKConversationOutputStatus::YieldedForEventsCheckpointFailed => {
+                Err(AgentDriverError::WaitForEventsCheckpointFailed)
             }
         }
     }
@@ -795,6 +822,14 @@ pub enum AgentDriverError {
          maximum agent runtime and cannot be configured per run."
     )]
     SandboxDeadlineReached,
+    /// The final checkpoint upload failed after a `wait_for_events` warm
+    /// wait window expired. Reported as an error rather than a clean
+    /// yield because resumability from the checkpoint isn't proven.
+    #[error(
+        "Failed to upload the resumable checkpoint after the wait_for_events warm wait window \
+         expired."
+    )]
+    WaitForEventsCheckpointFailed,
 }
 
 impl ErrorExt for AgentDriverError {
@@ -1292,7 +1327,7 @@ impl AgentDriver {
                          (reason={actual_reason:?}): {finalization_result:?}"
                     );
                 }
-                Self::run_snapshot_upload(&foreground).await;
+                let _ = Self::run_snapshot_upload(&foreground).await;
 
                 if tx.send(result).is_err() {
                     report_error!("Caller did not wait for agent driver to finish");
@@ -4023,6 +4058,40 @@ impl AgentDriver {
                     // Continuing an existing conversation should reset the idle timer.
                     run_exit.cancel_idle_timeout();
                 }
+                BlocklistAIHistoryEvent::WaitForEventsYielded {
+                    terminal_surface_id: event_tid,
+                    ..
+                } => {
+                    if *event_tid != terminal_id {
+                        return;
+                    }
+                    // The warm wait window closed with no inbound event. Upload the
+                    // final checkpoint before ending the run — without an idle
+                    // window, since a later event starts a fresh execution rather
+                    // than extending this one — so the resumed execution has a
+                    // history containing the closed wait call and its empty result.
+                    log::info!(
+                        "Ambient agent idle lifecycle: event=checkpoint_upload_started task_id={:?} terminal_view_id={terminal_id:?} outcome=yielded_for_events",
+                        me.task_id
+                    );
+                    let checkpoint_run_exit = run_exit.clone();
+                    let checkpoint_task_id = me.task_id;
+                    let checkpoint_foreground = ctx.spawner();
+                    ctx.spawn(
+                        async move { Self::run_snapshot_upload(&checkpoint_foreground).await },
+                        move |_me, checkpoint_succeeded, _ctx| {
+                            log::info!(
+                                "Ambient agent idle lifecycle: event=run_completion_immediate task_id={checkpoint_task_id:?} terminal_view_id={terminal_id:?} outcome=yielded_for_events checkpoint_succeeded={checkpoint_succeeded}"
+                            );
+                            let status = if checkpoint_succeeded {
+                                SDKConversationOutputStatus::YieldedForEvents
+                            } else {
+                                SDKConversationOutputStatus::YieldedForEventsCheckpointFailed
+                            };
+                            checkpoint_run_exit.complete_with_optional_idle(None, status);
+                        },
+                    );
+                }
                 BlocklistAIHistoryEvent::StartedNewConversation { .. }
                 | BlocklistAIHistoryEvent::ReassignedExchange { .. }
                 | BlocklistAIHistoryEvent::ClearedConversationsForTerminalSurface { .. }
@@ -4421,12 +4490,18 @@ impl AgentDriver {
     }
 
     /// Invoke the end-of-run snapshot upload pipeline if the feature flag is enabled and this
-    /// driver is associated with a cloud task. Errors are logged internally; this helper always
-    /// returns so cleanup can proceed.
+    /// driver is associated with a cloud task. Returns whether the upload is known to have
+    /// succeeded. Most callers treat this as best-effort and ignore the result; a caller that
+    /// must prove resumability (e.g. the `wait_for_events` warm-wait-window yield) inspects it.
+    ///
+    /// A skipped upload (feature disabled, no task id, `--no-snapshot`) counts as success:
+    /// there was nothing to fail. The periodic checkpoint coordinator is itself best-effort and
+    /// does not report per-attempt success, so reaching its `finalize` call also counts as
+    /// success; only the legacy one-shot upload's timeout is currently observable as failure.
     #[tracing::instrument(skip_all, fields(tags.cloud_agent = true))]
-    async fn run_snapshot_upload(spawner: &ModelSpawner<Self>) {
+    async fn run_snapshot_upload(spawner: &ModelSpawner<Self>) -> bool {
         if !FeatureFlag::OzHandoff.is_enabled() {
-            return;
+            return true;
         }
 
         // Snapshot upload is only meaningful for cloud task runs, so short-circuit before
@@ -4449,11 +4524,11 @@ impl AgentDriver {
             })
             .await
         else {
-            return;
+            return true;
         };
         if snapshot_disabled {
             log::info!("Skipping snapshot upload because --no-snapshot was specified");
-            return;
+            return true;
         }
 
         // An active coordinator replaces the legacy upload below. Budget must come from
@@ -4466,7 +4541,7 @@ impl AgentDriver {
                     upload_timeout,
                 ))
                 .await;
-            return;
+            return true;
         }
 
         let Ok((working_dir, client)) = spawner
@@ -4480,7 +4555,7 @@ impl AgentDriver {
                 "Unable to retrieve snapshot upload context for cleanup",
                 extra: { "task_id" => %task_id }
             );
-            return;
+            return false;
         };
 
         // Drain any pending declarations writes from the history subscription before the
@@ -4505,7 +4580,9 @@ impl AgentDriver {
                 "Snapshot upload timed out; continuing with cleanup",
                 extra: { "timeout" => ?upload_timeout, "task_id" => %task_id }
             );
+            return false;
         }
+        true
     }
 }
 
