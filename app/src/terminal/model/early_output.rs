@@ -60,10 +60,19 @@ pub struct EarlyOutput {
 
     /// User input that may be typeahead, which is matched against echoed text.
     unmatched_input: VecDeque<char>,
-    /// Characters registered via `push_expected_echo`, matched against echoed text. Unlike
-    /// `unmatched_input`, a match here is dropped entirely rather than surfaced as typeahead --
-    /// see `push_expected_echo`.
-    expected_echo: VecDeque<char>,
+    /// Characters registered via `push_expected_echo`, matched (possibly more than once, see
+    /// `expected_echo_position`) against echoed text. Unlike `unmatched_input`, a match here is
+    /// dropped entirely rather than surfaced as typeahead -- see `push_expected_echo`.
+    expected_echo: Vec<char>,
+    /// How many leading characters of `expected_echo` have matched in the current echo pass.
+    /// Unlike `unmatched_input`, matched characters are never removed from `expected_echo`
+    /// itself: a line editor's redraw can re-echo the same restored buffer an arbitrary number
+    /// of times per restore (measured: zsh's ZLE prints one character, returns to column 0, and
+    /// reprints the whole line; fish echoes the whole buffer, returns to column 0, and echoes
+    /// it again), so matching needs to tolerate repeats rather than treating the first full
+    /// match as the only one. Reset to 0 on a carriage return (see `maybe_rearm_expected_echo`),
+    /// since that's what precedes each repeat.
+    expected_echo_position: usize,
     /// Whether the last potential typeahead character received on the PTY was a
     /// carriage return. We can't rely on the last character of `typeahead` for
     /// this, because it only stores _matched_ typeahead.
@@ -85,7 +94,8 @@ impl EarlyOutput {
             typeahead: String::new(),
             typeahead_chars_inserted: 0.into(),
             unmatched_input: VecDeque::new(),
-            expected_echo: VecDeque::new(),
+            expected_echo: Vec::new(),
+            expected_echo_position: 0,
             just_matched_carriage_return: false,
             event_proxy,
             pending_background_block: None,
@@ -135,11 +145,18 @@ impl EarlyOutput {
     ///
     /// Example: `PtyController` restoring the input buffer after an in-band/generator command
     /// that necessarily cleared the shell's real buffer to run it as a foreground command.
+    ///
+    /// Replaces any previously-registered content outright, rather than appending to it: each
+    /// restore is a fresh, independent echo to expect, not a continuation of the last one.
     pub fn push_expected_echo(&mut self, input: &str) {
-        self.expected_echo.extend(input.chars().filter(|ch| {
-            // Only keep control characters that we expect to match in the echoed text.
-            !ch.is_ascii_control() || *ch == '\r'
-        }));
+        self.expected_echo = input
+            .chars()
+            .filter(|ch| {
+                // Only keep control characters that we expect to match in the echoed text.
+                !ch.is_ascii_control() || *ch == '\r'
+            })
+            .collect();
+        self.expected_echo_position = 0;
     }
 
     /// Reset the unmatched user input. This is called between blocks so that
@@ -160,14 +177,28 @@ impl EarlyOutput {
     }
 
     /// Returns whether the next character registered via `push_expected_echo` matches `ch`. If
-    /// it does match, the character is consumed. Unlike `consume_user_input`, a match here
-    /// should be dropped entirely by the caller rather than surfaced as typeahead.
+    /// it does match, the match position advances (but the content itself is retained, unlike
+    /// `consume_user_input`, so a later repeat of the same echo -- see `expected_echo_position`
+    /// -- can still match). A match here should be dropped entirely by the caller rather than
+    /// surfaced as typeahead.
     fn consume_expected_echo(&mut self, ch: char) -> bool {
-        let is_match = self.expected_echo.front() == Some(&ch);
+        let is_match = self.expected_echo.get(self.expected_echo_position) == Some(&ch);
         if is_match {
-            self.expected_echo.pop_front();
+            self.expected_echo_position += 1;
         }
         is_match
+    }
+
+    /// If anything is registered via `push_expected_echo`, rearms the matcher to expect that
+    /// same content again from the start. Called on every carriage return (regardless of how
+    /// much of the current pass matched): a carriage return returns the cursor to the start of
+    /// the line, which is exactly what a line editor does immediately before re-echoing the
+    /// line it just redrew, so the next characters to arrive may be the same content again
+    /// rather than something new.
+    fn maybe_rearm_expected_echo(&mut self) {
+        if !self.expected_echo.is_empty() {
+            self.expected_echo_position = 0;
+        }
     }
 
     /// Check a character received on the PTY, which may be typeahead or
@@ -236,6 +267,14 @@ impl EarlyOutput {
         );
         self.typeahead.clear();
         self.typeahead_chars_inserted = 0.into();
+
+        // Defensively bound expected-echo state to at most one prompt cycle: it should
+        // ordinarily already be fully consumed by the time a new prompt starts (the next
+        // `push_expected_echo` call replaces it outright anyway), but this guarantees a stale
+        // registration from a restore whose echo never fully arrived can't bleed into an
+        // unrelated future cycle.
+        self.expected_echo.clear();
+        self.expected_echo_position = 0;
     }
 
     /// Update early output state once the next command has started running. After
@@ -409,6 +448,11 @@ impl ansi::Handler for EarlyOutputHandler<'_> {
         if self.inner().consume_expected_echo('\r') {
             return;
         }
+        // A carriage return means the cursor just returned to the start of the line -- if a
+        // line editor is about to redraw (and therefore re-echo) the buffer this expected a
+        // single echo of, the redraw's characters start arriving right after this. See
+        // `maybe_rearm_expected_echo`.
+        self.inner().maybe_rearm_expected_echo();
         if !self.inner().handle_potential_typeahead('\r') {
             delegate!(self.carriage_return());
         }

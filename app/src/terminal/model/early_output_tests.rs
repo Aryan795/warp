@@ -167,6 +167,90 @@ fn test_push_expected_echo_is_swallowed_for_shell_reported() {
 }
 
 #[test]
+fn test_push_expected_echo_survives_a_partial_echo_before_a_carriage_return() {
+    // Reproduces zsh's ZLE redraw for a native-completions buffer restore: it echoes one
+    // character, returns to column 0, then re-echoes the whole line -- so the echo stream for
+    // a two-character restore is "g", CR, "g", "i", not "g", "i" once.
+    let mut block_list = new_block_list(
+        ChannelEventListener::new_for_test(),
+        TypeaheadMode::ShellReported,
+    );
+
+    block_list.early_output_mut().push_expected_echo("gi");
+
+    block_list.input('g');
+    block_list.carriage_return();
+    block_list.input('g');
+    block_list.input('i');
+    block_list.on_finish_byte_processing(&ansi::ProcessorInput::new(&[]));
+
+    assert!(
+        block_list.background_block_mut().is_none(),
+        "the redraw's repeat of the restored buffer must not start a phantom background block"
+    );
+    assert_eq!(block_list.early_output().typeahead(), "");
+}
+
+#[test]
+fn test_push_expected_echo_survives_a_full_echo_repeated_after_a_carriage_return() {
+    // Reproduces fish's redraw for a native-completions buffer restore: it echoes the whole
+    // line, returns to column 0 (twice), then echoes the whole line again -- so the echo
+    // stream for a two-character restore is "g", "i", CR, CR, "g", "i", CR.
+    let mut block_list = new_block_list(
+        ChannelEventListener::new_for_test(),
+        TypeaheadMode::ShellReported,
+    );
+
+    block_list.early_output_mut().push_expected_echo("gi");
+
+    block_list.input('g');
+    block_list.input('i');
+    block_list.carriage_return();
+    block_list.carriage_return();
+    block_list.input('g');
+    block_list.input('i');
+    block_list.carriage_return();
+    block_list.on_finish_byte_processing(&ansi::ProcessorInput::new(&[]));
+
+    assert!(
+        block_list.background_block_mut().is_none(),
+        "a repeated full echo of the restored buffer must not start a phantom background block"
+    );
+    assert_eq!(block_list.early_output().typeahead(), "");
+}
+
+#[test]
+fn test_push_expected_echo_state_does_not_survive_a_precmd() {
+    // A restore whose echo never fully arrives (e.g. the request was superseded) must not
+    // leave state that spuriously matches unrelated output in a later, unrelated prompt cycle.
+    let mut block_list = new_block_list(
+        ChannelEventListener::new_for_test(),
+        TypeaheadMode::ShellReported,
+    );
+
+    block_list.early_output_mut().push_expected_echo("gi");
+    block_list.input('g'); // Only a partial echo arrives before the cycle moves on.
+
+    block_list.command_finished(Default::default());
+    block_list.prompt_only_precmd(Default::default());
+
+    // In the new, unrelated cycle, plain background output that happens to start with the same
+    // character must be treated as ordinary background output, not swallowed as a leftover
+    // expected echo from the previous cycle.
+    block_list.input('g');
+    block_list.input('o');
+    block_list.on_finish_byte_processing(&ansi::ProcessorInput::new(&[]));
+
+    assert_eq!(
+        block_list
+            .background_block_mut()
+            .expect("Background block should exist")
+            .output_to_string(),
+        "go"
+    );
+}
+
+#[test]
 fn test_queued_typeahead_shell_reported() {
     let mut block_list = new_block_list(
         ChannelEventListener::new_for_test(),
