@@ -499,6 +499,14 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
         return
       fi
 
+      # Generator commands (including native-completions requests) are never user-facing --
+      # `warp_preexec` above already excludes them from PID-killing for the same reason.
+      # Without this, a native-completions request briefly sets the tab title to
+      # "warp_run_generator_comma...".
+      if [[ "$1" == warp_run_generator_command* ]]; then
+        return
+      fi
+
       cmd="$1"
       # warp_set_title_active_on_preexec is a preexec_function, which accepts 1 argument 
       #(currently invoked command)
