@@ -67,17 +67,26 @@ pub struct EarlyOutput {
     /// Every position in `expected_echo` that could currently be "next" to match, given
     /// everything matched so far. Matched characters are never removed from `expected_echo`
     /// itself: a line editor's redraw can re-echo the same restored buffer an arbitrary number
-    /// of times per restore (measured: zsh echoes one character, returns to column 0, then
-    /// reprints the whole line; fish sometimes reprints the whole line after returning to
-    /// column 0, and sometimes returns to column 0 *mid-line* and continues the same line from
-    /// where it left off), so matching needs to tolerate both a restart from the beginning and
-    /// a continuation from wherever it stopped, without knowing in advance which one a given
-    /// carriage return means. More than one position is tracked at once for exactly that
-    /// reason: `maybe_rearm_expected_echo` adds a candidate at position 0 on every carriage
-    /// return without discarding whatever position(s) were already live, and each subsequent
-    /// character advances every candidate whose next expected character matches it (dropping
-    /// the rest) -- so a character counts as expected echo if *any* live candidate predicts it,
-    /// however many candidates that turns out to be.
+    /// of times per restore, and not always as a clean repeat of the whole line -- measured
+    /// shapes include zsh echoing one character, returning to column 0, then reprinting the
+    /// whole line; fish returning to column 0 mid-line and continuing the same line from where
+    /// it left off; and, after a full pass has already matched, a carriage return followed by
+    /// only a short trailing fragment of the line (e.g. just its last character) rather than
+    /// the whole thing again. That last shape is why a carriage return rearms *every* position
+    /// in the pattern, not just 0: a trailing fragment is a restart from some position other
+    /// than the beginning, and which position that is isn't known until the characters that
+    /// follow resolve it. `maybe_rearm_expected_echo` adds every position on every carriage
+    /// return without discarding whatever was already live, and each subsequent character
+    /// advances every candidate whose next expected character matches it (dropping the rest) --
+    /// so a character counts as expected echo if *any* live candidate predicts it, however many
+    /// candidates that turns out to be. This is deliberately permissive: once a carriage return
+    /// has been seen, any single incoming character that occurs anywhere in the registered text
+    /// is absorbed rather than surfaced as background output, for as long as the candidate it
+    /// matched keeps being right. That's a real widening of what this can swallow, accepted
+    /// because the alternative -- guessing which specific restart position a given carriage
+    /// return means -- isn't possible from the carriage return alone, and this is scoped to the
+    /// restore window (nothing populates `expected_echo` outside of `push_expected_echo`, and
+    /// each restore replaces it outright rather than accumulating across restores).
     expected_echo_positions: BTreeSet<usize>,
     /// Whether the last potential typeahead character received on the PTY was a
     /// carriage return. We can't rely on the last character of `typeahead` for
@@ -172,6 +181,20 @@ impl EarlyOutput {
         self.unmatched_input.clear();
     }
 
+    /// Clears any registration made via `push_expected_echo`. Called when a real command
+    /// starts (`BlockList::start_active_block`, never `start_active_block_for_in_band_command`,
+    /// which is what a generator/completions request's own command uses) so a pattern left over
+    /// from the last restore can't outlive the request it belonged to. Without this, the
+    /// pattern and its carriage-return rearming (see `expected_echo_positions`) would otherwise
+    /// persist indefinitely -- across every later command's own carriage returns -- until the
+    /// next completions request happened to call `push_expected_echo` again, risking swallowing
+    /// a character of a real command's own echo or output if it happened to match something in
+    /// the stale pattern.
+    pub fn reset_expected_echo(&mut self) {
+        self.expected_echo.clear();
+        self.expected_echo_positions.clear();
+    }
+
     /// Returns whether the next user input character matches `ch`. If it does
     /// match, the character is consumed.
     fn consume_user_input(&mut self, ch: char) -> bool {
@@ -203,19 +226,13 @@ impl EarlyOutput {
         is_match
     }
 
-    /// If anything is registered via `push_expected_echo`, adds position 0 to the set of live
-    /// candidates (see `expected_echo_positions`) without discarding whatever was already
-    /// there. Called on every carriage return, regardless of how much of the current pass
-    /// matched: a carriage return returns the cursor to the start of the line, which happens
-    /// both when a line editor is about to redraw (and therefore re-echo) the whole line from
-    /// the beginning, and -- observed separately -- when it briefly returns to column 0 mid-line
-    /// and then continues echoing the same line from wherever it left off. Since it isn't known
-    /// in advance which of those a given carriage return means, both possibilities stay live
-    /// until the following characters resolve it.
+    /// Adds every position in `expected_echo` to the set of live candidates (see
+    /// `expected_echo_positions`) without discarding whatever was already there. Called on
+    /// every carriage return, regardless of how much of the current pass matched -- see
+    /// `expected_echo_positions`'s doc comment for why every position rather than just 0.
     fn maybe_rearm_expected_echo(&mut self) {
-        if !self.expected_echo.is_empty() {
-            self.expected_echo_positions.insert(0);
-        }
+        self.expected_echo_positions
+            .extend(0..self.expected_echo.len());
     }
 
     /// Check a character received on the PTY, which may be typeahead or
