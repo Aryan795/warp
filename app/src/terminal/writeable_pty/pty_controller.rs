@@ -186,6 +186,25 @@ impl<T: EventLoopSender> PtyController<T> {
                 // the way a `Command` is. Skipping a redundant restore sidesteps that race
                 // without needing to gate draining on this write at all -- the newer request
                 // will produce its own, current restore once it completes.
+                //
+                // Skipping is safe rather than a new way to lose the buffer: either the newer
+                // request's write never reaches the pty at all (its `before_write_fn` rejects
+                // it, or it gets retain-filtered by a still-newer request while still queued --
+                // see `run_native_shell_completions`), in which case the real buffer was never
+                // touched and there's nothing to restore; or its kill-buffer does go out, at
+                // which point it can no longer be retain-filtered away, so it will run to
+                // completion and fire its own `CompletionsFinished`, where this same check
+                // repeats. That recursion is bounded by real keystrokes -- each further
+                // supersession needs another character typed -- so the first request in the
+                // chain that finishes with nothing newer queued behind it has its restore sent,
+                // and submitting a command requires the user to stop typing regardless, which
+                // is exactly what lets the chain resolve before Enter is reachable.
+                //
+                // The one case this doesn't cover, and it's pre-existing rather than introduced
+                // here: if a request's kill-buffer goes out but its generator command then
+                // hangs, crashes, or is interrupted before emitting `9280;B`, `CompletionsFinished`
+                // never fires for it and the buffer is never restored -- true before this change
+                // and after it, since the original code also only ever restored on that event.
                 if let Some(buffer_text) = me.in_flight_native_completions_buffer_text.take()
                     && !buffer_text.is_empty()
                     && !me
