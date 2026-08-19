@@ -47,7 +47,7 @@ pub mod headers {
     /// because it can't be set from WASM.
     pub(crate) const WARP_CLIENT_ID: &str = "X-Warp-Client-ID";
 
-    /// Custom Warp header naming the team a request should be billed and authorized
+    /// Custom Warp header naming the team a request should be billed and attributed
     /// against. Only sent when the client knows which of the user's teams the request
     /// belongs to; the server derives a team itself when it is absent.
     pub const WARP_TEAM_UID: &str = "X-Warp-Team-UID";

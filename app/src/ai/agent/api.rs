@@ -396,10 +396,18 @@ impl RequestParams {
         // request isn't necessarily on that team, and its ordering need not match the
         // server's own first-team fallback. Omitting it lets the server apply that
         // fallback itself.
+        //
+        // `team_for_window` rather than `team_uid_for_window`: the raw map can hold a
+        // team the user has since left, because a restored window's assignment is
+        // persisted from a previous session and only revalidated when the workspace
+        // list is refreshed. `team_for_window` resolves through the current workspace's
+        // teams, so a stale assignment omits the header instead of sending a UID the
+        // server will reject - it rejects rather than falls back, so sending one we can
+        // already tell is stale would fail every agent-mode request.
         let team_uid = terminal_view_id
             .and_then(|id| app.window_id_for_view(id))
-            .and_then(|window_id| user_workspaces.team_uid_for_window(window_id))
-            .map(|team_uid| team_uid.to_string());
+            .and_then(|window_id| user_workspaces.team_for_window(window_id))
+            .map(|team| team.uid.to_string());
 
         Self {
             input: request_input.all_inputs().cloned().collect(),
