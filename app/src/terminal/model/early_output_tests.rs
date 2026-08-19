@@ -485,6 +485,47 @@ fn test_push_expected_echo_survives_a_cuf_advance_leaving_a_trailing_fragment() 
 }
 
 #[test]
+fn test_a_rearm_can_still_leak_exactly_one_coincidentally_matching_character() {
+    // The residual, acknowledged exposure of clearing on the first genuine mismatch rather
+    // than on a signal that reliably lands only after the real echo has arrived: if a fully-
+    // matched (and therefore already-exhausted) pattern gets rearmed by some *unrelated*
+    // command's own carriage return, and that unrelated command's output happens to start
+    // with a character the rearm predicts, that one coincidental character is swallowed
+    // before the very next, non-matching character closes the window. This is progress over
+    // no bound at all (unbounded, this could keep eating characters indefinitely across many
+    // later commands), not a full fix -- the bound is "at most one character", not zero.
+    let mut block_list = new_block_list(
+        ChannelEventListener::new_for_test(),
+        TypeaheadMode::ShellReported,
+    );
+
+    block_list.early_output_mut().push_expected_echo("gi");
+    block_list.input('g');
+    block_list.input('i');
+
+    // An unrelated command's own carriage return rearms position 0 (see
+    // `maybe_rearm_expected_echo`), without going through `start_active_block` -- e.g. the
+    // registering restore's own `CompletionsFinished` never got a chance to reach
+    // `start_active_block` in between, or this is that command's own prompt redraw.
+    block_list.carriage_return();
+
+    // Unrelated output starting with "g" -- coincidentally matches the rearmed position 0.
+    for ch in "grep".chars() {
+        block_list.input(ch);
+    }
+    block_list.on_finish_byte_processing(&ansi::ProcessorInput::new(&[]));
+
+    assert_eq!(
+        block_list
+            .background_block_mut()
+            .expect("the mismatching tail must still render as real background output")
+            .output_to_string(),
+        "rep",
+        "exactly the coincidentally-matching leading \"g\" is lost, not the whole word"
+    );
+}
+
+#[test]
 fn test_starting_a_real_command_clears_a_stale_expected_echo_registration() {
     // Without a clear on the transition that starts a real command, a pattern left over from
     // the last restore would otherwise persist indefinitely across every later command's own

@@ -214,11 +214,13 @@ impl<T: EventLoopSender> PtyController<T> {
                 {
                     // Register the restored text as expected echo *before* writing it, so the
                     // shell echoing it back is dropped entirely rather than rendered as a
-                    // phantom background block mirroring the restored text. Cleared once the
-                    // line editor is active again -- see the `LineEditorStatusEvent::Active`
-                    // handling below -- so the registration is bounded to this restore's own
-                    // redraw window rather than remaining live, and able to consume characters
-                    // of unrelated later output, indefinitely.
+                    // phantom background block mirroring the restored text. See
+                    // `EarlyOutput::consume_expected_echo` for how the registration's lifetime
+                    // is bounded -- `LineEditorStatusEvent::Active` looked like the right place
+                    // to end it here, but measured logs showed it firing before this write is
+                    // even flushed (`pending_writes_len=1` at that point), so clearing there
+                    // would have discarded the pattern before a single echoed character could
+                    // arrive.
                     me.terminal_model.lock().push_expected_echo(&buffer_text);
                     me.just_restored_native_completions_buffer = true;
                     me.pending_writes.push_front(PtyWrite::Bytes {
@@ -233,17 +235,11 @@ impl<T: EventLoopSender> PtyController<T> {
         ctx.subscribe_to_model(&line_editor_status, |me, _, event, ctx| {
             if let LineEditorStatusEvent::Active = event {
                 if mem::replace(&mut me.just_restored_native_completions_buffer, false) {
-                    // The line editor going active again is emitted a fixed delay after the
-                    // shell reaches precmd/end-prompt (`LINE_EDITOR_ACTIVATION_DELAY`), which is
-                    // well after any redraw -- including a later recolour pass -- following the
-                    // restore write has had a chance to play out. So this is also the right
-                    // place to end the restore's expected-echo registration: past this point,
-                    // the pattern is no longer describing an in-flight redraw, only something
-                    // that could accidentally match later, unrelated output (e.g. a background
-                    // job's own carriage-return-driven progress messages) -- see
-                    // `EarlyOutput::reset_expected_echo`. Skip input reporting this one time too
-                    // -- see the field's doc comment.
-                    me.terminal_model.lock().reset_expected_echo();
+                    // Skip input reporting this one time -- see the field's doc comment. Note
+                    // this fires *before* the restore write below is flushed (it's what
+                    // triggers `execute_next_queued_write` to actually send it, when nothing
+                    // else already has) -- see `EarlyOutput::consume_expected_echo` for where
+                    // the registration's lifetime is actually bounded, not here.
                     me.execute_next_queued_write(ctx);
                     return;
                 }

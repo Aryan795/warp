@@ -2306,13 +2306,6 @@ impl TerminalModel {
         }
     }
 
-    /// Clears any registration made via `push_expected_echo`. See `EarlyOutput::reset_expected_echo`.
-    pub fn reset_expected_echo(&mut self) {
-        if !self.alt_screen_active {
-            self.block_list.early_output_mut().reset_expected_echo();
-        }
-    }
-
     /// Takes accumulated typeahead that should be inserted into a front-end input editor.
     pub fn take_typeahead_for_input(&mut self) -> Option<(String, CharOffset)> {
         let completed_block_index = self.block_list.prev_matching_block_from_index(
