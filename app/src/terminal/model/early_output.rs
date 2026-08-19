@@ -72,15 +72,22 @@ pub struct EarlyOutput {
     /// starts at column 0, so ZLE can rewind with a plain carriage return; with
     /// `terminal.input.honor_ps1 = true` (the shell draws its own prompt), the line no longer
     /// starts at column 0, so ZLE switches its rewind onto *relative* motion -- a backspace or
-    /// CUB -- instead. So `honor_ps1` is the switch between the two rewind mechanisms below,
-    /// not just a detail of one particular measured session. Four motions are handled, all
-    /// measured against real sessions:
+    /// CUB -- instead; PSReadLine's own redraw uses *absolute* cursor addressing (CUP, e.g.
+    /// `\x1b[1;1H`) regardless. So `honor_ps1` and which line editor is driving are what select
+    /// among the rewind mechanisms below, not just a detail of one particular measured session.
+    /// Five motions are handled, all measured against real sessions:
     /// - A carriage return -- measured as either a restart of the whole line from the
     ///   beginning, or a brief mid-line return-to-column-0 that continues the same line from
     ///   wherever it left off, rather than restarting. Since it isn't known in advance which of
-    ///   those a given carriage return means, `maybe_rearm_expected_echo` adds position 0 as a
-    ///   new candidate without discarding whatever was already live, so both possibilities stay
+    ///   those a given carriage return means, `rearm_at_column(0)` adds position 0 as a new
+    ///   candidate without discarding whatever was already live, so both possibilities stay
     ///   open until the characters that follow resolve it.
+    /// - Absolute cursor addressing (CUP/CHA, `goto`/`goto_col`) -- the same ambiguity as a
+    ///   carriage return (restart vs. mid-line continuation), just to any column rather than
+    ///   only 0, on the premise that a registered pattern's echo always starts at column 0, so
+    ///   the escape sequence's own column parameter is already an absolute position in the
+    ///   pattern. `rearm_at_column(column)` handles both this and the carriage-return case
+    ///   above.
     /// - A backspace or CUB (`move_backward`), whose distance *is* known from the input itself
     ///   (always 1 for a backspace; the escape sequence's own parameter for CUB) --
     ///   `rearm_after_rewind` shifts every existing candidate back by that exact distance and
@@ -109,9 +116,8 @@ pub struct EarlyOutput {
     /// redraw window (nothing populates `expected_echo` outside of `push_expected_echo`, each
     /// restore replaces it outright rather than accumulating across restores, and
     /// `reset_expected_echo` is what closes the window -- see its own doc comment for when).
-    /// Cursor motions other than these four -- e.g. absolute column addressing (`\x1b[<n>G`,
-    /// `\x1b[<n>;<m>H`) -- are not handled; a redraw shape using one of those would need the
-    /// same treatment as the four above.
+    /// Cursor motions other than these five are not handled; a redraw shape using one would
+    /// need the same treatment as those above.
     expected_echo_positions: BTreeSet<usize>,
     /// Whether the last potential typeahead character received on the PTY was a
     /// carriage return. We can't rely on the last character of `typeahead` for
@@ -261,13 +267,18 @@ impl EarlyOutput {
         is_match
     }
 
-    /// If anything is registered via `push_expected_echo`, adds position 0 to the set of live
+    /// If anything is registered via `push_expected_echo`, adds `column` to the set of live
     /// candidates (see `expected_echo_positions`) without discarding whatever was already
-    /// there. Called on every carriage return, regardless of how much of the current pass
-    /// matched -- see `expected_echo_positions`'s doc comment for the two shapes this covers.
-    fn maybe_rearm_expected_echo(&mut self) {
+    /// there. `column` is the absolute column the cursor just moved to (0 for a carriage
+    /// return, or the escape sequence's own column parameter for absolute cursor addressing --
+    /// CHA/CUP, `goto`/`goto_col`), on the premise that a registered pattern's echo always
+    /// starts at column 0, so an absolute column is already an absolute position in the
+    /// pattern. Called regardless of how much of the current pass matched -- see
+    /// `expected_echo_positions`'s doc comment for the two shapes a carriage return in
+    /// particular covers.
+    fn rearm_at_column(&mut self, column: usize) {
         if !self.expected_echo.is_empty() {
-            self.expected_echo_positions.insert(0);
+            self.expected_echo_positions.insert(column);
         }
     }
 
@@ -571,8 +582,8 @@ impl ansi::Handler for EarlyOutputHandler<'_> {
         // A carriage return means the cursor just returned to the start of the line -- if a
         // line editor is about to redraw (and therefore re-echo) the buffer this expected a
         // single echo of, the redraw's characters start arriving right after this. See
-        // `maybe_rearm_expected_echo`.
-        self.inner().maybe_rearm_expected_echo();
+        // `rearm_at_column`.
+        self.inner().rearm_at_column(0);
         if !self.inner().handle_potential_typeahead('\r') {
             delegate!(self.carriage_return());
         }
@@ -689,6 +700,10 @@ impl ansi::Handler for EarlyOutputHandler<'_> {
     }
 
     fn goto(&mut self, row: super::index::VisibleRow, col: usize) {
+        // Absolute cursor addressing (CUP) is a rewind like carriage return, backspace and CUB,
+        // just to an absolute rather than relative column -- see `rearm_at_column`. The row is
+        // irrelevant to matching, which only tracks a linear character stream.
+        self.inner().rearm_at_column(col);
         delegate!(self.goto(row, col));
     }
 
@@ -697,6 +712,9 @@ impl ansi::Handler for EarlyOutputHandler<'_> {
     }
 
     fn goto_col(&mut self, col: usize) {
+        // CHA: the same absolute rewind as `goto`, just without a row component. See
+        // `rearm_at_column`.
+        self.inner().rearm_at_column(col);
         delegate!(self.goto_col(col));
     }
 

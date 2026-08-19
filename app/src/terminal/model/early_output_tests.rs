@@ -2,6 +2,7 @@ use super::TypeaheadMode;
 use crate::terminal::event_listener::ChannelEventListener;
 use crate::terminal::model::ansi::{self, Handler};
 use crate::terminal::model::blocks::BlockList;
+use crate::terminal::model::index::VisibleRow;
 use crate::terminal::model::session::SessionInfo;
 use crate::terminal::model::test_utils::TestBlockListBuilder;
 use crate::terminal::shell::ShellType;
@@ -485,6 +486,36 @@ fn test_push_expected_echo_survives_a_cuf_advance_leaving_a_trailing_fragment() 
 }
 
 #[test]
+fn test_push_expected_echo_survives_absolute_cursor_addressing_before_a_full_reprint() {
+    // Reproduces PSReadLine's own redraw, measured live: it rewinds not with a carriage
+    // return, a backspace or CUB, but with absolute cursor addressing (CUP, `\x1b[1;1H`), which
+    // none of those three motions cover -- a candidate left only at its post-match position
+    // would see the reprint's very next character as a genuine mismatch, which (per
+    // `EarlyOutputHandler::input()`) would end the window on real echo. `goto`/`goto_col` are
+    // treated the same way as a carriage return, just to any column (see `rearm_at_column`).
+    let mut block_list = new_block_list(
+        ChannelEventListener::new_for_test(),
+        TypeaheadMode::ShellReported,
+    );
+
+    block_list
+        .early_output_mut()
+        .push_expected_echo("starship pr");
+
+    block_list.input('s');
+    block_list.goto(VisibleRow(0), 0);
+    for ch in "starship pr".chars() {
+        block_list.input(ch);
+    }
+    block_list.on_finish_byte_processing(&ansi::ProcessorInput::new(&[]));
+
+    assert!(
+        block_list.background_block_mut().is_none(),
+        "an absolute-cursor-addressing rewind followed by a full reprint must not leak"
+    );
+}
+
+#[test]
 fn test_a_rearm_can_still_leak_exactly_one_coincidentally_matching_character() {
     // The residual, acknowledged exposure of clearing on the first genuine mismatch rather
     // than on a signal that reliably lands only after the real echo has arrived: if a fully-
@@ -503,10 +534,10 @@ fn test_a_rearm_can_still_leak_exactly_one_coincidentally_matching_character() {
     block_list.input('g');
     block_list.input('i');
 
-    // An unrelated command's own carriage return rearms position 0 (see
-    // `maybe_rearm_expected_echo`), without going through `start_active_block` -- e.g. the
-    // registering restore's own `CompletionsFinished` never got a chance to reach
-    // `start_active_block` in between, or this is that command's own prompt redraw.
+    // An unrelated command's own carriage return rearms position 0 (see `rearm_at_column`),
+    // without going through `start_active_block` -- e.g. the registering restore's own
+    // `CompletionsFinished` never got a chance to reach `start_active_block` in between, or
+    // this is that command's own prompt redraw.
     block_list.carriage_return();
 
     // Unrelated output starting with "g" -- coincidentally matches the rearmed position 0.
