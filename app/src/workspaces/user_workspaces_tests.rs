@@ -42,7 +42,11 @@ use warp_graphql::workspace::{
     WriteToPtyAutonomyValue as GqlWriteToPtyAutonomyValue,
     WriteToPtySettingInfo as GqlWriteToPtySettingInfo,
 };
-use warpui::{AddSingletonModel, App, WindowId};
+use warpui::elements::Empty;
+use warpui::platform::WindowStyle;
+use warpui::{
+    AddSingletonModel, App, AppContext, Element, Entity, TypedActionView, View, WindowId,
+};
 use warpui_extras::user_preferences;
 
 use super::*;
@@ -76,6 +80,63 @@ use crate::workspaces::workspace::{
 #[derive(Default)]
 struct CachedResources {
     workspaces: Vec<Workspace>,
+}
+
+#[derive(Default)]
+struct TeamContextTestView;
+
+impl Entity for TeamContextTestView {
+    type Event = ();
+}
+
+impl View for TeamContextTestView {
+    fn ui_name() -> &'static str {
+        "TeamContextTestView"
+    }
+
+    fn render(&self, _app: &AppContext) -> Box<dyn Element> {
+        Empty::new().finish()
+    }
+}
+
+impl TypedActionView for TeamContextTestView {
+    type Action = ();
+}
+#[test]
+fn team_context_uses_the_requesting_views_registered_team() {
+    let first_team = team_for_test();
+    let mut second_team = team_for_test();
+    second_team.uid = 456.into();
+    second_team.name = "second".to_string();
+    let mut workspace = workspace_for_test(&first_team);
+    workspace.teams.push(second_team.clone());
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        let (first_window_id, first_view) =
+            app.add_window(WindowStyle::NotStealFocus, |_| TeamContextTestView);
+        let (second_window_id, second_view) =
+            app.add_window(WindowStyle::NotStealFocus, |_| TeamContextTestView);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(first_window_id, first_team.uid, ctx);
+            user_workspaces.set_team_for_window(second_window_id, second_team.uid, ctx);
+        });
+
+        let first_context = first_view.update(&mut app, |_, ctx| {
+            UserWorkspaces::as_ref(ctx)
+                .team_context_for_view(ctx)
+                .expect("first view should have a team context")
+        });
+        let second_context = second_view.update(&mut app, |_, ctx| {
+            UserWorkspaces::as_ref(ctx)
+                .team_context_for_view(ctx)
+                .expect("second view should have a team context")
+        });
+
+        assert_eq!(first_context.team_uid, first_team.uid);
+        assert_eq!(second_context.team_uid, second_team.uid);
+    })
 }
 
 fn initialize_app(

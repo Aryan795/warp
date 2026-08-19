@@ -279,13 +279,10 @@ impl BuyCreditsBanner {
             .map(|option| option.credits);
         self.banner_auto_reload_update_in_flight = true;
 
-        if let Some(team_uid) = UserWorkspaces::as_ref(ctx)
-            .team_for_view(ctx)
-            .map(|team| team.uid)
-        {
+        if let Some(team_context) = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx) {
             UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
                 user_workspaces.update_addon_credits_settings(
-                    team_uid,
+                    team_context,
                     Some(true),
                     None, // Don't change monthly spend limit
                     selected_credits,

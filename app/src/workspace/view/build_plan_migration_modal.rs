@@ -788,7 +788,7 @@ impl TypedActionView for BuildPlanMigrationModal {
             BuildPlanMigrationModalViewAction::GetStartedClicked => {
                 // Get current team UID and workspace data
                 let workspaces = UserWorkspaces::as_ref(ctx);
-                let Some(team_uid) = workspaces.team_uid_for_window(ctx.window_id()) else {
+                let Some(team_context) = workspaces.team_context_for_view(ctx) else {
                     ctx.emit(BuildPlanMigrationModalEvent::ShowToast {
                         message: "Oops, something went wrong; your team data could not be found."
                             .to_string(),
@@ -837,7 +837,7 @@ impl TypedActionView for BuildPlanMigrationModal {
                 // Call API to update auto-reload settings
                 UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
                     user_workspaces.update_addon_credits_settings(
-                        team_uid,
+                        team_context,
                         Some(self.auto_reload_enabled),
                         new_monthly_spend_limit,
                         selected_denomination,

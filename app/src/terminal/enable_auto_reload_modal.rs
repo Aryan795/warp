@@ -402,7 +402,7 @@ impl warpui::TypedActionView for EnableAutoReloadModalBody {
             }
             Action::Enable => {
                 let workspaces = UserWorkspaces::as_ref(ctx);
-                let Some(team_uid) = workspaces.team_uid_for_window(ctx.window_id()) else {
+                let Some(team_context) = workspaces.team_context_for_view(ctx) else {
                     ctx.emit(EnableAutoReloadModalBodyEvent::ShowToast {
                         message: "Oops, something went wrong; your team's data could not be found."
                             .to_string(),
@@ -417,7 +417,7 @@ impl warpui::TypedActionView for EnableAutoReloadModalBody {
 
                 UserWorkspaces::handle(ctx).update(ctx, move |user_workspaces, ctx| {
                     user_workspaces.update_addon_credits_settings(
-                        team_uid,
+                        team_context,
                         Some(true),
                         // TODO: consider allowing user to set max monthly spend too in this modal
                         None,

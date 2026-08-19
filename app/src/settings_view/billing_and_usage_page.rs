@@ -60,7 +60,7 @@ use crate::view_components::ToastFlavor;
 use crate::view_components::action_button::{ActionButton, PrimaryTheme, SecondaryTheme};
 use crate::workspaces::update_manager::TeamUpdateManager;
 use crate::workspaces::user_profiles::UserProfiles;
-use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces, UserWorkspacesEvent};
 use crate::workspaces::workspace::{BillingMetadata, CustomerType, Workspace};
 use crate::{WorkspaceAction, send_telemetry_from_ctx};
 
@@ -225,6 +225,7 @@ pub(crate) struct ProratedRequestLimitsInfo {
 
 pub struct BillingAndUsagePageView {
     self_handle: WeakViewHandle<Self>,
+    team_context: Option<TeamContext>,
     auth_state: Arc<AuthState>,
     overage_limit_modal_state: ModalViewState<Modal<SpendingLimitModal>>,
     addon_credit_modal_state: ModalViewState<Modal<SpendingLimitModal>>,
@@ -386,8 +387,10 @@ impl BillingAndUsagePageView {
             })
         });
 
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         let mut me = Self {
             self_handle: ctx.handle(),
+            team_context,
             auth_state,
             overage_limit_modal_state: ModalViewState::new(overage_limit_modal_view),
             addon_credit_modal_state: ModalViewState::new(addon_credit_modal_view),
@@ -438,10 +441,11 @@ impl BillingAndUsagePageView {
     }
 
     fn refresh_addon_credits_settings(&mut self, ctx: &mut ViewContext<Self>) {
-        let Some(workspace) = UserWorkspaces::as_ref(ctx).current_workspace() else {
+        let Some(team_context) = self.team_context.as_ref() else {
             return;
         };
-        let addon_credits_settings = &workspace.settings.addon_credits_settings;
+        let addon_credits_settings =
+            UserWorkspaces::as_ref(ctx).addon_credits_settings(team_context);
         if addon_credits_settings.auto_reload_enabled {
             self.selected_addon_denomination = addon_credits_settings
                 .selected_auto_reload_credit_denomination
@@ -473,6 +477,12 @@ impl BillingAndUsagePageView {
         ctx: &mut ViewContext<Self>,
     ) {
         match event {
+            UserWorkspacesEvent::WindowTeamChanged { window_id }
+                if *window_id == ctx.window_id() =>
+            {
+                self.team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                ctx.notify();
+            }
             UserWorkspacesEvent::TeamsChanged => {
                 self.update_spending_limit_modals(ctx);
                 self.update_prorated_mouse_states(ctx);
@@ -580,12 +590,12 @@ impl BillingAndUsagePageView {
             }
             SpendingLimitModalEvent::Update { amount_cents } => {
                 let workspaces = UserWorkspaces::as_ref(ctx);
-                let team_uid = workspaces.team_uid_for_window(ctx.window_id());
-                let usage_settings = workspaces.usage_based_pricing_settings();
-
-                if let Some(team_uid) = team_uid {
+                let team_context = workspaces.team_context_for_view(ctx);
+                if let Some(team_context) = team_context {
+                    let usage_settings =
+                        workspaces.usage_based_pricing_settings(&team_context);
                     self.update_usage_based_pricing_settings(
-                        team_uid,
+                        team_context,
                         usage_settings.enabled,
                         Some(*amount_cents),
                         ctx,
@@ -608,12 +618,12 @@ impl BillingAndUsagePageView {
             }
             SpendingLimitModalEvent::Update { amount_cents } => {
                 let workspaces = UserWorkspaces::as_ref(ctx);
-                let team_uid = workspaces.team_uid_for_window(ctx.window_id());
+                let team_context = workspaces.team_context_for_view(ctx);
 
-                if let Some(team_uid) = team_uid {
+                if let Some(team_context) = team_context {
                     UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
                         user_workspaces.update_addon_credits_settings(
-                            team_uid,
+                            team_context,
                             None,
                             Some(*amount_cents as i32),
                             None,
@@ -629,7 +639,7 @@ impl BillingAndUsagePageView {
 
     fn update_usage_based_pricing_settings(
         &mut self,
-        team_uid: ServerId,
+        team_context: TeamContext,
         enabled: bool,
         max_monthly_spend_cents: Option<u32>,
         ctx: &mut ViewContext<Self>,
@@ -637,7 +647,7 @@ impl BillingAndUsagePageView {
         self.usage_based_pricing_toggle_loading = true;
         UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
             user_workspaces.update_usage_based_pricing_settings(
-                team_uid,
+                team_context,
                 enabled,
                 max_monthly_spend_cents,
                 ctx,
@@ -667,8 +677,11 @@ impl BillingAndUsagePageView {
     }
 
     fn update_spending_limit_modals(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(team_context) = self.team_context.as_ref() else {
+            return;
+        };
         let workspaces = UserWorkspaces::as_ref(ctx);
-        let usage_settings = workspaces.usage_based_pricing_settings();
+        let usage_settings = workspaces.usage_based_pricing_settings(team_context);
         let overage_limit = usage_settings.max_monthly_spend_cents.unwrap_or(5000);
         let addon_limit = workspaces
             .current_workspace()
@@ -831,10 +844,14 @@ impl TypedActionView for BillingAndUsagePageView {
                     ctx.open_url(&UserWorkspaces::upgrade_link(*user_id));
                 }
             },
-            BillingAndUsagePageAction::GenerateStripeBillingPortalLink { team_uid } => {
-                UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
-                    user_workspaces.generate_stripe_billing_portal_link(*team_uid, ctx);
-                });
+            BillingAndUsagePageAction::GenerateStripeBillingPortalLink { .. } => {
+                if let Some(team_context) =
+                    UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+                {
+                    UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
+                        user_workspaces.generate_stripe_billing_portal_link(team_context, ctx);
+                    });
+                }
             }
             BillingAndUsagePageAction::OpenTeamAdminPanel { team_uid } => {
                 AdminActions::open_admin_panel(*team_uid, ctx);
@@ -861,16 +878,20 @@ impl TypedActionView for BillingAndUsagePageView {
                 ctx.open_url(&url.url);
             }
             BillingAndUsagePageAction::UpdateUsageBasedPricingSettings {
-                team_uid,
                 enabled,
                 max_monthly_spend_cents,
+                ..
             } => {
-                self.update_usage_based_pricing_settings(
-                    *team_uid,
-                    *enabled,
-                    *max_monthly_spend_cents,
-                    ctx,
-                );
+                if let Some(team_context) =
+                    UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+                {
+                    self.update_usage_based_pricing_settings(
+                        team_context,
+                        *enabled,
+                        *max_monthly_spend_cents,
+                        ctx,
+                    );
+                }
             }
             BillingAndUsagePageAction::ShowOverageLimitModal => {
                 self.show_overage_limit_modal(ctx);
@@ -977,10 +998,10 @@ impl TypedActionView for BillingAndUsagePageView {
             BillingAndUsagePageAction::SelectTopupDenomination(i) => {
                 self.selected_addon_denomination = *i;
                 self.update_denomination_buttons_focus(ctx);
-                let team_uid = UserWorkspaces::as_ref(ctx).team_uid_for_window(ctx.window_id());
+                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
                 UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
-                    if let Some((workspace, team_uid)) =
-                        user_workspaces.current_workspace().zip(team_uid)
+                    if let Some((workspace, team_context)) =
+                        user_workspaces.current_workspace().zip(team_context)
                         && workspace
                             .settings
                             .addon_credits_settings
@@ -990,7 +1011,7 @@ impl TypedActionView for BillingAndUsagePageView {
                             .get(self.selected_addon_denomination)
                     {
                         user_workspaces.update_addon_credits_settings(
-                            team_uid,
+                            team_context,
                             None,
                             None,
                             Some(option.credits),
@@ -1006,18 +1027,37 @@ impl TypedActionView for BillingAndUsagePageView {
                     .get(self.selected_addon_denomination)
                 {
                     let credits = option.credits;
-                    let team_uid = *team_uid;
                     self.purchase_addon_credits_loading = true;
-                    UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
-                        user_workspaces.purchase_addon_credits(team_uid, credits, ctx);
-                    });
+                    match team_uid {
+                        Some(_) => {
+                            if let Some(team_context) =
+                                UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+                            {
+                                UserWorkspaces::handle(ctx).update(
+                                    ctx,
+                                    |user_workspaces, ctx| {
+                                        user_workspaces.purchase_addon_credits(
+                                            team_context,
+                                            credits,
+                                            ctx,
+                                        );
+                                    },
+                                );
+                            }
+                        }
+                        None => {
+                            UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
+                                user_workspaces.purchase_personal_addon_credits(credits, ctx);
+                            });
+                        }
+                    }
                     ctx.notify();
                 }
             }
             BillingAndUsagePageAction::ShowAddOnCreditModal => {
                 self.show_addon_credit_modal(ctx);
             }
-            BillingAndUsagePageAction::UpdateAutoReloadEnabled { team_uid, enabled } => {
+            BillingAndUsagePageAction::UpdateAutoReloadEnabled { enabled, .. } => {
                 send_telemetry_from_ctx!(
                     TelemetryEvent::AutoReloadToggledFromBillingSettings {
                         enabled: *enabled,
@@ -1036,15 +1076,19 @@ impl TypedActionView for BillingAndUsagePageView {
                 } else {
                     None
                 };
-                UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
-                    user_workspaces.update_addon_credits_settings(
-                        *team_uid,
-                        Some(*enabled),
-                        None,
-                        selected_auto_reload_value,
-                        ctx,
-                    );
-                });
+                if let Some(team_context) =
+                    UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+                {
+                    UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
+                        user_workspaces.update_addon_credits_settings(
+                            team_context,
+                            Some(*enabled),
+                            None,
+                            selected_auto_reload_value,
+                            ctx,
+                        );
+                    });
+                }
             }
             BillingAndUsagePageAction::DismissAmbientAgentTrialWidget => {
                 AISettings::handle(ctx).update(ctx, |settings, ctx| {

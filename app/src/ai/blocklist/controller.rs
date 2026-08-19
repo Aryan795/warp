@@ -82,7 +82,7 @@ use crate::terminal::model::terminal_model::TerminalModel;
 use crate::terminal::view::inline_banner::ZeroStatePromptSuggestionType;
 use crate::workspace::OneTimeModalModel;
 use crate::workspaces::update_manager::TeamUpdateManager;
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces};
 
 #[derive(Debug, Clone)]
 pub struct SessionContext {
@@ -317,6 +317,7 @@ pub struct BlocklistAIController {
     context_model: ModelHandle<BlocklistAIContextModel>,
     action_model: ModelHandle<BlocklistAIActionModel>,
     terminal_model: Arc<FairMutex<TerminalModel>>,
+    team_context: Option<Arc<TeamContext>>,
 
     in_flight_response_streams: PendingResponseStreams,
 
@@ -432,6 +433,7 @@ impl BlocklistAIController {
         active_session: ModelHandle<ActiveSession>,
         terminal_model: Arc<FairMutex<TerminalModel>>,
         terminal_surface_id: EntityId,
+        team_context: Option<Arc<TeamContext>>,
         ctx: &mut ModelContext<Self>,
     ) -> Self {
         ctx.subscribe_to_model(&action_model, move |me, _, event, ctx| {
@@ -624,6 +626,7 @@ impl BlocklistAIController {
             action_model,
             active_session,
             terminal_model,
+            team_context,
             in_flight_response_streams: PendingResponseStreams::new(),
             terminal_surface_id,
             should_refresh_available_llms_on_stream_finish: false,
@@ -2276,6 +2279,7 @@ impl BlocklistAIController {
 
         let request_params = api::RequestParams::new(
             Some(self.terminal_surface_id),
+            self.team_context.clone(),
             SessionContext::from_session(self.active_session.as_ref(ctx), ctx),
             &request_input,
             conversation_data,
@@ -2511,6 +2515,7 @@ impl BlocklistAIController {
 
         let mut request_params = api::RequestParams::new(
             Some(self.terminal_surface_id),
+            self.team_context.clone(),
             SessionContext::from_session(self.active_session.as_ref(ctx), ctx),
             &request_input,
             conversation_data.clone(),

@@ -510,12 +510,12 @@ impl BillingAndUsagePageV2View {
             }
             SpendingLimitModalEvent::Update { amount_cents } => {
                 let workspaces = UserWorkspaces::as_ref(ctx);
-                let team_uid = workspaces.team_uid_for_window(ctx.window_id());
+                let team_context = workspaces.team_context_for_view(ctx);
 
-                if let Some(team_uid) = team_uid {
+                if let Some(team_context) = team_context {
                     UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
                         user_workspaces.update_addon_credits_settings(
-                            team_uid,
+                            team_context,
                             None,
                             Some(*amount_cents as i32),
                             None,
@@ -2149,15 +2149,16 @@ impl TypedActionView for BillingAndUsagePageV2View {
                 self.update_denomination_buttons_focus(ctx);
                 let workspaces = UserWorkspaces::as_ref(ctx);
                 let team = workspaces.team_for_view(ctx);
+                let team_context = workspaces.team_context_for_view(ctx);
                 let has_admin_permissions = team.is_some_and(|team| {
                     AuthStateProvider::as_ref(ctx)
                         .get()
                         .user_email()
                         .is_some_and(|email| team.has_admin_permissions(&email))
                 });
-                let team_uid = team.map(|team| team.uid);
                 UserWorkspaces::handle(ctx).update(ctx, |ws, ctx| {
-                    if let Some((workspace, team_uid)) = ws.current_workspace().zip(team_uid)
+                    if let Some((workspace, team_context)) =
+                        ws.current_workspace().zip(team_context)
                         && has_admin_permissions
                         && workspace
                             .settings
@@ -2169,7 +2170,7 @@ impl TypedActionView for BillingAndUsagePageV2View {
                             .get(self.addon_credits.selected_denomination)
                     {
                         ws.update_addon_credits_settings(
-                            team_uid,
+                            team_context,
                             None,
                             None,
                             Some(opt.credits),
@@ -2197,7 +2198,7 @@ impl TypedActionView for BillingAndUsagePageV2View {
             BillingAndUsagePageAction::ShowAddOnCreditModal => {
                 self.show_addon_credit_modal(ctx);
             }
-            BillingAndUsagePageAction::UpdateAutoReloadEnabled { team_uid, enabled } => {
+            BillingAndUsagePageAction::UpdateAutoReloadEnabled { enabled, .. } => {
                 let auto_reload_denomination_credits = if *enabled {
                     let Some(option) = self
                         .addon_credits
@@ -2235,15 +2236,19 @@ impl TypedActionView for BillingAndUsagePageV2View {
                 } else {
                     "Auto-reload disabled.".to_string()
                 });
-                UserWorkspaces::handle(ctx).update(ctx, |ws, ctx| {
-                    ws.update_addon_credits_settings(
-                        *team_uid,
-                        Some(*enabled),
-                        None,
-                        auto_reload_denomination_credits,
-                        ctx,
-                    );
-                });
+                if let Some(team_context) =
+                    UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+                {
+                    UserWorkspaces::handle(ctx).update(ctx, |ws, ctx| {
+                        ws.update_addon_credits_settings(
+                            team_context,
+                            Some(*enabled),
+                            None,
+                            auto_reload_denomination_credits,
+                            ctx,
+                        );
+                    });
+                }
             }
             BillingAndUsagePageAction::DismissAmbientAgentTrialWidget => {
                 AISettings::handle(ctx).update(ctx, |settings, ctx| {

@@ -16,7 +16,7 @@ use warpui::{AppContext, ModelContext, SingletonEntity};
 
 use crate::auth::AuthStateProvider;
 use crate::settings::{AISettings, AISettingsChangedEvent};
-use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces, UserWorkspacesEvent};
 
 const GEAP_IDENTITY_TOKEN_DURATION: Duration = Duration::from_secs(60 * 60);
 
@@ -75,18 +75,21 @@ fn geap_mint_binding_from_parts(
     })
 }
 
-pub(crate) fn current_geap_policy(app: &AppContext) -> GeapPolicy {
+pub(crate) fn current_geap_policy_for_team(
+    team_context: &TeamContext,
+    app: &AppContext,
+) -> GeapPolicy {
     if !FeatureFlag::GeminiEnterprise.is_enabled() {
         return GeapPolicy::Disabled;
     }
     let user_workspaces = UserWorkspaces::as_ref(app);
-    if !user_workspaces.is_gemini_enterprise_credentials_enabled(app) {
+    if !user_workspaces.is_gemini_enterprise_credentials_enabled(team_context, app) {
         return GeapPolicy::Disabled;
     }
     let Some(user_id) = AuthStateProvider::as_ref(app).get().user_id() else {
         return GeapPolicy::Disabled;
     };
-    let Some(settings) = user_workspaces.gemini_enterprise_host_settings() else {
+    let Some(settings) = user_workspaces.gemini_enterprise_host_settings(team_context) else {
         return GeapPolicy::Unconfigured;
     };
     match geap_mint_binding_from_parts(

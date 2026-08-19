@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use regex::Regex;
 use warp_core::features::FeatureFlag;
-use warp_core::settings::{ChangeEventReason, Setting};
+use warp_core::settings::Setting;
 use warp_errors::report_error;
 use warp_graphql::workspace::FeatureModelChoice;
 use warpui::{
@@ -36,13 +36,13 @@ use crate::server::server_api::workspace::{PurchaseAddonCreditsOutcome, Workspac
 #[cfg(test)]
 use crate::server::server_api::{team::MockTeamClient, workspace::MockWorkspaceClient};
 use crate::settings::{
-    AISettings, AISettingsChangedEvent, CodeSettings, CodeSettingsChangedEvent, PrivacySettings,
+    AISettings, AISettingsChangedEvent, CodeSettings, CodeSettingsChangedEvent,
 };
 #[cfg(test)]
 use crate::workspaces::workspace::{AIAutonomyPolicy, WorkspaceMember, WorkspaceSettings};
 use crate::workspaces::workspace::{
-    AiAutonomySettings, AiOverages, PurchaseAddOnCreditsPolicy, SandboxedAgentSettings,
-    UsageBasedPricingSettings,
+    AddonCreditsSettings, AiAutonomySettings, AiOverages, PurchaseAddOnCreditsPolicy,
+    SandboxedAgentSettings, UsageBasedPricingSettings,
 };
 
 const STRIPE_SUBSCRIPTION_INTERVAL_PAGE_PREFIX: &str = "/upgrade";
@@ -154,6 +154,24 @@ pub struct WorkspacesMetadataWithPricing {
 pub struct CreateTeamResponse {
     pub workspace: Workspace,
     pub team: Team,
+}
+#[derive(Debug, Clone)]
+pub struct TeamContext {
+    team_uid: ServerId,
+}
+
+impl TeamContext {
+    fn new(team_uid: ServerId) -> Self {
+        Self { team_uid }
+    }
+
+    pub(crate) fn into_team_uid(self) -> ServerId {
+        self.team_uid
+    }
+
+    pub(crate) fn team_uid(&self) -> ServerId {
+        self.team_uid
+    }
 }
 
 impl UserWorkspaces {
@@ -338,6 +356,13 @@ impl UserWorkspaces {
     pub fn team_for_view<T: Entity>(&self, ctx: &ViewContext<T>) -> Option<&Team> {
         self.team_for_window(ctx.window_id())
     }
+    pub fn team_context_for_view<T: Entity>(
+        &self,
+        ctx: &ViewContext<T>,
+    ) -> Option<TeamContext> {
+        self.team_uid_for_window(ctx.window_id())
+            .map(TeamContext::new)
+    }
 
     pub fn team_for_view_handle<T: Entity>(
         &self,
@@ -387,6 +412,17 @@ impl UserWorkspaces {
             .iter()
             .flat_map(|w| w.teams.iter())
             .find(|t| t.uid == team_uid)
+    }
+
+    fn team_for_context(&self, team_context: &TeamContext) -> Option<&Team> {
+        self.team_from_uid_across_all_workspaces(team_context.team_uid)
+    }
+
+    fn team_for_context_mut(&mut self, team_context: &TeamContext) -> Option<&mut Team> {
+        self.workspaces
+            .iter_mut()
+            .flat_map(|workspace| workspace.teams.iter_mut())
+            .find(|team| team.uid == team_context.team_uid)
     }
 
     /// The teams [`Self::owner_to_space`] recognizes. An owner naming a team outside this set
@@ -535,49 +571,30 @@ impl UserWorkspaces {
             .map(|workspace| &workspace.billing_metadata)
     }
 
-    /// The given team's billing metadata when the team is known, otherwise
-    /// the current workspace's. For purchase surfaces that need
-    /// team/workspace-scoped state (e.g. delinquency); for the purchase
-    /// policy itself use [`Self::purchase_policy_for_team`], which adds the
-    /// user-level fallback for teamless users.
-    pub fn team_billing_metadata<'a>(
-        &'a self,
-        team: Option<&'a Team>,
-    ) -> Option<&'a BillingMetadata> {
-        team.map(|team| &team.billing_metadata)
-            .or_else(|| self.current_workspace_billing_metadata())
+    pub fn team_billing_metadata(
+        &self,
+        team_context: &TeamContext,
+    ) -> Option<&BillingMetadata> {
+        self.team_for_context(team_context)
+            .map(|team| &team.billing_metadata)
     }
 
-    pub fn is_custom_llm_enabled_for_team(&self, team: Option<&Team>) -> bool {
-        team.map(Team::is_custom_llm_enabled)
-            .or_else(|| {
-                self.current_workspace()
-                    .map(Workspace::is_custom_llm_enabled)
-            })
-            .unwrap_or(false)
+    pub fn is_custom_llm_enabled_for_team(&self, team_context: &TeamContext) -> bool {
+        self.team_for_context(team_context)
+            .is_some_and(Team::is_custom_llm_enabled)
     }
 
-    /// The add-on credits purchase policy for the current viewer context: the
-    /// current workspace's policy when one exists, else the user-level policy
-    /// from the workspaces-metadata response (how teamless users get one).
-    ///
-    /// Callers bound to a view/window should use
-    /// [`Self::purchase_policy_for_team`] instead, since their team can
-    /// differ from the current workspace's in multi-team situations.
-    pub fn purchase_policy(&self) -> Option<PurchaseAddOnCreditsPolicy> {
-        self.current_workspace_billing_metadata()
-            .and_then(|billing| billing.tier.purchase_add_on_credits_policy)
-            .or(self.user_purchase_policy)
+    pub fn purchase_policy_for_personal(&self) -> Option<PurchaseAddOnCreditsPolicy> {
+        self.user_purchase_policy
     }
 
-    /// [`Self::purchase_policy`], preferring the given team's policy when the
-    /// team is known (e.g. resolved from a view or window).
     pub fn purchase_policy_for_team(
         &self,
-        team: Option<&Team>,
+        team_context: &TeamContext,
     ) -> Option<PurchaseAddOnCreditsPolicy> {
-        team.and_then(|team| team.billing_metadata.tier.purchase_add_on_credits_policy)
-            .or_else(|| self.purchase_policy())
+        self.team_billing_metadata(team_context)
+            .and_then(|billing| billing.tier.purchase_add_on_credits_policy)
+            .or(self.user_purchase_policy)
     }
 
     /// Updates the user-level add-on credits purchase policy captured from a
@@ -630,7 +647,8 @@ impl UserWorkspaces {
         })
     }
 
-    pub fn ai_allowed_for_team(team: Option<&Team>) -> bool {
+    pub fn ai_allowed_for_team(&self, team_context: &TeamContext) -> bool {
+        let team = self.team_for_context(team_context);
         !team.is_some_and(|team| team.billing_metadata.customer_type == CustomerType::Enterprise)
             || team.is_some_and(|team| team.billing_metadata.is_warp_plan())
             || ChannelState::channel().is_dogfood()
@@ -713,26 +731,36 @@ impl UserWorkspaces {
     /// Note that the value may be incorrect if called before the team's billing metadata has been fetched.
     /// For solo users (no workspace), this is controlled by the `SoloUserByok` feature flag.
     /// Anonymous or logged-out users are not allowed to use BYO API keys.
-    pub fn is_byo_api_key_enabled(&self, app: &AppContext) -> bool {
+    pub fn is_byo_api_key_enabled(
+        &self,
+        team_context: &TeamContext,
+        app: &AppContext,
+    ) -> bool {
         if AuthStateProvider::as_ref(app)
             .get()
             .is_anonymous_or_logged_out()
         {
             return false;
         }
-        self.current_workspace()
-            .map(|workspace| workspace.is_byo_api_key_enabled())
-            .unwrap_or(FeatureFlag::SoloUserByok.is_enabled())
+        self.team_billing_metadata(team_context)
+            .is_some_and(BillingMetadata::is_byo_api_key_enabled)
+    }
+
+    pub fn is_byo_api_key_enabled_for_personal(&self, app: &AppContext) -> bool {
+        !AuthStateProvider::as_ref(app)
+            .get()
+            .is_anonymous_or_logged_out()
+            && FeatureFlag::SoloUserByok.is_enabled()
     }
 
     /// Whether the current workspace's managed BYOK/BYOE policy allows members
     /// to use their own provider API keys. Users with no workspace, or
     /// workspaces without the managed BYOK/BYOE policy, have no team-level
     /// restriction, so this returns true and the normal BYO entitlement applies.
-    pub fn are_member_byo_keys_allowed(&self) -> bool {
-        self.current_workspace().is_none_or(|workspace| {
-            !workspace.billing_metadata.is_managed_byok_byoe_enabled()
-                || workspace
+    pub fn are_member_byo_keys_allowed(&self, team_context: &TeamContext) -> bool {
+        self.team_for_context(team_context).is_none_or(|team| {
+            !team.billing_metadata.is_managed_byok_byoe_enabled()
+                || team
                     .settings
                     .team_byo
                     .as_ref()
@@ -744,7 +772,11 @@ impl UserWorkspaces {
     /// Whether custom inference endpoints are enabled for the current user.
     /// Anonymous or logged-out users are not allowed to use custom inference.
     /// Controlled by the BYO_ENDPOINT billing policy.
-    pub fn is_custom_inference_enabled(&self, app: &AppContext) -> bool {
+    pub fn is_custom_inference_enabled(
+        &self,
+        team_context: &TeamContext,
+        app: &AppContext,
+    ) -> bool {
         if AuthStateProvider::as_ref(app)
             .get()
             .is_anonymous_or_logged_out()
@@ -752,19 +784,24 @@ impl UserWorkspaces {
             return false;
         }
 
-        self.current_workspace()
-            .map(|workspace| workspace.billing_metadata.is_byo_endpoint_enabled())
-            .unwrap_or(true)
+        self.team_billing_metadata(team_context)
+            .is_some_and(BillingMetadata::is_byo_endpoint_enabled)
+    }
+
+    pub fn is_custom_inference_enabled_for_personal(&self, app: &AppContext) -> bool {
+        !AuthStateProvider::as_ref(app)
+            .get()
+            .is_anonymous_or_logged_out()
     }
 
     /// Whether the current workspace's managed BYOK/BYOE policy allows members
     /// to use their own custom endpoints. Users with no workspace, or
     /// workspaces without the managed BYOK/BYOE policy, have no team-level
     /// restriction, so this returns true and the normal BYO entitlement applies.
-    pub fn are_member_byo_endpoints_allowed(&self) -> bool {
-        self.current_workspace().is_none_or(|workspace| {
-            !workspace.billing_metadata.is_managed_byok_byoe_enabled()
-                || workspace
+    pub fn are_member_byo_endpoints_allowed(&self, team_context: &TeamContext) -> bool {
+        self.team_for_context(team_context).is_none_or(|team| {
+            !team.billing_metadata.is_managed_byok_byoe_enabled()
+                || team
                     .settings
                     .team_byo
                     .as_ref()
@@ -774,45 +811,62 @@ impl UserWorkspaces {
         })
     }
 
-    pub fn aws_bedrock_host_settings(&self) -> Option<&super::workspace::LlmHostSettings> {
-        self.current_workspace().and_then(|workspace| {
-            workspace
-                .settings
+    pub fn aws_bedrock_host_settings(
+        &self,
+        team_context: &TeamContext,
+    ) -> Option<&super::workspace::LlmHostSettings> {
+        self.team_for_context(team_context).and_then(|team| {
+            team.settings
                 .llm_settings
                 .host_configs
                 .get(&LLMModelHost::AwsBedrock)
         })
     }
 
-    /// Did the admin enable AWS Bedrock for the current workspace?
-    pub fn is_aws_bedrock_available_from_workspace(&self) -> bool {
-        self.current_workspace().is_some_and(|workspace| {
-            workspace.settings.llm_settings.enabled
+    pub fn is_aws_bedrock_available_for_team(&self, team_context: &TeamContext) -> bool {
+        self.team_for_context(team_context).is_some_and(|team| {
+            team.settings.llm_settings.enabled
                 && self
-                    .aws_bedrock_host_settings()
+                    .aws_bedrock_host_settings(team_context)
                     .is_some_and(|settings| settings.enabled)
         })
     }
-    pub fn aws_bedrock_host_enablement_setting(&self) -> HostEnablementSetting {
-        self.aws_bedrock_host_settings()
+
+    pub fn aws_bedrock_host_enablement_setting(
+        &self,
+        team_context: &TeamContext,
+    ) -> HostEnablementSetting {
+        self.aws_bedrock_host_settings(team_context)
             .map(|settings| settings.enablement_setting.clone())
             .unwrap_or_default()
     }
 
-    pub fn is_aws_bedrock_credentials_toggleable(&self) -> bool {
+    pub fn addon_credits_settings(
+        &self,
+        team_context: &TeamContext,
+    ) -> AddonCreditsSettings {
+        self.team_for_context(team_context)
+            .map(|team| team.settings.addon_credits_settings.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn is_aws_bedrock_credentials_toggleable(&self, team_context: &TeamContext) -> bool {
         matches!(
-            self.aws_bedrock_host_enablement_setting(),
+            self.aws_bedrock_host_enablement_setting(team_context),
             HostEnablementSetting::RespectUserSetting
         )
     }
 
-    pub fn is_aws_bedrock_credentials_enabled(&self, app: &AppContext) -> bool {
-        // i.e. did the admin go and toggle on aws bedrock in the admin panel?
-        if !self.is_aws_bedrock_available_from_workspace() {
+    pub fn is_aws_bedrock_credentials_enabled(
+        &self,
+        team_context: &TeamContext,
+        app: &AppContext,
+    ) -> bool {
+        if !self.is_aws_bedrock_available_for_team(team_context) {
             return false;
         }
 
-        match self.aws_bedrock_host_enablement_setting() {
+        match self.aws_bedrock_host_enablement_setting(team_context) {
             HostEnablementSetting::Enforce => true,
             HostEnablementSetting::RespectUserSetting => *AISettings::as_ref(app)
                 .aws_bedrock_credentials_enabled
@@ -820,44 +874,51 @@ impl UserWorkspaces {
         }
     }
 
-    pub fn gemini_enterprise_host_settings(&self) -> Option<&super::workspace::LlmHostSettings> {
-        self.current_workspace().and_then(|workspace| {
-            workspace
-                .settings
+    pub fn gemini_enterprise_host_settings(
+        &self,
+        team_context: &TeamContext,
+    ) -> Option<&super::workspace::LlmHostSettings> {
+        self.team_for_context(team_context).and_then(|team| {
+            team.settings
                 .llm_settings
                 .host_configs
                 .get(&LLMModelHost::GeminiEnterprise)
         })
     }
 
-    /// Did the admin enable Gemini Enterprise (GEAP) for the current workspace?
-    pub fn is_gemini_enterprise_available_from_workspace(&self) -> bool {
-        self.current_workspace().is_some_and(|workspace| {
-            workspace.settings.llm_settings.enabled
+    pub fn is_gemini_enterprise_available_for_team(&self, team_context: &TeamContext) -> bool {
+        self.team_for_context(team_context).is_some_and(|team| {
+            team.settings.llm_settings.enabled
                 && self
-                    .gemini_enterprise_host_settings()
+                    .gemini_enterprise_host_settings(team_context)
                     .is_some_and(|settings| settings.enabled)
         })
     }
 
-    pub fn gemini_enterprise_host_enablement_setting(&self) -> HostEnablementSetting {
-        self.gemini_enterprise_host_settings()
+    pub fn gemini_enterprise_host_enablement_setting(
+        &self,
+        team_context: &TeamContext,
+    ) -> HostEnablementSetting {
+        self.gemini_enterprise_host_settings(team_context)
             .map(|settings| settings.enablement_setting.clone())
             .unwrap_or_default()
     }
 
-    pub fn is_gemini_enterprise_credentials_toggleable(&self) -> bool {
+    pub fn is_gemini_enterprise_credentials_toggleable(
+        &self,
+        team_context: &TeamContext,
+    ) -> bool {
         matches!(
-            self.gemini_enterprise_host_enablement_setting(),
+            self.gemini_enterprise_host_enablement_setting(team_context),
             HostEnablementSetting::RespectUserSetting
         )
     }
 
-    /// Whether Gemini Enterprise (GEAP) credentials should be minted and attached for the
-    /// current user. Anonymous/logged-out guard from [`Self::is_byo_api_key_enabled`]:
-    /// a GEAP credential mint is rooted in the user's Warp session, so without one
-    /// there is nothing to mint from.
-    pub fn is_gemini_enterprise_credentials_enabled(&self, app: &AppContext) -> bool {
+    pub fn is_gemini_enterprise_credentials_enabled(
+        &self,
+        team_context: &TeamContext,
+        app: &AppContext,
+    ) -> bool {
         if !FeatureFlag::GeminiEnterprise.is_enabled() {
             return false;
         }
@@ -867,12 +928,11 @@ impl UserWorkspaces {
         {
             return false;
         }
-        // i.e. did the admin toggle on Gemini Enterprise in the admin panel?
-        if !self.is_gemini_enterprise_available_from_workspace() {
+        if !self.is_gemini_enterprise_available_for_team(team_context) {
             return false;
         }
 
-        match self.gemini_enterprise_host_enablement_setting() {
+        match self.gemini_enterprise_host_enablement_setting(team_context) {
             HostEnablementSetting::Enforce => true,
             HostEnablementSetting::RespectUserSetting => *AISettings::as_ref(app)
                 .gemini_enterprise_credentials_enabled
@@ -1085,17 +1145,6 @@ impl UserWorkspaces {
         // is part of.
         self.update_session_sharing_enablement(ctx);
 
-        // PrivacySettings can't observe UserWorkspaces for updates, as it's initialized too early in
-        // the app initialization flow. So, we update it manually whenever teams data changes.
-        PrivacySettings::handle(ctx).update(ctx, |settings, ctx| {
-            settings.set_is_telemetry_force_enabled(self.is_telemetry_force_enabled());
-            settings.set_enterprise_secret_redaction_settings(
-                self.is_enterprise_secret_redaction_enabled(),
-                self.get_enterprise_secret_redaction_regex_list(),
-                ChangeEventReason::CloudSync,
-                ctx,
-            );
-        });
 
         ctx.emit(UserWorkspacesEvent::TeamsChanged);
         ctx.emit(UserWorkspacesEvent::CodebaseContextEnablementChanged);
@@ -1202,6 +1251,22 @@ impl UserWorkspaces {
                     .await
             },
             Self::on_remove_user_from_team,
+        );
+    }
+
+    pub fn purchase_personal_addon_credits(
+        &mut self,
+        credits: i32,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let workspace_client = self.workspace_client.clone();
+        let _ = ctx.spawn(
+            async move {
+                workspace_client
+                    .purchase_personal_addon_credits(credits)
+                    .await
+            },
+            Self::on_purchase_addon_credits,
         );
     }
 
@@ -1569,14 +1634,14 @@ impl UserWorkspaces {
 
     pub fn generate_stripe_billing_portal_link(
         &mut self,
-        team_uid: ServerId,
+        team_context: TeamContext,
         ctx: &mut ModelContext<Self>,
     ) {
         let workspace_client = self.workspace_client.clone();
         let _ = ctx.spawn(
             async move {
                 workspace_client
-                    .generate_stripe_billing_portal_link(team_uid)
+                    .generate_stripe_billing_portal_link(team_context)
                     .await
             },
             Self::on_generate_stripe_billing_portal_link,
@@ -1585,7 +1650,7 @@ impl UserWorkspaces {
 
     pub fn update_usage_based_pricing_settings(
         &mut self,
-        team_uid: ServerId,
+        team_context: TeamContext,
         usage_based_pricing_enabled: bool,
         max_monthly_spend_cents: Option<u32>,
         ctx: &mut ModelContext<Self>,
@@ -1595,7 +1660,7 @@ impl UserWorkspaces {
             async move {
                 workspace_client
                     .update_usage_based_pricing_settings(
-                        team_uid,
+                        team_context,
                         usage_based_pricing_enabled,
                         max_monthly_spend_cents,
                     )
@@ -1632,7 +1697,7 @@ impl UserWorkspaces {
 
     pub fn purchase_addon_credits(
         &mut self,
-        team_uid: Option<ServerId>,
+        team_context: TeamContext,
         credits: i32,
         ctx: &mut ModelContext<Self>,
     ) {
@@ -1640,7 +1705,7 @@ impl UserWorkspaces {
         let _ = ctx.spawn(
             async move {
                 workspace_client
-                    .purchase_addon_credits(team_uid, credits)
+                    .purchase_addon_credits(team_context, credits)
                     .await
             },
             Self::on_purchase_addon_credits,
@@ -1675,17 +1740,26 @@ impl UserWorkspaces {
         ctx.notify();
     }
 
-    pub fn refresh_ai_overages(&mut self, ctx: &mut ModelContext<Self>) {
+    pub fn refresh_ai_overages(
+        &mut self,
+        team_context: TeamContext,
+        ctx: &mut ModelContext<Self>,
+    ) {
         let workspace_client = self.workspace_client.clone();
         let _ = ctx.spawn(
-            async move { workspace_client.refresh_ai_overages().await },
+            async move {
+                let result = workspace_client
+                    .refresh_ai_overages(&team_context)
+                    .await;
+                (team_context, result)
+            },
             Self::on_refresh_ai_overages,
         );
     }
 
     pub fn update_addon_credits_settings(
         &mut self,
-        team_uid: ServerId,
+        team_context: TeamContext,
         auto_reload_enabled: Option<bool>,
         max_monthly_spend_cents: Option<i32>,
         selected_auto_reload_credit_denomination: Option<i32>,
@@ -1696,7 +1770,7 @@ impl UserWorkspaces {
             async move {
                 workspace_client
                     .update_addon_credits_settings(
-                        team_uid,
+                        team_context,
                         auto_reload_enabled,
                         max_monthly_spend_cents,
                         selected_auto_reload_credit_denomination,
@@ -1707,15 +1781,15 @@ impl UserWorkspaces {
         );
     }
 
-    fn on_refresh_ai_overages(&mut self, result: Result<AiOverages>, ctx: &mut ModelContext<Self>) {
+    fn on_refresh_ai_overages(
+        &mut self,
+        (team_context, result): (TeamContext, Result<AiOverages>),
+        ctx: &mut ModelContext<Self>,
+    ) {
         match result {
             Ok(fresh_ai_overages) => {
-                // TODO: We really need to stop having duplicate billing metadata...
-                if let Some(workspace) = self.current_workspace_mut() {
-                    workspace.billing_metadata.ai_overages = Some(fresh_ai_overages.clone());
-                    for team in &mut workspace.teams {
-                        team.billing_metadata.ai_overages = Some(fresh_ai_overages.clone());
-                    }
+                if let Some(team) = self.team_for_context_mut(&team_context) {
+                    team.billing_metadata.ai_overages = Some(fresh_ai_overages);
                 }
 
                 ctx.emit(UserWorkspacesEvent::AiOveragesUpdated);
@@ -1727,90 +1801,88 @@ impl UserWorkspaces {
         }
     }
 
-    pub fn usage_based_pricing_settings(&self) -> UsageBasedPricingSettings {
-        self.current_workspace()
-            .map(|workspace| workspace.settings.usage_based_pricing_settings.clone())
+    pub fn usage_based_pricing_settings(
+        &self,
+        team_context: &TeamContext,
+    ) -> UsageBasedPricingSettings {
+        self.team_for_context(team_context)
+            .map(|team| team.settings.usage_based_pricing_settings.clone())
             .unwrap_or_default()
     }
 
-    pub fn is_telemetry_force_enabled(&self) -> bool {
-        self.current_workspace()
-            .map(|workspace| workspace.settings.telemetry_settings.force_enabled)
+    pub fn is_telemetry_force_enabled(&self, team_context: &TeamContext) -> bool {
+        self.team_for_context(team_context)
+            .map(|team| team.settings.telemetry_settings.force_enabled)
             .unwrap_or(false)
     }
 
-    pub fn is_enterprise_secret_redaction_enabled(&self) -> bool {
-        self.current_workspace()
-            .map(|workspace| workspace.settings.secret_redaction_settings.enabled)
+    pub fn is_enterprise_secret_redaction_enabled(&self, team_context: &TeamContext) -> bool {
+        self.team_for_context(team_context)
+            .map(|team| team.settings.secret_redaction.enabled.value)
             .unwrap_or(false)
     }
 
-    pub fn get_enterprise_secret_redaction_regex_list(&self) -> Vec<EnterpriseSecretRegex> {
-        self.current_workspace()
-            .map(|workspace| workspace.settings.secret_redaction_settings.regexes.clone())
+    pub fn get_enterprise_secret_redaction_regex_list(
+        &self,
+        team_context: &TeamContext,
+    ) -> Vec<EnterpriseSecretRegex> {
+        self.team_for_context(team_context)
+            .map(|team| team.settings.secret_redaction.regexes.values.clone())
             .unwrap_or_default()
     }
 
-    pub fn get_ugc_collection_enablement_setting(&self) -> UgcCollectionEnablementSetting {
-        self.current_workspace()
-            .map(|workspace| workspace.settings.ugc_collection_settings.setting.clone())
+    pub fn get_ugc_collection_enablement_setting(
+        &self,
+        team_context: &TeamContext,
+    ) -> UgcCollectionEnablementSetting {
+        self.team_for_context(team_context)
+            .map(|team| team.settings.ugc_collection.value.clone())
             .unwrap_or_default()
     }
 
-    pub fn get_cloud_conversation_storage_enablement_setting(&self) -> AdminEnablementSetting {
-        self.current_workspace()
-            .map(|workspace| {
-                workspace
-                    .settings
-                    .cloud_conversation_storage_settings
-                    .setting
-                    .clone()
-            })
+    pub fn get_cloud_conversation_storage_enablement_setting(
+        &self,
+        team_context: &TeamContext,
+    ) -> AdminEnablementSetting {
+        self.team_for_context(team_context)
+            .map(|team| team.settings.cloud_conversation_storage.value.clone())
             .unwrap_or_default()
     }
 
-    pub fn is_ai_allowed_in_remote_sessions(&self) -> bool {
-        self.current_workspace()
-            .map(|workspace| {
-                workspace
-                    .settings
-                    .ai_permissions_settings
-                    .allow_ai_in_remote_sessions
-            })
+    pub fn is_ai_allowed_in_remote_sessions(&self, team_context: &TeamContext) -> bool {
+        self.team_for_context(team_context)
+            .map(|team| team.settings.ai_permissions.allow_ai_in_remote_sessions.value)
             .unwrap_or(true)
     }
 
-    pub fn get_remote_session_regex_list(&self) -> Vec<Regex> {
-        self.current_workspace()
-            .map(|workspace| {
-                workspace
-                    .settings
-                    .ai_permissions_settings
+    pub fn get_remote_session_regex_list(&self, team_context: &TeamContext) -> Vec<Regex> {
+        self.team_for_context(team_context)
+            .map(|team| {
+                team.settings
+                    .ai_permissions
                     .remote_session_regex_list
-                    .clone()
+                    .values
+                    .iter()
+                    .filter_map(|pattern| Regex::new(pattern).ok())
+                    .collect()
             })
             .unwrap_or_default()
     }
 
-    pub fn is_anyone_with_link_sharing_enabled(&self) -> bool {
-        self.current_workspace()
-            .map(|workspace| {
-                workspace
-                    .settings
-                    .link_sharing_settings
+    pub fn is_anyone_with_link_sharing_enabled(&self, team_context: &TeamContext) -> bool {
+        self.team_for_context(team_context)
+            .map(|team| {
+                team.settings
+                    .link_sharing
                     .anyone_with_link_sharing_enabled
+                    .value
             })
             .unwrap_or(true)
     }
 
-    pub fn is_direct_link_sharing_enabled(&self) -> bool {
-        self.current_workspace()
-            .map(|workspace| {
-                workspace
-                    .settings
-                    .link_sharing_settings
-                    .direct_link_sharing_enabled
-            })
+    pub fn is_direct_link_sharing_enabled(&self, team_context: &TeamContext) -> bool {
+        self.team_for_context(team_context)
+            .map(|team| team.settings.link_sharing.direct_link_sharing_enabled.value)
             .unwrap_or(true)
     }
 
@@ -1835,12 +1907,16 @@ impl UserWorkspaces {
     /// Returns the codebase context settings, taking into account the organization,
     /// global AI settings, and codebase-specific settings.
     /// Prefer this function to determine whether to show indexing-related functionality.
-    pub fn is_codebase_context_enabled(&self, app: &AppContext) -> bool {
+    pub fn is_codebase_context_enabled(
+        &self,
+        team_context: &TeamContext,
+        app: &AppContext,
+    ) -> bool {
         // If the organization has an explicit setting, respect it and make user toggle irrelevant.
         // - Enable: forced ON by org, regardless of user preference.
         // - Disable: forced OFF by org.
         // - RespectUserSetting: respect the user setting.
-        let org_setting = self.team_allows_codebase_context();
+        let org_setting = self.team_allows_codebase_context(team_context);
         let ai_globally_enabled = AISettings::as_ref(app).is_any_ai_enabled(app);
 
         match org_setting {
@@ -1852,27 +1928,33 @@ impl UserWorkspaces {
         }
     }
 
-    pub fn default_host_slug(&self) -> Option<&str> {
-        self.current_workspace()
-            .and_then(|workspace| workspace.settings.default_host_slug.as_deref())
+    pub fn default_host_slug(&self, team_context: &TeamContext) -> Option<&str> {
+        self.team_for_context(team_context)
+            .and_then(|team| team.settings.default_host_slug.as_deref())
     }
 
     /// Returns the team-level agent attribution setting.
     ///
     /// Use this to decide whether the user's attribution toggle should be locked
     /// (`Enable`/`Disable`) or editable (`RespectUserSetting`).
-    pub fn get_agent_attribution_setting(&self) -> AdminEnablementSetting {
-        self.current_workspace()
-            .map(|workspace| workspace.settings.enable_warp_attribution.clone())
+    pub fn get_agent_attribution_setting(
+        &self,
+        team_context: &TeamContext,
+    ) -> AdminEnablementSetting {
+        self.team_for_context(team_context)
+            .map(|team| team.settings.enable_warp_attribution.clone())
             .unwrap_or_default()
     }
 
     /// Returns only the organization-specific codebase context enablement setting.
     /// Do not use this function to determine whether codebase context is generally enabled --
     /// use `is_codebase_context_enabled` instead.
-    pub fn team_allows_codebase_context(&self) -> AdminEnablementSetting {
-        self.current_workspace()
-            .map(|workspace| workspace.settings.codebase_context_settings.setting.clone())
+    pub fn team_allows_codebase_context(
+        &self,
+        team_context: &TeamContext,
+    ) -> AdminEnablementSetting {
+        self.team_for_context(team_context)
+            .map(|team| team.settings.codebase_context.value.clone())
             .unwrap_or_default()
     }
 

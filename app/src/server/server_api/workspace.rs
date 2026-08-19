@@ -25,7 +25,7 @@ use super::ServerApi;
 use super::team::TeamClient;
 use crate::server::graphql::{get_request_context, get_user_facing_error_message};
 use crate::server::ids::ServerId;
-use crate::workspaces::user_workspaces::WorkspacesMetadataResponse;
+use crate::workspaces::user_workspaces::{TeamContext, WorkspacesMetadataResponse};
 use crate::workspaces::workspace::AiOverages;
 
 /// Outcome of a successful `purchaseAddonCredits` mutation. Mirrors the
@@ -44,26 +44,31 @@ pub enum PurchaseAddonCreditsOutcome {
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
 pub trait WorkspaceClient: 'static + Send + Sync {
-    async fn generate_stripe_billing_portal_link(&self, team_uid: ServerId) -> Result<String>;
+    async fn generate_stripe_billing_portal_link(
+        &self,
+        team_context: TeamContext,
+    ) -> Result<String>;
 
     async fn update_usage_based_pricing_settings(
         &self,
-        team_uid: ServerId,
+        team_context: TeamContext,
         usage_based_pricing_enabled: bool,
         max_monthly_spend_cents: Option<u32>,
     ) -> Result<WorkspacesMetadataResponse>;
-
-    async fn refresh_ai_overages(&self) -> Result<AiOverages>;
+    async fn refresh_ai_overages(&self, team_context: &TeamContext) -> Result<AiOverages>;
 
     async fn purchase_addon_credits(
         &self,
-        team_uid: Option<ServerId>,
+        team_context: TeamContext,
         credits: i32,
     ) -> Result<PurchaseAddonCreditsOutcome>;
-
+    async fn purchase_personal_addon_credits(
+        &self,
+        credits: i32,
+    ) -> Result<PurchaseAddonCreditsOutcome>;
     async fn update_addon_credits_settings(
         &self,
-        team_uid: ServerId,
+        team_context: TeamContext,
         auto_reload_enabled: Option<bool>,
         max_monthly_spend_cents: Option<i32>,
         selected_auto_reload_credit_denomination: Option<i32>,
@@ -73,7 +78,11 @@ pub trait WorkspaceClient: 'static + Send + Sync {
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
 impl WorkspaceClient for ServerApi {
-    async fn generate_stripe_billing_portal_link(&self, team_uid: ServerId) -> Result<String> {
+    async fn generate_stripe_billing_portal_link(
+        &self,
+        team_context: TeamContext,
+    ) -> Result<String> {
+        let team_uid = team_context.into_team_uid();
         let variables = StripeBillingPortalVariables {
             input: StripeBillingPortalInput {
                 team_uid: team_uid.into(),
@@ -94,10 +103,11 @@ impl WorkspaceClient for ServerApi {
 
     async fn update_usage_based_pricing_settings(
         &self,
-        team_uid: ServerId,
+        team_context: TeamContext,
         usage_based_pricing_enabled: bool,
         max_monthly_spend_cents: Option<u32>,
     ) -> Result<WorkspacesMetadataResponse> {
+        let team_uid = team_context.into_team_uid();
         if let Some(cents) = max_monthly_spend_cents
             && cents > i32::MAX as u32
         {
@@ -134,7 +144,8 @@ impl WorkspaceClient for ServerApi {
         }
     }
 
-    async fn refresh_ai_overages(&self) -> Result<AiOverages> {
+    async fn refresh_ai_overages(&self, team_context: &TeamContext) -> Result<AiOverages> {
+        let _ = team_context.team_uid();
         let variables = GetAiOveragesForWorkspaceVariables {
             request_context: get_request_context(),
         };
@@ -162,6 +173,60 @@ impl WorkspaceClient for ServerApi {
     }
 
     async fn purchase_addon_credits(
+        &self,
+        team_context: TeamContext,
+        credits: i32,
+    ) -> Result<PurchaseAddonCreditsOutcome> {
+        self.purchase_addon_credits_for_team_uid(Some(team_context.into_team_uid()), credits)
+            .await
+    }
+
+    async fn purchase_personal_addon_credits(
+        &self,
+        credits: i32,
+    ) -> Result<PurchaseAddonCreditsOutcome> {
+        self.purchase_addon_credits_for_team_uid(None, credits).await
+    }
+    async fn update_addon_credits_settings(
+        &self,
+        team_context: TeamContext,
+        auto_reload_enabled: Option<bool>,
+        max_monthly_spend_cents: Option<i32>,
+        selected_auto_reload_credit_denomination: Option<i32>,
+    ) -> Result<WorkspacesMetadataResponse> {
+        let team_uid = team_context.into_team_uid();
+        let variables = UpdateWorkspaceSettingsVariables {
+            input: UpdateWorkspaceSettingsInput {
+                workspace_uid: team_uid.to_string(),
+                set_usage_based_pricing_settings: None,
+                set_addon_credits_settings: Some(AddonCreditsSettingsInput {
+                    auto_reload_enabled,
+                    max_monthly_spend_cents,
+                    selected_auto_reload_credit_denomination,
+                }),
+            },
+            request_context: get_request_context(),
+        };
+        let operation = UpdateWorkspaceSettings::build(variables);
+        let response = self.send_graphql_request(operation, None).await?;
+
+        match response.update_workspace_settings {
+            UpdateWorkspaceSettingsResult::UpdateWorkspaceSettingsOutput(_) => {
+                TeamClient::workspaces_metadata(self)
+                    .await
+                    .map(|w| w.metadata)
+            }
+            UpdateWorkspaceSettingsResult::UserFacingError(error) => {
+                Err(anyhow!(get_user_facing_error_message(error)))
+            }
+            UpdateWorkspaceSettingsResult::Unknown => Err(anyhow!("Unknown error")),
+        }
+    }
+
+}
+
+impl ServerApi {
+    async fn purchase_addon_credits_for_team_uid(
         &self,
         team_uid: Option<ServerId>,
         credits: i32,
@@ -203,38 +268,4 @@ impl WorkspaceClient for ServerApi {
         }
     }
 
-    async fn update_addon_credits_settings(
-        &self,
-        team_uid: ServerId,
-        auto_reload_enabled: Option<bool>,
-        max_monthly_spend_cents: Option<i32>,
-        selected_auto_reload_credit_denomination: Option<i32>,
-    ) -> Result<WorkspacesMetadataResponse> {
-        let variables = UpdateWorkspaceSettingsVariables {
-            input: UpdateWorkspaceSettingsInput {
-                workspace_uid: team_uid.to_string(),
-                set_usage_based_pricing_settings: None,
-                set_addon_credits_settings: Some(AddonCreditsSettingsInput {
-                    auto_reload_enabled,
-                    max_monthly_spend_cents,
-                    selected_auto_reload_credit_denomination,
-                }),
-            },
-            request_context: get_request_context(),
-        };
-        let operation = UpdateWorkspaceSettings::build(variables);
-        let response = self.send_graphql_request(operation, None).await?;
-
-        match response.update_workspace_settings {
-            UpdateWorkspaceSettingsResult::UpdateWorkspaceSettingsOutput(_) => {
-                TeamClient::workspaces_metadata(self)
-                    .await
-                    .map(|w| w.metadata)
-            }
-            UpdateWorkspaceSettingsResult::UserFacingError(error) => {
-                Err(anyhow!(get_user_facing_error_message(error)))
-            }
-            UpdateWorkspaceSettingsResult::Unknown => Err(anyhow!("Unknown error")),
-        }
-    }
 }

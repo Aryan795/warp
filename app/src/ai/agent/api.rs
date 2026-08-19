@@ -34,7 +34,7 @@ use crate::ai::mcp::TemplatableMCPServerManager;
 use crate::server::server_api::AIApiError;
 use crate::settings::AISettings;
 use crate::terminal::safe_mode_settings::get_secret_obfuscation_mode;
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces};
 
 /// Unique, server-generated conversation-scoped token to be roundtripped to the API when sending
 /// requests that follow-up within a given conversation.
@@ -120,6 +120,7 @@ impl TryFrom<ServerConversationToken>
 
 #[derive(Debug, Clone)]
 pub struct RequestParams {
+    pub(crate) team_context: Option<Arc<TeamContext>>,
     pub input: Vec<AIAgentInput>,
     pub conversation_token: Option<ServerConversationToken>,
     pub forked_from_conversation_token: Option<ServerConversationToken>,
@@ -189,6 +190,7 @@ impl RequestParams {
     #[cfg(test)]
     pub fn new_for_test() -> Self {
         Self {
+            team_context: None,
             input: vec![],
             conversation_token: None,
             forked_from_conversation_token: None,
@@ -226,6 +228,7 @@ impl RequestParams {
 
     pub fn new(
         terminal_view_id: Option<EntityId>,
+        team_context: Option<Arc<TeamContext>>,
         session_context: SessionContext,
         request_input: &RequestInput,
         conversation: ConversationData,
@@ -309,17 +312,30 @@ impl RequestParams {
 
         let user_workspaces = UserWorkspaces::as_ref(app);
         let api_key_manager = ApiKeyManager::as_ref(app);
-        let is_byo_enabled = user_workspaces.is_byo_api_key_enabled(app);
+        let is_byo_enabled = match team_context.as_deref() {
+            Some(team_context) => user_workspaces.is_byo_api_key_enabled(team_context, app),
+            None => user_workspaces.is_byo_api_key_enabled_for_personal(app),
+        };
         #[cfg(not(target_family = "wasm"))]
-        let geap_binding = crate::ai::geap_credentials::current_geap_policy(app).mint_binding();
+        let geap_binding = team_context
+            .as_deref()
+            .and_then(|team_context| {
+                crate::ai::geap_credentials::current_geap_policy_for_team(team_context, app)
+                    .mint_binding()
+            });
         #[cfg(target_family = "wasm")]
         let geap_binding: Option<::ai::api_keys::GeapMintBinding> = None;
+        let is_aws_bedrock_credentials_enabled = team_context.as_deref().is_some_and(|team_context| {
+            user_workspaces.is_aws_bedrock_credentials_enabled(team_context, app)
+        });
         let api_keys = api_key_manager.api_keys_for_request(
             is_byo_enabled,
-            user_workspaces.is_aws_bedrock_credentials_enabled(app),
+            is_aws_bedrock_credentials_enabled,
             geap_binding,
         );
-        let is_custom_inference_enabled = user_workspaces.is_custom_inference_enabled(app);
+        let is_custom_inference_enabled = team_context.as_deref().is_some_and(|team_context| {
+            user_workspaces.is_custom_inference_enabled(team_context, app)
+        });
         let custom_model_providers =
             api_key_manager.custom_model_providers_for_request(is_custom_inference_enabled);
         let custom_model_routers = FeatureFlag::CustomModelRouters.is_enabled().then(|| {
@@ -384,6 +400,7 @@ impl RequestParams {
             .context_window_limit_for_request(app);
 
         Self {
+            team_context,
             input: request_input.all_inputs().cloned().collect(),
             conversation_token: conversation.server_conversation_token,
             forked_from_conversation_token: conversation.forked_from_conversation_token,
