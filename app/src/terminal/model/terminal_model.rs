@@ -2298,11 +2298,18 @@ impl TerminalModel {
     }
 
     /// Registers `input` as characters expected to be echoed back on the pty, so the echo is
-    /// recognized as typeahead rather than unexpected background output regardless of the
+    /// dropped entirely rather than rendered as unexpected background output, regardless of the
     /// session's `TypeaheadMode`. See `EarlyOutput::push_expected_echo`.
     pub fn push_expected_echo(&mut self, input: &str) {
         if !self.alt_screen_active {
             self.block_list.early_output_mut().push_expected_echo(input);
+        }
+    }
+
+    /// Clears any registration made via `push_expected_echo`. See `EarlyOutput::reset_expected_echo`.
+    pub fn reset_expected_echo(&mut self) {
+        if !self.alt_screen_active {
+            self.block_list.early_output_mut().reset_expected_echo();
         }
     }
 
