@@ -346,11 +346,15 @@ fn should_open_unavailable_modal(state: &PromptAlertState, app: &AppContext) -> 
 }
 
 /// Whether a click should accept the chip by drawing on the lifetime
-/// prompt-suggestion allowance instead of the interactive wallet. This is the
-/// gate PRODUCT.md requires: remaining > 0 must never open the interactive
-/// unavailable modal and must dispatch `ResolvePromptSuggestion` instead.
-fn should_accept_via_suggestion_allowance(app: &AppContext) -> bool {
-    AIRequestUsageModel::as_ref(app).can_accept_prompt_suggestion()
+/// prompt-suggestion allowance instead of the interactive wallet. Only ever
+/// overrides the `RequestLimitReached` disabled state -- every other
+/// disabled state (offline, delinquent, anonymous hard gate, overage/spend
+/// policy) keeps its own disabled treatment and tooltip regardless of
+/// suggestion credits, per PRODUCT.md's "remaining > 0 and the other accept
+/// rules passing" gate.
+fn should_accept_via_suggestion_allowance(state: &PromptAlertState, app: &AppContext) -> bool {
+    matches!(state, PromptAlertState::RequestLimitReached)
+        && AIRequestUsageModel::as_ref(app).can_accept_prompt_suggestion()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -427,7 +431,8 @@ impl View for PromptSuggestionsView {
 
         let prompt_alert_state = self.prompt_alert.as_ref(app).state();
         let open_unavailable_modal = should_open_unavailable_modal(prompt_alert_state, app);
-        let can_accept_via_suggestion_allowance = should_accept_via_suggestion_allowance(app);
+        let can_accept_via_suggestion_allowance =
+            should_accept_via_suggestion_allowance(prompt_alert_state, app);
         // Only relevant when the disablement reason is the shared
         // "out of requests" state; other disabled states (offline, payment
         // issues) keep their own, higher-priority tooltip.

@@ -73,9 +73,46 @@ fn should_open_unavailable_modal_is_false_when_suggestion_remaining_is_positive(
                 "remaining > 0 must never open the interactive unavailable modal"
             );
             assert!(
-                should_accept_via_suggestion_allowance(ctx),
+                should_accept_via_suggestion_allowance(&PromptAlertState::RequestLimitReached, ctx),
                 "remaining > 0 must allow the accept to go through"
             );
+        });
+    })
+}
+
+/// PRODUCT.md gates the click on remaining > 0 *and* the other accept rules
+/// passing: a positive suggestion allowance must not override any disabled
+/// state besides `RequestLimitReached`. Free users who are offline or
+/// delinquent must stay blocked (with their own tooltip) even with credits.
+#[test]
+fn should_accept_via_suggestion_allowance_is_false_for_other_disabled_states_even_with_remaining() {
+    App::test((), |mut app| async move {
+        let _flag = FeatureFlag::OpenWarpNewSettingsModes.override_enabled(true);
+        initialize_app_with_allowance(
+            &mut app,
+            Some(PromptSuggestionAllowance {
+                limit: 300,
+                used: 100,
+            }),
+        );
+
+        app.read(|ctx| {
+            for state in [
+                PromptAlertState::NoConnection,
+                PromptAlertState::DelinquentDueToPaymentIssue,
+                PromptAlertState::AnonymousUserRequestLimitHardGate,
+                PromptAlertState::OveragesToggleableButNotEnabled,
+                PromptAlertState::MonthlyOveragesSpendLimitReached,
+            ] {
+                assert!(
+                    !should_accept_via_suggestion_allowance(&state, ctx),
+                    "a positive suggestion allowance must not override the {state:?} disabled state"
+                );
+                assert!(
+                    !should_open_unavailable_modal(&state, ctx),
+                    "the interactive unavailable modal is specific to RequestLimitReached, not {state:?}"
+                );
+            }
         });
     })
 }
@@ -99,7 +136,10 @@ fn should_open_unavailable_modal_is_false_when_suggestion_allowance_is_exhausted
                 &PromptAlertState::RequestLimitReached,
                 ctx
             ));
-            assert!(!should_accept_via_suggestion_allowance(ctx));
+            assert!(!should_accept_via_suggestion_allowance(
+                &PromptAlertState::RequestLimitReached,
+                ctx
+            ));
         });
     })
 }
@@ -118,7 +158,10 @@ fn should_open_unavailable_modal_is_true_when_no_suggestion_allowance_exists() {
                 &PromptAlertState::RequestLimitReached,
                 ctx
             ));
-            assert!(!should_accept_via_suggestion_allowance(ctx));
+            assert!(!should_accept_via_suggestion_allowance(
+                &PromptAlertState::RequestLimitReached,
+                ctx
+            ));
         });
     })
 }
