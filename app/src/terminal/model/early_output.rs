@@ -67,26 +67,33 @@ pub struct EarlyOutput {
     /// Every position in `expected_echo` that could currently be "next" to match, given
     /// everything matched so far. Matched characters are never removed from `expected_echo`
     /// itself: a line editor's redraw can re-echo the same restored buffer an arbitrary number
-    /// of times per restore, and not always as a clean repeat of the whole line -- measured
-    /// shapes include zsh echoing one character, returning to column 0, then reprinting the
-    /// whole line; fish returning to column 0 mid-line and continuing the same line from where
-    /// it left off; and, after a full pass has already matched, a carriage return followed by
-    /// only a short trailing fragment of the line (e.g. just its last character) rather than
-    /// the whole thing again. That last shape is why a carriage return rearms *every* position
-    /// in the pattern, not just 0: a trailing fragment is a restart from some position other
-    /// than the beginning, and which position that is isn't known until the characters that
-    /// follow resolve it. `maybe_rearm_expected_echo` adds every position on every carriage
-    /// return without discarding whatever was already live, and each subsequent character
-    /// advances every candidate whose next expected character matches it (dropping the rest) --
-    /// so a character counts as expected echo if *any* live candidate predicts it, however many
-    /// candidates that turns out to be. This is deliberately permissive: once a carriage return
-    /// has been seen, any single incoming character that occurs anywhere in the registered text
-    /// is absorbed rather than surfaced as background output, for as long as the candidate it
-    /// matched keeps being right. That's a real widening of what this can swallow, accepted
-    /// because the alternative -- guessing which specific restart position a given carriage
-    /// return means -- isn't possible from the carriage return alone, and this is scoped to the
-    /// restore window (nothing populates `expected_echo` outside of `push_expected_echo`, and
-    /// each restore replaces it outright rather than accumulating across restores).
+    /// of times per restore, using more than one way of rewinding the cursor to do it, and not
+    /// always as a clean repeat of the whole line. Two rewind shapes are handled:
+    /// - A carriage return, whose distance back isn't recoverable from the byte alone (it's an
+    ///   absolute jump to column 0, not a relative move) -- `maybe_rearm_expected_echo` adds
+    ///   *every* position in the pattern as a new candidate without discarding whatever was
+    ///   already live, since a trailing fragment (a restart from some position other than the
+    ///   beginning, observed after a full match) is just as possible as a restart from 0, and
+    ///   which one it is isn't known until the characters that follow resolve it.
+    /// - A backspace or CUB (`move_backward`), whose distance *is* known -- `rearm_after_rewind`
+    ///   shifts every existing candidate back by that exact distance and adds the result,
+    ///   again without discarding the originals, since whether a redraw actually follows is
+    ///   also not known in advance.
+    /// Either way, each subsequent character then advances every candidate whose next expected
+    /// character matches it (dropping the rest) -- so a character counts as expected echo if
+    /// *any* live candidate predicts it, however many candidates that turns out to be. The
+    /// carriage-return case is deliberately permissive: once one has been seen, any single
+    /// incoming character that occurs anywhere in the registered text is absorbed rather than
+    /// surfaced as background output, for as long as the candidate it matched keeps being
+    /// right. That's a real widening of what this can swallow, accepted because guessing which
+    /// specific restart position a given carriage return means isn't possible from the byte
+    /// alone. This is scoped to the restore window regardless (nothing populates `expected_echo`
+    /// outside of `push_expected_echo`, each restore replaces it outright rather than
+    /// accumulating across restores, and `reset_expected_echo` clears it when a real command
+    /// starts so a stale pattern can't outlive the request it belonged to). Rewinds other than
+    /// these two -- e.g. an absolute cursor move, or column-addressing escape sequences -- are
+    /// not handled; if a redraw shape using one of those surfaces, it will need the same
+    /// treatment as backspace/CUB here.
     expected_echo_positions: BTreeSet<usize>,
     /// Whether the last potential typeahead character received on the PTY was a
     /// carriage return. We can't rely on the last character of `typeahead` for
@@ -233,6 +240,24 @@ impl EarlyOutput {
     fn maybe_rearm_expected_echo(&mut self) {
         self.expected_echo_positions
             .extend(0..self.expected_echo.len());
+    }
+
+    /// Shifts every currently-live candidate position back by `distance` and adds the result to
+    /// the set of live candidates, without discarding the originals (see
+    /// `expected_echo_positions`'s doc comment for why the originals stay live too). Called on
+    /// a backspace (`distance` 1) or CUB (`distance` the column count from the escape
+    /// sequence), where -- unlike a carriage return -- the exact rewind distance is known, so
+    /// each candidate's new position can be computed directly rather than seeding every
+    /// position in the pattern. A candidate whose position is less than `distance` (the rewind
+    /// would move before where this candidate's matching started) is dropped rather than
+    /// underflowing.
+    fn rearm_after_rewind(&mut self, distance: usize) {
+        let rewound: BTreeSet<usize> = self
+            .expected_echo_positions
+            .iter()
+            .filter_map(|&position| position.checked_sub(distance))
+            .collect();
+        self.expected_echo_positions.extend(rewound);
     }
 
     /// Check a character received on the PTY, which may be typeahead or
@@ -491,6 +516,22 @@ impl ansi::Handler for EarlyOutputHandler<'_> {
         }
     }
 
+    fn backspace(&mut self) {
+        // A backspace is a rewind of exactly one column -- unlike a carriage return, whose
+        // redraw might restart from any position, a redraw following a backspace can only
+        // continue from one column earlier than wherever matching currently stands. See
+        // `rearm_after_rewind`.
+        self.inner().rearm_after_rewind(1);
+        delegate!(self.backspace());
+    }
+
+    fn move_backward(&mut self, columns: usize) {
+        // CUB: the same rewind as a backspace, but by a given column count rather than
+        // always one. See `rearm_after_rewind`.
+        self.inner().rearm_after_rewind(columns);
+        delegate!(self.move_backward(columns));
+    }
+
     fn linefeed(&mut self) -> ScrollDelta {
         if self.inner().consume_expected_echo('\n') {
             return ScrollDelta::zero();
@@ -618,10 +659,6 @@ impl ansi::Handler for EarlyOutputHandler<'_> {
         delegate!(self.move_forward(columns));
     }
 
-    fn move_backward(&mut self, columns: usize) {
-        delegate!(self.move_backward(columns));
-    }
-
     fn move_down_and_cr(&mut self, rows: usize) {
         delegate!(self.move_down_and_cr(rows));
     }
@@ -632,10 +669,6 @@ impl ansi::Handler for EarlyOutputHandler<'_> {
 
     fn put_tab(&mut self, count: u16) {
         delegate!(self.put_tab(count));
-    }
-
-    fn backspace(&mut self) {
-        delegate!(self.backspace());
     }
 
     fn bell(&mut self) {
