@@ -114,6 +114,25 @@ impl EarlyOutput {
         }
     }
 
+    /// Registers `input` as characters expected to be echoed back on the pty, regardless of the
+    /// active `TypeaheadMode` -- unlike `push_user_input`, which only records input for matching
+    /// when `mode` is `TypeaheadMode::InputMatching`.
+    ///
+    /// Used when something other than normal user typing deliberately writes bytes to the pty
+    /// outside of a command submission and wants the resulting echo recognized as typeahead
+    /// rather than unexpected background output (which would otherwise start a background
+    /// block) -- e.g. `PtyController` restoring the input buffer after an in-band/generator
+    /// command that necessarily cleared it to run as a foreground command. This is safe for
+    /// shells using `TypeaheadMode::ShellReported`, which `push_user_input` is a no-op for:
+    /// nothing else populates `unmatched_input` for those shells, so there's no risk of this
+    /// interfering with the shell-reported typeahead path.
+    pub fn push_expected_echo(&mut self, input: &str) {
+        self.unmatched_input.extend(input.chars().filter(|ch| {
+            // Only keep control characters that we expect to match in the echoed typeahead.
+            !ch.is_ascii_control() || *ch == '\r'
+        }));
+    }
+
     /// Reset the unmatched user input. This is called between blocks so that
     /// unmatched potential typeahead from one command doesn't throw off input
     /// matching for the rest of the session.
@@ -134,15 +153,19 @@ impl EarlyOutput {
     /// Check a character received on the PTY, which may be typeahead or
     /// background output.
     fn handle_potential_typeahead(&mut self, ch: char) -> bool {
-        let is_typeahead = match self.mode {
-            TypeaheadMode::InputMatching => {
-                // By default, the ONLCR TTY option is set, so carriage returns (from
-                // the enter key) are echoed as `\r\n`. If we match a carriage return
-                // as typeahead, we want to match the newline as well.
-                self.consume_user_input(ch) || (self.just_matched_carriage_return && ch == '\n')
-            }
-            _ => false,
-        };
+        // Characters explicitly registered via `push_expected_echo` are always honored as
+        // typeahead, regardless of `self.mode` -- see that method's doc comment. Otherwise,
+        // fall back to the mode-specific detection below.
+        let is_typeahead = self.consume_user_input(ch)
+            || match self.mode {
+                TypeaheadMode::InputMatching => {
+                    // By default, the ONLCR TTY option is set, so carriage returns (from
+                    // the enter key) are echoed as `\r\n`. If we match a carriage return
+                    // as typeahead, we want to match the newline as well.
+                    self.just_matched_carriage_return && ch == '\n'
+                }
+                _ => false,
+            };
         self.just_matched_carriage_return = is_typeahead && ch == '\r';
 
         if is_typeahead {

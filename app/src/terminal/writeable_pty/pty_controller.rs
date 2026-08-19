@@ -155,6 +155,12 @@ impl<T: EventLoopSender> PtyController<T> {
                 if let Some(buffer_text) = me.in_flight_native_completions_buffer_text.take()
                     && !buffer_text.is_empty()
                 {
+                    // Register the restored text as expected echo *before* writing it, so the
+                    // shell echoing it back is recognized as typeahead -- feeding it back into
+                    // the input editor the same way any other typeahead would be -- rather than
+                    // unexpected background output, which would otherwise render as a phantom
+                    // block mirroring the restored text.
+                    me.terminal_model.lock().push_expected_echo(&buffer_text);
                     me.pending_writes.push_front(PtyWrite::Bytes {
                         bytes: Cow::Owned(buffer_text.into_bytes()),
                     });
