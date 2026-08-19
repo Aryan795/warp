@@ -292,7 +292,6 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
 
     # Populates COMPREPLY for the given line using bash's own completion machinery
     # (resolved via `complete -p`), then prints each entry via the completions OSC.
-    # bash exposes no description channel, so entries are names only.
     #
     # Word-splitting here deliberately avoids `eval`, so a partially-typed, unbalanced
     # quote or an embedded `$( )` in the line under completion can never be executed;
@@ -362,7 +361,21 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
       # COMP_POINT is a byte offset into COMP_LINE, not a character count: ${#line} counts
       # characters under the session's locale, which undercounts for multibyte text.
       local COMP_POINT=$(( $(LC_ALL=C printf '%s' "$line" | LC_ALL=C command wc -c) ))
-      local COMP_TYPE=9
+      # 37 ('%', menu-complete) rather than 9 (plain Tab). cobra-generated "bash completion
+      # V2" scripts (kubectl, gh, and most modern Go CLIs) branch on this: for an ordinary
+      # Tab (9) with more than one match, they bake a padded "name  (description)" string
+      # directly into the COMPREPLY entry -- safe for real readline, which only ever inserts
+      # an entry when it's unique, but not for us, since we display every entry in a menu and
+      # insert whichever one is picked (measured: `gh __complete pr che` -> COMPREPLY holds
+      # "checkout  (Check out a pull request in git)" verbatim under COMP_TYPE=9, and would
+      # be inserted as that whole string). cobra's own case statement guarantees entries stay
+      # bare names under 37 or 42 regardless of match count -- see
+      # https://github.com/spf13/cobra/issues/1508, the issue this behavior is documented
+      # against. Confirmed empirically this has no effect on non-cobra completion functions:
+      # bash-completion (which drives the vast majority of scripts, including git's) never
+      # reads $COMP_TYPE at all, and calling `_git`'s completion function under 37 produces
+      # byte-identical output to 9.
+      local COMP_TYPE=37
       local COMP_KEY=9
 
       # compopt is only meaningful while bash's own readline machinery is driving a
