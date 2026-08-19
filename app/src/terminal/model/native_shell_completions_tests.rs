@@ -92,10 +92,6 @@ fn each_shell_uses_a_generator_command_recognized_name() {
             ShellType::Fish,
             "warp_run_generator_command_native_completions ",
         ),
-        (
-            ShellType::PowerShell,
-            "Warp-Run-GeneratorCommand-NativeCompletions ",
-        ),
     ] {
         let command = generator_command_for(shell_type, "x");
         // Fish's command has a leading space (see `generator_command_for`'s `ShellType::Fish`
@@ -105,4 +101,14 @@ fn each_shell_uses_a_generator_command_recognized_name() {
             "expected {command:?} to start with {expected_prefix:?}"
         );
     }
+}
+
+#[test]
+fn powershell_command_is_just_the_hex_text_with_no_function_call() {
+    // PowerShell never calls a named function at all: the caller types this directly as
+    // ordinary characters and reads it back via a PSReadLine key handler (see
+    // `POWERSHELL_NATIVE_COMPLETIONS_TRIGGER`'s doc comment in `pty_controller.rs`), so unlike
+    // the other three shells there's no generator-command name for anything to recognize.
+    let command = generator_command_for(ShellType::PowerShell, "git ch");
+    assert_eq!(command, "676974206368");
 }
