@@ -60,6 +60,10 @@ pub struct EarlyOutput {
 
     /// User input that may be typeahead, which is matched against echoed text.
     unmatched_input: VecDeque<char>,
+    /// Characters registered via `push_expected_echo`, matched against echoed text. Unlike
+    /// `unmatched_input`, a match here is dropped entirely rather than surfaced as typeahead --
+    /// see `push_expected_echo`.
+    expected_echo: VecDeque<char>,
     /// Whether the last potential typeahead character received on the PTY was a
     /// carriage return. We can't rely on the last character of `typeahead` for
     /// this, because it only stores _matched_ typeahead.
@@ -81,6 +85,7 @@ impl EarlyOutput {
             typeahead: String::new(),
             typeahead_chars_inserted: 0.into(),
             unmatched_input: VecDeque::new(),
+            expected_echo: VecDeque::new(),
             just_matched_carriage_return: false,
             event_proxy,
             pending_background_block: None,
@@ -115,20 +120,24 @@ impl EarlyOutput {
     }
 
     /// Registers `input` as characters expected to be echoed back on the pty, regardless of the
-    /// active `TypeaheadMode` -- unlike `push_user_input`, which only records input for matching
-    /// when `mode` is `TypeaheadMode::InputMatching`.
+    /// active `TypeaheadMode`.
     ///
     /// Used when something other than normal user typing deliberately writes bytes to the pty
-    /// outside of a command submission and wants the resulting echo recognized as typeahead
-    /// rather than unexpected background output (which would otherwise start a background
-    /// block) -- e.g. `PtyController` restoring the input buffer after an in-band/generator
-    /// command that necessarily cleared it to run as a foreground command. This is safe for
-    /// shells using `TypeaheadMode::ShellReported`, which `push_user_input` is a no-op for:
-    /// nothing else populates `unmatched_input` for those shells, so there's no risk of this
-    /// interfering with the shell-reported typeahead path.
+    /// outside of a command submission, where the caller already has an accurate copy of that
+    /// text elsewhere (e.g. an input editor's own buffer) and just wants the resulting echo not
+    /// to be treated as unexpected background output (which would otherwise start a background
+    /// block). This is deliberately *not* the same as `push_user_input`/typeahead: a matched
+    /// typeahead character is surfaced via `TerminalEvent::Typeahead` so it can be *inserted*
+    /// into the input editor, which is correct when the editor doesn't already have it, but
+    /// would duplicate it here, since the editor's copy was never cleared in the first place --
+    /// only the real shell's buffer was. A match here is instead dropped entirely: neither
+    /// rendered as background output nor surfaced as typeahead.
+    ///
+    /// Example: `PtyController` restoring the input buffer after an in-band/generator command
+    /// that necessarily cleared the shell's real buffer to run it as a foreground command.
     pub fn push_expected_echo(&mut self, input: &str) {
-        self.unmatched_input.extend(input.chars().filter(|ch| {
-            // Only keep control characters that we expect to match in the echoed typeahead.
+        self.expected_echo.extend(input.chars().filter(|ch| {
+            // Only keep control characters that we expect to match in the echoed text.
             !ch.is_ascii_control() || *ch == '\r'
         }));
     }
@@ -150,22 +159,29 @@ impl EarlyOutput {
         is_match
     }
 
+    /// Returns whether the next character registered via `push_expected_echo` matches `ch`. If
+    /// it does match, the character is consumed. Unlike `consume_user_input`, a match here
+    /// should be dropped entirely by the caller rather than surfaced as typeahead.
+    fn consume_expected_echo(&mut self, ch: char) -> bool {
+        let is_match = self.expected_echo.front() == Some(&ch);
+        if is_match {
+            self.expected_echo.pop_front();
+        }
+        is_match
+    }
+
     /// Check a character received on the PTY, which may be typeahead or
     /// background output.
     fn handle_potential_typeahead(&mut self, ch: char) -> bool {
-        // Characters explicitly registered via `push_expected_echo` are always honored as
-        // typeahead, regardless of `self.mode` -- see that method's doc comment. Otherwise,
-        // fall back to the mode-specific detection below.
-        let is_typeahead = self.consume_user_input(ch)
-            || match self.mode {
-                TypeaheadMode::InputMatching => {
-                    // By default, the ONLCR TTY option is set, so carriage returns (from
-                    // the enter key) are echoed as `\r\n`. If we match a carriage return
-                    // as typeahead, we want to match the newline as well.
-                    self.just_matched_carriage_return && ch == '\n'
-                }
-                _ => false,
-            };
+        let is_typeahead = match self.mode {
+            TypeaheadMode::InputMatching => {
+                // By default, the ONLCR TTY option is set, so carriage returns (from
+                // the enter key) are echoed as `\r\n`. If we match a carriage return
+                // as typeahead, we want to match the newline as well.
+                self.consume_user_input(ch) || (self.just_matched_carriage_return && ch == '\n')
+            }
+            _ => false,
+        };
         self.just_matched_carriage_return = is_typeahead && ch == '\r';
 
         if is_typeahead {
@@ -329,6 +345,9 @@ macro_rules! delegate {
 
 impl ansi::Handler for EarlyOutputHandler<'_> {
     fn input(&mut self, c: char) {
+        if self.inner().consume_expected_echo(c) {
+            return;
+        }
         let session_id = self.block_list.active_block().session_id();
         if !self.inner().handle_potential_typeahead(c) {
             self.with_background_output(|block| {
@@ -387,12 +406,18 @@ impl ansi::Handler for EarlyOutputHandler<'_> {
     }
 
     fn carriage_return(&mut self) {
+        if self.inner().consume_expected_echo('\r') {
+            return;
+        }
         if !self.inner().handle_potential_typeahead('\r') {
             delegate!(self.carriage_return());
         }
     }
 
     fn linefeed(&mut self) -> ScrollDelta {
+        if self.inner().consume_expected_echo('\n') {
+            return ScrollDelta::zero();
+        }
         if self.inner().handle_potential_typeahead('\n') {
             // If we match a newline as typeahead, this means the shell will
             // execute the accumulated typeahead as a new command. In that case,

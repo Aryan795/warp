@@ -10,6 +10,28 @@ fn hex_encodes_the_buffer_text_argument() {
 }
 
 #[test]
+fn fish_command_has_a_leading_space_to_omit_it_from_history() {
+    // A leading space is fish's only (default, non-configurable) mechanism for omitting a
+    // command from its history file -- unlike bash's HISTIGNORE or zsh's hist_ignore_space.
+    // Without it, every native-completions request would leak into the user's fish history.
+    let command = generator_command_for(ShellType::Fish, "git ch");
+    assert_eq!(
+        command,
+        " warp_run_generator_command_native_completions 676974206368"
+    );
+
+    // The other three shells have their own, different exclusion mechanisms and must not gain
+    // an unnecessary leading space.
+    for shell_type in [ShellType::Zsh, ShellType::Bash, ShellType::PowerShell] {
+        let command = generator_command_for(shell_type, "git ch");
+        assert!(
+            !command.starts_with(' '),
+            "expected {shell_type:?}'s command not to have a leading space, got {command:?}"
+        );
+    }
+}
+
+#[test]
 fn hex_argument_matches_the_contract_the_four_shell_decoders_rely_on() {
     // Characters that would otherwise require shell-specific quoting: single quotes,
     // double quotes, backslashes, a partially-typed unbalanced quote, and non-ASCII text.
@@ -22,7 +44,10 @@ fn hex_argument_matches_the_contract_the_four_shell_decoders_rely_on() {
         "",
     ];
     for input in inputs {
+        // Fish's command has a leading space (see `generator_command_for`'s `ShellType::Fish`
+        // case), so trim it before stripping the name prefix.
         let hex = generator_command_for(ShellType::Fish, input)
+            .trim_start()
             .strip_prefix("warp_run_generator_command_native_completions ")
             .expect("command has the expected prefix")
             .to_owned();
@@ -73,8 +98,10 @@ fn each_shell_uses_a_generator_command_recognized_name() {
         ),
     ] {
         let command = generator_command_for(shell_type, "x");
+        // Fish's command has a leading space (see `generator_command_for`'s `ShellType::Fish`
+        // case, which omits it from fish's history file), so trim before checking the prefix.
         assert!(
-            command.starts_with(expected_prefix),
+            command.trim_start().starts_with(expected_prefix),
             "expected {command:?} to start with {expected_prefix:?}"
         );
     }

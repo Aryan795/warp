@@ -15,7 +15,8 @@ use crate::terminal::shell::ShellType;
 ///   `warp_run_generator_command`.
 /// - bash's `warp_preexec` prefix-matches `warp_run_generator_command*`, as does its
 ///   `HISTIGNORE` entry (`*warp_run_generator_command*`).
-/// - fish's `warp_preexec` prefix-matches `warp_run_generator_command*`.
+/// - fish's `warp_preexec` prefix-matches `warp_run_generator_command*` (to kill stale generator
+///   jobs); the leading space added below is what actually omits it from fish's history file.
 /// - PowerShell's `Warp-Preexec` regex-matches `^Warp-Run-GeneratorCommand`.
 pub fn generator_command_for(shell_type: ShellType, buffer_text: &str) -> String {
     let hex_encoded_buffer_text = hex::encode(buffer_text.as_bytes());
@@ -27,8 +28,18 @@ pub fn generator_command_for(shell_type: ShellType, buffer_text: &str) -> String
         ShellType::Zsh => {
             format!("warp_run_generator_command_foreground_completions {hex_encoded_buffer_text}")
         }
-        ShellType::Bash | ShellType::Fish => {
+        ShellType::Bash => {
             format!("warp_run_generator_command_native_completions {hex_encoded_buffer_text}")
+        }
+        ShellType::Fish => {
+            // Unlike bash (`HISTIGNORE`) and zsh (`hist_ignore_space`/`_warp_zshaddhistory`),
+            // fish has no configurable command-pattern history exclusion -- a leading space is
+            // the only (default, non-configurable) way to omit a command from its history file.
+            // `bytes_to_execute_command`'s bracketed-paste handling already preserves leading
+            // whitespace specifically for this reason (see its `ShellType::Fish` case), and
+            // `InBandCommandExecutor::execute_command_internal` already does this for the
+            // existing `warp_run_generator_command` mechanism -- match that convention here.
+            format!(" warp_run_generator_command_native_completions {hex_encoded_buffer_text}")
         }
         ShellType::PowerShell => {
             format!("Warp-Run-GeneratorCommand-NativeCompletions {hex_encoded_buffer_text}")
