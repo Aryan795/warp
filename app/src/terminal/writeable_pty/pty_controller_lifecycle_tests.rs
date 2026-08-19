@@ -227,7 +227,7 @@ fn native_shell_completions_for_powershell_types_hex_then_chord_without_command_
         };
         // Hex text typed as ordinary characters, immediately followed by the Alt+3 trigger --
         // no kill-buffer, no Enter, nothing that looks like command execution at all.
-        assert_eq!(bytes.as_ref(), b"676974206368\x1b3");
+        assert_eq!(&bytes[..], b"676974206368\x1b3");
 
         drop(model_events_tx);
     });

@@ -268,13 +268,12 @@ impl EarlyOutput {
         self.typeahead.clear();
         self.typeahead_chars_inserted = 0.into();
 
-        // Defensively bound expected-echo state to at most one prompt cycle: it should
-        // ordinarily already be fully consumed by the time a new prompt starts (the next
-        // `push_expected_echo` call replaces it outright anyway), but this guarantees a stale
-        // registration from a restore whose echo never fully arrived can't bleed into an
-        // unrelated future cycle.
-        self.expected_echo.clear();
-        self.expected_echo_position = 0;
+        // Deliberately not clearing `expected_echo` here: `CompletionsFinished` (and the
+        // `push_expected_echo` call it triggers) fires when `9280;B` is parsed, which precedes
+        // the shell's own in-band-command precmd DCS -- so precmd normally lands *inside* the
+        // restore window, not after it, and clearing here would wipe a registration before its
+        // own echo has even arrived (measured: roughly five in six restores). Staleness is
+        // already bounded by `push_expected_echo` replacing its content outright on every call.
     }
 
     /// Update early output state once the next command has started running. After
