@@ -749,12 +749,24 @@ impl EnvironmentCommandRunner {
         ctx.subscribe_to_model(&UpdateManager::handle(ctx), move |_, _, event, ctx| {
             if let UpdateManagerEvent::ObjectOperationComplete { result } = event
                 && matches!(result.operation, ObjectOperation::Create { .. })
-                && matches!(result.success_type, OperationSuccessType::Success)
                 && result.client_id == Some(client_id)
             {
-                let server_id = result.server_id.unwrap();
-                println!("Environment created successfully with ID: {server_id}");
-                ctx.terminate_app(warpui::platform::TerminationMode::ForceTerminate, None);
+                match &result.success_type {
+                    OperationSuccessType::Success => {
+                        let server_id = result.server_id.unwrap();
+                        println!("Environment created successfully with ID: {server_id}");
+                        ctx.terminate_app(warpui::platform::TerminationMode::ForceTerminate, None);
+                    }
+                    OperationSuccessType::Denied(message) => {
+                        super::report_fatal_error(anyhow::anyhow!("{message}"), ctx);
+                    }
+                    _ => {
+                        super::report_fatal_error(
+                            anyhow::anyhow!("Failed to create environment"),
+                            ctx,
+                        );
+                    }
+                }
             }
         });
     }
