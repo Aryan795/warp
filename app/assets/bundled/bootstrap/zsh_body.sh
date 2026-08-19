@@ -1599,18 +1599,23 @@ esac
 
     # Restore zle-line-init to exactly what it was before, immediately -- this must happen
     # even if nothing above ran as expected, so a later real prompt read never sees our
-    # capture widget instead of the user's. Check existence before the plain `zle -D
-    # zle-line-init` case (unlike `zle -A ... zle-line-init` above, which creates its target
-    # if missing): whatever fired while we owned the widget can leave it already gone by the
-    # time we get here (e.g. a chained hook that itself calls `add-zle-hook-widget` and so
-    # rebinds zle-line-init to its own dispatcher), and deleting a widget that doesn't exist
-    # is a zsh error ("No such widget `zle-line-init'"), not a no-op.
+    # capture widget instead of the user's.
     if (( ${+widgets[_warp_saved_zle_line_init]} )); then
       zle -A _warp_saved_zle_line_init zle-line-init
       zle -D _warp_saved_zle_line_init
-    elif (( ${+widgets[zle-line-init]} )); then
-      zle -D zle-line-init
     fi
+    # If nothing was bound before, deliberately leave our own widget in place rather than
+    # `zle -D zle-line-init`-ing it away: measured directly (a minimal repro with nothing else
+    # involved beyond a `zle-line-init` handler that calls `accept-line` on itself), deleting
+    # a widget that was itself invoked as `zle-line-init` and called `accept-line` from
+    # within that same invocation corrupts zsh's own internal state for the *next*
+    # interactive prompt read, which then fails outright with "No such widget
+    # `zle-line-init'" -- an unusual pattern zsh does not expect to be undone by deleting the
+    # widget afterward. Checking `${+widgets[zle-line-init]}` first does not help: the widget
+    # still exists at this point (we are the ones who bound it), so that check is true and
+    # `zle -D` still runs, still corrupting the next prompt. Leaving it bound is harmless:
+    # `_warp_native_completions_zle_line_init`'s armed-flag guard above makes it a
+    # transparent no-op for every future firing until the next request re-arms it.
 
     # Fail safe independently of the above: if the capture widget never ran (e.g. some
     # other zle-line-init fired instead, or `select` returned without entering ZLE at all),
