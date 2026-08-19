@@ -304,6 +304,78 @@ fn test_push_expected_echo_tolerates_ambiguous_candidates_matching_the_same_char
 }
 
 #[test]
+fn test_push_expected_echo_survives_a_carriage_return_followed_by_only_a_trailing_fragment() {
+    // Reproduces zsh's redraw with a realistic rc (starship prompt, zsh-autosuggestions,
+    // zsh-syntax-highlighting): after a full pass has already matched the whole registered
+    // text, a carriage return is sometimes followed not by another full repeat but by only a
+    // short trailing fragment of the line -- e.g. just its last character. Seeding only
+    // position 0 on a carriage return (the original fix) can't match this, since the fragment
+    // doesn't start at the beginning; every position needs to be rearmed so whichever one the
+    // fragment actually restarts from is live.
+    let mut block_list = new_block_list(
+        ChannelEventListener::new_for_test(),
+        TypeaheadMode::ShellReported,
+    );
+
+    block_list
+        .early_output_mut()
+        .push_expected_echo("starship pr");
+
+    for ch in "starship pr".chars() {
+        block_list.input(ch);
+    }
+    block_list.carriage_return();
+    // Only the trailing fragment, not a full repeat.
+    block_list.input('r');
+    block_list.on_finish_byte_processing(&ansi::ProcessorInput::new(&[]));
+
+    assert!(
+        block_list.background_block_mut().is_none(),
+        "a trailing fragment after a carriage return following a full match must not leak"
+    );
+}
+
+#[test]
+fn test_starting_a_real_command_clears_a_stale_expected_echo_registration() {
+    // Without a clear on the transition that starts a real command, a pattern left over from
+    // the last restore -- plus the fact that a carriage return rearms every position in it --
+    // would otherwise persist indefinitely across every later command's own carriage returns,
+    // risking silently swallowing a character of that command's own, completely unrelated
+    // output if it happened to match something in the stale pattern.
+    let mut block_list = new_block_list(
+        ChannelEventListener::new_for_test(),
+        TypeaheadMode::ShellReported,
+    );
+
+    // A restore's echo fully arrives and matches, as usual.
+    block_list
+        .early_output_mut()
+        .push_expected_echo("starship pr");
+    for ch in "starship pr".chars() {
+        block_list.input(ch);
+    }
+
+    // The user then submits a real, unrelated command -- this is the transition that must
+    // clear the stale registration.
+    block_list.start_active_block();
+
+    // A later carriage return (e.g. the command's own submission) must not rearm the stale
+    // pattern: a character that would have matched it ("s", the pattern's first character)
+    // must be treated as real, unrelated output rather than silently dropped.
+    block_list.carriage_return();
+    block_list.input('s');
+    block_list.on_finish_byte_processing(&ansi::ProcessorInput::new(&[]));
+
+    assert_eq!(
+        block_list
+            .background_block_mut()
+            .expect("the character must be treated as real output, not silently swallowed")
+            .output_to_string(),
+        "s"
+    );
+}
+
+#[test]
 fn test_push_expected_echo_survives_a_precmd_within_the_same_restore_window() {
     // `CompletionsFinished` (and the `push_expected_echo` call it triggers) fires when `9280;B`
     // is parsed, which precedes the shell's own in-band-command precmd DCS -- so in practice a
