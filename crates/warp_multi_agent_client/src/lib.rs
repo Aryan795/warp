@@ -62,7 +62,8 @@ pub async fn generate_multi_agent_output(
         request_builder = request_builder.bearer_auth(token);
     }
     if let Some(team_uid) = team_uid {
-        request_builder = request_builder.header(http_client::headers::WARP_TEAM_UID, team_uid);
+        request_builder =
+            request_builder.header(http_client::headers::WARP_ACTIVE_TEAM_UID, team_uid);
     }
 
     for (name, value) in client
