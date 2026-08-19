@@ -304,38 +304,6 @@ fn test_push_expected_echo_tolerates_ambiguous_candidates_matching_the_same_char
 }
 
 #[test]
-fn test_push_expected_echo_survives_a_carriage_return_followed_by_only_a_trailing_fragment() {
-    // Reproduces zsh's redraw with a realistic rc (starship prompt, zsh-autosuggestions,
-    // zsh-syntax-highlighting): after a full pass has already matched the whole registered
-    // text, a carriage return is sometimes followed not by another full repeat but by only a
-    // short trailing fragment of the line -- e.g. just its last character. Seeding only
-    // position 0 on a carriage return (the original fix) can't match this, since the fragment
-    // doesn't start at the beginning; every position needs to be rearmed so whichever one the
-    // fragment actually restarts from is live.
-    let mut block_list = new_block_list(
-        ChannelEventListener::new_for_test(),
-        TypeaheadMode::ShellReported,
-    );
-
-    block_list
-        .early_output_mut()
-        .push_expected_echo("starship pr");
-
-    for ch in "starship pr".chars() {
-        block_list.input(ch);
-    }
-    block_list.carriage_return();
-    // Only the trailing fragment, not a full repeat.
-    block_list.input('r');
-    block_list.on_finish_byte_processing(&ansi::ProcessorInput::new(&[]));
-
-    assert!(
-        block_list.background_block_mut().is_none(),
-        "a trailing fragment after a carriage return following a full match must not leak"
-    );
-}
-
-#[test]
 fn test_push_expected_echo_survives_a_backspace_before_a_full_reprint() {
     // Reproduces zsh's redraw with `terminal.input.honor_ps1 = true` (the shell draws its own
     // prompt): the rewind is a literal backspace, not a carriage return -- the echo stream for
