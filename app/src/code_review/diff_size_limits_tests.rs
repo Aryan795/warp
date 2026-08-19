@@ -47,12 +47,30 @@ fn approx_bytes_counts_line_struct_overhead_not_just_text() {
     let bytes = approx_file_diff_bytes(&hunks, None);
 
     let line_struct_size = std::mem::size_of::<DiffLine>();
-    assert_eq!(bytes, line_struct_size + 1);
+    assert_eq!(bytes, line_struct_size + 8);
     // Guard against the specific regression: the broken formula returns
     // exactly `1` here (just `line.text.len()`), so assert we are not that.
     assert_ne!(
         bytes, 1,
         "must count DiffLine's own struct size, not just its text"
+    );
+}
+
+/// The per-line text floor exists to keep the estimate an honest lower
+/// bound even for the smallest possible line: real allocators round small
+/// allocations up to a minimum size class, so an empty `String` never
+/// actually costs 0 bytes of heap.
+#[test]
+fn approx_bytes_floors_empty_line_text_at_minimum_allocation() {
+    let hunks = [hunk(vec![line("")])];
+    let line_struct_size = std::mem::size_of::<DiffLine>();
+
+    let bytes = approx_file_diff_bytes(&hunks, None);
+
+    assert_eq!(
+        bytes,
+        line_struct_size + 8,
+        "an empty line's text contribution must still be floored to the minimum allocation"
     );
 }
 
@@ -85,7 +103,7 @@ fn approx_bytes_scales_with_line_count_for_short_lines() {
     let bytes = approx_file_diff_bytes(&hunks, None);
 
     let line_struct_size = std::mem::size_of::<DiffLine>();
-    assert_eq!(bytes, (line_struct_size + 1) * 1_000);
+    assert_eq!(bytes, (line_struct_size + 8) * 1_000);
     // The raw text alone is only 1000 bytes; the real estimate must be
     // dominated by per-line struct overhead, not the text.
     assert!(

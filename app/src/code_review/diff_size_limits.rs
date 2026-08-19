@@ -30,32 +30,42 @@ pub const MAX_TOTAL_DIFF_FILES: usize = 2_000;
  * Maximum aggregate bytes retained across all materialized file diffs (hunks
  * plus base content) in a single load — the other half of the aggregate
  * bound described on `MAX_TOTAL_DIFF_FILES`. Measured by
- * [`approx_file_diff_bytes`], which is a real memory estimate rather than a
- * proxy for one: it counts each parsed line's own struct size, not just its
- * text, since that struct is what's actually retained per line.
+ * [`approx_file_diff_bytes`], a *lower bound* on real retained memory (see
+ * its own doc comment for what it omits), not a full accounting of it.
  */
 pub const MAX_TOTAL_DIFF_BYTES: usize = 256 * 1024 * 1024; // 256MB in decimal
 
 /**
- * Estimates the memory a single file's materialized diff retains: every
- * `DiffHunk` line contributes its own struct size (`size_of::<DiffLine>()`,
- * not a hardcoded guess, so this stays correct if the struct's fields
- * change) plus its text's heap bytes, and the loaded base content (if any)
+ * A lower bound on the memory a single file's materialized diff retains:
+ * every `DiffHunk` line contributes its own struct size
+ * (`size_of::<DiffLine>()`, not a hardcoded guess, so this stays correct if
+ * the struct's fields change) plus its text's byte length floored at 8 (a
+ * typical minimum allocator size class, so a 1-byte line isn't counted as
+ * costing only 1 byte of heap), and the loaded base content (if any)
  * contributes its own length.
  *
- * Counting only `line.text.len()` (as an earlier version of this budget
- * did) undercounts badly: `DiffLine` itself is tens of bytes fixed overhead
- * per line regardless of text length, and diffs are typically dense with
- * short lines, so the struct overhead — not the text — dominates real
- * retained memory. Undercounting here lets a budget meant to cap memory in
- * the hundreds of megabytes actually admit many times that.
+ * This deliberately still undercounts real retained memory: each line's
+ * `String` has its own heap allocation and allocator size-class rounding
+ * beyond the floor applied here, `Vec` growth leaves capacity slack, and
+ * `DiffHunk` itself has header fields not counted per line. Those add a
+ * roughly constant-factor fudge on top of this number, not an
+ * order-of-magnitude one — unlike counting only `line.text.len()` (an
+ * earlier version of this budget), which undercounts badly: `DiffLine`
+ * itself is tens of bytes of fixed overhead per line regardless of text
+ * length, and diffs are typically dense with short lines, so the struct
+ * overhead — not the text — dominates real retained memory. Undercounting
+ * that badly let a budget meant to cap memory in the hundreds of megabytes
+ * actually admit many times that.
  */
 pub fn approx_file_diff_bytes(hunks: &[DiffHunk], content_at_head: Option<&str>) -> usize {
+    // A common minimum allocator size class; see the doc comment above.
+    const MIN_LINE_TEXT_ALLOCATION: usize = 8;
+
     let line_struct_size = std::mem::size_of::<DiffLine>();
     let hunks_bytes: usize = hunks
         .iter()
         .flat_map(|hunk| &hunk.lines)
-        .map(|line| line_struct_size + line.text.len())
+        .map(|line| line_struct_size + line.text.len().max(MIN_LINE_TEXT_ALLOCATION))
         .sum();
     hunks_bytes + content_at_head.map_or(0, str::len)
 }

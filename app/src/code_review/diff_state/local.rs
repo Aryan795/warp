@@ -1795,6 +1795,7 @@ impl LocalDiffStateModel {
         let numstat = Self::get_diff_metadata_using_numstat(repo_path, "HEAD").await?;
 
         let (files, total_additions, total_deletions) = Self::materialize_with_aggregate_cap(
+            repo_path,
             changed_files,
             &numstat,
             MAX_TOTAL_DIFF_FILES,
@@ -1821,6 +1822,9 @@ impl LocalDiffStateModel {
         .await?;
 
         Ok(GitDiffWithBaseContent {
+            // Counts paths shown in the review list, including any
+            // aggregate-capped placeholders — not the count of files whose
+            // diff was actually fetched and parsed.
             files_changed: files.len(),
             files,
             total_additions,
@@ -1844,7 +1848,17 @@ impl LocalDiffStateModel {
     /// be omitted, mirroring each mode's existing behavior; such files don't
     /// count against `max_files` or `max_bytes` since nothing was
     /// materialized for them.
+    ///
+    /// Note on the resulting bound: the budget is checked *before* fetching
+    /// a file and `materialized_bytes` is only updated *after* one is fully
+    /// materialized, so one file already in flight when the check runs can
+    /// still land — the aggregate can therefore overshoot `max_bytes` by up
+    /// to one file's own footprint (bounded by `MAX_DIFF_SIZE`-derived worst
+    /// cases, not by `max_bytes` itself), and until APP-5464 bounds base
+    /// content too, by that file's uncapped `git show` content as well.
+    /// This is a soft ceiling, not a hard one.
     async fn materialize_with_aggregate_cap<F, Fut>(
+        repo_path: &Path,
         changed_files: Vec<(String, GitFileStatus)>,
         numstat: &HashMap<String, GitNumStatMetadata>,
         max_files: usize,
@@ -1864,10 +1878,8 @@ impl LocalDiffStateModel {
         for (file_path, status) in changed_files {
             if files.len() >= max_files || materialized_bytes >= max_bytes {
                 Self::log_aggregate_cap_once(&mut logged_cap, files.len(), materialized_bytes);
-                let (additions, deletions) = numstat
-                    .get(&file_path)
-                    .map(|metadata| (metadata.lines_added, metadata.lines_removed))
-                    .unwrap_or((0, 0));
+                let (additions, deletions) =
+                    Self::skipped_file_line_counts(repo_path, &file_path, &status, numstat).await;
                 total_additions += additions;
                 total_deletions += deletions;
                 files.push(Self::unrenderable_file_diff(&file_path, &status));
@@ -1889,6 +1901,33 @@ impl LocalDiffStateModel {
         }
 
         Ok((files, total_additions, total_deletions))
+    }
+
+    /// Approximates a skipped file's additions/deletions for the aggregate
+    /// stats without materializing its diff: the numstat already fetched
+    /// for binary detection (`git diff --numstat`) when it has an entry, or
+    /// a cheap on-disk line count for untracked files, which `--numstat`
+    /// never reports (see APP-5462) — mirrors the same degrade-per-entry
+    /// logic `diff_metadata_against_head` already uses for untracked files.
+    async fn skipped_file_line_counts(
+        repo_path: &Path,
+        file_path: &str,
+        status: &GitFileStatus,
+        numstat: &HashMap<String, GitNumStatMetadata>,
+    ) -> (usize, usize) {
+        if let Some(metadata) = numstat.get(file_path) {
+            return (metadata.lines_added, metadata.lines_removed);
+        }
+        if matches!(status, GitFileStatus::Untracked) {
+            let num_lines = Self::num_lines_in_file_if_non_binary(&repo_path.join(file_path))
+                .await
+                .unwrap_or_else(|err| {
+                    log::debug!("Could not count lines for untracked entry {file_path}: {err}");
+                    None
+                });
+            return (num_lines.unwrap_or(0), 0);
+        }
+        (0, 0)
     }
 
     /// Builds a placeholder for a file the aggregate materialization budget
@@ -2196,6 +2235,7 @@ impl LocalDiffStateModel {
         let numstat = Self::get_diff_metadata_using_numstat(repo_path, &merge_base).await?;
 
         let (files, total_additions, total_deletions) = Self::materialize_with_aggregate_cap(
+            repo_path,
             changed_files,
             &numstat,
             MAX_TOTAL_DIFF_FILES,
@@ -2217,6 +2257,8 @@ impl LocalDiffStateModel {
         .await?;
 
         Ok(GitDiffWithBaseContent {
+            // See the comment on the same field in `diff_state_against_head`:
+            // counts paths shown in the review list, not files actually parsed.
             files_changed: files.len(),
             files,
             total_additions,

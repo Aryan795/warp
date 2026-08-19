@@ -527,6 +527,9 @@ async fn materialize_with_aggregate_cap_stops_fetching_once_file_cap_is_reached(
     let fetch_calls_clone = fetch_calls.clone();
 
     let (files, _, _) = LocalDiffStateModel::materialize_with_aggregate_cap(
+        // No path touches disk for `GitFileStatus::Modified` entries, so an
+        // arbitrary path is fine here.
+        std::path::Path::new("."),
         changed_files(10),
         &numstat,
         3,
@@ -576,6 +579,7 @@ async fn materialize_with_aggregate_cap_stops_fetching_once_byte_cap_is_reached(
     let max_bytes = per_file_bytes * 3;
 
     let (files, _, _) = LocalDiffStateModel::materialize_with_aggregate_cap(
+        std::path::Path::new("."),
         changed_files(10),
         &numstat,
         usize::MAX,
@@ -614,6 +618,7 @@ async fn materialize_with_aggregate_cap_uses_numstat_for_skipped_files_totals() 
 
     let (files, total_additions, total_deletions) =
         LocalDiffStateModel::materialize_with_aggregate_cap(
+            std::path::Path::new("."),
             changed_files(2),
             &numstat,
             1,
@@ -631,6 +636,41 @@ async fn materialize_with_aggregate_cap_uses_numstat_for_skipped_files_totals() 
         "a skipped file's additions must come from numstat, not be dropped"
     );
     assert_eq!(total_deletions, 7);
+}
+
+/// `git diff --numstat` never reports untracked files (they aren't part of
+/// any commit to diff against), so a skipped untracked file has no numstat
+/// entry. Its line-count contribution must still come from a cheap on-disk
+/// count — mirroring `diff_metadata_against_head`'s existing degrade path —
+/// rather than silently reporting zero (APP-5462 review finding).
+#[tokio::test]
+async fn materialize_with_aggregate_cap_counts_untracked_skipped_file_lines_from_disk() {
+    let repo_dir = tempfile::tempdir().expect("create temp repo dir");
+    let repo_path = repo_dir.path();
+    std::fs::write(repo_path.join("untracked.txt"), "one\ntwo\nthree\n")
+        .expect("write untracked file");
+    let numstat = HashMap::new();
+
+    let (files, total_additions, total_deletions) =
+        LocalDiffStateModel::materialize_with_aggregate_cap(
+            repo_path,
+            vec![("untracked.txt".to_string(), GitFileStatus::Untracked)],
+            &numstat,
+            0, // budget already exhausted: skip immediately
+            usize::MAX,
+            |file_path, status, _is_binary| async move {
+                Ok(Some(trivial_file_diff(file_path, status)))
+            },
+        )
+        .await
+        .expect("materialize_with_aggregate_cap should not error");
+
+    assert_eq!(files.len(), 1);
+    assert_eq!(
+        total_additions, 3,
+        "an untracked skipped file's line count must come from disk, not numstat"
+    );
+    assert_eq!(total_deletions, 0);
 }
 
 #[test]
