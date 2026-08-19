@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sum_tree::{Cursor, SeekBias};
 use warp_core::features::FeatureFlag;
 use warpui::elements::ClippedScrollStateHandle;
-use warpui::smooth_scroll::SmoothScrollController;
+use warpui::smooth_scroll::{NUM_PIXELS_PER_LINE, SmoothScrollController};
 use warpui::units::{IntoLines, IntoPixels, Lines, Pixels};
 use warpui::{AppContext, ModelHandle};
 
@@ -30,17 +30,6 @@ use super::{
 use crate::terminal::input::inline_menu::InlineMenuPositioner;
 use crate::terminal::model::blocks::RichContentItem;
 use crate::terminal::model::index::Point as IndexPoint;
-
-/// The number of pixels-per-line used to normalize a `Lines` delta into the same units the
-/// [`SmoothScrollController`]'s duration ramp is calibrated in (its 120/480 reference points are
-/// pixel magnitudes, matching what every generic WarpUI scrollable already converts non-precise
-/// line deltas to before animating -- see `NUM_PIXELS_PER_LINE` in
-/// `crates/warpui_core/src/elements/gui/scrollable.rs` and `new_scrollable/mod.rs`, whose value
-/// and rationale this mirrors exactly). Without this, a modest multi-line terminal delta reads
-/// as a tiny magnitude against a ramp expecting hundreds, and lands on the slow end of the
-/// duration ramp when an equivalent panel scroll would land on the fast end -- the terminal
-/// would visibly animate slower than the panel beside it for the same gesture.
-const NUM_PIXELS_PER_LINE: f32 = 40.;
 
 /// Shared handle to a [`SmoothScrollController`] animating discrete (non-precise) wheel input
 /// for the block list's vertical scrollback, gated by `FeatureFlag::SmoothScrolling`.
@@ -69,10 +58,6 @@ pub struct SmoothScrollHandle(Arc<Mutex<SmoothScrollHandleState>>);
 #[derive(Default)]
 struct SmoothScrollHandleState {
     controller: SmoothScrollController,
-    /// The portion of `controller`'s displayed position (pixel-equivalent units) already
-    /// applied to `ScrollState` via `take_increment`. The next call's increment is
-    /// `displayed_position(now) - applied`.
-    applied: f32,
     /// Whether a self-perpetuating `TerminalView::drive_smooth_scroll` timer loop is already
     /// scheduled to advance this animation. Prevents `TerminalView::scroll` from starting an
     /// overlapping second loop when called again while one is already running. See
@@ -96,9 +81,7 @@ impl SmoothScrollHandle {
     /// operation (precise input, keyboard, jump-to-block, etc.) doesn't inherit stale queued
     /// movement.
     pub fn cancel(&self, now: Instant) {
-        let mut state = self.0.lock().unwrap();
-        let displayed = state.controller.cancel(now);
-        state.applied = displayed;
+        self.0.lock().unwrap().controller.cancel(now);
     }
 
     /// Whether a segment is still easing in.
@@ -106,14 +89,11 @@ impl SmoothScrollHandle {
         self.0.lock().unwrap().controller.is_animating(now)
     }
 
-    /// Returns the incremental delta (in `Lines`) that hasn't yet been applied to `ScrollState`,
-    /// advancing the applied baseline so the same movement isn't emitted twice. Converts back
-    /// out of the controller's pixel-equivalent units.
+    /// Returns the incremental delta (in `Lines`) that hasn't yet been applied to `ScrollState`.
+    /// See [`SmoothScrollController::take_increment`]. Converts back out of the controller's
+    /// pixel-equivalent units.
     pub fn take_increment(&self, now: Instant) -> Lines {
-        let mut state = self.0.lock().unwrap();
-        let displayed = state.controller.displayed_position(now);
-        let increment = displayed - state.applied;
-        state.applied = displayed;
+        let increment = self.0.lock().unwrap().controller.take_increment(now);
         ((increment / NUM_PIXELS_PER_LINE) as f64).into_lines()
     }
 

@@ -323,10 +323,10 @@ This audit found the cancellation surface materially cleaner than Phase 1's, not
 
 The rest of this section describes the actual shipped shape, which differs from the original
 proposal below in one respect: rather than the controller emitting a full delta that
-`TerminalView` applies as one incremental `Lines` value per repaint, the controller output is
-applied via the same lazy, per-event-dispatch pattern already proven for Phase 1's `Manual`-axis
-scrollables (`ScrollState`/`take_smooth_scroll_increment` in `crates/warpui_core/src/elements/gui/
-scrollable.rs`), since `TerminalView::scroll` (which owns the only code path that can call
+`TerminalView` applies as one incremental `Lines` value per repaint, the controller tracks only
+the unapplied remainder of an animation (mirroring Phase 1's `Manual`-axis `take_smooth_scroll_
+increment` pattern in intent, though not in delivery mechanism -- see the revisions below), since
+`TerminalView::scroll` (which owns the only code path that can call
 `update_scroll_position_locking`) requires a `ViewContext`, unavailable during `BlockListElement`'s
 paint. Concretely:
 
@@ -337,22 +337,42 @@ paint. Concretely:
   each hold a clone, mirroring how `horizontal_clipped_scroll_state` is already threaded through.
 - `TerminalView::scroll(delta, precise, ctx)`: for precise input or the flag off, cancels the
   handle and applies `AfterScrollEvent` immediately, exactly as before. For eligible non-precise
-  input, calls `SmoothScrollHandle::add_delta` and returns without touching `scroll_position`.
-- `BlockListElement::paint` requests `ctx.repaint_after(SMOOTH_SCROLL_FRAME_INTERVAL)` while
-  `is_animating()`, identically to Phase 1's `Manual`/`Clipped` axes.
-- `BlockListElement::dispatch_event` unconditionally dispatches
-  `TerminalAction::AdvanceSmoothScroll` on every event it receives (mirroring
-  `Scrollable::dispatch_event`'s unconditional `advance_smooth_scroll` call exactly -- gating this
-  on `is_animating()` first would race with a segment completing between the gate check and the
-  actual increment-taking, silently dropping the final increment and landing short of the exact
-  target).
-- `TerminalView::advance_smooth_scroll` (the `AdvanceSmoothScroll` handler) takes the pending
-  increment and, if non-zero, applies it via `update_scroll_position_locking(AfterScrollEvent{..})`
-  -- the same existing path a direct scroll uses, so `scroll_position_for_delta`'s clamping and
-  `FollowsBottomOfMostRecentBlock` transition logic runs unmodified, against whatever the block
-  list's current state is that frame. This is what makes content arriving mid-animation a
-  non-issue: each increment is small and re-resolved against current state, not a captured
-  absolute target.
+  input, calls `SmoothScrollHandle::add_delta`, then, if a drive loop for this animation isn't
+  already running (`SmoothScrollHandle::try_start_driving`), starts `TerminalView::
+  drive_smooth_scroll`.
+- **Revision**: the first shipped version of `drive_smooth_scroll` used `BlockListElement::
+  paint`'s `ctx.repaint_after(SMOOTH_SCROLL_FRAME_INTERVAL)` plus an unconditional
+  `TerminalAction::AdvanceSmoothScroll` dispatch from `BlockListElement::dispatch_event`, mirroring
+  Phase 1's `Manual`-axis pattern exactly. That depended on the app's synthetic-`MouseMoved`
+  replay (`AppContext::build_scene`) to actually invoke `dispatch_event`, which only fires once a
+  *real* `MouseMoved` has already been cached for the window -- a window scrolled before ever
+  receiving one would register an animation and repaint forever without ever applying it. Fixed by
+  driving the animation independently of any dispatched event or cached pointer state:
+  `TerminalView::drive_smooth_scroll(handle, ctx)` builds a `futures::stream::unfold` that ticks
+  every `SMOOTH_SCROLL_FRAME_INTERVAL` via `Timer::after` and checks `is_animating()` directly on
+  the thread-safe handle, ending the stream once settled; `ctx.spawn_stream_local` spawns this
+  stream once per animation (not once per tick -- see below) and invokes `TerminalView::
+  advance_smooth_scroll` on the main thread for each tick the stream yields, with `on_done` marking
+  the loop stopped. `TerminalAction::AdvanceSmoothScroll` and `BlockListElement`'s paint/dispatch
+  involvement in this no longer exist.
+- **Second revision**: the first version of this fix re-spawned a *new* background-executor task
+  via `ctx.spawn(Timer::after(...), ...)` recursively, once per tick, rather than one long-lived
+  stream -- a fresh background-task-spawn-and-channel-bridge round trip on every ~8ms tick, which
+  is fine for this file's other, infrequent one-shot delayed actions but disproportionate overhead
+  for a tight repeating cadence, and a plausible source of the real-world scheduling latency a
+  hands-on visual pass reported (the terminal settling noticeably slower than an equivalent
+  Settings-page burst). The single-stream version above replaced it.
+- `TerminalView::advance_smooth_scroll` takes the pending increment via `SmoothScrollHandle::
+  take_increment` and, if non-zero, applies it via
+  `update_scroll_position_locking(AfterScrollEvent{..})` -- the same existing path a direct scroll
+  uses, so `scroll_position_for_delta`'s clamping and `FollowsBottomOfMostRecentBlock` transition
+  logic runs unmodified, against whatever the block list's current state is that frame. This is
+  what makes content arriving mid-animation a non-issue: each increment is small and re-resolved
+  against current state, not a captured absolute target.
+- `TerminalView::render` cancels `self.smooth_scroll` whenever alt screen is active, so an
+  animation in flight when alt screen opens doesn't keep silently advancing the hidden block-list
+  position (the drive loop above is independent of which element is on screen, so without this it
+  would have kept ticking during alt screen too).
 
 In `BlockListElement::scroll_internal`, the routing order is preserved exactly as originally
 proposed (reject-out-of-bounds, precise-to-lines conversion, long-running-block
@@ -395,8 +415,21 @@ the amendment above (this list supersedes the original one, which named tests fo
 - `zero_delta_is_a_no_op`
 - `long_rapid_same_direction_burst_reaches_exact_sum_of_deltas`
 - `inverse_delta_duration_ramps_between_the_two_reference_points`
+- `inverse_delta_duration_ramps_linearly_not_hyperbolically`: pins the exact mid-ramp shape (a
+  linear interpolation, ported directly from Chromium's `kInverseDeltaSlope`/
+  `kInverseDeltaOffset`) rather than merely checking the ramp is monotonic and unbroken -- an
+  earlier revision used an `A/delta + B` hyperbola fit through the same two endpoints instead,
+  which this assertion would fail under.
 - `velocity_preserving_duration_bound_shrinks_when_moving_fast_toward_a_small_remaining_delta`
+- `velocity_based_duration_bound_guards`: direct coverage of the two guards ported from
+  Chromium's `VelocityBasedDurationBound` (zero when already at target; unbounded when velocity
+  is zero or points away from the remaining delta), plus the exact `* 2.5` fudge factor.
 - `cubic_bezier_ease_in_out_matches_known_reference_values`
+- `take_increment_reports_only_the_unapplied_remainder` /
+  `cancel_and_set_position_immediately_resync_take_increment`: cover
+  `SmoothScrollController::take_increment`, hoisted from what `ScrollState`
+  (`crates/warpui_core/src/elements/gui/scrollable.rs`) and `SmoothScrollHandle`
+  (`app/src/terminal/block_list_viewport.rs`) used to hand-roll independently.
 
 Extend `new_scrollable/scrollable_tests.rs`, legacy `scrollable_tests.rs`, and
 `clipped_scrollable_tests.rs`:
@@ -410,11 +443,11 @@ Extend `new_scrollable/scrollable_tests.rs`, legacy `scrollable_tests.rs`, and
 - Dual-axis input animates axes independently.
 - A stale frame cannot move a rebuilt or cancelled scrollable.
 
-Phase 2 terminal tests added in `app/src/terminal/view_tests.rs` (driving `TerminalView::scroll`
-and `TerminalView::advance_smooth_scroll` directly rather than through a full `BlockListElement`
-paint/dispatch cycle -- the frame-driving mechanism itself is structurally identical to Phase 1's
-already-tested `Manual`-axis pattern, so these focus on what's actually new: precise/flag
-branching and the cancellation guard):
+Phase 2 terminal tests added in `app/src/terminal/view_tests.rs`. Some drive `TerminalView::
+scroll`/`advance_smooth_scroll` directly (focusing on precise/flag branching and the cancellation
+guard); others deliberately drive the animation purely through the real `drive_smooth_scroll`
+stream (via `Timer::after` and real polling), since that mechanism changed twice during revision
+and is exactly what a manual-poke-based test cannot exercise:
 - `test_smooth_scroll_wheel_animates_and_settles_to_exact_target`: a non-precise notch defers
   (doesn't apply synchronously), shows partial progress mid-flight, and lands exactly where an
   immediate scroll of the same delta would have.
@@ -425,11 +458,28 @@ branching and the cancellation guard):
 - `test_smooth_scroll_animation_settles_into_follows_bottom_of_most_recent_block`: a large
   animated overshoot settles into sticky-bottom mode, not stuck at `FixedAtPosition` right at the
   boundary (this is the test that found the `heights_approx_gte` fix above).
+- `test_smooth_scroll_advances_on_its_own_without_any_cached_mouse_position`: a window that has
+  never received a real `MouseMoved` still settles, driven purely by `drive_smooth_scroll`'s
+  independent stream -- this is the regression test for the stall the first revision fixed.
+- `test_smooth_scroll_drive_loop_settles_within_modeled_duration_via_real_polling`: polls
+  `scroll_position` via real sleeps (not a manual poke) for an 8-notch burst and asserts it
+  settles within ~300ms of real wall-clock time -- the regression test for the per-tick
+  background-task-spawn overhead the second revision fixed.
+- `test_smooth_scroll_cancels_when_entering_alt_screen_before_animation_settles` /
+  `..._settled_position_survives_alt_screen_round_trip`: an animation in flight when alt screen
+  opens is cancelled outright (not merely paused), and a round trip after the animation already
+  settled leaves the position untouched.
+- `test_smooth_scroll_handles_content_growing_mid_animation`: new blocks arriving mid-animation
+  (growing `max_scroll_top`) don't derail the animation; it still settles within the new bounds.
+
+`smooth_scroll_handle_tests` in `block_list_viewport.rs` covers the `Lines`-to-pixel-equivalent
+normalization at the `SmoothScrollHandle` boundary specifically (a 1-line delta takes the slow
+end of the duration ramp, a 20-line delta the fast end) -- this is the regression test for the
+unit-mismatch finding fixed above.
 
 Not covered by an automated test, and flagged rather than silently skipped: a live, real-content-
-streaming-mid-animation scenario (the reasoning for why this should already work -- increments are
-small and re-resolved against current state each frame -- is described above, but wasn't
-empirically exercised against genuinely arriving PTY output during an active animation). Recommend
+streaming-mid-animation scenario against genuinely arriving PTY output (as opposed to the
+synthetic block-insertion the automated test above uses) during an active animation. Recommend
 this get a pass during human/visual verification.
 
 Run focused tests while implementing:
