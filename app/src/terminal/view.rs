@@ -122,7 +122,8 @@ use session_sharing_protocol::sharer::{
 use settings::{Setting, ToggleableSetting};
 use shared_session::cloud_conversation_continuation::CloudConversationContinuationUiState;
 pub(crate) use shared_session::cloud_conversation_continuation::{
-    AIQueryRouting, resolve_ai_query_routing,
+    AIQueryRouting, CompletedChildPresentation, ConversationAccess,
+    completed_child_conversation_access, completed_child_presentation, resolve_ai_query_routing,
 };
 use shared_session::{SharedSessionAdapter, Viewer};
 use ssh_file_upload::{FileUpload, FileUploadEvent};
@@ -217,7 +218,8 @@ use crate::ai::agent::{
 use crate::ai::agent::{CurrentHead, DiffBase};
 use crate::ai::agent_conversations_model::{AgentConversationsModel, AgentConversationsModelEvent};
 use crate::ai::ambient_agents::{
-    AmbientAgentTaskId, AmbientConversationStatus, conversation_output_status_from_conversation,
+    AmbientAgentTask, AmbientAgentTaskId, AmbientConversationStatus,
+    conversation_output_status_from_conversation,
 };
 use crate::ai::blocklist::agent_view::agent_input_footer::toolbar_item::AgentToolbarItemKind;
 use crate::ai::blocklist::agent_view::orchestration_conversation_links::pane_group_id_containing_terminal_view;
@@ -2028,6 +2030,20 @@ pub enum Event {
         conversation_id: AIConversationId,
         session_id: session_sharing_protocol::common::SessionId,
     },
+    /// Unified-stack counterpart to [`Self::EnsureSharedSessionViewerChildPane`].
+    /// Carries the fetched task snapshot so pane construction uses the same
+    /// current-state materialization decision as pill-click restoration.
+    EnsureUnifiedViewerChildPane {
+        conversation_id: AIConversationId,
+        task: Box<AmbientAgentTask>,
+    },
+    /// A unified-stack child viewer could not join its dedicated live
+    /// execution session. The pane group keeps the child passive and
+    /// re-drives it from current task metadata.
+    OrchestrationChildSharedSessionJoinFailed {
+        conversation_id: AIConversationId,
+        session_id: session_sharing_protocol::common::SessionId,
+    },
     /// Emitted when "Open in new tab" is picked from a child pill's 3-dot menu.
     /// Bubbles up to the workspace to create the new tab.
     OpenChildAgentInNewTab {
@@ -2870,6 +2886,9 @@ pub struct TerminalView {
 
     ambient_agent_view_model: Option<ModelHandle<ambient_agent::AmbientAgentViewModel>>,
     pending_cloud_followup_task_id: Option<AmbientAgentTaskId>,
+    /// A passive orchestration child whose live execution session could not
+    /// be joined. Task refresh may later replace this with a transcript.
+    orchestration_child_live_unavailable: bool,
 
     /// Conversation details panel (side panel showing conversation/task metadata).
     /// Available for cloud Oz runs and for any active local AI conversation.
@@ -4440,6 +4459,7 @@ impl TerminalView {
             has_auto_opened_conversation_details_panel: false,
             conversation_details_panel_auto_open_policy: Default::default(),
             pending_cloud_followup_task_id: None,
+            orchestration_child_live_unavailable: false,
             conversation_details_panel_toggle_mouse_state: Default::default(),
             ambient_agent_cancel_mouse_state: Default::default(),
             active_init_project_model: None,
@@ -6255,8 +6275,7 @@ impl TerminalView {
                     );
                 });
                 let ai_block_clone = ai_block.clone();
-                let is_passive_conversation =
-                    ai_block_clone.as_ref(ctx).is_passive_conversation(ctx);
+                let is_passive_conversation = ai_block_clone.as_ref(ctx).is_passive_conversation();
                 self.find_model.update(ctx, move |find_model, _ctx| {
                     find_model.register_findable_rich_content_view(ai_block_clone);
                 });
@@ -8174,6 +8193,29 @@ impl TerminalView {
             ConversationDetailsPanelAutoOpenPolicy::DefaultClosed;
     }
 
+    pub(crate) fn set_orchestration_child_live_unavailable(
+        &mut self,
+        unavailable: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if self.orchestration_child_live_unavailable == unavailable {
+            return;
+        }
+        self.orchestration_child_live_unavailable = unavailable;
+        ctx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_orchestration_child_live_unavailable_for_test(&self) -> bool {
+        self.orchestration_child_live_unavailable
+    }
+    #[cfg(test)]
+    pub(crate) fn has_agent_view_zero_state_for_test(&self) -> bool {
+        self.rich_content_views
+            .iter()
+            .any(|view| view.is_agent_view_zero_state())
+    }
+
     #[cfg(test)]
     pub(crate) fn is_initial_conversation_details_panel_auto_open_suppressed_for_test(
         &self,
@@ -9381,9 +9423,25 @@ impl TerminalView {
         });
     }
 
-    /// Writes a shared session viewer's bytes to the pty
+    /// Writes a shared session viewer's bytes to the pty.
+    ///
+    /// A lone Ctrl-C byte that is actually forwarded to the PTY is
+    /// additionally observed by `CLIAgentSessionsModel` so that an interrupt
+    /// which silently kills a third-party harness turn (no plugin hook fires
+    /// on user interrupt) can still resolve the session, and its task, to
+    /// Cancelled. See `CLIAgentSessionsModel::observe_ctrl_c_write`.
+    /// Observation never delays or drops the write itself, and never arms a
+    /// window for a byte that `write_user_bytes_to_pty` rejected (e.g. the
+    /// active block is under agent control).
     pub fn write_viewer_bytes_to_pty(&mut self, bytes: Vec<u8>, ctx: &mut ViewContext<Self>) {
-        self.write_user_bytes_to_pty(bytes, ctx);
+        let is_ctrl_c = bytes == [0x03];
+        let forwarded = self.write_user_bytes_to_pty(bytes, ctx);
+        if forwarded && is_ctrl_c && FeatureFlag::CtrlCCancelsThirdPartyHarness.is_enabled() {
+            let terminal_view_id = self.view_id;
+            CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
+                sessions.observe_ctrl_c_write(terminal_view_id, ctx);
+            });
+        }
     }
 
     /// Ends the current line before writing the given bytes to the PTY.
@@ -9405,17 +9463,19 @@ impl TerminalView {
     }
 
     /// Writes to the PTY, resets selected blocks and updates scroll position.
-    /// Also calls logic to emit a sync event.
+    /// Also calls logic to emit a sync event. Returns whether the bytes were
+    /// actually forwarded to the PTY: `false` when the active block is under
+    /// agent control, in which case nothing is written.
     fn write_user_bytes_to_pty<B: Into<Cow<'static, [u8]>>>(
         &mut self,
         data: B,
         ctx: &mut ViewContext<Self>,
-    ) {
+    ) -> bool {
         {
             let mut terminal_model = self.model.lock();
             let active_block = terminal_model.block_list().active_block();
             if active_block.is_agent_in_control() {
-                return;
+                return false;
             }
             if active_block.is_active_and_long_running() && !active_block.has_received_user_input()
             {
@@ -9432,6 +9492,7 @@ impl TerminalView {
         self.update_scroll_position_locking(ScrollPositionUpdate::AfterWriteUserBytesToPty, ctx);
         self.write_to_pty(bytes, ctx);
         self.emit_non_editor_typed_event(bytes_vec, ctx);
+        true
     }
 
     /// Write to the PTY if the session has finished bootstrapping and
@@ -13508,7 +13569,8 @@ impl TerminalView {
                     }
                     CLIAgentSessionStatus::InProgress
                     | CLIAgentSessionStatus::Success
-                    | CLIAgentSessionStatus::Failed { .. } => {
+                    | CLIAgentSessionStatus::Failed { .. }
+                    | CLIAgentSessionStatus::Cancelled => {
                         // Auto-open rich input when the agent resumes or completes.
                         if !self.has_active_cli_agent_input_session(ctx) {
                             self.open_cli_agent_rich_input(CLIAgentInputEntrypoint::AutoShow, ctx);
@@ -15198,7 +15260,7 @@ impl TerminalView {
                 if ai_metadata
                     .ai_block_handle
                     .as_ref(ctx)
-                    .is_passive_conversation(ctx)
+                    .is_passive_conversation()
                     && matches!(
                         ai_metadata.ai_block_handle.as_ref(ctx).status(ctx),
                         AIBlockOutputStatus::Failed { .. }
@@ -15225,7 +15287,7 @@ impl TerminalView {
         self.rich_content_views.retain(|rich_content| {
             if let Some(ai_metadata) = rich_content.ai_block_metadata() {
                 let is_hidden = ai_metadata.ai_block_handle.read(ctx, |ai_block, ctx| {
-                    ai_block.is_hidden(ctx) && ai_block.is_passive_conversation(ctx)
+                    ai_block.is_passive_conversation() && ai_block.is_hidden(ctx)
                 });
                 if is_hidden {
                     ai_block_ids_to_remove.push(ai_metadata.ai_block_handle.id());
@@ -20895,8 +20957,8 @@ impl TerminalView {
             let ai_block = ai_metadata.ai_block_handle.as_ref(ctx);
 
             (!ai_block.is_finished()
-                && !ai_block.is_hidden(ctx)
-                && !ai_block.is_passive_conversation(ctx))
+                && !ai_block.is_passive_conversation()
+                && !ai_block.is_hidden(ctx))
             .then_some(&ai_metadata.ai_block_handle)
         })
     }
@@ -23752,6 +23814,42 @@ impl TerminalView {
         .finish()
     }
 
+    fn render_orchestration_child_live_unavailable(&self, app: &AppContext) -> Box<dyn Element> {
+        let appearance = Appearance::as_ref(app);
+        let color = appearance
+            .theme()
+            .sub_text_color(appearance.theme().background());
+
+        SavePosition::new(
+            Align::new(
+                Flex::column()
+                    .with_child(
+                        Text::new_inline(
+                            "Live session unavailable",
+                            appearance.ui_font_family(),
+                            14.,
+                        )
+                        .with_color(color.into())
+                        .finish(),
+                    )
+                    .with_child(
+                        Text::new_inline(
+                            "The transcript will appear when this child finishes.",
+                            appearance.ui_font_family(),
+                            12.,
+                        )
+                        .with_color(color.into())
+                        .finish(),
+                    )
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .finish(),
+            )
+            .finish(),
+            &self.content_element_position_id,
+        )
+        .finish()
+    }
+
     fn render_bookmark_element(
         index: BlockIndex,
         bookmark_mouse_state: MouseStateHandle,
@@ -25475,8 +25573,8 @@ impl TerminalView {
                     // Log to sentry if unknown error
                     if let RequestPermissionsOutcome::OtherError { error_message } = &outcome {
                         report_error!(
-                            "Unknown error when requesting notification permissions",
-                            extra: { "error_message" => %error_message }
+                            anyhow::anyhow!("{error_message}")
+                                .context("Unknown error when requesting notification permissions")
                         );
                     }
 
@@ -26209,15 +26307,16 @@ impl TerminalView {
 
     pub(super) fn toggle_file_tree(
         &mut self,
+        source: crate::server::telemetry::FileTreeSource,
         cli_agent: Option<crate::server::telemetry::CLIAgentType>,
         ctx: &mut ViewContext<Self>,
     ) {
-        use crate::server::telemetry::{FileTreeSource, TelemetryEvent};
+        use crate::server::telemetry::TelemetryEvent;
 
         self.toggle_left_panel_file_tree(false, ctx);
         send_telemetry_from_ctx!(
             TelemetryEvent::FileTreeToggled {
-                source: FileTreeSource::LeftPanelToolbelt,
+                source,
                 is_code_mode_v2: true,
                 cli_agent,
             },
@@ -27960,7 +28059,9 @@ impl View for TerminalView {
                         && !self.is_ambient_agent_session(app);
                     let is_loading_transcript = model.is_loading_conversation_transcript();
                     let should_show_loading = is_view_pending_clause || is_loading_transcript;
-                    let output_area = if should_show_loading {
+                    let output_area = if self.orchestration_child_live_unavailable {
+                        self.render_orchestration_child_live_unavailable(app)
+                    } else if should_show_loading {
                         self.render_viewer_loading(app)
                     } else if is_alt_screen_active {
                         did_wrap_terminal_size = true;
