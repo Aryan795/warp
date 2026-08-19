@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::VecDeque;
+use std::mem;
 use std::sync::Arc;
 
 use async_channel::{Receiver, Sender};
@@ -115,6 +116,15 @@ pub struct PtyController<T: EventLoopSender> {
     /// which never touch the real buffer in the first place (see `send_write_to_event_loop`'s
     /// handling of `PtyWrite::RunNativeShellCompletions`), so nothing needs restoring.
     in_flight_native_completions_buffer_text: Option<String>,
+    /// Set right when a native-completions buffer restore write is queued (see
+    /// `ModelEvent::CompletionsFinished` handling below) and cleared the next time the line
+    /// editor becomes active. While set, the `LineEditorStatusEvent::Active` subscription skips
+    /// queueing the input-reporting sequence -- both fire from the same underlying trigger (the
+    /// shell returning to a fresh prompt after the generator command completes), in an order
+    /// that isn't guaranteed, and re-running input reporting right after the restore would
+    /// report and clear the text this just wrote back, producing PTY output `push_expected_echo`
+    /// never registered and so isn't recognized, rendering as a phantom background block.
+    just_restored_native_completions_buffer: bool,
 }
 
 impl<T: EventLoopSender> PtyController<T> {
@@ -178,6 +188,7 @@ impl<T: EventLoopSender> PtyController<T> {
                     // unexpected background output, which would otherwise render as a phantom
                     // block mirroring the restored text.
                     me.terminal_model.lock().push_expected_echo(&buffer_text);
+                    me.just_restored_native_completions_buffer = true;
                     me.pending_writes.push_front(PtyWrite::Bytes {
                         bytes: Cow::Owned(buffer_text.into_bytes()),
                     });
@@ -189,6 +200,11 @@ impl<T: EventLoopSender> PtyController<T> {
 
         ctx.subscribe_to_model(&line_editor_status, |me, _, event, ctx| {
             if let LineEditorStatusEvent::Active = event {
+                if mem::replace(&mut me.just_restored_native_completions_buffer, false) {
+                    // Skip input reporting this one time -- see the field's doc comment.
+                    me.execute_next_queued_write(ctx);
+                    return;
+                }
                 let input_reporting_seq = me
                     .model_event_dispatcher
                     .as_ref(ctx)
@@ -236,6 +252,7 @@ impl<T: EventLoopSender> PtyController<T> {
             bootstrap_file: None,
             in_flight_native_completions_results_tx: None,
             in_flight_native_completions_buffer_text: None,
+            just_restored_native_completions_buffer: false,
         }
     }
 
