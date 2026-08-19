@@ -3684,6 +3684,13 @@ impl RenderState {
             let mut hidden_config: Option<HiddenBlockConfig> = None;
             let mut staging = Vec::new();
 
+            // Collect this range's output and insert it with a single `extend`, rather than pushing
+            // the items ahead of the hidden block one at a time: once the tree is taller than a
+            // single leaf, `SumTree::push` gives every item a leaf of its own (APP-5439). Nothing
+            // in this loop reads back from `new_tree`, so collecting first preserves the order
+            // exactly.
+            let mut range_items = Vec::new();
+
             // We want to always preserve 1) the non-hidden items 2) in the same order as they are inserted.
             for item in sub_tree.cursor::<CharOffset, CharOffset>() {
                 if let BlockItem::Hidden(config) = item {
@@ -3693,7 +3700,7 @@ impl RenderState {
                         hidden_config = Some(config.clone())
                     }
                 } else if hidden_config.is_none() {
-                    new_tree.push(item.clone());
+                    range_items.push(item.clone());
                 } else {
                     staging.push(item.clone())
                 }
@@ -3709,10 +3716,13 @@ impl RenderState {
                 } else {
                     BlockLocation::Middle
                 };
-                new_tree.push(BlockItem::Hidden(config));
+                range_items.push(BlockItem::Hidden(config));
             }
 
-            new_tree.extend(staging);
+            // The items that followed the hidden block go last, as they did when they were pushed
+            // separately.
+            range_items.extend(staging);
+            new_tree.extend(range_items);
             log::trace!("==== Finished processing range ====");
         }
 

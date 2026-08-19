@@ -928,6 +928,76 @@ fn test_multiselect_autoscroll_bounding_box() {
     );
 }
 
+/// Labels a tree's item kinds in order, so a test can pin a sequence.
+fn tree_item_kinds(tree: &SumTree<BlockItem>) -> Vec<&'static str> {
+    tree.cursor::<CharOffset, CharOffset>()
+        .map(|item| match item {
+            BlockItem::Hidden(_) => "hidden",
+            BlockItem::Paragraph(_) => "paragraph",
+            _ => "other",
+        })
+        .collect()
+}
+
+#[test]
+fn dedupe_hidden_ranges_packs_the_items_ahead_of_a_hidden_block() {
+    // Every paragraph here sits inside the hidden range and ahead of its hidden block, which is
+    // the sequence that used to be pushed an item at a time.
+    let mut tree = SumTree::new();
+    for _ in 0..200 {
+        tree.push(mock_paragraph(18.2, 0., 1));
+    }
+    tree.push(BlockItem::Hidden(HiddenBlockConfig::new(
+        LineCount(1),
+        CharOffset::from(1),
+        BlockLocation::End,
+    )));
+
+    let mut hidden_ranges = RangeSet::new();
+    hidden_ranges.insert(CharOffset::from(1)..CharOffset::from(202));
+
+    let resulting = RenderState::dedupe_hidden_ranges(tree, hidden_ranges);
+
+    let stats = resulting.node_stats();
+    assert!(
+        stats.items >= stats.leaves * (stats.slots_per_leaf - 1),
+        "deduped tree should fill its leaves, got {stats:?}"
+    );
+}
+
+#[test]
+fn dedupe_hidden_ranges_keeps_items_either_side_of_the_hidden_block() {
+    // Two paragraphs, then two adjacent hidden blocks to merge, then two more paragraphs: the
+    // items after the hidden block are buffered separately from the ones before it, so this pins
+    // that they come back in the original order around a single merged block.
+    let mut tree = SumTree::new();
+    tree.push(mock_paragraph(18.2, 0., 1));
+    tree.push(mock_paragraph(18.2, 0., 1));
+    tree.push(BlockItem::Hidden(HiddenBlockConfig::new(
+        LineCount(1),
+        CharOffset::from(1),
+        BlockLocation::Middle,
+    )));
+    tree.push(BlockItem::Hidden(HiddenBlockConfig::new(
+        LineCount(1),
+        CharOffset::from(1),
+        BlockLocation::Middle,
+    )));
+    tree.push(mock_paragraph(18.2, 0., 1));
+    tree.push(mock_paragraph(18.2, 0., 1));
+
+    let mut hidden_ranges = RangeSet::new();
+    hidden_ranges.insert(CharOffset::from(1)..CharOffset::from(7));
+
+    let resulting = RenderState::dedupe_hidden_ranges(tree, hidden_ranges);
+
+    assert_eq!(
+        tree_item_kinds(&resulting),
+        vec!["paragraph", "paragraph", "hidden", "paragraph", "paragraph",],
+        "the two adjacent hidden blocks should merge into one, with the paragraphs unmoved"
+    );
+}
+
 /// A temporary block, the kind `reset_temporary_block` drops and re-inserts.
 fn temporary_block() -> BlockItem {
     BlockItem::TemporaryBlock {
