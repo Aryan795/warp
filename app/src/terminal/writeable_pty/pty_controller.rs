@@ -6,6 +6,7 @@ use std::sync::Arc;
 use async_channel::{Receiver, Sender};
 use parking_lot::FairMutex;
 use thiserror::Error;
+use warp_completer::meta::Span;
 #[cfg(feature = "local_fs")]
 use warp_errors::report_error;
 use warp_util::path::ShellFamily;
@@ -77,7 +78,7 @@ enum PtyWrite {
         /// for the other three shells it's a full generator-command line.
         command: String,
         shell_type: ShellType,
-        results_tx: async_channel::Sender<Vec<ShellCompletion>>,
+        results_tx: async_channel::Sender<(Vec<ShellCompletion>, Option<Span>)>,
         /// The input editor's buffer text this request was computed from. For the three shells
         /// that run this as a foreground command, the generator command necessarily clears the
         /// shell's real input buffer to run (see `bytes_to_execute_command`), so once results
@@ -108,7 +109,8 @@ pub struct PtyController<T: EventLoopSender> {
     /// complete, it will be dropped to clean up the temporary file.
     #[cfg(not(target_family = "wasm"))]
     bootstrap_file: Option<TempBootstrapFile>,
-    in_flight_native_completions_results_tx: Option<async_channel::Sender<Vec<ShellCompletion>>>,
+    in_flight_native_completions_results_tx:
+        Option<async_channel::Sender<(Vec<ShellCompletion>, Option<Span>)>>,
     /// The buffer text of the currently in-flight native-completions request, if any. Written
     /// back to the pty verbatim once results come back (see `ModelEvent::CompletionsFinished`
     /// handling below), to undo the buffer-clearing that `bytes_to_execute_command` necessarily
@@ -165,12 +167,12 @@ impl<T: EventLoopSender> PtyController<T> {
                     me.send_switch_to_warp_prompt_bindkey(ctx);
                 }
             }
-            ModelEvent::CompletionsFinished(data) => {
+            ModelEvent::CompletionsFinished(data, replacement_span) => {
                 let Some(results_tx) = me.in_flight_native_completions_results_tx.take() else {
                     log::warn!("Received CompletionsFinished event but didn't have a channel to send results over!");
                     return;
                 };
-                let _ = block_on(results_tx.send(data.clone()));
+                let _ = block_on(results_tx.send((data.clone(), *replacement_span)));
 
                 // The generator command necessarily cleared the shell's real input buffer to
                 // run in the foreground (see `bytes_to_execute_command`); write back what the
@@ -856,7 +858,7 @@ impl<T: EventLoopSender> PtyController<T> {
     pub fn run_native_shell_completions(
         &mut self,
         buffer_text: String,
-        results_tx: async_channel::Sender<Vec<ShellCompletion>>,
+        results_tx: async_channel::Sender<(Vec<ShellCompletion>, Option<Span>)>,
         ctx: &mut ModelContext<Self>,
     ) {
         let Some(shell_type) = self
@@ -866,7 +868,7 @@ impl<T: EventLoopSender> PtyController<T> {
             .and_then(|id| self.sessions.as_ref(ctx).get(id))
             .map(|session| session.shell().shell_type())
         else {
-            let _ = results_tx.try_send(Vec::new());
+            let _ = results_tx.try_send((Vec::new(), None));
             return;
         };
         let command = native_shell_completions::generator_command_for(shell_type, &buffer_text);

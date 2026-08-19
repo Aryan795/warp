@@ -262,12 +262,11 @@ fn native_shell_completions_reports_no_matches_without_an_active_session() {
             controller.run_native_shell_completions("git ch".to_owned(), results_tx, ctx);
         });
 
-        assert!(
-            results_rx
-                .try_recv()
-                .expect("should immediately receive empty results")
-                .is_empty()
-        );
+        let (completions, replacement_span) = results_rx
+            .try_recv()
+            .expect("should immediately receive empty results");
+        assert!(completions.is_empty());
+        assert!(replacement_span.is_none());
         controller.read(&app, |controller, _| {
             assert!(controller.pending_writes.is_empty());
         });

@@ -26,7 +26,10 @@ use crate::util::AsciiDebug;
 #[derive(Clone)]
 /// Events sent to the main thread by the terminal model & event loop.
 pub enum Event {
-    CompletionsFinished(Vec<ShellCompletion>),
+    /// The second element is the shell's own notion of the range of the buffer the completions
+    /// replace, if it reported one (see `Handler::on_completion_replacement_span_received`).
+    /// `None` for shells that don't send this yet.
+    CompletionsFinished(Vec<ShellCompletion>, Option<warp_completer::meta::Span>),
     MouseCursorDirty,
     Title(String),
     VisibleBootstrapBlock,
@@ -403,7 +406,7 @@ pub enum ParseGeneratorOutputError {
 impl Debug for Event {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Event::CompletionsFinished(_) => write!(f, "CompletionsFinished"),
+            Event::CompletionsFinished(..) => write!(f, "CompletionsFinished"),
             Event::MouseCursorDirty => write!(f, "MouseCursorDirty"),
             Event::BlockCompleted(_) => write!(f, "BlockCompleted"),
             Event::AfterBlockCompleted(_) => write!(f, "AfterBlockCompleted"),
