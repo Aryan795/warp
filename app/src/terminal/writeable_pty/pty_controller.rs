@@ -155,6 +155,12 @@ impl<T: EventLoopSender> PtyController<T> {
                 if let Some(buffer_text) = me.in_flight_native_completions_buffer_text.take()
                     && !buffer_text.is_empty()
                 {
+                    // Register the restored text as expected echo *before* writing it, so the
+                    // shell echoing it back is recognized as typeahead -- feeding it back into
+                    // the input editor the same way any other typeahead would be -- rather than
+                    // unexpected background output, which would otherwise render as a phantom
+                    // block mirroring the restored text.
+                    me.terminal_model.lock().push_expected_echo(&buffer_text);
                     me.pending_writes.push_front(PtyWrite::Bytes {
                         bytes: Cow::Owned(buffer_text.into_bytes()),
                     });
@@ -645,7 +651,7 @@ impl<T: EventLoopSender> PtyController<T> {
     /// If the write corresponds to a command, this also calls
     /// [`LineEditorStatus::did_execute_command()`].
     fn send_write_to_event_loop(&mut self, write: PtyWrite, ctx: &mut ModelContext<Self>) -> bool {
-        let (bytes_to_write, is_for_command, on_write_fn) = match write {
+        let (bytes_to_write, is_for_command, on_write_fn, shell_type_for_split) = match write {
             PtyWrite::Command {
                 command,
                 shell_type,
@@ -659,13 +665,14 @@ impl<T: EventLoopSender> PtyController<T> {
                 )),
                 true,
                 on_write_fn,
+                Some(shell_type),
             ),
             PtyWrite::AgentInput { bytes, mode } => {
                 let decorated_bytes =
                     mode.decorate_bytes(bytes.into_owned(), self.is_bracketed_paste_enabled);
-                (decorated_bytes.into(), false, None)
+                (decorated_bytes.into(), false, None, None)
             }
-            PtyWrite::Bytes { bytes } => (bytes, false, None),
+            PtyWrite::Bytes { bytes } => (bytes, false, None, None),
             PtyWrite::RunNativeShellCompletions {
                 command,
                 shell_type,
@@ -690,6 +697,7 @@ impl<T: EventLoopSender> PtyController<T> {
                         Box::new(move || terminal_model.lock().start_in_band_command_execution())
                             as Box<dyn Fn() -> StartCommandOutcome + Send + 'static>,
                     ),
+                    Some(shell_type),
                 )
             }
         };
@@ -710,6 +718,23 @@ impl<T: EventLoopSender> PtyController<T> {
                 .update(ctx, |line_editor_status, ctx| {
                     line_editor_status.did_execute_command(ctx)
                 });
+        }
+
+        // PowerShell's kill-buffer chord (`Alt+2`, an ESC-prefixed two-byte sequence -- see
+        // `ShellType::kill_buffer_bytes`) is not reliably disambiguated by PSReadLine when it
+        // arrives concatenated with the command text that follows it in a single write/read:
+        // empirically, PSReadLine sometimes fails to recognize the chord at all in that case,
+        // leaving the existing buffer untouched and the command text typed literally on top of
+        // it. Splitting the chord into its own pty write -- even with no explicit delay before
+        // the second write -- reliably avoids this. The other three shells use a single,
+        // unambiguous control byte for this (no escape-sequence parsing involved), so no split
+        // is needed for them.
+        if let Some(shell_type) = shell_type_for_split
+            && let Some((kill_buffer, rest)) = split_kill_buffer_write(&bytes_to_write, shell_type)
+        {
+            self.send_message_to_event_loop(Message::Input(Cow::Owned(kill_buffer.to_vec())), ctx);
+            self.send_message_to_event_loop(Message::Input(Cow::Owned(rest.to_vec())), ctx);
+            return true;
         }
 
         self.send_message_to_event_loop(Message::Input(bytes_to_write), ctx);
@@ -771,6 +796,22 @@ pub enum PtyControllerEvent {
 
 impl<T: EventLoopSender> Entity for PtyController<T> {
     type Event = PtyControllerEvent;
+}
+
+/// If `shell_type`'s kill-buffer bytes need to be written to the pty as their own write, separate
+/// from the rest of `bytes` (the full output of `bytes_to_execute_command`), returns
+/// `Some((kill_buffer_bytes, rest))`. Returns `None` if no split is needed, in which case `bytes`
+/// should be sent as a single write. See the call site in `send_write_to_event_loop` for why this
+/// is currently only needed for PowerShell.
+fn split_kill_buffer_write(bytes: &[u8], shell_type: ShellType) -> Option<(&[u8], &[u8])> {
+    if shell_type != ShellType::PowerShell {
+        return None;
+    }
+    let kill_buffer_len = shell_type.kill_buffer_bytes().len();
+    if bytes.len() <= kill_buffer_len {
+        return None;
+    }
+    Some(bytes.split_at(kill_buffer_len))
 }
 
 /// Returns the shell-dependent array of bytes to be written to the PTY to execute `command`.

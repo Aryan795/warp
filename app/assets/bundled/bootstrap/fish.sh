@@ -218,6 +218,32 @@ function warp_run_generator_command_native_completions
     printf '\e]9280;B\a'
 end
 
+# Fish's own builtin `fish_title` sets the window title to the currently-running command
+# (truncated) by default, going through the normal OSC 0/2 title-setting mechanism rather
+# than Warp's own hooks -- so it has no way to know a command is an in-band/generator command
+# the way `warp_preexec`'s JSON hook does. Override it to fall back to the same "just show the
+# pwd" behavior it already uses for its own "fish" builtin case, matching upstream's exact
+# format otherwise.
+function fish_title
+    if not set -q INSIDE_EMACS; or string match -vq '*,term:*' -- $INSIDE_EMACS
+        set -l command $argv[1]
+        if not set -q command[1]
+            set command (status current-command)
+        end
+        if test "$command" = fish
+            set command ""
+        end
+        if string match -q "warp_run_generator_command*" -- "$command"
+            set command ""
+        end
+
+        set -l ssh
+        set -q SSH_TTY
+        and set ssh "["(prompt_hostname | string sub -l 10 | string collect)"]"
+        echo -- $ssh (string sub -l 20 -- $command) (prompt_pwd -d 1 -D 1)
+    end
+end
+
 # Run before a command is executed.
 function warp_preexec --on-event fish_preexec
     set -l command (warp_escape_json "$argv")
