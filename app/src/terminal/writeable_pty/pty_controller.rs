@@ -177,10 +177,21 @@ impl<T: EventLoopSender> PtyController<T> {
                 // user had actually typed so it isn't lost. This is queued to the front so it
                 // goes out as soon as the line editor is active again (i.e. once the shell has
                 // returned to a fresh prompt after the generator command completes), ahead of
-                // anything else -- including a newer completions request for what the user has
-                // typed since -- queued in the meantime.
+                // anything else queued in the meantime -- *unless* what's queued behind it is a
+                // newer completions request: that request's own kill-buffer is about to clear
+                // whatever's on the line again anyway, making this restore pointless to send at
+                // all, and (unlike an ordinary write) sending it regardless would race the newer
+                // request's kill-buffer/generator-command write, which drains immediately behind
+                // it since it isn't gated by `execute_next_queued_write`'s `is_command` check
+                // the way a `Command` is. Skipping a redundant restore sidesteps that race
+                // without needing to gate draining on this write at all -- the newer request
+                // will produce its own, current restore once it completes.
                 if let Some(buffer_text) = me.in_flight_native_completions_buffer_text.take()
                     && !buffer_text.is_empty()
+                    && !me
+                        .pending_writes
+                        .iter()
+                        .any(|write| matches!(write, PtyWrite::RunNativeShellCompletions { .. }))
                 {
                     // Register the restored text as expected echo *before* writing it, so the
                     // shell echoing it back is recognized as typeahead -- feeding it back into
