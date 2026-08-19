@@ -1517,10 +1517,19 @@ esac
   # read. p10k, zsh-syntax-highlighting, and zsh-autosuggestions all install their own
   # `zle-line-init` via `add-zle-hook-widget`, which binds the *widget* named `zle-line-init`
   # to a differently-named function; only the widget binding (not `functions[zle-line-init]`,
-  # which stays empty for such a binding) reflects what actually runs. So the capture/restore
-  # below goes entirely through widget names (`zle -A`/`zle -N`/`$widgets`), is scoped to the
-  # single `select` this function drives, and always restores the prior binding afterwards --
-  # this must never take permanent ownership of the widget. `zle-line-finish` needs no such
+  # which stays empty for such a binding) reflects what actually runs. So the capture below
+  # goes entirely through widget names (`zle -A`/`zle -N`/`$widgets`), not `functions[...]`.
+  #
+  # Once captured, our widget stays permanently bound to `zle-line-init` for the rest of the
+  # session rather than being restored/deleted after each `select` -- doing that per-request
+  # has proven fragile in both directions: deleting it can race a chained hook that itself
+  # rebinds `zle-line-init` during the chain call ("No such widget `zle-line-init'"), and
+  # simply leaving it bound without a self-check aliases the saved-widget name to itself on
+  # the *next* request (see the self-check below), which recurses into itself indefinitely
+  # (measured: "maximum nested function level reached"). A permanently-installed capture
+  # widget avoids both: it always chains to whatever was bound before we ever took over (see
+  # below), so it is functionally transparent to that original binding on every ordinary
+  # prompt read, and it is only ever captured/rebound once. `zle-line-finish` needs no such
   # capture: nothing in the completion path uses it.
   function _warp_native_completions_zle_line_init () {
     # zle-line-init can fire more than once while we own the widget (e.g. `select`
@@ -1581,12 +1590,18 @@ esac
     _WARP_NATIVE_COMPLETIONS_LINE=$line
     _WARP_NATIVE_COMPLETIONS_ARMED=1
 
-    # Take over zle-line-init for exactly this select, saving whatever was bound to it
-    # (if anything) under a private widget name so it can be chained and then restored.
-    if (( ${+widgets[zle-line-init]} )); then
-      zle -A zle-line-init _warp_saved_zle_line_init
+    # Take over zle-line-init for this select, saving whatever was bound to it (if anything
+    # genuinely different) under a private widget name so it can be chained. Skip the
+    # takeover entirely when zle-line-init is already our own capture widget -- left over
+    # from a prior request in this same session, since it is deliberately never torn down
+    # (see the comment above this function) -- there is nothing new to save, and aliasing
+    # _warp_saved_zle_line_init to our own widget here would alias the saved name to itself.
+    if [[ "${widgets[zle-line-init]:-}" != user:_warp_native_completions_zle_line_init ]]; then
+      if (( ${+widgets[zle-line-init]} )); then
+        zle -A zle-line-init _warp_saved_zle_line_init
+      fi
+      zle -N zle-line-init _warp_native_completions_zle_line_init
     fi
-    zle -N zle-line-init _warp_native_completions_zle_line_init
 
     local PS3='' REPLY
     # Swallow the line editor redraw the `select` causes (measured at ~31 bytes with a
@@ -1597,25 +1612,8 @@ esac
     { select _ in 1; do break; done } 2>/dev/null
     echo -n "$DCS_END"
 
-    # Restore zle-line-init to exactly what it was before, immediately -- this must happen
-    # even if nothing above ran as expected, so a later real prompt read never sees our
-    # capture widget instead of the user's.
-    if (( ${+widgets[_warp_saved_zle_line_init]} )); then
-      zle -A _warp_saved_zle_line_init zle-line-init
-      zle -D _warp_saved_zle_line_init
-    fi
-    # If nothing was bound before, deliberately leave our own widget in place rather than
-    # `zle -D zle-line-init`-ing it away: measured directly (a minimal repro with nothing else
-    # involved beyond a `zle-line-init` handler that calls `accept-line` on itself), deleting
-    # a widget that was itself invoked as `zle-line-init` and called `accept-line` from
-    # within that same invocation corrupts zsh's own internal state for the *next*
-    # interactive prompt read, which then fails outright with "No such widget
-    # `zle-line-init'" -- an unusual pattern zsh does not expect to be undone by deleting the
-    # widget afterward. Checking `${+widgets[zle-line-init]}` first does not help: the widget
-    # still exists at this point (we are the ones who bound it), so that check is true and
-    # `zle -D` still runs, still corrupting the next prompt. Leaving it bound is harmless:
-    # `_warp_native_completions_zle_line_init`'s armed-flag guard above makes it a
-    # transparent no-op for every future firing until the next request re-arms it.
+    # zle-line-init is deliberately left bound to our capture widget -- see the comment
+    # above this function for why restoring/deleting it per-request is not done here.
 
     # Fail safe independently of the above: if the capture widget never ran (e.g. some
     # other zle-line-init fired instead, or `select` returned without entering ZLE at all),
