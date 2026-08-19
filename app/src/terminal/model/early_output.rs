@@ -82,12 +82,20 @@ pub struct EarlyOutput {
     ///   those a given carriage return means, `rearm_at_column(0)` adds position 0 as a new
     ///   candidate without discarding whatever was already live, so both possibilities stay
     ///   open until the characters that follow resolve it.
-    /// - Absolute cursor addressing (CUP/CHA, `goto`/`goto_col`) -- the same ambiguity as a
-    ///   carriage return (restart vs. mid-line continuation), just to any column rather than
-    ///   only 0, on the premise that a registered pattern's echo always starts at column 0, so
-    ///   the escape sequence's own column parameter is already an absolute position in the
-    ///   pattern. `rearm_at_column(column)` handles both this and the carriage-return case
-    ///   above.
+    /// - Absolute cursor addressing (CUP/CHA, `goto`/`goto_col`), measured from PSReadLine's own
+    ///   redraw -- but only trusted when the column is 0. A carriage return unconditionally
+    ///   means "column 0", by definition; an arbitrary absolute column from CUP/CHA does not
+    ///   unconditionally mean "the buffer's own position 0" -- if a redraw re-renders a
+    ///   nonempty prompt together with the buffer, the column addressed partway through that
+    ///   redraw could just as easily be the prompt's own width as the buffer's start, and
+    ///   nothing in the byte stream distinguishes the two cases. Column 0 is safe under either
+    ///   reading (it is either genuinely the buffer's start, or so early into a redrawn prompt
+    ///   that nothing of the pattern could be confused with prompt text there); anything else
+    ///   is deliberately left as no information rather than risked as a wrong position. This is
+    ///   narrower than what was measured (a real session with a nonempty prompt has not yet
+    ///   been captured to confirm or rule out the wider-column concern) and should be widened
+    ///   only once that measurement exists, via the same `rearm_at_column(column)` backing
+    ///   both this and the carriage-return case above.
     /// - A backspace or CUB (`move_backward`), whose distance *is* known from the input itself
     ///   (always 1 for a backspace; the escape sequence's own parameter for CUB) --
     ///   `rearm_after_rewind` shifts every existing candidate back by that exact distance and
@@ -269,13 +277,20 @@ impl EarlyOutput {
 
     /// If anything is registered via `push_expected_echo`, adds `column` to the set of live
     /// candidates (see `expected_echo_positions`) without discarding whatever was already
-    /// there. `column` is the absolute column the cursor just moved to (0 for a carriage
-    /// return, or the escape sequence's own column parameter for absolute cursor addressing --
-    /// CHA/CUP, `goto`/`goto_col`), on the premise that a registered pattern's echo always
-    /// starts at column 0, so an absolute column is already an absolute position in the
-    /// pattern. Called regardless of how much of the current pass matched -- see
+    /// there. Called regardless of how much of the current pass matched -- see
     /// `expected_echo_positions`'s doc comment for the two shapes a carriage return in
     /// particular covers.
+    ///
+    /// This assumes `column` is itself a valid absolute position in the pattern -- i.e. that
+    /// the pattern's echo starts at that same column. That is unconditionally true for a
+    /// carriage return, whose `column` argument is always 0 by definition. It is *not*
+    /// unconditionally true for absolute cursor addressing (see the call sites in `goto`/
+    /// `goto_col`): when a prompt occupies columns before the buffer starts, a redraw that
+    /// re-renders the prompt and buffer together would address a column reflecting the prompt's
+    /// width, not 0, and only the caller can know whether that is the case here. Column 0
+    /// itself is always safe to trust regardless -- it is either genuinely the buffer's start,
+    /// in which case this is correct, or it is mid-prompt, in which case no candidate the
+    /// pattern's own characters could confuse with prompt text lives there anyway.
     fn rearm_at_column(&mut self, column: usize) {
         if !self.expected_echo.is_empty() {
             self.expected_echo_positions.insert(column);
@@ -702,8 +717,16 @@ impl ansi::Handler for EarlyOutputHandler<'_> {
     fn goto(&mut self, row: super::index::VisibleRow, col: usize) {
         // Absolute cursor addressing (CUP) is a rewind like carriage return, backspace and CUB,
         // just to an absolute rather than relative column -- see `rearm_at_column`. The row is
-        // irrelevant to matching, which only tracks a linear character stream.
-        self.inner().rearm_at_column(col);
+        // irrelevant to matching, which only tracks a linear character stream. Deliberately
+        // conservative about which column to trust: unlike a carriage return, which always
+        // means "column 0" by construction, an absolute column here could reflect a prompt's
+        // width rather than the buffer's own start if the redraw re-renders both together, and
+        // there is no way to tell from this byte alone which case applies. Column 0 is safe
+        // either way (see `rearm_at_column`'s doc comment); anything else is treated as no
+        // information rather than risked as a wrong position.
+        if col == 0 {
+            self.inner().rearm_at_column(col);
+        }
         delegate!(self.goto(row, col));
     }
 
@@ -712,9 +735,11 @@ impl ansi::Handler for EarlyOutputHandler<'_> {
     }
 
     fn goto_col(&mut self, col: usize) {
-        // CHA: the same absolute rewind as `goto`, just without a row component. See
-        // `rearm_at_column`.
-        self.inner().rearm_at_column(col);
+        // CHA: the same absolute rewind as `goto`, just without a row component, and the same
+        // deliberate conservatism about trusting only column 0. See `goto`.
+        if col == 0 {
+            self.inner().rearm_at_column(col);
+        }
         delegate!(self.goto_col(col));
     }
 
