@@ -250,17 +250,26 @@ impl UserWorkspaces {
     }
 
     /// Refreshes the active-team header seam (see [`Self::active_team_uid`]) from the
-    /// focused window's current team assignment. Reuses [`Self::team_for_window`], so a
-    /// window with no assignment, or one whose assigned team is no longer part of the
-    /// current workspace, resolves to no active team rather than falling back to some
-    /// other team.
+    /// focused window's current team assignment. Reuses [`Self::team_for_window`]: a
+    /// window with no assignment, or a stale assignment `reconcile_window_team_assignments`
+    /// hasn't (yet) corrected to a fallback team, resolves to no active team rather than
+    /// this method inventing its own fallback.
     fn sync_active_team_uid(&self, ctx: &AppContext) {
         let team_uid = ctx
             .windows()
-            .active_window()
+            .state()
+            .active_window
             .and_then(|window_id| self.team_for_window(window_id))
             .map(|team| team.uid.to_string());
         self.active_team_uid.set(team_uid);
+    }
+
+    /// Returns the current value of the active-team header seam. Test-only:
+    /// production code should never need to read this back, only
+    /// `BaseClient::graphql_request_options` does, via [`ActiveTeamUid::get`].
+    #[cfg(test)]
+    fn active_team_uid_for_test(&self) -> Option<String> {
+        self.active_team_uid.get()
     }
 
     pub fn upgrade_link(user_id: UserUid) -> String {
