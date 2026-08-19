@@ -200,10 +200,11 @@ function warp_run_generator_command_native_completions
     end
 
     printf '\e]9280;A;incrementally_typed\a'
-    # An empty line (the input editor was empty when the request fired) has no useful
-    # completions, and `complete -C ""` would otherwise list every command on $PATH
-    # synchronously in the user's own shell.
-    if test -n "$line"
+    # An empty or whitespace-only line (the input editor was empty, or held only spaces, when
+    # the request fired) has no useful completions, and `complete -C "<whitespace>"` would
+    # otherwise list every command on $PATH synchronously in the user's own shell -- trim
+    # before checking so a whitespace-only line is caught the same as a truly empty one.
+    if test -n "$(string trim -- "$line")"
         # `complete -C "<line>"` computes completions for an arbitrary line -- the same
         # entry point already used elsewhere in Warp's bootstrap for executable discovery --
         # returning one "match\tdescription" pair per line.
@@ -265,10 +266,10 @@ function warp_preexec --on-event fish_preexec
     # Use fish's own `not`, which negates a command's exit status directly.
     if not string match -q "warp_run_generator_command*" -- (string trim -- $argv[1])
         for pid in $_warp_generator_pids
-            # Suppress stderr output; kill writes to stderr if any of the given
-            # PIDS are not running (which might rarely be the case due to race
-            # conditions in checking which PIDS to cancel and this kill command.
-            kill -9 $pids >/dev/null 2>/dev/null
+            # Suppress stderr output; kill writes to stderr if the given PID is not running
+            # (which might rarely be the case due to race conditions in checking which PIDs to
+            # cancel and this kill command).
+            kill -9 $pid >/dev/null 2>/dev/null
         end
         set -g _warp_generator_pids ''
     end

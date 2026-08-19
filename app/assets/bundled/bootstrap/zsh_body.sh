@@ -1598,11 +1598,13 @@ esac
 
     # Probe ZLE capability before use: a non-interactive shell, `unsetopt zle`, or
     # `TERM=emacs` all mean there's no ZLE and therefore no zsh native completions here.
-    # An empty line (the input editor was empty when the request fired) has no useful
-    # completions either. Report zero matches in both cases so the client falls back to
+    # An empty or whitespace-only line (the input editor was empty, or held only spaces, when
+    # the request fired) has no useful completions either -- completing a blank command word
+    # would otherwise list every command on $PATH, so trim before checking rather than testing
+    # for a truly empty string. Report zero matches in both cases so the client falls back to
     # the bundled completer instead of hanging or erroring, and so we never pay the cost
     # of listing every top-level command/file synchronously in the user's own shell.
-    if [[ -z $line ]] || ! { [[ -o zle ]] && [[ -o interactive ]] && [[ "$TERM" != emacs ]] }; then
+    if [[ -z ${line//[[:space:]]/} ]] || ! { [[ -o zle ]] && [[ -o interactive ]] && [[ "$TERM" != emacs ]] }; then
       printf '\e]9280;A;incrementally_typed\a'
       printf '\e]9280;B\a'
       return
