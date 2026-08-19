@@ -53,6 +53,10 @@ pub async fn generate_multi_agent_output(
         redaction::redact_inputs(&mut params.input);
     }
 
+    // Sent as a request header rather than in the request body, so the server can
+    // resolve the team before it parses the body.
+    let team_uid = params.team_uid.take();
+
     let api_keys = api_keys_with_warp_credit_fallback_setting(
         params.api_keys,
         params.allow_use_of_warp_credits,
@@ -138,8 +142,12 @@ pub async fn generate_multi_agent_output(
         mcp_context: params.mcp_context.map(Into::into),
     };
 
-    let response_stream =
-        warp_multi_agent_client::generate_multi_agent_output(server_api.as_ref(), &request).await;
+    let response_stream = warp_multi_agent_client::generate_multi_agent_output(
+        server_api.as_ref(),
+        &request,
+        team_uid.as_deref(),
+    )
+    .await;
     match response_stream {
         Ok(stream) => {
             let output_stream = stream
