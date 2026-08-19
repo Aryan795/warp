@@ -65,6 +65,11 @@ enum PtyWrite {
         command: String,
         shell_type: ShellType,
         results_tx: async_channel::Sender<Vec<ShellCompletion>>,
+        /// The input editor's buffer text this request was computed from. The generator command
+        /// necessarily clears the shell's real input buffer to run (see `bytes_to_execute_command`),
+        /// so once results come back this is written back to the pty verbatim -- see
+        /// `in_flight_native_completions_buffer_text`.
+        buffer_text: String,
     },
 }
 
@@ -88,6 +93,11 @@ pub struct PtyController<T: EventLoopSender> {
     #[cfg(not(target_family = "wasm"))]
     bootstrap_file: Option<TempBootstrapFile>,
     in_flight_native_completions_results_tx: Option<async_channel::Sender<Vec<ShellCompletion>>>,
+    /// The buffer text of the currently in-flight native-completions request, if any. Written
+    /// back to the pty verbatim once results come back (see `ModelEvent::CompletionsFinished`
+    /// handling below), to undo the buffer-clearing that `bytes_to_execute_command` necessarily
+    /// performs to run the request as a foreground command.
+    in_flight_native_completions_buffer_text: Option<String>,
 }
 
 impl<T: EventLoopSender> PtyController<T> {
@@ -134,6 +144,22 @@ impl<T: EventLoopSender> PtyController<T> {
                     return;
                 };
                 let _ = block_on(results_tx.send(data.clone()));
+
+                // The generator command necessarily cleared the shell's real input buffer to
+                // run in the foreground (see `bytes_to_execute_command`); write back what the
+                // user had actually typed so it isn't lost. This is queued to the front so it
+                // goes out as soon as the line editor is active again (i.e. once the shell has
+                // returned to a fresh prompt after the generator command completes), ahead of
+                // anything else -- including a newer completions request for what the user has
+                // typed since -- queued in the meantime.
+                if let Some(buffer_text) = me.in_flight_native_completions_buffer_text.take()
+                    && !buffer_text.is_empty()
+                {
+                    me.pending_writes.push_front(PtyWrite::Bytes {
+                        bytes: Cow::Owned(buffer_text.into_bytes()),
+                    });
+                    me.execute_next_queued_write(ctx);
+                }
             }
             _ => (),
         });
@@ -186,6 +212,7 @@ impl<T: EventLoopSender> PtyController<T> {
             #[cfg(not(target_family = "wasm"))]
             bootstrap_file: None,
             in_flight_native_completions_results_tx: None,
+            in_flight_native_completions_buffer_text: None,
         }
     }
 
@@ -643,8 +670,10 @@ impl<T: EventLoopSender> PtyController<T> {
                 command,
                 shell_type,
                 results_tx,
+                buffer_text,
             } => {
                 self.in_flight_native_completions_results_tx = Some(results_tx);
+                self.in_flight_native_completions_buffer_text = Some(buffer_text);
 
                 // Write the generator command exactly as any other in-band command: the shell's
                 // own bootstrap logic (matched by name, see `native_shell_completions`) hides it
@@ -729,6 +758,7 @@ impl<T: EventLoopSender> PtyController<T> {
                 command,
                 shell_type,
                 results_tx,
+                buffer_text,
             });
         self.execute_next_queued_write(ctx);
     }

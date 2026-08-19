@@ -436,15 +436,25 @@ impl CommandExecutor for InBandCommandExecutor {
     }
 }
 
-/// Returns `true` if `command` is an in-band command string, e.g. a command executed via
-/// `InBandCommandExecutor`.
+/// Returns `true` if `command` is an in-band command string -- either one executed via
+/// `InBandCommandExecutor` (`warp_run_generator_command`/`Warp-Run-GeneratorCommand`), or one of
+/// the native-shell-completions generator functions declared in the bootstrap scripts
+/// (`warp_run_generator_command_foreground_completions`, `warp_run_generator_command_native_completions`,
+/// `Warp-Run-GeneratorCommand-NativeCompletions`), which are dispatched directly by
+/// `PtyController::run_native_shell_completions` rather than through this executor.
 ///
 /// In-band commands are prefixed with a leading space for Fish, which is done to omit them from
 /// fish's command history.  Thus we strip leading whitespace before matching the `command`.
+///
+/// This intentionally matches on the prefix alone (not `"<name> "` with a trailing space), the
+/// same convention the shell scripts themselves use for their own generator-command detection
+/// (e.g. zsh's `_is_warp_generator_command`, a substring match on `warp_run_generator_command`)
+/// -- so any current or future generator function name built on this prefix is recognized here
+/// without needing a matching change on both sides.
 pub fn is_in_band_command(command: &str) -> bool {
     let trimmed = command.trim_start();
-    trimmed.starts_with("Warp-Run-GeneratorCommand ")
-        || trimmed.starts_with("warp_run_generator_command ")
+    trimmed.starts_with("Warp-Run-GeneratorCommand")
+        || trimmed.starts_with("warp_run_generator_command")
 }
 
 #[cfg(test)]
