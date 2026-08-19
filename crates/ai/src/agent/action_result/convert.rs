@@ -1182,7 +1182,23 @@ impl TryFrom<FetchConversationResult> for api::request::input::tool_call_result:
                     },
                 ),
             ),
-            FetchConversationResult::Cancelled => Err(ConvertToAPITypeError::Ignore),
+            // Unlike RunAgents/WaitForEvents, FetchConversation has no user-facing cancel
+            // affordance, so this is always collateral cancellation, never a deliberate user
+            // action. Send it as an explicit error rather than dropping it, so the nested
+            // ConversationSearchAgent subagent (which blocks on this tool call's result) always
+            // finishes deterministically instead of depending on some unrelated later request to
+            // surface the generic `ToolCallResult.Cancel` marker for the still-unresolved call.
+            FetchConversationResult::Cancelled => Ok(
+                api::request::input::tool_call_result::Result::FetchConversation(
+                    api::FetchConversationResult {
+                        result: Some(api::fetch_conversation_result::Result::Error(
+                            api::fetch_conversation_result::Error {
+                                message: "Conversation fetch was cancelled".to_string(),
+                            },
+                        )),
+                    },
+                ),
+            ),
         }
     }
 }

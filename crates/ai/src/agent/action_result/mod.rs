@@ -932,6 +932,18 @@ impl AIAgentActionResultType {
 
     /// Returns `true` if this completion of this action result should trigger a follow-up request.
     pub fn should_trigger_request_upon_completion(&self) -> bool {
+        // FetchConversation has no user-facing cancel affordance (unlike e.g. RunAgents'
+        // Reject button or a shell command's Ctrl-C), so its cancellation is always collateral
+        // damage from cancelling the surrounding conversation's progress, never a deliberate
+        // "cancel this action" click. The nested ConversationSearchAgent subagent on the server
+        // blocks on a result for this tool call, so it must always be reported promptly rather
+        // than waiting for some unrelated later request to surface it.
+        if matches!(
+            self,
+            Self::FetchConversation(FetchConversationResult::Cancelled)
+        ) {
+            return true;
+        }
         !self.is_cancelled()
     }
 
@@ -1300,8 +1312,17 @@ impl Display for StopRecordingResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchConversationResult {
-    Success { directory_path: String },
+    Success {
+        directory_path: String,
+    },
     Error(String),
+    /// Collateral cancellation from cleaning up the surrounding conversation's pending
+    /// actions (e.g. a follow-up query submitted while the fetch was still in flight).
+    /// Unlike `RunAgentsResult::Cancelled`, this is never the result of a user-facing
+    /// cancel affordance, so it is serialized as an explicit `Error` on the wire (see
+    /// `convert.rs`) and always triggers a follow-up request (see
+    /// `should_trigger_request_upon_completion`) instead of relying on the server's
+    /// input interceptor to notice an unresolved tool call.
     Cancelled,
 }
 
