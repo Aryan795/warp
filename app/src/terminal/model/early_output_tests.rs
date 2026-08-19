@@ -220,6 +220,90 @@ fn test_push_expected_echo_survives_a_full_echo_repeated_after_a_carriage_return
 }
 
 #[test]
+fn test_push_expected_echo_survives_a_carriage_return_mid_pass_that_continues_rather_than_restarts()
+{
+    // Reproduces fish's redraw for a longer native-completions buffer restore: unlike the
+    // all-or-nothing repeats above, fish sometimes returns to column 0 *mid-line* and continues
+    // echoing the same line from wherever it left off, rather than restarting it from the
+    // beginning -- so the echo stream for a six-character restore can be "git ", CR, "ch", not
+    // a clean restart. A carriage return must not discard an in-progress match position just
+    // because it also opens up the possibility of a restart.
+    let mut block_list = new_block_list(
+        ChannelEventListener::new_for_test(),
+        TypeaheadMode::ShellReported,
+    );
+
+    block_list.early_output_mut().push_expected_echo("git ch");
+
+    for ch in "git ".chars() {
+        block_list.input(ch);
+    }
+    block_list.carriage_return();
+    for ch in "ch".chars() {
+        block_list.input(ch);
+    }
+    block_list.on_finish_byte_processing(&ansi::ProcessorInput::new(&[]));
+
+    assert!(
+        block_list.background_block_mut().is_none(),
+        "a carriage return that turns out to be mid-line must not make the continuation miss"
+    );
+    assert_eq!(block_list.early_output().typeahead(), "");
+}
+
+#[test]
+fn test_push_expected_echo_handles_a_carriage_return_between_two_matching_characters() {
+    // The minimal version of the same shape as above, isolating just the carriage return
+    // boundary: "g", CR, "i" against a registered "gi".
+    let mut block_list = new_block_list(
+        ChannelEventListener::new_for_test(),
+        TypeaheadMode::ShellReported,
+    );
+
+    block_list.early_output_mut().push_expected_echo("gi");
+
+    block_list.input('g');
+    block_list.carriage_return();
+    block_list.input('i');
+    block_list.on_finish_byte_processing(&ansi::ProcessorInput::new(&[]));
+
+    assert!(
+        block_list.background_block_mut().is_none(),
+        "a carriage return between two characters of a single continued echo must not misfire"
+    );
+}
+
+#[test]
+fn test_push_expected_echo_tolerates_ambiguous_candidates_matching_the_same_character() {
+    // When a carriage return leaves both a restart-at-0 candidate and a mid-pass candidate
+    // live, and the buffer contains a repeated character, more than one candidate can match
+    // the very same incoming character (e.g. registering "gg": after matching the first "g"
+    // and a carriage return, both position 0 and position 1 expect a "g" next). Both must be
+    // tracked rather than the matcher picking one arbitrarily and losing the other.
+    let mut block_list = new_block_list(
+        ChannelEventListener::new_for_test(),
+        TypeaheadMode::ShellReported,
+    );
+
+    block_list.early_output_mut().push_expected_echo("gg");
+
+    block_list.input('g');
+    block_list.carriage_return();
+    // Ambiguous: matches both the position-0 restart candidate and the position-1 continuation
+    // candidate.
+    block_list.input('g');
+    // Only the continuation candidate (now at position 2, fully matched) predicts nothing
+    // further; a fresh full echo would need another full "gg", which this test doesn't send,
+    // so nothing more should be consumed.
+    block_list.on_finish_byte_processing(&ansi::ProcessorInput::new(&[]));
+
+    assert!(
+        block_list.background_block_mut().is_none(),
+        "an ambiguous character that matches multiple live candidates must still be consumed"
+    );
+}
+
+#[test]
 fn test_push_expected_echo_survives_a_precmd_within_the_same_restore_window() {
     // `CompletionsFinished` (and the `push_expected_echo` call it triggers) fires when `9280;B`
     // is parsed, which precedes the shell's own in-band-command precmd DCS -- so in practice a

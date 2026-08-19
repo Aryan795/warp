@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::mem;
 
 use pathfinder_color::ColorU;
@@ -61,18 +61,24 @@ pub struct EarlyOutput {
     /// User input that may be typeahead, which is matched against echoed text.
     unmatched_input: VecDeque<char>,
     /// Characters registered via `push_expected_echo`, matched (possibly more than once, see
-    /// `expected_echo_position`) against echoed text. Unlike `unmatched_input`, a match here is
+    /// `expected_echo_positions`) against echoed text. Unlike `unmatched_input`, a match here is
     /// dropped entirely rather than surfaced as typeahead -- see `push_expected_echo`.
     expected_echo: Vec<char>,
-    /// How many leading characters of `expected_echo` have matched in the current echo pass.
-    /// Unlike `unmatched_input`, matched characters are never removed from `expected_echo`
+    /// Every position in `expected_echo` that could currently be "next" to match, given
+    /// everything matched so far. Matched characters are never removed from `expected_echo`
     /// itself: a line editor's redraw can re-echo the same restored buffer an arbitrary number
-    /// of times per restore (measured: zsh's ZLE prints one character, returns to column 0, and
-    /// reprints the whole line; fish echoes the whole buffer, returns to column 0, and echoes
-    /// it again), so matching needs to tolerate repeats rather than treating the first full
-    /// match as the only one. Reset to 0 on a carriage return (see `maybe_rearm_expected_echo`),
-    /// since that's what precedes each repeat.
-    expected_echo_position: usize,
+    /// of times per restore (measured: zsh echoes one character, returns to column 0, then
+    /// reprints the whole line; fish sometimes reprints the whole line after returning to
+    /// column 0, and sometimes returns to column 0 *mid-line* and continues the same line from
+    /// where it left off), so matching needs to tolerate both a restart from the beginning and
+    /// a continuation from wherever it stopped, without knowing in advance which one a given
+    /// carriage return means. More than one position is tracked at once for exactly that
+    /// reason: `maybe_rearm_expected_echo` adds a candidate at position 0 on every carriage
+    /// return without discarding whatever position(s) were already live, and each subsequent
+    /// character advances every candidate whose next expected character matches it (dropping
+    /// the rest) -- so a character counts as expected echo if *any* live candidate predicts it,
+    /// however many candidates that turns out to be.
+    expected_echo_positions: BTreeSet<usize>,
     /// Whether the last potential typeahead character received on the PTY was a
     /// carriage return. We can't rely on the last character of `typeahead` for
     /// this, because it only stores _matched_ typeahead.
@@ -95,7 +101,7 @@ impl EarlyOutput {
             typeahead_chars_inserted: 0.into(),
             unmatched_input: VecDeque::new(),
             expected_echo: Vec::new(),
-            expected_echo_position: 0,
+            expected_echo_positions: BTreeSet::new(),
             just_matched_carriage_return: false,
             event_proxy,
             pending_background_block: None,
@@ -156,7 +162,7 @@ impl EarlyOutput {
                 !ch.is_ascii_control() || *ch == '\r'
             })
             .collect();
-        self.expected_echo_position = 0;
+        self.expected_echo_positions = BTreeSet::from([0]);
     }
 
     /// Reset the unmatched user input. This is called between blocks so that
@@ -176,28 +182,39 @@ impl EarlyOutput {
         is_match
     }
 
-    /// Returns whether the next character registered via `push_expected_echo` matches `ch`. If
-    /// it does match, the match position advances (but the content itself is retained, unlike
-    /// `consume_user_input`, so a later repeat of the same echo -- see `expected_echo_position`
-    /// -- can still match). A match here should be dropped entirely by the caller rather than
-    /// surfaced as typeahead.
+    /// Returns whether `ch` matches the next expected character for *any* currently-live
+    /// candidate position (see `expected_echo_positions`). If at least one does, every matching
+    /// candidate advances by one and every non-matching one is dropped (a character can only be
+    /// consumed once, so a candidate that guessed wrong here can't be right going forward
+    /// either). A match should be dropped entirely by the caller rather than surfaced as
+    /// typeahead.
     fn consume_expected_echo(&mut self, ch: char) -> bool {
-        let is_match = self.expected_echo.get(self.expected_echo_position) == Some(&ch);
+        let next_positions: BTreeSet<usize> = self
+            .expected_echo_positions
+            .iter()
+            .filter_map(|&position| {
+                (self.expected_echo.get(position) == Some(&ch)).then_some(position + 1)
+            })
+            .collect();
+        let is_match = !next_positions.is_empty();
         if is_match {
-            self.expected_echo_position += 1;
+            self.expected_echo_positions = next_positions;
         }
         is_match
     }
 
-    /// If anything is registered via `push_expected_echo`, rearms the matcher to expect that
-    /// same content again from the start. Called on every carriage return (regardless of how
-    /// much of the current pass matched): a carriage return returns the cursor to the start of
-    /// the line, which is exactly what a line editor does immediately before re-echoing the
-    /// line it just redrew, so the next characters to arrive may be the same content again
-    /// rather than something new.
+    /// If anything is registered via `push_expected_echo`, adds position 0 to the set of live
+    /// candidates (see `expected_echo_positions`) without discarding whatever was already
+    /// there. Called on every carriage return, regardless of how much of the current pass
+    /// matched: a carriage return returns the cursor to the start of the line, which happens
+    /// both when a line editor is about to redraw (and therefore re-echo) the whole line from
+    /// the beginning, and -- observed separately -- when it briefly returns to column 0 mid-line
+    /// and then continues echoing the same line from wherever it left off. Since it isn't known
+    /// in advance which of those a given carriage return means, both possibilities stay live
+    /// until the following characters resolve it.
     fn maybe_rearm_expected_echo(&mut self) {
         if !self.expected_echo.is_empty() {
-            self.expected_echo_position = 0;
+            self.expected_echo_positions.insert(0);
         }
     }
 
