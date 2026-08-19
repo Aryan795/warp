@@ -12519,26 +12519,40 @@ impl Input {
                         Some(s) if !s.suggestions.is_empty() && !force_native_shell_completions => {
                             Some(s)
                         }
-                        _ => native_results_fut.await.map(|results| {
-                            let suggestions = results.into_iter().map(Into::into).collect_vec();
+                        _ => native_results_fut
+                            .await
+                            .map(|(results, shell_replacement_span)| {
+                                let suggestions = results.into_iter().map(Into::into).collect_vec();
 
-                            let token_end = cursor_position;
-                            // Within the section of the buffer from the start
-                            // to the end of this token...
-                            let token_start = buffer_text[0..token_end]
-                                // Find the last whitespace char before the token end.
-                                .rfind(char::is_whitespace)
-                                // If we find one, the token start is the next char.
-                                .map(|pos| pos + 1)
-                                // Otherwise, the start is the beginning of the buffer.
-                                .unwrap_or_default();
+                                // Prefer the shell's own notion of the range it's replacing (see
+                                // `Handler::on_completion_replacement_span_received`) over the
+                                // whitespace heuristic below: the heuristic assumes the token being
+                                // completed is whitespace-delimited, which doesn't hold for e.g. a
+                                // member-access completion like `$_.` in PowerShell, where the shell
+                                // replaces a zero-length or sub-token span within a larger,
+                                // non-whitespace-delimited expression. Not every shell reports this
+                                // yet, so the heuristic remains the fallback.
+                                let replacement_span =
+                                    shell_replacement_span.unwrap_or_else(|| {
+                                        let token_end = cursor_position;
+                                        // Within the section of the buffer from the start
+                                        // to the end of this token...
+                                        let token_start = buffer_text[0..token_end]
+                                            // Find the last whitespace char before the token end.
+                                            .rfind(char::is_whitespace)
+                                            // If we find one, the token start is the next char.
+                                            .map(|pos| pos + 1)
+                                            // Otherwise, the start is the beginning of the buffer.
+                                            .unwrap_or_default();
+                                        (token_start, token_end).into()
+                                    });
 
-                            SuggestionResults {
-                                replacement_span: (token_start, token_end).into(),
-                                suggestions,
-                                match_strategy: MatchStrategy::Fuzzy,
-                            }
-                        }),
+                                SuggestionResults {
+                                    replacement_span,
+                                    suggestions,
+                                    match_strategy: MatchStrategy::Fuzzy,
+                                }
+                            }),
                     };
 
                     (suggestions, completions_trigger, editor_snapshot)

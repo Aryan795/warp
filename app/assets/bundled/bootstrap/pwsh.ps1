@@ -429,6 +429,16 @@ $null = New-Module -Name Warp-Module -ScriptBlock {
                 if (-not [string]::IsNullOrEmpty($line)) {
                     $completion = [System.Management.Automation.CommandCompletion]::CompleteInput(
                         $line, $line.Length, $null)
+                    # PowerShell already knows the exact range of $line these matches replace --
+                    # e.g. a zero-length span right after the `.` in `$_.`, or just the `Na` in
+                    # `$_.Na` -- which is narrower than (and can disagree with) the client's own
+                    # whitespace-derived guess. Report it so the client uses it instead: without
+                    # this, filtering the shell's own already-correct candidates against the
+                    # client's wrong guess discards them. ReplacementIndex/ReplacementLength are
+                    # .NET string (UTF-16 code unit) offsets; sent as-is, so this is only exact
+                    # for ASCII lines -- the reported cases all are, and getting this precisely
+                    # right for non-ASCII lines is a larger undertaking left as a known gap.
+                    Write-Host -NoNewline "$([char]0x1b)]9280;S;$($completion.ReplacementIndex),$($completion.ReplacementLength)$oscEnd"
                     foreach ($match in $completion.CompletionMatches) {
                         Write-Host -NoNewline "$([char]0x1b)]9280;C;$($match.CompletionText)$oscEnd"
                         if (-not [string]::IsNullOrEmpty($match.ToolTip) -and $match.ToolTip -ne $match.CompletionText) {

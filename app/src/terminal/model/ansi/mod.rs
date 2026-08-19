@@ -74,6 +74,12 @@ const WARP_COMPLETIONS_OSC_MARKER: &[u8] = b"9280";
 const WARP_COMPLETIONS_START_BYTE: &[u8] = b"A";
 const WARP_COMPLETIONS_END_BYTE: &[u8] = b"B";
 const WARP_COMPLETIONS_MATCH_RESULT_BYTE: &[u8] = b"C";
+/// Denotes an OSC that reports the shell's own notion of the range of the buffer the
+/// completions replace, as a `<start>,<length>` byte pair (see
+/// `Handler::on_completion_replacement_span_received`). Optional: sent by a shell that has this
+/// information readily available (e.g. PowerShell's `CommandCompletion.ReplacementIndex`/
+/// `ReplacementLength`); the client falls back to a whitespace-derived span when it's absent.
+const WARP_COMPLETIONS_REPLACEMENT_SPAN_BYTE: &[u8] = b"S";
 
 /// Denotes an OSC that sends metadata about the last match result.
 /// The sequence begins with `D?` followed by the field that should be updated.
@@ -1198,6 +1204,37 @@ where
 
                     self.handler
                         .on_completion_result_received(shell_completion_result);
+                }
+                Some(&WARP_COMPLETIONS_REPLACEMENT_SPAN_BYTE) => {
+                    // The payload for the OSC is contained in the third parameter, as a
+                    // `<start>,<length>` pair of decimal byte offsets.
+                    let Some(data_str) = params
+                        .get(2)
+                        .map(|osc_data| String::from_utf8_lossy(osc_data))
+                    else {
+                        log::warn!(
+                            "Warp completions replacement span OSC marker did not contain payload"
+                        );
+                        return;
+                    };
+                    let Some((start_str, length_str)) = data_str.split_once(',') else {
+                        log::warn!(
+                            "Warp completions replacement span OSC marker payload was not a \
+                             comma-separated pair: {data_str:?}"
+                        );
+                        return;
+                    };
+                    let (Ok(start), Ok(length)) =
+                        (start_str.parse::<usize>(), length_str.parse::<usize>())
+                    else {
+                        log::warn!(
+                            "Warp completions replacement span OSC marker payload was not a \
+                             pair of non-negative integers: {data_str:?}"
+                        );
+                        return;
+                    };
+                    self.handler
+                        .on_completion_replacement_span_received(start, length);
                 }
                 Some(bytes) if bytes.starts_with(WARP_COMPLETIONS_MATCH_UPDATE_METADATA) => {
                     let Ok(parameter) = String::from_utf8(bytes.to_vec()) else {

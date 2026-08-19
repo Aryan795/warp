@@ -15,6 +15,7 @@ use session_sharing_protocol::common::{
 };
 use session_sharing_protocol::sharer::SessionSourceType;
 use string_offset::CharOffset;
+use warp_completer::meta::Span;
 use warp_core::command::ExitCode;
 use warp_core::features::FeatureFlag;
 use warp_core::semantic_selection::SemanticSelection;
@@ -325,7 +326,15 @@ enum IsReceivingInBandCommandOutput {
 enum IsReceivingCompletionsOutput {
     /// We're currently expecting completions data to come over the PTY.
     /// The exact data we're expecting depends on the [`CompletionsShellData`] type.
-    Yes { pending: CompletionsShellData },
+    Yes {
+        pending: CompletionsShellData,
+        /// The shell's own notion of the range of the buffer these completions replace, if the
+        /// shell reported one (see `Handler::on_completion_replacement_span_received`). `None`
+        /// for shells that don't send this yet; the client falls back to a whitespace-derived
+        /// span in that case (see `completions_fallback_strategy_for_trigger`'s caller in
+        /// `input.rs`).
+        replacement_span: Option<Span>,
+    },
 
     /// PTY output should be handled normally.
     No,
@@ -3332,7 +3341,10 @@ impl ansi::Handler for TerminalModel {
     }
 
     fn start_completions_output(&mut self, data: CompletionsShellData) {
-        self.is_receiving_completions_output = IsReceivingCompletionsOutput::Yes { pending: data };
+        self.is_receiving_completions_output = IsReceivingCompletionsOutput::Yes {
+            pending: data,
+            replacement_span: None,
+        };
     }
 
     fn end_completions_output(&mut self) {
@@ -3340,12 +3352,35 @@ impl ansi::Handler for TerminalModel {
             &mut self.is_receiving_completions_output,
             IsReceivingCompletionsOutput::No,
         ) {
-            IsReceivingCompletionsOutput::Yes { pending } => {
+            IsReceivingCompletionsOutput::Yes {
+                pending,
+                replacement_span,
+            } => {
                 self.event_proxy
-                    .send_terminal_event(Event::CompletionsFinished(pending.into()));
+                    .send_terminal_event(Event::CompletionsFinished(
+                        pending.into(),
+                        replacement_span,
+                    ));
             }
             IsReceivingCompletionsOutput::No => {
                 log::warn!("Tried to unexpectedly end completions output.")
+            }
+        }
+    }
+
+    /// Records the shell's own notion of the range of the buffer the completions it's about to
+    /// send (or has already started sending) replace. Optional: not every shell reports this
+    /// yet, in which case `Event::CompletionsFinished` carries `None` and the client falls back
+    /// to a whitespace-derived span.
+    fn on_completion_replacement_span_received(&mut self, start: usize, length: usize) {
+        match &mut self.is_receiving_completions_output {
+            IsReceivingCompletionsOutput::Yes {
+                replacement_span, ..
+            } => {
+                *replacement_span = Some(Span::new(start, start + length));
+            }
+            IsReceivingCompletionsOutput::No => {
+                log::warn!("Unexpectedly received a completions replacement span");
             }
         }
     }
@@ -3354,11 +3389,13 @@ impl ansi::Handler for TerminalModel {
         match &mut self.is_receiving_completions_output {
             IsReceivingCompletionsOutput::Yes {
                 pending: CompletionsShellData::IncrementallyTyped { output },
+                ..
             } => {
                 output.push(completion_result);
             }
             IsReceivingCompletionsOutput::Yes {
                 pending: CompletionsShellData::Raw { .. },
+                ..
             } => {
                 log::warn!(
                     "Received typed completion result but expected to be in raw completions mode"
@@ -3374,6 +3411,7 @@ impl ansi::Handler for TerminalModel {
         match &mut self.is_receiving_completions_output {
             IsReceivingCompletionsOutput::Yes {
                 pending: CompletionsShellData::IncrementallyTyped { output },
+                ..
             } => {
                 if let Some(last_item) = output.last_mut() {
                     last_item.update(completion_update);
@@ -3385,6 +3423,7 @@ impl ansi::Handler for TerminalModel {
             }
             IsReceivingCompletionsOutput::Yes {
                 pending: CompletionsShellData::Raw { .. },
+                ..
             } => {
                 log::warn!(
                     "Received typed completion result but expected to be in raw completions mode"
