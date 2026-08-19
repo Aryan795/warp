@@ -1,27 +1,16 @@
 use url::Url;
 use warp_errors::report_error;
 
-use super::web_intent_parser::WebIntent;
+use super::browser_url_resolution::resolve_browser_url;
 
 const DEFAULT_TITLE: &str = "Warp";
-const BASE_APP_PATH: &str = "/app";
 
 pub fn update_browser_url(url: Option<Url>, force_redirect: bool) {
-    let mut new_url = url;
-    if !force_redirect
-        && let Some(current_url) = parse_current_url()
-        && WebIntent::is_conversation_or_session_view(&current_url)
-    {
-        // The web session viewer's entry route (a conversation or shared-session
-        // view) must stay on the address bar no matter which pane inside it is
-        // focused. Without this, focusing a revealed child agent's pane — or
-        // that pane's shared session link resolving later — would silently
-        // replace the orchestrator's URL, so a refresh or copied link would
-        // land on the child instead of the orchestrator.
-        new_url = Some(current_url);
-    } else if new_url.is_none() {
-        new_url = get_base_app_url();
+    let current_url = parse_current_url();
+    if url.is_none() && current_url.is_none() {
+        report_error!("Failed to get the base url");
     }
+    let new_url = resolve_browser_url(current_url, url, force_redirect);
 
     if let Some(unwrapped_url) = new_url.and_then(safe_browser_navigation_url) {
         let window = gloo::utils::window();
@@ -73,16 +62,5 @@ pub fn parse_current_url() -> Option<Url> {
         return Some(parsed_url);
     }
 
-    None
-}
-
-fn get_base_app_url() -> Option<Url> {
-    if let Some(current_url) = parse_current_url() {
-        let mut new_url = current_url.clone();
-        new_url.set_path(BASE_APP_PATH);
-        new_url.set_query(None);
-        return Some(new_url);
-    }
-    report_error!("Failed to get the base url");
     None
 }
