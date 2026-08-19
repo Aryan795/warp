@@ -140,7 +140,7 @@ fn test_queued_typeahead_input_matching() {
 }
 
 #[test]
-fn test_push_expected_echo_avoids_background_block_for_shell_reported() {
+fn test_push_expected_echo_is_swallowed_for_shell_reported() {
     let mut block_list = new_block_list(
         ChannelEventListener::new_for_test(),
         TypeaheadMode::ShellReported,
@@ -148,19 +148,22 @@ fn test_push_expected_echo_avoids_background_block_for_shell_reported() {
 
     // Register "git ch" as expected echo -- e.g. `PtyController` restoring the input buffer
     // after a generator command that necessarily cleared it to run as a foreground command.
+    // The caller already has this text elsewhere (the input editor's own buffer, which was
+    // never cleared), so it must be dropped entirely here rather than surfaced as typeahead --
+    // surfacing it would duplicate it in the editor.
     block_list.early_output_mut().push_expected_echo("git ch");
 
-    // Echoing the exact same characters should be recognized as typeahead and NOT create a
-    // background block, unlike plain, unregistered echo for this mode (see
-    // `test_queued_typeahead_shell_reported` below, where the same characters without a prior
-    // `push_expected_echo` call go straight to a background block).
+    // Echoing the exact same characters should be swallowed: no background block, unlike
+    // plain, unregistered echo for this mode (see `test_queued_typeahead_shell_reported` below,
+    // where the same characters without a prior `push_expected_echo` call go straight to a
+    // background block), and no typeahead either.
     for ch in "git ch".chars() {
         block_list.input(ch);
     }
     block_list.on_finish_byte_processing(&ansi::ProcessorInput::new(&[]));
 
     assert!(block_list.background_block_mut().is_none());
-    assert_eq!(block_list.early_output().typeahead(), "git ch");
+    assert_eq!(block_list.early_output().typeahead(), "");
 }
 
 #[test]
