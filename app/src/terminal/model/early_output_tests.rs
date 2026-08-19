@@ -220,33 +220,58 @@ fn test_push_expected_echo_survives_a_full_echo_repeated_after_a_carriage_return
 }
 
 #[test]
-fn test_push_expected_echo_state_does_not_survive_a_precmd() {
-    // A restore whose echo never fully arrives (e.g. the request was superseded) must not
-    // leave state that spuriously matches unrelated output in a later, unrelated prompt cycle.
+fn test_push_expected_echo_survives_a_precmd_within_the_same_restore_window() {
+    // `CompletionsFinished` (and the `push_expected_echo` call it triggers) fires when `9280;B`
+    // is parsed, which precedes the shell's own in-band-command precmd DCS -- so in practice a
+    // `precmd` call normally lands *inside* the restore window, before the echo has arrived.
+    // `precmd` must not clear the registration out from under it.
     let mut block_list = new_block_list(
         ChannelEventListener::new_for_test(),
         TypeaheadMode::ShellReported,
     );
 
     block_list.early_output_mut().push_expected_echo("gi");
-    block_list.input('g'); // Only a partial echo arrives before the cycle moves on.
 
     block_list.command_finished(Default::default());
     block_list.prompt_only_precmd(Default::default());
 
-    // In the new, unrelated cycle, plain background output that happens to start with the same
-    // character must be treated as ordinary background output, not swallowed as a leftover
-    // expected echo from the previous cycle.
+    // The echo, arriving only now, must still be recognized.
+    block_list.input('g');
+    block_list.input('i');
+    block_list.on_finish_byte_processing(&ansi::ProcessorInput::new(&[]));
+
+    assert!(
+        block_list.background_block_mut().is_none(),
+        "the registration must survive an intervening precmd within the same restore"
+    );
+}
+
+#[test]
+fn test_push_expected_echo_staleness_is_bounded_by_the_next_registration_not_by_precmd() {
+    // A restore whose echo never fully arrives (e.g. the request was superseded by a newer
+    // one) must not leave state that spuriously matches unrelated output once a *new*
+    // registration has superseded it -- `push_expected_echo` replacing its content outright on
+    // every call is what bounds staleness, not any clearing on `precmd`.
+    let mut block_list = new_block_list(
+        ChannelEventListener::new_for_test(),
+        TypeaheadMode::ShellReported,
+    );
+
+    block_list.early_output_mut().push_expected_echo("gi");
+    block_list.input('g'); // Only a partial echo arrives before a newer request supersedes it.
+
+    block_list.command_finished(Default::default());
+    block_list.prompt_only_precmd(Default::default());
+
+    // A newer restore's registration must fully replace the stale one.
+    block_list.early_output_mut().push_expected_echo("go");
     block_list.input('g');
     block_list.input('o');
     block_list.on_finish_byte_processing(&ansi::ProcessorInput::new(&[]));
 
-    assert_eq!(
-        block_list
-            .background_block_mut()
-            .expect("Background block should exist")
-            .output_to_string(),
-        "go"
+    assert!(
+        block_list.background_block_mut().is_none(),
+        "the newer registration must be matched cleanly, not confused by the stale one"
     );
 }
 
