@@ -155,6 +155,11 @@ impl EarlyOutput {
     /// Replaces any previously-registered content outright, rather than appending to it: each
     /// restore is a fresh, independent echo to expect, not a continuation of the last one.
     pub fn push_expected_echo(&mut self, input: &str) {
+        log::debug!(
+            "PHANTOM_DIAG push_expected_echo({input:?}): before expected_echo={:?} positions={:?}",
+            self.expected_echo,
+            self.expected_echo_positions
+        );
         self.expected_echo = input
             .chars()
             .filter(|ch| {
@@ -163,6 +168,11 @@ impl EarlyOutput {
             })
             .collect();
         self.expected_echo_positions = BTreeSet::from([0]);
+        log::debug!(
+            "PHANTOM_DIAG push_expected_echo({input:?}): after expected_echo={:?} positions={:?}",
+            self.expected_echo,
+            self.expected_echo_positions
+        );
     }
 
     /// Reset the unmatched user input. This is called between blocks so that
@@ -197,6 +207,12 @@ impl EarlyOutput {
             })
             .collect();
         let is_match = !next_positions.is_empty();
+        log::debug!(
+            "PHANTOM_DIAG consume_expected_echo({ch:?}): match={is_match} positions_before={:?} positions_after={:?} expected_echo={:?}",
+            self.expected_echo_positions,
+            next_positions,
+            self.expected_echo
+        );
         if is_match {
             self.expected_echo_positions = next_positions;
         }
@@ -215,6 +231,12 @@ impl EarlyOutput {
     fn maybe_rearm_expected_echo(&mut self) {
         if !self.expected_echo.is_empty() {
             self.expected_echo_positions.insert(0);
+            log::debug!(
+                "PHANTOM_DIAG maybe_rearm_expected_echo: added candidate 0, positions now={:?}",
+                self.expected_echo_positions
+            );
+        } else {
+            log::debug!("PHANTOM_DIAG maybe_rearm_expected_echo: nothing registered, no-op");
         }
     }
 
@@ -277,6 +299,12 @@ impl EarlyOutput {
     /// blocklist's precmd hook, but doesn't implement the [`ansi::Handler`]
     /// interface because it doesn't need precmd data.
     pub fn precmd(&mut self) {
+        log::debug!(
+            "PHANTOM_DIAG precmd: fresh prompt cycle starting (expected_echo={:?}, positions={:?}, unmatched_input={:?})",
+            self.expected_echo,
+            self.expected_echo_positions,
+            self.unmatched_input
+        );
         // On precmd, clear accumulated typeahead for the previous command.
         safe_debug!(
             safe: ("Clearing accumulated typeahead"),
@@ -401,20 +429,32 @@ macro_rules! delegate {
 impl ansi::Handler for EarlyOutputHandler<'_> {
     fn input(&mut self, c: char) {
         if self.inner().consume_expected_echo(c) {
+            log::debug!("PHANTOM_DIAG input({c:?}): consumed as expected_echo");
             return;
         }
         let session_id = self.block_list.active_block().session_id();
         if !self.inner().handle_potential_typeahead(c) {
+            let expected_echo = format!("{:?}", self.inner().expected_echo);
+            let positions = format!("{:?}", self.inner().expected_echo_positions);
+            let unmatched_input = format!("{:?}", self.inner().unmatched_input);
+            let mode = format!("{:?}", self.inner().mode);
+            let active_block_started = self.block_list.active_block().started();
+            log::debug!(
+                "PHANTOM_DIAG input({c:?}): FELL THROUGH to background output (expected_echo={expected_echo}, positions={positions}, unmatched_input={unmatched_input}, mode={mode}, active_block_started={active_block_started})"
+            );
             self.with_background_output(|block| {
                 // We don't start background blocks until they have content because
                 // the shell often prints control characters in between commands
                 // to reset terminal state. If we eagerly added background blocks,
                 // there would be an empty one before almost every command.
                 if !block.started() {
+                    log::debug!("PHANTOM_DIAG input({c:?}): starting a NEW background block");
                     block.start_background(session_id);
                 }
                 block.input(c);
             })
+        } else {
+            log::debug!("PHANTOM_DIAG input({c:?}): consumed as typeahead");
         }
     }
 
@@ -462,6 +502,7 @@ impl ansi::Handler for EarlyOutputHandler<'_> {
 
     fn carriage_return(&mut self) {
         if self.inner().consume_expected_echo('\r') {
+            log::debug!("PHANTOM_DIAG carriage_return: consumed as expected_echo");
             return;
         }
         // A carriage return means the cursor just returned to the start of the line -- if a
@@ -470,12 +511,16 @@ impl ansi::Handler for EarlyOutputHandler<'_> {
         // `maybe_rearm_expected_echo`.
         self.inner().maybe_rearm_expected_echo();
         if !self.inner().handle_potential_typeahead('\r') {
+            log::debug!("PHANTOM_DIAG carriage_return: fell through to background output");
             delegate!(self.carriage_return());
+        } else {
+            log::debug!("PHANTOM_DIAG carriage_return: consumed as typeahead");
         }
     }
 
     fn linefeed(&mut self) -> ScrollDelta {
         if self.inner().consume_expected_echo('\n') {
+            log::debug!("PHANTOM_DIAG linefeed: consumed as expected_echo");
             return ScrollDelta::zero();
         }
         if self.inner().handle_potential_typeahead('\n') {
@@ -618,6 +663,11 @@ impl ansi::Handler for EarlyOutputHandler<'_> {
     }
 
     fn backspace(&mut self) {
+        let expected_echo = format!("{:?}", self.inner().expected_echo);
+        let positions = format!("{:?}", self.inner().expected_echo_positions);
+        log::debug!(
+            "PHANTOM_DIAG backspace: delegating straight to background block (expected_echo={expected_echo}, positions={positions})"
+        );
         delegate!(self.backspace());
     }
 

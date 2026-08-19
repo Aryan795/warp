@@ -166,6 +166,12 @@ impl<T: EventLoopSender> PtyController<T> {
                 }
             }
             ModelEvent::CompletionsFinished(data) => {
+                log::debug!(
+                    "PHANTOM_DIAG CompletionsFinished fired, {} results, in_flight_buffer_text={:?}, pending_writes_len={}",
+                    data.len(),
+                    me.in_flight_native_completions_buffer_text,
+                    me.pending_writes.len()
+                );
                 let Some(results_tx) = me.in_flight_native_completions_results_tx.take() else {
                     log::warn!("Received CompletionsFinished event but didn't have a channel to send results over!");
                     return;
@@ -217,12 +223,20 @@ impl<T: EventLoopSender> PtyController<T> {
                     // the input editor the same way any other typeahead would be -- rather than
                     // unexpected background output, which would otherwise render as a phantom
                     // block mirroring the restored text.
+                    log::debug!(
+                        "PHANTOM_DIAG CompletionsFinished: queueing restore write {buffer_text:?}, pending_writes_len_before={}",
+                        me.pending_writes.len()
+                    );
                     me.terminal_model.lock().push_expected_echo(&buffer_text);
                     me.just_restored_native_completions_buffer = true;
                     me.pending_writes.push_front(PtyWrite::Bytes {
                         bytes: Cow::Owned(buffer_text.into_bytes()),
                     });
                     me.execute_next_queued_write(ctx);
+                } else {
+                    log::debug!(
+                        "PHANTOM_DIAG CompletionsFinished: NOT restoring (empty, already consumed, or newer request queued)"
+                    );
                 }
             }
             _ => (),
@@ -230,8 +244,16 @@ impl<T: EventLoopSender> PtyController<T> {
 
         ctx.subscribe_to_model(&line_editor_status, |me, _, event, ctx| {
             if let LineEditorStatusEvent::Active = event {
+                log::debug!(
+                    "PHANTOM_DIAG LineEditorStatusEvent::Active fired, just_restored_native_completions_buffer={}, pending_writes_len={}",
+                    me.just_restored_native_completions_buffer,
+                    me.pending_writes.len()
+                );
                 if mem::replace(&mut me.just_restored_native_completions_buffer, false) {
                     // Skip input reporting this one time -- see the field's doc comment.
+                    log::debug!(
+                        "PHANTOM_DIAG LineEditorStatusEvent::Active: skipping input reporting (just restored)"
+                    );
                     me.execute_next_queued_write(ctx);
                     return;
                 }
@@ -242,6 +264,10 @@ impl<T: EventLoopSender> PtyController<T> {
                     .and_then(|id| me.sessions.as_ref(ctx).get(id))
                     .and_then(|session| session.shell().input_reporting_sequence());
                 if let Some(bytes) = input_reporting_seq {
+                    log::debug!(
+                        "PHANTOM_DIAG LineEditorStatusEvent::Active: queueing input-reporting sequence ({} bytes)",
+                        bytes.len()
+                    );
                     me.pending_writes.push_front(PtyWrite::Bytes {
                         bytes: Cow::Owned(bytes.to_vec()),
                     });
@@ -865,8 +891,15 @@ impl<T: EventLoopSender> PtyController<T> {
 
         // Make sure we only have a single pending native shell completions
         // request at a time by dropping any existing ones from the queue.
+        let len_before = self.pending_writes.len();
         self.pending_writes
             .retain(|write| !matches!(write, PtyWrite::RunNativeShellCompletions { .. }));
+        let dropped = len_before - self.pending_writes.len();
+        log::debug!(
+            "PHANTOM_DIAG run_native_shell_completions({buffer_text:?}): in_flight_buffer_text_already_set={:?}, in_flight_results_tx_already_set={}, dropped_stale_queued_requests={dropped}",
+            self.in_flight_native_completions_buffer_text,
+            self.in_flight_native_completions_results_tx.is_some()
+        );
 
         self.pending_writes
             .push_back(PtyWrite::RunNativeShellCompletions {
