@@ -1,7 +1,7 @@
 # Child-run deep links in the web session viewer
 
 ## Context
-See [PRODUCT.md](./PRODUCT.md) for the proposed behavior and five decisions that still await requester confirmation. This design is a follow-on to QUALITY-1764's narrow stopgap. The stopgap keeps the current `ConversationView` or `SessionView` path and suppresses focused-child URL rewrites. It intentionally loses the child selection on refresh and copied links. This design replaces that blanket viewer-mode suppression with explicit root-route and child-fragment navigation.
+See [PRODUCT.md](./PRODUCT.md) for the approved behavior. This design is a follow-on to QUALITY-1764's narrow stopgap. The stopgap keeps the current `ConversationView` or `SessionView` path and suppresses focused-child URL rewrites. It intentionally loses the child selection on refresh and copied links. This design replaces that blanket viewer-mode suppression with explicit root-route and child-fragment navigation.
 
 The web viewer is the WASM Warp client mounted by the React shell at [`client/src/app.tsx (277-293) @ df4801c`](https://github.com/warpdotdev/warp-server/blob/df4801cc884f3dbbd85bfdf8368bc362a63de4d1/client/src/app.tsx#L277-L293). The React entry points are [`client/src/ConversationView.tsx @ df4801c`](https://github.com/warpdotdev/warp-server/blob/df4801cc884f3dbbd85bfdf8368bc362a63de4d1/client/src/ConversationView.tsx) and [`client/src/SessionShareView.tsx @ df4801c`](https://github.com/warpdotdev/warp-server/blob/df4801cc884f3dbbd85bfdf8368bc362a63de4d1/client/src/SessionShareView.tsx).
 
@@ -21,7 +21,6 @@ The GraphQL `AIConversation` response contains `ambientAgentTaskId` but no paren
 The server already stores every required relationship. `Task` carries `ParentRunID` and `AgentConversationID` in [`model/types/ai_tasks.go (519-557) @ df4801c`](https://github.com/warpdotdev/warp-server/blob/df4801cc884f3dbbd85bfdf8368bc362a63de4d1/model/types/ai_tasks.go#L519-L557). A conversation maps to a task through `GetTaskByAgentConversationID`, and a session UUID maps to a run execution. [`logic/root_run.go (11-48) @ df4801c`](https://github.com/warpdotdev/warp-server/blob/df4801cc884f3dbbd85bfdf8368bc362a63de4d1/logic/root_run.go#L11-L48) already provides a bounded, cycle-safe ancestor walk. No migration or new persisted relationship is required.
 
 ## Proposed changes
-The API and client plan below implement the five recommended choices in PRODUCT.md. Revise the affected sections before implementation if the requester chooses an alternative.
 
 ### 1. Add a permission-aware route-resolution query in `warp-server`
 Add an authenticated GraphQL query named `resolveChildRunViewerRoute`. The React viewer already runs inside `AuthenticatedApolloWrapper` with an authenticated or anonymous principal, so the query can use the same principal and authorization engine as existing conversation metadata.
@@ -138,36 +137,64 @@ Both existing automatic redirect directions must carry viewer location state:
 
 Construct the destination with the URL API instead of string concatenation. Copy only the supported state above. This prevents query/fragment ordering mistakes and avoids copying a child session's route-specific credentials to the root.
 
-## Recommended decisions awaiting requester confirmation
+## Decisions
 
 ### Fragment versus query parameter
-- Recommended: URL fragment `#child=<run-id>`.
+- Chosen: URL fragment `#child=<run-id>`.
 - Advantages: client-only, survives copying and refresh, avoids `/conversation` query loss, and separates viewer selection from resource routing.
 - Rejected: `?child=...`. It requires query propagation through `WebIntent` and gives server routing ownership of client-only state.
 
 ### Run ID versus conversation/session ID
-- Recommended: run ID.
+- Chosen: run ID.
 - Advantages: one durable identity across live `/session` and stored `/conversation` routes; already indexed by the viewer.
 - Rejected: conversation or session ID. Either identifier can be absent or change relevance as a run transitions.
 
 ### Root versus immediate parent
-- Recommended: top-level root.
+- Chosen: top-level root.
 - Advantages: one stable orchestration context for any tree depth.
 - Rejected: immediate parent. Deep links would canonicalize to different viewer roots depending on depth.
 
+### Standalone suppression
+- Chosen: ship `?view=standalone` in the first implementation.
+- Advantages: preserves a direct-child debugging and sharing path without changing the default canonical route.
+- Rejected: defer the escape hatch. Deferral would make direct child viewing unavailable as soon as canonicalization ships.
+
+### Child access without root access
+- Chosen: render the accessible child at its original URL and return no root locator.
+- Advantages: preserves valid child access and does not disclose an inaccessible root identifier.
+- Rejected: redirect to the root and show an access error. This would break a valid child link and disclose a parent relationship the viewer cannot access.
+
 ### New authenticated query versus extending public redirect endpoints
-- Technical decision: use a permission-aware GraphQL query. This follows from the verified access-control requirement and does not depend on the requester choosing root versus immediate-parent canonicalization.
+- Chosen: a permission-aware GraphQL query.
 - Advantages: uses the authenticated or anonymous principal already established by the React wrapper and can fail closed without leaking root identifiers.
 - Rejected: add ancestry to the unauthenticated redirect endpoints. Those endpoints intentionally expose only same-run session/conversation canonicalization and cannot enforce the two-object access rule safely.
 
 ### History writes
-- Recommended: replace cold redirects, push user selections, and perform no write while applying history.
+- Chosen: replace cold redirects, push user selections, and perform no write while applying history.
 - Rejected: replace every selection. It prevents Back from recovering the root and reproduces the reported history loss.
 
 ## Assumptions
-- Current orchestration children have an `ai_tasks` row and durable run ID. A legacy child without one remains viewable but cannot produce a durable anchor.
-- `AuthenticatedApolloWrapper` has established a principal before the route-resolution query runs, including for link-shared anonymous viewing.
 - Existing root session and conversation access checks remain authoritative after navigation.
+
+## Risks and mitigations
+
+### Legacy children without durable run ancestry
+Older children may lack an `ai_tasks` row, `ParentRunID`, or another link needed to walk from the child to the root. They may also lack the run ID needed for `#child=<run-id>`. Root canonicalization must not guess from conversation-local state or redirect to a partial ancestor.
+
+Mitigation:
+- The server returns a null route resolution for missing or partial ancestry.
+- A direct child remains available at its original URL.
+- A child pill without a durable run ID remains selectable but leaves the root URL unanchored.
+- Tests include legacy/missing-link fixtures so this fallback remains intentional.
+
+### Anonymous principal readiness
+Link-shared routes create or load an anonymous principal before rendering the viewer, but route resolution crosses the React auth wrapper, GraphQL auth middleware, and object ACLs. A race or unsupported legacy anonymous session could leave no principal available when resolution starts.
+
+Mitigation:
+- `ConversationView` and `SessionShareView` do not call route resolution until their existing auth and source-access checks complete.
+- The GraphQL resolver requires a principal and returns no ancestry without one.
+- Resolution failure never blocks an accessible child; the client continues to the standalone child viewer.
+- Tests cover anonymous link sharing with access to both resources and child-only access.
 
 ## Out of scope
 - Persisting new ancestry data or migrating existing conversations.

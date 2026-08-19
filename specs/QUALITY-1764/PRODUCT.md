@@ -1,23 +1,14 @@
 # Child-run deep links in the web session viewer
 
 ## Summary
-The proposed web session viewer keeps an orchestrator route in the address bar while the user views a child run. The selected child is encoded in a URL fragment, so refreshes and copied links reopen the orchestration viewer with that child selected. Five product choices remain recommendations pending requester confirmation.
+The web session viewer keeps the root orchestrator route in the address bar while the user views a child run. The selected child is encoded as `#child=<run-id>`, so refreshes and copied links reopen the root orchestration viewer with that child selected.
 
 ## Problem
 Today a child-pill click can replace the root orchestrator URL with the child's own `/conversation/<id>` or `/session/<id>` URL. A refresh or copied link then opens the child without its orchestration context. A narrow stopgap preserves the root route but drops the selected child from the URL. This specification replaces that stopgap behavior with a root route plus a child-selection fragment.
-## Open decisions awaiting requester confirmation
-1. **Nested children — recommended: top-level root.** A direct link to a child at any depth canonicalizes to the top-level orchestrator, not the immediate parent. This gives the whole tree one stable viewer URL. Alternative: canonicalize one parent hop at a time.
-2. **Standalone escape hatch — recommended: ship in the first implementation.** `?view=standalone` suppresses only child-to-orchestrator canonicalization and survives automatic `/conversation` to `/session` redirects. This keeps a direct-child debugging and sharing path. Alternative: defer the escape hatch.
-3. **Browser history — recommended: replace cold redirects, push pill selections.** This avoids redirect loops while making Back traverse child selections and recover the orchestrator. Alternative: replace pill selections and keep Back unaware of them.
-4. **Anchor identity — recommended: `#child=<run-id>`.** A run ID survives a run's transition between a live session and a stored conversation. Alternative: put a conversation or session identifier in the fragment.
-5. **Access fallback — recommended: keep the direct child viewer.** If the viewer can access the child but not the orchestrator, do not redirect or disclose the orchestrator identifier. Alternative: show an access error after redirecting.
-
-The behavior below states these recommendations as the proposed contract. It is not approved until the requester confirms or changes all five choices.
 
 ## Behavior
 
 ### URL shape and pill navigation
-**Recommended behavior pending confirmation of anchor identity.**
 1. The stable viewer URL is the root orchestrator's route:
    - `/conversation/<root-conversation-id>`
    - `/session/<root-session-uuid>`
@@ -41,7 +32,6 @@ The behavior below states these recommendations as the proposed contract. It is 
 15. Automatic routing between a live session and a stored conversation preserves the child fragment. For example, `/session/<root-session>#child=<run>` may become `/conversation/<root-conversation>#child=<run>` after the session ends.
 
 ### Existing direct child links
-**Recommended behavior pending confirmation of root canonicalization.**
 16. Existing `/conversation/<child-conversation-id>` and `/session/<child-session-uuid>` links continue to work.
 17. By default, opening an orchestration child's direct URL resolves the child's ancestry and replaces the URL with the top-level root orchestrator route plus `#child=<child-run-id>`.
 18. An arbitrarily deep child redirects to the top-level root, not its immediate parent. The resulting root viewer selects the originally requested child.
@@ -50,7 +40,6 @@ The behavior below states these recommendations as the proposed contract. It is 
 21. A non-orchestration conversation or session opens normally and does not gain a child fragment.
 
 ### Access control and failures
-**Recommended behavior pending confirmation of the access fallback.**
 22. The server returns a root redirect only when the same viewer can access both the requested child and the selected root route.
 23. If the viewer can access the child but cannot access the root, the child opens as a standalone viewer at its original URL. The response does not disclose a root run ID, conversation ID, session UUID, or route.
 24. Missing, cyclic, over-depth, or partially deleted ancestor chains use the same standalone-child fallback. These conditions do not expose a partial ancestry result.
@@ -58,7 +47,6 @@ The behavior below states these recommendations as the proposed contract. It is 
 26. Normal access checks still apply after a redirect. If access changes between resolution and navigation, the destination uses the existing viewer access-error behavior.
 
 ### Standalone escape hatch
-**Recommended behavior pending confirmation of first-implementation scope.**
 27. The first implementation supports `?view=standalone` on direct child URLs:
    - `/conversation/<child-conversation-id>?view=standalone`
    - `/session/<child-session-uuid>?view=standalone`
@@ -68,22 +56,20 @@ The behavior below states these recommendations as the proposed contract. It is 
 31. If a standalone child viewer exposes descendants, selecting a descendant keeps the standalone child's route and query string as the viewer base, then adds the selected descendant's `#child=<run-id>` fragment.
 
 ### Browser history
-**Recommended behavior pending confirmation of history semantics.**
 32. A cold direct-child-to-root redirect replaces the current history entry. Browser Back returns to the page before the child link instead of reopening the child and redirecting again.
 33. A user-initiated pill selection pushes one browser-history entry.
 34. Browser Back and Forward traverse prior pill selections, including the unanchored root state. Applying a history entry changes the selected pill without adding another entry.
 35. The in-view back action returns from a child to the root and records the unanchored root state consistently with a root-pill selection.
 36. Focus changes, session-join events, transcript loading, and other non-navigation state updates do not create browser-history entries.
 
-## Recommended decisions awaiting confirmation
-- Use `#child=<run-id>` because a run ID survives live-session and stored-conversation route changes.
-- Canonicalize direct child links to the top-level root to keep one stable viewer for the complete orchestration tree.
-- Ship `?view=standalone` in the first implementation to preserve a direct-child debugging and sharing path.
-- Replace cold redirects and push pill selections so Back works without redirect loops.
-- Fail parent resolution closed so an authorized child remains usable instead of redirecting to an inaccessible parent.
+## Decisions
+- The fragment is `#child=<run-id>`. A run ID survives live-session and stored-conversation route changes.
+- Direct child links canonicalize to the top-level root. This keeps one stable viewer for the complete orchestration tree.
+- `?view=standalone` ships in the first implementation. It preserves a direct-child debugging and sharing path.
+- Cold redirects replace history. Pill selections push history.
+- Parent resolution fails closed. The product keeps an authorized child usable instead of redirecting to an inaccessible parent.
 
 ## Assumptions
-- Orchestration children created by current run infrastructure have durable run IDs.
 - Existing viewer access-error screens remain the fallback for an authorization race after route resolution.
 
 ## Out of scope
