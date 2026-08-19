@@ -2408,6 +2408,58 @@ fn agent_run_cloud_defaults_to_no_computer_use_override() {
     assert!(!run_args.computer_use.computer_use);
     assert!(!run_args.computer_use.no_computer_use);
     assert_eq!(run_args.computer_use.computer_use_override(), None);
+    assert_eq!(run_args.computer_use.computer_use_model_override(), None);
+}
+
+#[test]
+fn agent_run_cloud_accepts_computer_use_model_flag() {
+    let args = Args::try_parse_from([
+        "warp",
+        "agent",
+        "run-cloud",
+        "--prompt",
+        "hello",
+        "--computer-use",
+        "--computer-use-model",
+        "claude-4-5-sonnet",
+    ])
+    .unwrap();
+
+    let Some(Command::CommandLine(boxed_cmd)) = args.command else {
+        panic!("Expected `warp agent run-cloud` command");
+    };
+    let CliCommand::Agent(AgentCommand::RunCloud(run_args)) = boxed_cmd.as_ref() else {
+        panic!("Expected `warp agent run-cloud` command");
+    };
+
+    assert_eq!(run_args.computer_use.computer_use_override(), Some(true));
+    assert_eq!(
+        run_args.computer_use.computer_use_model_override(),
+        Some("claude-4-5-sonnet")
+    );
+}
+
+#[test]
+fn agent_run_cloud_ignores_blank_computer_use_model() {
+    let args = Args::try_parse_from([
+        "warp",
+        "agent",
+        "run-cloud",
+        "--prompt",
+        "hello",
+        "--computer-use-model",
+        "   ",
+    ])
+    .unwrap();
+
+    let Some(Command::CommandLine(boxed_cmd)) = args.command else {
+        panic!("Expected `warp agent run-cloud` command");
+    };
+    let CliCommand::Agent(AgentCommand::RunCloud(run_args)) = boxed_cmd.as_ref() else {
+        panic!("Expected `warp agent run-cloud` command");
+    };
+
+    assert_eq!(run_args.computer_use.computer_use_model_override(), None);
 }
 
 #[test]

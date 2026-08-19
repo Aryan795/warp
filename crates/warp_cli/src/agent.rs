@@ -88,6 +88,14 @@ pub struct ComputerUseArgs {
     /// Disable computer use capabilities for this agent run.
     #[arg(long = "no-computer-use", conflicts_with = "computer_use")]
     pub no_computer_use: bool,
+
+    /// Model for the computer use subagent, as a Warp model id.
+    ///
+    /// Only applies to the built-in Oz harness, and only when computer use is
+    /// enabled for the run; it is accepted and ignored otherwise. When omitted,
+    /// the run uses the default computer use model.
+    #[arg(long = "computer-use-model", value_name = "MODEL")]
+    pub computer_use_model: Option<String>,
 }
 
 impl ComputerUseArgs {
@@ -101,6 +109,14 @@ impl ComputerUseArgs {
             (false, true) => Some(false),
             _ => None,
         }
+    }
+
+    /// Returns the computer use model override, if a non-blank one was given.
+    pub fn computer_use_model_override(&self) -> Option<&str> {
+        self.computer_use_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
     }
 }
 

@@ -424,6 +424,10 @@ fn build_merged_config_and_task(
             .computer_use
             .computer_use_override()
             .or(file_merged.computer_use_enabled),
+        // `warp agent run` applies `--computer-use-model` to the run in-process
+        // (see `computer_use_model_override`), so the snapshot leaves the cloud
+        // configuration slot untouched.
+        computer_use_model_id: None,
         harness: harness_override,
         harness_auth_secrets: None,
         additional_source_repos: None,
@@ -522,6 +526,7 @@ fn build_server_side_task(
         worker_host: None,
         skill_spec: None,
         computer_use_enabled: args.computer_use.computer_use_override(),
+        computer_use_model_id: None,
         harness: harness_override,
         harness_auth_secrets: None,
         additional_source_repos: None,
