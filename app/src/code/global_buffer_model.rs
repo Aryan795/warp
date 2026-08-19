@@ -61,7 +61,7 @@ struct PendingDiffParse {
 /// keystrokes, short enough for the remote view to feel responsive.
 const REMOTE_EDIT_DEBOUNCE: Duration = Duration::from_millis(200);
 
-/// Content at or above this size skips the background incremental diff path on
+/// Content above this size skips the background incremental diff path on
 /// auto-reload and instead falls back to a synchronous `replace_all`, the same
 /// as when `IncrementalAutoReload` is disabled. The diff path holds the
 /// buffer's current text (freshly materialized from its rope) and the new file
@@ -548,13 +548,56 @@ impl GlobalBufferModel {
         } else {
             // Fallback: synchronous replace_all (non-incremental, or content too
             // large for the incremental diff path)
-            buffer.update(ctx, |buffer, ctx| {
-                buffer.replace_all(content, ctx);
-                buffer.set_version(new_version);
+            Self::apply_synchronous_reload(file_id, state, buffer, content, new_version, ctx);
+        }
+    }
+
+    /// Applies `content` to `buffer` synchronously via `replace_all`. Used both when
+    /// `IncrementalAutoReload` is disabled and when content is too large for the
+    /// background diff path.
+    ///
+    /// Aborts any pending background diff first: an earlier under-limit update may
+    /// have left one running, and letting it complete afterwards would apply a stale
+    /// diff against content it no longer matches, failing the base-version check in
+    /// `apply_diff_result` and broadcasting a spurious conflict.
+    ///
+    /// For `ServerLocal` buffers, mirrors `apply_diff_result`'s broadcast instead of
+    /// emitting `BufferUpdatedFromFileEvent`: `ServerModel` only acts on that event's
+    /// failure case, so a successful generic event would never reach connected
+    /// clients, leaving them on stale content.
+    fn apply_synchronous_reload(
+        file_id: FileId,
+        state: &mut InternalBufferState,
+        buffer: ModelHandle<Buffer>,
+        content: &str,
+        new_version: ContentVersion,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if let Some(pending) = state.pending_diff_parse.take() {
+            pending.abort_handle.abort();
+        }
+
+        let old_end = buffer.as_ref(ctx).max_charoffset();
+        buffer.update(ctx, |buffer, ctx| {
+            buffer.replace_all(content, ctx);
+            buffer.set_version(new_version);
+        });
+        state.set_base_content_version(new_version);
+
+        if let BufferSource::ServerLocal { sync_clock, .. } = &mut state.source {
+            let new_server_version = sync_clock.bump_server();
+            let expected_client_version = sync_clock.client_version;
+            ctx.emit(GlobalBufferModelEvent::ServerLocalBufferUpdated {
+                file_id,
+                edits: vec![CharOffsetEdit {
+                    start: CharOffset::from(1usize),
+                    end: old_end,
+                    text: content.to_string(),
+                }],
+                new_server_version,
+                expected_client_version,
             });
-
-            state.set_base_content_version(new_version);
-
+        } else {
             ctx.emit(GlobalBufferModelEvent::BufferUpdatedFromFileEvent {
                 file_id,
                 success: true,
