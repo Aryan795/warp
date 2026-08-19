@@ -47,7 +47,6 @@ pub mod headers {
     /// because it can't be set from WASM.
     pub(crate) const WARP_CLIENT_ID: &str = "X-Warp-Client-ID";
 
-    /// Custom Warp header naming the team a request should be attributed to.
     pub const WARP_ACTIVE_TEAM_UID: &str = "X-Warp-Active-Team-UID";
 
     /// Custom Warp header carrying the client's current OTEL span context in W3C

@@ -385,9 +385,6 @@ impl RequestParams {
             .data()
             .context_window_limit_for_request(app);
 
-        // `team_for_window`, not `team_uid_for_window`: a restored window's assignment
-        // can name a team the user has left, and the server rejects an unrecognized
-        // team rather than falling back.
         let team_uid = terminal_view_id
             .and_then(|id| app.window_id_for_view(id))
             .and_then(|window_id| user_workspaces.team_for_window(window_id))

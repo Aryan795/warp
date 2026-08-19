@@ -765,7 +765,6 @@ impl AppContext {
         self.windows.contains_key(&window_id)
     }
 
-    /// Returns the window currently containing the given view, if any.
     pub fn window_id_for_view(&self, view_id: EntityId) -> Option<WindowId> {
         self.view_to_window.get(&view_id).copied()
     }
