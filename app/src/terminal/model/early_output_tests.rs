@@ -167,6 +167,76 @@ fn test_push_expected_echo_is_swallowed_for_shell_reported() {
 }
 
 #[test]
+fn test_expected_echo_never_swallows_output_that_does_not_match_the_registered_pattern() {
+    // Every other test in this file feeds characters that *do* eventually match the registered
+    // pattern, since they're all reproducing a real redraw's echo. This asserts the opposite
+    // direction: replacing `consume_expected_echo`'s body with `!self.expected_echo.is_empty()`
+    // -- i.e. absorbing everything whenever anything is registered, regardless of whether it
+    // matches -- would leave every other test in this file green, since none of them feed a
+    // character that fails to match from the very first position. "xyz" shares no prefix at
+    // all with the registered "git ch", so it must render exactly as sent.
+    let mut block_list = new_block_list(
+        ChannelEventListener::new_for_test(),
+        TypeaheadMode::ShellReported,
+    );
+
+    block_list.early_output_mut().push_expected_echo("git ch");
+
+    for ch in "xyz".chars() {
+        block_list.input(ch);
+    }
+    block_list.on_finish_byte_processing(&ansi::ProcessorInput::new(&[]));
+
+    assert_eq!(
+        block_list
+            .background_block_mut()
+            .expect("unmatched output must render as real background output")
+            .output_to_string(),
+        "xyz"
+    );
+}
+
+#[test]
+fn test_expected_echo_does_not_corrupt_unrelated_output_once_reset() {
+    // Reproduces a real defect a standalone extraction of the matcher found: with the pattern
+    // "git ch" still live, unrelated background output "grep -rn foo" rendered as "rep -rn foo"
+    // -- the leading "g" was silently consumed, since it happens to match the registered
+    // pattern's own first character, and a mismatch never clears what a previous match already
+    // advanced. `EarlyOutput` alone cannot bound how long a registration stays live -- that is
+    // `PtyController`'s job, calling `reset_expected_echo` once the line editor is active again
+    // after a restore (see its own doc comment) -- so this simulates that boundary directly by
+    // calling `reset_expected_echo` before the unrelated output arrives, exactly as production
+    // code does once that boundary is crossed.
+    let mut block_list = new_block_list(
+        ChannelEventListener::new_for_test(),
+        TypeaheadMode::ShellReported,
+    );
+
+    block_list.early_output_mut().push_expected_echo("git ch");
+    for ch in "git ch".chars() {
+        block_list.input(ch);
+    }
+
+    // The restore's own redraw window has closed.
+    block_list.early_output_mut().reset_expected_echo();
+
+    // Unrelated output that happens to share a leading character with the stale pattern must
+    // render in full, not lose that character to a pattern that no longer applies.
+    for ch in "grep -rn foo".chars() {
+        block_list.input(ch);
+    }
+    block_list.on_finish_byte_processing(&ansi::ProcessorInput::new(&[]));
+
+    assert_eq!(
+        block_list
+            .background_block_mut()
+            .expect("unrelated output must render as real background output")
+            .output_to_string(),
+        "grep -rn foo"
+    );
+}
+
+#[test]
 fn test_push_expected_echo_survives_a_partial_echo_before_a_carriage_return() {
     // Reproduces zsh's ZLE redraw for a native-completions buffer restore: it echoes one
     // character, returns to column 0, then re-echoes the whole line -- so the echo stream for

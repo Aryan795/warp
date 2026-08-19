@@ -105,13 +105,13 @@ pub struct EarlyOutput {
     /// Every rearm/advance method here follows the same shape: each subsequent character
     /// advances every candidate whose next expected character matches it (dropping the rest) --
     /// so a character counts as expected echo if *any* live candidate predicts it, however many
-    /// candidates that turns out to be. This is scoped to the restore window regardless of
-    /// motion (nothing populates `expected_echo` outside of `push_expected_echo`, each restore
-    /// replaces it outright rather than accumulating across restores, and `reset_expected_echo`
-    /// clears it when a real command starts so a stale pattern can't outlive the request it
-    /// belonged to). Cursor motions other than these four -- e.g. absolute column addressing
-    /// (`\x1b[<n>G`, `\x1b[<n>;<m>H`) -- are not handled; a redraw shape using one of those
-    /// would need the same treatment as the four above.
+    /// candidates that turns out to be. This is meant to be scoped to a single restore's own
+    /// redraw window (nothing populates `expected_echo` outside of `push_expected_echo`, each
+    /// restore replaces it outright rather than accumulating across restores, and
+    /// `reset_expected_echo` is what closes the window -- see its own doc comment for when).
+    /// Cursor motions other than these four -- e.g. absolute column addressing (`\x1b[<n>G`,
+    /// `\x1b[<n>;<m>H`) -- are not handled; a redraw shape using one of those would need the
+    /// same treatment as the four above.
     expected_echo_positions: BTreeSet<usize>,
     /// Whether the last potential typeahead character received on the PTY was a
     /// carriage return. We can't rely on the last character of `typeahead` for
@@ -206,15 +206,21 @@ impl EarlyOutput {
         self.unmatched_input.clear();
     }
 
-    /// Clears any registration made via `push_expected_echo`. Called when a real command
-    /// starts (`BlockList::start_active_block`, never `start_active_block_for_in_band_command`,
-    /// which is what a generator/completions request's own command uses) so a pattern left over
-    /// from the last restore can't outlive the request it belonged to. Without this, the
-    /// pattern and its carriage-return rearming (see `expected_echo_positions`) would otherwise
-    /// persist indefinitely -- across every later command's own carriage returns -- until the
-    /// next completions request happened to call `push_expected_echo` again, risking swallowing
-    /// a character of a real command's own echo or output if it happened to match something in
-    /// the stale pattern.
+    /// Clears any registration made via `push_expected_echo`. Called from two places:
+    /// - `BlockList::start_active_block` (never `start_active_block_for_in_band_command`, which
+    ///   is what a generator/completions request's own command uses), so a pattern left over
+    ///   from the last restore can't outlive into a real, unrelated command's own output.
+    /// - `PtyController`, once the line editor is active again after a native-completions
+    ///   buffer restore (see the `LineEditorStatusEvent::Active` handling there), which bounds
+    ///   every restore's registration to its own redraw window rather than leaving it live
+    ///   indefinitely afterwards.
+    /// Without either, a pattern can remain live well past the redraw it was meant to cover,
+    /// and its rearming on a later carriage return/backspace/CUB (see
+    /// `expected_echo_positions`) can then silently absorb a character out of *real*,
+    /// unrelated output that happens to match something in the stale text -- measured: a
+    /// carriage-return-driven progress message (`\rloading 10%\rloading 20%...`) from an
+    /// unrelated background job lost several characters to a pattern left over from an earlier
+    /// completions request.
     pub fn reset_expected_echo(&mut self) {
         self.expected_echo.clear();
         self.expected_echo_positions.clear();

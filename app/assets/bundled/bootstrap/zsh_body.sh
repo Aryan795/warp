@@ -1531,33 +1531,54 @@ esac
   # below), so it is functionally transparent to that original binding on every ordinary
   # prompt read, and it is only ever captured/rebound once. `zle-line-finish` needs no such
   # capture: nothing in the completion path uses it.
+  #
+  # The self-check in the takeover logic below only closes the case where `zle-line-init` is
+  # bound directly to us. A deferred plugin loader (zinit's turbo mode, `zsh-defer`,
+  # `zvm_after_init`) that registers its own hook via `add-zle-hook-widget` *after* our
+  # takeover preserves our widget as the previous binding rather than the reverse, so
+  # `zle-line-init` ends up bound to that plugin's own dispatcher, which itself still calls
+  # us -- the self-check doesn't see that as "already us", saves the dispatcher, and rebinds
+  # to us again. Chaining to that saved dispatcher then invokes us a second time: the same
+  # "maximum nested function level reached" recursion as the case the self-check handles,
+  # just reached from the opposite bind order and on the *unarmed* path, so it wedges the
+  # shell on every ordinary prompt read rather than failing one completions request. The
+  # reentrancy guard below closes this and the self-check's case the same way, without
+  # needing to reason about which binding order caused it.
   function _warp_native_completions_zle_line_init () {
-    # zle-line-init can fire more than once while we own the widget (e.g. `select`
-    # re-reads on some inputs), so guard the actual capture behind the armed flag; once
-    # it has run, later firings just chain to whatever we took the widget over from.
-    if (( ! _WARP_NATIVE_COMPLETIONS_ARMED )); then
-      (( ${+widgets[_warp_saved_zle_line_init]} )) && zle _warp_saved_zle_line_init
+    if (( _WARP_NATIVE_COMPLETIONS_ZLE_LINE_INIT_RUNNING )); then
       return 0
     fi
-    _WARP_NATIVE_COMPLETIONS_ARMED=0
+    _WARP_NATIVE_COMPLETIONS_ZLE_LINE_INIT_RUNNING=1
+    {
+      # zle-line-init can fire more than once while we own the widget (e.g. `select`
+      # re-reads on some inputs), so guard the actual capture behind the armed flag; once
+      # it has run, later firings just chain to whatever we took the widget over from.
+      if (( ! _WARP_NATIVE_COMPLETIONS_ARMED )); then
+        (( ${+widgets[_warp_saved_zle_line_init]} )) && zle _warp_saved_zle_line_init
+        return 0
+      fi
+      _WARP_NATIVE_COMPLETIONS_ARMED=0
 
-    BUFFER=$_WARP_NATIVE_COMPLETIONS_LINE
-    CURSOR=${#BUFFER}
+      BUFFER=$_WARP_NATIVE_COMPLETIONS_LINE
+      CURSOR=${#BUFFER}
 
-    # Chain to whatever was bound to zle-line-init before we took it over, if anything.
-    (( ${+widgets[_warp_saved_zle_line_init]} )) && zle _warp_saved_zle_line_init
+      # Chain to whatever was bound to zle-line-init before we took it over, if anything.
+      (( ${+widgets[_warp_saved_zle_line_init]} )) && zle _warp_saved_zle_line_init
 
-    compprefuncs=( warp_mark_start_of_completions_for_compadd_override )
-    comppostfuncs=( warp_mark_end_of_completions )
-    COMPADD_OVERRIDE=true
-    zle warp_complete_via_compadd_override_internal
-    unset COMPADD_OVERRIDE
+      compprefuncs=( warp_mark_start_of_completions_for_compadd_override )
+      comppostfuncs=( warp_mark_end_of_completions )
+      COMPADD_OVERRIDE=true
+      zle warp_complete_via_compadd_override_internal
+      unset COMPADD_OVERRIDE
 
-    # A single-space throwaway buffer (rather than an empty one) is what `select`
-    # reliably accepts as ending its one read iteration without re-prompting.
-    BUFFER=' '
-    CURSOR=1
-    zle accept-line
+      # A single-space throwaway buffer (rather than an empty one) is what `select`
+      # reliably accepts as ending its one read iteration without re-prompting.
+      BUFFER=' '
+      CURSOR=1
+      zle accept-line
+    } always {
+      _WARP_NATIVE_COMPLETIONS_ZLE_LINE_INIT_RUNNING=0
+    }
   }
 
   # Foreground generator command for native shell completions, where the only argument is
