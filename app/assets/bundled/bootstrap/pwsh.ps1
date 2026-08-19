@@ -399,6 +399,56 @@ $null = New-Module -Name Warp-Module -ScriptBlock {
             Write-Host -NoNewline "$([char]0x1b)[2K"
         }
 
+        # Computes native shell completions for an arbitrary command line, without ever treating
+        # anything as a command to execute -- unlike Warp-Run-GeneratorCommand(-NativeCompletions),
+        # which this replaces for PowerShell, this never kills/retypes/submits the real buffer, so
+        # there is no buffer-clearing chord to race, no command text to type, no Enter, and nothing
+        # to restore afterward. The client writes the hex-encoded line to complete as ordinary
+        # typed characters (which PSReadLine echoes into its buffer exactly like any other typing,
+        # and which the client separately recognizes as expected echo so it isn't rendered as a
+        # block), immediately followed by this chord. The handler reads that text straight back out
+        # of the buffer via GetBufferState, decodes it, computes completions, emits them via the
+        # same OSC 9280 protocol the other three shells use, and reverts the buffer to empty --
+        # never AcceptLine, so this never reaches preexec/precmd, the real command-execution cycle,
+        # or the AddToHistoryHandler exclusion below, since it's never submitted at all.
+        Set-PSReadLineKeyHandler -Chord 'Alt+3' -ScriptBlock {
+            $hexEncodedLine = $null
+            $cursor = $null
+            [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$hexEncodedLine, [ref]$cursor)
+            # Revert immediately, before computing completions, so the buffer is never left
+            # holding the hex text if anything below throws.
+            [Microsoft.PowerShell.PSConsoleReadLine]::RevertLine()
+
+            Write-Host -NoNewline "$([char]0x1b)]9280;A;incrementally_typed$oscEnd"
+            try {
+                $line = Warp-Decode-HexString $hexEncodedLine
+
+                # An empty line (the input editor was empty when the request fired) has no
+                # useful completions, and CompleteInput('') would otherwise enumerate every
+                # command on $PATH synchronously in the user's own shell.
+                if (-not [string]::IsNullOrEmpty($line)) {
+                    $completion = [System.Management.Automation.CommandCompletion]::CompleteInput(
+                        $line, $line.Length, $null)
+                    foreach ($match in $completion.CompletionMatches) {
+                        Write-Host -NoNewline "$([char]0x1b)]9280;C;$($match.CompletionText)$oscEnd"
+                        if (-not [string]::IsNullOrEmpty($match.ToolTip) -and $match.ToolTip -ne $match.CompletionText) {
+                            # Cmdlet/parameter tooltips can span multiple lines (e.g. one syntax
+                            # set per parameter combination); collapse to a single line for
+                            # display.
+                            $description = ($match.ToolTip -split '\r?\n' | Where-Object { $_.Trim() -ne '' }) -join ' '
+                            Write-Host -NoNewline "$([char]0x1b)]9280;D?description;$description$oscEnd"
+                        }
+                    }
+                }
+            } catch {
+                Write-Verbose "Native completions failed: $($_.Exception.Message)"
+            } finally {
+                # Always emit the terminator, even if decoding or completion above threw, so the
+                # client never blocks waiting on a response that will never arrive.
+                Write-Host -NoNewline "$([char]0x1b)]9280;B$oscEnd"
+            }
+        }
+
         # Sets the prompt mode to custom prompt (PS1)
         # Is the equivalent of warp_change_prompt_modes_to_ps1 in other shells
         Set-PSReadLineKeyHandler -Chord 'Alt+p' -ScriptBlock {
@@ -821,55 +871,6 @@ $null = New-Module -Name Warp-Module -ScriptBlock {
 
     }
 
-    # Computes native shell completions for the given (hex-encoded) command line and emits
-    # them via the completions OSC protocol (see zsh_body.sh's compadd shim for the wire
-    # format: "<ESC>]9280;A;incrementally_typed<BEL>", then "<ESC>]9280;C;<match><BEL>" and
-    # optionally "<ESC>]9280;D?description;<description><BEL>" per match, then
-    # "<ESC>]9280;B<BEL>"). Runs synchronously in the foreground -- like native completions
-    # in the other shells, there is no async cancel-by-PID for this request.
-    #
-    # Usage:
-    #   Warp-Run-GeneratorCommand-NativeCompletions <hex-encoded line>
-    function Warp-Run-GeneratorCommand-NativeCompletions {
-        [CmdletBinding()]
-        param([string]$hexEncodedLine)
-
-        # Setting this variable prevents Warp-Precmd from emitting the 'Block started'
-        # hook to the Rust app, matching Warp-Run-GeneratorCommand.
-        $script:generatorCommand = $true
-
-        Write-Host -NoNewline "$([char]0x1b)]9280;A;incrementally_typed$oscEnd"
-        try {
-            # Decoding inside the same try as CompleteInput -- rather than before it -- means a
-            # missing/malformed hex argument still lands in the catch below instead of
-            # aborting the function before the "B" terminator is ever written.
-            $line = Warp-Decode-HexString $hexEncodedLine
-
-            # An empty line (the input editor was empty when the request fired) has no useful
-            # completions, and CompleteInput('') would otherwise enumerate every command on
-            # $PATH synchronously in the user's own shell.
-            if (-not [string]::IsNullOrEmpty($line)) {
-                $completion = [System.Management.Automation.CommandCompletion]::CompleteInput(
-                    $line, $line.Length, $null)
-                foreach ($match in $completion.CompletionMatches) {
-                    Write-Host -NoNewline "$([char]0x1b)]9280;C;$($match.CompletionText)$oscEnd"
-                    if (-not [string]::IsNullOrEmpty($match.ToolTip) -and $match.ToolTip -ne $match.CompletionText) {
-                        # Cmdlet/parameter tooltips can span multiple lines (e.g. one syntax set
-                        # per parameter combination); collapse to a single line for display.
-                        $description = ($match.ToolTip -split '\r?\n' | Where-Object { $_.Trim() -ne '' }) -join ' '
-                        Write-Host -NoNewline "$([char]0x1b)]9280;D?description;$description$oscEnd"
-                    }
-                }
-            }
-        } catch {
-            Write-Verbose "Native completions failed: $($_.Exception.Message)"
-        } finally {
-            # Always emit the terminator, even if decoding or completion above threw, so the
-            # client never blocks waiting on a response that will never arrive.
-            Write-Host -NoNewline "$([char]0x1b)]9280;B$oscEnd"
-        }
-    }
-
     function Warp-Render-Prompt {
         param([bool]$status, [int]$code, [bool]$isGeneratorCommand)
 
@@ -1067,7 +1068,7 @@ $null = New-Module -Name Warp-Module -ScriptBlock {
     # bootstrap logic pasted into the PTY and the output of shell startup files.
     Warp-Precmd -status $global:? -code $global:LASTEXITCODE
 
-    Export-ModuleMember -Function clear, Clear-Host, Get-EpochTime, Warp-Finish-Update, Warp-Handle-DistUpgrade, Warp-Run-GeneratorCommand, Warp-Run-GeneratorCommand-NativeCompletions, Warp-Finish-Bootstrap
+    Export-ModuleMember -Function clear, Clear-Host, Get-EpochTime, Warp-Finish-Update, Warp-Handle-DistUpgrade, Warp-Run-GeneratorCommand, Warp-Finish-Bootstrap
 }
 
 # Finally, get ready to source the user's RC files. This must be done in the global scope (not
