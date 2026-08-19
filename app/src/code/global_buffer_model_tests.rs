@@ -3,13 +3,18 @@ use remote_server::proto::TextEdit;
 use repo_metadata::RepoMetadataModel;
 use repo_metadata::repositories::DetectedRepositories;
 use repo_metadata::watcher::DirectoryWatcher;
+use warp_core::features::FeatureFlag;
+use warp_editor::content::buffer::Buffer;
 use warp_files::FileModel;
 use warp_util::content_version::ContentVersion;
 use warp_util::host_id::HostId;
 use warp_util::standardized_path::StandardizedPath;
-use warpui::{App, ModelHandle, SingletonEntity};
+use warpui::{App, ModelContext, ModelHandle, SingletonEntity};
 
-use super::{BufferSource, CharOffsetEdit, GlobalBufferModel, PendingEditBatch};
+use super::{
+    BufferSource, BufferState, CharOffsetEdit, GlobalBufferModel, InternalBufferState,
+    MAX_INCREMENTAL_DIFF_CONTENT_BYTES, PendingEditBatch,
+};
 use crate::test_util::settings::initialize_settings_for_tests;
 
 // ── Test-only helpers on GlobalBufferModel ────────────────────────
@@ -70,6 +75,43 @@ impl GlobalBufferModel {
                 debounce_timer: None,
             });
         }
+    }
+
+    /// Seeds a Local buffer with the given content, bypassing the async
+    /// `FileModel` load path so `populate_buffer_with_read_content` can be
+    /// driven directly.
+    fn seed_local_buffer_for_test(
+        &mut self,
+        content: &str,
+        ctx: &mut ModelContext<Self>,
+    ) -> BufferState {
+        let file_id = warp_util::file::FileId::new();
+        let buffer = ctx.add_model(|_| Buffer::default());
+        let version = ContentVersion::new();
+        buffer.update(ctx, |buf, ctx| {
+            buf.replace_all(content, ctx);
+            buf.set_version(version);
+        });
+        self.buffers.insert(
+            file_id,
+            InternalBufferState {
+                buffer: buffer.downgrade(),
+                latest_buffer_version: None,
+                pending_diff_parse: None,
+                source: BufferSource::Local {
+                    base_content_version: Some(version),
+                    initial_content_version: Some(version),
+                },
+            },
+        );
+        BufferState::new(file_id, buffer)
+    }
+
+    /// Returns whether a background diff parse is pending for `file_id`.
+    fn has_pending_diff_parse_for_test(&self, file_id: warp_util::file::FileId) -> bool {
+        self.buffers
+            .get(&file_id)
+            .is_some_and(|state| state.pending_diff_parse.is_some())
     }
 }
 
@@ -319,5 +361,84 @@ fn pending_batch_bumps_client_version_immediately() {
             // server_version unchanged
             assert_eq!(clock.server_version, ContentVersion::from_raw(1));
         });
+    })
+}
+
+// ── Auto-reload: incremental diff size guard ─────────────────────
+
+#[test]
+fn auto_reload_under_size_limit_uses_background_diff() {
+    App::test((), |mut app| async move {
+        init_app(&mut app);
+        app.add_singleton_model(GlobalBufferModel::new);
+        let _incremental_auto_reload = FeatureFlag::IncrementalAutoReload.override_enabled(true);
+
+        let buffer_state = gbm(&app).update(&mut app, |gbm, ctx| {
+            gbm.seed_local_buffer_for_test("hello", ctx)
+        });
+        let file_id = buffer_state.file_id;
+        let base_version = app.read(|ctx| buffer_state.buffer.as_ref(ctx).version());
+
+        gbm(&app).update(&mut app, |gbm, ctx| {
+            gbm.populate_buffer_with_read_content(
+                file_id,
+                "hello world",
+                base_version,
+                ContentVersion::new(),
+                false,
+                ctx,
+            );
+        });
+
+        // Well under the (test-mode) size limit: the diff is computed on a
+        // background task rather than applied synchronously.
+        let handle = gbm(&app);
+        app.read(|ctx| {
+            assert!(
+                handle.as_ref(ctx).has_pending_diff_parse_for_test(file_id),
+                "content under the size limit should spawn a background diff"
+            );
+        });
+        assert_eq!(content(&app, file_id), "hello");
+    })
+}
+
+#[test]
+fn auto_reload_over_size_limit_falls_back_to_synchronous_replace() {
+    App::test((), |mut app| async move {
+        init_app(&mut app);
+        app.add_singleton_model(GlobalBufferModel::new);
+        let _incremental_auto_reload = FeatureFlag::IncrementalAutoReload.override_enabled(true);
+
+        let buffer_state = gbm(&app).update(&mut app, |gbm, ctx| {
+            gbm.seed_local_buffer_for_test("hello", ctx)
+        });
+        let file_id = buffer_state.file_id;
+        let base_version = app.read(|ctx| buffer_state.buffer.as_ref(ctx).version());
+
+        // One byte over the (test-mode) size limit, so this exercises the
+        // boundary directly rather than relying on a specific production value.
+        let oversized_content = "a".repeat(MAX_INCREMENTAL_DIFF_CONTENT_BYTES + 1);
+        gbm(&app).update(&mut app, |gbm, ctx| {
+            gbm.populate_buffer_with_read_content(
+                file_id,
+                &oversized_content,
+                base_version,
+                ContentVersion::new(),
+                false,
+                ctx,
+            );
+        });
+
+        // Over the size limit: no background diff is spawned, and the
+        // synchronous replace_all fallback applies the content immediately.
+        let handle = gbm(&app);
+        app.read(|ctx| {
+            assert!(
+                !handle.as_ref(ctx).has_pending_diff_parse_for_test(file_id),
+                "content over the size limit should not spawn a background diff"
+            );
+        });
+        assert_eq!(content(&app, file_id), oversized_content);
     })
 }
