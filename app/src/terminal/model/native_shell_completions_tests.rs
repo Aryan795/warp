@@ -10,14 +10,15 @@ fn hex_encodes_the_buffer_text_argument() {
 }
 
 #[test]
-fn hex_argument_round_trips_arbitrary_bytes() {
+fn hex_argument_matches_the_contract_the_four_shell_decoders_rely_on() {
     // Characters that would otherwise require shell-specific quoting: single quotes,
-    // double quotes, backslashes, and a partially-typed unbalanced quote.
+    // double quotes, backslashes, a partially-typed unbalanced quote, and non-ASCII text.
     let inputs = [
         "git ch",
         "echo 'hello world'",
         "echo \"hi\\there\"",
         "echo 'unterminated",
+        "caf\u{e9}",
         "",
     ];
     for input in inputs {
@@ -25,7 +26,28 @@ fn hex_argument_round_trips_arbitrary_bytes() {
             .strip_prefix("warp_run_generator_command_native_completions ")
             .expect("command has the expected prefix")
             .to_owned();
-        let decoded = hex::decode(&hex).expect("hex-decodes cleanly");
+
+        // Each shell decoder (zsh/bash's `${hex:$i:2}` slicing, fish's `string sub`, and
+        // PowerShell's `Substring`) assumes exactly this shape: lowercase hex digits, no
+        // separators, and an even count so every two-character slice is a complete byte.
+        // Round-tripping through the `hex` crate wouldn't catch a change to this shape
+        // (its decoder is more permissive than any of the four), so decode by hand here,
+        // the same way the shell scripts do.
+        assert!(
+            hex.chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "expected only lowercase hex digits with no separators, got {hex:?}"
+        );
+        assert_eq!(
+            hex.len() % 2,
+            0,
+            "expected an even number of hex digits, got {hex:?}"
+        );
+
+        let decoded: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("valid hex pair"))
+            .collect();
         assert_eq!(String::from_utf8(decoded).unwrap(), input);
     }
 }

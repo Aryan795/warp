@@ -5,9 +5,9 @@ use warpui::App;
 
 use super::*;
 use crate::terminal::event_listener::ChannelEventListener;
+use crate::terminal::model::StartCommandOutcome;
 use crate::terminal::model::ansi::{Handler, PreexecValue};
 use crate::terminal::model::session::{SessionId, SessionInfo, Sessions};
-use crate::terminal::model::{StartCommandOutcome, native_shell_completions};
 
 #[derive(Clone, Default)]
 struct TestEventLoopSender {
@@ -151,10 +151,15 @@ fn native_shell_completions_queues_the_generator_command_for_the_active_sessions
             else {
                 panic!("expected a queued RunNativeShellCompletions write");
             };
+            // Pinning the exact literal (rather than comparing against
+            // `generator_command_for`'s own output) keeps this test meaningful if that
+            // function's encoding ever changes; the assertion that matters most here is
+            // `shell_type` above, confirming it comes from the active session rather than
+            // some default.
             assert_eq!(*shell_type, ShellType::Fish);
             assert_eq!(
                 command,
-                &native_shell_completions::generator_command_for(ShellType::Fish, "git ch")
+                "warp_run_generator_command_native_completions 676974206368"
             );
         });
 

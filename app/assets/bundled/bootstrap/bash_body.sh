@@ -300,6 +300,11 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
     # own tokenizer would.
     _warp_native_bash_completions() {
       local line="$1"
+      # `read -ra` splits on $IFS, which is the session's value, not necessarily the
+      # default whitespace set (a plugin or the user's own script can have changed it);
+      # force the default explicitly so a quoted argument containing a space still
+      # yields zero matches consistently rather than splitting on whatever $IFS is.
+      local IFS=$' \t\n'
       local -a words
       read -ra words <<< "$line"
       # A trailing space means the user is completing a new, empty word.
@@ -343,13 +348,22 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
       [[ -z "$func" ]] && return
       declare -F "$func" >/dev/null 2>&1 || return
 
-      COMPREPLY=()
-      COMP_WORDS=("${words[@]}")
-      COMP_CWORD=$cword
-      COMP_LINE="$line"
-      COMP_POINT=${#line}
-      COMP_TYPE=9
-      COMP_KEY=9
+      # These must be visible to $func exactly as bash's own real completion machinery
+      # presents them: as the ambient globals COMP_WORDS/COMP_CWORD/etc., not as arguments.
+      # Declaring them `local` here rather than as plain (implicitly global) assignments
+      # gets both properties at once -- bash's dynamic scoping makes a `local` visible by
+      # name to any function called from this scope, including $func below, and it is
+      # automatically unset again once this function returns, so a completion request
+      # never leaves stale values sitting in the user's own session.
+      local COMPREPLY=()
+      local -a COMP_WORDS=("${words[@]}")
+      local COMP_CWORD=$cword
+      local COMP_LINE="$line"
+      # COMP_POINT is a byte offset into COMP_LINE, not a character count: ${#line} counts
+      # characters under the session's locale, which undercounts for multibyte text.
+      local COMP_POINT=$(( $(LC_ALL=C printf '%s' "$line" | LC_ALL=C command wc -c) ))
+      local COMP_TYPE=9
+      local COMP_KEY=9
 
       # compopt is only meaningful while bash's own readline machinery is driving a
       # completion; calling it here from a plain function call fails loudly to stderr, so
