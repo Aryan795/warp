@@ -72,6 +72,12 @@ end
 # Lets the Rust app pass arbitrary argument text (e.g. the in-progress command line) as a
 # plain, unquoted hex string, without needing any shell quoting.
 function warp_hex_decode_string
+    # No argument, or an empty one, decodes to nothing -- guard explicitly rather than
+    # letting `string length -- $hex` expand to nothing and leave the loop condition below
+    # with a missing operand.
+    if test (count $argv) -eq 0 -o -z "$argv[1]"
+        return
+    end
     set -l hex $argv[1]
     set -l escaped ''
     set -l i 1
@@ -80,7 +86,13 @@ function warp_hex_decode_string
         set escaped "$escaped\\x$pair"
         set i (math $i + 2)
     end
-    command printf -- '%b' $escaped
+    # Use fish's own builtin printf, not `command printf`: BSD/macOS's external printf(1)
+    # only documents octal \nnn escapes for %b, not \xNN, so `command printf` would decode
+    # every native fish completion to literal "\x67..." text on macOS. Fish's builtin printf
+    # doesn't treat a leading "--" as an end-of-options marker the way external printf(1)
+    # does -- it prints the two literal characters instead -- so it's omitted here; the
+    # format string is our own fixed literal, never user input, so it's safe to skip.
+    printf '%b' $escaped
 end
 
 # A list of PIDs for running in-band command(s). This is used to kill running
@@ -182,17 +194,25 @@ end
 #   warp_run_generator_command_native_completions <hex-encoded line>
 function warp_run_generator_command_native_completions
     set -g _WARP_GENERATOR_COMMAND 1
-    set -l line (warp_hex_decode_string $argv[1])
+    set -l line
+    if test (count $argv) -gt 0
+        set line (warp_hex_decode_string $argv[1] 2>/dev/null)
+    end
 
     printf '\e]9280;A;incrementally_typed\a'
-    # `complete -C "<line>"` computes completions for an arbitrary line -- the same
-    # entry point already used elsewhere in Warp's bootstrap for executable discovery --
-    # returning one "match\tdescription" pair per line.
-    for entry in (complete -C "$line")
-        set -l parts (string split -m 1 \t -- $entry)
-        printf '\e]9280;C;%s\a' $parts[1]
-        if test (count $parts) -gt 1 -a -n "$parts[2]"
-            printf '\e]9280;D?description;%s\a' $parts[2]
+    # An empty line (the input editor was empty when the request fired) has no useful
+    # completions, and `complete -C ""` would otherwise list every command on $PATH
+    # synchronously in the user's own shell.
+    if test -n "$line"
+        # `complete -C "<line>"` computes completions for an arbitrary line -- the same
+        # entry point already used elsewhere in Warp's bootstrap for executable discovery --
+        # returning one "match\tdescription" pair per line.
+        for entry in (complete -C "$line")
+            set -l parts (string split -m 1 \t -- $entry)
+            printf '\e]9280;C;%s\a' $parts[1]
+            if test (count $parts) -gt 1 -a -n "$parts[2]"
+                printf '\e]9280;D?description;%s\a' $parts[2]
+            end
         end
     end
     printf '\e]9280;B\a'

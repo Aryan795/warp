@@ -310,7 +310,14 @@ impl<T: EventLoopSender> PtyController<T> {
         }
 
         if let Some(write) = self.pending_writes.pop_front() {
-            let is_command = matches!(write, PtyWrite::Command { .. });
+            // `RunNativeShellCompletions` must be treated like `Command` here: it puts the
+            // shell into a synchronous foreground read (e.g. zsh's `select`), so draining the
+            // next queued write immediately would deliver it into that read instead of a normal
+            // prompt, where it can be consumed and lost.
+            let is_command = matches!(
+                write,
+                PtyWrite::Command { .. } | PtyWrite::RunNativeShellCompletions { .. }
+            );
             let did_write = self.send_write_to_event_loop(write, ctx);
             if !is_command || !did_write {
                 self.execute_next_queued_write(ctx);

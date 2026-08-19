@@ -76,6 +76,13 @@ $null = New-Module -Name Warp-Module -ScriptBlock {
         # UTF-8 text. Lets the Rust app pass arbitrary argument text (e.g. the in-progress
         # command line) as a plain, unquoted hex string, without needing any shell quoting.
         function Warp-Decode-HexString([string]$hex) {
+            # An empty (or missing, which binds to an empty string for an unmandated [string]
+            # parameter) argument decodes to nothing. Guard explicitly: the `for` loop below
+            # never executing leaves $bytes as $null rather than an empty array, and
+            # GetString($null) throws.
+            if ([string]::IsNullOrEmpty($hex)) {
+                return ''
+            }
             $bytes = for ($i = 0; $i -lt $hex.Length; $i += 2) {
                 [Convert]::ToByte($hex.Substring($i, 2), 16)
             }
@@ -831,25 +838,36 @@ $null = New-Module -Name Warp-Module -ScriptBlock {
         # hook to the Rust app, matching Warp-Run-GeneratorCommand.
         $script:generatorCommand = $true
 
-        $line = Warp-Decode-HexString $hexEncodedLine
-
         Write-Host -NoNewline "$([char]0x1b)]9280;A;incrementally_typed$oscEnd"
         try {
-            $completion = [System.Management.Automation.CommandCompletion]::CompleteInput(
-                $line, $line.Length, $null)
-            foreach ($match in $completion.CompletionMatches) {
-                Write-Host -NoNewline "$([char]0x1b)]9280;C;$($match.CompletionText)$oscEnd"
-                if (-not [string]::IsNullOrEmpty($match.ToolTip) -and $match.ToolTip -ne $match.CompletionText) {
-                    # Cmdlet/parameter tooltips can span multiple lines (e.g. one syntax set
-                    # per parameter combination); collapse to a single line for display.
-                    $description = ($match.ToolTip -split '\r?\n' | Where-Object { $_.Trim() -ne '' }) -join ' '
-                    Write-Host -NoNewline "$([char]0x1b)]9280;D?description;$description$oscEnd"
+            # Decoding inside the same try as CompleteInput -- rather than before it -- means a
+            # missing/malformed hex argument still lands in the catch below instead of
+            # aborting the function before the "B" terminator is ever written.
+            $line = Warp-Decode-HexString $hexEncodedLine
+
+            # An empty line (the input editor was empty when the request fired) has no useful
+            # completions, and CompleteInput('') would otherwise enumerate every command on
+            # $PATH synchronously in the user's own shell.
+            if (-not [string]::IsNullOrEmpty($line)) {
+                $completion = [System.Management.Automation.CommandCompletion]::CompleteInput(
+                    $line, $line.Length, $null)
+                foreach ($match in $completion.CompletionMatches) {
+                    Write-Host -NoNewline "$([char]0x1b)]9280;C;$($match.CompletionText)$oscEnd"
+                    if (-not [string]::IsNullOrEmpty($match.ToolTip) -and $match.ToolTip -ne $match.CompletionText) {
+                        # Cmdlet/parameter tooltips can span multiple lines (e.g. one syntax set
+                        # per parameter combination); collapse to a single line for display.
+                        $description = ($match.ToolTip -split '\r?\n' | Where-Object { $_.Trim() -ne '' }) -join ' '
+                        Write-Host -NoNewline "$([char]0x1b)]9280;D?description;$description$oscEnd"
+                    }
                 }
             }
         } catch {
             Write-Verbose "Native completions failed: $($_.Exception.Message)"
+        } finally {
+            # Always emit the terminator, even if decoding or completion above threw, so the
+            # client never blocks waiting on a response that will never arrive.
+            Write-Host -NoNewline "$([char]0x1b)]9280;B$oscEnd"
         }
-        Write-Host -NoNewline "$([char]0x1b)]9280;B$oscEnd"
     }
 
     function Warp-Render-Prompt {
