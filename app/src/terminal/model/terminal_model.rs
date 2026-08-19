@@ -2632,6 +2632,11 @@ impl ansi::Handler for TerminalModel {
             }
         } else if let IsReceivingCompletionsOutput::Yes {
             pending: CompletionsShellData::Raw { output },
+            // No shell currently emits the replacement-span OSC while sending raw-format
+            // completions output (the only shell that emits it -- PowerShell -- always uses
+            // `incrementally_typed`), and this branch only accumulates raw text character by
+            // character; it has no use for a span even if one were ever set here.
+            replacement_span: _,
         } = &mut self.is_receiving_completions_output
         {
             output.push(c);

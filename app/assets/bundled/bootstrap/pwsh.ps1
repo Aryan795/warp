@@ -438,7 +438,16 @@ $null = New-Module -Name Warp-Module -ScriptBlock {
                     # .NET string (UTF-16 code unit) offsets; sent as-is, so this is only exact
                     # for ASCII lines -- the reported cases all are, and getting this precisely
                     # right for non-ASCII lines is a larger undertaking left as a known gap.
-                    Write-Host -NoNewline "$([char]0x1b)]9280;S;$($completion.ReplacementIndex),$($completion.ReplacementLength)$oscEnd"
+                    #
+                    # A whitespace-only line (measured: e.g. "   ") reports a negative
+                    # ReplacementIndex/ReplacementLength -- CompleteInput has nothing to anchor a
+                    # replacement to there, and there are no matches either. Skip the OSC rather
+                    # than send a negative pair the client would just reject and warn about on
+                    # trivially reachable input; the client's whitespace-derived fallback span is
+                    # exactly as good as anything a negative index could have conveyed anyway.
+                    if ($completion.ReplacementIndex -ge 0) {
+                        Write-Host -NoNewline "$([char]0x1b)]9280;S;$($completion.ReplacementIndex),$($completion.ReplacementLength)$oscEnd"
+                    }
                     foreach ($match in $completion.CompletionMatches) {
                         Write-Host -NoNewline "$([char]0x1b)]9280;C;$($match.CompletionText)$oscEnd"
                         if (-not [string]::IsNullOrEmpty($match.ToolTip) -and $match.ToolTip -ne $match.CompletionText) {
