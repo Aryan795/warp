@@ -336,6 +336,72 @@ fn test_push_expected_echo_survives_a_carriage_return_followed_by_only_a_trailin
 }
 
 #[test]
+fn test_push_expected_echo_survives_a_backspace_before_a_full_reprint() {
+    // Reproduces zsh's redraw with `terminal.input.honor_ps1 = true` (the shell draws its own
+    // prompt): the rewind is a literal backspace, not a carriage return -- the echo stream for
+    // an 11-character restore is "s", backspace, then the whole line again ("starship pr").
+    // Measured: 0 backspaces in 16 requests with Warp drawing the prompt, exactly 1 in each of
+    // 10 requests with the shell drawing it. A carriage-return-only rearm cannot help here,
+    // since none of these redraws ever emit a carriage return at all.
+    let mut block_list = new_block_list(
+        ChannelEventListener::new_for_test(),
+        TypeaheadMode::ShellReported,
+    );
+
+    block_list
+        .early_output_mut()
+        .push_expected_echo("starship pr");
+
+    block_list.input('s');
+    block_list.backspace();
+    for ch in "starship pr".chars() {
+        block_list.input(ch);
+    }
+    block_list.on_finish_byte_processing(&ansi::ProcessorInput::new(&[]));
+
+    assert!(
+        block_list.background_block_mut().is_none(),
+        "a backspace-based rewind followed by a full reprint must not leak"
+    );
+}
+
+#[test]
+fn test_push_expected_echo_survives_a_cub_rewind_after_a_full_match() {
+    // Reproduces a further redraw pass with zsh-syntax-highlighting loaded: after a full
+    // match, the command word gets recoloured via CUB (cursor-backward, e.g. `\x1b[11D` for an
+    // 11-character buffer) rather than a carriage return or backspace, followed by the
+    // recoloured characters (interspersed with SGR codes, irrelevant to matching) and a CUF
+    // skipping over the untouched remainder. Unlike a carriage return, CUB's distance is known
+    // from the escape sequence's own parameter, so this should rearm precisely rather than
+    // seeding every position.
+    let mut block_list = new_block_list(
+        ChannelEventListener::new_for_test(),
+        TypeaheadMode::ShellReported,
+    );
+
+    block_list
+        .early_output_mut()
+        .push_expected_echo("starship pr");
+    for ch in "starship pr".chars() {
+        block_list.input(ch);
+    }
+
+    // Recolour just "starship" (8 characters): rewind by the full 11, then re-echo only the
+    // first 8 characters (SGR codes in between are handled by other ansi::Handler methods, not
+    // `input`, so they're omitted here).
+    block_list.move_backward(11);
+    for ch in "starship".chars() {
+        block_list.input(ch);
+    }
+    block_list.on_finish_byte_processing(&ansi::ProcessorInput::new(&[]));
+
+    assert!(
+        block_list.background_block_mut().is_none(),
+        "a CUB-based rewind and partial recolour reprint must not leak"
+    );
+}
+
+#[test]
 fn test_starting_a_real_command_clears_a_stale_expected_echo_registration() {
     // Without a clear on the transition that starts a real command, a pattern left over from
     // the last restore -- plus the fact that a carriage return rearms every position in it --
