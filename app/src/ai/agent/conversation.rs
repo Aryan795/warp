@@ -2291,18 +2291,22 @@ impl AIConversation {
             self.total_request_cost += request_cost;
         }
 
+        // Mirrors the `credits_spent_for_last_block` reset above: a
+        // user-initiated request starts a new response block. This must
+        // happen unconditionally (not just when `request_charges` is
+        // present this round), otherwise a new user-initiated request that
+        // happens to arrive without charges would leave the previous
+        // block's totals in place and the UI would show stale pricing.
+        if was_user_initiated_request {
+            self.conversation_usage_metadata
+                .charged_usage_for_last_block = Some(ChargedUsageTotals::default());
+        }
         if let Some(request_charges) = request_charges {
             let totals = ChargedUsageTotals::from(&request_charges);
             let charged_usage_for_last_block = self
                 .conversation_usage_metadata
                 .charged_usage_for_last_block
                 .get_or_insert_with(ChargedUsageTotals::default);
-
-            // Mirrors the `credits_spent_for_last_block` reset above: a
-            // user-initiated request starts a new response block.
-            if was_user_initiated_request {
-                *charged_usage_for_last_block = ChargedUsageTotals::default();
-            }
             *charged_usage_for_last_block += totals;
         }
 

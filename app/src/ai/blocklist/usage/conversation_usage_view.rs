@@ -812,9 +812,9 @@ impl ConversationUsageView {
     /// Pushes a "PRICING BREAKDOWN" section with a row per inference
     /// token category (input, cache read, cache write, output), gated by
     /// `FeatureFlag::PricingTransparency`. Absent entirely when the flag is
-    /// off or the breakdown is unavailable (e.g. the settings usage-history
-    /// surface, which sources this view from a GraphQL query that doesn't
-    /// yet expose a per-category cost breakdown — documented gap).
+    /// off or `charged_usage` is unavailable (e.g. pricing transparency is
+    /// disabled server-side, so the source query didn't return a
+    /// per-category cost breakdown).
     fn append_pricing_breakdown_section(
         &self,
         labels: &mut Vec<Box<dyn Element>>,
