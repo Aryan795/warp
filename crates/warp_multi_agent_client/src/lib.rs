@@ -41,11 +41,6 @@ cfg_if::cfg_if! {
 }
 
 /// Opens a decoded multi-agent response event stream.
-///
-/// `team_uid` names the team the request should be billed and attributed against.
-/// It is omitted when the client doesn't know which of the user's teams the request
-/// belongs to, in which case the server derives one itself. The server rejects a
-/// team the user isn't a member of rather than falling back.
 pub async fn generate_multi_agent_output(
     client: &BaseClient,
     request: &warp_multi_agent_api::Request,

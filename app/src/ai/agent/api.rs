@@ -162,9 +162,6 @@ pub struct RequestParams {
     pub parent_agent_id: Option<String>,
     /// The display name for this agent (e.g. "Agent 1"), assigned by the orchestrator.
     pub agent_name: Option<String>,
-    /// The UID of the team active in the request's window, if the user belongs to one.
-    /// Sent so the server can attribute the request to this team instead of guessing
-    /// (e.g. for a user who belongs to more than one team).
     pub team_uid: Option<String>,
 }
 
@@ -388,22 +385,9 @@ impl RequestParams {
             .data()
             .context_window_limit_for_request(app);
 
-        // Send the team active in this request's window, so the server can attribute
-        // the request to it instead of guessing (e.g. for a user on more than one team).
-        // Only derive this from an actual mapped window and its window-scoped
-        // assignment: unlike `inherited_or_default_team_uid`, we do NOT fall back to the
-        // workspace's first team when there's no window, since a viewless/personal-context
-        // request isn't necessarily on that team, and its ordering need not match the
-        // server's own first-team fallback. Omitting it lets the server apply that
-        // fallback itself.
-        //
-        // `team_for_window` rather than `team_uid_for_window`: the raw map can hold a
-        // team the user has since left, because a restored window's assignment is
-        // persisted from a previous session and only revalidated when the workspace
-        // list is refreshed. `team_for_window` resolves through the current workspace's
-        // teams, so a stale assignment omits the header instead of sending a UID the
-        // server will reject - it rejects rather than falls back, so sending one we can
-        // already tell is stale would fail every agent-mode request.
+        // `team_for_window`, not `team_uid_for_window`: a restored window's assignment
+        // can name a team the user has left, and the server rejects an unrecognized
+        // team rather than falling back.
         let team_uid = terminal_view_id
             .and_then(|id| app.window_id_for_view(id))
             .and_then(|window_id| user_workspaces.team_for_window(window_id))

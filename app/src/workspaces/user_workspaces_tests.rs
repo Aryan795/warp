@@ -842,11 +842,6 @@ fn test_window_team_assignment_inherits_from_source_or_default_team() {
     })
 }
 
-// `RequestParams::new` derives the `X-Warp-Team-UID` header from
-// `team_for_window`, and the server rejects an unknown or non-member team
-// rather than falling back. Both cases below would therefore fail *every*
-// agent-mode request if the header were derived from a looser accessor, so
-// this pins the two properties that derivation depends on.
 #[test]
 fn test_team_for_window_omits_unmapped_and_stale_window_assignments() {
     let team = team_for_test();
@@ -859,19 +854,12 @@ fn test_team_for_window_omits_unmapped_and_stale_window_assignments() {
         let stale_window_id = WindowId::new();
         let departed_team_uid = 456.into();
         UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
-            // A restored window carries its team assignment over from a previous
-            // session without revalidation, so it can name a team the user has
-            // since left.
             user_workspaces.register_window(stale_window_id, Some(departed_team_uid), ctx);
         });
 
         app.read(|ctx| {
             let user_workspaces = UserWorkspaces::as_ref(ctx);
 
-            // No workspace fallback for a window that was never registered:
-            // a viewless/personal-context request isn't necessarily on the
-            // workspace's first team, and that ordering need not match the
-            // server's own fallback.
             assert!(
                 user_workspaces
                     .team_for_window(unmapped_window_id)
@@ -882,8 +870,6 @@ fn test_team_for_window_omits_unmapped_and_stale_window_assignments() {
                 Some(team.uid)
             );
 
-            // The raw assignment survives, but resolving it against the current
-            // workspace's teams drops it, so no stale UID reaches the server.
             assert_eq!(
                 user_workspaces.team_uid_for_window(stale_window_id),
                 Some(departed_team_uid)
