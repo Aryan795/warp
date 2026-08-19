@@ -2,30 +2,37 @@
 //! mouse-wheel scroll input.
 //!
 //! See `specs/CSAT-6046/TECH.md` for the design rationale. This module intentionally lives
-//! outside the GUI element tree so that both the generic WarpUI scrollables (Phase 1) and, in
-//! the future, `TerminalView` scrollback (Phase 2) can share the same controller.
+//! outside the GUI element tree so that both the generic WarpUI scrollables (Phase 1) and
+//! `TerminalView` scrollback (Phase 2) can share the same controller.
 //!
 //! ## Model
-//! This mirrors Chromium's wheel-scroll animation (`cc::ScrollOffsetAnimationCurve`), adopted
-//! after hands-on feedback that a flat 120ms ease-out cubic did not feel smooth enough:
+//! This mirrors Chromium's wheel-scroll animation, `cc::ScrollOffsetAnimationCurve`
+//! (`cc/animation/scroll_offset_animation_curve.cc`, public on chromium.googlesource.com),
+//! adopted after hands-on feedback that a flat 120ms ease-out cubic did not feel smooth enough:
 //! - Motion follows a cubic bezier ease-in-out, the same shape as CSS's `ease-in-out` keyword
 //!   (control points `(0.42, 0)` and `(0.58, 1)`), rather than an ease-out-only curve. A notch
 //!   from rest eases in before decelerating into the target, instead of launching at full speed.
+//!   This matches Chromium's `EaseInOutWithInitialSlope`, which also fixes the first control
+//!   point's x-coordinate at 0.42 and only varies its y-coordinate to encode a starting slope.
 //! - Duration is inversely proportional to the wheel delta (`DurationBehavior::kInverseDelta`):
 //!   a single small notch gets a longer, gentler animation; fast spinning collapses toward a
-//!   shorter, snappier one. See [`inverse_delta_duration`].
+//!   shorter, snappier one. This is a direct port of Chromium's linear ramp between
+//!   `kInverseDeltaRampStartPx`/`kInverseDeltaMaxDuration` and
+//!   `kInverseDeltaRampEndPx`/`kInverseDeltaMinDuration`. See [`inverse_delta_duration`].
 //! - A new same-direction notch arriving mid-flight *retargets* the single running animation
 //!   rather than stacking an independent contribution on top of it: the curve is reshaped so
 //!   its start velocity matches the outgoing velocity of the animation it's replacing, so
 //!   velocity stays continuous across the retarget instead of jumping. A
-//!   [`velocity_preserving_duration`] bound keeps that reshaping from overshooting when the
-//!   controller is already moving fast and the newly retargeted distance is small.
+//!   [`velocity_preserving_duration`] bound, ported from Chromium's `VelocityBasedDurationBound`,
+//!   keeps that reshaping from overshooting when the controller is already moving fast and the
+//!   newly retargeted distance is small.
 //! - Opposite-direction input still discards the unrendered remainder and reverses immediately
 //!   from the currently displayed position, as approved (this is unaffected by the model above).
 
 use std::time::Duration;
 
 use instant::Instant;
+use warp_features::FeatureFlag;
 
 /// Cadence at which a view with an active [`SmoothScrollController`] should request another
 /// repaint. Chosen to comfortably exceed common display refresh rates (e.g. 60Hz / ~16.7ms, or
@@ -37,47 +44,77 @@ use instant::Instant;
 /// as often as this display-refresh headroom allows.
 pub const SMOOTH_SCROLL_FRAME_INTERVAL: Duration = Duration::from_millis(8);
 
-/// The two ends of the inverse-delta duration ramp: a wheel delta at or below
-/// [`INVERSE_DELTA_REFERENCE_SMALL`] gets [`INVERSE_DELTA_MAX_DURATION`] (slow, gentle); a delta
-/// at or above [`INVERSE_DELTA_REFERENCE_LARGE`] gets [`INVERSE_DELTA_MIN_DURATION`] (fast,
-/// snappy). These reference points are the two data points available to us from published
-/// research on Chromium's `cc::ScrollOffsetAnimationCurve` (`kInverseDeltaMaxDuration` = 200ms
-/// at a 120px delta, `kInverseDeltaMinDuration` = 100ms at 480px); Chromium's exact interpolation
-/// between them isn't available to us, so [`inverse_delta_duration`] fits a simple `A/delta + B`
-/// hyperbola through both points instead.
-const INVERSE_DELTA_MIN_DURATION: Duration = Duration::from_millis(100);
-const INVERSE_DELTA_MAX_DURATION: Duration = Duration::from_millis(200);
-const INVERSE_DELTA_REFERENCE_SMALL: f32 = 120.0;
-const INVERSE_DELTA_REFERENCE_LARGE: f32 = 480.0;
+/// The number of pixels-per-line used to convert a non-precise (line-based) wheel delta into
+/// the pixel-equivalent units every [`SmoothScrollController`] operates in, including its
+/// duration ramp's 120/480 reference points. Every consumer of this controller that receives
+/// line-based input converts through this single constant, so a given gesture animates with
+/// the same feel regardless of which scrollable it lands on.
+///
+/// This mirrors the value cocoa scroll events without
+/// [`hasPreciseScrollingDeltas`](https://developer.apple.com/documentation/appkit/nsevent/1525758-hasprecisescrollingdeltas?language=objc)
+/// are converted at (see the historical rationale on the generic scrollables' wheel handlers):
+/// inspired by the value Chromium and Flutter use, chosen over the OS-reported ~10px/line
+/// default because that reads as too slow.
+pub const NUM_PIXELS_PER_LINE: f32 = 40.0;
+
+/// Whether a wheel input should be animated by a [`SmoothScrollController`] rather than applied
+/// immediately. Precise (trackpad) input always keeps its existing continuous behavior, and
+/// disabling `FeatureFlag::SmoothScrolling` preserves the pre-existing immediate-jump behavior
+/// for discrete input too.
+pub fn should_animate_wheel_input(precise: bool) -> bool {
+    !precise && FeatureFlag::SmoothScrolling.is_enabled()
+}
+
+/// Chromium's inverse-delta ramp constants (`kInverseDelta*` in
+/// `cc/animation/scroll_offset_animation_curve.cc`), expressed in 60ths of a second the way
+/// Chromium expresses them (`kInverseDeltaMinDuration = 6.0`, `kInverseDeltaMaxDuration = 12.0`,
+/// divided by `kDurationDivisor = 60.0`): a wheel delta at or below
+/// [`INVERSE_DELTA_RAMP_START_PX`] gets [`INVERSE_DELTA_MAX_DURATION_60THS`] (slow, gentle); a
+/// delta at or above [`INVERSE_DELTA_RAMP_END_PX`] gets [`INVERSE_DELTA_MIN_DURATION_60THS`]
+/// (fast, snappy); between them, duration ramps linearly.
+const INVERSE_DELTA_MIN_DURATION_60THS: f32 = 6.0;
+const INVERSE_DELTA_MAX_DURATION_60THS: f32 = 12.0;
+const INVERSE_DELTA_RAMP_START_PX: f32 = 120.0;
+const INVERSE_DELTA_RAMP_END_PX: f32 = 480.0;
+const DURATION_DIVISOR: f32 = 60.0;
 
 /// Never let a retarget's reshaped duration collapse below this floor (roughly one frame at
 /// 60Hz), even if the velocity-based bound would otherwise push it toward zero.
 const MIN_RETARGET_DURATION: Duration = Duration::from_millis(16);
 
+/// [`INVERSE_DELTA_MAX_DURATION_60THS`]/[`INVERSE_DELTA_MIN_DURATION_60THS`] expressed directly
+/// as [`Duration`]s, so the two ends of the ramp are exact values rather than round-tripping
+/// through an `f32` division by [`DURATION_DIVISOR`] (which cannot represent `1/60` exactly).
+const INVERSE_DELTA_MAX_DURATION: Duration = Duration::from_millis(200);
+const INVERSE_DELTA_MIN_DURATION: Duration = Duration::from_millis(100);
+
 /// Duration for a discrete wheel notch, given the absolute magnitude of its delta in pixels.
-/// Implements Chromium's `DurationBehavior::kInverseDelta`: "makes fast wheel flings feel
-/// snappy while preserving smoothness of slow wheel movements." See the module-level docs for
-/// where the two reference points this fits come from.
+/// A direct port of Chromium's `DurationBehavior::kInverseDelta` linear ramp: "makes fast wheel
+/// flings feel snappy while preserving smoothness of slow wheel movements."
 fn inverse_delta_duration(abs_delta: f32) -> Duration {
-    if abs_delta <= INVERSE_DELTA_REFERENCE_SMALL {
+    // At or beyond either end of the ramp, return the exact `Duration` constant rather than
+    // computing it via the formula below: the formula's `f32` division by `DURATION_DIVISOR`
+    // (60) cannot represent `1/60` exactly, so it lands a few nanoseconds off the boundary
+    // values -- harmless for anything reading a `Duration` back as a float, but visible to an
+    // exact `Duration` comparison.
+    if abs_delta <= INVERSE_DELTA_RAMP_START_PX {
         return INVERSE_DELTA_MAX_DURATION;
     }
-    if abs_delta >= INVERSE_DELTA_REFERENCE_LARGE {
+    if abs_delta >= INVERSE_DELTA_RAMP_END_PX {
         return INVERSE_DELTA_MIN_DURATION;
     }
 
-    // Fit `duration_ms = A / delta + B` through (SMALL, MAX_DURATION) and (LARGE, MIN_DURATION):
-    //   A = (max_ms - min_ms) * (small * large) / (large - small)
-    //   B = max_ms - A / small
-    let max_ms = INVERSE_DELTA_MAX_DURATION.as_secs_f32() * 1000.0;
-    let min_ms = INVERSE_DELTA_MIN_DURATION.as_secs_f32() * 1000.0;
-    let small = INVERSE_DELTA_REFERENCE_SMALL;
-    let large = INVERSE_DELTA_REFERENCE_LARGE;
-    let a = (max_ms - min_ms) * (small * large) / (large - small);
-    let b = max_ms - a / small;
-
-    let duration_ms = a / abs_delta + b;
-    Duration::from_secs_f32((duration_ms / 1000.0).max(0.0))
+    // kInverseDeltaSlope = (kInverseDeltaMinDuration - kInverseDeltaMaxDuration)
+    //                    / (kInverseDeltaRampEndPx - kInverseDeltaRampStartPx)
+    let slope = (INVERSE_DELTA_MIN_DURATION_60THS - INVERSE_DELTA_MAX_DURATION_60THS)
+        / (INVERSE_DELTA_RAMP_END_PX - INVERSE_DELTA_RAMP_START_PX);
+    // kInverseDeltaOffset = kInverseDeltaMaxDuration - kInverseDeltaRampStartPx * kInverseDeltaSlope
+    let offset = INVERSE_DELTA_MAX_DURATION_60THS - INVERSE_DELTA_RAMP_START_PX * slope;
+    let duration_60ths = (offset + abs_delta * slope).clamp(
+        INVERSE_DELTA_MIN_DURATION_60THS,
+        INVERSE_DELTA_MAX_DURATION_60THS,
+    );
+    Duration::from_secs_f32(duration_60ths / DURATION_DIVISOR)
 }
 
 /// The x-coordinate of a bezier curve's first control point, fixed across every curve this
@@ -100,10 +137,11 @@ const EASE_IN_OUT: CubicBezier = CubicBezier {
     y2: BEZIER_Y2,
 };
 
-/// The largest safe value for a reshaped curve's first control point's y-coordinate, chosen
-/// empirically to keep the curve monotonic without visibly overshooting past `y = 1` before
-/// `t = 1` (spot-checked numerically; not a value Chromium publishes, since we don't have
-/// their exact `EaseInOutWithInitialSlope` reshaping formula, only its documented intent).
+/// A defensive clamp on a reshaped curve's first control point's y-coordinate: without it, an
+/// unreasonably large starting slope (which [`velocity_preserving_duration`] is meant to
+/// prevent, but which could still arise from an edge case this code hasn't anticipated) would
+/// make the curve overshoot past `y = 1` before `t = 1`. Spot-checked numerically to keep the
+/// curve monotonic at this value.
 const MAX_INITIAL_SLOPE_Y1: f32 = 1.0;
 
 /// A cubic bezier timing function mapping normalized time (`x`, always in `[0, 1]`) to
@@ -197,22 +235,6 @@ impl CubicBezier {
         }
         (lo + hi) / 2.0
     }
-
-    /// The normalized progress `y` at normalized time `x`.
-    fn ease(&self, x: f32) -> f32 {
-        self.sample_y(self.solve_t_for_x(x))
-    }
-
-    /// `dy/dx` at normalized time `x`: the slope of progress with respect to time, i.e. the
-    /// normalized velocity.
-    fn slope_at(&self, x: f32) -> f32 {
-        let t = self.solve_t_for_x(x);
-        let dx = self.sample_dx(t);
-        if dx.abs() < 1e-6 {
-            return 0.0;
-        }
-        self.sample_dy(t) / dx
-    }
 }
 
 /// A single eased motion from `start_position` (at `start_velocity`) to `target` (always ending
@@ -248,47 +270,69 @@ impl Segment {
     }
 
     fn position(&self, now: Instant) -> f32 {
-        let delta = self.target - self.start_position;
-        if delta == 0.0 {
-            return self.target;
-        }
-        self.start_position + delta * self.curve().ease(self.normalized_time(now))
+        self.sample(now).0
     }
 
-    /// The instantaneous velocity (position units per second) at `now`.
-    fn velocity(&self, now: Instant) -> f32 {
+    /// Position and instantaneous velocity (position units per second) at `now`, solving the
+    /// bezier parameter `t` only once for both rather than twice (as separate `position`/
+    /// `velocity` calls would).
+    fn sample(&self, now: Instant) -> (f32, f32) {
         let delta = self.target - self.start_position;
         let duration_secs = self.duration.as_secs_f32();
-        if delta == 0.0 || duration_secs <= 0.0 {
-            return 0.0;
+        if delta == 0.0 {
+            return (self.target, 0.0);
         }
-        let normalized_slope = self.curve().slope_at(self.normalized_time(now));
-        normalized_slope * delta / duration_secs
+        let curve = self.curve();
+        let t = curve.solve_t_for_x(self.normalized_time(now));
+        let position = self.start_position + delta * curve.sample_y(t);
+        let velocity = if duration_secs <= 0.0 {
+            0.0
+        } else {
+            let dx = curve.sample_dx(t);
+            let normalized_slope = if dx.abs() < 1e-6 {
+                0.0
+            } else {
+                curve.sample_dy(t) / dx
+            };
+            normalized_slope * delta / duration_secs
+        };
+        (position, velocity)
     }
+}
+
+/// The fudge factor in Chromium's `VelocityBasedDurationBound`, whose source comment attributes
+/// it to compensating for the ease-out tail of the curve.
+const VELOCITY_DURATION_BOUND_FACTOR: f32 = 2.5;
+
+/// A direct port of Chromium's `VelocityBasedDurationBound`: caps how long a retarget may take
+/// given the controller's current velocity and the remaining distance, so a fast-moving
+/// animation retargeted by a small amount doesn't get stretched out to a duration that would
+/// make the reshaped curve's starting slope overshoot past the target and rubber-band back.
+///
+/// Returns zero when `remaining_delta` is already zero (nothing left to bound), and an
+/// effectively unbounded duration when `current_velocity` is zero or points the opposite
+/// direction from `remaining_delta` (the bound only makes sense while already moving toward the
+/// new target).
+fn velocity_based_duration_bound(remaining_delta: f32, current_velocity: f32) -> Duration {
+    if remaining_delta == 0.0 {
+        return Duration::ZERO;
+    }
+    if current_velocity == 0.0 || current_velocity.signum() != remaining_delta.signum() {
+        return Duration::MAX;
+    }
+    Duration::from_secs_f32(
+        (remaining_delta / current_velocity).abs() * VELOCITY_DURATION_BOUND_FACTOR,
+    )
 }
 
 /// Chooses the duration for a same-direction retarget of `remaining_delta` (the distance still
 /// left to travel to the new target, from the currently displayed position) while the
-/// controller is already moving at `current_velocity`.
-///
-/// Starts from the same [`inverse_delta_duration`] every fresh notch gets, then applies
-/// Chromium's velocity-based bound: if the controller is moving fast and `remaining_delta` is
-/// small, a duration that long would force an unreasonably steep starting slope on the reshaped
-/// curve (see [`CubicBezier::with_initial_slope`]), which reads as the curve overshooting past
-/// the target and rubber-banding back. Capping the duration keeps the reshaped curve's starting
-/// slope at or below [`MAX_INITIAL_SLOPE_Y1`] (expressed via [`BEZIER_X1`]) instead.
+/// controller is already moving at `current_velocity`: the same [`inverse_delta_duration`]
+/// every fresh notch gets, bounded by [`velocity_based_duration_bound`].
 fn velocity_preserving_duration(remaining_delta: f32, current_velocity: f32) -> Duration {
     let base = inverse_delta_duration(remaining_delta.abs());
-    if current_velocity == 0.0 || remaining_delta == 0.0 {
-        return base;
-    }
-
-    // Solve for the duration at which normalized_slope == MAX_INITIAL_SLOPE_Y1 / BEZIER_X1:
-    //   normalized_slope = velocity * duration / remaining_delta
-    let safe_duration_secs =
-        (MAX_INITIAL_SLOPE_Y1 / BEZIER_X1 * remaining_delta / current_velocity).abs();
-    let bounded = base.min(Duration::from_secs_f32(safe_duration_secs));
-    bounded.max(MIN_RETARGET_DURATION)
+    let bound = velocity_based_duration_bound(remaining_delta, current_velocity);
+    base.min(bound).max(MIN_RETARGET_DURATION)
 }
 
 /// Animates a single scroll axis toward an exact target position using Chromium's wheel-scroll
@@ -304,6 +348,10 @@ pub struct SmoothScrollController {
     committed: f32,
     /// The single in-flight motion, if any.
     segment: Option<Segment>,
+    /// The displayed position as of the last [`Self::take_increment`] call (or construction,
+    /// or the last [`Self::cancel`]/[`Self::set_position_immediately`]). See
+    /// [`Self::take_increment`].
+    last_taken: f32,
 }
 
 impl SmoothScrollController {
@@ -311,6 +359,7 @@ impl SmoothScrollController {
         Self {
             committed: initial_position,
             segment: None,
+            last_taken: initial_position,
         }
     }
 
@@ -383,7 +432,7 @@ impl SmoothScrollController {
             return;
         };
 
-        let current_position = segment.position(now);
+        let (current_position, current_velocity) = segment.sample(now);
         let remaining = segment.target - current_position;
 
         if remaining != 0.0 && remaining.signum() != delta.signum() {
@@ -402,7 +451,6 @@ impl SmoothScrollController {
         }
 
         // Same direction: retarget the running segment, preserving its current velocity.
-        let current_velocity = segment.velocity(now);
         let new_target = segment.target + delta;
         let new_remaining = new_target - current_position;
         let duration = velocity_preserving_duration(new_remaining, current_velocity);
@@ -416,18 +464,38 @@ impl SmoothScrollController {
     }
 
     /// Cancels any in-flight animation, settling at the currently displayed position, and
-    /// returns that position.
+    /// returns that position. Also resyncs [`Self::take_increment`]'s baseline to that position,
+    /// so a caller that applies a direct scroll immediately after cancelling (rather than
+    /// through the incremental mechanism) doesn't see a stale jump reported on the next
+    /// `take_increment` call.
     pub fn cancel(&mut self, now: Instant) -> f32 {
         let displayed = self.displayed_position(now);
         self.committed = displayed;
         self.segment = None;
+        self.last_taken = displayed;
         displayed
     }
 
-    /// Immediately jumps to `position`, cancelling any in-flight animation.
+    /// Immediately jumps to `position`, cancelling any in-flight animation and resyncing
+    /// [`Self::take_increment`]'s baseline, for the same reason [`Self::cancel`] does.
     pub fn set_position_immediately(&mut self, position: f32) {
         self.committed = position;
         self.segment = None;
+        self.last_taken = position;
+    }
+
+    /// Returns the change in [`Self::displayed_position`] since the last call to this method (or
+    /// since construction, or the last [`Self::cancel`]/[`Self::set_position_immediately`]),
+    /// settling a completed segment as a side effect like [`Self::displayed_position`].
+    ///
+    /// This hoists the "track what's already been applied, return only the remainder" pattern
+    /// that callers which apply the animation incrementally (rather than painting an absolute
+    /// position directly) would otherwise have to hand-roll themselves.
+    pub fn take_increment(&mut self, now: Instant) -> f32 {
+        let current = self.displayed_position(now);
+        let increment = current - self.last_taken;
+        self.last_taken = current;
+        increment
     }
 }
 

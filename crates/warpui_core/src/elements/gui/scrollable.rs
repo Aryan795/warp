@@ -5,7 +5,6 @@ use instant::Instant;
 use pathfinder_color::ColorU;
 use pathfinder_geometry::rect::RectF;
 use pathfinder_geometry::vector::{Vector2F, vec2f};
-use warp_features::FeatureFlag;
 
 use super::{
     AfterLayoutContext, AppContext, Axis, Element, Event, EventContext, Fill, LayoutContext,
@@ -16,34 +15,15 @@ use crate::elements::F32Ext;
 use crate::event::{DispatchedEvent, ModifiersState};
 pub use crate::scene::CornerRadius;
 use crate::scene::Radius;
-use crate::smooth_scroll::{SMOOTH_SCROLL_FRAME_INTERVAL, SmoothScrollController};
+use crate::smooth_scroll::{
+    NUM_PIXELS_PER_LINE, SMOOTH_SCROLL_FRAME_INTERVAL, SmoothScrollController,
+    should_animate_wheel_input,
+};
 use crate::units::{IntoPixels, Pixels};
 
 pub const LEFT_PADDING: f32 = 2.;
 const RIGHT_PADDING: f32 = 2.;
 const MINIMUM_HEIGHT: f32 = 20.;
-
-/// The number of pixels-per-line when dealing with a cocoa scroll event
-/// that lacks precision (i.e. [`hasPreciseScrollingDeltas`](https://developer.apple.com/documentation/appkit/nsevent/1525758-hasprecisescrollingdeltas?language=objc))
-/// is false. While some mouse devices provide finer scroll deltas
-/// (in pixels), other generic devices don't and we thus have to convert the
-/// provided non-precise scroll deltas (which are in terms of lines) into pixels.
-///
-/// While we could use the application line-height to calculate the number of pixels,
-/// this requires us to couple the scrolling APIs with `Lines`, which doesn't apply
-/// for horizontal scrolling.
-///
-/// We also decided to not use [`CGEventSourceGetPixelsPerLine`](https://developer.apple.com/documentation/coregraphics/1408775-cgeventsourcegetpixelsperline)
-/// because it defaults to ~10 pixels per line, which makes scrolling feel slow compared to other applications.
-///
-/// The value we chose is inspired by the value that Chromium and Flutter use:
-/// - https://chromium.googlesource.com/chromium/src/+/9306606fbbd1ebf51cfe23ea6bcfa19a1ff43363/ui/events/cocoa/events_mac.mm#158
-/// - https://github.com/flutter/engine/blob/cc925b0021330759e18960e1ccbd7e55dec3c375/shell/platform/darwin/macos/framework/Source/FlutterViewController.mm#L768-L775.
-///
-/// TODO: currently, this constant reflects the value that makes sense for MacOS (cocoa) scroll events.
-/// Ideally, we should hide this implementation detail at the platform level and have consumers
-/// solely operate with pixel-based scroll events.
-const NUM_PIXELS_PER_LINE: Pixels = Pixels::new(40.);
 
 #[derive(Clone, Default)]
 pub struct ScrollState {
@@ -51,9 +31,6 @@ pub struct ScrollState {
     pub hovered: bool,
     pub child_hovered: bool,
     smooth_scroll: SmoothScrollController,
-    /// The absolute position already applied to the child via `scroll()`. Used to compute the
-    /// incremental delta remaining to emit on the next tick.
-    smooth_scroll_emitted: f32,
 }
 
 impl ScrollState {
@@ -71,7 +48,6 @@ impl ScrollState {
     /// scroll operation (e.g. scrollbar drag, precise input) doesn't inherit stale movement.
     pub fn cancel_smooth_scroll(&mut self, now: Instant) {
         self.smooth_scroll.cancel(now);
-        self.smooth_scroll_emitted = self.smooth_scroll.target();
     }
 
     pub fn is_animating_smooth_scroll(&mut self) -> bool {
@@ -79,12 +55,10 @@ impl ScrollState {
     }
 
     /// Returns the incremental delta that hasn't yet been applied to the child, advancing the
-    /// emitted baseline so the same movement isn't emitted twice.
+    /// emitted baseline so the same movement isn't emitted twice. See
+    /// [`SmoothScrollController::take_increment`].
     pub fn take_smooth_scroll_increment(&mut self, now: Instant) -> f32 {
-        let displayed = self.smooth_scroll.displayed_position(now);
-        let increment = displayed - self.smooth_scroll_emitted;
-        self.smooth_scroll_emitted = displayed;
-        increment
+        self.smooth_scroll.take_increment(now)
     }
 }
 
@@ -382,8 +356,8 @@ impl Scrollable {
                 // If the scroll was not `precise`, we need to convert the delta (which is
                 // actually in terms of `Lines`) to the right number of `Pixels`.
                 // See the comment on [`SCROLLBAR_PIXELS_PER_COCOA_TICK`] for more details.
-                let full_delta = delta_along_axis * NUM_PIXELS_PER_LINE.as_f32();
-                if FeatureFlag::SmoothScrolling.is_enabled() {
+                let full_delta = delta_along_axis * NUM_PIXELS_PER_LINE;
+                if should_animate_wheel_input(precise) {
                     self.state().animate_scroll_by(full_delta, Instant::now());
                     ctx.notify();
                 } else {
