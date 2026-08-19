@@ -276,6 +276,42 @@ fn test_app_web_link_rewrites_to_new_cloud_agent_conversation() {
 }
 
 #[test]
+fn is_conversation_or_session_view_true_for_conversation_view() {
+    let url = Url::parse(&format!(
+        "{}/conversation/some-conversation-token",
+        ChannelState::server_root_url()
+    ))
+    .unwrap();
+
+    assert!(web_intent_parser::WebIntent::is_conversation_or_session_view(&url));
+}
+
+#[test]
+fn is_conversation_or_session_view_true_for_session_view() {
+    let url = Url::parse(&format!(
+        "{}/session/317d0686-7a0b-4b67-806b-aaa3e9df501b",
+        ChannelState::server_root_url()
+    ))
+    .unwrap();
+
+    assert!(web_intent_parser::WebIntent::is_conversation_or_session_view(&url));
+}
+
+#[test]
+fn is_conversation_or_session_view_false_for_other_web_routes() {
+    let url = Url::parse(&format!("{}/app", ChannelState::server_root_url())).unwrap();
+
+    assert!(!web_intent_parser::WebIntent::is_conversation_or_session_view(&url));
+}
+
+#[test]
+fn is_conversation_or_session_view_false_for_unrecognized_url() {
+    let url = Url::parse("https://google.com").unwrap();
+
+    assert!(!web_intent_parser::WebIntent::is_conversation_or_session_view(&url));
+}
+
+#[test]
 fn test_action_create_environment_parse() {
     let url = Url::parse(&format!(
         "{}://action/create_environment?repo=foo&repo=bar",
