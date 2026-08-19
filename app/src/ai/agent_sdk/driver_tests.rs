@@ -961,6 +961,61 @@ fn terminal_status_log_outcome_labels_are_low_cardinality() {
     assert_eq!(terminal_status_log_outcome(&error_status()), "error");
 }
 
+// ── QUALITY-1759: wait_for_events warm-wait-window hibernation ──────────────
+
+#[test]
+fn yielded_for_events_never_defers_by_idle_on_complete() {
+    // Hibernation is the point of the first no-event timeout: the sandbox must
+    // close immediately regardless of any configured --idle-on-complete window.
+    let window = idle_window_for_terminal_status(
+        &SDKConversationOutputStatus::YieldedForEvents,
+        Some(Duration::from_secs(45 * 60)),
+        Some(Duration::from_secs(15 * 60)),
+    );
+    assert_eq!(window, None);
+}
+
+#[test]
+fn yielded_for_events_checkpoint_failed_never_defers_by_idle_windows() {
+    let window = idle_window_for_terminal_status(
+        &SDKConversationOutputStatus::YieldedForEventsCheckpointFailed,
+        Some(Duration::from_secs(45 * 60)),
+        Some(Duration::from_secs(15 * 60)),
+    );
+    assert_eq!(window, None);
+}
+
+#[test]
+fn yielded_for_events_resolves_to_a_successful_driver_result() {
+    assert!(
+        SDKConversationOutputStatus::YieldedForEvents
+            .into_result()
+            .is_ok()
+    );
+}
+
+#[test]
+fn sandbox_deadline_reports_error_before_exit() {
+    // A checkpoint upload failure after the warm wait window closes must not be
+    // reported as a successful (or BLOCKED) driver result: resumability from the
+    // checkpoint isn't proven, so the execution ends in an error.
+    let result = SDKConversationOutputStatus::YieldedForEventsCheckpointFailed.into_result();
+    assert!(matches!(
+        result,
+        Err(AgentDriverError::WaitForEventsCheckpointFailed)
+    ));
+
+    // The sandbox-deadline timer path (WARP_SANDBOX_DEADLINE) reports this exact,
+    // plan-derived status message and classifies as AgentTaskState::Error; see
+    // error_classification_tests::sandbox_deadline_reached_is_error_with_exact_message_and_no_error_code
+    // for the full classification assertion.
+    assert_eq!(
+        AgentDriverError::SandboxDeadlineReached.to_string(),
+        "Sandbox runtime limit reached. WARP_SANDBOX_DEADLINE is set by Warp from your plan's \
+         maximum agent runtime and cannot be configured per run."
+    );
+}
+
 #[test]
 fn task_env_vars_include_parent_run_id_when_present() {
     let task_id: AmbientAgentTaskId = "550e8400-e29b-41d4-a716-446655440000".parse().unwrap();
