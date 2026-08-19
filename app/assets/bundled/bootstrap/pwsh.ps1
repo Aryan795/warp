@@ -642,6 +642,8 @@ $null = New-Module -Name Warp-Module -ScriptBlock {
     # created and the other not yet assigned.
     function Warp-Ensure-RunspacePool {
         [System.Threading.Monitor]::Enter($script:runspacePoolInitLock)
+        $innerPool = $null
+        $outerPool = $null
         try {
             if ($null -ne $script:innerRunspacePool) {
                 return
@@ -671,6 +673,17 @@ $null = New-Module -Name Warp-Module -ScriptBlock {
 
             $script:innerRunspacePool = $innerPool
             $script:outerRunspacePool = $outerPool
+        } catch {
+            # Dispose whichever pool(s) already opened before the failure. Otherwise a failed
+            # attempt leaks an opened pool's runspaces, and the next generator command's retry
+            # (neither field got published above) would pile another one on top of it.
+            if ($null -ne $innerPool) {
+                $innerPool.Dispose()
+            }
+            if ($null -ne $outerPool) {
+                $outerPool.Dispose()
+            }
+            throw
         } finally {
             [System.Threading.Monitor]::Exit($script:runspacePoolInitLock)
         }
