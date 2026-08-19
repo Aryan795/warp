@@ -206,15 +206,19 @@ impl EarlyOutput {
         self.unmatched_input.clear();
     }
 
-    /// Clears any registration made via `push_expected_echo`. Called from
+    /// Clears any registration made via `push_expected_echo`. Called from two places:
     /// `BlockList::start_active_block` (never `start_active_block_for_in_band_command`, which
     /// is what a generator/completions request's own command uses), so a pattern left over from
-    /// the last restore can't outlive into a real, unrelated command's own output. This alone
-    /// doesn't bound a restore's own window, though: measured logs showed `PtyController` has
-    /// no signal that reliably lands after the restore write is sent and after its echo has
-    /// fully arrived (`LineEditorStatusEvent::Active` was tried and found to fire *before* the
-    /// write is even flushed) -- see `consume_expected_echo` for how that window is actually
-    /// bounded instead.
+    /// the last restore can't outlive into a real, unrelated command's own output; and
+    /// `EarlyOutputHandler::input()`, on the first *real* character the pattern can't explain
+    /// (see that method for why control-byte probes must not trigger this). Two prior attempts
+    /// at bounding this window were tried and found wrong before landing here:
+    /// `LineEditorStatusEvent::Active` fires *before* the restore write is even flushed, so
+    /// clearing there discarded the whole restored buffer rather than protecting it; and
+    /// clearing inside `consume_expected_echo` itself on *any* mismatch broke every
+    /// carriage-return-driven redraw, since `carriage_return()`/`linefeed()` probe it with
+    /// `'\r'`/`'\n'`, which a restored buffer's text never contains, guaranteeing a mismatch on
+    /// every single redraw regardless of whether the real echo matched.
     pub fn reset_expected_echo(&mut self) {
         self.expected_echo.clear();
         self.expected_echo_positions.clear();
@@ -237,15 +241,11 @@ impl EarlyOutput {
     /// either). A match should be dropped entirely by the caller rather than surfaced as
     /// typeahead.
     ///
-    /// If nothing registered predicts `ch` -- and something *was* registered -- this also ends
-    /// the registration's window: no external signal reliably lands only after a restore's own
-    /// echo has fully arrived (see `reset_expected_echo`'s doc comment), so the first character
-    /// the pattern can't explain is treated as proof the echo is over, real or not. This bounds
-    /// the damage from ending the window too early or too late to a single leaked character
-    /// rather than a registration surviving to corrupt arbitrary later, unrelated output --
-    /// measured, unbounded: a carriage-return-driven progress message
-    /// (`\rloading 10%\rloading 20%...`) from an unrelated background job lost several
-    /// characters to a pattern left over from an earlier completions request.
+    /// Deliberately has no side effect on a mismatch: this is also probed with `'\r'`/`'\n'`
+    /// from `carriage_return()`/`linefeed()` to decide whether those bytes are part of the
+    /// registered pattern (they never are -- a restored buffer's text contains neither), and a
+    /// mismatch there is not evidence the echo is over. See `EarlyOutputHandler::input()` for
+    /// where a mismatch instead ends the window.
     fn consume_expected_echo(&mut self, ch: char) -> bool {
         let next_positions: BTreeSet<usize> = self
             .expected_echo_positions
@@ -257,8 +257,6 @@ impl EarlyOutput {
         let is_match = !next_positions.is_empty();
         if is_match {
             self.expected_echo_positions = next_positions;
-        } else if !self.expected_echo.is_empty() {
-            self.reset_expected_echo();
         }
         is_match
     }
@@ -496,6 +494,18 @@ impl ansi::Handler for EarlyOutputHandler<'_> {
     fn input(&mut self, c: char) {
         if self.inner().consume_expected_echo(c) {
             return;
+        }
+        // The first *real* character the pattern can't explain ends its window (see
+        // `reset_expected_echo`'s doc comment for why this lives here and not inside
+        // `consume_expected_echo` itself): no external signal reliably lands only after a
+        // restore's own echo has fully arrived, so this is treated as proof the echo is over,
+        // real or not. This bounds the damage from ending the window too early or too late to
+        // a single leaked character rather than a registration surviving to corrupt arbitrary
+        // later, unrelated output -- measured, unbounded: a carriage-return-driven progress
+        // message (`\rloading 10%\rloading 20%...`) from an unrelated background job lost
+        // several characters to a pattern left over from an earlier completions request.
+        if !self.inner().expected_echo.is_empty() {
+            self.inner().reset_expected_echo();
         }
         let session_id = self.block_list.active_block().session_id();
         if !self.inner().handle_potential_typeahead(c) {
