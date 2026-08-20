@@ -95,22 +95,32 @@ fn app_keeps_default_secure_storage_service_name() {
 }
 
 #[test]
-fn startup_auth_is_non_blocking_only_for_tui() {
-    // Only the TUI front-end skips the startup IAP wait; every other launch mode
-    // keeps the blocking behavior so this scope can't widen beyond the TUI.
-    let tui = LaunchMode::Tui {
-        entrypoint: TuiEntryPoint::Interactive {
-            mount: Box::new(|_| {}),
-            api_key: None,
-        },
-    };
-    assert!(startup_auth_is_non_blocking(&tui));
-
-    let blocking_modes = [
+fn startup_auth_is_non_blocking_for_gui_and_tui() {
+    // The GUI and TUI front-ends both skip the startup IAP wait: blocking here is
+    // what deadlocks a cloud sandbox once its bootstrap JWT expires (see
+    // warpdotdev/warp#15342). Every other launch mode keeps the blocking
+    // behavior so this scope can't widen without a deliberate decision.
+    let non_blocking_modes = [
         LaunchMode::App {
             args: Default::default(),
             api_key: None,
         },
+        LaunchMode::Tui {
+            entrypoint: TuiEntryPoint::Interactive {
+                mount: Box::new(|_| {}),
+                api_key: None,
+            },
+        },
+    ];
+    for mode in non_blocking_modes {
+        assert!(
+            startup_auth_is_non_blocking(&mode),
+            "{} must not block startup auth on IAP",
+            mode.as_str_for_tracing()
+        );
+    }
+
+    let blocking_modes = [
         LaunchMode::CommandLine {
             command: CliCommand::Whoami,
             global_options: GlobalOptions::default(),

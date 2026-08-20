@@ -1378,13 +1378,22 @@ impl StartupUserAuthentication {
 
 /// Whether startup user authentication should proceed without blocking on IAP.
 ///
-/// The TUI front-end must not stall its startup waiting for a staging IAP token
-/// the server may not even require, so it authenticates immediately and lets IAP
-/// resolve out of band (see [`authenticate_user_after_iap_access`]). Every other
-/// front-end keeps the blocking behavior. IAP config only exists on staging
-/// builds, so this never affects production.
+/// The GUI and TUI front-ends must not stall startup waiting for a staging IAP
+/// token the server may not even require, so they authenticate immediately and
+/// let IAP resolve out of band (see [`authenticate_user_after_iap_access`]).
+/// Blocking here is what deadlocks a cloud sandbox once its bootstrap JWT
+/// expires: the self-mint that would refresh it needs IAP access itself, so a
+/// missing token would otherwise mean no login, indefinitely. `CommandLine`
+/// never reaches this function at all - it establishes IAP access synchronously
+/// in its own dispatch path instead (see the call site), so a one-shot
+/// invocation still fails closed with a reported error rather than
+/// authenticating optimistically. `Test`, `RemoteServerProxy`, and
+/// `RemoteServerDaemon` keep the blocking behavior: nothing observed so far
+/// shows they hit the same deadlock, and widening them without evidence risks
+/// masking a real auth failure in a headless/test context. IAP config only
+/// exists on staging builds, so this never affects production.
 fn startup_auth_is_non_blocking(launch_mode: &LaunchMode) -> bool {
-    matches!(launch_mode, LaunchMode::Tui { .. })
+    matches!(launch_mode, LaunchMode::App { .. } | LaunchMode::Tui { .. })
 }
 
 fn authenticate_user_after_iap_access(
@@ -1420,7 +1429,17 @@ fn authenticate_user_after_iap_access(
                     authentication.start(ctx);
                 }
             }
-            IapManagerEvent::AccessUnavailable | IapManagerEvent::RefreshFailed { .. } => {}
+            // `RefreshFailed` is already logged by `IapManager` itself for every
+            // attempt; this handler only needs to react to the terminal outcome.
+            IapManagerEvent::AccessUnavailable => {
+                log::warn!(
+                    "Staging IAP access unavailable within the startup grace period; the \
+                     optimistic auth attempt already ran, and IAP refresh keeps retrying in \
+                     the background. If the app looks logged out, this - not an invalid key - \
+                     is why."
+                );
+            }
+            IapManagerEvent::RefreshFailed { .. } => {}
         });
         iap_manager.update(ctx, |manager, ctx| manager.ensure_access(ctx));
         return;
