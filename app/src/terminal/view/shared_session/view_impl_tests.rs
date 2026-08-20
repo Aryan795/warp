@@ -10,7 +10,7 @@ use persistence::model::ConversationUsageMetadata;
 use session_sharing_protocol::sharer::SessionSourceType;
 use warp_multi_agent_api::{self as api, client_action as api_client_action};
 use warpui::platform::WindowStyle;
-use warpui::{App, EntityId, TypedActionView, ViewHandle};
+use warpui::{App, EntityId, Presenter, TypedActionView, ViewHandle, WindowInvalidation};
 
 use super::*;
 use crate::ai::agent::api::ServerConversationToken;
@@ -71,6 +71,60 @@ fn prepare_shared_ambient_pre_first_exchange(
     model
         .block_list_mut()
         .set_is_executing_oz_environment_startup_commands(true);
+    drop(model);
+    ctx.notify();
+}
+
+#[derive(Debug)]
+struct SharedAmbientSetupRenderState {
+    input_mounted: bool,
+    status_bar_directly_mounted: bool,
+    status_bar_mount_count: usize,
+}
+
+fn render_shared_ambient_setup_scene(
+    app: &mut App,
+    terminal: &ViewHandle<TerminalView>,
+) -> SharedAmbientSetupRenderState {
+    let (window_id, input_id, input_position_id, status_bar_id) =
+        terminal.read(app, |view, ctx| {
+            let input = view.input();
+            (
+                terminal.window_id(ctx),
+                input.id(),
+                input.as_ref(ctx).status_free_input_save_position_id(),
+                input.as_ref(ctx).agent_status_bar().id(),
+            )
+        });
+
+    app.update(|ctx| {
+        let mut presenter = Presenter::new(window_id);
+        presenter.invalidate(
+            WindowInvalidation {
+                updated: ctx.view_ids_for_window(window_id).into_iter().collect(),
+                ..Default::default()
+            },
+            ctx,
+        );
+        presenter.build_scene(vec2f(1024., 768.), 1., None, ctx);
+
+        let input_mounted = presenter
+            .position_cache()
+            .get_position(&input_position_id)
+            .is_some();
+        let status_bar_ancestors = ctx.view_ancestors(window_id, status_bar_id);
+        let status_bar_directly_mounted =
+            status_bar_ancestors.ends_with(&[terminal.id(), status_bar_id]);
+        let status_bar_mounted_through_input =
+            input_mounted && status_bar_ancestors.ends_with(&[input_id, status_bar_id]);
+
+        SharedAmbientSetupRenderState {
+            input_mounted,
+            status_bar_directly_mounted,
+            status_bar_mount_count: usize::from(status_bar_directly_mounted)
+                + usize::from(status_bar_mounted_through_input),
+        }
+    })
 }
 
 #[test]
@@ -92,9 +146,21 @@ fn test_read_only_shared_ambient_setup_renders_status_without_input() {
 
             let model = view.model.lock();
             assert!(model.is_read_only());
-            assert!(!view.is_input_box_visible(&model, ctx));
-            assert!(view.should_render_cloud_setup_status_without_input(&model, ctx));
         });
+
+        let rendered = render_shared_ambient_setup_scene(&mut app, &terminal);
+        assert!(
+            !rendered.input_mounted,
+            "read-only setup must not mount interactive input"
+        );
+        assert!(
+            rendered.status_bar_directly_mounted,
+            "read-only setup must mount the status bar independently of input"
+        );
+        assert_eq!(
+            rendered.status_bar_mount_count, 1,
+            "read-only setup must render exactly one status surface"
+        );
     });
 }
 
@@ -113,9 +179,21 @@ fn test_editable_shared_ambient_setup_does_not_duplicate_status() {
 
             let model = view.model.lock();
             assert!(!model.is_read_only());
-            assert!(view.is_input_box_visible(&model, ctx));
-            assert!(!view.should_render_cloud_setup_status_without_input(&model, ctx));
         });
+
+        let rendered = render_shared_ambient_setup_scene(&mut app, &terminal);
+        assert!(
+            rendered.input_mounted,
+            "editable setup must keep mounting the input"
+        );
+        assert!(
+            !rendered.status_bar_directly_mounted,
+            "editable setup must not mount a second status bar outside input"
+        );
+        assert_eq!(
+            rendered.status_bar_mount_count, 1,
+            "editable setup must render exactly one status surface through input"
+        );
     });
 }
 
@@ -142,9 +220,21 @@ fn test_read_only_shared_ambient_status_stays_hidden_after_setup() {
 
             let model = view.model.lock();
             assert!(model.is_read_only());
-            assert!(!view.is_input_box_visible(&model, ctx));
-            assert!(!view.should_render_cloud_setup_status_without_input(&model, ctx));
         });
+
+        let rendered = render_shared_ambient_setup_scene(&mut app, &terminal);
+        assert!(
+            !rendered.input_mounted,
+            "read-only post-setup view must not mount interactive input"
+        );
+        assert!(
+            !rendered.status_bar_directly_mounted,
+            "read-only post-setup view must not retain setup status"
+        );
+        assert_eq!(
+            rendered.status_bar_mount_count, 0,
+            "read-only post-setup view must render no setup status surface"
+        );
     });
 }
 
