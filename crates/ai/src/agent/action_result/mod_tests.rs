@@ -56,28 +56,17 @@ fn run_agents_is_failed_when_no_agents_launch() {
 }
 
 #[test]
-fn cancelled_fetch_conversation_always_triggers_follow_up_request() {
-    // FetchConversation has no user-facing cancel affordance, so any cancellation of it
-    // is always collateral damage from cancelling the surrounding conversation's
-    // progress, never a deliberate user click. The nested ConversationSearchAgent
-    // subagent blocks on a result for this tool call, so completion must always trigger
-    // a follow-up request rather than silently leaving the conversation stuck (which
-    // otherwise surfaces to the user as a spurious "cancelled" conversation, since
-    // `BlocklistAIController` marks the conversation Cancelled locally instead of
-    // sending a follow-up when no finished result triggers one).
+fn cancelled_fetch_conversation_does_not_unconditionally_trigger_a_follow_up_request() {
+    // `Cancelled` covers both a deliberate terminal cancellation (Stop, pane close,
+    // delete) and collateral same-conversation cleanup, and `AIAgentActionResultType`
+    // alone can't distinguish the two (that context lives in the `CancellationReason`
+    // passed alongside the `FinishedAction` event, not in the result itself). So this
+    // must behave like every other cancelled result here and NOT unconditionally
+    // trigger a follow-up -- doing so would revive a conversation the user genuinely
+    // stopped. The collateral case is instead reported through the request that
+    // already owns it (see `crates/ai/.../convert.rs`'s explicit-error serialization
+    // and the app-level `BlocklistAIController` tests).
     let result = AIAgentActionResultType::FetchConversation(FetchConversationResult::Cancelled);
-
-    assert!(result.is_cancelled());
-    assert!(result.should_trigger_request_upon_completion());
-}
-
-#[test]
-fn other_cancelled_results_do_not_trigger_a_follow_up_request() {
-    // Sanity check that the FetchConversation carve-out is scoped narrowly and doesn't
-    // change the documented behavior for actions with a genuine user-facing cancel
-    // affordance (e.g. RunAgents' Reject button), which rely on the server's input
-    // interceptor to synthesize the generic `ToolCallResult.Cancel` marker instead.
-    let result = AIAgentActionResultType::RunAgents(RunAgentsResult::Cancelled);
 
     assert!(result.is_cancelled());
     assert!(!result.should_trigger_request_upon_completion());

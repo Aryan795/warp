@@ -1183,11 +1183,12 @@ impl TryFrom<FetchConversationResult> for api::request::input::tool_call_result:
                 ),
             ),
             // Unlike RunAgents/WaitForEvents, FetchConversation has no user-facing cancel
-            // affordance, so this is always collateral cancellation, never a deliberate user
-            // action. Send it as an explicit error rather than dropping it, so the nested
-            // ConversationSearchAgent subagent (which blocks on this tool call's result) always
-            // finishes deterministically instead of depending on some unrelated later request to
-            // surface the generic `ToolCallResult.Cancel` marker for the still-unresolved call.
+            // affordance, so whenever this result does get included in an outbound request
+            // (whether from a deliberate terminal cancel or collateral same-conversation
+            // cleanup), send an explicit error rather than dropping it. The nested
+            // ConversationSearchAgent subagent blocks on a result for this tool call, so it
+            // must resolve deterministically rather than depending on the server's input
+            // interceptor to notice the still-unresolved call on some later request.
             FetchConversationResult::Cancelled => Ok(
                 api::request::input::tool_call_result::Result::FetchConversation(
                     api::FetchConversationResult {

@@ -7,11 +7,11 @@ use warp_multi_agent_api::response_event;
 use warpui::{App, SingletonEntity};
 
 use super::response_stream::{PendingResume, RecoveryBudget};
-use crate::ai::agent::conversation::AIConversationId;
+use crate::ai::agent::conversation::{AIConversationId, ConversationStatus};
 use crate::ai::agent::task::TaskId;
 use crate::ai::agent::{
-    AIAgentAttachment, AIAgentContext, AIAgentInput, CancellationReason, ImageContext,
-    PassiveSuggestionTrigger, UserQueryMode,
+    AIAgentAction, AIAgentActionId, AIAgentActionType, AIAgentAttachment, AIAgentContext,
+    AIAgentInput, CancellationReason, ImageContext, PassiveSuggestionTrigger, UserQueryMode,
 };
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::blocklist::{
@@ -20,6 +20,17 @@ use crate::ai::blocklist::{
 };
 use crate::ai::llms::LLMId;
 use crate::test_util::terminal::{add_window_with_terminal, initialize_app_for_terminal_view};
+
+fn pending_fetch_conversation_action(task_id: TaskId) -> AIAgentAction {
+    AIAgentAction {
+        id: AIAgentActionId::from("fetch-conversation-1".to_owned()),
+        task_id,
+        action: AIAgentActionType::FetchConversation {
+            conversation_id: "target-conversation".to_owned(),
+        },
+        requires_result: true,
+    }
+}
 
 fn new_ambient_agent_task_id() -> AmbientAgentTaskId {
     Uuid::new_v4().to_string().parse().unwrap()
@@ -494,5 +505,156 @@ fn optimistic_cli_subagent_completion_with_in_flight_stream_reports_success() {
                 Some(&crate::ai::agent::conversation::ConversationStatus::Success)
             );
         });
+    });
+}
+
+/// `FetchConversation` has no user-facing cancel affordance, so its cancellation is always
+/// driven by the generic action-cancellation machinery. A genuine terminal cancellation (e.g.
+/// the Stop button, mapped to `ManuallyCancelled`) must not be converted into a new outbound
+/// request -- doing so would revive a conversation the user explicitly stopped.
+#[test]
+fn manual_cancel_of_pending_fetch_conversation_does_not_revive_conversation() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+
+        let sent_requests = Arc::new(Mutex::new(0usize));
+        let sent_requests_for_subscription = Arc::clone(&sent_requests);
+
+        let conversation_id = terminal.update(&mut app, |view, ctx| {
+            let controller_handle = view.ai_controller().clone();
+            ctx.subscribe_to_model(&controller_handle, move |_, _, event, _| {
+                if matches!(event, super::BlocklistAIControllerEvent::SentRequest { .. }) {
+                    *sent_requests_for_subscription.lock().unwrap() += 1;
+                }
+            });
+
+            let terminal_surface_id = view.id();
+            let conversation_id =
+                BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+                    history.start_new_conversation(terminal_surface_id, false, false, false, ctx)
+                });
+            let task_id = BlocklistAIHistoryModel::as_ref(ctx)
+                .conversation(&conversation_id)
+                .unwrap()
+                .get_root_task_id()
+                .clone();
+
+            view.ai_controller().update(ctx, |controller, ctx| {
+                controller.action_model.update(ctx, |action_model, _| {
+                    action_model.enqueue_pending_action_for_test(
+                        conversation_id,
+                        pending_fetch_conversation_action(task_id),
+                    );
+                });
+
+                controller.cancel_conversation_progress(
+                    conversation_id,
+                    CancellationReason::ManuallyCancelled,
+                    ctx,
+                );
+            });
+
+            conversation_id
+        });
+
+        assert_eq!(*sent_requests.lock().unwrap(), 0);
+        BlocklistAIHistoryModel::handle(&app).read(&app, |history, _| {
+            assert_eq!(
+                history.conversation(&conversation_id).map(|c| c.status()),
+                Some(&ConversationStatus::Cancelled)
+            );
+        });
+    });
+}
+
+/// Collateral cancellation (a follow-up submitted for the same conversation while the fetch is
+/// still resolving) must not mark the conversation `Cancelled` on its own -- the request that
+/// triggered the cancellation already owns reporting the result. The drained result must
+/// serialize to an explicit error rather than being silently dropped, so the server's nested
+/// `ConversationSearchAgent` resolves deterministically instead of hanging or relying on the
+/// input interceptor to notice a still-unresolved tool call.
+#[test]
+fn collateral_cancel_of_pending_fetch_conversation_reports_explicit_error_via_owning_request() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+
+        let (conversation_id, initial_status, drained) = terminal.update(&mut app, |view, ctx| {
+            let terminal_surface_id = view.id();
+            let conversation_id =
+                BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+                    history.start_new_conversation(terminal_surface_id, false, false, false, ctx)
+                });
+            let task_id = BlocklistAIHistoryModel::as_ref(ctx)
+                .conversation(&conversation_id)
+                .unwrap()
+                .get_root_task_id()
+                .clone();
+            let initial_status = BlocklistAIHistoryModel::as_ref(ctx)
+                .conversation(&conversation_id)
+                .map(|c| c.status().clone());
+
+            let drained = view.ai_controller().update(ctx, |controller, ctx| {
+                controller.action_model.update(ctx, |action_model, _| {
+                    action_model.enqueue_pending_action_for_test(
+                        conversation_id,
+                        pending_fetch_conversation_action(task_id),
+                    );
+                });
+
+                controller.cancel_conversation_progress(
+                    conversation_id,
+                    CancellationReason::FollowUpSubmitted {
+                        is_for_same_conversation: true,
+                    },
+                    ctx,
+                );
+
+                controller.action_model.update(ctx, |action_model, _| {
+                    action_model.drain_finished_action_results(conversation_id)
+                })
+            });
+
+            (conversation_id, initial_status, drained)
+        });
+
+        // Collateral cancellation must not finalize the conversation locally; that would
+        // surface as a spurious "cancelled" state even though the user never cancelled.
+        BlocklistAIHistoryModel::handle(&app).read(&app, |history, _| {
+            assert_eq!(
+                history
+                    .conversation(&conversation_id)
+                    .map(|c| c.status().clone()),
+                initial_status
+            );
+        });
+
+        // The drained result is available for the owning request to report, and serializes
+        // to an explicit error rather than being dropped from that request.
+        assert_eq!(drained.len(), 1);
+        let wire_input: warp_multi_agent_api::request::input::user_inputs::user_input::Input =
+            drained[0]
+                .clone()
+                .try_into()
+                .expect("cancelled FetchConversation must serialize instead of being dropped");
+        let warp_multi_agent_api::request::input::user_inputs::user_input::Input::ToolCallResult(
+            tool_call_result,
+        ) = wire_input
+        else {
+            panic!("expected a tool call result");
+        };
+        assert!(matches!(
+            tool_call_result.result,
+            Some(
+                warp_multi_agent_api::request::input::tool_call_result::Result::FetchConversation(
+                    warp_multi_agent_api::FetchConversationResult {
+                        result: Some(
+                            warp_multi_agent_api::fetch_conversation_result::Result::Error(_)
+                        ),
+                    }
+                )
+            )
+        ));
     });
 }
