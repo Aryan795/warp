@@ -104,6 +104,45 @@ fn add_recording_subscriber(
     );
     subscriber_id
 }
+
+/// Awaits `update_rx` until every file in `all_files` has been seen across delivered batches
+/// (failing on any duplicate along the way), or `deadline` elapses first -- in which case it
+/// panics with the batches seen so far and the files still missing, instead of hanging until
+/// nextest's slow-timeout. `on_batch` is called with the 0-based batch index and the batch
+/// itself before its files are recorded, so callers can assert per-batch properties without
+/// reimplementing the receive loop. Returns the received files and the number of batches.
+async fn collect_until_seen(
+    update_rx: &mut mpsc::UnboundedReceiver<RepositoryUpdate>,
+    all_files: &[TargetFile],
+    deadline: Duration,
+    mut on_batch: impl FnMut(usize, &RepositoryUpdate),
+) -> (HashSet<TargetFile>, usize) {
+    let mut seen = HashSet::new();
+    let mut batch_count = 0;
+    let sleep = futures::FutureExt::fuse(Timer::after(deadline));
+    futures::pin_mut!(sleep);
+    while seen.len() < all_files.len() {
+        futures::select! {
+            flushed = update_rx.next().fuse() => {
+                let flushed = flushed.expect("channel closed before every update was seen");
+                on_batch(batch_count, &flushed);
+                for file in flushed.added {
+                    assert!(seen.insert(file), "duplicate file delivered across batches");
+                }
+                batch_count += 1;
+            }
+            _ = sleep => {
+                let missing: Vec<_> = all_files.iter().filter(|f| !seen.contains(f)).collect();
+                panic!(
+                    "timed out after {batch_count} batch(es) waiting for the rest to be \
+                     delivered; missing: {missing:?}"
+                );
+            }
+        }
+    }
+    (seen, batch_count)
+}
+
 #[test]
 fn tracked_remote_ref_validates_full_ref_names() {
     assert_eq!(
@@ -238,6 +277,104 @@ fn merge_repository_updates_preserves_remote_ref_updates() {
     assert!(
         acc.added
             .contains(&TargetFile::new(PathBuf::from("/repo/file.txt"), false))
+    );
+}
+
+#[test]
+fn merge_repository_updates_applies_every_entry_when_a_move_collapses_into_added() {
+    let source = TargetFile::new(PathBuf::from("/repo/source.txt"), false);
+    let move_target = TargetFile::new(PathBuf::from("/repo/moved.txt"), false);
+    let unrelated_move_to = TargetFile::new(PathBuf::from("/repo/d.txt"), false);
+    let unrelated_move_from = TargetFile::new(PathBuf::from("/repo/c.txt"), false);
+    let added_file = TargetFile::new(PathBuf::from("/repo/added.txt"), false);
+    let deleted_file = TargetFile::new(PathBuf::from("/repo/deleted.txt"), false);
+
+    // `acc` already records `source` as added, so the incoming batch's move collapses into it
+    // via the `acc.added.remove(from)` branch.
+    let mut acc = RepositoryUpdate {
+        added: [source.clone()].into(),
+        ..Default::default()
+    };
+
+    let incoming = RepositoryUpdate {
+        // A pre-existing bug used `return` instead of `continue` in this branch, which would
+        // abandon the unrelated move plus every later phase below.
+        moved: [(move_target.clone(), source.clone())].into(),
+        added: [added_file.clone()].into(),
+        deleted: [deleted_file.clone()].into(),
+        remote_ref_updated: true,
+        ..Default::default()
+    };
+    // A second, independent move exercises that the moves loop itself keeps iterating (not
+    // just the phases after it); kept separate to avoid HashMap-iteration-order ambiguity with
+    // the colliding move above.
+    let mut incoming_with_second_move = incoming.clone();
+    incoming_with_second_move
+        .moved
+        .insert(unrelated_move_to.clone(), unrelated_move_from.clone());
+
+    merge_repository_updates(&mut acc, &incoming_with_second_move);
+
+    assert!(
+        acc.added.contains(&move_target),
+        "the colliding move should collapse into `added`"
+    );
+    assert!(!acc.added.contains(&source));
+    assert_eq!(
+        acc.moved.get(&unrelated_move_to),
+        Some(&unrelated_move_from),
+        "the unrelated move must still be recorded"
+    );
+    assert!(
+        acc.added.contains(&added_file),
+        "adds after the moves phase must still be applied"
+    );
+    assert!(
+        acc.deleted.contains(&deleted_file),
+        "deletes after the moves phase must still be applied"
+    );
+    assert!(acc.remote_ref_updated, "flags must still be folded in");
+}
+
+#[test]
+fn merge_repository_updates_applies_every_entry_when_a_move_collapses_into_modified() {
+    let source = TargetFile::new(PathBuf::from("/repo/source.txt"), false);
+    let move_target = TargetFile::new(PathBuf::from("/repo/moved.txt"), false);
+    let unrelated_move_to = TargetFile::new(PathBuf::from("/repo/d.txt"), false);
+    let unrelated_move_from = TargetFile::new(PathBuf::from("/repo/c.txt"), false);
+    let added_file = TargetFile::new(PathBuf::from("/repo/added.txt"), false);
+
+    // `acc` already records `source` as modified, so the incoming batch's move collapses into
+    // it via the `acc.modified.remove(from)` branch.
+    let mut acc = RepositoryUpdate {
+        modified: [source.clone()].into(),
+        ..Default::default()
+    };
+
+    let mut incoming = RepositoryUpdate {
+        moved: [(move_target.clone(), source.clone())].into(),
+        added: [added_file.clone()].into(),
+        ..Default::default()
+    };
+    incoming
+        .moved
+        .insert(unrelated_move_to.clone(), unrelated_move_from.clone());
+
+    merge_repository_updates(&mut acc, &incoming);
+
+    assert!(
+        acc.modified.contains(&move_target),
+        "the colliding move should collapse into `modified`"
+    );
+    assert!(!acc.modified.contains(&source));
+    assert_eq!(
+        acc.moved.get(&unrelated_move_to),
+        Some(&unrelated_move_from),
+        "the unrelated move must still be recorded"
+    );
+    assert!(
+        acc.added.contains(&added_file),
+        "adds after the moves phase must still be applied"
     );
 }
 
@@ -593,20 +730,20 @@ fn single_incoming_update_exceeding_the_bound_is_delivered_without_loss() {
                     repo.notify_subscriber(subscriber_id, &huge_update, ctx);
                 });
 
-                let mut seen = HashSet::new();
-                let mut batch_count = 0;
-                while seen.len() < total_files {
-                    let flushed = update_rx.next().await.expect("batch");
-                    if batch_count == 0 {
-                        // Nothing else is in flight yet the first time the bound is crossed, so
-                        // that first batch is delivered immediately, on its own, bounded.
-                        assert_eq!(flushed.added.len(), MAX_PENDING_ENTRIES);
-                    }
-                    for file in flushed.added {
-                        assert!(seen.insert(file), "duplicate file delivered across batches");
-                    }
-                    batch_count += 1;
-                }
+                let (seen, batch_count) = collect_until_seen(
+                    &mut update_rx,
+                    &all_files,
+                    Duration::from_secs(5),
+                    |index, flushed| {
+                        if index == 0 {
+                            // Nothing else is in flight yet the first time the bound is
+                            // crossed, so that first batch is delivered immediately, on its
+                            // own, bounded.
+                            assert_eq!(flushed.added.len(), MAX_PENDING_ENTRIES);
+                        }
+                    },
+                )
+                .await;
 
                 assert_eq!(seen.len(), total_files);
                 for file in &all_files {
@@ -696,14 +833,13 @@ fn forced_and_debounced_flushes_apply_every_update_exactly_once_with_a_slow_cons
                 // a separate batch), but nothing may ever be dropped or duplicated.
                 // `SlowRecordingSubscriber` itself asserts that no two batches are ever
                 // delivered concurrently.
-                let mut seen = HashSet::new();
-                while seen.len() < total_updates {
-                    let flushed = update_rx.next().await.expect("flush");
-                    assert!(!flushed.added.is_empty());
-                    for file in flushed.added {
-                        assert!(seen.insert(file), "duplicate file delivered across batches");
-                    }
-                }
+                let (seen, _batch_count) = collect_until_seen(
+                    &mut update_rx,
+                    &all_files,
+                    Duration::from_secs(5),
+                    |_, flushed| assert!(!flushed.added.is_empty()),
+                )
+                .await;
 
                 assert_eq!(seen.len(), total_updates);
                 for file in &all_files {
@@ -806,6 +942,125 @@ fn unsubscribe_cancels_pending_delivery_and_releases_the_backlog() {
                     }
                     _ = futures::FutureExt::fuse(Timer::after(Duration::from_millis(200))) => {}
                 }
+            });
+        },
+    );
+}
+
+#[test]
+fn coalescing_a_move_that_collapses_into_an_existing_add_still_applies_later_entries() {
+    VirtualFS::test(
+        "coalescing_a_move_that_collapses_into_an_existing_add_still_applies_later_entries",
+        |dirs, mut vfs| {
+            vfs.mkdir("repo");
+            let repo_path = dirs.tests().join("repo");
+
+            App::test((), |mut app| async move {
+                let watcher_handle = app.add_singleton_model(DirectoryWatcher::new_for_testing);
+                let repo_handle = watcher_handle
+                    .update(&mut app, |watcher, ctx| {
+                        watcher.add_directory(
+                            StandardizedPath::from_local_canonicalized(&repo_path).unwrap(),
+                            ctx,
+                        )
+                    })
+                    .unwrap();
+
+                const MAX_PENDING_ENTRIES: usize = 3;
+                let (update_tx, mut update_rx) = mpsc::unbounded::<RepositoryUpdate>();
+                let in_flight = Arc::new(AtomicBool::new(false));
+                let start = repo_handle.update(&mut app, |repo, ctx| {
+                    let buffered = BufferingRepositorySubscriber::with_max_pending_entries(
+                        SlowRecordingSubscriber {
+                            update_tx,
+                            in_flight: Arc::clone(&in_flight),
+                            delay: Duration::from_millis(80),
+                        },
+                        Duration::from_secs(3600),
+                        MAX_PENDING_ENTRIES,
+                    );
+                    repo.start_watching(
+                        RepositoryWatchMode::FilesystemOnly,
+                        Box::new(buffered),
+                        ctx,
+                    )
+                });
+                std::mem::drop(start.registration_future);
+                let subscriber_id = start.subscriber_id;
+
+                // Batch A: crosses the bound on its own and is dispatched immediately (nothing
+                // else is in flight yet), taking 80ms to resolve.
+                let a1 = TargetFile::new(repo_path.join("a1.txt"), false);
+                let a2 = TargetFile::new(repo_path.join("a2.txt"), false);
+                let a3 = TargetFile::new(repo_path.join("a3.txt"), false);
+                let batch_a_update = RepositoryUpdate {
+                    added: [a1.clone(), a2.clone(), a3.clone()].into(),
+                    ..Default::default()
+                };
+                repo_handle.update(&mut app, |repo, ctx| {
+                    repo.notify_subscriber(subscriber_id, &batch_a_update, ctx);
+                });
+
+                // Batch B: crosses the bound while A is still in flight, so it becomes the
+                // initial `next_delivery` backlog via a plain assignment (nothing to merge with
+                // yet).
+                let move_target = TargetFile::new(repo_path.join("moved.txt"), false);
+                let w1 = TargetFile::new(repo_path.join("w1.txt"), false);
+                let w2 = TargetFile::new(repo_path.join("w2.txt"), false);
+                let batch_b_update = RepositoryUpdate {
+                    added: [move_target.clone(), w1.clone(), w2.clone()].into(),
+                    ..Default::default()
+                };
+                repo_handle.update(&mut app, |repo, ctx| {
+                    repo.notify_subscriber(subscriber_id, &batch_b_update, ctx);
+                });
+
+                // Batch C: also crosses the bound while A is still in flight, so `hand_off`
+                // merges it into the existing `next_delivery` (batch B) via
+                // `merge_repository_updates`. Its one move's source is `move_target`, which
+                // batch B recorded as `added` -- the exact "a move collapses into an existing
+                // add" condition a pre-existing bug (`return` instead of `continue` in the
+                // moves loop) would abandon everything after, dropping `extra_added` and
+                // `extra_deleted` below. A single move (not two) keeps this deterministic,
+                // independent of `HashMap` iteration order.
+                let moved_to = TargetFile::new(repo_path.join("moved_to.txt"), false);
+                let extra_added = TargetFile::new(repo_path.join("extra_added.txt"), false);
+                let extra_deleted = TargetFile::new(repo_path.join("extra_deleted.txt"), false);
+                let batch_c_update = RepositoryUpdate {
+                    moved: [(moved_to.clone(), move_target.clone())].into(),
+                    added: [extra_added.clone()].into(),
+                    deleted: [extra_deleted.clone()].into(),
+                    ..Default::default()
+                };
+                repo_handle.update(&mut app, |repo, ctx| {
+                    repo.notify_subscriber(subscriber_id, &batch_c_update, ctx);
+                });
+
+                // Batch A completes first.
+                let flushed_a = update_rx.next().await.expect("batch A");
+                assert_eq!(flushed_a.added, [a1, a2, a3].into());
+
+                // The coalesced backlog (B merged with C) is delivered next, once A's in-flight
+                // delivery completes.
+                let flushed_backlog = update_rx.next().await.expect("coalesced backlog");
+                assert!(
+                    flushed_backlog.added.contains(&moved_to),
+                    "the move's target should replace the source in `added`"
+                );
+                assert!(
+                    !flushed_backlog.added.contains(&move_target),
+                    "the move's source should no longer be recorded as `added`"
+                );
+                assert!(flushed_backlog.added.contains(&w1));
+                assert!(flushed_backlog.added.contains(&w2));
+                assert!(
+                    flushed_backlog.added.contains(&extra_added),
+                    "adds after the colliding move must still be applied"
+                );
+                assert!(
+                    flushed_backlog.deleted.contains(&extra_deleted),
+                    "deletes after the colliding move must still be applied"
+                );
             });
         },
     );

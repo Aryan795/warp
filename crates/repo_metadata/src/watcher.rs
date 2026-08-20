@@ -768,9 +768,13 @@ impl RepositoryUpdate {
         self.added.contains(file) || self.modified.contains(file)
     }
 
-    /// Coalesces `incoming` into `self`, using the same normalization rules `Repository`'s
-    /// internal debounce buffer applies (moves, then adds, then modifies, then deletes;
-    /// cancelling adds/deletes of the same path within the merged window, and so on).
+    /// Coalesces `incoming` into `self` as if `incoming` happened chronologically after `self`.
+    /// This is not a plain union of the two updates: it applies the same normalization a
+    /// debounce window would (moves before adds before modifies before deletes), so an add
+    /// followed by a delete of the same path cancels out, a move's target replaces its source
+    /// wherever the source was already tracked, and so on. Merging out of chronological order,
+    /// or merging two updates that weren't captured over a contiguous window, can produce a
+    /// result that doesn't correspond to any real sequence of filesystem events.
     pub fn merge(&mut self, incoming: &RepositoryUpdate) {
         crate::repository::merge_repository_updates(self, incoming);
     }

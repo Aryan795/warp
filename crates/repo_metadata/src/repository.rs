@@ -580,11 +580,11 @@ pub(crate) fn merge_repository_updates(acc: &mut RepositoryUpdate, incoming: &Re
     for (to, from) in &incoming.moved {
         if acc.added.remove(from) {
             acc.added.insert(to.clone());
-            return;
+            continue;
         }
         if acc.modified.remove(from) {
             acc.modified.insert(to.clone());
-            return;
+            continue;
         }
 
         // Collapse chain: if `from` was a prior destination, pull its original source
