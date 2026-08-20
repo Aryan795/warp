@@ -1300,20 +1300,8 @@ impl Display for StopRecordingResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchConversationResult {
-    Success {
-        directory_path: String,
-    },
+    Success { directory_path: String },
     Error(String),
-    /// Synthesized by the generic action-cancellation machinery whenever pending actions for
-    /// the conversation are cancelled — the same path used for a deliberate terminal
-    /// cancellation (Stop, pane close, delete) *and* for collateral cleanup when a follow-up
-    /// request is submitted for the same conversation while the fetch is still in flight.
-    /// `FetchConversation` has no user-facing cancel affordance of its own, so unlike
-    /// `RunAgentsResult::Cancelled` this is serialized as an explicit `Error` on the wire (see
-    /// `convert.rs`) rather than dropped: the nested `ConversationSearchAgent` subagent on the
-    /// server blocks on a result for this tool call, so whenever this result does end up
-    /// included in an outbound request, it must resolve that subagent deterministically
-    /// instead of leaving the tool call to be swept up by the server's input interceptor.
     Cancelled,
 }
 

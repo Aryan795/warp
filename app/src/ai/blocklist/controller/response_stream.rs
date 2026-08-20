@@ -320,6 +320,16 @@ impl ResponseStream {
         ctx.emit(ResponseStreamEvent::AfterStreamFinished { cancellation: None });
         self.cancellation_tx = None;
     }
+
+    /// Marks this stream as having a resume scheduled for once it finishes (mirrors what
+    /// `begin_recovery`'s `RecoveryAction::Resume` branch sets), without needing a real
+    /// recoverable failure. Lets tests drive the lifecycle where a stream failed after
+    /// dispatching client actions, so an automatic resume is scheduled alongside whatever
+    /// those actions' results end up doing.
+    #[cfg(test)]
+    pub fn set_pending_resume_for_test(&mut self, resume: PendingResume) {
+        self.pending_resume = Some(resume);
+    }
     #[cfg(test)]
     pub fn new_for_test(id: ResponseStreamId) -> Self {
         let (cancellation_tx, _rx) = oneshot::channel();

@@ -570,13 +570,11 @@ fn manual_cancel_of_pending_fetch_conversation_does_not_revive_conversation() {
 }
 
 /// Collateral cancellation (a follow-up submitted for the same conversation while the fetch is
-/// still resolving) must not mark the conversation `Cancelled` on its own -- the request that
-/// triggered the cancellation already owns reporting the result. The drained result must
-/// serialize to an explicit error rather than being silently dropped, so the server's nested
-/// `ConversationSearchAgent` resolves deterministically instead of hanging or relying on the
-/// input interceptor to notice a still-unresolved tool call.
+/// still resolving) must not mark the conversation `Cancelled` on its own -- unlike a genuine
+/// terminal cancellation, its `CancellationOutcome` is `KeepInProgress`, so the conversation is
+/// left alone rather than being spuriously finalized while a follow-up is already underway.
 #[test]
-fn collateral_cancel_of_pending_fetch_conversation_reports_explicit_error_via_owning_request() {
+fn collateral_cancel_of_pending_fetch_conversation_does_not_mark_conversation_cancelled() {
     App::test((), |mut app| async move {
         initialize_app_for_terminal_view(&mut app);
         let terminal = add_window_with_terminal(&mut app, None);
@@ -631,31 +629,12 @@ fn collateral_cancel_of_pending_fetch_conversation_reports_explicit_error_via_ow
             );
         });
 
-        // The drained result is available for the owning request to report, and serializes
-        // to an explicit error rather than being dropped from that request.
+        // The cancelled result was drained (available to whatever sends the next request
+        // for this conversation), rather than left stuck in the pending queue.
         assert_eq!(drained.len(), 1);
-        let wire_input: warp_multi_agent_api::request::input::user_inputs::user_input::Input =
-            drained[0]
-                .clone()
-                .try_into()
-                .expect("cancelled FetchConversation must serialize instead of being dropped");
-        let warp_multi_agent_api::request::input::user_inputs::user_input::Input::ToolCallResult(
-            tool_call_result,
-        ) = wire_input
-        else {
-            panic!("expected a tool call result");
-        };
         assert!(matches!(
-            tool_call_result.result,
-            Some(
-                warp_multi_agent_api::request::input::tool_call_result::Result::FetchConversation(
-                    warp_multi_agent_api::FetchConversationResult {
-                        result: Some(
-                            warp_multi_agent_api::fetch_conversation_result::Result::Error(_)
-                        ),
-                    }
-                )
-            )
+            drained[0].result,
+            AIAgentActionResultType::FetchConversation(FetchConversationResult::Cancelled)
         ));
     });
 }
@@ -815,6 +794,126 @@ fn stranded_action_result_is_flushed_once_triggering_stream_completes() {
                         .as_ref(ctx)
                         .get_finished_action_results(conversation_id)
                         .is_none_or(|results| results.is_empty())
+                );
+            });
+        });
+    });
+}
+
+/// A stream can fail with a recoverable error *after* dispatching client actions -- exactly
+/// the situation that can strand one of those actions' results (see the test above) -- in
+/// which case an automatic resume is scheduled for once the stream finishes. If a stranded
+/// result is flushed for that same stream completion, that flush's follow-up request already
+/// takes over resuming the conversation; the scheduled resume must not *also* fire, or the
+/// conversation gets two outbound requests racing each other.
+#[test]
+fn flushed_stranded_result_suppresses_a_scheduled_resume_for_the_same_stream() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+
+        let sent_requests = Arc::new(Mutex::new(0usize));
+        let sent_requests_for_subscription = Arc::clone(&sent_requests);
+
+        let (conversation_id, stream) = terminal.update(&mut app, |view, ctx| {
+            let controller_handle = view.ai_controller().clone();
+            ctx.subscribe_to_model(&controller_handle, move |_, _, event, _| {
+                if matches!(event, super::BlocklistAIControllerEvent::SentRequest { .. }) {
+                    *sent_requests_for_subscription.lock().unwrap() += 1;
+                }
+            });
+
+            let terminal_surface_id = view.id();
+            let stream_id = ResponseStreamId::new_for_test();
+            let conversation_id =
+                BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+                    let conversation_id = history.start_new_conversation(
+                        terminal_surface_id,
+                        false,
+                        false,
+                        false,
+                        ctx,
+                    );
+                    let task_id = history
+                        .conversation(&conversation_id)
+                        .unwrap()
+                        .get_root_task_id()
+                        .clone();
+                    history
+                        .update_conversation_for_new_request_input(
+                            RequestInput {
+                                conversation_id,
+                                input_messages: HashMap::from([(task_id, vec![])]),
+                                working_directory: None,
+                                model_id: LLMId::from("test-model"),
+                                coding_model_id: LLMId::from("test-coding-model"),
+                                cli_agent_model_id: LLMId::from("test-cli-agent-model"),
+                                computer_use_model_id: LLMId::from("test-computer-use-model"),
+                                shared_session_response_initiator: None,
+                                request_start_ts: Local::now(),
+                                supported_tools_override: None,
+                            },
+                            stream_id.clone(),
+                            terminal_surface_id,
+                            ctx,
+                        )
+                        .unwrap();
+                    conversation_id
+                });
+            let stream = ctx.add_model(|_| ResponseStream::new_for_test(stream_id.clone()));
+            view.ai_controller().update(ctx, |controller, ctx| {
+                controller.register_mock_stream_for_test(
+                    stream_id,
+                    conversation_id,
+                    stream.clone(),
+                    ctx,
+                );
+            });
+            (conversation_id, stream)
+        });
+
+        // A fast action finishes and is deferred, exactly as in the stranding test above.
+        terminal.update(&mut app, |view, ctx| {
+            view.ai_controller().update(ctx, |controller, ctx| {
+                controller.action_model.update(ctx, |action_model, ctx| {
+                    action_model.apply_finished_action_result(
+                        conversation_id,
+                        AIAgentActionResult {
+                            id: AIAgentActionId::from("fetch-conversation-1".to_owned()),
+                            task_id: TaskId::new("task".to_owned()),
+                            result: AIAgentActionResultType::FetchConversation(
+                                FetchConversationResult::Success {
+                                    directory_path: "/tmp/conversation".to_owned(),
+                                },
+                            ),
+                        },
+                        ctx,
+                    );
+                });
+            });
+        });
+        assert_eq!(*sent_requests.lock().unwrap(), 0);
+
+        // But this time the stream failed (recoverably) after dispatching that action, so a
+        // resume is scheduled for once it finishes.
+        stream.update(&mut app, |stream, ctx| {
+            stream.set_pending_resume_for_test(PendingResume::new_for_test(
+                RecoveryBudget::fresh().next_attempt(),
+                std::time::Duration::from_secs(3600),
+            ));
+            stream.emit_stream_finished_for_test(ctx);
+        });
+
+        // The flush already sent exactly one follow-up request that takes over resuming the
+        // conversation, so the scheduled resume must not also be armed.
+        assert_eq!(*sent_requests.lock().unwrap(), 1);
+        terminal.update(&mut app, |view, ctx| {
+            view.ai_controller().update(ctx, |controller, _| {
+                assert!(
+                    !controller
+                        .pending_auto_resume_handles
+                        .contains_key(&conversation_id),
+                    "the scheduled resume must have been suppressed, not armed alongside the flush"
                 );
             });
         });

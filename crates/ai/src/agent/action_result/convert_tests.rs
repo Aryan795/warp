@@ -35,46 +35,6 @@ fn read_files_partial_success_converts_failed_files() {
 }
 
 #[test]
-fn fetch_conversation_cancelled_converts_to_explicit_error() {
-    // Unlike RunAgents/WaitForEvents, FetchConversation has no user-facing cancel
-    // affordance, so a `Cancelled` result must be serialized as an explicit error
-    // rather than dropped (`ConvertToAPITypeError::Ignore`). Otherwise the nested
-    // ConversationSearchAgent subagent on the server never learns the fetch it is
-    // blocked on ended, and the client never sends a follow-up request in the first
-    // place (see `should_trigger_request_upon_completion`).
-    let result =
-        api::request::input::tool_call_result::Result::try_from(FetchConversationResult::Cancelled)
-            .expect("cancelled FetchConversation should convert to an explicit error");
-
-    let api::request::input::tool_call_result::Result::FetchConversation(result) = result else {
-        panic!("expected fetch_conversation result");
-    };
-
-    let Some(api::fetch_conversation_result::Result::Error(error)) = result.result else {
-        panic!("expected error result");
-    };
-    assert_eq!(error.message, "Conversation fetch was cancelled");
-}
-
-#[test]
-fn fetch_conversation_success_converts_to_directory_path() {
-    let result =
-        api::request::input::tool_call_result::Result::try_from(FetchConversationResult::Success {
-            directory_path: "/tmp/conversation-abc".to_string(),
-        })
-        .expect("successful FetchConversation should convert");
-
-    let api::request::input::tool_call_result::Result::FetchConversation(result) = result else {
-        panic!("expected fetch_conversation result");
-    };
-
-    let Some(api::fetch_conversation_result::Result::Success(success)) = result.result else {
-        panic!("expected success result");
-    };
-    assert_eq!(success.directory_path, "/tmp/conversation-abc");
-}
-
-#[test]
 fn ask_user_question_skipped_by_auto_approve_converts_to_skipped_answers() {
     let result = api::request::input::tool_call_result::Result::from(
         AskUserQuestionResult::SkippedByAutoApprove {

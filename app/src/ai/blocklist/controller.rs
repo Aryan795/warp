@@ -1685,18 +1685,22 @@ impl BlocklistAIController {
     /// event is processed (a plain scheduling race between two independently spawned
     /// futures, not anything user-driven) is left in `finished_action_results` with
     /// nothing left to ever revisit it, stranding it indefinitely.
+    ///
+    /// Returns `true` when it actually sent a follow-up request. The caller must not also
+    /// fire a scheduled resume for the same stream completion in that case (see the call
+    /// site): that request already takes over resuming the conversation.
     fn flush_stranded_follow_up_for_conversation(
         &mut self,
         conversation_id: AIConversationId,
         ctx: &mut ModelContext<Self>,
-    ) {
+    ) -> bool {
         if self
             .in_flight_response_streams
             .has_active_stream_for_conversation(conversation_id, ctx)
         {
             // A new stream already started for this conversation; that request owns
             // delivering any results now.
-            return;
+            return false;
         }
         if self
             .action_model
@@ -1705,7 +1709,7 @@ impl BlocklistAIController {
         {
             // Still executing (or another action is); its own `FinishedAction` will drive
             // the follow-up once everything settles.
-            return;
+            return false;
         }
         let has_finished_results = self
             .action_model
@@ -1713,7 +1717,7 @@ impl BlocklistAIController {
             .get_finished_action_results(conversation_id)
             .is_some_and(|results| !results.is_empty());
         if !has_finished_results {
-            return;
+            return false;
         }
         log::info!(
             "Flushing stranded action result(s) for conversation_id={conversation_id:?}: a \
@@ -1721,6 +1725,7 @@ impl BlocklistAIController {
              that stream has now finished without anything else redelivering the result."
         );
         self.send_follow_up_for_conversation(conversation_id, ctx);
+        true
     }
 
     fn conversation_ready_for_pending_events(
@@ -3230,6 +3235,7 @@ impl BlocklistAIController {
                 }
 
                 // Cancelled streams will handle pending_response_stream updates synchronously.
+                let mut flushed_stranded_follow_up = false;
                 if cancellation.is_none() {
                     self.in_flight_response_streams.cleanup_stream(&stream_id);
 
@@ -3239,15 +3245,32 @@ impl BlocklistAIController {
 
                     // Also recover any follow-up that deferred because this stream still
                     // looked active when its action finished (see the method doc).
-                    self.flush_stranded_follow_up_for_conversation(conversation_id, ctx);
+                    flushed_stranded_follow_up =
+                        self.flush_stranded_follow_up_for_conversation(conversation_id, ctx);
                 }
 
                 // Before cleaning up the response stream, check if we should attempt to resume.
                 // The resume inherits the failed request's remaining recovery budget, so
                 // retries and resumes stay bounded by one shared counter.
+                //
+                // Mutually exclusive with the flush above: a resume is scheduled precisely
+                // when this stream failed *after* dispatching client actions (so an
+                // in-request retry was unsafe), which is exactly the situation that can
+                // strand one of those actions' results. If the flush already sent a fresh
+                // request for this conversation, that request already takes over resuming
+                // it; firing the scheduled resume as well would send a second, redundant
+                // request that can race or collide with the one the flush just sent.
                 let pending_resume = response_stream.as_ref(ctx).pending_resume();
                 if let Some(resume) = pending_resume {
-                    self.schedule_auto_resume_after_error(conversation_id, resume, ctx);
+                    if flushed_stranded_follow_up {
+                        log::info!(
+                            "Skipping scheduled resume for conversation_id={conversation_id:?}: \
+                             a flushed stranded action result already sent a follow-up request \
+                             that takes over resuming it."
+                        );
+                    } else {
+                        self.schedule_auto_resume_after_error(conversation_id, resume, ctx);
+                    }
                 }
 
                 // Clean up the response stream tracking entry now that the stream is complete.
