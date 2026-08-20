@@ -389,14 +389,8 @@ fn custom_endpoint_usage_display_label_resolves_alias_name_and_generic_fallback(
         )],
         ..Default::default()
     };
-    let preferences = LLMPreferences {
-        models_by_feature: ModelsByFeature::default(),
-        agent_mode_models_unavailable: false,
-        last_update: None,
-        base_llm_for_terminal_view: HashMap::new(),
-        custom_llms: build_custom_llm_infos(&keys),
-        custom_model_routers: Vec::new(),
-    };
+    let preferences =
+        LLMPreferences::for_test(ModelsByFeature::default(), build_custom_llm_infos(&keys));
 
     assert_eq!(
         preferences.custom_endpoint_usage_display_label("uuid-alias"),
@@ -532,14 +526,8 @@ fn is_cloud_runnable_oz_model_id_classifies_ids() {
         )],
         ..Default::default()
     };
-    let preferences = LLMPreferences {
-        models_by_feature: ModelsByFeature::default(),
-        agent_mode_models_unavailable: false,
-        last_update: None,
-        base_llm_for_terminal_view: HashMap::new(),
-        custom_llms: build_custom_llm_infos(&keys),
-        custom_model_routers: Vec::new(),
-    };
+    let preferences =
+        LLMPreferences::for_test(ModelsByFeature::default(), build_custom_llm_infos(&keys));
 
     // Custom-endpoint (BYOK) UUID id — not cloud-runnable.
     assert!(
@@ -716,17 +704,13 @@ fn with_model_picker_query_test_context(f: impl FnOnce(&LLMPreferences, &AppCont
                 None,
             )
             .expect("choices are non-empty");
-            let preferences = LLMPreferences {
-                models_by_feature: ModelsByFeature {
+            let preferences = LLMPreferences::for_test(
+                ModelsByFeature {
                     agent_mode,
                     ..Default::default()
                 },
-                agent_mode_models_unavailable: false,
-                last_update: None,
-                base_llm_for_terminal_view: HashMap::new(),
-                custom_llms: Vec::new(),
-                custom_model_routers: Vec::new(),
-            };
+                Vec::new(),
+            );
             f(&preferences, app_ctx);
         });
     });
@@ -1047,17 +1031,13 @@ fn preferences_for_profile_model_tests() -> LLMPreferences {
         None,
     )
     .expect("choices are non-empty");
-    LLMPreferences {
-        models_by_feature: ModelsByFeature {
+    LLMPreferences::for_test(
+        ModelsByFeature {
             agent_mode,
             ..Default::default()
         },
-        agent_mode_models_unavailable: false,
-        last_update: None,
-        base_llm_for_terminal_view: HashMap::new(),
-        custom_llms: Vec::new(),
-        custom_model_routers: Vec::new(),
-    }
+        Vec::new(),
+    )
 }
 
 #[test]
@@ -1288,4 +1268,96 @@ fn explicit_child_model_pin_preserves_gui_behavior_and_only_emits_for_effective_
         });
         assert_eq!(active_model_events.get(), 1);
     });
+}
+
+// -- Per-team model catalog isolation (PR 3A: `models_by_team`) --
+//
+// These exercise the state layer directly with two independently resolved team scopes,
+// standing in for what two windows' own `TeamContext`s (see
+// `crate::workspaces::user_workspaces::UserWorkspaces::team_context_for_view`) would resolve
+// to. That resolution path is PR 0's own foundation and is already covered by
+// `user_workspaces_tests.rs`; what these tests own is whether `LLMPreferences` keeps two
+// concurrently-open teams' catalogs independent once a caller supplies their resolved scope.
+
+#[test]
+fn team_scoped_model_catalogs_stay_independent_for_two_concurrently_open_teams() {
+    let mut preferences = LLMPreferences::for_test(ModelsByFeature::default(), Vec::new());
+
+    let team_a: Option<ServerId> = Some(111.into());
+    let team_b: Option<ServerId> = Some(222.into());
+    let models_a = ModelsByFeature {
+        agent_mode: available(
+            "auto",
+            vec![server_llm("auto", None), server_llm("team-a-model", None)],
+        ),
+        ..ModelsByFeature::default()
+    };
+    let models_b = ModelsByFeature {
+        agent_mode: available(
+            "auto",
+            vec![server_llm("auto", None), server_llm("team-b-model", None)],
+        ),
+        ..ModelsByFeature::default()
+    };
+
+    preferences.update_feature_model_choices_for_team(team_a, Ok(models_a.clone()));
+    preferences.update_feature_model_choices_for_team(team_b, Ok(models_b.clone()));
+
+    assert_eq!(
+        preferences.models_by_feature_for_team(team_a),
+        &models_a,
+        "team A's entry should hold team A's catalog"
+    );
+    assert_eq!(
+        preferences.models_by_feature_for_team(team_b),
+        &models_b,
+        "team B's entry should hold team B's catalog, independent of team A's concurrent update"
+    );
+    assert_eq!(
+        preferences.models_by_feature(),
+        &ModelsByFeature::default(),
+        "the legacy bucket no accessor has migrated off of yet must not observe either team's update"
+    );
+}
+
+#[test]
+fn team_scoped_read_defaults_to_an_empty_catalog_before_any_fetch() {
+    let preferences = LLMPreferences::for_test(ModelsByFeature::default(), Vec::new());
+    let unvisited_team: Option<ServerId> = Some(333.into());
+
+    assert_eq!(
+        preferences.models_by_feature_for_team(unvisited_team),
+        &ModelsByFeature::default(),
+        "a team scope with no fetch yet should read a shared empty default, not panic or borrow \
+         another team's data"
+    );
+}
+
+#[test]
+fn agent_mode_models_unavailable_is_scoped_per_team() {
+    let mut preferences = LLMPreferences::for_test(ModelsByFeature::default(), Vec::new());
+    let team_a: Option<ServerId> = Some(111.into());
+    let team_b: Option<ServerId> = Some(222.into());
+
+    // Simulate a failed fetch recorded for team A only.
+    preferences.models_by_team.insert(
+        team_a,
+        TeamModelState {
+            models_by_feature: ModelsByFeature::default(),
+            agent_mode_models_unavailable: true,
+        },
+    );
+
+    assert!(
+        preferences.agent_mode_models_unavailable_for_team(team_a),
+        "team A's failed fetch should be reflected in its own flag"
+    );
+    assert!(
+        !preferences.agent_mode_models_unavailable_for_team(team_b),
+        "team B, which never failed, must not observe team A's failure"
+    );
+    assert!(
+        !preferences.agent_mode_models_unavailable(),
+        "the legacy no-team bucket must not observe a per-team failure either"
+    );
 }
