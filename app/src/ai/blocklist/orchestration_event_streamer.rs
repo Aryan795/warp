@@ -55,6 +55,14 @@ const EVENT_CHILD_AGENT_STARTED: &str = "child_agent_started";
 /// Wire `event_type` emitted on a CHILD run when its sandbox session links;
 /// the session UUID is carried in `ref_id`.
 const EVENT_RUN_SESSION_LINKED: &str = "run_session_linked";
+/// Wire `event_type` emitted self-scoped (`run_id` == the descendant's own run) only by a
+/// server-side parent-completion cascade, never by a run's own ordinary completion. Unlike
+/// every other self-scoped lifecycle event (dropped by `convert_lifecycle_events` because a
+/// run's own driver already reports its own status directly), this one is a safe,
+/// unambiguous external stop signal: the server has already recorded this run as `SUCCEEDED`
+/// on its own authority, so the local client must stop its still-live process and project
+/// `Success` without sending a contradicting `CANCELLED` back.
+const EVENT_RUN_SUCCEEDED_BY_PARENT_COMPLETION: &str = "run_succeeded_by_parent_completion";
 
 /// Per-event item delivered from the SSE background task to the entity.
 struct SseStreamItem {
@@ -321,6 +329,10 @@ pub enum OrchestrationEventStreamerEvent {
         run_id: String,
         status: ConversationStatus,
     },
+    /// A parent-completion cascade recorded this conversation's own run as `SUCCEEDED` while
+    /// it was still running locally. The subscriber (the controller) must stop the local
+    /// conversation and project `Success` without reporting `CANCELLED`.
+    ParentCompletionSucceeded { conversation_id: AIConversationId },
 }
 
 /// Outcome of selecting the SSE wire filter for an owner-side conversation.
@@ -2671,6 +2683,22 @@ impl OrchestrationEventStreamer {
                 .or_default()
                 .pending_message_ids
                 .extend(message_ids);
+        }
+
+        // A parent-completion cascade recorded this conversation's own run as SUCCEEDED.
+        // Unlike every other self-scoped event (handled below by convert_lifecycle_events,
+        // which deliberately drops self events because a run's own driver already reports
+        // its own status), this one is emitted only by the server-side cascade and is safe
+        // to treat as an authoritative external stop signal. Tombstone the run so a later,
+        // out-of-order buffered event cannot restore an earlier local status.
+        if events.iter().any(|event| {
+            event.run_id == self_run_id
+                && event.event_type == EVENT_RUN_SUCCEEDED_BY_PARENT_COMPLETION
+        }) {
+            self.remember_killed_run_id(self_run_id.to_string());
+            ctx.emit(OrchestrationEventStreamerEvent::ParentCompletionSucceeded {
+                conversation_id,
+            });
         }
 
         // The owner-side event service delivers lifecycle notifications to the
