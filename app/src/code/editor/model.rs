@@ -313,10 +313,13 @@ pub struct CodeEditorModel {
     lazy_layout_initialized: bool,
     /// Whether syntax parsing should be bootstrapped from the latest full buffer content.
     pending_syntax_tree_bootstrap: bool,
-    /// Whether this editor maintains diff state (base content + line-level diff status) as
-    /// content changes. Editors that can never show diff UI should disable this, since
-    /// otherwise every content change pays the cost of materializing the full buffer text and
-    /// diffing it against the base, regardless of whether anything reads the result.
+    /// Whether ordinary `ContentChanged` events (`handle_content_model_event`) recompute the
+    /// diff. Editors that can never show diff UI should disable this, since otherwise every
+    /// content change pays the cost of materializing the full buffer text and diffing it
+    /// against the base, regardless of whether anything reads the result. This does NOT gate
+    /// diff base maintenance (`reset_content`/`set_base` always maintain it) or the other
+    /// `compute_diff` call sites (`set_base`'s `recompute_diff` path and the `ContentReplaced`
+    /// hidden-lines path) — no live caller combines either of those with a gated editor today.
     diff_tracking_enabled: bool,
 }
 
@@ -614,6 +617,10 @@ impl CodeEditorModel {
         context_lines: usize,
         ctx: &mut ModelContext<Self>,
     ) {
+        // The `DelayRenderingTrigger::DiffUpdate` installed below is only ever released by
+        // `compute_diff` emitting `DiffModelEvent::DiffUpdated`; with diff tracking disabled
+        // that never happens, permanently stalling render flushes for this editor.
+        debug_assert!(self.diff_tracking_enabled);
         let buffer_version = self.buffer_version(ctx);
 
         self.hide_lines_outside_of_active_diff = Some(context_lines);
@@ -1599,6 +1606,11 @@ impl CodeEditorModel {
                 selection_model_id,
             } => {
                 let buffer = self.content().as_ref(ctx);
+                // Snapshot the buffer text atomically with `buffer_version`, before any other
+                // model update below runs. Materializing the full buffer text is an O(document
+                // size) copy, so skip it entirely for editors that can never show diff UI
+                // rather than paying that cost on every keystroke.
+                let content = self.diff_tracking_enabled.then(|| buffer.text());
                 if self.should_defer_syntax_tree_parsing() {
                     self.pending_syntax_tree_bootstrap = true;
                 } else {
@@ -1647,11 +1659,7 @@ impl CodeEditorModel {
                     }
                 }
 
-                // Computing the diff requires materializing the full buffer text on every edit
-                // (an O(document size) copy), so skip it entirely for editors that can never
-                // show diff UI rather than paying that cost on every keystroke.
-                if self.diff_tracking_enabled {
-                    let content = self.content().as_ref(ctx).text();
+                if let Some(content) = content {
                     self.diff.update(ctx, move |diff, ctx| {
                         diff.compute_diff(content, *buffer_version, ctx)
                     });

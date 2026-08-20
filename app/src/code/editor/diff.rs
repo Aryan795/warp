@@ -619,10 +619,14 @@ impl DiffModel {
         self.abort_handle = Some((handle, version));
     }
 
-    /// Whether a diff computation is currently in flight (i.e. `compute_diff` scheduled an
-    /// async task that hasn't completed yet).
+    /// Whether `compute_diff` has been called since the diff base was last set. Reflects
+    /// `abort_handle` being populated: it becomes `Some` as soon as `compute_diff` schedules
+    /// its async task, stays `Some` (with the handle replaced) across later `compute_diff`
+    /// calls, and is only cleared back to `None` by `set_base`. This does NOT indicate whether
+    /// the spawned computation has completed — a long-finished computation still leaves this
+    /// `true`.
     #[cfg(test)]
-    pub(crate) fn has_pending_diff_computation(&self) -> bool {
+    pub(crate) fn diff_computation_was_scheduled(&self) -> bool {
         self.abort_handle.is_some()
     }
 
