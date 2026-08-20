@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use ratatui::buffer::CellWidth;
 use ratatui::style::{Color, Modifier};
 
@@ -14,7 +16,9 @@ fn line_buffer(line: &str) -> TuiBuffer {
 
 fn draw_to_string(renderer: &mut TuiFrameRenderer, buffer: &TuiBuffer) -> String {
     let mut output = Vec::new();
-    renderer.draw(&mut output, buffer, None).unwrap();
+    renderer
+        .draw(&mut output, buffer, None, &HashMap::new())
+        .unwrap();
     String::from_utf8(output).unwrap()
 }
 
@@ -265,13 +269,17 @@ fn cursor_is_shown_when_present_and_hidden_otherwise() {
     let buffer = line_buffer("abc");
 
     let mut shown = Vec::new();
-    renderer.draw(&mut shown, &buffer, Some((1, 0))).unwrap();
+    renderer
+        .draw(&mut shown, &buffer, Some((1, 0)), &HashMap::new())
+        .unwrap();
     let shown = String::from_utf8(shown).unwrap();
     assert!(shown.contains("\u{1b}[?25h"), "cursor should be shown");
     assert!(shown.contains(&move_to(1, 0)));
 
     let mut hidden = Vec::new();
-    renderer.draw(&mut hidden, &buffer, None).unwrap();
+    renderer
+        .draw(&mut hidden, &buffer, None, &HashMap::new())
+        .unwrap();
     let hidden = String::from_utf8(hidden).unwrap();
     assert!(hidden.contains("\u{1b}[?25l"), "cursor should be hidden");
 }
