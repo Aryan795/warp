@@ -8,7 +8,6 @@ use pathfinder_geometry::vector::vec2f;
 use warp_core::ui::Icon;
 use warp_core::ui::appearance::Appearance;
 use warp_graphql::billing::AddonCreditsOption;
-use warp_graphql::error::BudgetExceededError;
 use warpui::elements::{
     Align, Border, ChildAnchor, ChildView, ConstrainedBox, Container, CornerRadius,
     CrossAxisAlignment, DropShadow, Expanded, Flex, FormattedTextElement, HighlightedHyperlink,
@@ -36,7 +35,9 @@ use crate::server::ids::ServerId;
 use crate::server::telemetry::{OutOfCreditsBannerAction, TelemetryEvent};
 use crate::settings_view::create_discount_badge;
 use crate::view_components::{Dropdown, DropdownAction};
-use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
+use crate::workspaces::user_workspaces::{
+    PurchaseAddonCreditsCompletion, UserWorkspaces, UserWorkspacesEvent,
+};
 
 #[derive(Default)]
 struct MouseStates {
@@ -54,13 +55,6 @@ pub struct BuyCreditsBanner {
     addon_credits_options: Vec<AddonCreditsOption>,
     selected_denomination_index: usize,
     purchase_addon_credits_loading: bool,
-    /// The team explicitly targeted by the in-flight purchase, captured when the buy button
-    /// was clicked (`None` outer = no purchase in flight for this banner; inner `None` =
-    /// personal purchase). Completion handling authorizes and acts against this captured
-    /// target, not whichever team the window currently shows: the window can switch teams
-    /// while the purchase is in flight, and every window's banner observes the same global
-    /// purchase events, so a stray event with nothing pending here belongs to another window.
-    pending_purchase_team_uid: Option<Option<ServerId>>,
     should_display_banner: bool,
     billing_settings_hyperlink: HighlightedHyperlink,
     is_denomination_dropdown_open: bool,
@@ -70,6 +64,12 @@ pub struct BuyCreditsBanner {
     /// saved payment method). Shows a "finish in browser" banner until the
     /// credits land via polling or the user dismisses it.
     checkout_pending: bool,
+    /// The team a checkout-in-progress purchase targeted (`None` outer = no checkout
+    /// pending; inner `None` = personal purchase). Unlike the purchase's own synchronous
+    /// completion — correlated per call via the `Receiver` `purchase_addon_credits` returns
+    /// — the browser-checkout completion is detected later via credit-availability polling,
+    /// which cannot carry that correlation, so this banner-local field remembers it instead.
+    checkout_pending_team_uid: Option<Option<ServerId>>,
 }
 
 impl BuyCreditsBanner {
@@ -102,10 +102,10 @@ impl BuyCreditsBanner {
                         // The browser checkout completed; honor the
                         // auto-reload opt-in made when initiating the
                         // purchase, like the synchronous purchase path does.
-                        // `take()` also drops this banner's pending-purchase
+                        // `take()` also drops this banner's pending-checkout
                         // marker now that the purchase is fully resolved.
-                        if let Some(purchased_team_uid) = me.pending_purchase_team_uid.take() {
-                            me.enable_auto_reload_if_requested(purchased_team_uid, ctx);
+                        if let Some(team_uid) = me.checkout_pending_team_uid.take() {
+                            me.enable_auto_reload_if_requested(team_uid, ctx);
                         }
                     }
                     ctx.notify();
@@ -145,13 +145,13 @@ impl BuyCreditsBanner {
             addon_credits_options: Default::default(),
             selected_denomination_index: 0,
             purchase_addon_credits_loading: false,
-            pending_purchase_team_uid: None,
             should_display_banner: false,
             billing_settings_hyperlink: HighlightedHyperlink::default(),
             is_denomination_dropdown_open: false,
             auto_reload_enabled: false,
             banner_auto_reload_update_in_flight: false,
             checkout_pending: false,
+            checkout_pending_team_uid: None,
         };
         me.update_addon_credits_options(ctx);
         me
@@ -169,96 +169,12 @@ impl BuyCreditsBanner {
                 self.update_addon_credits_options(ctx);
                 ctx.notify();
             }
-            UserWorkspacesEvent::PurchaseAddonCreditsCheckoutRequired { checkout_url } => {
-                if self.purchase_addon_credits_loading {
-                    self.purchase_addon_credits_loading = false;
-                    self.checkout_pending = true;
-                    ctx.open_url(checkout_url);
-                    ctx.notify();
-                }
-            }
-            UserWorkspacesEvent::PurchaseAddonCreditsSuccess => {
-                // This is a global event: every window's banner observes it. Nothing pending
-                // here means some other window's purchase succeeded, not this one's; ignore it
-                // rather than authorizing or acting against whichever team this window
-                // happens to show right now.
-                let Some(purchased_team_uid) = self.pending_purchase_team_uid.take() else {
-                    return;
-                };
-                self.purchase_addon_credits_loading = false;
-                self.checkout_pending = false;
-
-                let banner_toggle_flag_enabled =
-                    FeatureFlag::BuildPlanAutoReloadBannerToggle.is_enabled();
-                let post_purchase_modal_flag_enabled =
-                    FeatureFlag::BuildPlanAutoReloadPostPurchaseModal.is_enabled();
-
-                let selected_credits = self
-                    .addon_credits_options
-                    .get(self.selected_denomination_index)
-                    .map(|option| option.credits);
-                let has_admin_permissions = {
-                    let purchased_team = purchased_team_uid
-                        .and_then(|team_uid| UserWorkspaces::as_ref(ctx).team_from_uid(team_uid));
-                    let auth_state = AuthStateProvider::as_ref(ctx).get();
-                    auth_state
-                        .user_email()
-                        .zip(purchased_team)
-                        .map(|(email, team)| team.has_admin_permissions(&email))
-                        .unwrap_or_default()
-                };
-
-                // Things we always do:
-                // - emit telemetry
-                // - hide banner
-                send_telemetry_from_ctx!(
-                    TelemetryEvent::OutOfCreditsBannerClosed {
-                        action: OutOfCreditsBannerAction::CreditsPurchased,
-                        selected_credits,
-                        auto_reload_checkbox_enabled: self.auto_reload_enabled,
-                        banner_toggle_flag_enabled,
-                        post_purchase_modal_flag_enabled,
-                    },
-                    ctx
-                );
-
-                self.should_display_banner = false;
-                AIRequestUsageModel::handle(ctx).update(ctx, |ai_request_usage_model, ctx| {
-                    ai_request_usage_model.dismiss_buy_credits_banner(ctx);
-                });
-
-                // Experiment-specific behavior:
-                // - Banner toggle flow: optionally enable auto-reload immediately.
-                // - Post-purchase modal flow: show the modal.
-                if banner_toggle_flag_enabled {
-                    self.enable_auto_reload_if_requested(purchased_team_uid, ctx);
-                } else if has_admin_permissions && post_purchase_modal_flag_enabled {
-                    // Default selection in the modal should match the denomination the user clicked "buy" on.
-                    ctx.emit(BuyCreditsBannerEvent::OpenAutoReloadModal {
-                        purchased_credits: selected_credits.unwrap_or(0),
-                    });
-                }
-
-                ctx.notify();
-            }
-            UserWorkspacesEvent::PurchaseAddonCreditsRejected(err) => {
-                // As above: a rejection for a purchase this banner never started belongs to
-                // another window.
-                if self.pending_purchase_team_uid.take().is_none() {
-                    return;
-                }
-                self.purchase_addon_credits_loading = false;
-                self.banner_auto_reload_update_in_flight = false;
-
-                if err.downcast_ref::<BudgetExceededError>().is_some() {
-                    self.should_display_banner = true;
-                } else {
-                    AIRequestUsageModel::handle(ctx).update(ctx, |ai_request_usage_model, ctx| {
-                        ai_request_usage_model.dismiss_buy_credits_banner(ctx);
-                    });
-                }
-                ctx.notify();
-            }
+            // This banner's own purchase completion (checkout-required, success, rejected) is
+            // handled directly off the `Receiver` `purchase_addon_credits` returns to the call
+            // that started it (see `handle_purchase_completion`), not off these global events:
+            // every window's banner observes the same event regardless of which call produced
+            // it, so a subscriber here cannot tell its own purchase's result apart from another
+            // window's.
             UserWorkspacesEvent::UpdateWorkspaceSettingsSuccess => {
                 if self.banner_auto_reload_update_in_flight {
                     self.banner_auto_reload_update_in_flight = false;
@@ -322,6 +238,95 @@ impl BuyCreditsBanner {
                 ctx,
             );
         });
+    }
+
+    /// Handles the outcome of the purchase *this banner itself* started, delivered via the
+    /// `Receiver` `UserWorkspaces::purchase_addon_credits` returned to that call. `team_uid` is
+    /// the team that specific purchase targeted, captured at dispatch time in
+    /// `Action::PurchaseAddonCredits`; it is not re-derived from the window here, since the
+    /// window can switch teams while the purchase is in flight.
+    fn handle_purchase_completion(
+        &mut self,
+        completion: PurchaseAddonCreditsCompletion,
+        team_uid: Option<ServerId>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.purchase_addon_credits_loading = false;
+        match completion {
+            PurchaseAddonCreditsCompletion::CheckoutRequired { checkout_url } => {
+                self.checkout_pending = true;
+                self.checkout_pending_team_uid = Some(team_uid);
+                ctx.open_url(&checkout_url);
+                ctx.notify();
+            }
+            PurchaseAddonCreditsCompletion::Completed => {
+                self.checkout_pending = false;
+
+                let banner_toggle_flag_enabled =
+                    FeatureFlag::BuildPlanAutoReloadBannerToggle.is_enabled();
+                let post_purchase_modal_flag_enabled =
+                    FeatureFlag::BuildPlanAutoReloadPostPurchaseModal.is_enabled();
+
+                let selected_credits = self
+                    .addon_credits_options
+                    .get(self.selected_denomination_index)
+                    .map(|option| option.credits);
+                let has_admin_permissions = {
+                    let purchased_team = team_uid
+                        .and_then(|team_uid| UserWorkspaces::as_ref(ctx).team_from_uid(team_uid));
+                    let auth_state = AuthStateProvider::as_ref(ctx).get();
+                    auth_state
+                        .user_email()
+                        .zip(purchased_team)
+                        .map(|(email, team)| team.has_admin_permissions(&email))
+                        .unwrap_or_default()
+                };
+
+                // Things we always do:
+                // - emit telemetry
+                // - hide banner
+                send_telemetry_from_ctx!(
+                    TelemetryEvent::OutOfCreditsBannerClosed {
+                        action: OutOfCreditsBannerAction::CreditsPurchased,
+                        selected_credits,
+                        auto_reload_checkbox_enabled: self.auto_reload_enabled,
+                        banner_toggle_flag_enabled,
+                        post_purchase_modal_flag_enabled,
+                    },
+                    ctx
+                );
+
+                self.should_display_banner = false;
+                AIRequestUsageModel::handle(ctx).update(ctx, |ai_request_usage_model, ctx| {
+                    ai_request_usage_model.dismiss_buy_credits_banner(ctx);
+                });
+
+                // Experiment-specific behavior:
+                // - Banner toggle flow: optionally enable auto-reload immediately.
+                // - Post-purchase modal flow: show the modal.
+                if banner_toggle_flag_enabled {
+                    self.enable_auto_reload_if_requested(team_uid, ctx);
+                } else if has_admin_permissions && post_purchase_modal_flag_enabled {
+                    // Default selection in the modal should match the denomination the user clicked "buy" on.
+                    ctx.emit(BuyCreditsBannerEvent::OpenAutoReloadModal {
+                        purchased_credits: selected_credits.unwrap_or(0),
+                    });
+                }
+
+                ctx.notify();
+            }
+            PurchaseAddonCreditsCompletion::Rejected { is_budget_exceeded } => {
+                self.banner_auto_reload_update_in_flight = false;
+                if is_budget_exceeded {
+                    self.should_display_banner = true;
+                } else {
+                    AIRequestUsageModel::handle(ctx).update(ctx, |ai_request_usage_model, ctx| {
+                        ai_request_usage_model.dismiss_buy_credits_banner(ctx);
+                    });
+                }
+                ctx.notify();
+            }
+        }
     }
 
     fn render_auto_reload_checkbox(&self, appearance: &Appearance) -> Box<dyn Element> {
@@ -1087,10 +1092,21 @@ impl warpui::TypedActionView for BuyCreditsBanner {
                     .get(self.selected_denomination_index)
                 {
                     let credits = option.credits;
+                    let team_uid = *team_uid;
                     self.purchase_addon_credits_loading = true;
-                    self.pending_purchase_team_uid = Some(*team_uid);
-                    UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
-                        user_workspaces.purchase_addon_credits(*team_uid, credits, ctx);
+                    let receiver =
+                        UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
+                            user_workspaces.purchase_addon_credits(team_uid, credits, ctx)
+                        });
+                    let _ = ctx.spawn(receiver, move |me, result, ctx| {
+                        // A cancelled receiver (sender dropped without sending) shouldn't
+                        // happen in practice, but fail closed as a rejection rather than
+                        // leaving the banner stuck showing "Buying…" forever.
+                        let completion =
+                            result.unwrap_or(PurchaseAddonCreditsCompletion::Rejected {
+                                is_budget_exceeded: false,
+                            });
+                        me.handle_purchase_completion(completion, team_uid, ctx);
                     });
                     ctx.notify();
                 }

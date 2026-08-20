@@ -1009,7 +1009,11 @@ impl TypedActionView for BillingAndUsagePageView {
                     let team_uid = *team_uid;
                     self.purchase_addon_credits_loading = true;
                     UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
-                        user_workspaces.purchase_addon_credits(team_uid, credits, ctx);
+                        // This page reacts to the purchase via the global
+                        // `UserWorkspacesEvent::PurchaseAddonCredits*` events (unaffected by
+                        // this call's return value), not the per-call `Receiver`, since there
+                        // is only ever one such page per window.
+                        drop(user_workspaces.purchase_addon_credits(team_uid, credits, ctx));
                     });
                     ctx.notify();
                 }

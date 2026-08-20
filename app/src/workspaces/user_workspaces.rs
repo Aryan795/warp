@@ -2,10 +2,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
+use futures::channel::oneshot::{self, Receiver};
 use regex::Regex;
 use warp_core::features::FeatureFlag;
 use warp_core::settings::{ChangeEventReason, Setting};
 use warp_errors::report_error;
+use warp_graphql::error::BudgetExceededError;
 use warp_graphql::workspace::FeatureModelChoice;
 use warpui::{
     AppContext, Entity, ModelContext, SingletonEntity, Tracked, ViewContext, WeakViewHandle,
@@ -18,8 +20,9 @@ use super::team::{DiscoverableTeam, MembershipRole, Team};
 #[cfg(test)]
 use super::workspace::WorkspaceMemberUsageInfo;
 use super::workspace::{
-    AdminEnablementSetting, BillingMetadata, CustomerType, EnterpriseSecretRegex,
-    HostEnablementSetting, UgcCollectionEnablementSetting, Workspace, WorkspaceUid,
+    AdminEnablementSetting, BillingCycleUsageEntry, BillingMetadata, CustomerType,
+    EnterpriseSecretRegex, HostEnablementSetting, UgcCollectionEnablementSetting, Workspace,
+    WorkspaceUid,
 };
 use crate::ai::credit_availability::AICreditAvailability;
 use crate::ai::llms::LLMModelHost;
@@ -156,6 +159,20 @@ pub struct CreateTeamResponse {
     pub team: Team,
 }
 
+/// The outcome of one [`UserWorkspaces::purchase_addon_credits`] call, delivered directly to
+/// the caller that started it.
+///
+/// `UserWorkspacesEvent::PurchaseAddonCredits*` is global and fires for every subscriber
+/// regardless of which call (if any concurrent ones exist) produced it, so a subscriber with
+/// per-call state (e.g. which team it targeted) cannot tell its own purchase's result apart
+/// from another window's. This type rides the [`Receiver`] returned to the caller instead,
+/// which structurally can only resolve once, for the one call that created it.
+pub(crate) enum PurchaseAddonCreditsCompletion {
+    Completed,
+    CheckoutRequired { checkout_url: String },
+    Rejected { is_budget_exceeded: bool },
+}
+
 /// The team an operation is scoped to, captured once from the window that started it.
 ///
 /// A logical operation carries its `TeamContext` from start to finish instead of asking a
@@ -212,10 +229,19 @@ impl<'a> TeamRenderContext<'a> {
             .any(|member| &member.uid == user_uid)
     }
 
-    /// Whether a usage entry's server-reported `attributed_team_uid` matches the rendered
-    /// team, without handing the team's own UID to the caller for that comparison.
-    pub(crate) fn attributed_team_uid_matches(&self, attributed_team_uid: Option<&str>) -> bool {
-        attributed_team_uid == Some(self.team.uid.to_string().as_str())
+    /// Usage entries the server attributed to the rendered team. Does the comparison
+    /// internally rather than exposing a caller-supplied-candidate-vs-team-UID predicate,
+    /// which would let a caller probe for the team's UID one guess at a time.
+    pub(crate) fn filter_entries_by_attribution(
+        &self,
+        entries: &[BillingCycleUsageEntry],
+    ) -> Vec<BillingCycleUsageEntry> {
+        let team_uid = self.team.uid.to_string();
+        entries
+            .iter()
+            .filter(|entry| entry.attributed_team_uid.as_deref() == Some(team_uid.as_str()))
+            .cloned()
+            .collect()
     }
 }
 
@@ -1756,12 +1782,22 @@ impl UserWorkspaces {
         ctx.notify();
     }
 
-    pub fn purchase_addon_credits(
+    /// Starts an add-on credits purchase and returns a [`Receiver`] that resolves with this
+    /// specific call's outcome — see [`PurchaseAddonCreditsCompletion`] for why callers with
+    /// per-purchase state (e.g. which team to act on) must use this rather than
+    /// [`UserWorkspacesEvent::PurchaseAddonCredits*`] to drive that state.
+    ///
+    /// The global event is still emitted unconditionally alongside it, unchanged, for
+    /// subscribers that only care about workspace-wide state (e.g. refreshed billing
+    /// metadata) and not which call produced it.
+    pub(crate) fn purchase_addon_credits(
         &mut self,
         team_uid: Option<ServerId>,
         credits: i32,
         ctx: &mut ModelContext<Self>,
-    ) {
+    ) -> Receiver<PurchaseAddonCreditsCompletion> {
+        let (sender, receiver) = oneshot::channel();
+        let mut sender = Some(sender);
         let workspace_client = self.workspace_client.clone();
         let _ = ctx.spawn(
             async move {
@@ -1769,15 +1805,32 @@ impl UserWorkspaces {
                     .purchase_addon_credits(team_uid, credits)
                     .await
             },
-            Self::on_purchase_addon_credits,
+            move |model, result, ctx| {
+                model.on_purchase_addon_credits(result, &mut sender, ctx);
+            },
         );
+        receiver
     }
 
     fn on_purchase_addon_credits(
         &mut self,
         result: Result<PurchaseAddonCreditsOutcome>,
+        sender: &mut Option<oneshot::Sender<PurchaseAddonCreditsCompletion>>,
         ctx: &mut ModelContext<Self>,
     ) {
+        let completion = match &result {
+            Ok(PurchaseAddonCreditsOutcome::Completed(_)) => {
+                PurchaseAddonCreditsCompletion::Completed
+            }
+            Ok(PurchaseAddonCreditsOutcome::CheckoutRequired { checkout_url }) => {
+                PurchaseAddonCreditsCompletion::CheckoutRequired {
+                    checkout_url: checkout_url.clone(),
+                }
+            }
+            Err(err) => PurchaseAddonCreditsCompletion::Rejected {
+                is_budget_exceeded: err.downcast_ref::<BudgetExceededError>().is_some(),
+            },
+        };
         match result {
             Ok(PurchaseAddonCreditsOutcome::Completed(result)) => {
                 let wrapped = WorkspacesMetadataWithPricing {
@@ -1799,6 +1852,9 @@ impl UserWorkspaces {
             }
         };
         ctx.notify();
+        if let Some(sender) = sender.take() {
+            let _ = sender.send(completion);
+        }
     }
 
     pub fn refresh_ai_overages(&mut self, ctx: &mut ModelContext<Self>) {

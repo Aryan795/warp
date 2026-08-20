@@ -71,8 +71,10 @@ use crate::workspaces::team_tester::TeamTesterStatus;
 use crate::workspaces::update_manager::TeamUpdateManager;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::workspaces::workspace::{
-    AdminEnablementSetting, HostEnablementSetting, LlmHostSettings, MultiAdminPolicy,
-    PurchaseAddOnCreditsPolicy, Workspace,
+    AdminEnablementSetting, AiCreditsUsageAndCostSubjectType, AiCreditsUsageAndCostType,
+    AiCreditsUsageBucket, AiCreditsUsageSource, BillingCycleUsageEntry, CodebaseContextSettings,
+    HostEnablementSetting, LlmHostSettings, MultiAdminPolicy, PurchaseAddOnCreditsPolicy,
+    Workspace,
 };
 
 #[derive(Default)]
@@ -1256,13 +1258,40 @@ fn test_team_render_context_predicates_match_each_windows_own_team() {
                 "team A should not claim a member that never joined it"
             );
 
-            let team_a_uid_string = team_a.uid.to_string();
-            let team_b_uid_string = team_b.uid.to_string();
-            assert!(render_a.attributed_team_uid_matches(Some(team_a_uid_string.as_str())));
-            assert!(!render_a.attributed_team_uid_matches(Some(team_b_uid_string.as_str())));
-            assert!(!render_a.attributed_team_uid_matches(None));
+            // `filter_entries_by_attribution` does the whole comparison internally rather
+            // than exposing a bare candidate-vs-team-UID predicate a caller could use to
+            // probe for the team's UID one guess at a time.
+            let entries = vec![
+                entry_attributed_to(Some(team_a.uid.to_string())),
+                entry_attributed_to(Some(team_b.uid.to_string())),
+                entry_attributed_to(None),
+            ];
+            let filtered = render_a.filter_entries_by_attribution(&entries);
+            assert_eq!(
+                filtered.len(),
+                1,
+                "only the entry attributed to team A should survive"
+            );
+            assert_eq!(
+                filtered[0].attributed_team_uid,
+                Some(team_a.uid.to_string())
+            );
         });
     })
+}
+
+fn entry_attributed_to(attributed_team_uid: Option<String>) -> BillingCycleUsageEntry {
+    BillingCycleUsageEntry {
+        subject_type: AiCreditsUsageAndCostSubjectType::User,
+        subject_uid: None,
+        subject_display_name: None,
+        cost_type: AiCreditsUsageAndCostType::BaseLimit,
+        usage_bucket: AiCreditsUsageBucket::Ai,
+        usage_source: AiCreditsUsageSource::Local,
+        credits_used: 1,
+        cost_cents: 0,
+        attributed_team_uid,
+    }
 }
 
 #[test]
@@ -1923,7 +1952,7 @@ fn test_purchase_addon_credits_forwards_teamless_team_uid() {
         });
 
         UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
-            user_workspaces.purchase_addon_credits(None, 1_000, ctx);
+            drop(user_workspaces.purchase_addon_credits(None, 1_000, ctx));
         });
 
         // Give the spawned client call time to run so the mock expectation is
@@ -1956,7 +1985,7 @@ fn test_purchase_addon_credits_forwards_team_uid_when_present() {
         });
 
         UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
-            user_workspaces.purchase_addon_credits(Some(123.into()), 2_000, ctx);
+            drop(user_workspaces.purchase_addon_credits(Some(123.into()), 2_000, ctx));
         });
 
         // Give the spawned client call time to run so the mock expectation is

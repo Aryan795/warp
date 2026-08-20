@@ -144,12 +144,7 @@ impl BillingCycleUsageSectionView {
                 .unwrap_or_default(),
         );
         match self.render_context(app) {
-            Some(render_context) => entries
-                .into_iter()
-                .filter(|entry| {
-                    render_context.attributed_team_uid_matches(entry.attributed_team_uid.as_deref())
-                })
-                .collect(),
+            Some(render_context) => render_context.filter_entries_by_attribution(&entries),
             // No team resolved (teamless viewer): nothing to scope to, so
             // leave the entries as the server sent them.
             None => entries,
