@@ -71,8 +71,9 @@ use crate::workspaces::team_tester::TeamTesterStatus;
 use crate::workspaces::update_manager::TeamUpdateManager;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::workspaces::workspace::{
-    AdminEnablementSetting, CodebaseContextSettings, HostEnablementSetting, LlmHostSettings,
-    MultiAdminPolicy, PurchaseAddOnCreditsPolicy, Workspace,
+    AdminEnablementSetting, ByoApiKeyPolicy, ByoEndpointPolicy, CodebaseContextSettings,
+    HostEnablementSetting, LlmHostSettings, ManagedByokByoePolicy, MultiAdminPolicy,
+    PurchaseAddOnCreditsPolicy, TeamByoSettings, Workspace,
 };
 
 #[derive(Default)]
@@ -1188,6 +1189,221 @@ fn test_team_context_and_render_context_return_none_without_a_team() {
                     .team_render_context_for_view_handle(&weak_view, ctx)
                     .is_none(),
                 "a window with no team should not resolve a TeamRenderContext"
+            );
+        });
+    })
+}
+
+#[test]
+fn test_agent_settings_byo_key_enabled_reads_selected_team_per_window() {
+    let (mut team_a, mut team_b) = two_teams();
+    team_a.billing_metadata.tier.byo_api_key_policy = Some(ByoApiKeyPolicy { enabled: true });
+    team_b.billing_metadata.tier.byo_api_key_policy = Some(ByoApiKeyPolicy { enabled: false });
+    let mut workspace = workspace_for_test(&team_a);
+    workspace.teams.push(team_b.clone());
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+        app.add_singleton_model(|_| AuthStateProvider::new_for_test());
+
+        let (window_a, view_a) = create_test_window(&mut app);
+        let (window_b, view_b) = create_test_window(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window_a, team_a.uid, ctx);
+            user_workspaces.set_team_for_window(window_b, team_b.uid, ctx);
+        });
+        let weak_a = view_a.downgrade();
+        let weak_b = view_b.downgrade();
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            let context_a = user_workspaces.team_render_context_for_view_handle(&weak_a, ctx);
+            let context_b = user_workspaces.team_render_context_for_view_handle(&weak_b, ctx);
+            assert!(
+                user_workspaces.agent_settings_is_byo_api_key_enabled(context_a.as_ref(), ctx),
+                "team A's BYO API key policy should be enabled for its window"
+            );
+            assert!(
+                !user_workspaces.agent_settings_is_byo_api_key_enabled(context_b.as_ref(), ctx),
+                "team B's BYO API key policy should be disabled for its window"
+            );
+        });
+    })
+}
+
+#[test]
+fn test_agent_settings_are_member_byo_keys_allowed_follows_window_team_change() {
+    let (mut team_a, mut team_b) = two_teams();
+    // Team A imposes no managed BYOK/BYOE policy, so members are unrestricted.
+    team_a.billing_metadata.tier.managed_byok_byoe_policy = None;
+    // Team B manages BYOK/BYOE centrally and disallows member-provided keys.
+    team_b.billing_metadata.tier.managed_byok_byoe_policy =
+        Some(ManagedByokByoePolicy { enabled: true });
+    team_b.settings.team_byo = Some(TeamByoSettings {
+        first_party_enabled: true,
+        endpoints_enabled: true,
+        allow_user_keys: false,
+        allow_user_endpoints: false,
+        first_party_keys: vec![],
+        endpoints: vec![],
+    });
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace_for_test(&team_a)]);
+
+        let (window_id, view) = create_test_window(&mut app);
+        let weak_view = view.downgrade();
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window_id, team_a.uid, ctx);
+        });
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            let context = user_workspaces.team_render_context_for_view_handle(&weak_view, ctx);
+            assert!(
+                user_workspaces.agent_settings_are_member_byo_keys_allowed(context.as_ref()),
+                "team A has no managed BYOK/BYOE policy, so members should be unrestricted"
+            );
+        });
+
+        // Reconcile the window onto team B by removing team A from the workspace.
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.update_workspaces(vec![workspace_for_test(&team_b)], ctx);
+        });
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            let context = user_workspaces.team_render_context_for_view_handle(&weak_view, ctx);
+            assert!(
+                !user_workspaces.agent_settings_are_member_byo_keys_allowed(context.as_ref()),
+                "after the window reconciles onto team B, its restrictive BYOK policy should apply"
+            );
+        });
+    })
+}
+
+#[test]
+fn test_agent_settings_custom_inference_enabled_reads_selected_team_per_window() {
+    let (mut team_a, mut team_b) = two_teams();
+    team_a.billing_metadata.tier.byo_endpoint_policy = Some(ByoEndpointPolicy { enabled: true });
+    team_b.billing_metadata.tier.byo_endpoint_policy = Some(ByoEndpointPolicy { enabled: false });
+    let mut workspace = workspace_for_test(&team_a);
+    workspace.teams.push(team_b.clone());
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+        app.add_singleton_model(|_| AuthStateProvider::new_for_test());
+
+        let (window_a, view_a) = create_test_window(&mut app);
+        let (window_b, view_b) = create_test_window(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window_a, team_a.uid, ctx);
+            user_workspaces.set_team_for_window(window_b, team_b.uid, ctx);
+        });
+        let weak_a = view_a.downgrade();
+        let weak_b = view_b.downgrade();
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            let context_a = user_workspaces.team_render_context_for_view_handle(&weak_a, ctx);
+            let context_b = user_workspaces.team_render_context_for_view_handle(&weak_b, ctx);
+            assert!(
+                user_workspaces.agent_settings_is_custom_inference_enabled(context_a.as_ref(), ctx),
+                "team A's custom-endpoint policy should be enabled for its window"
+            );
+            assert!(
+                !user_workspaces
+                    .agent_settings_is_custom_inference_enabled(context_b.as_ref(), ctx),
+                "team B's custom-endpoint policy should be disabled for its window"
+            );
+        });
+    })
+}
+
+#[test]
+fn test_agent_settings_are_member_byo_endpoints_allowed_follows_window_team_change() {
+    let (mut team_a, mut team_b) = two_teams();
+    // Team A imposes no managed BYOK/BYOE policy, so members are unrestricted.
+    team_a.billing_metadata.tier.managed_byok_byoe_policy = None;
+    // Team B manages BYOK/BYOE centrally and disallows member-provided endpoints.
+    team_b.billing_metadata.tier.managed_byok_byoe_policy =
+        Some(ManagedByokByoePolicy { enabled: true });
+    team_b.settings.team_byo = Some(TeamByoSettings {
+        first_party_enabled: true,
+        endpoints_enabled: true,
+        allow_user_keys: false,
+        allow_user_endpoints: false,
+        first_party_keys: vec![],
+        endpoints: vec![],
+    });
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace_for_test(&team_a)]);
+
+        let (window_id, view) = create_test_window(&mut app);
+        let weak_view = view.downgrade();
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window_id, team_a.uid, ctx);
+        });
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            let context = user_workspaces.team_render_context_for_view_handle(&weak_view, ctx);
+            assert!(
+                user_workspaces.agent_settings_are_member_byo_endpoints_allowed(context.as_ref()),
+                "team A has no managed BYOK/BYOE policy, so members should be unrestricted"
+            );
+        });
+
+        // Reconcile the window onto team B by removing team A from the workspace.
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.update_workspaces(vec![workspace_for_test(&team_b)], ctx);
+        });
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            let context = user_workspaces.team_render_context_for_view_handle(&weak_view, ctx);
+            assert!(
+                !user_workspaces.agent_settings_are_member_byo_endpoints_allowed(context.as_ref()),
+                "after the window reconciles onto team B, its restrictive BYOE policy should apply"
+            );
+        });
+    })
+}
+
+#[test]
+fn test_agent_settings_byo_reads_default_without_a_team() {
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![]);
+        app.add_singleton_model(|_| AuthStateProvider::new_for_test());
+        let _flag = FeatureFlag::SoloUserByok.override_enabled(true);
+
+        let (window_id, _view) = create_test_window(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.register_window(window_id, None, ctx);
+        });
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert!(
+                user_workspaces.agent_settings_is_byo_api_key_enabled(None, ctx),
+                "a no-team window should fall back to the solo-user BYO API key flag"
+            );
+            assert!(
+                user_workspaces.agent_settings_are_member_byo_keys_allowed(None),
+                "a no-team window has no managed BYOK policy restricting it"
+            );
+            assert!(
+                user_workspaces.agent_settings_is_custom_inference_enabled(None, ctx),
+                "a no-team window should default custom inference to enabled"
+            );
+            assert!(
+                user_workspaces.agent_settings_are_member_byo_endpoints_allowed(None),
+                "a no-team window has no managed BYOE policy restricting it"
+            );
+            assert!(
+                !user_workspaces.agent_settings_is_managed_byok_byoe_enabled(None),
+                "a no-team window has no team to manage BYOK/BYOE centrally"
             );
         });
     })

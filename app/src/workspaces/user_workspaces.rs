@@ -22,7 +22,7 @@ use super::workspace::{
     HostEnablementSetting, UgcCollectionEnablementSetting, Workspace, WorkspaceUid,
 };
 use crate::ai::credit_availability::AICreditAvailability;
-use crate::ai::llms::LLMModelHost;
+use crate::ai::llms::{LLMModelHost, LLMProvider};
 use crate::ai::request_usage_model::AIRequestUsageModel;
 use crate::auth::{AuthStateProvider, UserUid};
 use crate::channel::ChannelState;
@@ -842,6 +842,139 @@ impl UserWorkspaces {
                         team_byo.endpoints_enabled && team_byo.allow_user_endpoints
                     })
         })
+    }
+
+    /// [`Self::is_byo_api_key_enabled`], scoped to `context`'s team. `context` is `None` for
+    /// a no-team window, which falls back to the `SoloUserByok` feature flag.
+    pub(crate) fn agent_settings_is_byo_api_key_enabled(
+        &self,
+        context: Option<&TeamRenderContext<'_>>,
+        app: &AppContext,
+    ) -> bool {
+        if AuthStateProvider::as_ref(app)
+            .get()
+            .is_anonymous_or_logged_out()
+        {
+            return false;
+        }
+        context
+            .map(|context| context.team.billing_metadata.is_byo_api_key_enabled())
+            .unwrap_or(FeatureFlag::SoloUserByok.is_enabled())
+    }
+
+    /// [`Self::are_member_byo_keys_allowed`], scoped to `context`'s team. `context` is
+    /// `None` for a no-team window, which has no managed BYOK policy and returns `true`.
+    pub(crate) fn agent_settings_are_member_byo_keys_allowed(
+        &self,
+        context: Option<&TeamRenderContext<'_>>,
+    ) -> bool {
+        context.is_none_or(|context| {
+            !context.team.billing_metadata.is_managed_byok_byoe_enabled()
+                || context
+                    .team
+                    .settings
+                    .team_byo
+                    .as_ref()
+                    .is_some_and(|team_byo| {
+                        team_byo.first_party_enabled && team_byo.allow_user_keys
+                    })
+        })
+    }
+
+    /// [`Self::is_custom_inference_enabled`], scoped to `context`'s team. `context` is
+    /// `None` for a no-team window, which returns `true`.
+    pub(crate) fn agent_settings_is_custom_inference_enabled(
+        &self,
+        context: Option<&TeamRenderContext<'_>>,
+        app: &AppContext,
+    ) -> bool {
+        if AuthStateProvider::as_ref(app)
+            .get()
+            .is_anonymous_or_logged_out()
+        {
+            return false;
+        }
+        context
+            .map(|context| context.team.billing_metadata.is_byo_endpoint_enabled())
+            .unwrap_or(true)
+    }
+
+    /// [`Self::are_member_byo_endpoints_allowed`], scoped to `context`'s team. `context` is
+    /// `None` for a no-team window, which has no managed BYOK policy and returns `true`.
+    pub(crate) fn agent_settings_are_member_byo_endpoints_allowed(
+        &self,
+        context: Option<&TeamRenderContext<'_>>,
+    ) -> bool {
+        context.is_none_or(|context| {
+            !context.team.billing_metadata.is_managed_byok_byoe_enabled()
+                || context
+                    .team
+                    .settings
+                    .team_byo
+                    .as_ref()
+                    .is_some_and(|team_byo| {
+                        team_byo.endpoints_enabled && team_byo.allow_user_endpoints
+                    })
+        })
+    }
+
+    /// Whether `context`'s team manages BYOK/BYOE centrally. `context` is `None` for a
+    /// no-team window, which has no such policy and returns `false`.
+    pub(crate) fn agent_settings_is_managed_byok_byoe_enabled(
+        &self,
+        context: Option<&TeamRenderContext<'_>>,
+    ) -> bool {
+        context.is_some_and(|context| context.team.billing_metadata.is_managed_byok_byoe_enabled())
+    }
+
+    /// Whether `context`'s team has provided its own first-party key for `provider`.
+    /// `context` is `None` for a no-team window, which has no team-provided key and returns
+    /// `false`.
+    pub(crate) fn agent_settings_has_team_first_party_key(
+        &self,
+        context: Option<&TeamRenderContext<'_>>,
+        provider: LLMProvider,
+    ) -> bool {
+        context.is_some_and(|context| {
+            context.team.billing_metadata.is_managed_byok_byoe_enabled()
+                && context
+                    .team
+                    .settings
+                    .team_byo
+                    .as_ref()
+                    .is_some_and(|team_byo| {
+                        team_byo.first_party_enabled
+                            && team_byo
+                                .first_party_keys
+                                .iter()
+                                .any(|key| key.provider == provider)
+                    })
+        })
+    }
+
+    /// Whether `context`'s team is an Enterprise customer.
+    pub(crate) fn agent_settings_is_enterprise_team(
+        &self,
+        context: &TeamRenderContext<'_>,
+    ) -> bool {
+        context.team.billing_metadata.customer_type == CustomerType::Enterprise
+    }
+
+    /// Whether `user_email` has admin permissions on `context`'s team.
+    pub(crate) fn agent_settings_team_has_admin_permissions(
+        &self,
+        context: &TeamRenderContext<'_>,
+        user_email: &str,
+    ) -> bool {
+        context.team.has_admin_permissions(user_email)
+    }
+
+    /// The Build-plan upgrade link for `context`'s team.
+    pub(crate) fn agent_settings_upgrade_link_for_team(
+        &self,
+        context: &TeamRenderContext<'_>,
+    ) -> String {
+        Self::upgrade_link_for_team(context.team.uid)
     }
 
     pub fn aws_bedrock_host_settings(&self) -> Option<&super::workspace::LlmHostSettings> {

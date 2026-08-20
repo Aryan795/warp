@@ -108,7 +108,7 @@ use crate::view_components::action_button::{
 };
 use crate::view_components::{Dropdown, DropdownItem, FilterableDropdown};
 use crate::workspaces::user_workspaces::UserWorkspacesEvent;
-use crate::workspaces::workspace::{AdminEnablementSetting, CustomerType};
+use crate::workspaces::workspace::AdminEnablementSetting;
 use crate::{TelemetryEvent, UserWorkspaces, send_telemetry_from_ctx};
 
 const PRIMARY_HEADER_FONT_SIZE: f32 = 24.;
@@ -925,9 +925,7 @@ impl WarpAgentPageView {
             });
         }
 
-        let custom_inference_controls_enabled = is_any_ai_enabled
-            && UserWorkspaces::as_ref(ctx).is_custom_inference_enabled(ctx)
-            && UserWorkspaces::as_ref(ctx).are_member_byo_endpoints_allowed();
+        let custom_inference_controls_enabled = Self::can_use_custom_inference_controls(ctx);
         let custom_inference_add_button = ctx.add_typed_action_view(|_| {
             ActionButton::new("+ Add custom model", SecondaryTheme)
                 .with_size(ButtonSize::Small)
@@ -1422,10 +1420,14 @@ impl WarpAgentPageView {
             })
             .collect()
     }
-    fn can_use_custom_inference_controls(app: &AppContext) -> bool {
-        AISettings::as_ref(app).is_any_ai_enabled(app)
-            && UserWorkspaces::as_ref(app).is_custom_inference_enabled(app)
-            && UserWorkspaces::as_ref(app).are_member_byo_endpoints_allowed()
+    fn can_use_custom_inference_controls(ctx: &ViewContext<Self>) -> bool {
+        if !AISettings::as_ref(ctx).is_any_ai_enabled(ctx) {
+            return false;
+        }
+        let workspaces = UserWorkspaces::as_ref(ctx);
+        let team_context = workspaces.team_render_context_for_view_handle(&ctx.handle(), ctx);
+        workspaces.agent_settings_is_custom_inference_enabled(team_context.as_ref(), ctx)
+            && workspaces.agent_settings_are_member_byo_endpoints_allowed(team_context.as_ref())
     }
 
     fn show_add_custom_endpoint_modal(&mut self, ctx: &mut ViewContext<Self>) {
@@ -2887,15 +2889,16 @@ impl ActiveAIWidget {
 
     // TODO: Check if the user's enterprise billing policy allows toggling this feature.
     fn is_shared_block_title_generation_toggleable(&self, app: &AppContext) -> bool {
+        let workspaces = UserWorkspaces::as_ref(app);
+        let is_enterprise_team = workspaces
+            .team_render_context_for_view_handle(&self.view_handle, app)
+            .is_some_and(|context| workspaces.agent_settings_is_enterprise_team(&context));
+
         FeatureFlag::SharedBlockTitleGeneration.is_enabled()
             && AISettings::as_ref(app)
                 .shared_block_title_generation_enabled_internal
                 .is_supported_on_current_platform()
-            && (!UserWorkspaces::as_ref(app)
-                .team_for_view_handle(&self.view_handle, app)
-                .is_some_and(|team| {
-                    team.billing_metadata.customer_type == CustomerType::Enterprise
-                })
+            && (!is_enterprise_team
                 // Override the enterprise check for dogfood builds, as our dogfood team
                 // is an enterprise team.
                 || ChannelState::channel().is_dogfood())
@@ -4266,8 +4269,13 @@ impl ApiKeysWidget {
         let ai_settings = AISettings::as_ref(ctx);
         let workspace_handle = UserWorkspaces::handle(ctx);
         let is_any_ai_enabled = ai_settings.is_any_ai_enabled(ctx);
-        let is_byo_enabled = workspace_handle.as_ref(ctx).is_byo_api_key_enabled(ctx);
-        let member_byo_keys_allowed = workspace_handle.as_ref(ctx).are_member_byo_keys_allowed();
+        let view_handle = ctx.handle();
+        let workspaces = workspace_handle.as_ref(ctx);
+        let team_context = workspaces.team_render_context_for_view_handle(&view_handle, ctx);
+        let is_byo_enabled =
+            workspaces.agent_settings_is_byo_api_key_enabled(team_context.as_ref(), ctx);
+        let member_byo_keys_allowed =
+            workspaces.agent_settings_are_member_byo_keys_allowed(team_context.as_ref());
 
         let provider_api_key_editors = LLMProvider::API_KEY_PROVIDERS
             .into_iter()
@@ -4323,9 +4331,13 @@ impl ApiKeysWidget {
                     if let UserWorkspacesEvent::TeamsChanged = event {
                         let is_any_ai_enabled =
                             AISettings::handle(ctx).as_ref(ctx).is_any_ai_enabled(ctx);
-                        let is_byo_enabled = workspace.as_ref(ctx).is_byo_api_key_enabled(ctx);
-                        let member_byo_keys_allowed =
-                            workspace.as_ref(ctx).are_member_byo_keys_allowed();
+                        let workspaces = workspace.as_ref(ctx);
+                        let team_context =
+                            workspaces.team_render_context_for_view_handle(&ctx.handle(), ctx);
+                        let is_byo_enabled = workspaces
+                            .agent_settings_is_byo_api_key_enabled(team_context.as_ref(), ctx);
+                        let member_byo_keys_allowed = workspaces
+                            .agent_settings_are_member_byo_keys_allowed(team_context.as_ref());
                         let is_enabled = is_any_ai_enabled && is_byo_enabled;
                         let has_key = !editor_clone.as_ref(ctx).is_empty(ctx);
                         if !is_byo_enabled && has_key {
@@ -4428,8 +4440,13 @@ impl ApiKeysWidget {
         ctx.subscribe_to_model(&workspace_handle, move |_, workspace, event, ctx| {
             if let UserWorkspacesEvent::TeamsChanged = event {
                 let is_any_ai_enabled = AISettings::handle(ctx).as_ref(ctx).is_any_ai_enabled(ctx);
-                let is_byo_enabled = workspace.as_ref(ctx).is_byo_api_key_enabled(ctx);
-                let member_byo_keys_allowed = workspace.as_ref(ctx).are_member_byo_keys_allowed();
+                let workspaces = workspace.as_ref(ctx);
+                let team_context =
+                    workspaces.team_render_context_for_view_handle(&ctx.handle(), ctx);
+                let is_byo_enabled =
+                    workspaces.agent_settings_is_byo_api_key_enabled(team_context.as_ref(), ctx);
+                let member_byo_keys_allowed =
+                    workspaces.agent_settings_are_member_byo_keys_allowed(team_context.as_ref());
                 for button in &grok_buttons {
                     button.update(ctx, |button, ctx| {
                         button.set_disabled(
@@ -4451,7 +4468,7 @@ impl ApiKeysWidget {
         });
 
         Self {
-            view_handle: ctx.handle(),
+            view_handle,
             provider_api_key_editors,
 
             grok_connect_button,
@@ -4466,23 +4483,10 @@ impl ApiKeysWidget {
             description_learn_more_index: Default::default(),
         }
     }
-    fn has_team_first_party_key(provider: &LLMProvider, app: &AppContext) -> bool {
-        UserWorkspaces::as_ref(app)
-            .current_workspace()
-            .is_some_and(|workspace| {
-                workspace.billing_metadata.is_managed_byok_byoe_enabled()
-                    && workspace
-                        .settings
-                        .team_byo
-                        .as_ref()
-                        .is_some_and(|team_byo| {
-                            team_byo.first_party_enabled
-                                && team_byo
-                                    .first_party_keys
-                                    .iter()
-                                    .any(|key| key.provider == *provider)
-                        })
-            })
+    fn has_team_first_party_key(&self, provider: LLMProvider, app: &AppContext) -> bool {
+        let workspaces = UserWorkspaces::as_ref(app);
+        let team_context = workspaces.team_render_context_for_view_handle(&self.view_handle, app);
+        workspaces.agent_settings_has_team_first_party_key(team_context.as_ref(), provider)
     }
 
     fn render_team_key_info_icon(
@@ -4572,7 +4576,7 @@ impl ApiKeysWidget {
         let mut label_row = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_child(label);
-        if Self::has_team_first_party_key(&provider, app) {
+        if self.has_team_first_party_key(provider, app) {
             label_row.add_child(
                 Container::new(self.render_team_key_info_icon(
                     &provider,
@@ -5026,13 +5030,18 @@ struct CustomInferenceVisibility {
 }
 
 impl CustomInferenceVisibility {
-    fn compute(app: &AppContext) -> Self {
+    fn compute(view_handle: &WeakViewHandle<WarpAgentPageView>, app: &AppContext) -> Self {
         let workspaces = UserWorkspaces::as_ref(app);
+        let team_context = workspaces.team_render_context_for_view_handle(view_handle, app);
         let is_any_ai_enabled = AISettings::as_ref(app).is_any_ai_enabled(app);
-        let is_byo_enabled = workspaces.is_byo_api_key_enabled(app);
-        let is_custom_inference_enabled = workspaces.is_custom_inference_enabled(app);
-        let member_byo_keys_allowed = workspaces.are_member_byo_keys_allowed();
-        let member_byo_endpoints_allowed = workspaces.are_member_byo_endpoints_allowed();
+        let is_byo_enabled =
+            workspaces.agent_settings_is_byo_api_key_enabled(team_context.as_ref(), app);
+        let is_custom_inference_enabled =
+            workspaces.agent_settings_is_custom_inference_enabled(team_context.as_ref(), app);
+        let member_byo_keys_allowed =
+            workspaces.agent_settings_are_member_byo_keys_allowed(team_context.as_ref());
+        let member_byo_endpoints_allowed =
+            workspaces.agent_settings_are_member_byo_endpoints_allowed(team_context.as_ref());
 
         // BYOK: shown even when BYO is off so the upgrade CTA can render.
         let show_provider_keys = member_byo_keys_allowed;
@@ -5050,8 +5059,7 @@ impl CustomInferenceVisibility {
             show_custom_inference,
             custom_inference_controls_enabled,
             managed_byok_byoe_enabled: workspaces
-                .current_workspace()
-                .is_some_and(|workspace| workspace.billing_metadata.is_managed_byok_byoe_enabled()),
+                .agent_settings_is_managed_byok_byoe_enabled(team_context.as_ref()),
         }
     }
 
@@ -5079,7 +5087,7 @@ impl SettingsWidget for ApiKeysWidget {
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
-        let visibility = CustomInferenceVisibility::compute(app);
+        let visibility = CustomInferenceVisibility::compute(&self.view_handle, app);
         let CustomInferenceVisibility {
             is_any_ai_enabled,
             is_byo_enabled,
@@ -5254,10 +5262,11 @@ impl SettingsWidget for ApiKeysWidget {
         // Upgrade CTA if BYOK not enabled
         if !is_byo_enabled && show_provider_keys {
             let auth_state = AuthStateProvider::as_ref(app).get();
-            let upgrade_text_fragments = if let Some(team) =
-                UserWorkspaces::as_ref(app).team_for_view_handle(&self.view_handle, app)
+            let workspaces = UserWorkspaces::as_ref(app);
+            let upgrade_text_fragments = if let Some(context) =
+                workspaces.team_render_context_for_view_handle(&self.view_handle, app)
             {
-                if team.billing_metadata.customer_type == CustomerType::Enterprise {
+                if workspaces.agent_settings_is_enterprise_team(&context) {
                     vec![
                         FormattedTextFragment::hyperlink("Contact sales", "mailto:sales@warp.dev"),
                         FormattedTextFragment::plain_text(
@@ -5266,8 +5275,9 @@ impl SettingsWidget for ApiKeysWidget {
                     ]
                 } else {
                     let current_user_email = auth_state.user_email().unwrap_or_default();
-                    let has_admin_permissions = team.has_admin_permissions(&current_user_email);
-                    let upgrade_url = UserWorkspaces::upgrade_link_for_team(team.uid);
+                    let has_admin_permissions = workspaces
+                        .agent_settings_team_has_admin_permissions(&context, &current_user_email);
+                    let upgrade_url = workspaces.agent_settings_upgrade_link_for_team(&context);
                     if has_admin_permissions {
                         vec![
                             FormattedTextFragment::hyperlink(
