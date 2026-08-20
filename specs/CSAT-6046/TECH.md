@@ -116,28 +116,32 @@ Use one running segment per axis instead of a list of independent contributions:
   bezier parameter `t` (Newton-Raphson, falling back to bisection), then returning `y(t)`, the
   same technique browsers use for `cubic-bezier()` timing functions.
 - **Duration**: inversely proportional to the notch's delta magnitude
-  (`DurationBehavior::kInverseDelta`). Chromium's published reference points are
-  `kInverseDeltaMaxDuration` = 200ms at a 120px delta and `kInverseDeltaMinDuration` = 100ms at
-  480px, clamped at both ends; Chromium's exact interpolation between them is not available to
-  us, so fit a simple `A / delta + B` hyperbola through those two points instead.
+  (`DurationBehavior::kInverseDelta`), a direct port of the linear ramp in
+  `cc/animation/scroll_offset_animation_curve.cc`: `kInverseDeltaMaxDuration` = 200ms at or below
+  a 120px delta (`kInverseDeltaRampStartPx`), `kInverseDeltaMinDuration` = 100ms at or above 480px
+  (`kInverseDeltaRampEndPx`), and a linear interpolation (`kInverseDeltaSlope`/
+  `kInverseDeltaOffset`) between them.
 - **Retarget**: on a same-direction notch arriving mid-flight, reshape the curve so its starting
   slope (in normalized time/progress space) matches the outgoing segment's velocity at that
   instant, rather than starting a fresh, independent, zero-velocity contribution. Implement this
   by holding the bezier's first control point's `x`-coordinate fixed and solving for its
   `y`-coordinate from the desired starting slope (`y1 = slope * x1`, clamped to avoid visible
   overshoot), keeping the second control point fixed so every curve still eases out to a stop at
-  its target. This is the same curve-reshaping Chromium's `EaseInOutWithInitialSlope` describes
-  doing, though its exact reshaping formula is not published, so this is our own derivation of an
-  equivalent construction.
-- **Velocity-based duration bound**: cap a retarget's duration so its reshaped starting slope
-  cannot exceed a safe threshold when the controller is already moving fast toward a small
-  remaining distance -- Chromium's `VelocityBasedDurationBound`, which exists specifically to
-  stop a rubber-banding overshoot in that scenario.
+  its target. This matches `cc::EaseInOutWithInitialSlope` in the same Chromium source file,
+  which likewise fixes its first control point's x-coordinate at 0.42 and varies only its
+  y-coordinate to encode a starting slope.
+- **Velocity-based duration bound**: a direct port of `VelocityBasedDurationBound` in the same
+  source file, which caps a retarget's duration to `(remaining_delta / current_velocity).abs() *
+  2.5` so its reshaped starting slope cannot overshoot when the controller is already moving fast
+  toward a small remaining distance. Returns zero when there's no remaining delta, and an
+  unbounded duration when the current velocity is zero or points away from the remaining delta
+  (the bound only applies while the controller is already moving toward the new target).
 - Opposite-direction input keeps the existing behavior unchanged: cancel at the currently
   displayed position (zero velocity), then ease in fresh toward the new target.
 
 Every other approved behavior (exact landing on target, cancellation semantics, unchanged
-multiplier and 40px-per-line conversion, independent axes) is unaffected.
+multiplier and 40px-per-line conversion, independent axes) is unaffected. Source:
+[`cc/animation/scroll_offset_animation_curve.cc`](https://chromium.googlesource.com/chromium/src/+/main/cc/animation/scroll_offset_animation_curve.cc).
 
 ### Keep animation ownership at the scroll consumer
 Options:
