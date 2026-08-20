@@ -2717,11 +2717,22 @@ impl BlocklistAIController {
         self.pending_passive_suggestion_results
             .remove(&conversation_id);
 
-        // Discard any pending manual/passive follow-up request for this
-        // conversation. Otherwise it would linger and fire a spurious
-        // follow-up (restarting the conversation) the next time some
-        // unrelated action for it finishes, even after this cancellation.
-        self.pending_passive_follow_ups.remove(&conversation_id);
+        // Discard a pending manual/passive follow-up request for this
+        // conversation, but only when the conversation is being terminally
+        // cancelled. Otherwise it would linger and fire a spurious follow-up
+        // (restarting the conversation) the next time some unrelated action
+        // for it finishes, even after a real Stop. Every other cancellation
+        // reason (e.g. an optimistic `Succeeded` completion, or a
+        // same-conversation follow-up/takeover that keeps the conversation
+        // going) must keep delivering a follow-up the controller requested on
+        // purpose -- narrowing this to non-terminal reasons is a separate,
+        // pre-existing semantics question this fix does not answer.
+        if matches!(
+            reason.conversation_outcome(),
+            CancellationOutcome::Cancelled
+        ) {
+            self.pending_passive_follow_ups.remove(&conversation_id);
+        }
 
         // Remove any locked pending-LRC queries so they don't linger after cancellation.
         QueuedQueryModel::handle(ctx).update(ctx, |model, ctx| {

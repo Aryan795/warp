@@ -581,3 +581,100 @@ fn manual_stop_with_pending_fetch_conversation_does_not_restart_conversation() {
         });
     });
 }
+
+/// A pending manual/passive follow-up (`request_follow_up_after_actions`)
+/// must still be delivered when the conversation is *not* being terminally
+/// cancelled -- e.g. an optimistic `Succeeded` completion
+/// (`CommandFinishedDuringInlineAgentView`, mirroring
+/// `optimistic_cli_subagent_completion_with_in_flight_stream_reports_success`).
+/// Regression for over-narrowing `cancel_conversation_progress`'s
+/// `pending_passive_follow_ups` clear to every cancellation reason instead of
+/// only terminal cancellation.
+#[test]
+fn succeeded_cancellation_with_pending_manual_follow_up_still_delivers_it() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+
+        let conversation_id = terminal.update(&mut app, |view, ctx| {
+            let terminal_surface_id = view.id();
+            let (conversation_id, task_id) =
+                BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+                    let conversation_id = history.start_new_conversation(
+                        terminal_surface_id,
+                        false,
+                        false,
+                        false,
+                        ctx,
+                    );
+                    history.update_conversation_status(
+                        terminal_surface_id,
+                        conversation_id,
+                        ConversationStatus::InProgress,
+                        ctx,
+                    );
+                    let task_id = history
+                        .conversation(&conversation_id)
+                        .unwrap()
+                        .get_root_task_id()
+                        .clone();
+                    (conversation_id, task_id)
+                });
+
+            view.ai_controller().update(ctx, |controller, ctx| {
+                let action = AIAgentAction {
+                    id: AIAgentActionId::from("pending-action".to_string()),
+                    task_id,
+                    action: AIAgentActionType::FetchConversation {
+                        conversation_id: "target-convo".to_string(),
+                    },
+                    requires_result: true,
+                };
+                controller.action_model.update(ctx, |action_model, _ctx| {
+                    action_model.queue_pending_action_for_test(action, conversation_id);
+                });
+
+                // A manual/passive follow-up was already requested while the
+                // action above is still pending, so this only sets the
+                // pending flag and returns early.
+                controller.request_follow_up_after_actions(conversation_id, ctx);
+
+                // A non-terminal, "keep going" cancellation (e.g. an
+                // optimistic command completion) must still deliver the
+                // pending follow-up rather than dropping it.
+                controller.cancel_conversation_progress(
+                    conversation_id,
+                    CancellationReason::CommandFinishedDuringInlineAgentView,
+                    ctx,
+                );
+            });
+
+            conversation_id
+        });
+
+        // `send_follow_up_for_conversation` drains finished action results
+        // entirely (removing the conversation's entry); if the follow-up were
+        // incorrectly suppressed, the entry would still be present and
+        // non-empty. Checked from a separate read (not inside the update
+        // closure above) since the FinishedAction subscriber that would drain
+        // it may only run once that closure's borrow is released.
+        terminal.read(&app, |view, ctx| {
+            assert!(
+                view.ai_controller()
+                    .as_ref(ctx)
+                    .action_model
+                    .as_ref(ctx)
+                    .get_finished_action_results(conversation_id)
+                    .is_none(),
+                "a pending manual follow-up must still be delivered when the conversation is \
+                 not terminally cancelled"
+            );
+        });
+        BlocklistAIHistoryModel::handle(&app).read(&app, |history, _| {
+            assert_eq!(
+                history.conversation(&conversation_id).map(|c| c.status()),
+                Some(&ConversationStatus::InProgress)
+            );
+        });
+    });
+}
