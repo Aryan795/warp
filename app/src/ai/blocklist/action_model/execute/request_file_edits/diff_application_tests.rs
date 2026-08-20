@@ -707,9 +707,10 @@ fn test_create_edit_over_empty_file_becomes_an_update() {
         )
         .await;
 
-        let diffs = result
-            .expect("Expected the create to be coerced into an update")
-            .diffs;
+        let applied = result.expect("Expected the create to be coerced into an update");
+        assert_eq!(applied.notes, vec![format!("Replaced empty {file_path}.")]);
+        assert!(applied.overwrites.is_empty());
+        let diffs = applied.diffs;
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].file_name, file_path);
         assert_eq!(diffs[0].original_content, "");
@@ -746,9 +747,13 @@ fn test_create_edit_with_identical_content_becomes_an_update() {
         )
         .await;
 
-        let diffs = result
-            .expect("Expected the create to be coerced into a no-op update")
-            .diffs;
+        let applied = result.expect("Expected the create to be coerced into a no-op update");
+        assert_eq!(
+            applied.notes,
+            vec![format!("{file_path} already contained the requested content.")]
+        );
+        assert!(applied.overwrites.is_empty());
+        let diffs = applied.diffs;
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].original_content, content);
 

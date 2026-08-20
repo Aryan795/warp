@@ -580,6 +580,12 @@ async fn apply_create_file<F, Fut>(
             if existing_content.is_empty()
                 || (existing_content == content && content.ends_with('\n')) =>
         {
+            let note = if existing_content.is_empty() {
+                format!("Replaced empty {file_path}.")
+            } else {
+                format!("{file_path} already contained the requested content.")
+            };
+            result.notes.push(note);
             result
                 .diffs
                 .push(full_replacement_diff(file_path, existing_content, content));
