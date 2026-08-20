@@ -606,6 +606,10 @@ pub struct BlockListElement {
     scroll_position: ScrollPosition,
     is_terminal_focused: bool,
     is_terminal_selecting: bool,
+    /// Whether the current text-selection gesture is a Shift+click extension of an existing
+    /// selection. When true, `LeftMouseDragged` keeps extending text even while Shift remains
+    /// held, instead of being interpreted as a whole-block selection drag.
+    is_extending_text_selection: bool,
     /// This map contains the IDs of sessions that were subshells as keys. Their corresponding
     /// values are the command that spawned the subshell, which is needed to paint the "flag"
     subshell_sessions: HashMap<SessionId, SubshellSource>,
@@ -911,6 +915,7 @@ impl BlockListElement {
             scroll_position: terminal_view_render_context.scroll_position,
             is_terminal_focused: terminal_view_render_context.is_terminal_focused,
             is_terminal_selecting: terminal_view_render_context.is_terminal_selecting,
+            is_extending_text_selection: terminal_view_render_context.is_extending_text_selection,
             subshell_sessions: terminal_view_render_context.spawning_command_for_subshell_sessions,
             subshell_flags: HashMap::new(),
             size: None,
@@ -1469,6 +1474,21 @@ impl BlockListElement {
         }
     }
 
+    /// Returns whether a Shift+click should extend the current point-based text selection
+    /// (via the existing `BlockList::update_selection` primitive) rather than begin a new
+    /// selection or fall back to whole-block range selection. Applies when there is a current,
+    /// non-empty point-based selection; rich-content-only selections are resolved separately by
+    /// their owning `SelectableArea`.
+    fn shift_click_extends_text_selection(&self, modifiers: &ModifiersState) -> bool {
+        modifiers.shift
+            && self
+                .model
+                .lock()
+                .block_list()
+                .selection()
+                .is_some_and(|selection| !selection.is_empty())
+    }
+
     fn middle_mouse_down(&self, position: Vector2F, ctx: &mut EventContext) -> bool {
         let mut dispatched_screen_click = false;
         let handled = if self.is_mouse_position_within_bounds(position) {
@@ -1624,13 +1644,23 @@ impl BlockListElement {
                                 });
                             }
 
+                            let text_select_action =
+                                if self.shift_click_extends_text_selection(modifiers) {
+                                    BlockTextSelectAction::Extend {
+                                        point,
+                                        side,
+                                        position,
+                                    }
+                                } else {
+                                    BlockTextSelectAction::Begin {
+                                        point,
+                                        side,
+                                        selection_type,
+                                        position,
+                                    }
+                                };
                             ctx.dispatch_typed_action(TerminalAction::BlockTextSelect(
-                                BlockTextSelectAction::Begin {
-                                    point,
-                                    side,
-                                    selection_type,
-                                    position,
-                                },
+                                text_select_action,
                             ));
                         }
                         // While rich content blocks can't be selected like command blocks,
@@ -1664,13 +1694,23 @@ impl BlockListElement {
                                 action: BlockSelectAction::MouseDown(None),
                                 should_redetermine_focus,
                             });
+                            let text_select_action =
+                                if self.shift_click_extends_text_selection(modifiers) {
+                                    BlockTextSelectAction::Extend {
+                                        point,
+                                        side,
+                                        position,
+                                    }
+                                } else {
+                                    BlockTextSelectAction::Begin {
+                                        point,
+                                        side,
+                                        selection_type,
+                                        position,
+                                    }
+                                };
                             ctx.dispatch_typed_action(TerminalAction::BlockTextSelect(
-                                BlockTextSelectAction::Begin {
-                                    point,
-                                    side,
-                                    selection_type,
-                                    position,
-                                },
+                                text_select_action,
                             ));
                         }
                         _ => {
@@ -1970,6 +2010,10 @@ impl BlockListElement {
             let side = self
                 .size_info
                 .get_mouse_side(position - vec2f(bounds.origin().x(), snackbar_bottom));
+            // While extending an existing selection via Shift+click, subsequent drags keep
+            // moving the active text endpoint even though Shift remains held; otherwise Shift
+            // held during a drag is interpreted as a whole-block selection drag instead.
+            let is_selecting_blocks = is_selecting_blocks && !self.is_extending_text_selection;
             if !is_selecting_blocks
                 && let Some(point) = self.coord_to_point(
                     SnackbarPoint::underneath_snackbar(position),

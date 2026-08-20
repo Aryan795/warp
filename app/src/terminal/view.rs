@@ -2315,6 +2315,7 @@ pub struct TerminalViewRenderContext {
     pub link_tool_tip: Option<GridHighlightedLink>,
     pub is_terminal_focused: bool,
     pub is_terminal_selecting: bool,
+    pub is_extending_text_selection: bool,
     pub is_context_menu_open: bool,
     pub is_waterfall_gap_mode: bool,
     pub pane_state: SplitPaneState,
@@ -2526,6 +2527,12 @@ pub struct TerminalView {
 
     /// Whether there is an active text selection.
     is_selecting: bool,
+
+    /// Whether the current text-selection gesture is a Shift+click extension of an existing
+    /// selection, rather than a plain click-and-drag. Set for the duration of the gesture so
+    /// `LeftMouseDragged` events keep extending text even while Shift remains held; see
+    /// `BlockListElement::mouse_dragged`.
+    is_extending_text_selection: bool,
 
     context_menu: ViewHandle<Menu<TerminalAction>>,
 
@@ -4325,6 +4332,7 @@ impl TerminalView {
             alt_screen_scroll_top: Lines::zero(),
             horizontal_clipped_scroll_state: Default::default(),
             is_selecting: false,
+            is_extending_text_selection: false,
             context_menu_state: None,
             context_menu,
             hovered_secret: None,
@@ -18125,6 +18133,9 @@ impl TerminalView {
             SelectAction::Update {
                 point, side, delta, ..
             } => self.update_alt_selection(*point, *side, delta, ctx),
+            // Shift+click text-selection extension is out of scope for the alt screen in v1;
+            // alt-screen mouse-down never dispatches `Extend`.
+            SelectAction::Extend { .. } => {}
             SelectAction::End => {
                 self.end_alt_selection(ctx);
             }
@@ -18180,6 +18191,7 @@ impl TerminalView {
     fn end_text_selection(&mut self, ctx: &mut ViewContext<Self>) {
         if self.is_selecting {
             self.is_selecting = false;
+            self.is_extending_text_selection = false;
             self.block_text_selection_start_position = None;
 
             let selected_text = {
@@ -18487,6 +18499,11 @@ impl TerminalView {
                 delta,
                 position,
             } => self.update_block_text_selection(*point, *side, *delta, *position, ctx),
+            BlockTextSelectAction::Extend {
+                point,
+                side,
+                position,
+            } => self.extend_block_text_selection(*point, *side, *position, ctx),
             BlockTextSelectAction::End => {
                 self.end_text_selection(ctx);
             }
@@ -18889,6 +18906,7 @@ impl TerminalView {
         }
 
         self.block_text_selection_start_position = Some(position);
+        self.is_extending_text_selection = false;
 
         self.model
             .lock()
@@ -18896,8 +18914,83 @@ impl TerminalView {
             .start_selection(point, selection_type, side);
         self.is_selecting = true;
 
+        self.prime_rich_content_selections_for_cross_block_selection(
+            point,
+            selection_type,
+            position,
+            ctx,
+        );
+
+        ctx.notify();
+    }
+
+    /// Extends the current point-based block-list text selection's active endpoint to `point`,
+    /// keeping the fixed endpoint unchanged. Dispatched instead of [`Self::begin_block_text_selection`]
+    /// when a Shift+click is applicable (see `BlockListElement::mouse_down`).
+    fn extend_block_text_selection(
+        &mut self,
+        point: BlockListPoint,
+        side: Side,
+        position: Vector2F,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        // Clear any active text selections in CLI subagent views, since the extension will move
+        // the active endpoint of the selection on the underlying block list.
+        for subagent_view in self.cli_subagent_views.values() {
+            subagent_view.update(ctx, |view, ctx| view.clear_all_selections(ctx));
+        }
+
+        self.block_text_selection_start_position = Some(position);
+
+        let is_inverted_blocklist = self.is_inverted_blocklist(ctx);
+        let semantic_selection = SemanticSelection::as_ref(ctx);
+        let head_point = {
+            let mut model = self.model.lock();
+            let block_list = model.block_list_mut();
+            // Normalize a completed word/line selection to its visible simple endpoints before
+            // moving the tail, so Shift+click always performs simple cell/character extension.
+            block_list.standardize_text_selection(semantic_selection, is_inverted_blocklist);
+            let Some(head_point) = block_list
+                .selection()
+                .map(|selection| selection.head_point())
+            else {
+                return;
+            };
+            block_list.update_selection(point, side);
+            head_point
+        };
+        self.is_selecting = true;
+        self.is_extending_text_selection = true;
+
+        // Applicable text extension always wins over whole-block selection.
+        self.clear_selected_blocks(ctx);
+
+        self.prime_rich_content_selections_for_cross_block_selection(
+            head_point,
+            SelectionType::Simple,
+            position,
+            ctx,
+        );
+
+        ctx.notify();
+    }
+
+    /// Loops over each rich-content (AI) block in the block list and, for any that don't contain
+    /// `reference_point`, primes it with an external cross-block selection bound at its minimum
+    /// (top left) or maximum (bottom right) point. This is needed to support point-based
+    /// selections that span command blocks and AI blocks, since a `SelectableArea` can't start a
+    /// selection outside of its own bounds on its own.
+    ///
+    /// `reference_point` is the point relative to which each AI block's position is compared: the
+    /// click point when starting a fresh selection, or the fixed head point when extending one.
+    fn prime_rich_content_selections_for_cross_block_selection(
+        &mut self,
+        reference_point: BlockListPoint,
+        selection_type: SelectionType,
+        position: Vector2F,
+        ctx: &mut ViewContext<Self>,
+    ) {
         if self.rich_content_views.is_empty() {
-            ctx.notify();
             return;
         }
 
@@ -18909,18 +19002,17 @@ impl TerminalView {
             .cursor::<BlockHeight, BlockHeightSummary>();
         block_cursor.seek(&BlockHeight::from(0.), SeekBias::Right);
 
-        let selection_start_total_index = {
-            let mut click_cursor = block_list
+        let reference_total_index = {
+            let mut reference_cursor = block_list
                 .block_heights()
                 .cursor::<BlockHeight, BlockHeightSummary>();
-            click_cursor.seek(&BlockHeight::from(point.row), SeekBias::Right);
-            click_cursor.start().total_count
+            reference_cursor.seek(&BlockHeight::from(reference_point.row), SeekBias::Right);
+            reference_cursor.start().total_count
         };
 
-        // Loop over each item in the block list. If it's an AI block which doesn't include the point
-        // where the user clicked, begin a selection at either the maximum (bottom right) or minimum
-        // (top left) point in the block. This is needed to support selections across command blocks
-        // and AI blocks since SelectableArea can't start selections outside of its bounds on its own.
+        // Loop over each item in the block list. If it's an AI block which doesn't include the
+        // reference point, prime a selection at either the maximum (bottom right) or minimum
+        // (top left) point in the block.
         if let Some(active_window_id) = ctx.windows().active_window() {
             while let Some(block_height_item) = block_cursor.item() {
                 if let BlockHeightItem::RichContent(RichContentItem { view_id, .. }) =
@@ -18935,16 +19027,13 @@ impl TerminalView {
                     let ai_block_view = ctx.view(&ai_block);
                     let ai_block_total_index = block_cursor.start().total_count;
 
-                    if (ai_block_total_index < selection_start_total_index
-                        && !is_inverted_blocklist)
-                        || (ai_block_total_index > selection_start_total_index
-                            && is_inverted_blocklist)
+                    if (ai_block_total_index < reference_total_index && !is_inverted_blocklist)
+                        || (ai_block_total_index > reference_total_index && is_inverted_blocklist)
                     {
                         ai_block_view.start_selection_at_max_point(selection_type, x_pos);
-                    } else if (ai_block_total_index > selection_start_total_index
+                    } else if (ai_block_total_index > reference_total_index
                         && !is_inverted_blocklist)
-                        || (ai_block_total_index < selection_start_total_index
-                            && is_inverted_blocklist)
+                        || (ai_block_total_index < reference_total_index && is_inverted_blocklist)
                     {
                         ai_block_view.start_selection_at_min_point(selection_type, x_pos);
                     }
@@ -18953,8 +19042,6 @@ impl TerminalView {
                 block_cursor.next();
             }
         };
-
-        ctx.notify();
     }
 
     fn update_block_text_selection(
@@ -20474,6 +20561,7 @@ impl TerminalView {
         // rich content view component (i.e. `CodeEditorView`), setting `is_selecting` to false
         // will prevent the selection from "spilling" into neighbouring blocks.
         self.is_selecting = false;
+        self.is_extending_text_selection = false;
 
         // TODO(Simon): This doesn't work as intended for nested inline SelectableAreas.
         // This includes inline action headers, requested commands, and env var collection blocks.
@@ -23830,6 +23918,7 @@ impl TerminalView {
                 .expect("terminal should upgrade")
                 .is_focused(app),
             is_terminal_selecting: self.is_selecting(),
+            is_extending_text_selection: self.is_extending_text_selection,
             is_context_menu_open: self.is_context_menu_open(),
             is_waterfall_gap_mode: self.is_waterfall_gap_mode(model, app),
             pane_state,
