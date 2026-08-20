@@ -904,29 +904,60 @@ impl UserWorkspaces {
         self.are_member_byo_endpoints_allowed_for_team(context.map(|context| context.team.uid))
     }
 
-    /// Whether `context`'s team has provided its own first-party key for `provider`.
-    /// `context` is `None` for a no-team window, which has no team-provided key and returns
-    /// `false`.
-    pub(crate) fn agent_settings_has_team_first_party_key(
+    /// Whether `team_uid`'s team has provided its own first-party key for `provider`.
+    /// `team_uid` is `None`, or names a team no longer in the current workspace, for a
+    /// no-team window, which has no team-provided key and returns `false`.
+    pub fn has_team_first_party_key_for_team(
         &self,
-        context: Option<&TeamRenderContext<'_>>,
+        team_uid: Option<ServerId>,
         provider: LLMProvider,
     ) -> bool {
         self.is_managed_byok_byoe_enabled()
-            && context.is_some_and(|context| {
-                context
-                    .team
-                    .settings
-                    .team_byo
-                    .as_ref()
-                    .is_some_and(|team_byo| {
+            && team_uid
+                .and_then(|team_uid| self.team_from_uid(team_uid))
+                .is_some_and(|team| {
+                    team.settings.team_byo.as_ref().is_some_and(|team_byo| {
                         team_byo.first_party_enabled
                             && team_byo
                                 .first_party_keys
                                 .iter()
                                 .any(|key| key.provider == provider)
                     })
-            })
+                })
+    }
+
+    /// Whether `team_uid`'s team has configured and enabled a BYO endpoint model whose
+    /// `config_key` is `model_config_key`. `team_uid` is `None`, or names a team no longer in
+    /// the current workspace, for a no-team window, which has no team-provided endpoint and
+    /// returns `false`.
+    pub fn has_team_byo_endpoint_for_model_for_team(
+        &self,
+        team_uid: Option<ServerId>,
+        model_config_key: &str,
+    ) -> bool {
+        self.is_managed_byok_byoe_enabled()
+            && team_uid
+                .and_then(|team_uid| self.team_from_uid(team_uid))
+                .is_some_and(|team| {
+                    team.settings.team_byo.as_ref().is_some_and(|team_byo| {
+                        team_byo.endpoints_enabled
+                            && team_byo.endpoints.iter().any(|endpoint| {
+                                endpoint.enabled
+                                    && endpoint.models.iter().any(|model| {
+                                        model.enabled && model.config_key == model_config_key
+                                    })
+                            })
+                    })
+                })
+    }
+
+    /// [`Self::has_team_first_party_key_for_team`], scoped to `context`'s team.
+    pub(crate) fn agent_settings_has_team_first_party_key(
+        &self,
+        context: Option<&TeamRenderContext<'_>>,
+        provider: LLMProvider,
+    ) -> bool {
+        self.has_team_first_party_key_for_team(context.map(|context| context.team.uid), provider)
     }
 
     /// Whether `user_email` has admin permissions on `context`'s team.

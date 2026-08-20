@@ -183,7 +183,7 @@ pub use crate::search::slash_command_menu::static_commands::{
     SlashCommandKind, SlashCommandSurfaces,
 };
 pub use crate::search::slash_command_menu::{SlashCommandId, StaticCommand};
-pub use crate::server::ids::SyncId;
+pub use crate::server::ids::{ServerId, SyncId};
 pub use crate::server::server_api::ServerApiProvider;
 #[cfg(feature = "voice_input")]
 pub use crate::server::server_api::TranscribeError;

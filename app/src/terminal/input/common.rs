@@ -485,8 +485,9 @@ pub(super) fn maybe_add_buy_credits_banner(
     app: &AppContext,
 ) {
     let workspaces = UserWorkspaces::as_ref(app);
+    let team = workspaces.team_for_view_handle(input_view_handle, app);
     let can_purchase_addon_credits = workspaces
-        .purchase_policy_for_team(workspaces.team_for_view_handle(input_view_handle, app))
+        .purchase_policy_for_team(team)
         .is_some_and(|policy| policy.allows_purchases());
 
     // Show buy credits banner if billing policy allows purchasing, input is focused,
@@ -500,6 +501,7 @@ pub(super) fn maybe_add_buy_credits_banner(
     );
     let is_using_api_key_for_current_model = should_show_key_icon_for_model(
         LLMPreferences::as_ref(app).get_active_base_model(app, Some(terminal_view_id)),
+        team.map(|team| team.uid),
         app,
     );
     if can_purchase_addon_credits

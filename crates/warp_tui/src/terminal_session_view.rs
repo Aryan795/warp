@@ -1689,6 +1689,7 @@ impl TuiTerminalSessionView {
                 input_editor_model.clone(),
                 suggestions_mode.clone(),
                 terminal_surface_id,
+                window_id,
                 ctx,
             )
         });

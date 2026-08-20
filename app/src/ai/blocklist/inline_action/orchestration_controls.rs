@@ -52,6 +52,7 @@ use crate::view_components::FilterableDropdown;
 use crate::view_components::dropdown::{
     Dropdown, DropdownAction, DropdownItemAction, DropdownStyle,
 };
+use crate::workspaces::user_workspaces::UserWorkspaces;
 
 // ── Shared constants ────────────────────────────────────────────────
 
@@ -279,6 +280,7 @@ fn oz_model_menu_items<A: OrchestrationControlAction, V: View>(
                 .find(|llm| llm.id.to_string() == row.id)
         })
         .collect();
+    let team_uid = UserWorkspaces::as_ref(ctx).team_uid_for_window(ctx.window_id());
     available_model_menu_items(
         ordered_choices,
         move |llm| DropdownAction::select_action_and_close(A::model_changed(llm.id.to_string())),
@@ -286,6 +288,7 @@ fn oz_model_menu_items<A: OrchestrationControlAction, V: View>(
         None,
         false,
         false,
+        team_uid,
         ctx,
     )
 }

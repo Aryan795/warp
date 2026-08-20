@@ -40,6 +40,7 @@ use crate::search::data_source::{Query, QueryFilter, QueryResult};
 use crate::search::mixer::DataSourceRunErrorWrapper;
 use crate::search::result_renderer::ItemHighlightState;
 use crate::search::{SearchItem, SyncDataSource};
+use crate::server::ids::ServerId;
 use crate::settings_view::SettingsSection;
 use crate::terminal::input::inline_menu::{
     DetailsRenderConfig, InlineMenuAction, InlineMenuMessageArgs, InlineMenuType,
@@ -162,6 +163,7 @@ pub fn query_model_picker_choices<'a>(
     llm_preferences: &LLMPreferences,
     choices: impl IntoIterator<Item = &'a LLMInfo>,
     query_text: &str,
+    team_uid: Option<ServerId>,
     app: &AppContext,
 ) -> Vec<ModelPickerChoice> {
     let choices = ModelSelectorDataSource::order_model_choices(
@@ -185,7 +187,7 @@ pub fn query_model_picker_choices<'a>(
                 Some(result)
             };
             let disable_reason = if llm.disable_reason == Some(DisableReason::RequiresUpgrade)
-                && should_show_key_icon_for_model(llm, app)
+                && should_show_key_icon_for_model(llm, team_uid, app)
             {
                 None
             } else {
@@ -323,14 +325,16 @@ impl SyncDataSource for ModelSelectorDataSource {
                 })
                 .collect_vec()
         };
+        let team_uid = UserWorkspaces::as_ref(app).team_uid_for_window(self.window_id);
         Ok(
-            query_model_picker_choices(llm_preferences, choices, &query.text, app)
+            query_model_picker_choices(llm_preferences, choices, &query.text, team_uid, app)
                 .into_iter()
                 .map(|choice| {
                     QueryResult::from(ModelSearchItem::new(
                         choice,
                         &active_llm_id,
                         self.window_id,
+                        team_uid,
                         app,
                     ))
                 })
@@ -373,6 +377,7 @@ impl ModelSearchItem {
         choice: ModelPickerChoice,
         active_llm_id: &LLMId,
         window_id: WindowId,
+        team_uid: Option<ServerId>,
         app: &AppContext,
     ) -> Self {
         let llm = &choice.llm;
@@ -381,7 +386,7 @@ impl ModelSearchItem {
         let is_using_bedrock = should_show_bedrock_icon_for_model(llm, app);
         let is_using_gemini_enterprise_agent_platform =
             should_show_gemini_enterprise_agent_platform_icon_for_model(llm, app);
-        let byo_key_source = byo_key_source_for_model(llm, app);
+        let byo_key_source = byo_key_source_for_model(llm, team_uid, app);
         let leading_icon = model_leading_icon(
             llm,
             ModelIconFlags {

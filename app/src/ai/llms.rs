@@ -18,6 +18,7 @@ use super::execution_profiles::profiles::AIExecutionProfilesModel;
 use crate::auth::AuthStateProvider;
 use crate::auth::auth_manager::{AuthManager, AuthManagerEvent};
 use crate::network::{NetworkStatus, NetworkStatusEvent, NetworkStatusKind};
+use crate::server::ids::ServerId;
 use crate::server::server_api::ServerApiProvider;
 use crate::user_config::{WarpConfig, WarpConfigUpdateEvent};
 use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
@@ -96,42 +97,61 @@ fn is_using_team_first_party_key_for_provider(provider: &LLMProvider, app: &AppC
         })
 }
 
-pub fn byo_key_source_for_model(llm: &LLMInfo, app: &AppContext) -> Option<ByoKeySource> {
+/// Team-scoped counterpart to [`first_party_key_source_for_provider`], for the credential-source
+/// UI (model picker icons and sidecar). `team_uid` is the requesting window's currently-selected
+/// team, resolved by the caller; `None` for a no-team window.
+///
+/// This is deliberately a separate function from [`first_party_key_source_for_provider`] rather
+/// than a signature change to it: that function's only remaining caller,
+/// [`is_using_first_party_key_for_provider`] (via [`is_usable_llm`]), decides whether a
+/// `RequiresUpgrade` model should stay selectable, and re-scoping that decision to a specific
+/// window's team is a larger, separate change tracked as deferred work.
+fn first_party_key_source_for_provider_for_team(
+    provider: &LLMProvider,
+    team_uid: Option<ServerId>,
+    app: &AppContext,
+) -> Option<ByoKeySource> {
+    let workspaces = UserWorkspaces::as_ref(app);
+    if workspaces.are_member_byo_keys_allowed_for_team(team_uid)
+        && is_using_api_key_for_provider(provider, app)
+    {
+        return Some(ByoKeySource::UserProvided);
+    }
+    if workspaces.has_team_first_party_key_for_team(team_uid, *provider) {
+        return Some(ByoKeySource::TeamProvided);
+    }
+    None
+}
+
+/// The BYO credential source that will actually be used for `llm`, given `team_uid`'s team
+/// `team_byo` policy. `team_uid` is the requesting window's currently-selected team, resolved
+/// by the caller; `None` for a no-team window.
+pub fn byo_key_source_for_model(
+    llm: &LLMInfo,
+    team_uid: Option<ServerId>,
+    app: &AppContext,
+) -> Option<ByoKeySource> {
+    let workspaces = UserWorkspaces::as_ref(app);
     let is_custom_endpoint = LLMPreferences::as_ref(app)
         .custom_llm_info_for_id(&llm.id)
         .is_some();
-    if is_custom_endpoint && UserWorkspaces::as_ref(app).are_member_byo_endpoints_allowed() {
+    if is_custom_endpoint && workspaces.are_member_byo_endpoints_allowed_for_team(team_uid) {
         return Some(ByoKeySource::UserProvided);
     }
-    if is_using_team_byo_endpoint_for_model(llm, app) {
+    if workspaces.has_team_byo_endpoint_for_model_for_team(team_uid, llm.id.as_str()) {
         return Some(ByoKeySource::TeamProvided);
     }
-    first_party_key_source_for_provider(&llm.provider, app)
+    first_party_key_source_for_provider_for_team(&llm.provider, team_uid, app)
 }
 
-fn is_using_team_byo_endpoint_for_model(llm: &LLMInfo, app: &AppContext) -> bool {
-    UserWorkspaces::as_ref(app)
-        .current_workspace()
-        .is_some_and(|workspace| {
-            workspace.billing_metadata.is_managed_byok_byoe_enabled()
-                && workspace
-                    .settings
-                    .team_byo
-                    .as_ref()
-                    .is_some_and(|team_byo| {
-                        team_byo.endpoints_enabled
-                            && team_byo.endpoints.iter().any(|endpoint| {
-                                endpoint.enabled
-                                    && endpoint.models.iter().any(|model| {
-                                        model.enabled && model.config_key == llm.id.as_str()
-                                    })
-                            })
-                    })
-        })
-}
-
-pub fn should_show_key_icon_for_model(llm: &LLMInfo, app: &AppContext) -> bool {
-    byo_key_source_for_model(llm, app).is_some()
+/// Whether the credential (key) icon should be shown for `llm` in `team_uid`'s window. See
+/// [`byo_key_source_for_model`].
+pub fn should_show_key_icon_for_model(
+    llm: &LLMInfo,
+    team_uid: Option<ServerId>,
+    app: &AppContext,
+) -> bool {
+    byo_key_source_for_model(llm, team_uid, app).is_some()
 }
 
 fn should_show_host_icon_for_model(
