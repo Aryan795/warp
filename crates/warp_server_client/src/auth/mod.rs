@@ -32,6 +32,7 @@ use warp_graphql::mutations::update_user_settings::{
     UpdateUserSettings, UpdateUserSettingsInput, UpdateUserSettingsResult,
     UpdateUserSettingsVariables,
 };
+use warp_graphql::object_permissions::OwnerType;
 use warp_graphql::queries::api_keys::{
     ApiKeyProperties, ApiKeyPropertiesResult, ApiKeys, ApiKeysVariables,
 };
@@ -40,12 +41,27 @@ use warp_graphql::queries::get_user_settings::{GetUserSettings, GetUserSettingsV
 use warp_server_auth::credentials::{AuthToken, Credentials, FirebaseToken, LoginToken};
 pub use warp_server_auth::user_uid;
 
-use crate::base_client::BaseClient;
-use crate::graphql_helpers::send_graphql_request;
+use crate::base_client::{BaseClient, TEAM_UID_HEADER};
+use crate::graphql_helpers::{send_graphql_request, send_graphql_request_with_headers};
 use crate::ids::ApiKeyUid;
 
 /// Header key used to associate unauthenticated requests with an experiment identity.
 pub const EXPERIMENT_ID_HEADER: &str = "X-Warp-Experiment-Id";
+
+/// Retains personal keys, and team-owned keys only when `team_uid` is given. `APIKeyProperties`
+/// does not expose which team owns a team-scoped key, so this cannot yet narrow to `team_uid`
+/// specifically among several teams; see the doc comment on [`AuthClient::list_api_keys`].
+fn retain_personal_and_team_api_keys(
+    keys: Vec<ApiKeyProperties>,
+    team_uid: Option<&str>,
+) -> Vec<ApiKeyProperties> {
+    keys.into_iter()
+        .filter(|key| match key.owner_type {
+            OwnerType::User => true,
+            OwnerType::Team => team_uid.is_some(),
+        })
+        .collect()
+}
 
 /// A named agent identity from the public API.
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -151,7 +167,11 @@ pub trait AuthClient: Send + Sync {
         timeout: Duration,
     ) -> StdResult<FirebaseToken, UserAuthenticationError>;
 
-    async fn list_api_keys(&self) -> Result<Vec<ApiKeyProperties>>;
+    /// Lists API keys visible to the caller, scoped to personal and agent-identity keys plus
+    /// `team_uid`'s when given. `APIKeyProperties` does not yet expose which team owns a
+    /// team-scoped or agent-identity key, so today this can only distinguish "no team" from
+    /// "some team"; once the server exposes a per-key team UID this can filter precisely.
+    async fn list_api_keys<'a>(&self, team_uid: Option<&'a str>) -> Result<Vec<ApiKeyProperties>>;
 
     async fn create_api_key(
         &self,
@@ -415,13 +435,24 @@ impl AuthClient for AuthClientImpl {
             .await
     }
 
-    async fn list_api_keys(&self) -> Result<Vec<ApiKeyProperties>> {
+    async fn list_api_keys<'a>(&self, team_uid: Option<&'a str>) -> Result<Vec<ApiKeyProperties>> {
         let operation = ApiKeys::build(ApiKeysVariables {
             request_context: warp_graphql::client::get_request_context(),
         });
-        let response = send_graphql_request(self.base_client.as_ref(), operation, None).await?;
+        let extra_headers = team_uid
+            .map(|uid| vec![(TEAM_UID_HEADER.to_string(), uid.to_string())])
+            .unwrap_or_default();
+        let response = send_graphql_request_with_headers(
+            self.base_client.as_ref(),
+            operation,
+            None,
+            extra_headers,
+        )
+        .await?;
         match response.api_keys {
-            ApiKeyPropertiesResult::ApiKeyPropertiesOutput(output) => Ok(output.api_keys),
+            ApiKeyPropertiesResult::ApiKeyPropertiesOutput(output) => {
+                Ok(retain_personal_and_team_api_keys(output.api_keys, team_uid))
+            }
             ApiKeyPropertiesResult::UserFacingError(error) => Err(anyhow!(
                 warp_graphql::client::get_user_facing_error_message(error)
             )),
@@ -436,6 +467,10 @@ impl AuthClient for AuthClientImpl {
         agent_uid: Option<cynic::Id>,
         expires_at: Option<warp_graphql::scalars::Time>,
     ) -> Result<GenerateApiKeyResult> {
+        let extra_headers = team_id
+            .as_ref()
+            .map(|uid| vec![(TEAM_UID_HEADER.to_string(), uid.inner().to_string())])
+            .unwrap_or_default();
         let operation = GenerateApiKey::build(GenerateApiKeyVariables {
             input: GenerateApiKeyInput {
                 name,
@@ -445,7 +480,13 @@ impl AuthClient for AuthClientImpl {
             },
             request_context: warp_graphql::client::get_request_context(),
         });
-        let response = send_graphql_request(self.base_client.as_ref(), operation, None).await?;
+        let response = send_graphql_request_with_headers(
+            self.base_client.as_ref(),
+            operation,
+            None,
+            extra_headers,
+        )
+        .await?;
         Ok(response.generate_api_key)
     }
 

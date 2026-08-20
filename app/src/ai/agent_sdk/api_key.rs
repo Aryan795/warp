@@ -64,11 +64,22 @@ impl ApiKeyCommandRunner {
         ctx: &mut ModelContext<Self>,
     ) {
         let auth_client = ServerApiProvider::as_ref(ctx).get_auth_client();
+        let team_uid = match super::common::resolve_headless_team_scope(
+            args.scope.team.as_deref(),
+            args.scope.personal,
+            ctx,
+        ) {
+            Ok(team_uid) => team_uid.map(|uid| uid.to_string()),
+            Err(err) => {
+                super::report_fatal_error(err, ctx);
+                return;
+            }
+        };
 
         ctx.spawn(
             async move {
                 let mut keys: Vec<_> = auth_client
-                    .list_api_keys()
+                    .list_api_keys(team_uid.as_deref())
                     .await?
                     .into_iter()
                     .map(ApiKeyInfo::from)
@@ -132,11 +143,22 @@ impl ApiKeyCommandRunner {
         let force = args.force;
         let json_output = args.json_output;
         let auth_client = ServerApiProvider::as_ref(ctx).get_auth_client();
+        let team_uid = match super::common::resolve_headless_team_scope(
+            args.scope.team.as_deref(),
+            args.scope.personal,
+            ctx,
+        ) {
+            Ok(team_uid) => team_uid.map(|uid| uid.to_string()),
+            Err(err) => {
+                super::report_fatal_error(err, ctx);
+                return;
+            }
+        };
 
         ctx.spawn(
             async move {
                 let keys = auth_client
-                    .list_api_keys()
+                    .list_api_keys(team_uid.as_deref())
                     .await?
                     .into_iter()
                     .map(ApiKeyInfo::from)
