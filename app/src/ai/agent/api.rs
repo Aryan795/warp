@@ -31,7 +31,6 @@ use crate::ai::execution_profiles::AIExecutionProfileAppExt;
 use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
 use crate::ai::llms::{LLMId, LLMPreferences};
 use crate::ai::mcp::TemplatableMCPServerManager;
-use crate::server::ids::ServerId;
 use crate::server::server_api::AIApiError;
 use crate::settings::AISettings;
 use crate::terminal::safe_mode_settings::get_secret_obfuscation_mode;
@@ -225,17 +224,12 @@ impl RequestParams {
         }
     }
 
-    #[cfg_attr(target_family = "wasm", allow(unused_variables))]
     pub fn new(
         terminal_view_id: Option<EntityId>,
         session_context: SessionContext,
         request_input: &RequestInput,
         conversation: ConversationData,
         metadata: Option<RequestMetadata>,
-        // The team selected by the request's own window, resolved once by the caller rather
-        // than re-derived here from whichever workspace happens to be ambiently "current".
-        // Only consulted for team-scoped credentials (GEAP) today.
-        team_uid: Option<ServerId>,
         app: &AppContext,
     ) -> Self {
         let ai_settings = AISettings::as_ref(app);
@@ -316,14 +310,14 @@ impl RequestParams {
         let user_workspaces = UserWorkspaces::as_ref(app);
         let api_key_manager = ApiKeyManager::as_ref(app);
         let is_byo_enabled = user_workspaces.is_byo_api_key_enabled(app);
-        #[cfg(not(target_family = "wasm"))]
-        let geap_binding = crate::ai::geap_credentials::geap_binding_for_team(app, team_uid);
-        #[cfg(target_family = "wasm")]
-        let geap_binding: Option<::ai::api_keys::GeapMintBinding> = None;
+        // Team scope deliberately never reaches this constructor: `RequestParams` is cloned
+        // for retries, so a capability embedded here could travel somewhere it was never
+        // established. The caller attaches the GEAP credential afterward, once, via
+        // `geap_credentials::attach_geap_credentials_if_available`.
         let api_keys = api_key_manager.api_keys_for_request(
             is_byo_enabled,
             user_workspaces.is_aws_bedrock_credentials_enabled(app),
-            geap_binding,
+            None,
         );
         let is_custom_inference_enabled = user_workspaces.is_custom_inference_enabled(app);
         let custom_model_providers =

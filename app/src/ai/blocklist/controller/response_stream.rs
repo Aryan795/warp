@@ -301,6 +301,13 @@ pub struct ResponseStream {
     /// retry, GEAP refresh, or completion callback never re-resolves "current team" from a
     /// window that may have since switched teams. `None` when the window had no team
     /// selected.
+    ///
+    /// PR 2B slice 1 (#15355) independently adds this same field, threaded through the same
+    /// `new` -> `retry` -> `spawn_request` path, continuing on into `spawn_generate` and
+    /// `generate_multi_agent_output` to attach `X-Warp-Team-Uid`. This PR stops at
+    /// `spawn_request`, where it consumes the value for GEAP instead. Whichever of the two PRs
+    /// merges second hits an expected, mechanical conflict on the shared prefix: keep one copy
+    /// of the field and the shared threading, and keep both consumers.
     team_uid: Option<ServerId>,
 }
 

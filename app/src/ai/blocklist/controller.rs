@@ -428,9 +428,17 @@ impl BlocklistAIController {
         SessionContext::from_session(self.active_session.as_ref(ctx), ctx).skill_path_origin()
     }
 
-    /// The team currently selected in this controller's window, resolved fresh (never
-    /// cached) so a later team switch is picked up by the next request rather than the
-    /// window that started an earlier one.
+    /// The team currently selected in this controller's window, resolved fresh on every call
+    /// rather than cached: this stores a `WindowId`, not a captured team, so a request always
+    /// asks the window which team it is on right now instead of trusting an earlier answer.
+    ///
+    /// This is a deliberate choice, not just the convenient one: if the user corrects which
+    /// team a window is on mid-conversation, a later turn in that same conversation should
+    /// attribute to the newly selected team, not the one the conversation started under. A
+    /// team-of-record captured once at conversation start would itself go stale the moment the
+    /// user makes that correction. If usage/billing ever needs one team-of-record per
+    /// conversation for invoicing, that reconciliation belongs server-side, not as an early,
+    /// silently-stale lock on the client.
     fn team_uid(&self, app: &AppContext) -> Option<ServerId> {
         UserWorkspaces::as_ref(app).team_uid_for_window(self.window_id)
     }
@@ -2289,15 +2297,22 @@ impl BlocklistAIController {
             is_auto_resume_after_error: false,
         });
 
-        let request_params = api::RequestParams::new(
+        let mut request_params = api::RequestParams::new(
             Some(self.terminal_surface_id),
             SessionContext::from_session(self.active_session.as_ref(ctx), ctx),
             &request_input,
             conversation_data,
             metadata,
-            self.team_uid(ctx),
             ctx,
         );
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(team_uid) = self.team_uid(ctx) {
+            crate::ai::geap_credentials::attach_geap_credentials_if_available(
+                &mut request_params,
+                team_uid,
+                ctx,
+            );
+        }
 
         Ok((conversation_id, request_params))
     }
@@ -2534,9 +2549,16 @@ impl BlocklistAIController {
             &request_input,
             conversation_data.clone(),
             query_metadata,
-            team_uid,
             ctx,
         );
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(team_uid) = team_uid {
+            crate::ai::geap_credentials::attach_geap_credentials_if_available(
+                &mut request_params,
+                team_uid,
+                ctx,
+            );
+        }
         request_params.parent_agent_id = parent_agent_id;
         request_params.agent_name = agent_name;
 

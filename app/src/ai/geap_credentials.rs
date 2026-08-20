@@ -117,6 +117,31 @@ pub(crate) fn geap_binding_for_team(
     current_geap_policy_for_team(app, team).mint_binding()
 }
 
+/// Attaches `team_uid`'s GEAP credential to `params`, if one is already loaded for it.
+///
+/// Deliberately not part of `RequestParams::new()`: that constructor never receives team
+/// scope (`RequestParams` is cloned for retries, so a capability embedded there could travel
+/// to a retry that never established it). The caller resolves `team_uid` itself and calls
+/// this once, right after construction, to fold in the one piece of team-scoped data that
+/// does belong in the request payload: the already-minted credential value.
+pub(crate) fn attach_geap_credentials_if_available(
+    params: &mut crate::ai::agent::api::RequestParams,
+    team_uid: ServerId,
+    app: &AppContext,
+) {
+    let Some(binding) = geap_binding_for_team(app, Some(team_uid)) else {
+        return;
+    };
+    let Some(credentials) = ApiKeyManager::as_ref(app).geap_credentials_for_request(&binding)
+    else {
+        return;
+    };
+    params
+        .api_keys
+        .get_or_insert_with(Default::default)
+        .google_cloud_credentials = Some(credentials);
+}
+
 pub trait GeapCredentialRefresher {
     fn subscribe_to_geap_settings_changes(&mut self, ctx: &mut ModelContext<Self>)
     where
