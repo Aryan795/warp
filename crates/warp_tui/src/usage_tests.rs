@@ -31,6 +31,8 @@ fn fixture_charged_usage() -> ChargedUsageTotals {
         output_tokens: 50,
         input_cache_read_tokens: 20,
         input_cache_write_tokens: 10,
+        web_search_count: 1,
+        web_search_cost_in_cents: 5.0,
     }
 }
 
@@ -112,15 +114,15 @@ fn detail_mode_explicitly_marks_unknown_historical_cost() {
 }
 
 /// Detail mode renders the total cost, token count, and the per-category
-/// input/cache-read/cache-write/output breakdown, all summed from a
-/// `ChargedUsageTotals` fixture.
+/// input/cache-read/cache-write/output/web-search breakdown, all summed
+/// from a `ChargedUsageTotals` fixture.
 #[test]
 fn detail_mode_renders_full_breakdown() {
     let usage = totals_with_charged_usage(2.5, 3.3, fixture_charged_usage());
     let text = entry_text(TuiUsageDisplayMode::Detail, usage);
     assert_eq!(
         text,
-        "$0.03 \u{b7} 180 tok \u{b7} in $0.01 \u{b7} cr $0.00 \u{b7} cw $0.00 \u{b7} out $0.02"
+        "$0.03 \u{b7} 180 tok \u{b7} in $0.01 \u{b7} cr $0.00 \u{b7} cw $0.00 \u{b7} out $0.02 \u{b7} web $0.05"
     );
 }
 

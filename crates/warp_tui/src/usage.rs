@@ -92,10 +92,11 @@ fn entry_text(mode: TuiUsageDisplayMode, totals: ConversationUsageTotals) -> Str
 
 /// Condenses the full pricing-transparency breakdown onto a single status
 /// line: total dollar cost, token count, and the per-category inference
-/// cost breakdown (summed across every usage category/model via
-/// `ChargedUsageTotals`). Gracefully degrades (like `Cost` mode) when the
-/// underlying data isn't available -- e.g. a legacy conversation, or a
-/// server response predating the pricing-transparency breakdown fields.
+/// cost breakdown (input/cache-read/cache-write/output plus web search,
+/// summed across every usage category/model via `ChargedUsageTotals`).
+/// Gracefully degrades (like `Cost` mode) when the underlying data isn't
+/// available -- e.g. a legacy conversation, or a server response predating
+/// the pricing-transparency breakdown fields.
 fn format_detail(totals: ConversationUsageTotals) -> String {
     let Some(cost_in_cents) = totals.cost_in_cents else {
         return "Cost unavailable".to_owned();
@@ -107,11 +108,12 @@ fn format_detail(totals: ConversationUsageTotals) -> String {
             text.push_str(&format!(" \u{b7} {total_tokens} tok"));
         }
         text.push_str(&format!(
-            " \u{b7} in {} \u{b7} cr {} \u{b7} cw {} \u{b7} out {}",
+            " \u{b7} in {} \u{b7} cr {} \u{b7} cw {} \u{b7} out {} \u{b7} web {}",
             format_cost(charged_usage.input_cost_in_cents),
             format_cost(charged_usage.input_cache_read_cost_in_cents),
             format_cost(charged_usage.input_cache_write_cost_in_cents),
             format_cost(charged_usage.output_cost_in_cents),
+            format_cost(charged_usage.web_search_cost_in_cents),
         ));
     }
     text
