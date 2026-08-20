@@ -55,7 +55,9 @@ use super::{
 };
 use crate::ai::agent::api::ServerConversationToken;
 use crate::ai::agent::comment::ReviewComment;
-use crate::ai::agent::conversation::{RecordingSpanInfo, RecordingSpanStatus, SubagentTaskOutcome};
+use crate::ai::agent::conversation::{
+    ConversationStatus, RecordingSpanInfo, RecordingSpanStatus, SubagentTaskOutcome,
+};
 use crate::ai::agent::icons::{self, gray_stop_icon, yellow_stop_icon};
 use crate::ai::agent::task::TaskId;
 use crate::ai::agent::{
@@ -983,8 +985,20 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
                                 c.subagent_task_outcome(&TaskId::new(subagent_task_id.clone()))
                                     .ok()
                             });
-                            let search_status =
-                                ConversationSearchStatus::from_outcome(subagent_outcome);
+                            // A Stop never writes a Cancel marker onto the parent tool
+                            // call itself (that only happens when the server tears down
+                            // the subagent's in-flight calls); it just ends the
+                            // conversation, leaving the parent call permanently
+                            // unresolved (`Pending`). The conversation's own terminal
+                            // `Cancelled` status is therefore the only signal that the
+                            // card should settle in that case, since the parent result
+                            // never will.
+                            let conversation_is_terminally_cancelled =
+                                matches!(conversation_status, Some(ConversationStatus::Cancelled));
+                            let search_status = ConversationSearchStatus::from_outcome(
+                                subagent_outcome,
+                                conversation_is_terminally_cancelled,
+                            );
                             let icon = match search_status {
                                 ConversationSearchStatus::Finished => {
                                     inline_action_icons::green_check_icon(appearance)
@@ -4223,10 +4237,19 @@ fn render_collapsible_debug_output(
 
 /// The outcome of a `ConversationSearch` subagent, as shown by its inline card.
 ///
-/// Derived directly from the actual result recorded on the subagent's parent
-/// tool call ([`SubagentTaskOutcome`]) so that a search the user genuinely
+/// Derived from the actual result recorded on the subagent's parent tool
+/// call ([`SubagentTaskOutcome`]) so that a search the user genuinely
 /// cancelled (the server's generic `Cancel` marker) is never conflated with
 /// one that finished with a real answer or error.
+///
+/// A conversation the user stops locally (rather than one the server
+/// cancels) never writes any result onto that parent tool call: the client
+/// only ever cancels tracked [`AIAgentAction`]s, and the subagent's own
+/// parent call is not one -- it exists purely as a passive
+/// [`AIAgentOutputMessageType::Subagent`] display item, so there is nothing
+/// for a client-side Stop to resolve. `conversation_is_terminally_cancelled`
+/// is the fallback for that case: it settles the card without depending on
+/// a result that a Stop, on its own, never produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConversationSearchStatus {
     Running,
@@ -4235,10 +4258,16 @@ enum ConversationSearchStatus {
 }
 
 impl ConversationSearchStatus {
-    fn from_outcome(outcome: Option<SubagentTaskOutcome>) -> Self {
+    fn from_outcome(
+        outcome: Option<SubagentTaskOutcome>,
+        conversation_is_terminally_cancelled: bool,
+    ) -> Self {
         match outcome {
             Some(SubagentTaskOutcome::Completed) => Self::Finished,
             Some(SubagentTaskOutcome::Cancelled) => Self::Cancelled,
+            Some(SubagentTaskOutcome::Pending) | None if conversation_is_terminally_cancelled => {
+                Self::Cancelled
+            }
             Some(SubagentTaskOutcome::Pending) | None => Self::Running,
         }
     }
