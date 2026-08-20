@@ -2876,6 +2876,86 @@ fn drain_family_events_primary_routes_mixed_batch_and_delivers_inbox() {
     });
 }
 
+/// Regression for review finding 1: on the unified family-drain path (as used whenever
+/// `OrchestrationUnifiedStack` is enabled), the self-scoped `run_succeeded_by_parent_completion`
+/// event must still reach `handle_event_batch` and emit `ParentCompletionSucceeded`. Before the
+/// fix, `classify_family_event` had no arm for this event type, so it fell through to `Opaque`
+/// and was silently dropped -- the local child would have kept running indefinitely on the
+/// unified stack despite the server-authoritative SUCCEEDED.
+#[test]
+fn drain_family_events_primary_forwards_self_scoped_parent_completion_event() {
+    App::test((), |mut app| async move {
+        initialize_settings_for_tests(&mut app);
+        let (sender, _receiver) = std::sync::mpsc::sync_channel::<ModelEvent>(4);
+        let mut global_resource_handles = GlobalResourceHandles::mock(&mut app);
+        global_resource_handles.model_event_sender = Some(sender);
+        app.add_singleton_model(|_| GlobalResourceHandlesProvider::new(global_resource_handles));
+
+        let history_model =
+            app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
+
+        let self_run_id = make_parent_task_id_for_test(0xf6).to_string();
+        let mut conversation = AIConversation::new(false, false);
+        conversation.set_run_id(self_run_id.clone());
+        let conversation_id = conversation.id();
+        let terminal_view_id = warpui::EntityId::new();
+        history_model.update(&mut app, |model, ctx| {
+            model.restore_conversations(terminal_view_id, vec![conversation], ctx);
+        });
+
+        let mut mock = MockAIClient::new();
+        mock.expect_update_event_sequence_on_server()
+            .returning(|_, _| Ok(()));
+        let ai_client: Arc<dyn AIClient> = Arc::new(mock);
+        let server_api = ServerApiProvider::new_for_test().get();
+        let streamer = app.add_singleton_model(|ctx| {
+            OrchestrationEventStreamer::new_with_clients_for_test(ai_client, server_api, ctx)
+        });
+
+        let captured: std::sync::Arc<parking_lot::Mutex<Vec<AIConversationId>>> =
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let captured_for_closure = captured.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_model(&streamer, move |_, event, _| {
+                if let OrchestrationEventStreamerEvent::ParentCompletionSucceeded {
+                    conversation_id,
+                } = event
+                {
+                    captured_for_closure.lock().push(*conversation_id);
+                }
+            })
+        });
+
+        let events = vec![make_seq_event(
+            EVENT_RUN_SUCCEEDED_BY_PARENT_COMPLETION,
+            &self_run_id,
+            None,
+            9,
+        )];
+
+        streamer.update(&mut app, |me, ctx| {
+            let tracker = OrchestrationChildTracker::new(self_run_id.parse().unwrap());
+            me.drain_family_events(
+                conversation_id,
+                &self_run_id,
+                FamilyDrainMode::Primary,
+                tracker,
+                0,
+                events,
+                Vec::new(),
+                ctx,
+            );
+        });
+
+        assert_eq!(
+            captured.lock().clone(),
+            vec![conversation_id],
+            "the unified family-drain path must still forward the self-scoped parent-completion \
+             event to handle_event_batch and emit ParentCompletionSucceeded"
+        );
+    });
+}
+
 #[test]
 fn drain_family_events_observer_advances_cursor_without_server_push() {
     // Observer routes child lifecycle to the tracker and persists the cursor

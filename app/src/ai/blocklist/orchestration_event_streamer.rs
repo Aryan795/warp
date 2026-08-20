@@ -414,6 +414,12 @@ fn classify_family_event(event: &AgentRunEvent, self_run_id: &str) -> FamilyEven
             None => FamilyEvent::Opaque,
         },
         (true, EVENT_NEW_MESSAGE) => FamilyEvent::ParentSelf(event.clone()),
+        // Must be classified explicitly and forwarded as ParentSelf: it is a self-scoped
+        // event, but not a recognised lifecycle type (`lifecycle_event_type_from_wire`
+        // returns None for it), so without this arm it would fall through to Opaque and
+        // never reach handle_event_batch's ParentCompletionSucceeded detection on the
+        // unified family-drain path.
+        (true, EVENT_RUN_SUCCEEDED_BY_PARENT_COMPLETION) => FamilyEvent::ParentSelf(event.clone()),
         (true, event_type) => {
             // The parent's own lifecycle events are ParentSelf; unrecognised
             // self events advance the cursor only.
