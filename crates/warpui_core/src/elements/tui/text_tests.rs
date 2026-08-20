@@ -350,7 +350,7 @@ fn hyperlink_recording_respects_an_active_clip_and_the_scratch_copy_path() {
     }
     for x in [0, 1, 8, 9] {
         assert!(
-            frame.hyperlinks.get(&(x, 0)).is_none(),
+            !frame.hyperlinks.contains_key(&(x, 0)),
             "column {x} was clipped and never painted, so it must not be linked"
         );
     }

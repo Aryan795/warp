@@ -166,7 +166,7 @@ fn hyperlink_survives_compositing_translated_to_the_padded_final_position() {
     }
     for x in [0, 1, 2, 7, 8, 9] {
         assert!(
-            frame.hyperlinks.get(&(x, 0)).is_none(),
+            !frame.hyperlinks.contains_key(&(x, 0)),
             "column {x} should not be tagged"
         );
     }
@@ -186,7 +186,7 @@ fn opaque_foreground_layer_clears_a_lower_layers_hyperlink() {
     assert_eq!(frame.buffer.to_lines(), vec!["XXXX"]);
     for x in 0..4 {
         assert!(
-            frame.hyperlinks.get(&(x, 0)).is_none(),
+            !frame.hyperlinks.contains_key(&(x, 0)),
             "column {x} must not remain clickable once an opaque, non-hyperlinked layer covers it"
         );
     }
