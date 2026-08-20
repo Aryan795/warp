@@ -641,11 +641,24 @@ fn merge_repository_updates(acc: &mut RepositoryUpdate, incoming: &RepositoryUpd
     acc.remote_ref_updated |= incoming.remote_ref_updated;
 }
 
+/// Maximum number of buffered filesystem changes (the combined size of `added`, `modified`,
+/// `deleted`, and `moved`) a [`BufferingRepositorySubscriber`] accumulates before it forces a
+/// flush ahead of the debounce timer. Bounds memory under sustained filesystem churn (e.g. a
+/// large `git checkout` or `npm install`) while remaining large enough that ordinary update
+/// bursts still coalesce through the debounce window instead of flushing on every batch.
+const DEFAULT_MAX_PENDING_ENTRIES: usize = 10_000;
+
+/// Total number of individual filesystem changes buffered in `update`.
+fn pending_entry_count(update: &RepositoryUpdate) -> usize {
+    update.added.len() + update.modified.len() + update.deleted.len() + update.moved.len()
+}
+
 /// A generic debouncing layer for any RepositorySubscriber.
 pub struct BufferingRepositorySubscriber<S> {
     inner: Arc<Mutex<S>>,
     state: Arc<Mutex<BufferState>>,
     debounce: Duration,
+    max_pending_entries: usize,
 }
 
 #[derive(Default)]
@@ -659,11 +672,32 @@ struct BufferState {
 
 impl<S> BufferingRepositorySubscriber<S> {
     pub fn new(inner: S, debounce: Duration) -> Self {
+        Self::new_with_max_pending_entries(inner, debounce, DEFAULT_MAX_PENDING_ENTRIES)
+    }
+
+    fn new_with_max_pending_entries(
+        inner: S,
+        debounce: Duration,
+        max_pending_entries: usize,
+    ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(inner)),
             state: Arc::new(Mutex::new(BufferState::default())),
             debounce,
+            max_pending_entries,
         }
+    }
+
+    /// Like [`Self::new`], but allows overriding the maximum number of buffered filesystem
+    /// changes before a flush is forced ahead of the debounce timer. Exposed for tests that need
+    /// to exercise the bound without buffering `DEFAULT_MAX_PENDING_ENTRIES` real entries.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn with_max_pending_entries(
+        inner: S,
+        debounce: Duration,
+        max_pending_entries: usize,
+    ) -> Self {
+        Self::new_with_max_pending_entries(inner, debounce, max_pending_entries)
     }
 }
 
@@ -681,11 +715,11 @@ where
 
     fn on_files_updated(
         &mut self,
-        _repository: &Repository,
+        repository: &Repository,
         update: &RepositoryUpdate,
         ctx: &mut ModelContext<Repository>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
-        {
+        let forced_batch = {
             let mut st = self.state.lock().unwrap();
             merge_repository_updates(&mut st.pending, update);
             st.version = st.version.wrapping_add(1);
@@ -739,6 +773,23 @@ where
                     },
                 ));
             }
+
+            // Force a flush ahead of the debounce timer once the buffer grows past the bound, so
+            // memory stays bounded under sustained filesystem churn. This never drops or reorders
+            // anything: the drained batch already went through `merge_repository_updates`'s
+            // coalescing, and the flusher spawned above (or already running from an earlier call)
+            // keeps draining whatever accumulates afterward.
+            (pending_entry_count(&st.pending) >= self.max_pending_entries)
+                .then(|| std::mem::take(&mut st.pending))
+        };
+
+        if let Some(batch) = forced_batch
+            && !batch.is_empty()
+            && let Ok(mut inner) = self.inner.lock()
+        {
+            let fut = inner.on_files_updated(repository, &batch, ctx);
+            // Drive the subscriber's async update to completion.
+            ctx.spawn(fut, |_, _, _| {});
         }
 
         Box::pin(ready(()))

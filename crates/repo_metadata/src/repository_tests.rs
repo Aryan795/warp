@@ -11,8 +11,8 @@ use warpui_core::r#async::Timer;
 use warpui_core::{App, ModelContext};
 
 use super::{
-    Repository, RepositorySubscriber, RepositorySubscription, RepositoryWatchMode,
-    TrackedRemoteRef, merge_repository_updates,
+    BufferingRepositorySubscriber, Repository, RepositorySubscriber, RepositorySubscription,
+    RepositoryWatchMode, TrackedRemoteRef, merge_repository_updates,
 };
 use crate::repositories::stub_git_repository;
 use crate::watcher::DirectoryWatcher;
@@ -431,6 +431,148 @@ fn tracked_remote_ref_change_notifies_subscribers() {
             assert!(update.moved.is_empty());
         });
     });
+}
+
+#[test]
+fn forced_flush_drains_pending_before_debounce_timer_fires() {
+    VirtualFS::test(
+        "forced_flush_drains_pending_before_debounce_timer_fires",
+        |dirs, mut vfs| {
+            vfs.mkdir("repo");
+            let repo_path = dirs.tests().join("repo");
+
+            App::test((), |mut app| async move {
+                let watcher_handle = app.add_singleton_model(DirectoryWatcher::new_for_testing);
+                let repo_handle = watcher_handle
+                    .update(&mut app, |watcher, ctx| {
+                        watcher.add_directory(
+                            StandardizedPath::from_local_canonicalized(&repo_path).unwrap(),
+                            ctx,
+                        )
+                    })
+                    .unwrap();
+
+                const MAX_PENDING_ENTRIES: usize = 3;
+                let (update_tx, mut update_rx) = mpsc::unbounded::<RepositoryUpdate>();
+                let start = repo_handle.update(&mut app, |repo, ctx| {
+                    let buffered = BufferingRepositorySubscriber::with_max_pending_entries(
+                        RecordingSubscriber { update_tx },
+                        // Long enough that the debounce timer cannot plausibly fire during
+                        // the test, so any observed flush must come from the forced path.
+                        Duration::from_secs(3600),
+                        MAX_PENDING_ENTRIES,
+                    );
+                    repo.start_watching(
+                        RepositoryWatchMode::FilesystemOnly,
+                        Box::new(buffered),
+                        ctx,
+                    )
+                });
+                std::mem::drop(start.registration_future);
+                let subscriber_id = start.subscriber_id;
+
+                let expected_files: Vec<_> = (0..MAX_PENDING_ENTRIES)
+                    .map(|i| TargetFile::new(repo_path.join(format!("file{i}.txt")), false))
+                    .collect();
+                for file in &expected_files {
+                    let update = RepositoryUpdate {
+                        added: [file.clone()].into(),
+                        ..Default::default()
+                    };
+                    repo_handle.update(&mut app, |repo, ctx| {
+                        repo.notify_subscriber(subscriber_id, &update, ctx);
+                    });
+                }
+
+                let flushed = update_rx.next().await.expect("forced flush");
+                assert_eq!(flushed.added.len(), MAX_PENDING_ENTRIES);
+                for file in &expected_files {
+                    assert!(flushed.added.contains(file));
+                }
+            });
+        },
+    );
+}
+
+#[test]
+fn forced_flushes_do_not_drop_updates_while_debounce_never_settles() {
+    VirtualFS::test(
+        "forced_flushes_do_not_drop_updates_while_debounce_never_settles",
+        |dirs, mut vfs| {
+            vfs.mkdir("repo");
+            let repo_path = dirs.tests().join("repo");
+
+            App::test((), |mut app| async move {
+                let watcher_handle = app.add_singleton_model(DirectoryWatcher::new_for_testing);
+                let repo_handle = watcher_handle
+                    .update(&mut app, |watcher, ctx| {
+                        watcher.add_directory(
+                            StandardizedPath::from_local_canonicalized(&repo_path).unwrap(),
+                            ctx,
+                        )
+                    })
+                    .unwrap();
+
+                const MAX_PENDING_ENTRIES: usize = 5;
+                let (update_tx, mut update_rx) = mpsc::unbounded::<RepositoryUpdate>();
+                let start = repo_handle.update(&mut app, |repo, ctx| {
+                    let buffered = BufferingRepositorySubscriber::with_max_pending_entries(
+                        RecordingSubscriber { update_tx },
+                        // Long enough that the debounce timer never fires during the test, so
+                        // updates keep arriving into a buffer that never observes a quiet period.
+                        Duration::from_secs(3600),
+                        MAX_PENDING_ENTRIES,
+                    );
+                    repo.start_watching(
+                        RepositoryWatchMode::FilesystemOnly,
+                        Box::new(buffered),
+                        ctx,
+                    )
+                });
+                std::mem::drop(start.registration_future);
+                let subscriber_id = start.subscriber_id;
+
+                // Enough updates to force two flushes, with a partial batch left over that only
+                // the (unreached, 3600s) debounce timer would flush.
+                let total_updates = MAX_PENDING_ENTRIES * 2 + 3;
+                let all_files: Vec<_> = (0..total_updates)
+                    .map(|i| TargetFile::new(repo_path.join(format!("file{i}.txt")), false))
+                    .collect();
+                for file in &all_files {
+                    let update = RepositoryUpdate {
+                        added: [file.clone()].into(),
+                        ..Default::default()
+                    };
+                    repo_handle.update(&mut app, |repo, ctx| {
+                        repo.notify_subscriber(subscriber_id, &update, ctx);
+                    });
+                }
+
+                let mut flushed_files = std::collections::HashSet::new();
+                for _ in 0..2 {
+                    let flushed = update_rx.next().await.expect("forced flush");
+                    assert_eq!(flushed.added.len(), MAX_PENDING_ENTRIES);
+                    for file in flushed.added {
+                        assert!(flushed_files.insert(file), "duplicate flushed file");
+                    }
+                }
+
+                assert_eq!(flushed_files.len(), MAX_PENDING_ENTRIES * 2);
+                for file in all_files.iter().take(MAX_PENDING_ENTRIES * 2) {
+                    assert!(flushed_files.contains(file));
+                }
+
+                // The remaining updates stay buffered; without waiting out the debounce, no
+                // third flush should be observed.
+                futures::select! {
+                    update = update_rx.next().fuse() => {
+                        panic!("unexpected extra flush: {update:?}");
+                    }
+                    _ = futures::FutureExt::fuse(Timer::after(Duration::from_millis(100))) => {}
+                }
+            });
+        },
+    );
 }
 
 #[test]
