@@ -52,8 +52,7 @@ use crate::ai::agent_sdk::driver::harness::{
     ThirdPartyHarness, ThirdPartyHarnessTelemetryEvent, harness_model_env_vars, task_env_vars,
 };
 use crate::ai::agent_sdk::driver::telemetry::{
-    WaitForEventsCheckpointOutcome, WaitForEventsEpisodeResolvedEvent, WaitForEventsOutcome,
-    WaitForEventsTelemetryEvent,
+    WaitForEventsTelemetryEvent, wait_for_events_episode_resolved_event,
 };
 use crate::ai::agent_sdk::setup_observability::{SetupClientEventReporter, SetupStep};
 use crate::ai::ambient_agents::task::HarnessModelConfig;
@@ -4130,16 +4129,15 @@ impl AgentDriver {
                             );
                             send_telemetry_from_ctx!(
                                 WaitForEventsTelemetryEvent::EpisodeResolved(
-                                    WaitForEventsEpisodeResolvedEvent {
-                                        task_id: checkpoint_task_id.map(|id| id.to_string()),
-                                        execution_id: checkpoint_execution_id,
+                                    wait_for_events_episode_resolved_event(
+                                        checkpoint_task_id.map(|id| id.to_string()),
+                                        checkpoint_execution_id,
                                         server_idle_timeout_seconds,
                                         used_fallback,
-                                        resolved_watchdog_seconds: resolved_watchdog.as_secs(),
-                                        hibernate_on_first_timeout_enabled: FeatureFlag::HibernateOnFirstWaitTimeout.is_enabled(),
-                                        wait_outcome: WaitForEventsOutcome::Timeout,
-                                        checkpoint_outcome: WaitForEventsCheckpointOutcome::from_succeeded(checkpoint_succeeded),
-                                    }
+                                        resolved_watchdog.as_secs(),
+                                        FeatureFlag::HibernateOnFirstWaitTimeout.is_enabled(),
+                                        checkpoint_succeeded,
+                                    )
                                 ),
                                 ctx
                             );

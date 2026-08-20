@@ -60,6 +60,37 @@ pub(crate) struct WaitForEventsEpisodeResolvedEvent {
     pub checkpoint_outcome: WaitForEventsCheckpointOutcome,
 }
 
+/// Builds the wait-episode telemetry payload from the stamp fields threaded through
+/// the `wait_for_events` yield chain, the driver's own identifiers, and the final
+/// checkpoint attempt's outcome.
+///
+/// Extracted from the driver's callback so the exact construction used at that call
+/// site is unit-testable (see `telemetry_tests.rs`) without exercising the real
+/// checkpoint pipeline, which is gated by a feature flag that cannot be reliably
+/// forced on from a unit test for code running on the background executor (thread-
+/// local flag overrides do not cross into that executor's worker thread, and
+/// globally flipping a flag is disallowed outside integration tests).
+pub(crate) fn wait_for_events_episode_resolved_event(
+    task_id: Option<String>,
+    execution_id: String,
+    server_idle_timeout_seconds: i32,
+    used_fallback: bool,
+    resolved_watchdog_seconds: u64,
+    hibernate_on_first_timeout_enabled: bool,
+    checkpoint_succeeded: bool,
+) -> WaitForEventsEpisodeResolvedEvent {
+    WaitForEventsEpisodeResolvedEvent {
+        task_id,
+        execution_id,
+        server_idle_timeout_seconds,
+        used_fallback,
+        resolved_watchdog_seconds,
+        hibernate_on_first_timeout_enabled,
+        wait_outcome: WaitForEventsOutcome::Timeout,
+        checkpoint_outcome: WaitForEventsCheckpointOutcome::from_succeeded(checkpoint_succeeded),
+    }
+}
+
 impl TelemetryEvent for WaitForEventsTelemetryEvent {
     fn name(&self) -> &'static str {
         WaitForEventsTelemetryEventDiscriminants::from(self).name()
