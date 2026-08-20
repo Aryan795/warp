@@ -90,8 +90,8 @@ fn wrapped_link_text_carries_the_full_url_on_every_wrapped_row() {
         app.add_singleton_model(|_| Appearance::mock());
         app.read(|ctx| {
             let url = "https://warp.dev/very/long/path/that/should/wrap/across/rows";
-            let formatted = parse_markdown(&format!("[click here]({url})"))
-                .expect("Markdown should parse");
+            let formatted =
+                parse_markdown(&format!("[click here]({url})")).expect("Markdown should parse");
             let (lines, hyperlinks) = render_with_hyperlinks(&formatted, 20, ctx);
             assert!(
                 lines.len() > 1,

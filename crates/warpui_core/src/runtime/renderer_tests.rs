@@ -25,7 +25,9 @@ fn draw_with_hyperlinks(
     hyperlinks: &HashMap<(u16, u16), Rc<str>>,
 ) -> String {
     let mut output = Vec::new();
-    renderer.draw(&mut output, buffer, None, hyperlinks).unwrap();
+    renderer
+        .draw(&mut output, buffer, None, hyperlinks)
+        .unwrap();
     String::from_utf8(output).unwrap()
 }
 

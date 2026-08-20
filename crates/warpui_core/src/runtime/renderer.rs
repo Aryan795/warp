@@ -177,13 +177,21 @@ impl TuiFrameRenderer {
                     hyperlinks,
                 )?;
             }
-            write_cell_run(&mut backend, diff[index..=index].iter().copied(), hyperlinks)?;
+            write_cell_run(
+                &mut backend,
+                diff[index..=index].iter().copied(),
+                hyperlinks,
+            )?;
 
             index = trailing_diff_end;
             batch_start = index;
         }
         if batch_start < diff.len() {
-            write_cell_run(&mut backend, diff[batch_start..].iter().copied(), hyperlinks)?;
+            write_cell_run(
+                &mut backend,
+                diff[batch_start..].iter().copied(),
+                hyperlinks,
+            )?;
         }
 
         match cursor_position {

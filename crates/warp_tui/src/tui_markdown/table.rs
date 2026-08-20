@@ -118,7 +118,11 @@ impl TuiMarkdownTable {
                     self.palette,
                     &mut hyperlinks,
                 ));
-                table.add_child(TuiText::from_spans(spans).with_hyperlinks(hyperlinks).finish());
+                table.add_child(
+                    TuiText::from_spans(spans)
+                        .with_hyperlinks(hyperlinks)
+                        .finish(),
+                );
             }
             if row_index + 1 < rows.len() {
                 table.add_child(blank_row());
@@ -266,7 +270,9 @@ fn table_row(
         }
         let mut hyperlinks = Vec::new();
         let spans = aligned_cell_spans(cell, *alignment, *width, base, palette, &mut hyperlinks);
-        let text = TuiText::from_spans(spans).with_hyperlinks(hyperlinks).finish();
+        let text = TuiText::from_spans(spans)
+            .with_hyperlinks(hyperlinks)
+            .finish();
         row.add_child(TuiFixedWidth::new(*width, text).finish());
     }
     row.finish()
