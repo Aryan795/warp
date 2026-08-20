@@ -502,7 +502,9 @@ fn optimistic_cli_subagent_completion_with_in_flight_stream_reports_success() {
 /// follow-up when its ConversationSearch subagent is otherwise legitimately
 /// running, but NOT when the whole conversation is being terminally stopped
 /// (e.g. the user pressed Stop) — otherwise the conversation the user just
-/// stopped would restart itself.
+/// stopped would restart itself. Also covers the case where a manual/passive
+/// follow-up (`request_follow_up_after_actions`) was already pending at the
+/// moment of the Stop: that must not survive the terminal cancellation either.
 #[test]
 fn manual_stop_with_pending_fetch_conversation_does_not_restart_conversation() {
     App::test((), |mut app| async move {
@@ -550,6 +552,12 @@ fn manual_stop_with_pending_fetch_conversation_does_not_restart_conversation() {
                 controller.action_model.update(ctx, |action_model, _ctx| {
                     action_model.queue_pending_action_for_test(action, conversation_id);
                 });
+
+                // A manual/passive follow-up was already requested for this
+                // conversation before the user pressed Stop. Since the fetch
+                // above is still pending, this only sets the pending flag and
+                // returns early without sending anything yet.
+                controller.request_follow_up_after_actions(conversation_id, ctx);
 
                 // Simulate the user pressing Stop while the fetch is pending.
                 controller.cancel_conversation_progress(
