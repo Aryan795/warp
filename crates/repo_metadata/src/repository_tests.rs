@@ -1,6 +1,9 @@
+use std::collections::HashSet;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures::channel::mpsc;
@@ -41,6 +44,46 @@ impl RepositorySubscriber for RecordingSubscriber {
         let update_tx = self.update_tx.clone();
         Box::pin(async move {
             let _ = update_tx.unbounded_send(update);
+        })
+    }
+}
+
+/// A subscriber whose `on_files_updated` takes `delay` to resolve, and asserts that it is never
+/// invoked again before the previous call's returned future has resolved. Used to prove that
+/// `BufferingRepositorySubscriber` serializes delivery instead of racing overlapping calls.
+struct SlowRecordingSubscriber {
+    update_tx: mpsc::UnboundedSender<RepositoryUpdate>,
+    in_flight: Arc<AtomicBool>,
+    delay: Duration,
+}
+
+impl RepositorySubscriber for SlowRecordingSubscriber {
+    fn on_scan(
+        &mut self,
+        _repository: &Repository,
+        _ctx: &mut ModelContext<Repository>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
+        Box::pin(async {})
+    }
+
+    fn on_files_updated(
+        &mut self,
+        _repository: &Repository,
+        update: &RepositoryUpdate,
+        _ctx: &mut ModelContext<Repository>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
+        assert!(
+            !self.in_flight.swap(true, Ordering::SeqCst),
+            "on_files_updated was invoked again before the previous call's future resolved"
+        );
+        let update = update.clone();
+        let update_tx = self.update_tx.clone();
+        let in_flight = Arc::clone(&self.in_flight);
+        let delay = self.delay;
+        Box::pin(async move {
+            Timer::after(delay).await;
+            let _ = update_tx.unbounded_send(update);
+            in_flight.store(false, Ordering::SeqCst);
         })
     }
 }
@@ -495,9 +538,93 @@ fn forced_flush_drains_pending_before_debounce_timer_fires() {
 }
 
 #[test]
-fn forced_flushes_do_not_drop_updates_while_debounce_never_settles() {
+fn single_incoming_update_exceeding_the_bound_is_split_into_bounded_batches() {
     VirtualFS::test(
-        "forced_flushes_do_not_drop_updates_while_debounce_never_settles",
+        "single_incoming_update_exceeding_the_bound_is_split_into_bounded_batches",
+        |dirs, mut vfs| {
+            vfs.mkdir("repo");
+            let repo_path = dirs.tests().join("repo");
+
+            App::test((), |mut app| async move {
+                let watcher_handle = app.add_singleton_model(DirectoryWatcher::new_for_testing);
+                let repo_handle = watcher_handle
+                    .update(&mut app, |watcher, ctx| {
+                        watcher.add_directory(
+                            StandardizedPath::from_local_canonicalized(&repo_path).unwrap(),
+                            ctx,
+                        )
+                    })
+                    .unwrap();
+
+                const MAX_PENDING_ENTRIES: usize = 4;
+                let (update_tx, mut update_rx) = mpsc::unbounded::<RepositoryUpdate>();
+                let start = repo_handle.update(&mut app, |repo, ctx| {
+                    let buffered = BufferingRepositorySubscriber::with_max_pending_entries(
+                        RecordingSubscriber { update_tx },
+                        // Long enough that the debounce timer cannot plausibly fire during
+                        // the test, so every observed batch must come from the forced,
+                        // within-a-single-update chunking path.
+                        Duration::from_secs(3600),
+                        MAX_PENDING_ENTRIES,
+                    );
+                    repo.start_watching(
+                        RepositoryWatchMode::FilesystemOnly,
+                        Box::new(buffered),
+                        ctx,
+                    )
+                });
+                std::mem::drop(start.registration_future);
+                let subscriber_id = start.subscriber_id;
+
+                // A single incoming update far larger than the configured bound, exactly the
+                // large-single-event case a coalesced filesystem-watcher batch can produce (a
+                // huge git checkout or npm install landing as one `RepositoryUpdate`). A clean
+                // multiple of the bound so nothing is left waiting on the (unreached) debounce.
+                let total_files = MAX_PENDING_ENTRIES * 3;
+                let all_files: Vec<_> = (0..total_files)
+                    .map(|i| TargetFile::new(repo_path.join(format!("file{i}.txt")), false))
+                    .collect();
+                let huge_update = RepositoryUpdate {
+                    added: all_files.iter().cloned().collect(),
+                    ..Default::default()
+                };
+
+                repo_handle.update(&mut app, |repo, ctx| {
+                    repo.notify_subscriber(subscriber_id, &huge_update, ctx);
+                });
+
+                let mut seen = HashSet::new();
+                let mut batch_count = 0;
+                while seen.len() < total_files {
+                    let flushed = update_rx.next().await.expect("bounded batch");
+                    assert!(
+                        flushed.added.len() <= MAX_PENDING_ENTRIES,
+                        "batch of {} entries exceeded the configured bound of {MAX_PENDING_ENTRIES}",
+                        flushed.added.len()
+                    );
+                    for file in flushed.added {
+                        assert!(seen.insert(file), "duplicate file delivered across batches");
+                    }
+                    batch_count += 1;
+                }
+
+                assert_eq!(seen.len(), total_files);
+                for file in &all_files {
+                    assert!(seen.contains(file));
+                }
+                assert!(
+                    batch_count > 1,
+                    "a single update far exceeding the bound should be split into multiple batches"
+                );
+            });
+        },
+    );
+}
+
+#[test]
+fn forced_and_debounced_flushes_apply_every_update_exactly_once_with_a_slow_consumer() {
+    VirtualFS::test(
+        "forced_and_debounced_flushes_apply_every_update_exactly_once_with_a_slow_consumer",
         |dirs, mut vfs| {
             vfs.mkdir("repo");
             let repo_path = dirs.tests().join("repo");
@@ -514,13 +641,25 @@ fn forced_flushes_do_not_drop_updates_while_debounce_never_settles() {
                     .unwrap();
 
                 const MAX_PENDING_ENTRIES: usize = 5;
+                // Short enough to elapse comfortably within the test's timeout, but long enough
+                // that the feed loop below (which never awaits between updates) reliably
+                // finishes well before it fires.
+                const DEBOUNCE: Duration = Duration::from_millis(30);
+                // Longer than `DEBOUNCE`, so the debounce timer can fire while a forced batch is
+                // still being delivered -- exercising the case where a debounce-triggered flush
+                // has to wait behind an in-flight forced delivery instead of racing it.
+                const CONSUMER_DELAY: Duration = Duration::from_millis(40);
+
                 let (update_tx, mut update_rx) = mpsc::unbounded::<RepositoryUpdate>();
+                let in_flight = Arc::new(AtomicBool::new(false));
                 let start = repo_handle.update(&mut app, |repo, ctx| {
                     let buffered = BufferingRepositorySubscriber::with_max_pending_entries(
-                        RecordingSubscriber { update_tx },
-                        // Long enough that the debounce timer never fires during the test, so
-                        // updates keep arriving into a buffer that never observes a quiet period.
-                        Duration::from_secs(3600),
+                        SlowRecordingSubscriber {
+                            update_tx,
+                            in_flight: Arc::clone(&in_flight),
+                            delay: CONSUMER_DELAY,
+                        },
+                        DEBOUNCE,
                         MAX_PENDING_ENTRIES,
                     );
                     repo.start_watching(
@@ -532,8 +671,8 @@ fn forced_flushes_do_not_drop_updates_while_debounce_never_settles() {
                 std::mem::drop(start.registration_future);
                 let subscriber_id = start.subscriber_id;
 
-                // Enough updates to force two flushes, with a partial batch left over that only
-                // the (unreached, 3600s) debounce timer would flush.
+                // Two forced flushes' worth, plus a partial batch that only the debounce timer
+                // flushes once the feed goes quiet.
                 let total_updates = MAX_PENDING_ENTRIES * 2 + 3;
                 let all_files: Vec<_> = (0..total_updates)
                     .map(|i| TargetFile::new(repo_path.join(format!("file{i}.txt")), false))
@@ -548,27 +687,30 @@ fn forced_flushes_do_not_drop_updates_while_debounce_never_settles() {
                     });
                 }
 
-                let mut flushed_files = std::collections::HashSet::new();
-                for _ in 0..2 {
-                    let flushed = update_rx.next().await.expect("forced flush");
-                    assert_eq!(flushed.added.len(), MAX_PENDING_ENTRIES);
+                // Exactly three batches account for every update: two forced (5 each) and one
+                // debounced remainder (3). `SlowRecordingSubscriber` itself asserts that no two
+                // of them are ever delivered concurrently.
+                let mut seen = HashSet::new();
+                for _ in 0..3 {
+                    let flushed = update_rx.next().await.expect("flush");
+                    assert!(!flushed.added.is_empty());
+                    assert!(flushed.added.len() <= MAX_PENDING_ENTRIES);
                     for file in flushed.added {
-                        assert!(flushed_files.insert(file), "duplicate flushed file");
+                        assert!(seen.insert(file), "duplicate file delivered across batches");
                     }
                 }
 
-                assert_eq!(flushed_files.len(), MAX_PENDING_ENTRIES * 2);
-                for file in all_files.iter().take(MAX_PENDING_ENTRIES * 2) {
-                    assert!(flushed_files.contains(file));
+                assert_eq!(seen.len(), total_updates);
+                for file in &all_files {
+                    assert!(seen.contains(file));
                 }
 
-                // The remaining updates stay buffered; without waiting out the debounce, no
-                // third flush should be observed.
+                // Nothing else should ever arrive.
                 futures::select! {
                     update = update_rx.next().fuse() => {
                         panic!("unexpected extra flush: {update:?}");
                     }
-                    _ = futures::FutureExt::fuse(Timer::after(Duration::from_millis(100))) => {}
+                    _ = futures::FutureExt::fuse(Timer::after(Duration::from_millis(300))) => {}
                 }
             });
         },
