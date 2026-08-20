@@ -9,6 +9,3 @@ license.workspace = true
 
 [dependencies]
 fuzzy-matcher = "0.3.7"
-
-[dev-dependencies]
-instant.workspace = true

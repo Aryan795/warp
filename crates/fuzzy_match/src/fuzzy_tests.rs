@@ -375,38 +375,29 @@ fn test_ignore_spaces_single_word_query() {
 // SkimMatcherV2::fuzzy_indices builds an O(pattern_len * text_len) score matrix with no cap
 // by default, which lets a single pathologically long piece of text (e.g. a huge pasted blob
 // recorded as one shell history entry) drive that allocation into the gigabytes.
-// `element_limit` bounds it; these tests would hang or blow past a reasonable memory/time
-// budget without that bound.
-
+// `element_limit` bounds it by falling back to a cheaper greedy match once the matrix would
+// exceed the cap, which scores this input differently (48 vs. 51 below) than the full DP
+// alignment would. That score difference is the only externally observable signal that the
+// bound is actually being applied, so assert on it directly: without `element_limit`, this
+// test would still return `Some(..)`, just with the higher unbounded-DP score.
 #[test]
-fn test_long_text_completes_quickly_without_unbounded_allocation() {
-    // Comfortably exceeds FUZZY_MATCH_ELEMENT_LIMIT (1_000_000 cells) for any non-trivial
-    // query, forcing the `element_limit` fallback instead of allocating a
-    // `query_len * text_len`-cell score matrix.
-    let text = "x".repeat(3_000_000);
-    let query = "xxxxx";
+fn test_long_text_triggers_element_limit_fallback() {
+    // rows * cols = 3 * 500_001, comfortably over the 1_000_000-cell limit.
+    let text = "a".repeat(500_000);
 
-    let start = instant::Instant::now();
-    let result = match_indices_case_insensitive(&text, query);
-    let elapsed = start.elapsed();
-
-    assert!(result.is_some());
-    assert!(
-        elapsed < std::time::Duration::from_secs(5),
-        "fuzzy match against a long text took too long, suggesting an unbounded score matrix \
-         allocation: {elapsed:?}"
+    assert_eq!(
+        match_indices(&text, "aa").map(|r| (r.score, r.matched_indices)),
+        Some((48, vec![0, 1]))
     );
-}
-
-#[test]
-fn test_long_text_all_entry_points_stay_bounded() {
-    // All three public entry points build their own SkimMatcherV2, so each must set
-    // element_limit independently.
-    let text = "y".repeat(3_000_000);
-
-    assert!(match_indices(&text, "yyyyy").is_some());
-    assert!(match_indices_case_insensitive(&text, "yyyyy").is_some());
-    assert!(match_indices_case_insensitive_ignore_spaces(&text, "y y y").is_some());
+    assert_eq!(
+        match_indices_case_insensitive(&text, "aa").map(|r| (r.score, r.matched_indices)),
+        Some((48, vec![0, 1]))
+    );
+    assert_eq!(
+        match_indices_case_insensitive_ignore_spaces(&text, "a a")
+            .map(|r| (r.score, r.matched_indices)),
+        Some((48, vec![0, 1]))
+    );
 }
 
 #[test]

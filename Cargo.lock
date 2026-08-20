@@ -5516,7 +5516,6 @@ name = "fuzzy_match"
 version = "0.1.0"
 dependencies = [
  "fuzzy-matcher",
- "instant",
 ]
 
 [[package]]
