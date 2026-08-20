@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::future::Future;
 #[cfg(feature = "local_fs")]
 use std::path::{Component, Path, PathBuf};
@@ -575,7 +575,7 @@ impl Entity for Repository {
 }
 
 /// Coalescing merge for RepositoryUpdate with normalization rules.
-fn merge_repository_updates(acc: &mut RepositoryUpdate, incoming: &RepositoryUpdate) {
+pub(crate) fn merge_repository_updates(acc: &mut RepositoryUpdate, incoming: &RepositoryUpdate) {
     // 1) Moves first
     for (to, from) in &incoming.moved {
         if acc.added.remove(from) {
@@ -660,19 +660,39 @@ pub struct BufferingRepositorySubscriber<S> {
     max_pending_entries: usize,
 }
 
-#[derive(Default)]
 struct BufferState {
     pending: RepositoryUpdate,
     /// Monotonic counter incremented for each incoming update; used to implement true debounce.
     version: u64,
     /// Whether the background flusher loop is currently running.
     flush_handle: Option<SpawnedFutureHandle>,
-    /// Batches that crossed `max_pending_entries` (or were handed off by the debounce flusher)
-    /// and are waiting to be delivered to `inner`. Drained strictly one at a time so `inner`
-    /// never sees overlapping or out-of-order calls to `on_files_updated`.
-    delivery_queue: VecDeque<RepositoryUpdate>,
-    /// Whether a batch from `delivery_queue` is currently being delivered to `inner`.
+    /// A batch that crossed `max_pending_entries` (or was handed off by the debounce flusher)
+    /// while a delivery to `inner` was already in flight. Further such batches are coalesced
+    /// into this one via `merge_repository_updates` rather than queued separately, so the
+    /// backlog stays proportional to the number of distinct un-delivered paths instead of
+    /// growing with the number of batches that formed while `inner` was busy. Taken and
+    /// delivered as a single batch once the in-flight delivery completes.
+    next_delivery: Option<RepositoryUpdate>,
+    /// Whether a batch is currently being delivered to `inner`. Only one delivery is ever in
+    /// flight at a time, so `inner` never sees overlapping or out-of-order calls to
+    /// `on_files_updated`.
     delivering: bool,
+    /// Cleared on unsubscribe so an in-flight or still-forming delivery becomes a no-op instead
+    /// of continuing to call `inner` (and retaining memory) after the subscription has ended.
+    active: bool,
+}
+
+impl Default for BufferState {
+    fn default() -> Self {
+        Self {
+            pending: RepositoryUpdate::default(),
+            version: 0,
+            flush_handle: None,
+            next_delivery: None,
+            delivering: false,
+            active: true,
+        }
+    }
 }
 
 impl<S> BufferingRepositorySubscriber<S> {
@@ -706,79 +726,43 @@ impl<S> BufferingRepositorySubscriber<S> {
     }
 }
 
-/// Merges `update` into `st.pending` one entry at a time, in the same phase order
+/// Splits `update` into a sequence of single-entry updates, in the same phase order
 /// `merge_repository_updates` already applies within a single call (moves, then adds, then
-/// modifies, then deletes, with the boolean flags folded in last), pushing the accumulated
-/// batch onto `st.delivery_queue` every time the combined entry count reaches
-/// `max_pending_entries`. `merge_repository_updates`'s per-phase coalescing only depends on
-/// phases being applied in that order, not on how many entries are merged in one call, so this
-/// keeps `pending` bounded even when a single incoming `update` by itself exceeds the limit,
-/// without changing the coalesced result.
-fn merge_update_bounded(
-    st: &mut BufferState,
-    update: &RepositoryUpdate,
-    max_pending_entries: usize,
-) {
-    fn flush_if_over_bound(st: &mut BufferState, max_pending_entries: usize) {
-        if pending_entry_count(&st.pending) >= max_pending_entries {
-            st.delivery_queue.push_back(std::mem::take(&mut st.pending));
-        }
-    }
+/// modifies, then deletes, with the boolean flags folded into one final update).
+/// `merge_repository_updates`'s per-phase coalescing only depends on phases being applied in
+/// that order, not on how many entries are merged in one call, so merging this sequence one
+/// piece at a time is equivalent to merging `update` as a whole.
+fn single_entry_updates(update: &RepositoryUpdate) -> impl Iterator<Item = RepositoryUpdate> + '_ {
+    let moves = update.moved.iter().map(|(to, from)| RepositoryUpdate {
+        moved: [(to.clone(), from.clone())].into(),
+        ..Default::default()
+    });
+    let adds = update.added.iter().map(|p| RepositoryUpdate {
+        added: [p.clone()].into(),
+        ..Default::default()
+    });
+    let modifies = update.modified.iter().map(|p| RepositoryUpdate {
+        modified: [p.clone()].into(),
+        ..Default::default()
+    });
+    let deletes = update.deleted.iter().map(|p| RepositoryUpdate {
+        deleted: [p.clone()].into(),
+        ..Default::default()
+    });
+    let flags = (update.commit_updated || update.index_lock_detected || update.remote_ref_updated)
+        .then(|| RepositoryUpdate {
+            commit_updated: update.commit_updated,
+            index_lock_detected: update.index_lock_detected,
+            remote_ref_updated: update.remote_ref_updated,
+            ..Default::default()
+        })
+        .into_iter();
 
-    for (to, from) in &update.moved {
-        merge_repository_updates(
-            &mut st.pending,
-            &RepositoryUpdate {
-                moved: [(to.clone(), from.clone())].into(),
-                ..Default::default()
-            },
-        );
-        flush_if_over_bound(st, max_pending_entries);
-    }
-    for p in &update.added {
-        merge_repository_updates(
-            &mut st.pending,
-            &RepositoryUpdate {
-                added: [p.clone()].into(),
-                ..Default::default()
-            },
-        );
-        flush_if_over_bound(st, max_pending_entries);
-    }
-    for p in &update.modified {
-        merge_repository_updates(
-            &mut st.pending,
-            &RepositoryUpdate {
-                modified: [p.clone()].into(),
-                ..Default::default()
-            },
-        );
-        flush_if_over_bound(st, max_pending_entries);
-    }
-    for p in &update.deleted {
-        merge_repository_updates(
-            &mut st.pending,
-            &RepositoryUpdate {
-                deleted: [p.clone()].into(),
-                ..Default::default()
-            },
-        );
-        flush_if_over_bound(st, max_pending_entries);
-    }
-
-    // The flags never contribute to `pending_entry_count`, so folding them in can't itself
-    // cross the bound; merge them once, after every path-bearing entry above.
-    if update.commit_updated || update.index_lock_detected || update.remote_ref_updated {
-        merge_repository_updates(
-            &mut st.pending,
-            &RepositoryUpdate {
-                commit_updated: update.commit_updated,
-                index_lock_detected: update.index_lock_detected,
-                remote_ref_updated: update.remote_ref_updated,
-                ..Default::default()
-            },
-        );
-    }
+    moves
+        .chain(adds)
+        .chain(modifies)
+        .chain(deletes)
+        .chain(flags)
 }
 
 impl<S> RepositorySubscriber for BufferingRepositorySubscriber<S>
@@ -801,7 +785,6 @@ where
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
         {
             let mut st = self.state.lock().unwrap();
-            merge_update_bounded(&mut st, update, self.max_pending_entries);
             st.version = st.version.wrapping_add(1);
 
             // Start a single background flusher if it's not already running.
@@ -846,11 +829,7 @@ where
                         if merged.is_empty() {
                             return;
                         }
-                        state_for_completion
-                            .lock()
-                            .unwrap()
-                            .delivery_queue
-                            .push_back(merged);
+                        Self::hand_off(&state_for_completion, merged);
                         Self::advance_delivery(
                             inner_for_completion,
                             state_for_completion,
@@ -862,14 +841,29 @@ where
             }
         }
 
-        // Deliver whatever just crossed the bound (or is otherwise queued), one batch at a
-        // time. A no-op if a delivery is already in flight or nothing is queued.
-        Self::advance_delivery(
-            Arc::clone(&self.inner),
-            Arc::clone(&self.state),
-            repository,
-            ctx,
-        );
+        // Merge one entry at a time, so `pending` never grows past `max_pending_entries` even
+        // when `update` by itself is far larger than that. Whenever a chunk crosses the bound,
+        // try to deliver it immediately: if nothing else is in flight it goes out right away
+        // (bounded); if a delivery is already running, it's coalesced into the single pending
+        // backlog instead of queued, so a slow consumer never accumulates more than one
+        // (still-bounded-in-content, if not in size) extra batch.
+        for chunk in single_entry_updates(update) {
+            let ready = {
+                let mut st = self.state.lock().unwrap();
+                merge_repository_updates(&mut st.pending, &chunk);
+                (pending_entry_count(&st.pending) >= self.max_pending_entries)
+                    .then(|| std::mem::take(&mut st.pending))
+            };
+            let Some(ready) = ready else { continue };
+
+            Self::hand_off(&self.state, ready);
+            Self::advance_delivery(
+                Arc::clone(&self.inner),
+                Arc::clone(&self.state),
+                repository,
+                ctx,
+            );
+        }
 
         Box::pin(ready(()))
     }
@@ -881,6 +875,12 @@ where
         if let Some(handle) = st.flush_handle.take() {
             handle.abort();
         }
+        // Release any buffered or backlogged work and mark this subscription inactive, so an
+        // already-in-flight delivery's completion becomes a no-op instead of continuing to call
+        // `inner` (and keeping this state alive) after the subscription has ended.
+        st.active = false;
+        st.next_delivery = None;
+        st.pending = RepositoryUpdate::default();
     }
 }
 
@@ -888,10 +888,19 @@ impl<S> BufferingRepositorySubscriber<S>
 where
     S: RepositorySubscriber + Send + Sync + 'static,
 {
-    /// Delivers the next queued batch to `inner`, unless a delivery is already in flight. On
-    /// completion, recurses to pick up whatever queued up next, so `inner.on_files_updated`
-    /// never has two batches in flight at once and batches are always applied in the order they
-    /// were queued.
+    /// Coalesces `batch` into the pending delivery backlog, merging with whatever is already
+    /// there instead of storing it separately.
+    fn hand_off(state: &Arc<Mutex<BufferState>>, batch: RepositoryUpdate) {
+        let mut st = state.lock().unwrap();
+        match &mut st.next_delivery {
+            Some(existing) => merge_repository_updates(existing, &batch),
+            None => st.next_delivery = Some(batch),
+        }
+    }
+
+    /// Delivers the pending backlog to `inner`, unless a delivery is already in flight or the
+    /// subscription has been unsubscribed. On completion, recurses to pick up whatever
+    /// coalesced in next, so `inner.on_files_updated` never has two batches in flight at once.
     fn advance_delivery(
         inner: Arc<Mutex<S>>,
         state: Arc<Mutex<BufferState>>,
@@ -900,10 +909,10 @@ where
     ) {
         let batch = {
             let mut st = state.lock().unwrap();
-            if st.delivering {
+            if !st.active || st.delivering {
                 return;
             }
-            let Some(batch) = st.delivery_queue.pop_front() else {
+            let Some(batch) = st.next_delivery.take() else {
                 return;
             };
             st.delivering = true;
@@ -920,8 +929,13 @@ where
         let inner_for_next = Arc::clone(&inner);
         let state_for_next = Arc::clone(&state);
         ctx.spawn(fut, move |repo_model, (), repo_ctx| {
-            state_for_next.lock().unwrap().delivering = false;
-            Self::advance_delivery(inner_for_next, state_for_next, repo_model, repo_ctx);
+            let mut st = state_for_next.lock().unwrap();
+            st.delivering = false;
+            let active = st.active;
+            drop(st);
+            if active {
+                Self::advance_delivery(inner_for_next, state_for_next, repo_model, repo_ctx);
+            }
         });
     }
 }

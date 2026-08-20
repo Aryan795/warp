@@ -538,9 +538,9 @@ fn forced_flush_drains_pending_before_debounce_timer_fires() {
 }
 
 #[test]
-fn single_incoming_update_exceeding_the_bound_is_split_into_bounded_batches() {
+fn single_incoming_update_exceeding_the_bound_is_delivered_without_loss() {
     VirtualFS::test(
-        "single_incoming_update_exceeding_the_bound_is_split_into_bounded_batches",
+        "single_incoming_update_exceeding_the_bound_is_delivered_without_loss",
         |dirs, mut vfs| {
             vfs.mkdir("repo");
             let repo_path = dirs.tests().join("repo");
@@ -596,12 +596,12 @@ fn single_incoming_update_exceeding_the_bound_is_split_into_bounded_batches() {
                 let mut seen = HashSet::new();
                 let mut batch_count = 0;
                 while seen.len() < total_files {
-                    let flushed = update_rx.next().await.expect("bounded batch");
-                    assert!(
-                        flushed.added.len() <= MAX_PENDING_ENTRIES,
-                        "batch of {} entries exceeded the configured bound of {MAX_PENDING_ENTRIES}",
-                        flushed.added.len()
-                    );
+                    let flushed = update_rx.next().await.expect("batch");
+                    if batch_count == 0 {
+                        // Nothing else is in flight yet the first time the bound is crossed, so
+                        // that first batch is delivered immediately, on its own, bounded.
+                        assert_eq!(flushed.added.len(), MAX_PENDING_ENTRIES);
+                    }
                     for file in flushed.added {
                         assert!(seen.insert(file), "duplicate file delivered across batches");
                     }
@@ -612,9 +612,12 @@ fn single_incoming_update_exceeding_the_bound_is_split_into_bounded_batches() {
                 for file in &all_files {
                     assert!(seen.contains(file));
                 }
+                // Everything after the first bounded batch coalesces into a single backlog
+                // while that first delivery is in flight (see `BufferState::next_delivery`), so
+                // this is only guaranteed to be more than one batch, not every batch bounded.
                 assert!(
                     batch_count > 1,
-                    "a single update far exceeding the bound should be split into multiple batches"
+                    "a single update far exceeding the bound should still be split into more than one batch"
                 );
             });
         },
@@ -687,14 +690,16 @@ fn forced_and_debounced_flushes_apply_every_update_exactly_once_with_a_slow_cons
                     });
                 }
 
-                // Exactly three batches account for every update: two forced (5 each) and one
-                // debounced remainder (3). `SlowRecordingSubscriber` itself asserts that no two
-                // of them are ever delivered concurrently.
+                // Some number of forced and/or debounced batches account for every update --
+                // exactly how many depends on timing (a forced batch that's still in flight
+                // when more work becomes ready coalesces that work into one backlog rather than
+                // a separate batch), but nothing may ever be dropped or duplicated.
+                // `SlowRecordingSubscriber` itself asserts that no two batches are ever
+                // delivered concurrently.
                 let mut seen = HashSet::new();
-                for _ in 0..3 {
+                while seen.len() < total_updates {
                     let flushed = update_rx.next().await.expect("flush");
                     assert!(!flushed.added.is_empty());
-                    assert!(flushed.added.len() <= MAX_PENDING_ENTRIES);
                     for file in flushed.added {
                         assert!(seen.insert(file), "duplicate file delivered across batches");
                     }
@@ -711,6 +716,95 @@ fn forced_and_debounced_flushes_apply_every_update_exactly_once_with_a_slow_cons
                         panic!("unexpected extra flush: {update:?}");
                     }
                     _ = futures::FutureExt::fuse(Timer::after(Duration::from_millis(300))) => {}
+                }
+            });
+        },
+    );
+}
+
+#[test]
+fn unsubscribe_cancels_pending_delivery_and_releases_the_backlog() {
+    VirtualFS::test(
+        "unsubscribe_cancels_pending_delivery_and_releases_the_backlog",
+        |dirs, mut vfs| {
+            vfs.mkdir("repo");
+            let repo_path = dirs.tests().join("repo");
+
+            App::test((), |mut app| async move {
+                let watcher_handle = app.add_singleton_model(DirectoryWatcher::new_for_testing);
+                let repo_handle = watcher_handle
+                    .update(&mut app, |watcher, ctx| {
+                        watcher.add_directory(
+                            StandardizedPath::from_local_canonicalized(&repo_path).unwrap(),
+                            ctx,
+                        )
+                    })
+                    .unwrap();
+
+                const MAX_PENDING_ENTRIES: usize = 3;
+                let (update_tx, mut update_rx) = mpsc::unbounded::<RepositoryUpdate>();
+                let in_flight = Arc::new(AtomicBool::new(false));
+                let start = repo_handle.update(&mut app, |repo, ctx| {
+                    let buffered = BufferingRepositorySubscriber::with_max_pending_entries(
+                        SlowRecordingSubscriber {
+                            update_tx,
+                            in_flight: Arc::clone(&in_flight),
+                            delay: Duration::from_millis(50),
+                        },
+                        Duration::from_secs(3600),
+                        MAX_PENDING_ENTRIES,
+                    );
+                    repo.start_watching(
+                        RepositoryWatchMode::FilesystemOnly,
+                        Box::new(buffered),
+                        ctx,
+                    )
+                });
+                std::mem::drop(start.registration_future);
+                let subscriber_id = start.subscriber_id;
+
+                // First threshold crossing: dispatched immediately, taking 50ms to resolve.
+                // Second threshold crossing: nothing is in flight, so it coalesces into the
+                // pending backlog instead of being delivered.
+                let total_updates = MAX_PENDING_ENTRIES * 2;
+                for i in 0..total_updates {
+                    let update = RepositoryUpdate {
+                        added: [TargetFile::new(
+                            repo_path.join(format!("file{i}.txt")),
+                            false,
+                        )]
+                        .into(),
+                        ..Default::default()
+                    };
+                    repo_handle.update(&mut app, |repo, ctx| {
+                        repo.notify_subscriber(subscriber_id, &update, ctx);
+                    });
+                }
+
+                // Unsubscribe while the first batch is still in flight and the second is only
+                // backlogged.
+                repo_handle.update(&mut app, |repo, ctx| {
+                    repo.stop_watching(subscriber_id, ctx);
+                });
+
+                // The already-in-flight first batch still completes normally...
+                let flushed = update_rx
+                    .next()
+                    .await
+                    .expect("the in-flight delivery still completes");
+                assert_eq!(flushed.added.len(), MAX_PENDING_ENTRIES);
+
+                // ...but the backlogged second batch must never be delivered: unsubscribing
+                // released it instead of delivering it late. The channel closing (because
+                // dropping the subscription released the last reference to the subscriber) is
+                // an acceptable way for that to manifest, same as the timer simply elapsing.
+                futures::select! {
+                    result = update_rx.next().fuse() => {
+                        if let Some(update) = result {
+                            panic!("unexpected delivery after unsubscribe: {update:?}");
+                        }
+                    }
+                    _ = futures::FutureExt::fuse(Timer::after(Duration::from_millis(200))) => {}
                 }
             });
         },

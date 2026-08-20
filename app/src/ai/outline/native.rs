@@ -37,9 +37,11 @@ struct OutlineState {
     /// Subscriber ID for repository updates (if watching).
     subscriber_id: Option<SubscriberId>,
     /// Updates that arrived while a recomputation was already in flight (`status` was
-    /// `Pending`). Drained, in arrival order, once that recomputation completes, so sustained
-    /// filesystem churn never loses an update just because it arrived mid-recomputation.
-    queued_updates: VecDeque<RepositoryUpdate>,
+    /// `Pending`), coalesced via `RepositoryUpdate::merge` into a single accumulator rather
+    /// than queued individually -- so a burst of churn during one slow recomputation costs one
+    /// growing update, not one stored copy per update that arrived. Applied as one follow-up
+    /// recomputation once the in-flight one completes, so nothing is lost.
+    pending_update: RepositoryUpdate,
 }
 
 pub enum RepoOutlinesEvent {
@@ -132,7 +134,7 @@ impl RepoOutlines {
                 repository,
                 status: OutlineStatus::Pending,
                 subscriber_id: None,
-                queued_updates: VecDeque::new(),
+                pending_update: RepositoryUpdate::default(),
             };
             self.outlines.insert(repo_path.clone(), outline_state);
             self.outline_queue.push_back(repo_path);
@@ -411,19 +413,19 @@ impl RepoOutlines {
                         state.status = OutlineStatus::Complete(outline);
                         ctx.emit(RepoOutlinesEvent::OutlinesUpdated(repo_path.clone()));
 
-                        // Apply whatever queued up while we were recomputing, so sustained
+                        // Apply whatever coalesced in while we were recomputing, so sustained
                         // filesystem churn under a slow recomputation never loses an update.
-                        let next_update = state.queued_updates.pop_front();
-                        if let Some(next_update) = next_update {
+                        if !state.pending_update.is_empty() {
+                            let next_update = std::mem::take(&mut state.pending_update);
                             me.handle_repository_update(&repo_path, next_update, ctx);
                         }
                     },
                 );
             }
             OutlineStatus::Pending => {
-                // A recomputation is already in flight; queue this update so it isn't lost, to
-                // be applied once that recomputation completes.
-                state.queued_updates.push_back(update);
+                // A recomputation is already in flight; merge this update into the pending
+                // accumulator so it isn't lost, to be applied once that recomputation completes.
+                state.pending_update.merge(&update);
             }
             OutlineStatus::Failed => {
                 log::warn!("Failed to update repo outline: repo outline failed");
@@ -465,3 +467,7 @@ impl RepositorySubscriber for OutlineRepositorySubscriber {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "native_tests.rs"]
+mod tests;

@@ -767,6 +767,13 @@ impl RepositoryUpdate {
     pub fn contains_added_or_modified(&self, file: &TargetFile) -> bool {
         self.added.contains(file) || self.modified.contains(file)
     }
+
+    /// Coalesces `incoming` into `self`, using the same normalization rules `Repository`'s
+    /// internal debounce buffer applies (moves, then adds, then modifies, then deletes;
+    /// cancelling adds/deletes of the same path within the merged window, and so on).
+    pub fn merge(&mut self, incoming: &RepositoryUpdate) {
+        crate::repository::merge_repository_updates(self, incoming);
+    }
 }
 
 /// An asynchronous task in a watched repository.
