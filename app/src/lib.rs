@@ -1398,6 +1398,16 @@ fn startup_auth_is_non_blocking(launch_mode: &LaunchMode) -> bool {
     matches!(launch_mode, LaunchMode::App { .. } | LaunchMode::Tui { .. })
 }
 
+/// Starts the pending startup authentication if it hasn't already fired.
+fn fire_pending_retry(
+    pending_authentication: &Rc<RefCell<Option<StartupUserAuthentication>>>,
+    ctx: &mut AppContext,
+) {
+    if let Some(authentication) = pending_authentication.borrow_mut().take() {
+        authentication.start(ctx);
+    }
+}
+
 fn authenticate_user_after_iap_access(
     authentication: StartupUserAuthentication,
     non_blocking: bool,
@@ -1429,14 +1439,6 @@ fn authenticate_user_after_iap_access(
         authentication.clone().start(ctx);
         let retry_gate = Rc::new(RefCell::new(StartupAuthRetryGate::default()));
         let pending_authentication = Rc::new(RefCell::new(Some(authentication)));
-
-        let fire_pending_retry =
-            |pending_authentication: &Rc<RefCell<Option<StartupUserAuthentication>>>,
-             ctx: &mut AppContext| {
-                if let Some(authentication) = pending_authentication.borrow_mut().take() {
-                    authentication.start(ctx);
-                }
-            };
 
         let auth_manager = AuthManager::handle(ctx);
         {
