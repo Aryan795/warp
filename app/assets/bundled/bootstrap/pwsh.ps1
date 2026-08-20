@@ -676,12 +676,23 @@ $null = New-Module -Name Warp-Module -ScriptBlock {
         } catch {
             # Dispose whichever pool(s) already opened before the failure. Otherwise a failed
             # attempt leaks an opened pool's runspaces, and the next generator command's retry
-            # (neither field got published above) would pile another one on top of it.
+            # (neither field got published above) would pile another one on top of it. Each
+            # disposal is wrapped separately and suppressed on failure, so a disposal error
+            # can't mask the original exception (the one a user needs to diagnose why pool init
+            # failed) or stop us from also attempting to dispose the other pool.
             if ($null -ne $innerPool) {
-                $innerPool.Dispose()
+                try {
+                    $innerPool.Dispose()
+                } catch {
+                    Write-Verbose "Failed to dispose inner runspace pool during cleanup: $($_.Exception.Message)"
+                }
             }
             if ($null -ne $outerPool) {
-                $outerPool.Dispose()
+                try {
+                    $outerPool.Dispose()
+                } catch {
+                    Write-Verbose "Failed to dispose outer runspace pool during cleanup: $($_.Exception.Message)"
+                }
             }
             throw
         } finally {
