@@ -309,7 +309,12 @@ impl RequestParams {
 
         let user_workspaces = UserWorkspaces::as_ref(app);
         let api_key_manager = ApiKeyManager::as_ref(app);
-        let is_byo_enabled = user_workspaces.is_byo_api_key_enabled(app);
+        // Plan entitlement (workspace-level) gates whether BYO is possible at all; the team's
+        // `team_byo` policy (`are_member_byo_keys_allowed`/`are_member_byo_endpoints_allowed`)
+        // separately gates whether *this member* may use their own credentials. Both must hold
+        // before a member-provided key or endpoint is attached to a request.
+        let is_byo_enabled = user_workspaces.is_byo_api_key_enabled(app)
+            && user_workspaces.are_member_byo_keys_allowed();
         #[cfg(not(target_family = "wasm"))]
         let geap_binding = crate::ai::geap_credentials::current_geap_policy(app).mint_binding();
         #[cfg(target_family = "wasm")]
@@ -319,7 +324,8 @@ impl RequestParams {
             user_workspaces.is_aws_bedrock_credentials_enabled(app),
             geap_binding,
         );
-        let is_custom_inference_enabled = user_workspaces.is_custom_inference_enabled(app);
+        let is_custom_inference_enabled = user_workspaces.is_custom_inference_enabled(app)
+            && user_workspaces.are_member_byo_endpoints_allowed();
         let custom_model_providers =
             api_key_manager.custom_model_providers_for_request(is_custom_inference_enabled);
         let custom_model_routers = FeatureFlag::CustomModelRouters.is_enabled().then(|| {
