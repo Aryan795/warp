@@ -3,11 +3,12 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use cloud_object_models::CodeForge;
 use futures::channel::oneshot;
 use futures::executor::block_on;
+use instant::Instant;
 use repo_metadata::{DirectoryWatcher, RepoMetadataEvent, RepoMetadataModel, RepositoryIdentifier};
 use serde_json::json;
 use tempfile::TempDir;
@@ -1145,7 +1146,7 @@ fn wait_for_events_yielded_emits_single_telemetry_event_with_stamped_fields_when
             let execution_id = driver.execution_id.clone();
             let terminal_id = driver.terminal_driver.as_ref(ctx).terminal_view().id();
 
-            let _ = driver.execute_run(AgentRunPrompt::Local(String::new()), ctx);
+            std::mem::drop(driver.execute_run(AgentRunPrompt::Local(String::new()), ctx));
 
             BlocklistAIHistoryModel::handle(ctx).update(ctx, |model, ctx| {
                 model.mark_wait_for_events_yielded(
@@ -1210,7 +1211,7 @@ fn wait_for_events_yielded_threads_fallback_and_null_task_id_into_telemetry() {
             let execution_id = driver.execution_id.clone();
             let terminal_id = driver.terminal_driver.as_ref(ctx).terminal_view().id();
 
-            let _ = driver.execute_run(AgentRunPrompt::Local(String::new()), ctx);
+            std::mem::drop(driver.execute_run(AgentRunPrompt::Local(String::new()), ctx));
 
             BlocklistAIHistoryModel::handle(ctx).update(ctx, |model, ctx| {
                 model.mark_wait_for_events_yielded(
