@@ -3283,11 +3283,14 @@ impl Input {
         // that this view's window is known, and keep it in sync with that window's current team
         // afterwards: a team switch (or team policy data arriving late) must take effect without
         // needing a Safe Mode settings change to trigger a resync.
-        let window_id = ctx.window_id();
         model
             .lock()
-            .set_obfuscate_secrets(get_secret_obfuscation_mode_for_window(window_id, ctx));
-        ctx.subscribe_to_model(&UserWorkspaces::handle(ctx), move |me, _, event, ctx| {
+            .set_obfuscate_secrets(get_secret_obfuscation_mode_for_window(ctx.window_id(), ctx));
+        ctx.subscribe_to_model(&UserWorkspaces::handle(ctx), |me, _, event, ctx| {
+            // Resolved fresh on every event (not captured at subscribe time): a cross-window
+            // tab drag moves this view without emitting `WindowTeamChanged`, so a captured
+            // window id would keep matching the window this terminal used to live in.
+            let window_id = ctx.window_id();
             let team_policy_may_have_changed = match event {
                 UserWorkspacesEvent::WindowTeamChanged {
                     window_id: changed_window_id,
@@ -16319,6 +16322,23 @@ impl View for Input {
             INPUT_A11Y_HELPER,
             WarpA11yRole::TextareaRole,
         ))
+    }
+
+    fn on_window_transferred(
+        &mut self,
+        _source_window_id: WindowId,
+        target_window_id: WindowId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        // A cross-window tab drag moves this view without updating `UserWorkspaces` or
+        // emitting `WindowTeamChanged`, so the subscription above won't fire on its own;
+        // resolve the new window's team here so redaction follows the tab immediately.
+        self.model
+            .lock()
+            .set_obfuscate_secrets(get_secret_obfuscation_mode_for_window(
+                target_window_id,
+                ctx,
+            ));
     }
 
     fn on_focus(&mut self, focus_ctx: &FocusContext, ctx: &mut ViewContext<Self>) {
