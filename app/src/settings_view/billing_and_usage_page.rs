@@ -2965,7 +2965,7 @@ impl BillingAndUsagePageView {
 
         let show_addon_credits_panel = workspace.is_some()
             || workspaces
-                .purchase_policy_for_render_context(render_context.as_ref())
+                .purchase_policy()
                 .is_some_and(|policy| policy.allows_purchases());
         if show_addon_credits_panel {
             let bonus_credit_balance = workspace.map_or_else(

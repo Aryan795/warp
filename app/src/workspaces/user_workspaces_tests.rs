@@ -72,9 +72,8 @@ use crate::workspaces::update_manager::TeamUpdateManager;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::workspaces::workspace::{
     AdminEnablementSetting, AiCreditsUsageAndCostSubjectType, AiCreditsUsageAndCostType,
-    AiCreditsUsageBucket, AiCreditsUsageSource, BillingCycleUsageEntry, CodebaseContextSettings,
-    HostEnablementSetting, LlmHostSettings, MultiAdminPolicy, PurchaseAddOnCreditsPolicy,
-    Workspace,
+    AiCreditsUsageBucket, AiCreditsUsageSource, BillingCycleUsageEntry, HostEnablementSetting,
+    LlmHostSettings, MultiAdminPolicy, PurchaseAddOnCreditsPolicy, Workspace,
 };
 
 #[derive(Default)]

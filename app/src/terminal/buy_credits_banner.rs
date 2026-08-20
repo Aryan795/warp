@@ -718,7 +718,7 @@ impl BuyCreditsBanner {
                 .is_some_and(|email| render_context.has_admin_permissions(&email))
         });
         let delinquent_due_to_payment_issue = workspaces
-            .team_billing_metadata_for_render_context(render_context.as_ref())
+            .current_workspace_billing_metadata()
             .is_some_and(|billing| billing.is_delinquent_due_to_payment_issue());
         let auto_reload_banner_toggle_ff =
             FeatureFlag::BuildPlanAutoReloadBannerToggle.is_enabled();
@@ -731,7 +731,7 @@ impl BuyCreditsBanner {
 
         // Check if the selected purchase would reach/exceed the monthly limit
         let premium_bps = workspaces
-            .purchase_policy_for_render_context(render_context.as_ref())
+            .purchase_policy()
             .map_or(0, |policy| policy.effective_premium_bps());
         let selected_option = self
             .addon_credits_options

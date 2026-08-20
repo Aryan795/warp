@@ -1798,7 +1798,7 @@ impl BillingAndUsagePageV2View {
         let render_context = workspaces.team_render_context_for_view_handle(&self.self_handle, app);
         let show_addon_credits_panel = ws.is_some()
             || workspaces
-                .purchase_policy_for_render_context(render_context.as_ref())
+                .purchase_policy()
                 .is_some_and(|policy| policy.allows_purchases());
         if show_addon_credits_panel {
             let is_payg_zero = ws.is_some_and(|ws| {
