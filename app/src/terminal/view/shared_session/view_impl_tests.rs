@@ -38,10 +38,115 @@ use crate::terminal::TerminalView;
 use crate::terminal::model::blocks::{INLINE_BANNER_HEIGHT, ToTotalIndex as _};
 use crate::terminal::model::terminal_model::ConversationTranscriptViewerStatus;
 use crate::terminal::view::shared_session::test_utils::terminal_view_for_viewer;
-use crate::terminal::view::{AIQueryRouting, TerminalAction, resolve_ai_query_routing};
+use crate::terminal::view::{
+    AIQueryRouting, AgentViewEntryOrigin, TerminalAction, resolve_ai_query_routing,
+};
 use crate::test_util::add_window_with_terminal;
 use crate::test_util::terminal::initialize_app_for_terminal_view;
 use crate::{FeatureFlag, assert_lines_approx_eq};
+
+fn prepare_shared_ambient_pre_first_exchange(
+    view: &mut TerminalView,
+    shared_session_status: SharedSessionStatus,
+    ctx: &mut ViewContext<TerminalView>,
+) {
+    let task_id = "11111111-1111-1111-1111-111111111111"
+        .parse::<AmbientAgentTaskId>()
+        .expect("hardcoded task id parses");
+    let ambient_agent_view_model = view.ensure_ambient_agent_view_model(ctx);
+    ambient_agent_view_model.update(ctx, |model, ctx| {
+        model.enter_viewing_existing_session(task_id, ctx);
+    });
+    view.enter_agent_view_for_new_conversation(
+        None,
+        AgentViewEntryOrigin::ThirdPartyCloudAgent,
+        ctx,
+    );
+
+    let mut model = view.model.lock();
+    model.set_shared_session_source(SharedSessionSource::ambient_agent(Some(
+        task_id.to_string(),
+    )));
+    model.set_shared_session_status(shared_session_status);
+    model
+        .block_list_mut()
+        .set_is_executing_oz_environment_startup_commands(true);
+}
+
+#[test]
+fn test_read_only_shared_ambient_setup_renders_status_without_input() {
+    let _agent_view_flag = FeatureFlag::AgentView.override_enabled(true);
+    let _cloud_mode_flag = FeatureFlag::CloudMode.override_enabled(true);
+    let _handoff_flag = FeatureFlag::HandoffCloudCloud.override_enabled(true);
+    let _setup_v2_flag = FeatureFlag::CloudModeSetupV2.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        let terminal = terminal_view_for_viewer(&mut app);
+
+        terminal.update(&mut app, |view, ctx| {
+            prepare_shared_ambient_pre_first_exchange(
+                view,
+                SharedSessionStatus::FinishedViewer,
+                ctx,
+            );
+
+            let model = view.model.lock();
+            assert!(model.is_read_only());
+            assert!(!view.is_input_box_visible(&model, ctx));
+            assert!(view.should_render_cloud_setup_status_without_input(&model, ctx));
+        });
+    });
+}
+
+#[test]
+fn test_editable_shared_ambient_setup_does_not_duplicate_status() {
+    let _agent_view_flag = FeatureFlag::AgentView.override_enabled(true);
+    let _cloud_mode_flag = FeatureFlag::CloudMode.override_enabled(true);
+    let _handoff_flag = FeatureFlag::HandoffCloudCloud.override_enabled(true);
+    let _setup_v2_flag = FeatureFlag::CloudModeSetupV2.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        let terminal = terminal_view_for_viewer(&mut app);
+
+        terminal.update(&mut app, |view, ctx| {
+            prepare_shared_ambient_pre_first_exchange(view, SharedSessionStatus::executor(), ctx);
+
+            let model = view.model.lock();
+            assert!(!model.is_read_only());
+            assert!(view.is_input_box_visible(&model, ctx));
+            assert!(!view.should_render_cloud_setup_status_without_input(&model, ctx));
+        });
+    });
+}
+
+#[test]
+fn test_read_only_shared_ambient_status_stays_hidden_after_setup() {
+    let _agent_view_flag = FeatureFlag::AgentView.override_enabled(true);
+    let _cloud_mode_flag = FeatureFlag::CloudMode.override_enabled(true);
+    let _handoff_flag = FeatureFlag::HandoffCloudCloud.override_enabled(true);
+    let _setup_v2_flag = FeatureFlag::CloudModeSetupV2.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        let terminal = terminal_view_for_viewer(&mut app);
+
+        terminal.update(&mut app, |view, ctx| {
+            prepare_shared_ambient_pre_first_exchange(
+                view,
+                SharedSessionStatus::FinishedViewer,
+                ctx,
+            );
+            view.model
+                .lock()
+                .block_list_mut()
+                .set_is_executing_oz_environment_startup_commands(false);
+
+            let model = view.model.lock();
+            assert!(model.is_read_only());
+            assert!(!view.is_input_box_visible(&model, ctx));
+            assert!(!view.should_render_cloud_setup_status_without_input(&model, ctx));
+        });
+    });
+}
 
 #[test]
 fn test_prompt_context_menu_items_shared_session_viewer_no_edit_prompt() {
