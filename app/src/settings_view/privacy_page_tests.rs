@@ -39,13 +39,16 @@ fn team_for_test(uid: ServerId, name: &str) -> Team {
     }
 }
 
-fn workspace_for_test(team: &Team) -> Workspace {
+fn workspace_for_test(teams: Vec<Team>) -> Workspace {
     Workspace {
         uid: "workspace_uid123456789".to_string().into(),
         name: "test".to_string(),
         stripe_customer_id: None,
-        teams: vec![team.clone()],
-        billing_metadata: team.billing_metadata.clone(),
+        billing_metadata: teams
+            .first()
+            .map(|t| t.billing_metadata.clone())
+            .unwrap_or_default(),
+        teams,
         bonus_grants_purchased_this_month: Default::default(),
         billing_cycle_usage: None,
         has_billing_history: false,
@@ -92,13 +95,21 @@ fn zdr_badge_probe(view_handle: WeakViewHandle<PrivacyPageView>) -> AppAnalytics
     }
 }
 
-/// Instantiates a real `PrivacyPageView` in a real window (not a synthetic view), assigns
-/// its window to team A (which disables UGC collection), then reconciles the window onto
-/// team B and onto no team, asserting the team-derived widget state changes each time
-/// through the same `WeakViewHandle` the page's own widgets use. This exercises
-/// `PrivacyPageView::new`'s full construction (including the `UserWorkspaces` observation
-/// added to fix the page never redrawing after a window team change), unlike a synthetic
-/// test view that never runs that constructor.
+/// Instantiates two real `PrivacyPageView`s in two real windows (not synthetic views) within
+/// the *same* workspace, one on team A (which disables UGC collection) and one on team B
+/// (which respects the user's setting), open at the same time. A test that only ever has one
+/// team present at a time -- swapping the workspace's team list in place, one window, one
+/// `current_workspace()` -- cannot distinguish correct window-scoping from the old
+/// `current_workspace()`-based reads: with a single team present, both would give the same
+/// answer. Two windows on two teams *simultaneously present in one workspace* is the case
+/// only a genuinely per-window read can get right, since `current_workspace()` has no way to
+/// answer differently for the two windows.
+///
+/// Then removes team A from the workspace, which reconciles window A's assignment onto team B
+/// (the only remaining team) while leaving window B untouched, and asserts only window A's
+/// widget state changes. This exercises `PrivacyPageView::new`'s full construction (including
+/// the `UserWorkspaces` observation added to fix the page never redrawing after a window team
+/// change), unlike a synthetic test view that never runs that constructor.
 ///
 /// This does not independently assert that a redraw is *scheduled* after a team change:
 /// `warpui_core`'s invalidation-draining and frame-simulation APIs
@@ -112,40 +123,60 @@ fn test_privacy_page_view_reflects_window_team_change() {
     let team_b = team_for_test(456.into(), "team-b");
 
     App::test((), |mut app| async move {
-        init_privacy_page_test_app(&mut app, vec![workspace_for_test(&team_a)]);
+        init_privacy_page_test_app(
+            &mut app,
+            vec![workspace_for_test(vec![team_a.clone(), team_b.clone()])],
+        );
 
-        let (window_id, view) = app.add_window(WindowStyle::NotStealFocus, PrivacyPageView::new);
+        let (window_a, view_a) = app.add_window(WindowStyle::NotStealFocus, PrivacyPageView::new);
+        let (window_b, view_b) = app.add_window(WindowStyle::NotStealFocus, PrivacyPageView::new);
         UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
-            user_workspaces.set_team_for_window(window_id, team_a.uid, ctx);
+            user_workspaces.set_team_for_window(window_a, team_a.uid, ctx);
+            user_workspaces.set_team_for_window(window_b, team_b.uid, ctx);
         });
 
-        let weak_view = view.downgrade();
+        let weak_view_a = view_a.downgrade();
+        let weak_view_b = view_b.downgrade();
         app.read(|ctx| {
             assert!(
-                zdr_badge_probe(weak_view.clone()).should_show_zdr_badge(ctx),
-                "team A disables UGC collection, so the ZDR badge should show"
+                zdr_badge_probe(weak_view_a.clone()).should_show_zdr_badge(ctx),
+                "window A's team disables UGC collection, so its ZDR badge should show"
+            );
+            assert!(
+                !zdr_badge_probe(weak_view_b.clone()).should_show_zdr_badge(ctx),
+                "window B's team respects the user's UGC setting, so its ZDR badge should not \
+                 show, even though both windows share one workspace and one `current_workspace()`"
             );
         });
 
-        // Reconcile the window onto team B by removing team A from the workspace.
+        // Remove team A from the workspace: window A reconciles onto the only remaining team
+        // (team B). Window B's team is untouched.
         UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
-            user_workspaces.update_workspaces(vec![workspace_for_test(&team_b)], ctx);
+            user_workspaces.update_workspaces(vec![workspace_for_test(vec![team_b.clone()])], ctx);
         });
         app.read(|ctx| {
             assert!(
-                !zdr_badge_probe(weak_view.clone()).should_show_zdr_badge(ctx),
+                !zdr_badge_probe(weak_view_a.clone()).should_show_zdr_badge(ctx),
                 "after reconciling onto team B, which respects the user's UGC setting, \
-                 the ZDR badge should no longer show"
+                 window A's ZDR badge should no longer show"
+            );
+            assert!(
+                !zdr_badge_probe(weak_view_b.clone()).should_show_zdr_badge(ctx),
+                "window B's team was never touched by window A's reconciliation"
             );
         });
 
-        // Reconcile the window onto no team by removing every team.
+        // Reconcile every window onto no team by removing every team.
         UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
             user_workspaces.update_workspaces(vec![], ctx);
         });
         app.read(|ctx| {
             assert!(
-                !zdr_badge_probe(weak_view.clone()).should_show_zdr_badge(ctx),
+                !zdr_badge_probe(weak_view_a.clone()).should_show_zdr_badge(ctx),
+                "a window with no team should not show the ZDR badge"
+            );
+            assert!(
+                !zdr_badge_probe(weak_view_b.clone()).should_show_zdr_badge(ctx),
                 "a window with no team should not show the ZDR badge"
             );
         });
