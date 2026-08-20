@@ -223,6 +223,7 @@ impl<T: EventLoopSender> PtyController<T> {
                     // even flushed (`pending_writes_len=1` at that point), so clearing there
                     // would have discarded the pattern before a single echoed character could
                     // arrive.
+                    log::debug!("PHANTOM_DIAG CompletionsFinished: queued restore write {buffer_text:?}");
                     me.terminal_model.lock().push_expected_echo(&buffer_text);
                     me.just_restored_native_completions_buffer = true;
                     me.pending_writes.push_front(PtyWrite::Bytes {
@@ -861,6 +862,7 @@ impl<T: EventLoopSender> PtyController<T> {
         results_tx: async_channel::Sender<(Vec<ShellCompletion>, Option<Span>)>,
         ctx: &mut ModelContext<Self>,
     ) {
+        log::debug!("PHANTOM_DIAG run_native_shell_completions({buffer_text:?})");
         let Some(shell_type) = self
             .model_event_dispatcher
             .as_ref(ctx)

@@ -203,6 +203,7 @@ impl EarlyOutput {
     /// Replaces any previously-registered content outright, rather than appending to it: each
     /// restore is a fresh, independent echo to expect, not a continuation of the last one.
     pub fn push_expected_echo(&mut self, input: &str) {
+        log::debug!("PHANTOM_DIAG push_expected_echo({input:?}): replacing {:?}", self.expected_echo);
         self.expected_echo = input
             .chars()
             .filter(|ch| {
@@ -234,6 +235,9 @@ impl EarlyOutput {
     /// `'\r'`/`'\n'`, which a restored buffer's text never contains, guaranteeing a mismatch on
     /// every single redraw regardless of whether the real echo matched.
     pub fn reset_expected_echo(&mut self) {
+        log::debug!(
+            "PHANTOM_DIAG reset_expected_echo: clearing expected_echo={:?} positions={:?}",
+            self.expected_echo, self.expected_echo_positions);
         self.expected_echo.clear();
         self.expected_echo_positions.clear();
     }
@@ -269,6 +273,9 @@ impl EarlyOutput {
             })
             .collect();
         let is_match = !next_positions.is_empty();
+        log::debug!(
+            "PHANTOM_DIAG consume_expected_echo({ch:?}): match={is_match} before={:?} after={:?} pattern={:?}",
+            self.expected_echo_positions, next_positions, self.expected_echo);
         if is_match {
             self.expected_echo_positions = next_positions;
         }
@@ -312,7 +319,9 @@ impl EarlyOutput {
             .iter()
             .filter_map(|&position| position.checked_sub(distance))
             .collect();
+        let before = self.expected_echo_positions.clone();
         self.expected_echo_positions.extend(rewound);
+        log::debug!("PHANTOM_DIAG rearm_after_rewind({distance}): {before:?} -> {:?}", self.expected_echo_positions);
     }
 
     /// Shifts every currently-live candidate position forward by `distance` and adds the
@@ -333,7 +342,9 @@ impl EarlyOutput {
             .iter()
             .map(|&position| position + distance)
             .collect();
+        let before = self.expected_echo_positions.clone();
         self.expected_echo_positions.extend(advanced);
+        log::debug!("PHANTOM_DIAG advance_after_forward_move({distance}): {before:?} -> {:?}", self.expected_echo_positions);
     }
 
     /// Check a character received on the PTY, which may be typeahead or
@@ -531,6 +542,7 @@ impl ansi::Handler for EarlyOutputHandler<'_> {
         // message (`\rloading 10%\rloading 20%...`) from an unrelated background job lost
         // several characters to a pattern left over from an earlier completions request.
         if !self.inner().expected_echo.is_empty() {
+            log::debug!("PHANTOM_DIAG input({c:?}): first real character the pattern cannot explain -- ENDING the window");
             self.inner().reset_expected_echo();
         }
         let session_id = self.block_list.active_block().session_id();
@@ -541,6 +553,7 @@ impl ansi::Handler for EarlyOutputHandler<'_> {
                 // to reset terminal state. If we eagerly added background blocks,
                 // there would be an empty one before almost every command.
                 if !block.started() {
+                    log::debug!("PHANTOM_DIAG input({c:?}): starting a NEW background block");
                     block.start_background(session_id);
                 }
                 block.input(c);
@@ -609,6 +622,7 @@ impl ansi::Handler for EarlyOutputHandler<'_> {
         // redraw might restart from any position, a redraw following a backspace can only
         // continue from one column earlier than wherever matching currently stands. See
         // `rearm_after_rewind`.
+        log::debug!("PHANTOM_DIAG backspace: rewind in bytes, rearming by 1");
         self.inner().rearm_after_rewind(1);
         delegate!(self.backspace());
     }
@@ -616,6 +630,7 @@ impl ansi::Handler for EarlyOutputHandler<'_> {
     fn move_backward(&mut self, columns: usize) {
         // CUB: the same rewind as a backspace, but by a given column count rather than
         // always one. See `rearm_after_rewind`.
+        log::debug!("PHANTOM_DIAG move_backward: CUB in bytes, rearming by {columns}");
         self.inner().rearm_after_rewind(columns);
         delegate!(self.move_backward(columns));
     }
@@ -623,6 +638,7 @@ impl ansi::Handler for EarlyOutputHandler<'_> {
     fn move_forward(&mut self, columns: usize) {
         // CUF: the forward counterpart to move_backward/backspace. See
         // `advance_after_forward_move`.
+        log::debug!("PHANTOM_DIAG move_forward: CUF in bytes, advancing by {columns}");
         self.inner().advance_after_forward_move(columns);
         delegate!(self.move_forward(columns));
     }

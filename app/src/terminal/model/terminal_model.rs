@@ -3314,6 +3314,7 @@ impl ansi::Handler for TerminalModel {
         }
 
         let bytes = input.bytes();
+        log::debug!("PHANTOM_DIAG raw_pty_bytes({}): {}", bytes.len(), bytes.escape_ascii());
 
         // Send a copy of the bytes to subscribers.
         self.event_proxy.send_pty_read_event(bytes);
