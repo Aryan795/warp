@@ -192,11 +192,30 @@ pub(crate) struct TeamRenderContext<'a> {
 }
 
 impl<'a> TeamRenderContext<'a> {
-    /// The borrowed current-render team, for presentation and policy-read call sites that
-    /// already work with `Option<&Team>`. This is not a UID conversion: the borrow, and thus
-    /// the render scope it comes from, travels with the reference.
-    pub(crate) fn team(&self) -> &'a Team {
+    /// Whether `email` has admin permissions on the rendered team.
+    pub(crate) fn has_admin_permissions(&self, email: &str) -> bool {
+        self.team.has_admin_permissions(email)
+    }
+
+    /// The rendered team's member count, for admin-only, member-count-gated presentation
+    /// (e.g. a per-member usage sort control that only makes sense for more than one member).
+    pub(crate) fn member_count(&self) -> usize {
+        self.team.members.len()
+    }
+
+    /// Whether `user_uid` belongs to the rendered team, for scoping a workspace-wide roster
+    /// down to this team's members.
+    pub(crate) fn has_member(&self, user_uid: &UserUid) -> bool {
         self.team
+            .members
+            .iter()
+            .any(|member| &member.uid == user_uid)
+    }
+
+    /// Whether a usage entry's server-reported `attributed_team_uid` matches the rendered
+    /// team, without handing the team's own UID to the caller for that comparison.
+    pub(crate) fn attributed_team_uid_matches(&self, attributed_team_uid: Option<&str>) -> bool {
+        attributed_team_uid == Some(self.team.uid.to_string().as_str())
     }
 }
 
@@ -627,6 +646,17 @@ impl UserWorkspaces {
             .or_else(|| self.current_workspace_billing_metadata())
     }
 
+    /// [`Self::team_billing_metadata`], scoped to a resolved [`TeamRenderContext`]'s team
+    /// instead of a raw `&Team`, for presentation call sites that only ever hold the former.
+    pub(crate) fn team_billing_metadata_for_render_context<'a>(
+        &'a self,
+        context: Option<&TeamRenderContext<'a>>,
+    ) -> Option<&'a BillingMetadata> {
+        context
+            .map(|context| &context.team.billing_metadata)
+            .or_else(|| self.current_workspace_billing_metadata())
+    }
+
     pub fn is_custom_llm_enabled_for_team(&self, team: Option<&Team>) -> bool {
         team.map(Team::is_custom_llm_enabled)
             .or_else(|| {
@@ -656,6 +686,23 @@ impl UserWorkspaces {
         team: Option<&Team>,
     ) -> Option<PurchaseAddOnCreditsPolicy> {
         team.and_then(|team| team.billing_metadata.tier.purchase_add_on_credits_policy)
+            .or_else(|| self.purchase_policy())
+    }
+
+    /// [`Self::purchase_policy_for_team`], scoped to a resolved [`TeamRenderContext`]'s team
+    /// instead of a raw `&Team`, for presentation call sites that only ever hold the former.
+    pub(crate) fn purchase_policy_for_render_context(
+        &self,
+        context: Option<&TeamRenderContext<'_>>,
+    ) -> Option<PurchaseAddOnCreditsPolicy> {
+        context
+            .and_then(|context| {
+                context
+                    .team
+                    .billing_metadata
+                    .tier
+                    .purchase_add_on_credits_policy
+            })
             .or_else(|| self.purchase_policy())
     }
 

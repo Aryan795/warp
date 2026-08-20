@@ -1193,13 +1193,27 @@ fn test_team_context_and_render_context_return_none_without_a_team() {
     })
 }
 
-/// `TeamRenderContext::team()` is the accessor billing/usage presentation call sites use
-/// instead of reading the struct's private field directly (as the tests above do). Window-team
-/// change and no-team behavior for this same resolution are already covered above; this only
-/// checks that the accessor exposes what was resolved for each window.
+/// Focused coverage for the narrow `TeamRenderContext` predicates that billing/usage
+/// presentation call sites use instead of reading the struct's private field directly (as the
+/// tests above do). Window-team change and no-team behavior for this same resolution are
+/// already covered above; this only checks that the predicates reflect what was resolved for
+/// each window.
 #[test]
-fn test_team_render_context_team_accessor_matches_each_windows_own_team() {
-    let (team_a, team_b) = two_teams();
+fn test_team_render_context_predicates_match_each_windows_own_team() {
+    let (mut team_a, mut team_b) = two_teams();
+    let admin_uid = UserUid::new("admin");
+    let admin_email = "admin@example.com";
+    team_a.members.push(TeamMember {
+        uid: admin_uid,
+        email: admin_email.to_string(),
+        role: MembershipRole::Owner,
+    });
+    let outsider_uid = UserUid::new("outsider");
+    team_b.members.push(TeamMember {
+        uid: UserUid::new("team-b-member"),
+        email: "member@example.com".to_string(),
+        role: MembershipRole::User,
+    });
     let mut workspace = workspace_for_test(&team_a);
     workspace.teams.push(team_b.clone());
 
@@ -1217,20 +1231,36 @@ fn test_team_render_context_team_accessor_matches_each_windows_own_team() {
         let weak_view_b = view_b.downgrade();
         app.read(|ctx| {
             let user_workspaces = UserWorkspaces::as_ref(ctx);
-            assert_eq!(
-                user_workspaces
-                    .team_render_context_for_view_handle(&weak_view_a, ctx)
-                    .map(|render| render.team().uid),
-                Some(team_a.uid),
-                "team() should expose window A's resolved team"
+            let render_a = user_workspaces
+                .team_render_context_for_view_handle(&weak_view_a, ctx)
+                .expect("window A should resolve a render context");
+            let render_b = user_workspaces
+                .team_render_context_for_view_handle(&weak_view_b, ctx)
+                .expect("window B should resolve a render context");
+
+            assert!(
+                render_a.has_admin_permissions(admin_email),
+                "the admin should have admin permissions on team A"
             );
-            assert_eq!(
-                user_workspaces
-                    .team_render_context_for_view_handle(&weak_view_b, ctx)
-                    .map(|render| render.team().uid),
-                Some(team_b.uid),
-                "team() should expose window B's resolved team"
+            assert!(
+                !render_b.has_admin_permissions(admin_email),
+                "team A's admin should not have admin permissions on team B"
             );
+
+            assert!(
+                render_a.has_member(&admin_uid),
+                "team A should have its own member"
+            );
+            assert!(
+                !render_a.has_member(&outsider_uid),
+                "team A should not claim a member that never joined it"
+            );
+
+            let team_a_uid_string = team_a.uid.to_string();
+            let team_b_uid_string = team_b.uid.to_string();
+            assert!(render_a.attributed_team_uid_matches(Some(team_a_uid_string.as_str())));
+            assert!(!render_a.attributed_team_uid_matches(Some(team_b_uid_string.as_str())));
+            assert!(!render_a.attributed_team_uid_matches(None));
         });
     })
 }

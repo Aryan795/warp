@@ -54,6 +54,13 @@ pub struct BuyCreditsBanner {
     addon_credits_options: Vec<AddonCreditsOption>,
     selected_denomination_index: usize,
     purchase_addon_credits_loading: bool,
+    /// The team explicitly targeted by the in-flight purchase, captured when the buy button
+    /// was clicked (`None` outer = no purchase in flight for this banner; inner `None` =
+    /// personal purchase). Completion handling authorizes and acts against this captured
+    /// target, not whichever team the window currently shows: the window can switch teams
+    /// while the purchase is in flight, and every window's banner observes the same global
+    /// purchase events, so a stray event with nothing pending here belongs to another window.
+    pending_purchase_team_uid: Option<Option<ServerId>>,
     should_display_banner: bool,
     billing_settings_hyperlink: HighlightedHyperlink,
     is_denomination_dropdown_open: bool,
@@ -95,7 +102,11 @@ impl BuyCreditsBanner {
                         // The browser checkout completed; honor the
                         // auto-reload opt-in made when initiating the
                         // purchase, like the synchronous purchase path does.
-                        me.enable_auto_reload_if_requested(ctx);
+                        // `take()` also drops this banner's pending-purchase
+                        // marker now that the purchase is fully resolved.
+                        if let Some(purchased_team_uid) = me.pending_purchase_team_uid.take() {
+                            me.enable_auto_reload_if_requested(purchased_team_uid, ctx);
+                        }
                     }
                     ctx.notify();
                 }
@@ -134,6 +145,7 @@ impl BuyCreditsBanner {
             addon_credits_options: Default::default(),
             selected_denomination_index: 0,
             purchase_addon_credits_loading: false,
+            pending_purchase_team_uid: None,
             should_display_banner: false,
             billing_settings_hyperlink: HighlightedHyperlink::default(),
             is_denomination_dropdown_open: false,
@@ -166,6 +178,13 @@ impl BuyCreditsBanner {
                 }
             }
             UserWorkspacesEvent::PurchaseAddonCreditsSuccess => {
+                // This is a global event: every window's banner observes it. Nothing pending
+                // here means some other window's purchase succeeded, not this one's; ignore it
+                // rather than authorizing or acting against whichever team this window
+                // happens to show right now.
+                let Some(purchased_team_uid) = self.pending_purchase_team_uid.take() else {
+                    return;
+                };
                 self.purchase_addon_credits_loading = false;
                 self.checkout_pending = false;
 
@@ -179,14 +198,12 @@ impl BuyCreditsBanner {
                     .get(self.selected_denomination_index)
                     .map(|option| option.credits);
                 let has_admin_permissions = {
-                    let workspaces = UserWorkspaces::as_ref(ctx);
-                    let current_team = workspaces
-                        .team_context_for_view(ctx)
-                        .and_then(|team_context| workspaces.team_for_context(&team_context));
+                    let purchased_team = purchased_team_uid
+                        .and_then(|team_uid| UserWorkspaces::as_ref(ctx).team_from_uid(team_uid));
                     let auth_state = AuthStateProvider::as_ref(ctx).get();
                     auth_state
                         .user_email()
-                        .zip(current_team)
+                        .zip(purchased_team)
                         .map(|(email, team)| team.has_admin_permissions(&email))
                         .unwrap_or_default()
                 };
@@ -214,7 +231,7 @@ impl BuyCreditsBanner {
                 // - Banner toggle flow: optionally enable auto-reload immediately.
                 // - Post-purchase modal flow: show the modal.
                 if banner_toggle_flag_enabled {
-                    self.enable_auto_reload_if_requested(ctx);
+                    self.enable_auto_reload_if_requested(purchased_team_uid, ctx);
                 } else if has_admin_permissions && post_purchase_modal_flag_enabled {
                     // Default selection in the modal should match the denomination the user clicked "buy" on.
                     ctx.emit(BuyCreditsBannerEvent::OpenAutoReloadModal {
@@ -225,6 +242,11 @@ impl BuyCreditsBanner {
                 ctx.notify();
             }
             UserWorkspacesEvent::PurchaseAddonCreditsRejected(err) => {
+                // As above: a rejection for a purchase this banner never started belongs to
+                // another window.
+                if self.pending_purchase_team_uid.take().is_none() {
+                    return;
+                }
                 self.purchase_addon_credits_loading = false;
                 self.banner_auto_reload_update_in_flight = false;
 
@@ -257,25 +279,29 @@ impl BuyCreditsBanner {
     }
 
     /// If the user opted into auto-reload via the banner checkbox (banner
-    /// toggle experiment), persist the setting after a completed purchase.
-    fn enable_auto_reload_if_requested(&mut self, ctx: &mut ViewContext<Self>) {
+    /// toggle experiment), persist the setting for `team_uid` after a completed purchase.
+    /// `team_uid` must be the team the completed purchase actually targeted (personal
+    /// purchases have no team-level auto-reload setting to persist), not whichever team the
+    /// window happens to show when the purchase resolves.
+    fn enable_auto_reload_if_requested(
+        &mut self,
+        team_uid: Option<ServerId>,
+        ctx: &mut ViewContext<Self>,
+    ) {
         if !FeatureFlag::BuildPlanAutoReloadBannerToggle.is_enabled() || !self.auto_reload_enabled {
             return;
         }
-
-        let workspaces = UserWorkspaces::as_ref(ctx);
-        let team_context = workspaces.team_context_for_view(ctx);
-        let current_team = team_context
-            .as_ref()
-            .and_then(|team_context| workspaces.team_for_context(team_context));
+        let Some(team_uid) = team_uid else {
+            return;
+        };
 
         let has_admin_permissions = {
+            let team = UserWorkspaces::as_ref(ctx).team_from_uid(team_uid);
             let auth_state = AuthStateProvider::as_ref(ctx).get();
             auth_state
                 .user_email()
-                .zip(current_team)
-                .map(|(email, team)| team.has_admin_permissions(&email))
-                .unwrap_or_default()
+                .zip(team)
+                .is_some_and(|(email, team)| team.has_admin_permissions(&email))
         };
         if !has_admin_permissions {
             return;
@@ -287,17 +313,15 @@ impl BuyCreditsBanner {
             .map(|option| option.credits);
         self.banner_auto_reload_update_in_flight = true;
 
-        if let Some(team_uid) = current_team.map(|team| team.uid) {
-            UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
-                user_workspaces.update_addon_credits_settings(
-                    team_uid,
-                    Some(true),
-                    None, // Don't change monthly spend limit
-                    selected_credits,
-                    ctx,
-                );
-            });
-        }
+        UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
+            user_workspaces.update_addon_credits_settings(
+                team_uid,
+                Some(true),
+                None, // Don't change monthly spend limit
+                selected_credits,
+                ctx,
+            );
+        });
     }
 
     fn render_auto_reload_checkbox(&self, appearance: &Appearance) -> Box<dyn Element> {
@@ -488,14 +512,12 @@ impl BuyCreditsBanner {
         .finish();
 
         let auth_state = AuthStateProvider::as_ref(app).get();
-        let current_team = UserWorkspaces::as_ref(app)
-            .team_render_context_for_view_handle(&self.view_handle, app)
-            .map(|render_context| render_context.team());
+        let render_context =
+            UserWorkspaces::as_ref(app).team_render_context_for_view_handle(&self.view_handle, app);
         let has_admin_permissions = auth_state
             .user_email()
-            .zip(current_team)
-            .map(|(email, team)| team.has_admin_permissions(&email))
-            .unwrap_or_default();
+            .zip(render_context.as_ref())
+            .is_some_and(|(email, render_context)| render_context.has_admin_permissions(&email));
 
         // Banner text with title and description based on admin status
         let banner_description = if has_admin_permissions {
@@ -684,16 +706,14 @@ impl BuyCreditsBanner {
 
         let auth_state = AuthStateProvider::as_ref(app).get();
         let workspaces = UserWorkspaces::as_ref(app);
-        let current_team = workspaces
-            .team_render_context_for_view_handle(&self.view_handle, app)
-            .map(|render_context| render_context.team());
-        let has_admin_permissions = current_team.is_none_or(|team| {
+        let render_context = workspaces.team_render_context_for_view_handle(&self.view_handle, app);
+        let has_admin_permissions = render_context.as_ref().is_none_or(|render_context| {
             auth_state
                 .user_email()
-                .is_some_and(|email| team.has_admin_permissions(&email))
+                .is_some_and(|email| render_context.has_admin_permissions(&email))
         });
         let delinquent_due_to_payment_issue = workspaces
-            .team_billing_metadata(current_team)
+            .team_billing_metadata_for_render_context(render_context.as_ref())
             .is_some_and(|billing| billing.is_delinquent_due_to_payment_issue());
         let auto_reload_banner_toggle_ff =
             FeatureFlag::BuildPlanAutoReloadBannerToggle.is_enabled();
@@ -706,7 +726,7 @@ impl BuyCreditsBanner {
 
         // Check if the selected purchase would reach/exceed the monthly limit
         let premium_bps = workspaces
-            .purchase_policy_for_team(current_team)
+            .purchase_policy_for_render_context(render_context.as_ref())
             .map_or(0, |policy| policy.effective_premium_bps());
         let selected_option = self
             .addon_credits_options
@@ -802,7 +822,13 @@ impl BuyCreditsBanner {
         };
 
         let make_buy_button = || {
-            let team_uid = current_team.map(|team| team.uid);
+            // The buy button is bound to whichever team is currently displayed: capture that
+            // team's raw UID directly from the window, not through the render context, which
+            // exposes no UID by design.
+            let team_uid = self
+                .view_handle
+                .window_id(app)
+                .and_then(|window_id| workspaces.team_uid_for_window(window_id));
 
             let buy_button_disabled = self.purchase_addon_credits_loading
                 || delinquent_due_to_payment_issue
@@ -1062,6 +1088,7 @@ impl warpui::TypedActionView for BuyCreditsBanner {
                 {
                     let credits = option.credits;
                     self.purchase_addon_credits_loading = true;
+                    self.pending_purchase_team_uid = Some(*team_uid);
                     UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
                         user_workspaces.purchase_addon_credits(*team_uid, credits, ctx);
                     });
@@ -1075,3 +1102,7 @@ impl warpui::TypedActionView for BuyCreditsBanner {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "buy_credits_banner_tests.rs"]
+mod tests;

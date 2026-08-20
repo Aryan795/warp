@@ -2861,12 +2861,18 @@ impl BillingAndUsagePageView {
             .user_email()
             .unwrap_or_default();
         let workspaces = UserWorkspaces::as_ref(app);
-        let team = workspaces
-            .team_render_context_for_view_handle(&self.self_handle, app)
-            .map(|render_context| render_context.team());
+        let render_context = workspaces.team_render_context_for_view_handle(&self.self_handle, app);
+        // Explicit-target actions below (the admin/addon-credits panels) are bound to
+        // whichever team is currently displayed: capture that team's raw UID directly from
+        // the window, not through the render context, which exposes no UID by design.
+        let team_uid = self
+            .self_handle
+            .window_id(app)
+            .and_then(|window_id| workspaces.team_uid_for_window(window_id));
         let billing_metadata = workspaces.current_workspace_billing_metadata();
-        let has_admin_permissions =
-            team.is_some_and(|team| team.has_admin_permissions(&current_user_email));
+        let has_admin_permissions = render_context.as_ref().is_some_and(|render_context| {
+            render_context.has_admin_permissions(&current_user_email)
+        });
 
         let mut usage_header_right_side = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
@@ -2955,7 +2961,7 @@ impl BillingAndUsagePageView {
 
         let show_addon_credits_panel = workspace.is_some()
             || workspaces
-                .purchase_policy_for_team(team)
+                .purchase_policy_for_render_context(render_context.as_ref())
                 .is_some_and(|policy| policy.allows_purchases());
         if show_addon_credits_panel {
             let bonus_credit_balance = workspace.map_or_else(
@@ -2973,14 +2979,15 @@ impl BillingAndUsagePageView {
                     .is_enterprise_pay_as_you_go_enabled()
             }) && bonus_credit_balance == 0;
 
-            let can_manage_addon_credits =
-                team.is_none_or(|team| team.has_admin_permissions(&current_user_email));
+            let can_manage_addon_credits = render_context.as_ref().is_none_or(|render_context| {
+                render_context.has_admin_permissions(&current_user_email)
+            });
 
             if !is_enterprise_payg_with_zero_credits {
                 usage.add_child(self.render_addon_credits_panel(
                     self.selected_addon_denomination,
                     workspace,
-                    team.map(|team| team.uid),
+                    team_uid,
                     can_manage_addon_credits,
                     bonus_credit_balance,
                     &self.addon_credits_options,
@@ -3027,7 +3034,7 @@ impl BillingAndUsagePageView {
                 .is_some_and(|p| p.limit == 0)
         {
             usage.add_child(self.render_enterprise_usage_card(
-                team.map(|team| team.uid),
+                team_uid,
                 has_admin_permissions,
                 appearance,
             ));
@@ -3171,17 +3178,15 @@ impl BillingAndUsagePageView {
 
         let auth_state = AuthStateProvider::as_ref(app).get();
 
-        let upgrade_cta_text_fragments = if let (Some(team), Some(billing_metadata)) =
-            (team, billing_metadata)
+        let upgrade_cta_text_fragments = if let (Some(team_uid), Some(billing_metadata)) =
+            (team_uid, billing_metadata)
         {
             if workspace_is_delinquent_due_to_payment_issue {
                 if has_admin_permissions {
                     vec![
                         FormattedTextFragment::hyperlink_action(
                             "Manage billing",
-                            BillingAndUsagePageAction::GenerateStripeBillingPortalLink {
-                                team_uid: team.uid,
-                            },
+                            BillingAndUsagePageAction::GenerateStripeBillingPortalLink { team_uid },
                         ),
                         FormattedTextFragment::plain_text(" to regain access to AI features."),
                     ]
@@ -3192,7 +3197,7 @@ impl BillingAndUsagePageView {
                     )]
                 }
             } else if billing_metadata.can_upgrade_to_higher_tier_plan() {
-                let upgrade_url = UserWorkspaces::upgrade_link_for_team(team.uid);
+                let upgrade_url = UserWorkspaces::upgrade_link_for_team(team_uid);
                 if has_admin_permissions {
                     if billing_metadata.can_upgrade_to_build_plan() {
                         if billing_metadata.is_on_legacy_paid_plan() {
@@ -3240,7 +3245,7 @@ impl BillingAndUsagePageView {
                 vec![
                     FormattedTextFragment::hyperlink(
                         "Upgrade to Max",
-                        UserWorkspaces::upgrade_link_for_team(team.uid),
+                        UserWorkspaces::upgrade_link_for_team(team_uid),
                     ),
                     FormattedTextFragment::plain_text(" for more AI credits."),
                 ]
@@ -3248,7 +3253,7 @@ impl BillingAndUsagePageView {
                 vec![
                     FormattedTextFragment::hyperlink(
                         "Switch to Business",
-                        UserWorkspaces::upgrade_link_for_team(team.uid),
+                        UserWorkspaces::upgrade_link_for_team(team_uid),
                     ),
                     FormattedTextFragment::plain_text(
                         " for security features like SSO and automatically applied zero data retention.",
@@ -3335,7 +3340,7 @@ impl BillingAndUsagePageView {
                 .finish(),
         );
 
-        if let (Some(team), Some(billing_metadata)) = (team, billing_metadata)
+        if let (Some(team_uid), Some(billing_metadata)) = (team_uid, billing_metadata)
             && billing_metadata.is_usage_based_pricing_toggleable()
         {
             let usage_based_pricing_settings = workspaces.usage_based_pricing_settings();
@@ -3348,7 +3353,7 @@ impl BillingAndUsagePageView {
                 Container::new(self.render_usage_based_pricing_section(
                     enabled,
                     billing_metadata,
-                    team.uid,
+                    team_uid,
                     appearance,
                     app,
                     has_admin_permissions,
@@ -3672,17 +3677,23 @@ impl BillingAndUsagePageView {
             right_side.add_child(plan_badge);
         }
 
-        if let Some(team) = workspaces
-            .team_render_context_for_view_handle(&self.self_handle, app)
-            .map(|render_context| render_context.team())
-        {
+        let render_context = workspaces.team_render_context_for_view_handle(&self.self_handle, app);
+        if let Some(render_context) = render_context.as_ref() {
             let current_user_email = auth_state.user_email().unwrap_or_default();
-            let has_admin_permissions = team.has_admin_permissions(&current_user_email);
+            let has_admin_permissions = render_context.has_admin_permissions(&current_user_email);
 
-            if has_admin_permissions {
+            // The admin actions below are bound to whichever team is currently displayed:
+            // capture that team's raw UID directly from the window, not through the render
+            // context, which exposes no UID by design.
+            let team_uid = self
+                .self_handle
+                .window_id(app)
+                .and_then(|window_id| workspaces.team_uid_for_window(window_id));
+
+            if has_admin_permissions && let Some(team_uid) = team_uid {
                 if let (Some(workspace), Some(billing_metadata)) = (workspace, billing_metadata)
                     && let Some(admin_actions) = self.render_team_admin_actions(
-                        team.uid,
+                        team_uid,
                         billing_metadata,
                         workspace.has_billing_history,
                         appearance,
@@ -3692,7 +3703,7 @@ impl BillingAndUsagePageView {
                 }
 
                 if billing_metadata.is_some_and(BillingMetadata::is_enterprise_plan) {
-                    let admin_panel_button = self.render_admin_panel_button(team.uid, appearance);
+                    let admin_panel_button = self.render_admin_panel_button(team_uid, appearance);
                     right_side.add_child(admin_panel_button);
                 }
             }
