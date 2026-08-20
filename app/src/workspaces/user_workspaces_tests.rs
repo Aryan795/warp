@@ -1193,6 +1193,137 @@ fn test_team_context_and_render_context_return_none_without_a_team() {
     })
 }
 
+fn ai_overages_for_test(requests_used: i32) -> AiOverages {
+    AiOverages {
+        current_monthly_request_cost_cents: requests_used * 100,
+        current_monthly_requests_used: requests_used,
+        current_period_end: chrono::Utc::now(),
+    }
+}
+
+/// Two windows refreshing AI overages under different teams must not let one
+/// operation's result bleed into the other team's billing metadata, matching the
+/// acceptance criterion that a window's usage refresh cannot change another team's
+/// displayed or enforced state.
+#[test]
+fn test_refresh_ai_overages_scopes_the_write_to_the_captured_team_only() {
+    let (team_a, team_b) = two_teams();
+    let mut workspace = workspace_for_test(&team_a);
+    workspace.teams.push(team_b.clone());
+
+    App::test((), |mut app| async move {
+        let mut workspace_client = MockWorkspaceClient::new();
+        workspace_client
+            .expect_refresh_ai_overages()
+            .times(1)
+            .returning(|| Ok(ai_overages_for_test(7)));
+
+        app.add_singleton_model(PrivacySettings::mock);
+        app.add_singleton_model(|ctx| {
+            UserWorkspaces::mock(
+                Arc::new(MockTeamClient::new()),
+                Arc::new(workspace_client),
+                vec![workspace],
+                ctx,
+            )
+        });
+
+        let (window_a, view_a) = create_test_window(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window_a, team_a.uid, ctx);
+        });
+        let context_a = view_a
+            .update(&mut app, |_, ctx| {
+                UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+            })
+            .expect("a window assigned to team A should mint a context");
+
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.refresh_ai_overages(Some(context_a), ctx);
+        });
+
+        warpui::r#async::Timer::after(Duration::from_millis(100)).await;
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert_eq!(
+                user_workspaces
+                    .team_from_uid(team_a.uid)
+                    .and_then(|team| team.billing_metadata.ai_overages.as_ref())
+                    .map(|overages| overages.current_monthly_requests_used),
+                Some(7),
+                "the captured team should receive the refreshed overages"
+            );
+            assert!(
+                user_workspaces
+                    .team_from_uid(team_b.uid)
+                    .is_some_and(|team| team.billing_metadata.ai_overages.is_none()),
+                "a concurrent window's team must not be touched by another team's refresh"
+            );
+            assert!(
+                user_workspaces
+                    .current_workspace_billing_metadata()
+                    .is_some_and(|billing| billing.ai_overages.is_none()),
+                "a team-scoped refresh must not also write into workspace-level billing metadata"
+            );
+        });
+    })
+}
+
+/// The one production caller of `refresh_ai_overages` today has no `ViewContext` and so
+/// passes `None`; that no-team refresh must stay scoped to the workspace and must not
+/// touch any team's billing metadata (replacing the old behavior of writing into every
+/// team unconditionally).
+#[test]
+fn test_refresh_ai_overages_without_scope_only_updates_the_workspace() {
+    let (team_a, team_b) = two_teams();
+    let mut workspace = workspace_for_test(&team_a);
+    workspace.teams.push(team_b.clone());
+
+    App::test((), |mut app| async move {
+        let mut workspace_client = MockWorkspaceClient::new();
+        workspace_client
+            .expect_refresh_ai_overages()
+            .times(1)
+            .returning(|| Ok(ai_overages_for_test(3)));
+
+        app.add_singleton_model(|ctx| {
+            UserWorkspaces::mock(
+                Arc::new(MockTeamClient::new()),
+                Arc::new(workspace_client),
+                vec![workspace],
+                ctx,
+            )
+        });
+
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.refresh_ai_overages(None, ctx);
+        });
+
+        warpui::r#async::Timer::after(Duration::from_millis(100)).await;
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert_eq!(
+                user_workspaces
+                    .current_workspace_billing_metadata()
+                    .and_then(|billing| billing.ai_overages.as_ref())
+                    .map(|overages| overages.current_monthly_requests_used),
+                Some(3),
+                "a no-team refresh should still update the workspace-level overages"
+            );
+            for team_uid in [team_a.uid, team_b.uid] {
+                assert!(
+                    user_workspaces
+                        .team_from_uid(team_uid)
+                        .is_some_and(|team| team.billing_metadata.ai_overages.is_none()),
+                    "a no-team refresh must not write into any team's billing metadata"
+                );
+            }
+        });
+    })
+}
+
 #[test]
 fn test_spaces_for_window_orders_selected_team_shared_and_personal() {
     let _flag = FeatureFlag::SharedWithMe.override_enabled(true);

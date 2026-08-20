@@ -314,6 +314,11 @@ impl UserWorkspaces {
             .and_then(|w| w.teams.iter().find(|t| t.uid == team_uid))
     }
 
+    fn team_from_uid_mut(&mut self, team_uid: ServerId) -> Option<&mut Team> {
+        self.current_workspace_mut()
+            .and_then(|w| w.teams.iter_mut().find(|t| t.uid == team_uid))
+    }
+
     pub fn register_window(
         &mut self,
         window_id: WindowId,
@@ -417,6 +422,12 @@ impl UserWorkspaces {
     #[allow(dead_code)]
     pub(crate) fn team_for_context(&self, context: &TeamContext) -> Option<&Team> {
         self.team_from_uid(context.team_uid)
+    }
+
+    /// Mutable counterpart to [`Self::team_for_context`], for operations that write back to
+    /// the team an operation was scoped to instead of every team in the workspace.
+    pub(crate) fn team_for_context_mut(&mut self, context: &TeamContext) -> Option<&mut Team> {
+        self.team_from_uid_mut(context.team_uid)
     }
 
     /// Returns the windows whose team assignment changed.
@@ -1745,11 +1756,17 @@ impl UserWorkspaces {
         ctx.notify();
     }
 
-    pub fn refresh_ai_overages(&mut self, ctx: &mut ModelContext<Self>) {
+    /// Refreshes AI overages and writes the result into `scope`'s team, or into the current
+    /// workspace when the operation has no team to scope to (see [`Self::on_refresh_ai_overages`]).
+    pub(crate) fn refresh_ai_overages(
+        &mut self,
+        scope: Option<TeamContext>,
+        ctx: &mut ModelContext<Self>,
+    ) {
         let workspace_client = self.workspace_client.clone();
         let _ = ctx.spawn(
             async move { workspace_client.refresh_ai_overages().await },
-            Self::on_refresh_ai_overages,
+            move |model, result, ctx| model.on_refresh_ai_overages(scope, result, ctx),
         );
     }
 
@@ -1777,14 +1794,28 @@ impl UserWorkspaces {
         );
     }
 
-    fn on_refresh_ai_overages(&mut self, result: Result<AiOverages>, ctx: &mut ModelContext<Self>) {
+    /// Applies a fetched `AiOverages` value to exactly the scope the refresh started for: the
+    /// one team `scope` was captured from, or the current workspace when `scope` is `None`.
+    /// Never writes into a team other than the one the operation was scoped to, so a refresh
+    /// started under one window's team cannot alter what another window's team displays.
+    fn on_refresh_ai_overages(
+        &mut self,
+        scope: Option<TeamContext>,
+        result: Result<AiOverages>,
+        ctx: &mut ModelContext<Self>,
+    ) {
         match result {
             Ok(fresh_ai_overages) => {
-                // TODO: We really need to stop having duplicate billing metadata...
-                if let Some(workspace) = self.current_workspace_mut() {
-                    workspace.billing_metadata.ai_overages = Some(fresh_ai_overages.clone());
-                    for team in &mut workspace.teams {
-                        team.billing_metadata.ai_overages = Some(fresh_ai_overages.clone());
+                match scope {
+                    Some(context) => {
+                        if let Some(team) = self.team_for_context_mut(&context) {
+                            team.billing_metadata.ai_overages = Some(fresh_ai_overages);
+                        }
+                    }
+                    None => {
+                        if let Some(workspace) = self.current_workspace_mut() {
+                            workspace.billing_metadata.ai_overages = Some(fresh_ai_overages);
+                        }
                     }
                 }
 
