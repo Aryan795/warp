@@ -787,6 +787,14 @@ pub enum AgentDriverError {
         /// Matching row(s) from the harness block, trimmed and capped.
         excerpt: String,
     },
+    /// `WARP_SANDBOX_DEADLINE` expired before `run_internal` completed.
+    /// Warp-controlled infrastructure limit, not a task outcome, so it is
+    /// reported as `ERROR` rather than `FAILED`.
+    #[error(
+        "Sandbox runtime limit reached. WARP_SANDBOX_DEADLINE is set by Warp from your plan's \
+         maximum agent runtime and cannot be configured per run."
+    )]
+    SandboxDeadlineReached,
 }
 
 impl ErrorExt for AgentDriverError {
@@ -1213,6 +1221,10 @@ impl AgentDriver {
                     #[cfg(not(unix))]
                     let sigterm_fut = future::pending::<()>();
 
+                    // `select!` resolves exactly one arm and drops the other future(s), so a
+                    // `run_internal` completion that lands first (reporting its own terminal
+                    // task state, e.g. SUCCEEDED) can never be overwritten by this branch: the
+                    // timer future is simply dropped without ever producing this error.
                     let result = futures::select! {
                         r = Self::run_internal(task, foreground.clone()).fuse() => r,
                         _ = timer_fut.fuse() => {
@@ -1220,7 +1232,7 @@ impl AgentDriver {
                                 "Sandbox deadline approaching (WARP_SANDBOX_DEADLINE); \
                                  aborting run_internal to allow recording finalization"
                             );
-                            Ok(())
+                            Err(AgentDriverError::SandboxDeadlineReached)
                         }
                         _ = sigterm_fut.fuse() => {
                             // Backup path — should not fire in normal operation.
