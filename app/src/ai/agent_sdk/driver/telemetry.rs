@@ -47,7 +47,9 @@ impl WaitForEventsCheckpointOutcome {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct WaitForEventsEpisodeResolvedEvent {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Serialized as `null` (not omitted) when absent, so every emitted
+    /// event carries the full fixed eight-field payload for schema-based
+    /// dashboard queries.
     pub task_id: Option<String>,
     pub execution_id: String,
     pub server_idle_timeout_seconds: i32,

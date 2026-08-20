@@ -1,4 +1,4 @@
-use serde_json::json;
+use serde_json::{Value, json};
 use warp_core::telemetry::TelemetryEvent as _;
 
 use super::*;
@@ -34,7 +34,7 @@ fn episode_resolved_reports_stamp_and_checkpoint_fields() {
 }
 
 #[test]
-fn episode_resolved_omits_task_id_when_absent_and_reports_failed_checkpoint() {
+fn episode_resolved_serializes_task_id_as_null_when_absent_and_reports_failed_checkpoint() {
     let event = WaitForEventsTelemetryEvent::EpisodeResolved(WaitForEventsEpisodeResolvedEvent {
         task_id: None,
         execution_id: "exec-456".to_string(),
@@ -47,7 +47,10 @@ fn episode_resolved_omits_task_id_when_absent_and_reports_failed_checkpoint() {
     });
 
     let payload = event.payload().unwrap();
-    assert!(!payload.as_object().unwrap().contains_key("task_id"));
+    // The key must still be present (as `null`), not omitted: the payload's
+    // eight-field shape must stay fixed regardless of which fields are set.
+    assert!(payload.as_object().unwrap().contains_key("task_id"));
+    assert_eq!(payload["task_id"], Value::Null);
     assert_eq!(payload["used_fallback"], json!(true));
     assert_eq!(payload["checkpoint_outcome"], json!("failed"));
 }
