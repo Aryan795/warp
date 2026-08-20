@@ -1,12 +1,31 @@
 # Child-run deep links in the web session viewer
 
 ## Summary
-The web session viewer keeps the root orchestrator route in the address bar while the user views a child run. The selected child is encoded as `#child=<run-id>`, so refreshes and copied links reopen the root orchestration viewer with that child selected.
+The work ships in phases. Phase 0 immediately stops child-pill navigation from replacing the web session viewer's entry URL. It does not preserve the selected child on refresh or in a copied link. Later phases replace that temporary rule with the approved final behavior: the viewer keeps the root orchestrator route and encodes the selected child as `#child=<run-id>`.
 
 ## Problem
-Today a child-pill click can replace the root orchestrator URL with the child's own `/conversation/<id>` or `/session/<id>` URL. A refresh or copied link then opens the child without its orchestration context. A narrow stopgap preserves the root route but drops the selected child from the URL. This specification replaces that stopgap behavior with a root route plus a child-selection fragment.
+Today a child-pill click can replace the root orchestrator URL with the child's own `/conversation/<id>` or `/session/<id>` URL. A refresh or copied link then opens the child without its orchestration context.
+
+## Delivery phases
+
+### Phase 0 — Preserve the viewer entry URL
+Phase 0 is implemented in the same PR as this specification.
+
+1. While the current URL is `/conversation/<id>` or `/session/<id>`, a non-forced pane focus or pane-link update keeps that current URL.
+2. Clicking a child pill no longer replaces the orchestrator URL with the child's URL.
+3. Refreshing or copying the URL reopens the orchestrator with no child selected.
+4. Phase 0 does not create an anchored child link. It is a narrow bug fix while the remaining phases are implemented.
+
+Phase 0 is deliberately temporary. Its blanket URL-preservation rule suppresses the explicit fragment write required by the final design. Phase 2 must remove or invert that rule before it adds anchor navigation. If the anchor writer is layered beneath the Phase 0 guard, clicking a pill will silently fail to add `#child=<run-id>`.
+
+### Phase 1 — Canonicalize direct child links
+Phase 1 adds permission-aware server route resolution. It redirects an accessible direct child link to the accessible top-level root plus the child's anchor. It also adds the `?view=standalone` escape hatch and the no-disclosure access fallback.
+
+### Phase 2 — Restore and navigate anchored selections
+Phase 2 adds anchored pill navigation, refresh restoration, stale-anchor cleanup, and Back/Forward history behavior in the WASM viewer. It replaces Phase 0's blanket preservation rule with selection-aware URL handling.
 
 ## Behavior
+The requirements below describe the final state after Phases 1 and 2.
 
 ### URL shape and pill navigation
 1. The stable viewer URL is the root orchestrator's route:

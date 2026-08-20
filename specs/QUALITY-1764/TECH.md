@@ -1,7 +1,7 @@
 # Child-run deep links in the web session viewer
 
 ## Context
-See [PRODUCT.md](./PRODUCT.md) for the approved behavior. This design is a follow-on to QUALITY-1764's narrow stopgap. The stopgap keeps the current `ConversationView` or `SessionView` path and suppresses focused-child URL rewrites. It intentionally loses the child selection on refresh and copied links. This design replaces that blanket viewer-mode suppression with explicit root-route and child-fragment navigation.
+See [PRODUCT.md](./PRODUCT.md) for the approved behavior and delivery phases. This PR combines the specification with the narrow QUALITY-1764 fix as Phase 0. Phase 0 keeps the current `ConversationView` or `SessionView` URL and suppresses focused-child URL rewrites. It fixes the reported refresh and copied-link failure now, but it intentionally loses the child selection. Phases 1 and 2 replace that temporary behavior with permission-aware root routing and child-fragment navigation.
 
 The web viewer is the WASM Warp client mounted by the React shell at [`client/src/app.tsx (277-293) @ df4801c`](https://github.com/warpdotdev/warp-server/blob/df4801cc884f3dbbd85bfdf8368bc362a63de4d1/client/src/app.tsx#L277-L293). The React entry points are [`client/src/ConversationView.tsx @ df4801c`](https://github.com/warpdotdev/warp-server/blob/df4801cc884f3dbbd85bfdf8368bc362a63de4d1/client/src/ConversationView.tsx) and [`client/src/SessionShareView.tsx @ df4801c`](https://github.com/warpdotdev/warp-server/blob/df4801cc884f3dbbd85bfdf8368bc362a63de4d1/client/src/SessionShareView.tsx).
 
@@ -20,9 +20,31 @@ The GraphQL `AIConversation` response contains `ambientAgentTaskId` but no paren
 
 The server already stores every required relationship. `Task` carries `ParentRunID` and `AgentConversationID` in [`model/types/ai_tasks.go (519-557) @ df4801c`](https://github.com/warpdotdev/warp-server/blob/df4801cc884f3dbbd85bfdf8368bc362a63de4d1/model/types/ai_tasks.go#L519-L557). A conversation maps to a task through `GetTaskByAgentConversationID`, and a session UUID maps to a run execution. [`logic/root_run.go (11-48) @ df4801c`](https://github.com/warpdotdev/warp-server/blob/df4801cc884f3dbbd85bfdf8368bc362a63de4d1/logic/root_run.go#L11-L48) already provides a bounded, cycle-safe ancestor walk. No migration or new persisted relationship is required.
 
-## Proposed changes
+## Delivery phases
 
-### 1. Add a permission-aware route-resolution query in `warp-server`
+### Phase 0 — Preserve the entry viewer URL
+Phase 0 is implemented in this PR.
+
+`app/src/uri/browser_url_resolution.rs` adds the pure `resolve_browser_url` decision. For a non-forced request, it returns the current URL whenever the current URL parses as `ConversationView` or `SessionView`. `app/src/uri/browser_url_handler.rs` uses that decision before calling `history.replaceState`.
+
+Both known unwanted write paths already call the same browser handler:
+- A child-pill pane focus reaches `PaneGroup::focus` and `update_browser_url`.
+- `ManagerEvent::JoinedSession` reaches `handle_pane_link_updated` and the same `update_browser_url`.
+
+The guard therefore keeps the orchestrator's entry route for both a focused child's existing shareable link and a child session link that resolves later. It also keeps forced login and signup redirects unchanged.
+
+Phase 0 has an intentional limitation: it does not encode the selected child. Refresh and copied links return to the orchestrator with no child selected.
+
+Phase 0 is not a foundation for Phase 2. Its blanket early return suppresses every non-forced requested URL while the current URL is a viewer route. That includes the root URL with a new `#child=<run-id>` fragment. Phase 2 must remove or invert this early return before it wires user selection to the anchor writer. Do not layer fragment writes behind the Phase 0 rule. If both rules remain active, the anchor write silently resolves back to the unmodified URL and no fragment appears.
+
+When Phase 2 replaces the guard:
+- Preserve the Phase 0 invariant that generic pane focus and `ManagerEvent::JoinedSession` never replace the root path with a child's path.
+- Allow explicit selection navigation to add or remove the child fragment.
+- Rewrite the Phase 0 regression tests to distinguish a generic focused-pane request from an explicit selection request.
+
+### Phase 1 — Canonicalize direct child routes
+
+#### 1. Add a permission-aware route-resolution query in `warp-server`
 Add an authenticated GraphQL query named `resolveChildRunViewerRoute`. The React viewer already runs inside `AuthenticatedApolloWrapper` with an authenticated or anonymous principal, so the query can use the same principal and authorization engine as existing conversation metadata.
 
 Use this schema shape:
@@ -74,7 +96,7 @@ The access check is part of route resolution, not a client-side follow-up. This 
 
 Keep the current unauthenticated `/agent/sessions/:session_uuid/redirect` and `/agent/conversations/:conversation_id/redirect` endpoints for same-run live-session/transcript canonicalization. Do not add ancestry to those public responses.
 
-### 2. Resolve direct routes in the React shell before mounting WASM
+#### 2. Resolve direct routes in the React shell before mounting WASM
 Add the query and generated client types under `warp-server/client`. Update `ConversationView.tsx` and `SessionShareView.tsx` to run route resolution after their existing source-access check succeeds and before `WasmView` mounts.
 
 For a non-null resolution:
@@ -88,7 +110,10 @@ Read `view=standalone` from the raw browser query string before dispatching the 
 
 Do not copy child-only query parameters, such as a child session password, onto a root route. The only cross-route query behavior introduced by this work is preservation of `view=standalone` across redirects for the same run.
 
-### 3. Parse viewer location state separately from `WebIntent`
+### Phase 2 — Add anchor selection and history
+Remove or invert Phase 0's blanket viewer-route preservation before implementing the work below. The Phase 2 browser URL API must distinguish explicit selection navigation from incidental pane focus. An implementation that leaves the Phase 0 early return in front of the anchor writer is incomplete even if its selection state changes in memory.
+
+#### 3. Parse viewer location state separately from `WebIntent`
 Keep route intent and viewer selection as separate concepts:
 - `WebIntent` continues to choose `ConversationView` or `SessionView`.
 - A new viewer-location parser reads the raw browser URL and returns:
@@ -100,7 +125,7 @@ Fragments stay client-only. Do not put the child selection in a query parameter 
 
 The browser URL writer must mutate the fragment on a clone of the current root URL. It must preserve the root path and supported query parameters.
 
-### 4. Restore anchored selection after explicit hydration
+#### 4. Restore anchored selection after explicit hydration
 The viewer must retain the parsed child run ID as pending state until initial orchestration hydration explicitly settles.
 
 The existing viewer path already assigns child task IDs as run IDs and indexes them in `BlocklistAIHistoryModel` while registering children in [`app/src/terminal/shared_session/viewer/orchestration_viewer_model.rs (351-460) @ 04a7f83`](https://github.com/warpdotdev/warp/blob/04a7f8342c0b78978f12ecd2a3e032ff439bd56f/app/src/terminal/shared_session/viewer/orchestration_viewer_model.rs#L351-L460). The run-ID lookup is exposed by [`app/src/ai/blocklist/history_model.rs (1555-1567) @ 04a7f83`](https://github.com/warpdotdev/warp/blob/04a7f8342c0b78978f12ecd2a3e032ff439bd56f/app/src/ai/blocklist/history_model.rs#L1555-L1567).
@@ -115,7 +140,7 @@ Add an explicit "initial child index settled" event to the orchestration hydrati
 
 Do not use a timer to clear pending selection. Slow child discovery must not turn a valid link into the root fallback.
 
-### 5. Replace viewer-mode dynamic URL suppression with explicit selection history
+#### 5. Replace viewer-mode dynamic URL suppression with explicit selection history
 Retain generic focused-pane URL behavior outside `ConversationView` and `SessionView`. In viewer mode, stop deriving the browser path from `focused_pane_content().shareable_link()`.
 
 Replace the stopgap's "preserve the current viewer URL for every focused pane" rule with:
@@ -130,7 +155,7 @@ Pass a navigation origin through the selection path, for example `User`, `Browse
 
 Use `pushState` only for a changed user selection. Use `replaceState` for a stale-fragment cleanup. The cold child-to-root replacement remains owned by the React shell.
 
-### 6. Preserve same-run automatic redirects
+#### 6. Preserve same-run automatic redirects
 Both existing automatic redirect directions must carry viewer location state:
 - Root deep link: preserve `#child=<run-id>`.
 - Standalone child: preserve `?view=standalone`.
@@ -206,7 +231,28 @@ Mitigation:
 
 ## Testing and validation
 
-### `warp-server` resolver and React shell
+### Phase 0 — implemented in this PR
+The pure guard and its direct tests are in `app/src/uri/browser_url_resolution.rs:22-37` and `app/src/uri/uri_tests.rs:279-434`.
+
+The Phase 0 branch has passed:
+- `cargo nextest run -p warp -E 'test(/^uri::/)'` — 78 of 78 tests passed.
+- `cargo check -p warp --lib` — passed.
+- `cargo clippy -p warp --all-targets --tests -- -D warnings` — passed.
+- `./script/wasm/bundle --check-only` — the Warp library type-checked for `wasm32-unknown-unknown`.
+- `cargo fmt -- --check` on the touched files — passed.
+
+The regression tests prove:
+- A parent `/conversation` URL survives a child `/session` request.
+- A parent `/session` URL survives a child `/conversation` request.
+- The existing no-shareable-link fallback preserves a viewer URL.
+- Non-viewer URLs still use the requested URL or `/app` fallback.
+- Forced redirects bypass the guard.
+
+Visual verification is blocked, not skipped. The local Postgres, Redis, Temporal, `warp-server`, WASM client, and classic web shell started successfully. The real browser flow stopped at Warp's sign-in screen. The environment had no real test-account credentials and no supported way to mint a valid local browser session. Phase 0 browser behavior therefore remains unproven by a live capture. The guard is verified by the direct unit tests and call-path tracing above.
+
+To complete Phase 0 visual verification, provide a real test-account login or a supported non-UI method to mint a valid local browser session. Then open a parent run with a child, select the child, confirm the path remains the parent route, and refresh to confirm the parent reopens with no child selected.
+
+### Phase 1 — `warp-server` resolver and React shell
 - Add Go tests for `resolveChildRunViewerRoute`:
   - conversation source resolves a one-level child to the root;
   - session source resolves through its execution run ID;
@@ -226,7 +272,7 @@ Mitigation:
 - Run `yarn --cwd client test --runInBand ConversationView SessionShareView`.
 - Run `yarn --cwd client type-check`.
 
-### Warp WASM client
+### Phase 2 — Warp WASM client
 - Add parser unit tests for valid, missing, malformed, percent-encoded, and duplicate `child` fragments and exact `view=standalone` handling.
 - Add `PaneGroup` or browser URL handler tests for:
   - child selection preserves root path/query and pushes one entry;
@@ -240,7 +286,7 @@ Mitigation:
 - Run the focused `PaneGroup` and orchestration viewer-model tests added by the implementation.
 - Run the repository's WASM compile check or `cargo check -p warp --target wasm32-unknown-unknown`.
 
-### End-to-end visual proof
+### Final end-to-end visual proof
 Use browser computer-use verification against an orchestrated run with at least two children. Record one video that proves:
 1. Clicking two child pills changes only `#child=<run-id>`.
 2. Browser Back returns through the first child to the unanchored root.
@@ -251,8 +297,10 @@ Use browser computer-use verification against an orchestrated run with at least 
 Run a second access-control case where the test principal can view the child but not the root. Record that the child remains standalone and no root identifier appears in the URL or response.
 
 ## Parallelization
-Use two implementation branches because the server/React route resolver and the Warp WASM selection state are independent until integration:
-- `factory/quality-1764-route-resolution` in `warp-server` owns the GraphQL resolver, access checks, React route handling, and their tests.
-- `factory/quality-1764-viewer-anchor` in `warp` owns fragment parsing, pending selection, pane navigation origin, history handling, and WASM tests. This branch starts from the spec branch so the approved specs remain in the final Warp PR.
+Phase 0 and the approved specification share `factory/quality-1764-preserve-viewer-url` and PR #15317. Keep this branch as the Warp integration point.
 
-The server branch lands first or provides a stable query contract. The Warp branch can implement against the schema shape in this spec in parallel. Final end-to-end verification begins after a test environment contains both changes. The implementation produces one PR per repository; the Warp PR retains `specs/QUALITY-1764`.
+After spec approval, use two implementation branches because the server/React route resolver and the Warp WASM selection state are independent until integration:
+- `factory/quality-1764-route-resolution` in `warp-server` owns the GraphQL resolver, access checks, React route handling, and their tests.
+- PR #15317's Warp branch owns fragment parsing, pending selection, pane navigation origin, history handling, and WASM tests. Its Phase 2 change must replace or invert the Phase 0 guard before adding anchor writes.
+
+The server branch lands first or provides a stable query contract. The Warp work can implement against the schema shape in this spec in parallel. Final end-to-end verification begins after a test environment contains both changes. The implementation produces one PR per repository; PR #15317 retains `specs/QUALITY-1764` and the phased history.
