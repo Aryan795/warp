@@ -7,11 +7,11 @@ use warp_multi_agent_api::response_event;
 use warpui::{App, SingletonEntity};
 
 use super::response_stream::{PendingResume, RecoveryBudget};
-use crate::ai::agent::conversation::AIConversationId;
+use crate::ai::agent::conversation::{AIConversationId, ConversationStatus};
 use crate::ai::agent::task::TaskId;
 use crate::ai::agent::{
-    AIAgentAttachment, AIAgentContext, AIAgentInput, CancellationReason, ImageContext,
-    PassiveSuggestionTrigger, UserQueryMode,
+    AIAgentAction, AIAgentActionId, AIAgentActionType, AIAgentAttachment, AIAgentContext,
+    AIAgentInput, CancellationReason, ImageContext, PassiveSuggestionTrigger, UserQueryMode,
 };
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::blocklist::{
@@ -492,6 +492,83 @@ fn optimistic_cli_subagent_completion_with_in_flight_stream_reports_success() {
             assert_eq!(
                 history.conversation(&conversation_id).map(|c| c.status()),
                 Some(&crate::ai::agent::conversation::ConversationStatus::Success)
+            );
+        });
+    });
+}
+
+/// Regression for the FetchConversation-cancel special case: a cancelled
+/// FetchConversation's error result must still reach the server via a
+/// follow-up when its ConversationSearch subagent is otherwise legitimately
+/// running, but NOT when the whole conversation is being terminally stopped
+/// (e.g. the user pressed Stop) — otherwise the conversation the user just
+/// stopped would restart itself.
+#[test]
+fn manual_stop_with_pending_fetch_conversation_does_not_restart_conversation() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+
+        let conversation_id = terminal.update(&mut app, |view, ctx| {
+            let terminal_surface_id = view.id();
+            let (conversation_id, task_id) =
+                BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+                    let conversation_id = history.start_new_conversation(
+                        terminal_surface_id,
+                        false,
+                        false,
+                        false,
+                        ctx,
+                    );
+                    history.update_conversation_status(
+                        terminal_surface_id,
+                        conversation_id,
+                        ConversationStatus::InProgress,
+                        ctx,
+                    );
+                    let task_id = history
+                        .conversation(&conversation_id)
+                        .unwrap()
+                        .get_root_task_id()
+                        .clone();
+                    (conversation_id, task_id)
+                });
+
+            view.ai_controller().update(ctx, |controller, ctx| {
+                // A pending FetchConversation, as would exist while a
+                // ConversationSearch subagent is still fetching the target
+                // conversation, with no active response stream (matching a
+                // conversation that is otherwise idle between server turns).
+                let action = AIAgentAction {
+                    id: AIAgentActionId::from("fetch-convo-action".to_string()),
+                    task_id,
+                    action: AIAgentActionType::FetchConversation {
+                        conversation_id: "target-convo".to_string(),
+                    },
+                    requires_result: true,
+                };
+                controller.action_model.update(ctx, |action_model, _ctx| {
+                    action_model.queue_pending_action_for_test(action, conversation_id);
+                });
+
+                // Simulate the user pressing Stop while the fetch is pending.
+                controller.cancel_conversation_progress(
+                    conversation_id,
+                    CancellationReason::ManuallyCancelled,
+                    ctx,
+                );
+            });
+
+            conversation_id
+        });
+
+        // The conversation must end up Cancelled, not InProgress. InProgress
+        // would mean a follow-up request was auto-sent for a conversation the
+        // user just stopped.
+        BlocklistAIHistoryModel::handle(&app).read(&app, |history, _| {
+            assert_eq!(
+                history.conversation(&conversation_id).map(|c| c.status()),
+                Some(&ConversationStatus::Cancelled)
             );
         });
     });

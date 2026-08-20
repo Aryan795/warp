@@ -1063,6 +1063,21 @@ impl BlocklistAIActionModel {
         self.try_to_execute_available_actions(conversation_id, ctx);
     }
 
+    /// Directly enqueues `action` as pending for `conversation_id`, bypassing
+    /// preprocessing. Used to set up a pending action for cancellation tests
+    /// without driving the full response/preprocessing pipeline.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn queue_pending_action_for_test(
+        &mut self,
+        action: AIAgentAction,
+        conversation_id: AIConversationId,
+    ) {
+        self.pending_actions
+            .entry(conversation_id)
+            .or_default()
+            .push_back(action);
+    }
+
     /// Apply a finished action result to the conversation.
     /// This is used in agent session sharing to apply finished action results
     /// received from the action stream.

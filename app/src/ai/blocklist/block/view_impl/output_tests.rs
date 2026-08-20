@@ -13,7 +13,7 @@ use warpui::App;
 use watcher::HomeDirectoryWatcher;
 
 use super::{
-    ConversationSearchStatus, RecordingCardText, format_upload_artifact_text,
+    ConversationSearchStatus, RecordingCardText, SubagentTaskOutcome, format_upload_artifact_text,
     parsed_skill_for_common_locations, read_skill_display_text,
     should_decorate_recorded_use_computer, start_recording_card_text, stop_recording_card_text,
 };
@@ -322,32 +322,36 @@ fn parsed_skill_for_common_locations_does_not_mix_remote_hosts() {
 }
 
 #[test]
-fn conversation_search_status_finished_wins_over_a_stale_cancelled_exchange() {
-    // A nested FetchConversation exchange can have had its response stream
-    // interrupted along the way (e.g. superseded by a follow-up) even though
-    // the subagent has since finished with an answer or a reported error.
-    // The card must show the resolved outcome, not a spurious cancellation.
+fn conversation_search_status_finished_for_a_completed_outcome() {
+    // A `Completed` outcome (a real answer or a server-reported error) must
+    // render as finished. The transcript-level derivation of this outcome
+    // (rejecting a bare `Cancel` marker) is covered by
+    // `subagent_task_outcome_*` in `conversation_tests.rs`.
     assert_eq!(
-        ConversationSearchStatus::from_flags(true, true),
+        ConversationSearchStatus::from_outcome(Some(SubagentTaskOutcome::Completed)),
         ConversationSearchStatus::Finished
     );
-    assert!(ConversationSearchStatus::from_flags(true, true).is_done());
+    assert!(ConversationSearchStatus::from_outcome(Some(SubagentTaskOutcome::Completed)).is_done());
 }
 
 #[test]
-fn conversation_search_status_cancelled_only_when_not_finished() {
+fn conversation_search_status_cancelled_for_a_cancelled_outcome() {
     assert_eq!(
-        ConversationSearchStatus::from_flags(false, true),
+        ConversationSearchStatus::from_outcome(Some(SubagentTaskOutcome::Cancelled)),
         ConversationSearchStatus::Cancelled
     );
-    assert!(ConversationSearchStatus::from_flags(false, true).is_done());
+    assert!(ConversationSearchStatus::from_outcome(Some(SubagentTaskOutcome::Cancelled)).is_done());
 }
 
 #[test]
-fn conversation_search_status_running_when_neither_finished_nor_cancelled() {
+fn conversation_search_status_running_for_pending_or_missing_outcome() {
     assert_eq!(
-        ConversationSearchStatus::from_flags(false, false),
+        ConversationSearchStatus::from_outcome(Some(SubagentTaskOutcome::Pending)),
         ConversationSearchStatus::Running
     );
-    assert!(!ConversationSearchStatus::from_flags(false, false).is_done());
+    assert_eq!(
+        ConversationSearchStatus::from_outcome(None),
+        ConversationSearchStatus::Running
+    );
+    assert!(!ConversationSearchStatus::from_outcome(None).is_done());
 }

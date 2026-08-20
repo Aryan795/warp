@@ -494,11 +494,20 @@ impl BlocklistAIController {
             // triggers a follow-up nor counts as a cancellation.
             let treat_as_success =
                 matches!(cancellation_outcome, Some(CancellationOutcome::Succeeded));
+            // A cancelled FetchConversation's error result must still reach the
+            // server (see `is_cancelled_fetch_conversation`), *unless* the whole
+            // conversation is being terminally cancelled (e.g. the user pressed
+            // Stop) — auto-sending a follow-up for a conversation the user just
+            // stopped would restart it out from under them.
+            let is_terminal_cancellation =
+                matches!(cancellation_outcome, Some(CancellationOutcome::Cancelled));
             let should_trigger_follow_up_request = (!is_passive_code_diff
                 && !treat_as_success
-                && finished_action_results
-                    .iter()
-                    .any(|result| result.result.should_trigger_request_upon_completion()))
+                && finished_action_results.iter().any(|result| {
+                    result.result.should_trigger_request_upon_completion()
+                        || (!is_terminal_cancellation
+                            && result.result.is_cancelled_fetch_conversation())
+                }))
                 || has_manual_follow_up;
             if !should_trigger_follow_up_request {
                 if matches!(

@@ -56,16 +56,19 @@ fn run_agents_is_failed_when_no_agents_launch() {
 }
 
 #[test]
-fn cancelled_fetch_conversation_still_triggers_a_follow_up_request() {
-    // FetchConversation is a nested, server-driven tool call inside a
-    // ConversationSearch subagent flow with no user checkpoint of its own. A
-    // cancelled fetch is converted to an error result (see convert.rs) that
-    // must still reach the server via a follow-up, or the subagent hangs
-    // instead of finishing deterministically.
+fn cancelled_fetch_conversation_does_not_auto_trigger_a_follow_up_request() {
+    // should_trigger_request_upon_completion follows the general is_cancelled
+    // rule for every result, including FetchConversation: whether a cancelled
+    // fetch's error result should still reach the server via a follow-up
+    // depends on *why* it was cancelled (e.g. suppressed entirely if the whole
+    // conversation is being terminally stopped), which this type alone cannot
+    // know. See `is_cancelled_fetch_conversation` and
+    // `BlocklistAIController`'s `FinishedAction` handling for that decision.
     let result = AIAgentActionResultType::FetchConversation(FetchConversationResult::Cancelled);
 
     assert!(result.is_cancelled());
-    assert!(result.should_trigger_request_upon_completion());
+    assert!(!result.should_trigger_request_upon_completion());
+    assert!(result.is_cancelled_fetch_conversation());
 }
 
 #[test]
@@ -76,4 +79,5 @@ fn most_other_cancelled_results_do_not_trigger_a_follow_up_request() {
 
     assert!(result.is_cancelled());
     assert!(!result.should_trigger_request_upon_completion());
+    assert!(!result.is_cancelled_fetch_conversation());
 }

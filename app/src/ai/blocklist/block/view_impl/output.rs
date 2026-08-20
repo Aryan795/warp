@@ -55,7 +55,7 @@ use super::{
 };
 use crate::ai::agent::api::ServerConversationToken;
 use crate::ai::agent::comment::ReviewComment;
-use crate::ai::agent::conversation::{RecordingSpanInfo, RecordingSpanStatus};
+use crate::ai::agent::conversation::{RecordingSpanInfo, RecordingSpanStatus, SubagentTaskOutcome};
 use crate::ai::agent::icons::{self, gray_stop_icon, yellow_stop_icon};
 use crate::ai::agent::task::TaskId;
 use crate::ai::agent::{
@@ -975,30 +975,16 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
                             should_render_footer = false;
                             should_render_suggestions = false;
                             let conversation = props.model.conversation(app);
-                            let is_finished = conversation
-                                .and_then(|c| {
-                                    c.is_subagent_task_finished(&TaskId::new(
-                                        subagent_task_id.clone(),
-                                    ))
+                            // Derived from the actual result recorded on the parent tool
+                            // call (success/error vs. the generic Cancel marker), rather
+                            // than merely whether *any* result exists — a search the user
+                            // genuinely cancelled must never render as finished.
+                            let subagent_outcome = conversation.and_then(|c| {
+                                c.subagent_task_outcome(&TaskId::new(subagent_task_id.clone()))
                                     .ok()
-                                })
-                                .unwrap_or(false);
-                            // Only relevant when the subagent hasn't finished: an
-                            // exchange along the way (e.g. a superseded nested
-                            // FetchConversation) can have had its response stream
-                            // interrupted without the subagent itself ending in a
-                            // genuine cancellation.
-                            let has_cancelled_exchange = !is_finished
-                                && conversation.is_some_and(|c| {
-                                    let subagent_task_id = TaskId::new(subagent_task_id.clone());
-                                    c.get_task(&subagent_task_id).is_some_and(|task| {
-                                        task.exchanges().any(|e| e.output_status.is_cancelled())
-                                    })
-                                });
-                            let search_status = ConversationSearchStatus::from_flags(
-                                is_finished,
-                                has_cancelled_exchange,
-                            );
+                            });
+                            let search_status =
+                                ConversationSearchStatus::from_outcome(subagent_outcome);
                             let icon = match search_status {
                                 ConversationSearchStatus::Finished => {
                                     inline_action_icons::green_check_icon(appearance)
@@ -4237,10 +4223,10 @@ fn render_collapsible_debug_output(
 
 /// The outcome of a `ConversationSearch` subagent, as shown by its inline card.
 ///
-/// A subagent that has since finished (with an answer or a server-reported
-/// error) always takes priority over an earlier exchange whose response
-/// stream was itself interrupted along the way (e.g. a follow-up request
-/// superseding it), so a resolved search is never shown as cancelled.
+/// Derived directly from the actual result recorded on the subagent's parent
+/// tool call ([`SubagentTaskOutcome`]) so that a search the user genuinely
+/// cancelled (the server's generic `Cancel` marker) is never conflated with
+/// one that finished with a real answer or error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConversationSearchStatus {
     Running,
@@ -4249,13 +4235,11 @@ enum ConversationSearchStatus {
 }
 
 impl ConversationSearchStatus {
-    fn from_flags(is_finished: bool, has_cancelled_exchange: bool) -> Self {
-        if is_finished {
-            Self::Finished
-        } else if has_cancelled_exchange {
-            Self::Cancelled
-        } else {
-            Self::Running
+    fn from_outcome(outcome: Option<SubagentTaskOutcome>) -> Self {
+        match outcome {
+            Some(SubagentTaskOutcome::Completed) => Self::Finished,
+            Some(SubagentTaskOutcome::Cancelled) => Self::Cancelled,
+            Some(SubagentTaskOutcome::Pending) | None => Self::Running,
         }
     }
 
