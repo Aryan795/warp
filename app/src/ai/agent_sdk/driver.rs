@@ -2966,17 +2966,17 @@ impl AgentDriver {
         // loops for git credentials and Bedrock OIDC credentials via
         // `with_credential_refreshes`. Refresh futures never resolve on their own —
         // they are dropped automatically when the harness result resolves.
-        log::info!(
-            "Git credential refresh lifecycle: event=wrapper_created \
-             git_refresh_enabled={} bedrock_refresh_enabled={}",
-            task_id_for_refresh.is_some(),
-            oidc_strategy_for_refresh.is_some()
-        );
         match task.harness {
             HarnessKind::Oz => {
                 let status_rx = foreground
                     .spawn(move |me, ctx| me.execute_run(task.prompt, ctx))
                     .await?;
+                log::info!(
+                    "Git credential refresh lifecycle: event=wrapper_created \
+                     git_refresh_enabled={} bedrock_refresh_enabled={}",
+                    task_id_for_refresh.is_some(),
+                    oidc_strategy_for_refresh.is_some()
+                );
 
                 let conversation_status = with_credential_refreshes(
                     async move {
@@ -3029,6 +3029,12 @@ impl AgentDriver {
                     })
                     .await?;
                 let runtime_error_patterns = harness.runtime_error_patterns();
+                log::info!(
+                    "Git credential refresh lifecycle: event=wrapper_created \
+                     git_refresh_enabled={} bedrock_refresh_enabled={}",
+                    task_id_for_refresh.is_some(),
+                    oidc_strategy_for_refresh.is_some()
+                );
 
                 with_credential_refreshes(
                     Self::run_harness(
