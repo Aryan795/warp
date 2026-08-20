@@ -3548,6 +3548,9 @@ impl TerminalView {
                 ctx,
             )
         });
+        // Captured before the closure so it reads this view's own window, not whatever
+        // `ModelContext` the new controller's constructor closure would otherwise see.
+        let terminal_window_id = ctx.window_id();
         let ai_controller = ctx.add_model(|ctx| {
             BlocklistAIController::new(
                 ai_input_model.clone(),
@@ -3557,6 +3560,7 @@ impl TerminalView {
                 active_session.clone(),
                 model.clone(),
                 terminal_view_id,
+                terminal_window_id,
                 ctx,
             )
         });

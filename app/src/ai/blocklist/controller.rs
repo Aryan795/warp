@@ -27,7 +27,7 @@ use warp_core::assertions::safe_assert;
 use warp_errors::report_error;
 use warp_multi_agent_api::{Task, ToolType, message};
 use warpui::r#async::{SpawnedFutureHandle, Timer};
-use warpui::{AppContext, Entity, EntityId, ModelContext, ModelHandle, SingletonEntity};
+use warpui::{AppContext, Entity, EntityId, ModelContext, ModelHandle, SingletonEntity, WindowId};
 
 use self::response_stream::{PendingResume, RecoveryBudget, ResponseStream, ResponseStreamEvent};
 use super::action_model::{BlocklistAIActionEvent, BlocklistAIActionModel};
@@ -68,6 +68,7 @@ use crate::network::NetworkStatus;
 use crate::notebooks::editor::model::FileLinkResolutionContext;
 use crate::persistence::ModelEvent;
 use crate::send_telemetry_from_ctx;
+use crate::server::ids::ServerId;
 use crate::server::server_api::AIApiError;
 #[cfg(not(target_family = "wasm"))]
 use crate::server::server_api::ServerApiProvider;
@@ -323,6 +324,11 @@ pub struct BlocklistAIController {
     /// The ID of the terminal surface this controller is associated with.
     terminal_surface_id: EntityId,
 
+    /// The window this controller's terminal surface belongs to. Stable for the surface's
+    /// lifetime (unlike the team selected in that window), so each request resolves its own
+    /// team scope fresh via [`Self::team_uid`] rather than caching one.
+    window_id: WindowId,
+
     should_refresh_available_llms_on_stream_finish: bool,
 
     shared_session_state: shared_session::SharedSessionState,
@@ -422,6 +428,13 @@ impl BlocklistAIController {
         SessionContext::from_session(self.active_session.as_ref(ctx), ctx).skill_path_origin()
     }
 
+    /// The team currently selected in this controller's window, resolved fresh (never
+    /// cached) so a later team switch is picked up by the next request rather than the
+    /// window that started an earlier one.
+    fn team_uid(&self, app: &AppContext) -> Option<ServerId> {
+        UserWorkspaces::as_ref(app).team_uid_for_window(self.window_id)
+    }
+
     /// Creates a controller for a terminal surface.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -432,6 +445,7 @@ impl BlocklistAIController {
         active_session: ModelHandle<ActiveSession>,
         terminal_model: Arc<FairMutex<TerminalModel>>,
         terminal_surface_id: EntityId,
+        window_id: WindowId,
         ctx: &mut ModelContext<Self>,
     ) -> Self {
         ctx.subscribe_to_model(&action_model, move |me, _, event, ctx| {
@@ -626,6 +640,7 @@ impl BlocklistAIController {
             terminal_model,
             in_flight_response_streams: PendingResponseStreams::new(),
             terminal_surface_id,
+            window_id,
             should_refresh_available_llms_on_stream_finish: false,
             shared_session_state: shared_session::SharedSessionState::default(),
             ambient_agent_task_id: None,
@@ -2280,6 +2295,7 @@ impl BlocklistAIController {
             &request_input,
             conversation_data,
             metadata,
+            self.team_uid(ctx),
             ctx,
         );
 
@@ -2500,12 +2516,15 @@ impl BlocklistAIController {
         // authenticate. The connected Grok subscription's request-time OAuth
         // refresh is handled in the response stream's send path
         // (`ResponseStream::spawn_request`).
+        let team_uid = self.team_uid(ctx);
         #[cfg(not(target_family = "wasm"))]
-        {
+        if let Some(team_uid) = team_uid {
             use ::ai::api_keys::ApiKeyManager;
 
             ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
-                crate::ai::geap_credentials::refresh_geap_credentials_if_needed(manager, ctx);
+                crate::ai::geap_credentials::refresh_geap_credentials_if_needed(
+                    manager, team_uid, ctx,
+                );
             });
         }
 
@@ -2515,6 +2534,7 @@ impl BlocklistAIController {
             &request_input,
             conversation_data.clone(),
             query_metadata,
+            team_uid,
             ctx,
         );
         request_params.parent_agent_id = parent_agent_id;
@@ -2532,7 +2552,13 @@ impl BlocklistAIController {
                 client_exchange_id: None,
                 model_id: Some(request_params.model.clone()),
             };
-            ResponseStream::new(request_params.clone(), ai_identifiers, recovery, ctx)
+            ResponseStream::new(
+                request_params.clone(),
+                ai_identifiers,
+                recovery,
+                team_uid,
+                ctx,
+            )
         });
         let response_stream_id = response_stream.as_ref(ctx).id().clone();
         let response_stream_clone = response_stream.clone();
