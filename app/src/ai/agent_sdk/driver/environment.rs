@@ -558,11 +558,7 @@ impl RepositoryRevisionCapture {
         let revisions_dir = self.result_dir.parent().map(Path::to_path_buf);
         let _ = std::fs::remove_dir_all(&self.result_dir);
         if let Some(revisions_dir) = revisions_dir {
-            let warp_dir = revisions_dir.parent().map(Path::to_path_buf);
             let _ = std::fs::remove_dir(&revisions_dir);
-            if let Some(warp_dir) = warp_dir {
-                let _ = std::fs::remove_dir(warp_dir);
-            }
         }
         RepositoryRevisionSnapshotRequest {
             snapshot_uuid: self.snapshot_uuid,

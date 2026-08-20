@@ -93,8 +93,9 @@ fn git_object_id_validation_accepts_sha1_and_sha256_only() {
 }
 
 #[test]
-fn revision_snapshot_omits_missing_or_invalid_results_and_cleans_up() {
+fn revision_snapshot_cleans_results_without_removing_workspace_warp_directory() {
     let temp = TempDir::new().unwrap();
+    fs::create_dir(temp.path().join(".warp")).unwrap();
     let capture = RepositoryRevisionCapture::new(temp.path());
     fs::create_dir_all(&capture.result_dir).unwrap();
     fs::write(
@@ -123,7 +124,14 @@ fn revision_snapshot_omits_missing_or_invalid_results_and_cleans_up() {
         "0123456789abcdef0123456789abcdef01234567"
     );
     assert!(!result_dir.exists());
-    assert!(!temp.path().join(".warp").exists());
+    assert!(temp.path().join(".warp").exists());
+    assert!(
+        !temp
+            .path()
+            .join(".warp")
+            .join("repository-revisions")
+            .exists()
+    );
 }
 
 #[test]
