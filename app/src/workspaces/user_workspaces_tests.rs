@@ -1336,6 +1336,239 @@ fn test_refresh_ai_overages_without_scope_only_updates_the_workspace() {
     })
 }
 
+/// A `WorkspaceClient` double that lets a test control exactly when each of several
+/// concurrent `refresh_ai_overages` calls resolves (in call order), so completion order
+/// can be driven independently of call order without relying on timing. Each call blocks
+/// on its own gate and returns its own pre-assigned value once that gate fires.
+struct OrderedRefreshClient {
+    call_index: std::sync::atomic::AtomicUsize,
+    gates: std::sync::Mutex<Vec<Option<futures::channel::oneshot::Receiver<()>>>>,
+    values: Vec<AiOverages>,
+}
+
+impl OrderedRefreshClient {
+    fn new(gates: Vec<futures::channel::oneshot::Receiver<()>>, values: Vec<AiOverages>) -> Self {
+        Self {
+            call_index: std::sync::atomic::AtomicUsize::new(0),
+            gates: std::sync::Mutex::new(gates.into_iter().map(Some).collect()),
+            values,
+        }
+    }
+}
+
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+impl WorkspaceClient for OrderedRefreshClient {
+    async fn generate_stripe_billing_portal_link(&self, _team_uid: ServerId) -> Result<String> {
+        unimplemented!("not exercised by this test")
+    }
+
+    async fn update_usage_based_pricing_settings(
+        &self,
+        _team_uid: ServerId,
+        _usage_based_pricing_enabled: bool,
+        _max_monthly_spend_cents: Option<u32>,
+    ) -> Result<WorkspacesMetadataResponse> {
+        unimplemented!("not exercised by this test")
+    }
+
+    async fn refresh_ai_overages(&self) -> Result<AiOverages> {
+        let index = self
+            .call_index
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let gate = self.gates.lock().unwrap()[index]
+            .take()
+            .expect("each call consumes its own gate exactly once");
+        let _ = gate.await;
+        Ok(self.values[index].clone())
+    }
+
+    async fn purchase_addon_credits(
+        &self,
+        _team_uid: Option<ServerId>,
+        _credits: i32,
+    ) -> Result<PurchaseAddonCreditsOutcome> {
+        unimplemented!("not exercised by this test")
+    }
+
+    async fn update_addon_credits_settings(
+        &self,
+        _team_uid: ServerId,
+        _auto_reload_enabled: Option<bool>,
+        _max_monthly_spend_cents: Option<i32>,
+        _selected_auto_reload_credit_denomination: Option<i32>,
+    ) -> Result<WorkspacesMetadataResponse> {
+        unimplemented!("not exercised by this test")
+    }
+}
+
+/// Two independently captured `TeamContext`s, each refreshing concurrently, must not
+/// interfere with each other even when the operation that started second finishes
+/// first. This is Group 3's actual acceptance criterion ("test two windows using
+/// different teams concurrently"), not just that a single scoped write lands correctly.
+///
+/// This test does not assume which of the two `refresh_ai_overages` calls the
+/// background executor happens to poll (and therefore complete) first -- only that
+/// exactly one gate is released at a time, so exactly one refresh may complete before
+/// the other is released. Whichever team that turns out to be, the assertions below
+/// still prove the two operations never cross-contaminate.
+#[test]
+fn test_refresh_ai_overages_two_concurrent_scoped_refreshes_do_not_interfere() {
+    let (team_a, team_b) = two_teams();
+    let mut workspace = workspace_for_test(&team_a);
+    workspace.teams.push(team_b.clone());
+
+    App::test((), |mut app| async move {
+        let (gate_0_tx, gate_0_rx) = futures::channel::oneshot::channel();
+        let (gate_1_tx, gate_1_rx) = futures::channel::oneshot::channel();
+        // Which of window A's or window B's operation is bound to gate/value 0 vs. 1
+        // depends on which the executor polls first; this test doesn't need to know
+        // (or assume) which, since the assertions below are keyed off which *team*
+        // shows a result rather than off call order.
+        let workspace_client = OrderedRefreshClient::new(
+            vec![gate_0_rx, gate_1_rx],
+            vec![ai_overages_for_test(11), ai_overages_for_test(22)],
+        );
+
+        app.add_singleton_model(PrivacySettings::mock);
+        app.add_singleton_model(|ctx| {
+            UserWorkspaces::mock(
+                Arc::new(MockTeamClient::new()),
+                Arc::new(workspace_client),
+                vec![workspace],
+                ctx,
+            )
+        });
+
+        let (window_a, view_a) = create_test_window(&mut app);
+        let (window_b, view_b) = create_test_window(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window_a, team_a.uid, ctx);
+            user_workspaces.set_team_for_window(window_b, team_b.uid, ctx);
+        });
+        let context_a = view_a
+            .update(&mut app, |_, ctx| {
+                UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+            })
+            .expect("window A should mint a context");
+        let context_b = view_b
+            .update(&mut app, |_, ctx| {
+                UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+            })
+            .expect("window B should mint a context");
+
+        // Observe completion deterministically via the event the model emits, rather
+        // than a fixed sleep.
+        let user_workspaces_handle = UserWorkspaces::handle(&app);
+        let (sender, receiver) = async_channel::unbounded();
+        app.update(|ctx| {
+            let sender = sender.clone();
+            ctx.subscribe_to_model(
+                &user_workspaces_handle,
+                move |_, event: &UserWorkspacesEvent, _| {
+                    if matches!(event, UserWorkspacesEvent::AiOveragesUpdated) {
+                        let _ = sender.try_send(());
+                    }
+                },
+            );
+        });
+
+        // Both windows start a concurrently in-flight, independently scoped refresh.
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.refresh_ai_overages(Some(context_a), ctx);
+            user_workspaces.refresh_ai_overages(Some(context_b), ctx);
+        });
+
+        // Release exactly one underlying server response and let its (single) team
+        // update land, while the other operation is still held back entirely.
+        let _ = gate_0_tx.send(());
+        receiver
+            .recv()
+            .await
+            .expect("the first released refresh should complete");
+
+        let (first_team_uid, second_team_uid) = app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            let has_value = |team_uid: ServerId| {
+                user_workspaces
+                    .team_from_uid(team_uid)
+                    .is_some_and(|team| team.billing_metadata.ai_overages.is_some())
+            };
+            let (a_has_value, b_has_value) = (has_value(team_a.uid), has_value(team_b.uid));
+            assert_ne!(
+                a_has_value, b_has_value,
+                "exactly one team should have a result after releasing exactly one gate; \
+                 both or neither indicates the write path used a shared buffer instead of \
+                 the captured per-operation scope"
+            );
+            if a_has_value {
+                (team_a.uid, team_b.uid)
+            } else {
+                (team_b.uid, team_a.uid)
+            }
+        });
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert_eq!(
+                user_workspaces
+                    .team_from_uid(first_team_uid)
+                    .and_then(|team| team.billing_metadata.ai_overages.as_ref())
+                    .map(|overages| overages.current_monthly_requests_used),
+                Some(11),
+                "the team whose refresh completed first should get the first released value"
+            );
+            assert!(
+                user_workspaces
+                    .team_from_uid(second_team_uid)
+                    .is_some_and(|team| team.billing_metadata.ai_overages.is_none()),
+                "the other team's refresh is still in flight and must not have a result yet"
+            );
+            assert!(
+                user_workspaces
+                    .current_workspace_billing_metadata()
+                    .is_some_and(|billing| billing.ai_overages.is_none()),
+                "a team-scoped refresh must not touch workspace-level billing metadata"
+            );
+        });
+
+        // Release the second server response and confirm it lands only in the other
+        // team, without disturbing the first team's already-completed result.
+        let _ = gate_1_tx.send(());
+        receiver
+            .recv()
+            .await
+            .expect("the second released refresh should complete");
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert_eq!(
+                user_workspaces
+                    .team_from_uid(second_team_uid)
+                    .and_then(|team| team.billing_metadata.ai_overages.as_ref())
+                    .map(|overages| overages.current_monthly_requests_used),
+                Some(22),
+                "the second team should receive the second released value"
+            );
+            assert_eq!(
+                user_workspaces
+                    .team_from_uid(first_team_uid)
+                    .and_then(|team| team.billing_metadata.ai_overages.as_ref())
+                    .map(|overages| overages.current_monthly_requests_used),
+                Some(11),
+                "the first team's earlier result must be unaffected by the second \
+                 operation's later completion"
+            );
+            assert!(
+                user_workspaces
+                    .current_workspace_billing_metadata()
+                    .is_some_and(|billing| billing.ai_overages.is_none()),
+                "neither team-scoped refresh should touch workspace-level billing metadata"
+            );
+        });
+    })
+}
+
 #[test]
 fn test_spaces_for_window_orders_selected_team_shared_and_personal() {
     let _flag = FeatureFlag::SharedWithMe.override_enabled(true);
