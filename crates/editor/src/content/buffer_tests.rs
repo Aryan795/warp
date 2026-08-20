@@ -11287,6 +11287,98 @@ fn test_color_code_block() {
     });
 }
 
+/// Builds a code block of `lines` lines and a contiguous set of `token_bytes`-sized color
+/// ranges covering it, mimicking what syntax highlighting hands to the buffer.
+fn code_block_with_colors(
+    lines: usize,
+    token_bytes: usize,
+) -> (String, Vec<(Range<ByteOffset>, ColorU)>) {
+    let code = (0..lines)
+        .map(|i| format!("let value_{i:02} = compute({i:02});"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let colors = (0..code.len().div_ceil(token_bytes))
+        .map(|i| {
+            let start = i * token_bytes;
+            let end = (start + token_bytes).min(code.len());
+            let color = if i % 2 == 0 {
+                ColorU::white()
+            } else {
+                ColorU::black()
+            };
+            (ByteOffset::from(start)..ByteOffset::from(end), color)
+        })
+        .collect();
+
+    (code, colors)
+}
+
+/// Regression test for APP-5567. Coloring a code block rebuilds it into the buffer's
+/// `SumTree`, and `SumTree::push` appends a fresh leaf holding a single item rather than
+/// packing the item into the rightmost leaf. Emitting a color marker per token boundary and a
+/// text fragment per run therefore cost a whole tree node — a couple of kilobytes, since a
+/// node inlines its items and their summaries — per item, which is what amplified a
+/// highlighted notebook into gigabytes of live heap. The items must be packed into shared
+/// leaves instead, and re-highlighting the same block must not grow the tree.
+#[test]
+fn test_color_code_block_packs_tree_leaves() {
+    App::test((), |mut app| async move {
+        let buffer = app.add_model(|_| Buffer::new(Box::new(|_, _| IndentBehavior::Ignore)));
+        let selection = app.add_model(|_| BufferSelectionModel::new(buffer.clone()));
+
+        let (code, colors) = code_block_with_colors(40, 4);
+
+        buffer.update(&mut app, |buffer, ctx| {
+            buffer.edit_internal_first_selection(
+                CharOffset::from(1)..CharOffset::from(1),
+                &code,
+                Default::default(),
+                selection.clone(),
+                ctx,
+            );
+
+            let block = CharOffset::from(1)..CharOffset::from(1 + code.chars().count());
+            buffer.block_style_range(
+                block.clone(),
+                BufferBlockStyle::CodeBlock {
+                    code_block_type: CodeBlockType::Shell,
+                },
+                selection.clone(),
+                ctx,
+            );
+
+            buffer.color_code_block_ranges_internal(block.start, &colors);
+
+            let colored = buffer.content.debug();
+            let stats = buffer.content.node_stats();
+            println!(
+                "APP-5567 first pass: {} bytes of code, {stats:?}",
+                code.len()
+            );
+
+            // Items are packed into leaves rather than each getting its own. A leaf holds up
+            // to `2 * TREE_BASE` items: 4 with `sum_tree/test-util`, which these tests enable,
+            // and 12 without it.
+            assert!(
+                stats.leaves * 3 <= stats.items,
+                "expected items to be packed into shared leaves, got {stats:?}"
+            );
+
+            // Re-highlighting rebuilds the block from scratch, so the tree must come out the
+            // same size every time rather than accumulating across passes.
+            for _ in 0..4 {
+                buffer.color_code_block_ranges_internal(block.start, &colors);
+            }
+
+            let repeated_stats = buffer.content.node_stats();
+            println!("APP-5567 fifth pass: {repeated_stats:?}");
+            assert_eq!(buffer.content.debug(), colored);
+            assert_eq!(repeated_stats, stats);
+        });
+    });
+}
+
 #[test]
 fn test_remove_coloring_in_middle_of_block() {
     App::test((), |mut app| async move {

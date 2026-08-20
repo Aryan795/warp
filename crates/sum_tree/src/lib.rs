@@ -42,6 +42,15 @@ pub enum SeekBias {
 #[derive(Debug, Clone)]
 pub struct SumTree<T: Item>(Arc<Node<T>>);
 
+/// Tally of a tree's physical structure, used to check how densely items are packed into
+/// leaves. See [`SumTree::node_stats`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct NodeStats {
+    pub internal_nodes: usize,
+    pub leaves: usize,
+    pub items: usize,
+}
+
 impl<T: Item> Default for SumTree<T> {
     fn default() -> Self {
         Self::new()
@@ -292,6 +301,30 @@ impl<T: Item> SumTree<T> {
         match self.0.as_ref() {
             Node::Leaf { items, .. } => items.is_empty(),
             Node::Internal { .. } => false,
+        }
+    }
+
+    /// Walks the whole tree and tallies its physical structure. Linear in the number of
+    /// nodes, so this is meant for diagnostics and tests rather than hot paths. A subtree
+    /// shared with another tree is counted once per reference to it.
+    pub fn node_stats(&self) -> NodeStats {
+        let mut stats = NodeStats::default();
+        self.accumulate_node_stats(&mut stats);
+        stats
+    }
+
+    fn accumulate_node_stats(&self, stats: &mut NodeStats) {
+        match self.0.as_ref() {
+            Node::Internal { child_trees, .. } => {
+                stats.internal_nodes += 1;
+                for child in child_trees {
+                    child.accumulate_node_stats(stats);
+                }
+            }
+            Node::Leaf { items, .. } => {
+                stats.leaves += 1;
+                stats.items += items.len();
+            }
         }
     }
 
