@@ -635,13 +635,18 @@ impl PersistedWorkspace {
     }
 
     /// Enables or disables codebase indexing according to the setting.
+    ///
+    /// This is a process-wide on/off switch for the shared indexing infrastructure, gated on
+    /// whether *any* known team scope allows codebase context; it must not be used to decide
+    /// whether a specific window/repo may be indexed (see `enable_codebase_indexing`, which
+    /// filters candidate roots per window's own team).
     fn maybe_enable_codebase_indexing(ctx: &mut ModelContext<Self>) {
         CodebaseIndexManager::handle(ctx).update(ctx, |manager, ctx| {
             if !manager.is_indexing_enabled() {
                 return;
             }
             let codebase_context_enabled =
-                UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(ctx);
+                UserWorkspaces::as_ref(ctx).is_codebase_context_enabled_for_any_known_team(ctx);
             if codebase_context_enabled {
                 Self::enable_codebase_indexing(manager, ctx);
             } else {
@@ -676,6 +681,13 @@ impl PersistedWorkspace {
         }
     }
 
+    /// NOTE: this is a coarse, process-wide "is any known team allowed to index at all" gate,
+    /// not per-window authorization. Repo detection (`DetectedRepositories`) and
+    /// `user_added_workspace` are not window-scoped today, so a repository can still be
+    /// *created and indexed* here while the scope that actually triggered it is denied,
+    /// provided some other known team scope allows indexing. Only retrieval and exposure
+    /// (`input_context.rs`, `trigger_incremental_sync_for_conversation`) are scoped to the
+    /// requesting window's own team by this change.
     #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
     fn index_repo(&self, directory_path: PathBuf, ctx: &mut ModelContext<Self>) {
         ProjectContextModel::handle(ctx).update(ctx, |model, ctx| {
@@ -686,7 +698,7 @@ impl PersistedWorkspace {
             );
         });
         if FeatureFlag::FullSourceCodeEmbedding.is_enabled()
-            && UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(ctx)
+            && UserWorkspaces::as_ref(ctx).is_codebase_context_enabled_for_any_known_team(ctx)
             && *CodeSettings::as_ref(ctx).auto_indexing_enabled
         {
             CodebaseIndexManager::handle(ctx).update(ctx, |manager, ctx| {
@@ -822,15 +834,18 @@ impl PersistedWorkspace {
 
     /// Triggers an incremental sync for the codebase context when a new conversation starts.
     /// This ensures that the codebase index is up-to-date before the conversation begins.
+    ///
+    /// Authorizes against the team currently assigned to the window that owns
+    /// `terminal_view_id`, not the process-global codebase-context check: a window on a team
+    /// that disables codebase context must not sync (or later retrieve from) a shared index,
+    /// even when another team's window is allowed to. `team_for_window` is one of the
+    /// compatibility resolvers Group 4 plans to delete; this gate must be preserved across that
+    /// cleanup, not dropped along with the resolver.
     fn trigger_incremental_sync_for_conversation(
         &mut self,
         terminal_view_id: warpui::EntityId,
         ctx: &mut ModelContext<Self>,
     ) {
-        if !UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(ctx) {
-            return;
-        }
-
         // Get the current working directory for the terminal view that started the conversation
         // Collect window IDs first to avoid borrowing conflicts
         let window_ids: Vec<_> = ctx.window_ids().collect();
@@ -841,6 +856,13 @@ impl PersistedWorkspace {
             for terminal_view in terminal_views.into_iter().flatten() {
                 let terminal_view_ref = terminal_view.as_ref(ctx);
                 if terminal_view_ref.view_id() == terminal_view_id {
+                    let window_team = UserWorkspaces::as_ref(ctx).team_for_window(window_id);
+                    if !UserWorkspaces::as_ref(ctx)
+                        .is_codebase_context_enabled_for_team(window_team, ctx)
+                    {
+                        return;
+                    }
+
                     if terminal_view_ref.active_session_is_local(ctx) != Some(true) {
                         log::info!(
                             "Skipping local codebase incremental sync for non-local agent conversation"
@@ -1269,10 +1291,20 @@ impl PersistedWorkspace {
     }
 }
 
+/// Candidate roots for auto-indexing, restricted to windows whose *own* current team allows
+/// codebase context. Without this, auto-indexing could enqueue a repository visited only from
+/// a window whose team disables indexing, authorized solely because some other window's team
+/// allows it. `team_for_window` is one of the compatibility resolvers Group 4 plans to delete;
+/// this per-window filter must be preserved across that cleanup, not dropped with the resolver.
 #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
 pub fn all_working_directories(app: &AppContext) -> HashSet<PathBuf> {
+    let user_workspaces = UserWorkspaces::as_ref(app);
     let mut working_directories = HashSet::new();
     for window_id in app.window_ids() {
+        let window_team = user_workspaces.team_for_window(window_id);
+        if !user_workspaces.is_codebase_context_enabled_for_team(window_team, app) {
+            continue;
+        }
         for terminal_view in app
             .views_of_type::<TerminalView>(window_id)
             .into_iter()
