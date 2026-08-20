@@ -21,6 +21,8 @@
 //!   [`add_child`](TuiParentElement::add_child) /
 //!   [`add_children`](TuiParentElement::add_children).
 
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::Duration;
 
 use instant::Instant;
@@ -151,6 +153,11 @@ pub struct TuiPaintContext<'a> {
     /// Stack-local captures of explicitly opaque paint regions. These regions
     /// are compositing metadata only and never enter the terminal cell buffer.
     opaque_region_captures: Vec<Vec<TuiScreenRect>>,
+    /// Hyperlinks recorded during paint, keyed by absolute buffer cell.
+    /// Ratatui's `Cell` carries no hyperlink attribute of its own, so this is
+    /// the side table `TuiFrameRenderer` consumes to bracket the matching
+    /// cell runs in OSC 8 escapes.
+    hyperlinks: HashMap<(u16, u16), Rc<str>>,
 }
 
 /// The soonest an element may request a repaint after the current paint.
@@ -168,6 +175,7 @@ impl<'a> TuiPaintContext<'a> {
             repaint_at: None,
             terminal_cursor: None,
             opaque_region_captures: Vec::new(),
+            hyperlinks: HashMap::new(),
         }
     }
     /// Attaches the active scene layer to an absolute screen position.
@@ -189,6 +197,13 @@ impl<'a> TuiPaintContext<'a> {
     /// Returns the hardware cursor submitted during paint.
     pub fn terminal_cursor(&self) -> Option<TuiScreenPoint> {
         self.terminal_cursor
+    }
+
+    /// Records the URL a painted buffer cell should carry as an OSC 8
+    /// hyperlink. Called by elements (e.g. `TuiText`) once they know which
+    /// cell a hyperlink span landed in.
+    pub(crate) fn record_hyperlink(&mut self, position: TuiPoint, url: Rc<str>) {
+        self.hyperlinks.insert((position.x, position.y), url);
     }
 
     /// Runs `f` inside a clipped normal scene layer.
@@ -266,10 +281,24 @@ impl<'a> TuiPaintContext<'a> {
         self.repaint_at
     }
 
-    /// Finishes paint and returns its retained scene and repaint request.
-    pub(crate) fn finish(self) -> (TuiScene, Option<Instant>, Option<TuiScreenPoint>) {
+    /// Finishes paint and returns its retained scene, repaint request, and
+    /// hyperlink side table.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn finish(
+        self,
+    ) -> (
+        TuiScene,
+        Option<Instant>,
+        Option<TuiScreenPoint>,
+        HashMap<(u16, u16), Rc<str>>,
+    ) {
         debug_assert!(self.scene.is_at_root_layer());
-        (self.scene, self.repaint_at, self.terminal_cursor)
+        (
+            self.scene,
+            self.repaint_at,
+            self.terminal_cursor,
+            self.hyperlinks,
+        )
     }
 }
 
