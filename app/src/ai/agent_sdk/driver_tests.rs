@@ -1016,6 +1016,50 @@ fn sandbox_deadline_reports_error_before_exit() {
     );
 }
 
+// ── QUALITY-1759 revision: genuine-checkpoint gate and no double upload ────
+
+/// `run_snapshot_upload` with `require_genuine_checkpoint=true` must not claim success
+/// when checkpointing is not actually available (here: `FeatureFlag::OzHandoff` disabled,
+/// its default state in tests unless explicitly overridden). A hibernation cannot claim a
+/// checkpoint it never produced.
+#[test]
+fn run_snapshot_upload_fails_genuine_requirement_when_oz_handoff_disabled() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let temp = TempDir::new().unwrap();
+        let working_dir = dunce::canonicalize(temp.path()).unwrap();
+        let terminal_view = add_window_with_terminal(&mut app, None);
+        let driver_handle = app.add_model(|ctx| {
+            let terminal_driver =
+                super::terminal::TerminalDriver::create_from_existing_view(terminal_view, ctx);
+            AgentDriver::new_for_test(working_dir.clone(), terminal_driver, ctx)
+        });
+
+        let (tx, rx) = futures::channel::oneshot::channel::<(bool, bool)>();
+        driver_handle.update(&mut app, |_, ctx| {
+            let spawner = ctx.spawner();
+            ctx.spawn(
+                async move {
+                    let genuine = AgentDriver::run_snapshot_upload(&spawner, true).await;
+                    let best_effort = AgentDriver::run_snapshot_upload(&spawner, false).await;
+                    let _ = tx.send((genuine, best_effort));
+                },
+                |_, _, _| {},
+            );
+        });
+        let (genuine_result, best_effort_result) = rx.await.unwrap();
+
+        assert!(
+            !genuine_result,
+            "a hibernation must not claim checkpoint success when checkpointing is unavailable"
+        );
+        assert!(
+            best_effort_result,
+            "ordinary best-effort cleanup must still treat a skipped upload as success"
+        );
+    });
+}
+
 #[test]
 fn task_env_vars_include_parent_run_id_when_present() {
     let task_id: AmbientAgentTaskId = "550e8400-e29b-41d4-a716-446655440000".parse().unwrap();

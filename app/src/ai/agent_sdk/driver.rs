@@ -588,6 +588,12 @@ pub struct AgentDriver {
     /// pure no-op for local and disabled runs.
     snapshot_file_writer: Option<snapshot::DeclarationsWriterHandle>,
 
+    /// Set once the `WaitForEventsYielded` handler has already attempted the final
+    /// checkpoint upload for this run's clean exit (see `SDKConversationOutputStatus::
+    /// YieldedForEvents` / `YieldedForEventsCheckpointFailed`), so the unconditional
+    /// end-of-run cleanup in `run` does not redundantly upload a second final checkpoint.
+    final_checkpoint_uploaded_for_yield: bool,
+
     /// Whether the driver should skip dispatching the initial
     /// `StartFromAmbientRunPrompt`. Mirror of `AgentDriverOptions::skip_initial_turn`,
     /// sourced from the `--skip-initial-turn` CLI flag. Read by `execute_run`
@@ -1059,6 +1065,7 @@ impl AgentDriver {
             parent_run_id: parent_run_id_for_self,
             third_party_harness_model_config,
             snapshot_file_writer,
+            final_checkpoint_uploaded_for_yield: false,
             skip_initial_turn,
             strict_mcp_startup,
             mcp_startup_timeout: mcp_startup_timeout.unwrap_or(MCP_SERVER_STARTUP_TIMEOUT),
@@ -1108,6 +1115,7 @@ impl AgentDriver {
             parent_run_id: None,
             third_party_harness_model_config: None,
             snapshot_file_writer: None,
+            final_checkpoint_uploaded_for_yield: false,
             skip_initial_turn: false,
             strict_mcp_startup: false,
             mcp_startup_timeout: MCP_SERVER_STARTUP_TIMEOUT,
@@ -1327,7 +1335,13 @@ impl AgentDriver {
                          (reason={actual_reason:?}): {finalization_result:?}"
                     );
                 }
-                let _ = Self::run_snapshot_upload(&foreground).await;
+                let already_uploaded_for_yield = foreground
+                    .spawn(|me, _| me.final_checkpoint_uploaded_for_yield)
+                    .await
+                    .unwrap_or(false);
+                if !already_uploaded_for_yield {
+                    let _ = Self::run_snapshot_upload(&foreground, false).await;
+                }
 
                 if tx.send(result).is_err() {
                     report_error!("Caller did not wait for agent driver to finish");
@@ -4078,11 +4092,23 @@ impl AgentDriver {
                     let checkpoint_task_id = me.task_id;
                     let checkpoint_foreground = ctx.spawner();
                     ctx.spawn(
-                        async move { Self::run_snapshot_upload(&checkpoint_foreground).await },
-                        move |_me, checkpoint_succeeded, _ctx| {
+                        async move {
+                            // `require_genuine_checkpoint=true`: a hibernation may only
+                            // claim success when a resumable checkpoint was actually
+                            // produced. Unlike most callers of `run_snapshot_upload`, a
+                            // skipped upload (checkpointing disabled, no cloud task id,
+                            // or `--no-snapshot`) is not "nothing to fail" here -- it
+                            // means the closed wait tool call has no persisted result to
+                            // rehydrate from, so it must not be reported as success.
+                            Self::run_snapshot_upload(&checkpoint_foreground, true).await
+                        },
+                        move |me, checkpoint_succeeded, _ctx| {
                             log::info!(
                                 "Ambient agent idle lifecycle: event=run_completion_immediate task_id={checkpoint_task_id:?} terminal_view_id={terminal_id:?} outcome=yielded_for_events checkpoint_succeeded={checkpoint_succeeded}"
                             );
+                            // Attempted (successfully or not) here, so the unconditional
+                            // end-of-run cleanup must not upload a second final checkpoint.
+                            me.final_checkpoint_uploaded_for_yield = true;
                             let status = if checkpoint_succeeded {
                                 SDKConversationOutputStatus::YieldedForEvents
                             } else {
@@ -4492,22 +4518,30 @@ impl AgentDriver {
     /// Invoke the end-of-run snapshot upload pipeline if the feature flag is enabled and this
     /// driver is associated with a cloud task. Returns whether the upload is known to have
     /// succeeded. Most callers treat this as best-effort and ignore the result; a caller that
-    /// must prove resumability (e.g. the `wait_for_events` warm-wait-window yield) inspects it.
+    /// must prove resumability (e.g. the `wait_for_events` warm-wait-window yield) inspects it
+    /// and passes `require_genuine_checkpoint=true`.
     ///
-    /// A skipped upload (feature disabled, no task id, `--no-snapshot`) counts as success:
-    /// there was nothing to fail. The periodic checkpoint coordinator is itself best-effort and
-    /// does not report per-attempt success, so reaching its `finalize` call also counts as
-    /// success; only the legacy one-shot upload's timeout is currently observable as failure.
+    /// When `require_genuine_checkpoint` is `false` (the default for ordinary end-of-run
+    /// cleanup), a skipped upload (feature disabled, no task id, `--no-snapshot`) counts as
+    /// success: there was nothing to fail. When it is `true`, those same skip conditions
+    /// return `false` instead: a hibernation cannot claim a checkpoint it never produced, so
+    /// the caller must treat that as a failed yield rather than a clean one. The periodic
+    /// checkpoint coordinator is itself best-effort and does not report per-attempt success,
+    /// so reaching its `finalize` call also counts as success; only the legacy one-shot
+    /// upload's timeout is currently observable as failure.
     #[tracing::instrument(skip_all, fields(tags.cloud_agent = true))]
-    async fn run_snapshot_upload(spawner: &ModelSpawner<Self>) -> bool {
+    async fn run_snapshot_upload(
+        spawner: &ModelSpawner<Self>,
+        require_genuine_checkpoint: bool,
+    ) -> bool {
         if !FeatureFlag::OzHandoff.is_enabled() {
-            return true;
+            return !require_genuine_checkpoint;
         }
 
         // Snapshot upload is only meaningful for cloud task runs, so short-circuit before
         // pulling the rest of the context onto this task.
         let Ok((
-            Some(task_id),
+            maybe_task_id,
             snapshot_disabled,
             upload_timeout,
             script_timeout,
@@ -4524,11 +4558,14 @@ impl AgentDriver {
             })
             .await
         else {
-            return true;
+            return !require_genuine_checkpoint;
+        };
+        let Some(task_id) = maybe_task_id else {
+            return !require_genuine_checkpoint;
         };
         if snapshot_disabled {
             log::info!("Skipping snapshot upload because --no-snapshot was specified");
-            return true;
+            return !require_genuine_checkpoint;
         }
 
         // An active coordinator replaces the legacy upload below. Budget must come from
