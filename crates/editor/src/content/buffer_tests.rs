@@ -12,6 +12,7 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use serde_yaml::{Mapping, Value};
 use string_offset::{ByteOffset, CharOffset};
+use sum_tree::MAX_LEAF_ITEMS;
 use vec1::{Vec1, vec1};
 use warp_util::content_version::ContentVersion;
 use warpui_core::elements::ListIndentLevel;
@@ -11314,13 +11315,11 @@ fn code_block_with_colors(
     (code, colors)
 }
 
-/// Regression test for APP-5567. Coloring a code block rebuilds it into the buffer's
-/// `SumTree`, and `SumTree::push` appends a fresh leaf holding a single item rather than
-/// packing the item into the rightmost leaf. Emitting a color marker per token boundary and a
-/// text fragment per run therefore cost a whole tree node — a couple of kilobytes, since a
-/// node inlines its items and their summaries — per item, which is what amplified a
-/// highlighted notebook into gigabytes of live heap. The items must be packed into shared
-/// leaves instead, and re-highlighting the same block must not grow the tree.
+/// Regression test for APP-5567. Coloring a code block used to append the rebuilt block's
+/// items one at a time, which gave each item a tree node of its own and amplified a
+/// highlighted notebook into gigabytes of live heap; see `BufferTextBatch` for the mechanism.
+/// The items must be packed into shared leaves, and re-highlighting the same block must not
+/// grow the tree.
 #[test]
 fn test_color_code_block_packs_tree_leaves() {
     App::test((), |mut app| async move {
@@ -11352,16 +11351,11 @@ fn test_color_code_block_packs_tree_leaves() {
 
             let colored = buffer.content.debug();
             let stats = buffer.content.node_stats();
-            println!(
-                "APP-5567 first pass: {} bytes of code, {stats:?}",
-                code.len()
-            );
 
-            // Items are packed into leaves rather than each getting its own. A leaf holds up
-            // to `2 * TREE_BASE` items: 4 with `sum_tree/test-util`, which these tests enable,
-            // and 12 without it.
+            // Items are packed into leaves rather than each getting its own: all but the last
+            // leaf of a batched append is full, so the average sits just under the cap.
             assert!(
-                stats.leaves * 3 <= stats.items,
+                stats.leaves * (MAX_LEAF_ITEMS - 1) <= stats.items,
                 "expected items to be packed into shared leaves, got {stats:?}"
             );
 
@@ -11371,10 +11365,8 @@ fn test_color_code_block_packs_tree_leaves() {
                 buffer.color_code_block_ranges_internal(block.start, &colors);
             }
 
-            let repeated_stats = buffer.content.node_stats();
-            println!("APP-5567 fifth pass: {repeated_stats:?}");
             assert_eq!(buffer.content.debug(), colored);
-            assert_eq!(repeated_stats, stats);
+            assert_eq!(buffer.content.node_stats(), stats);
         });
     });
 }

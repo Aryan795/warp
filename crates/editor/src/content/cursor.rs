@@ -451,10 +451,13 @@ impl<'a> BufferTextBatch<'a> {
         self.text.push(c);
     }
 
-    /// Queue a non-text item, such as a color marker.
-    pub(super) fn push(&mut self, item: BufferText) {
+    /// Queue a color marker.
+    ///
+    /// Only markers can be queued directly. That is what lets [`Self::flush_text`] assume the
+    /// queue never ends in a text fragment that later text could have been packed into.
+    pub(super) fn push_marker(&mut self, marker: ColorMarker) {
         self.flush_text();
-        self.items.push(item);
+        self.items.push(BufferText::Color(marker));
     }
 
     /// Append everything queued so far to the destination tree.
@@ -473,8 +476,8 @@ impl<'a> BufferTextBatch<'a> {
             // `append_str` tops up the trailing text fragment before starting a new one.
             self.content.append_str(&self.text);
         } else {
-            // Anything queued ahead of this text is a marker, which ends the trailing
-            // fragment anyway, so there is nothing to top up.
+            // The queue only ever ends in a marker, which ends the trailing fragment anyway,
+            // so there is nothing to top up.
             push_text_items(&mut self.items, &self.text);
         }
 

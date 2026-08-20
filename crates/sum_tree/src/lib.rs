@@ -13,6 +13,10 @@ const TREE_BASE: usize = 2;
 #[cfg(not(feature = "test-util"))]
 const TREE_BASE: usize = 6;
 
+/// The most items a single leaf can hold. [`SumTree::extend`] fills leaves up to this many
+/// items; [`SumTree::push`] appends a leaf holding one item regardless.
+pub const MAX_LEAF_ITEMS: usize = 2 * TREE_BASE;
+
 pub trait Item: Clone + fmt::Debug {
     type Summary: for<'a> AddAssign<&'a Self::Summary> + Default + Clone + fmt::Debug;
 
@@ -44,6 +48,7 @@ pub struct SumTree<T: Item>(Arc<Node<T>>);
 
 /// Tally of a tree's physical structure, used to check how densely items are packed into
 /// leaves. See [`SumTree::node_stats`].
+#[cfg(feature = "test-util")]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct NodeStats {
     pub internal_nodes: usize,
@@ -305,14 +310,15 @@ impl<T: Item> SumTree<T> {
     }
 
     /// Walks the whole tree and tallies its physical structure. Linear in the number of
-    /// nodes, so this is meant for diagnostics and tests rather than hot paths. A subtree
-    /// shared with another tree is counted once per reference to it.
+    /// nodes. A subtree shared with another tree is counted once per reference to it.
+    #[cfg(feature = "test-util")]
     pub fn node_stats(&self) -> NodeStats {
         let mut stats = NodeStats::default();
         self.accumulate_node_stats(&mut stats);
         stats
     }
 
+    #[cfg(feature = "test-util")]
     fn accumulate_node_stats(&self, stats: &mut NodeStats) {
         match self.0.as_ref() {
             Node::Internal { child_trees, .. } => {

@@ -146,6 +146,134 @@ fn test_append_str_creates_new_fragment_when_full() {
     );
 }
 
+/// Builds a tree whose trailing item takes the named shape, covering each case
+/// [`BufferSumTree::append_str`] can meet when it tries to top up the trailing fragment.
+fn seed_tree(shape: &str) -> SumTree<BufferText> {
+    use arrayvec::ArrayString;
+
+    use crate::content::text::TEXT_FRAGMENT_SIZE;
+
+    let mut tree: SumTree<BufferText> = SumTree::new();
+    match shape {
+        "empty" => (),
+        "empty_fragment" => tree.push(BufferText::Text {
+            fragment: ArrayString::new(),
+            char_count: 0,
+        }),
+        "room" => tree.append_str("Init"),
+        "at_cap" => tree.append_str(&"a".repeat(TEXT_FRAGMENT_SIZE)),
+        "one_short" => tree.append_str(&"a".repeat(TEXT_FRAGMENT_SIZE - 1)),
+        "newline" => {
+            tree.append_str("ab");
+            tree.push(BufferText::Newline);
+        }
+        "marker" => {
+            tree.append_str("ab");
+            tree.push(BufferText::Marker {
+                marker_type: BufferTextStyle::bold(),
+                dir: MarkerDir::Start,
+            });
+        }
+        other => panic!("unknown seed shape: {other}"),
+    }
+    tree
+}
+
+/// Asserts that no fragment's leading character would have fitted in the fragment before it,
+/// which is what it means for the text to be packed as tightly as [`TEXT_FRAGMENT_SIZE`]
+/// allows. Together with the content assertion this pins the fragmentation exactly, since
+/// maximal left-to-right packing of a given sequence is unique.
+fn assert_fragments_packed(tree: &SumTree<BufferText>, case: &str) {
+    use crate::content::text::TEXT_FRAGMENT_SIZE;
+
+    let mut cursor = tree.cursor::<(), ()>();
+    cursor.descend_to_first_item(tree, |_| true);
+
+    let mut previous_len = None;
+    while let Some(item) = cursor.item() {
+        if let BufferText::Text {
+            fragment,
+            char_count,
+        } = item
+        {
+            assert!(
+                fragment.len() <= TEXT_FRAGMENT_SIZE,
+                "{case}: fragment holds {} bytes, over the cap",
+                fragment.len()
+            );
+            assert_eq!(
+                *char_count as usize,
+                fragment.chars().count(),
+                "{case}: char_count disagrees with the fragment"
+            );
+            if let Some(previous_len) = previous_len
+                && let Some(first) = fragment.chars().next()
+            {
+                assert!(
+                    previous_len + first.len_utf8() > TEXT_FRAGMENT_SIZE,
+                    "{case}: fragment {fragment:?} should have been packed into the previous one"
+                );
+            }
+            previous_len = Some(fragment.len());
+        } else {
+            previous_len = None;
+        }
+        cursor.next();
+    }
+}
+
+#[test]
+fn test_append_str_fragmentation() {
+    use crate::content::text::TEXT_FRAGMENT_SIZE;
+
+    let full = "a".repeat(TEXT_FRAGMENT_SIZE);
+    let almost_full = "a".repeat(TEXT_FRAGMENT_SIZE - 1);
+    let over_cap = "a".repeat(TEXT_FRAGMENT_SIZE + 5);
+    // Three bytes per character, so splitting at the cap lands mid-character.
+    let snowmen = "☃".repeat(30);
+
+    // (seed shape, appended text, expected content, expected text fragment count)
+    let cases: Vec<(&str, &str, String, usize)> = vec![
+        ("empty", "", String::new(), 0),
+        ("empty", "\n", "\\n".to_string(), 0),
+        ("empty", "\nabc", "\\nabc".to_string(), 1),
+        ("empty", "ab\ncd", "ab\\ncd".to_string(), 2),
+        ("empty", "ab\n", "ab\\n".to_string(), 1),
+        // `lines` strips the carriage return, so CRLF collapses to a single newline item.
+        ("empty", "ab\r\ncd", "ab\\ncd".to_string(), 2),
+        ("empty", "é", "é".to_string(), 1),
+        ("empty", &over_cap, over_cap.clone(), 2),
+        ("empty", &snowmen, snowmen.clone(), 2),
+        ("empty_fragment", "", String::new(), 1),
+        ("empty_fragment", "ab", "ab".to_string(), 1),
+        ("room", "", "Init".to_string(), 1),
+        ("room", " text", "Init text".to_string(), 1),
+        ("room", "\n", "Init\\n".to_string(), 1),
+        ("room", "ab\ncd", "Initab\\ncd".to_string(), 2),
+        ("room", "ab\r\ncd", "Initab\\ncd".to_string(), 2),
+        ("room", "é", "Inité".to_string(), 1),
+        ("room", &over_cap, format!("Init{over_cap}"), 2),
+        ("room", &snowmen, format!("Init{snowmen}"), 2),
+        ("at_cap", "extra", format!("{full}extra"), 2),
+        ("at_cap", "é", format!("{full}é"), 2),
+        ("one_short", "ab", format!("{almost_full}ab"), 2),
+        // Only one byte is free and the character needs two, so none of it can be topped up.
+        ("one_short", "é", format!("{almost_full}é"), 2),
+        ("newline", "cd", "ab\\ncd".to_string(), 2),
+        ("marker", "cd", "ab<b_s>cd".to_string(), 2),
+    ];
+
+    for (shape, text, expected_content, expected_fragments) in cases {
+        let case = format!("seed {shape:?} + {text:?}");
+        let mut tree = seed_tree(shape);
+        tree.append_str(text);
+
+        assert_eq!(tree.debug(), expected_content, "{case}");
+        assert_eq!(count_text_fragments(&tree), expected_fragments, "{case}");
+        assert_fragments_packed(&tree, &case);
+    }
+}
+
 #[test]
 fn test_styled_text_before_markers() {
     let mut tree: SumTree<BufferText> = SumTree::new();
