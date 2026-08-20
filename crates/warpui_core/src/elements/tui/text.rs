@@ -38,7 +38,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use super::{
     Color, TuiConstraint, TuiElement, TuiLayoutContext, TuiPaintContext, TuiPaintSurface,
-    TuiPoint, TuiScreenPoint, TuiScreenPosition, TuiSize, TuiStyle, text_width,
+    TuiScreenPoint, TuiScreenPosition, TuiSize, TuiStyle, text_width,
 };
 use crate::AppContext;
 
