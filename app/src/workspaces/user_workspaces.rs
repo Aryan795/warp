@@ -855,46 +855,53 @@ impl UserWorkspaces {
             .is_some_and(|billing| billing.is_managed_byok_byoe_enabled())
     }
 
-    /// [`Self::are_member_byo_keys_allowed`], but reading `context`'s team's effective
-    /// `TeamSettings.team_byo` policy instead of the workspace-level settings. `context` is
-    /// `None` for a no-team window, which has no team policy restricting it and returns
-    /// `true`.
+    /// [`Self::are_member_byo_keys_allowed`], but reading `team_uid`'s team's effective
+    /// `TeamSettings.team_byo` policy instead of the workspace-level settings. `team_uid` is
+    /// `None`, or names a team no longer in the current workspace, for a no-team window,
+    /// which has no team policy restricting it and returns `true`.
+    pub(crate) fn are_member_byo_keys_allowed_for_team(&self, team_uid: Option<ServerId>) -> bool {
+        !self.is_managed_byok_byoe_enabled()
+            || team_uid
+                .and_then(|team_uid| self.team_from_uid(team_uid))
+                .is_none_or(|team| {
+                    team.settings.team_byo.as_ref().is_some_and(|team_byo| {
+                        team_byo.first_party_enabled && team_byo.allow_user_keys
+                    })
+                })
+    }
+
+    /// [`Self::are_member_byo_endpoints_allowed`], but reading `team_uid`'s team's effective
+    /// `TeamSettings.team_byo` policy instead of the workspace-level settings. `team_uid` is
+    /// `None`, or names a team no longer in the current workspace, for a no-team window,
+    /// which has no team policy restricting it and returns `true`.
+    pub(crate) fn are_member_byo_endpoints_allowed_for_team(
+        &self,
+        team_uid: Option<ServerId>,
+    ) -> bool {
+        !self.is_managed_byok_byoe_enabled()
+            || team_uid
+                .and_then(|team_uid| self.team_from_uid(team_uid))
+                .is_none_or(|team| {
+                    team.settings.team_byo.as_ref().is_some_and(|team_byo| {
+                        team_byo.endpoints_enabled && team_byo.allow_user_endpoints
+                    })
+                })
+    }
+
+    /// [`Self::are_member_byo_keys_allowed_for_team`], scoped to `context`'s team.
     pub(crate) fn agent_settings_are_member_byo_keys_allowed(
         &self,
         context: Option<&TeamRenderContext<'_>>,
     ) -> bool {
-        !self.is_managed_byok_byoe_enabled()
-            || context.is_none_or(|context| {
-                context
-                    .team
-                    .settings
-                    .team_byo
-                    .as_ref()
-                    .is_some_and(|team_byo| {
-                        team_byo.first_party_enabled && team_byo.allow_user_keys
-                    })
-            })
+        self.are_member_byo_keys_allowed_for_team(context.map(|context| context.team.uid))
     }
 
-    /// [`Self::are_member_byo_endpoints_allowed`], but reading `context`'s team's effective
-    /// `TeamSettings.team_byo` policy instead of the workspace-level settings. `context` is
-    /// `None` for a no-team window, which has no team policy restricting it and returns
-    /// `true`.
+    /// [`Self::are_member_byo_endpoints_allowed_for_team`], scoped to `context`'s team.
     pub(crate) fn agent_settings_are_member_byo_endpoints_allowed(
         &self,
         context: Option<&TeamRenderContext<'_>>,
     ) -> bool {
-        !self.is_managed_byok_byoe_enabled()
-            || context.is_none_or(|context| {
-                context
-                    .team
-                    .settings
-                    .team_byo
-                    .as_ref()
-                    .is_some_and(|team_byo| {
-                        team_byo.endpoints_enabled && team_byo.allow_user_endpoints
-                    })
-            })
+        self.are_member_byo_endpoints_allowed_for_team(context.map(|context| context.team.uid))
     }
 
     /// Whether `context`'s team has provided its own first-party key for `provider`.

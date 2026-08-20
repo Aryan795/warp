@@ -27,7 +27,7 @@ use warp_core::assertions::safe_assert;
 use warp_errors::report_error;
 use warp_multi_agent_api::{Task, ToolType, message};
 use warpui::r#async::{SpawnedFutureHandle, Timer};
-use warpui::{AppContext, Entity, EntityId, ModelContext, ModelHandle, SingletonEntity};
+use warpui::{AppContext, Entity, EntityId, ModelContext, ModelHandle, SingletonEntity, WindowId};
 
 use self::response_stream::{PendingResume, RecoveryBudget, ResponseStream, ResponseStreamEvent};
 use super::action_model::{BlocklistAIActionEvent, BlocklistAIActionModel};
@@ -68,6 +68,7 @@ use crate::network::NetworkStatus;
 use crate::notebooks::editor::model::FileLinkResolutionContext;
 use crate::persistence::ModelEvent;
 use crate::send_telemetry_from_ctx;
+use crate::server::ids::ServerId;
 use crate::server::server_api::AIApiError;
 #[cfg(not(target_family = "wasm"))]
 use crate::server::server_api::ServerApiProvider;
@@ -323,6 +324,10 @@ pub struct BlocklistAIController {
     /// The ID of the terminal surface this controller is associated with.
     terminal_surface_id: EntityId,
 
+    /// The window this controller's terminal surface lives in, used to resolve the requesting
+    /// window's currently-selected team fresh at request time (see [`Self::team_uid`]).
+    window_id: WindowId,
+
     should_refresh_available_llms_on_stream_finish: bool,
 
     shared_session_state: shared_session::SharedSessionState,
@@ -422,6 +427,12 @@ impl BlocklistAIController {
         SessionContext::from_session(self.active_session.as_ref(ctx), ctx).skill_path_origin()
     }
 
+    /// The team currently selected for this controller's window, resolved fresh from `ctx` so
+    /// callers always see the window's current team rather than one captured earlier.
+    pub(crate) fn team_uid(&self, ctx: &AppContext) -> Option<ServerId> {
+        UserWorkspaces::as_ref(ctx).team_uid_for_window(self.window_id)
+    }
+
     /// Creates a controller for a terminal surface.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -432,6 +443,7 @@ impl BlocklistAIController {
         active_session: ModelHandle<ActiveSession>,
         terminal_model: Arc<FairMutex<TerminalModel>>,
         terminal_surface_id: EntityId,
+        window_id: WindowId,
         ctx: &mut ModelContext<Self>,
     ) -> Self {
         ctx.subscribe_to_model(&action_model, move |me, _, event, ctx| {
@@ -626,6 +638,7 @@ impl BlocklistAIController {
             terminal_model,
             in_flight_response_streams: PendingResponseStreams::new(),
             terminal_surface_id,
+            window_id,
             should_refresh_available_llms_on_stream_finish: false,
             shared_session_state: shared_session::SharedSessionState::default(),
             ambient_agent_task_id: None,
@@ -2274,7 +2287,7 @@ impl BlocklistAIController {
             is_auto_resume_after_error: false,
         });
 
-        let request_params = api::RequestParams::new(
+        let mut request_params = api::RequestParams::new(
             Some(self.terminal_surface_id),
             SessionContext::from_session(self.active_session.as_ref(ctx), ctx),
             &request_input,
@@ -2282,6 +2295,7 @@ impl BlocklistAIController {
             metadata,
             ctx,
         );
+        request_params.apply_team_byo_policy(self.team_uid(ctx), ctx);
 
         Ok((conversation_id, request_params))
     }
@@ -2517,6 +2531,7 @@ impl BlocklistAIController {
             query_metadata,
             ctx,
         );
+        request_params.apply_team_byo_policy(self.team_uid(ctx), ctx);
         request_params.parent_agent_id = parent_agent_id;
         request_params.agent_name = agent_name;
 

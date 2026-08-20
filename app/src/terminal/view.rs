@@ -3548,6 +3548,7 @@ impl TerminalView {
                 ctx,
             )
         });
+        let window_id = ctx.window_id();
         let ai_controller = ctx.add_model(|ctx| {
             BlocklistAIController::new(
                 ai_input_model.clone(),
@@ -3557,6 +3558,7 @@ impl TerminalView {
                 active_session.clone(),
                 model.clone(),
                 terminal_view_id,
+                window_id,
                 ctx,
             )
         });
