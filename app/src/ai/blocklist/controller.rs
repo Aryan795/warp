@@ -2724,9 +2724,8 @@ impl BlocklistAIController {
         // for it finishes, even after a real Stop. Every other cancellation
         // reason (e.g. an optimistic `Succeeded` completion, or a
         // same-conversation follow-up/takeover that keeps the conversation
-        // going) must keep delivering a follow-up the controller requested on
-        // purpose -- narrowing this to non-terminal reasons is a separate,
-        // pre-existing semantics question this fix does not answer.
+        // going) keeps delivering a follow-up the controller requested on
+        // purpose.
         if matches!(
             reason.conversation_outcome(),
             CancellationOutcome::Cancelled
