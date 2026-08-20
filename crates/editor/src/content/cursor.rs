@@ -460,7 +460,8 @@ impl<'a> BufferTextBatch<'a> {
 
     /// Queue a color marker.
     ///
-    /// Only markers can be queued directly. That is what lets [`Self::flush_text`] assume the
+    /// Only markers can be queued directly. That, together with the newline that always
+    /// follows [`Self::push_char`]'s own flush, is what lets [`Self::flush_text`] assume the
     /// queue never ends in a text fragment that later text could have been packed into.
     pub(super) fn push_marker(&mut self, marker: ColorMarker) {
         self.flush_text();
@@ -483,8 +484,10 @@ impl<'a> BufferTextBatch<'a> {
             // `append_str` tops up the trailing text fragment before starting a new one.
             self.content.append_str(&self.text);
         } else {
-            // The queue only ever ends in a marker, which ends the trailing fragment anyway,
-            // so there is nothing to top up.
+            // The queue can only end in a text fragment right after `push_char` flushed a
+            // carriage return, and then this text starts with the newline that forced that
+            // flush, so `append_str` would have found no first line to top up either. Every
+            // other flush is followed by a marker, which ends the trailing fragment anyway.
             push_text_items(&mut self.items, &self.text);
         }
 
@@ -496,6 +499,13 @@ impl Drop for BufferTextBatch<'_> {
     /// Dropping a batch that still holds queued items would discard that content silently, so
     /// catch a caller that returns early without calling [`BufferTextBatch::finish`].
     fn drop(&mut self) {
+        // A batch is live across the whole rebuild, so an unrelated panic in that window would
+        // unwind through here. Asserting then would panic during cleanup, which aborts the
+        // process and buries the original failure.
+        if std::thread::panicking() {
+            return;
+        }
+
         debug_assert!(
             self.items.is_empty() && self.text.is_empty(),
             "BufferTextBatch dropped without finish(); the queued content would be lost"

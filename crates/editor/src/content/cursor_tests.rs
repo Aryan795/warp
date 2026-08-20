@@ -282,7 +282,7 @@ fn test_append_str_fragmentation() {
 }
 
 /// One step of a code-block rebuild: the only two things the rebuild loop emits.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum Step {
     Marker(ColorMarker),
     Char(char),
@@ -363,23 +363,56 @@ fn test_batched_appends_match_unbatched() {
         .concat(),
     ];
 
-    for (index, program) in programs.iter().enumerate() {
-        let unbatched = append_unbatched(program);
-        let batched = append_batched(program);
-
-        assert_eq!(batched.debug(), unbatched.debug(), "program {index}");
-        assert_eq!(
-            count_text_fragments(&batched),
-            count_text_fragments(&unbatched),
-            "program {index}: fragmentation differs"
-        );
-        assert_fragments_packed(&batched, &format!("program {index}"));
-        // The whole point of batching: the same items, in no more leaves than before.
-        assert!(
-            batched.node_stats().leaves <= unbatched.node_stats().leaves,
-            "program {index}: batching added leaves"
-        );
+    for program in &programs {
+        assert_batched_matches_unbatched(program);
     }
+}
+
+/// The same equivalence, over every short program rather than hand-picked ones. The carriage
+/// return bug was an interaction between two characters that only shows when they land
+/// adjacent inside one buffered run, which is the kind of case nobody thinks to write down.
+#[test]
+fn test_batched_appends_match_unbatched_exhaustively() {
+    let alphabet = [
+        Step::Char('a'),
+        Step::Char('\r'),
+        Step::Char('\n'),
+        Step::Marker(ColorMarker::Start(ColorU::white())),
+        Step::Marker(ColorMarker::End),
+    ];
+
+    for length in 1..=5 {
+        for mut encoded in 0..alphabet.len().pow(length) {
+            let program: Vec<Step> = (0..length)
+                .map(|_| {
+                    let step = alphabet[encoded % alphabet.len()].clone();
+                    encoded /= alphabet.len();
+                    step
+                })
+                .collect();
+
+            assert_batched_matches_unbatched(&program);
+        }
+    }
+}
+
+fn assert_batched_matches_unbatched(program: &[Step]) {
+    let case = format!("program {program:?}");
+    let unbatched = append_unbatched(program);
+    let batched = append_batched(program);
+
+    assert_eq!(batched.debug(), unbatched.debug(), "{case}");
+    assert_eq!(
+        count_text_fragments(&batched),
+        count_text_fragments(&unbatched),
+        "{case}: fragmentation differs"
+    );
+    assert_fragments_packed(&batched, &case);
+    // The whole point of batching: the same items, in no more leaves than before.
+    assert!(
+        batched.node_stats().leaves <= unbatched.node_stats().leaves,
+        "{case}: batching added leaves"
+    );
 }
 
 #[test]
