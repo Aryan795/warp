@@ -4523,12 +4523,12 @@ impl AgentDriver {
     ///
     /// When `require_genuine_checkpoint` is `false` (the default for ordinary end-of-run
     /// cleanup), a skipped upload (feature disabled, no task id, `--no-snapshot`) counts as
-    /// success: there was nothing to fail. When it is `true`, those same skip conditions
-    /// return `false` instead: a hibernation cannot claim a checkpoint it never produced, so
-    /// the caller must treat that as a failed yield rather than a clean one. The periodic
-    /// checkpoint coordinator is itself best-effort and does not report per-attempt success,
-    /// so reaching its `finalize` call also counts as success; only the legacy one-shot
-    /// upload's timeout is currently observable as failure.
+    /// success: there was nothing to fail; so does any periodic-coordinator `finalize`
+    /// outcome, since that path is itself best-effort here. When it is `true`, those same
+    /// skip conditions return `false` instead, and a periodic-coordinator finalize is only
+    /// treated as success when it actually committed a checkpoint (see `FinalizeOutcome`):
+    /// a hibernation cannot claim a checkpoint it never produced, so the caller must treat
+    /// anything else as a failed yield rather than a clean one.
     #[tracing::instrument(skip_all, fields(tags.cloud_agent = true))]
     async fn run_snapshot_upload(
         spawner: &ModelSpawner<Self>,
@@ -4572,13 +4572,34 @@ impl AgentDriver {
         // `finalize_budget`: the coordinator's floor is `script_timeout + upload_timeout`,
         // so a smaller budget silently skips the final attempt.
         if let Some(coordinator) = checkpoint_coordinator {
-            coordinator
+            let outcome = coordinator
                 .finalize(checkpoint_coordinator::finalize_budget(
                     script_timeout,
                     upload_timeout,
                 ))
                 .await;
-            return true;
+            match &outcome {
+                checkpoint_coordinator::FinalizeOutcome::Committed { generation } => {
+                    log::info!(
+                        "Periodic checkpoint coordinator finalize committed generation={}",
+                        generation.as_str()
+                    );
+                }
+                checkpoint_coordinator::FinalizeOutcome::NotCommitted { result } => {
+                    log::info!(
+                        "Periodic checkpoint coordinator finalize did not commit: {result:?}"
+                    );
+                }
+                checkpoint_coordinator::FinalizeOutcome::Unknown => {
+                    log::info!("Periodic checkpoint coordinator finalize outcome unknown");
+                }
+            }
+            // Ordinary best-effort cleanup does not care whether the periodic coordinator's
+            // last attempt actually committed. A caller requiring proof of a resumable
+            // checkpoint does: `finalize` acknowledging is not itself evidence of a commit --
+            // it also acks on skip/failure/timeout/a dropped result channel (see
+            // `FinalizeOutcome`) -- so only a genuine commit satisfies that requirement.
+            return outcome.is_committed() || !require_genuine_checkpoint;
         }
 
         let Ok((working_dir, client)) = spawner
