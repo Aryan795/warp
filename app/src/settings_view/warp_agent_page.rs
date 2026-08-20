@@ -1426,7 +1426,7 @@ impl WarpAgentPageView {
         }
         let workspaces = UserWorkspaces::as_ref(ctx);
         let team_context = workspaces.team_render_context_for_view_handle(&ctx.handle(), ctx);
-        workspaces.agent_settings_is_custom_inference_enabled(team_context.as_ref(), ctx)
+        workspaces.is_custom_inference_enabled(ctx)
             && workspaces.agent_settings_are_member_byo_endpoints_allowed(team_context.as_ref())
     }
 
@@ -1917,7 +1917,7 @@ impl WarpAgentPageView {
                     .git_operations_autogen_enabled_internal
                     .is_supported_on_current_platform())
         {
-            widgets.push(Box::new(ActiveAIWidget::new(ctx)));
+            widgets.push(Box::new(ActiveAIWidget::default()));
         }
         widgets.push(Box::new(AIInputWidget::default()));
         let voice_supported = cfg!(feature = "voice_input")
@@ -2834,8 +2834,8 @@ impl SettingsWidget for GlobalAIWidget {
     }
 }
 
+#[derive(Default)]
 struct ActiveAIWidget {
-    view_handle: WeakViewHandle<WarpAgentPageView>,
     active_ai_toggle: SwitchStateHandle,
     intelligent_autosuggestions_toggle: SwitchStateHandle,
     prompt_suggestions_toggle: SwitchStateHandle,
@@ -2846,18 +2846,6 @@ struct ActiveAIWidget {
 }
 
 impl ActiveAIWidget {
-    fn new(ctx: &ViewContext<WarpAgentPageView>) -> Self {
-        Self {
-            view_handle: ctx.handle(),
-            active_ai_toggle: Default::default(),
-            intelligent_autosuggestions_toggle: Default::default(),
-            prompt_suggestions_toggle: Default::default(),
-            code_suggestions_toggle: Default::default(),
-            natural_language_autosuggestions_toggle: Default::default(),
-            shared_block_title_generation_toggle: Default::default(),
-            git_operations_autogen_toggle: Default::default(),
-        }
-    }
     fn is_next_command_toggleable(&self, app: &AppContext) -> bool {
         UserWorkspaces::as_ref(app).is_next_command_enabled()
             && AISettings::as_ref(app)
@@ -2889,16 +2877,15 @@ impl ActiveAIWidget {
 
     // TODO: Check if the user's enterprise billing policy allows toggling this feature.
     fn is_shared_block_title_generation_toggleable(&self, app: &AppContext) -> bool {
-        let workspaces = UserWorkspaces::as_ref(app);
-        let is_enterprise_team = workspaces
-            .team_render_context_for_view_handle(&self.view_handle, app)
-            .is_some_and(|context| workspaces.agent_settings_is_enterprise_team(&context));
+        let is_enterprise_plan = UserWorkspaces::as_ref(app)
+            .current_workspace_billing_metadata()
+            .is_some_and(|billing| billing.is_enterprise_plan());
 
         FeatureFlag::SharedBlockTitleGeneration.is_enabled()
             && AISettings::as_ref(app)
                 .shared_block_title_generation_enabled_internal
                 .is_supported_on_current_platform()
-            && (!is_enterprise_team
+            && (!is_enterprise_plan
                 // Override the enterprise check for dogfood builds, as our dogfood team
                 // is an enterprise team.
                 || ChannelState::channel().is_dogfood())
@@ -4272,8 +4259,7 @@ impl ApiKeysWidget {
         let view_handle = ctx.handle();
         let workspaces = workspace_handle.as_ref(ctx);
         let team_context = workspaces.team_render_context_for_view_handle(&view_handle, ctx);
-        let is_byo_enabled =
-            workspaces.agent_settings_is_byo_api_key_enabled(team_context.as_ref(), ctx);
+        let is_byo_enabled = workspaces.is_byo_api_key_enabled(ctx);
         let member_byo_keys_allowed =
             workspaces.agent_settings_are_member_byo_keys_allowed(team_context.as_ref());
 
@@ -4334,8 +4320,7 @@ impl ApiKeysWidget {
                         let workspaces = workspace.as_ref(ctx);
                         let team_context =
                             workspaces.team_render_context_for_view_handle(&ctx.handle(), ctx);
-                        let is_byo_enabled = workspaces
-                            .agent_settings_is_byo_api_key_enabled(team_context.as_ref(), ctx);
+                        let is_byo_enabled = workspaces.is_byo_api_key_enabled(ctx);
                         let member_byo_keys_allowed = workspaces
                             .agent_settings_are_member_byo_keys_allowed(team_context.as_ref());
                         let is_enabled = is_any_ai_enabled && is_byo_enabled;
@@ -4443,8 +4428,7 @@ impl ApiKeysWidget {
                 let workspaces = workspace.as_ref(ctx);
                 let team_context =
                     workspaces.team_render_context_for_view_handle(&ctx.handle(), ctx);
-                let is_byo_enabled =
-                    workspaces.agent_settings_is_byo_api_key_enabled(team_context.as_ref(), ctx);
+                let is_byo_enabled = workspaces.is_byo_api_key_enabled(ctx);
                 let member_byo_keys_allowed =
                     workspaces.agent_settings_are_member_byo_keys_allowed(team_context.as_ref());
                 for button in &grok_buttons {
@@ -5034,10 +5018,8 @@ impl CustomInferenceVisibility {
         let workspaces = UserWorkspaces::as_ref(app);
         let team_context = workspaces.team_render_context_for_view_handle(view_handle, app);
         let is_any_ai_enabled = AISettings::as_ref(app).is_any_ai_enabled(app);
-        let is_byo_enabled =
-            workspaces.agent_settings_is_byo_api_key_enabled(team_context.as_ref(), app);
-        let is_custom_inference_enabled =
-            workspaces.agent_settings_is_custom_inference_enabled(team_context.as_ref(), app);
+        let is_byo_enabled = workspaces.is_byo_api_key_enabled(app);
+        let is_custom_inference_enabled = workspaces.is_custom_inference_enabled(app);
         let member_byo_keys_allowed =
             workspaces.agent_settings_are_member_byo_keys_allowed(team_context.as_ref());
         let member_byo_endpoints_allowed =
@@ -5058,8 +5040,7 @@ impl CustomInferenceVisibility {
             provider_keys_enabled,
             show_custom_inference,
             custom_inference_controls_enabled,
-            managed_byok_byoe_enabled: workspaces
-                .agent_settings_is_managed_byok_byoe_enabled(team_context.as_ref()),
+            managed_byok_byoe_enabled: workspaces.is_managed_byok_byoe_enabled(),
         }
     }
 
@@ -5263,34 +5244,34 @@ impl SettingsWidget for ApiKeysWidget {
         if !is_byo_enabled && show_provider_keys {
             let auth_state = AuthStateProvider::as_ref(app).get();
             let workspaces = UserWorkspaces::as_ref(app);
-            let upgrade_text_fragments = if let Some(context) =
+            // Plan tier is a workspace billing entitlement, independent of which team the
+            // window has selected; only the admin-permission branch below is team-scoped.
+            let is_enterprise_plan = workspaces
+                .current_workspace_billing_metadata()
+                .is_some_and(|billing| billing.is_enterprise_plan());
+            let upgrade_text_fragments = if is_enterprise_plan {
+                vec![
+                    FormattedTextFragment::hyperlink("Contact sales", "mailto:sales@warp.dev"),
+                    FormattedTextFragment::plain_text(
+                        " to enable bringing your own API keys on your Enterprise plan.",
+                    ),
+                ]
+            } else if let Some(context) =
                 workspaces.team_render_context_for_view_handle(&self.view_handle, app)
             {
-                if workspaces.agent_settings_is_enterprise_team(&context) {
+                let current_user_email = auth_state.user_email().unwrap_or_default();
+                let has_admin_permissions = workspaces
+                    .agent_settings_team_has_admin_permissions(&context, &current_user_email);
+                let upgrade_url = workspaces.agent_settings_upgrade_link_for_team(&context);
+                if has_admin_permissions {
                     vec![
-                        FormattedTextFragment::hyperlink("Contact sales", "mailto:sales@warp.dev"),
-                        FormattedTextFragment::plain_text(
-                            " to enable bringing your own API keys on your Enterprise plan.",
-                        ),
+                        FormattedTextFragment::hyperlink("Upgrade to the Build plan", upgrade_url),
+                        FormattedTextFragment::plain_text(" to use your own API keys."),
                     ]
                 } else {
-                    let current_user_email = auth_state.user_email().unwrap_or_default();
-                    let has_admin_permissions = workspaces
-                        .agent_settings_team_has_admin_permissions(&context, &current_user_email);
-                    let upgrade_url = workspaces.agent_settings_upgrade_link_for_team(&context);
-                    if has_admin_permissions {
-                        vec![
-                            FormattedTextFragment::hyperlink(
-                                "Upgrade to the Build plan",
-                                upgrade_url,
-                            ),
-                            FormattedTextFragment::plain_text(" to use your own API keys."),
-                        ]
-                    } else {
-                        vec![FormattedTextFragment::plain_text(
-                            "Ask your team's admin to upgrade to the Build plan to use your own API keys.",
-                        )]
-                    }
+                    vec![FormattedTextFragment::plain_text(
+                        "Ask your team's admin to upgrade to the Build plan to use your own API keys.",
+                    )]
                 }
             } else if FeatureFlag::SoloUserByok.is_enabled()
                 && auth_state.is_anonymous_or_logged_out()
