@@ -277,6 +277,38 @@ impl TuiText {
             paragraph
         }
     }
+
+    /// Recovers which cells `Paragraph::render` painted for each hyperlink
+    /// span, using the sentinel `underline_color` `tui_markdown` encodes on
+    /// those spans' styles: `Paragraph` owns wrapping, so this is the only
+    /// point that knows where a link landed once wrapped. Clears the
+    /// sentinel afterward so no color is actually rendered.
+    fn record_hyperlinks(
+        &self,
+        origin: TuiScreenPosition,
+        size: TuiSize,
+        surface: &mut TuiPaintSurface<'_>,
+        ctx: &mut TuiPaintContext,
+    ) {
+        for row in 0..size.height {
+            for column in 0..size.width {
+                let position = origin.offset(i32::from(column), i32::from(row));
+                let Some(buffer_point) = surface.buffer_point(position) else {
+                    continue;
+                };
+                let Some(cell) = surface.cell_mut(position) else {
+                    continue;
+                };
+                let Color::Indexed(index) = cell.underline_color else {
+                    continue;
+                };
+                cell.underline_color = Color::Reset;
+                if let Some(url) = self.hyperlinks.get(usize::from(index)) {
+                    ctx.record_hyperlink(buffer_point, url.clone());
+                }
+            }
+        }
+    }
 }
 
 impl TuiElement for TuiText {
@@ -330,38 +362,6 @@ impl TuiElement for TuiText {
         surface.render_widget(origin, size, self.paragraph(size.width));
         if !self.hyperlinks.is_empty() {
             self.record_hyperlinks(origin, size, surface, ctx);
-        }
-    }
-
-    /// Recovers which cells `Paragraph::render` (above) painted for each
-    /// hyperlink span, using the sentinel `underline_color` `tui_markdown`
-    /// encodes on those spans' styles: `Paragraph` owns wrapping, so this is
-    /// the only point that knows where a link landed once wrapped. Clears the
-    /// sentinel afterward so no color is actually rendered.
-    fn record_hyperlinks(
-        &self,
-        origin: TuiScreenPosition,
-        size: TuiSize,
-        surface: &mut TuiPaintSurface<'_>,
-        ctx: &mut TuiPaintContext,
-    ) {
-        for row in 0..size.height {
-            for column in 0..size.width {
-                let position = origin.offset(i32::from(column), i32::from(row));
-                let Some(buffer_point) = surface.buffer_point(position) else {
-                    continue;
-                };
-                let Some(cell) = surface.cell_mut(position) else {
-                    continue;
-                };
-                let Color::Indexed(index) = cell.underline_color else {
-                    continue;
-                };
-                cell.underline_color = Color::Reset;
-                if let Some(url) = self.hyperlinks.get(usize::from(index)) {
-                    ctx.record_hyperlink(buffer_point, url.clone());
-                }
-            }
         }
     }
 
