@@ -1454,15 +1454,30 @@ fn teams_changed_prunes_a_removed_teams_scoped_catalog() {
         initialize_team_scope_test_app(&mut app, workspace);
         let llm_preferences = app.add_singleton_model(LLMPreferences::new);
 
+        let (window, view) = create_team_scope_test_window(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window, team.uid, ctx);
+        });
+        let context = view
+            .update(&mut app, |_, ctx| {
+                UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+            })
+            .expect("window has a team");
+
         // Seed a cached entry as if a caller had already fetched this team's catalog.
         llm_preferences.update(&mut app, |preferences, _| {
-            preferences.models_by_team.insert(
-                Some(team.uid),
-                TeamModelState {
-                    models_by_feature: ModelsByFeature::default(),
-                    agent_mode_models_unavailable: false,
-                },
+            preferences.update_feature_model_choices_for_context(
+                Some(&context),
+                Ok(ModelsByFeature::default()),
             );
+        });
+        llm_preferences.read(&app, |preferences, _| {
+            assert_eq!(
+                preferences.models_by_feature_for_context(Some(&context)),
+                &ModelsByFeature::default(),
+                "the entry should be seeded before the team is removed"
+            );
+            assert_eq!(preferences.models_by_team.len(), 1);
         });
 
         // The user leaves the team: no workspace has it anymore.
@@ -1472,27 +1487,9 @@ fn teams_changed_prunes_a_removed_teams_scoped_catalog() {
 
         llm_preferences.read(&app, |preferences, _| {
             assert!(
-                !preferences.models_by_team.contains_key(&Some(team.uid)),
+                preferences.models_by_team.is_empty(),
                 "a team removed from every workspace should be pruned from models_by_team"
             );
         });
     });
-}
-
-#[test]
-fn is_team_scope_still_valid_treats_no_team_as_always_valid_and_checks_membership() {
-    let current_team_uids: HashSet<ServerId> = [ServerId::from(111)].into_iter().collect();
-
-    assert!(
-        LLMPreferences::is_team_scope_still_valid(None, &current_team_uids),
-        "a resolved no-team scope is never pruned"
-    );
-    assert!(
-        LLMPreferences::is_team_scope_still_valid(Some(111.into()), &current_team_uids),
-        "a current member team stays valid"
-    );
-    assert!(
-        !LLMPreferences::is_team_scope_still_valid(Some(222.into()), &current_team_uids),
-        "a team no longer in any workspace is invalid, e.g. dropping a stale in-flight fetch"
-    );
 }
