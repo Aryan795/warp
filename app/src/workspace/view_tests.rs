@@ -432,11 +432,15 @@ fn test_create_team_folder_noop_without_a_team() {
     });
 }
 
-/// Test that a destination captured when a creation action fires stays stable even if the
-/// window's own team changes afterward (e.g. because the user's team membership changed),
-/// while the window is still open and the dialog it opened hasn't been confirmed yet.
+/// Characterization test, not a regression guard: `CreateTeamFolder` resolves its destination
+/// and opens the naming dialog in one synchronous step, with no await, callback, or user
+/// interaction in between where a later window-team change could be observed. This test would
+/// pass against the pre-migration code too, since both versions read the window's team at the
+/// same single instant — it pins the current captured-and-carried shape (the value stored in the
+/// dialog does not track the window's team going forward) so a future change that defers the
+/// read past that instant would be caught here.
 #[test]
-fn test_create_team_folder_destination_stable_after_window_team_changes() {
+fn test_create_team_folder_destination_does_not_track_later_window_team_changes() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
 
