@@ -22,6 +22,8 @@
 - Operations that explicitly identify a target team may continue to use a raw team UID. This includes discovery, joining, switching, and administration for a team named by the UI. Existing-resource operations prefer the resource identifier when the server can derive and authorize its team.
 - A window either has a selected team or follows no-team behavior. This design does not add a broader pending or global scope enum.
 - Global models and singletons cannot treat one window's selection as process-wide state. Team-derived state is request-local, keyed by team, or handled by an explicitly cross-team operation.
+- Codebase-indexing permission is evaluated for the team scope that starts or uses the work. Shared local index artifacts may be reused across allowed scopes, but a denied scope cannot create, sync, retrieve from, or expose an index to AI.
+- When every known team scope has effective codebase indexing disabled, process-global indexing work does not run. The client does not restore active indices, register index filesystem watchers, automatically discover work, start background sync, or expose indexed retrieval merely because persisted index data exists.
 - Trusted transport may inspect `TeamContext` only to put the same selected team into the request header or body. The response must update that same team's state; adding the type to a signature is insufficient if transport ignores it or falls back to the first/default team. The server still authenticates membership and rejects inconsistent scope.
 - Migration PRs may temporarily retain `team_uid_for_window`, `team_for_window`, `team_for_view`, and `team_for_view_handle`. The completed design removes those general resolvers and retains only `team_render_context_for_view_handle` for borrowed render scope.
 - Public API documentation explains these capability, rendering, and ownership guarantees. Routine call sites remain self-documenting; comments do not narrate implementation steps, list callers, or describe migration history.
@@ -143,7 +145,8 @@ These PRs establish the migration pattern for UI whose team is inferred from the
 #### PR 1C: Code indexing settings
 
 - Migrate the code-indexing settings page and its team-derived codebase-context and automatic-indexing policy reads and changes.
-- Keep indexing jobs tied to their explicit codebase or operation state rather than a later window lookup.
+- Mint operation scope when a window requests indexing, resync, deletion, or indexed retrieval; do not resolve that operation's team from the window again.
+- Present indexing as unavailable in a window whose current team disables it, even when another allowed team has created a shared local index for the same repository.
 - Leave global or cross-window indexing cache redesign out of this PR.
 
 #### PR 1D: Billing and usage presentation
@@ -201,7 +204,10 @@ These PRs require an explicit design review before implementation. They must not
 #### PR 3E: Persisted workspace and codebase indexing
 
 - Remove implicit current/default-team policy from persisted workspace restoration and codebase-indexing decisions.
-- Carry operation scope for new work and use explicit resource identity for existing indexed codebases where possible.
+- Keep local index artifacts shareable where safe, but track which team scopes may create, sync, and use each index.
+- Carry the authorizing scope into background work so indexing can continue without consulting a later window selection.
+- If every known team scope has effective codebase indexing disabled, do not restore active indices, register index filesystem watchers, automatically enqueue repositories, start background sync, or expose indexed retrieval. Persisted artifacts may remain inactive on disk.
+- In a mixed-policy process, run shared background indexing work only when at least one allowed scope authorizes it, and reject creation, mutation, and retrieval from disabled scopes.
 - Ensure background work cannot inherit whichever window most recently changed teams.
 
 ### Group 4: Enforcement cleanup
