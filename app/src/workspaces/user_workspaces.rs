@@ -1233,15 +1233,6 @@ impl UserWorkspaces {
 
         // PrivacySettings can't observe UserWorkspaces for updates, as it's initialized too early in
         // the app initialization flow. So, we update it manually whenever teams data changes.
-        //
-        // These two booleans are the only team-derived values `PrivacySettings` still caches.
-        // They stay ambient (ignoring which window/team is asking) because their remaining
-        // readers -- most visibly `privacy_page.rs` -- call a zero-argument `&self` getter with
-        // no window or team to resolve; a per-team cache key would be meaningless to them. The
-        // enterprise regex *list* used to be cached here too but no longer is: nothing besides
-        // this ambient pair needed a second, manually-synchronized copy of data `UserWorkspaces`
-        // already owns and refreshes (see `CustomSecretRegexUpdater`, which now reads the list
-        // straight from `UserWorkspaces`).
         PrivacySettings::handle(ctx).update(ctx, |settings, ctx| {
             settings.set_is_telemetry_force_enabled(self.is_telemetry_force_enabled());
             settings.set_is_enterprise_secret_redaction_enabled(

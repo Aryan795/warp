@@ -327,11 +327,7 @@ impl PrivacySettings {
         enabled: bool,
         ctx: &mut ModelContext<Self>,
     ) {
-        if enabled == self.is_enterprise_secret_redaction_enabled {
-            return;
-        }
-
-        if enabled {
+        if enabled && !self.is_enterprise_secret_redaction_enabled {
             // First time: Force enable secret redaction setting (safe mode).
             let safe_mode_settings = SafeModeSettings::handle(ctx);
             ctx.update_model(&safe_mode_settings, |safe_mode_settings, ctx| {
@@ -340,6 +336,10 @@ impl PrivacySettings {
         }
 
         self.is_enterprise_secret_redaction_enabled = enabled;
+        // Always notify, even when `enabled` is unchanged: callers of this setter (see
+        // `UserWorkspaces::notify_and_emit_teams_changed`) call it on every teams refresh, and an
+        // observer like the privacy page can have other team-derived data change (e.g. the
+        // enterprise regex list) without this flag flipping.
         ctx.notify();
     }
 
