@@ -3,13 +3,11 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use cloud_object_models::CodeForge;
 use futures::channel::oneshot;
 use futures::executor::block_on;
-use futures::future;
 use repo_metadata::{DirectoryWatcher, RepoMetadataEvent, RepoMetadataModel, RepositoryIdentifier};
 use tempfile::TempDir;
 use warp_cli::agent::Harness;
@@ -35,7 +33,7 @@ use super::{
     OZ_MESSAGE_LISTENER_MANAGED_EXTERNALLY_ENV, OZ_MESSAGE_LISTENER_STATE_ROOT_ENV,
     PlatformErrorCode, SDKConversationOutputStatus, build_secret_env_vars,
     idle_window_for_cli_session_status, idle_window_for_terminal_status,
-    race_run_with_refresh_futures, setup_failure_status_update, terminal_status_log_outcome,
+    setup_failure_status_update, terminal_status_log_outcome,
 };
 use crate::ai::agent::task::TaskId;
 use crate::ai::agent::{
@@ -53,99 +51,6 @@ use crate::ai::skills::SkillManager;
 use crate::auth::credentials::Credentials;
 use crate::server::server_api::managed_mcp::MockManagedMcpClient;
 use crate::test_util::terminal::{add_window_with_terminal, initialize_app_for_terminal_view};
-struct CountOnDrop(Arc<AtomicUsize>);
-
-impl Drop for CountOnDrop {
-    fn drop(&mut self) {
-        self.0.fetch_add(1, Ordering::SeqCst);
-    }
-}
-
-fn run_wait_resume_refresh_lifecycle(has_initial_turn: bool) -> (usize, usize) {
-    let (refresh_tick_tx, refresh_tick_rx) = async_channel::unbounded::<()>();
-    let (initial_turn_tx, initial_turn_rx) = oneshot::channel::<()>();
-    let (follow_up_tx, follow_up_rx) = oneshot::channel::<()>();
-    let (run_exit_tx, run_exit_rx) = oneshot::channel::<()>();
-    let refresh_count = Arc::new(AtomicUsize::new(0));
-    let refresh_count_for_loop = Arc::clone(&refresh_count);
-    let drop_count = Arc::new(AtomicUsize::new(0));
-    let drop_count_for_loop = Arc::clone(&drop_count);
-
-    let run_future = async move {
-        if has_initial_turn {
-            initial_turn_rx
-                .await
-                .expect("fresh execution's initial turn should complete");
-        }
-        follow_up_rx.await.expect("follow-up signal should arrive");
-        run_exit_rx.await.expect("run exit signal should arrive");
-    };
-    let git_refresh = async move {
-        let _drop_guard = CountOnDrop(drop_count_for_loop);
-        loop {
-            match refresh_tick_rx.recv().await {
-                Ok(()) => {
-                    refresh_count_for_loop.fetch_add(1, Ordering::SeqCst);
-                }
-                Err(_) => future::pending::<()>().await,
-            }
-        }
-    };
-
-    let lifecycle = async move {
-        if has_initial_turn {
-            initial_turn_tx
-                .send(())
-                .expect("fresh execution should enter its long wait");
-        }
-        refresh_tick_tx
-            .send(())
-            .await
-            .expect("first periodic refresh tick should be observed");
-        while refresh_count.load(Ordering::SeqCst) != 1 {
-            futures_lite::future::yield_now().await;
-        }
-
-        follow_up_tx
-            .send(())
-            .expect("follow-up should wake the reused run");
-        refresh_tick_tx
-            .send(())
-            .await
-            .expect("refresh cadence should continue after follow-up");
-        while refresh_count.load(Ordering::SeqCst) != 2 {
-            futures_lite::future::yield_now().await;
-        }
-
-        run_exit_tx
-            .send(())
-            .expect("run should exit after the resumed turn");
-        Arc::clone(&refresh_count)
-    };
-
-    let ((), refresh_count) = block_on(future::join(
-        race_run_with_refresh_futures(run_future, git_refresh, future::pending()),
-        lifecycle,
-    ));
-    (
-        refresh_count.load(Ordering::SeqCst),
-        drop_count.load(Ordering::SeqCst),
-    )
-}
-
-#[test]
-fn git_refresh_future_remains_polled_across_fresh_and_resumed_waits() {
-    assert_eq!(
-        run_wait_resume_refresh_lifecycle(true),
-        (2, 1),
-        "fresh execution"
-    );
-    assert_eq!(
-        run_wait_resume_refresh_lifecycle(false),
-        (2, 1),
-        "resumed execution"
-    );
-}
 
 #[test]
 fn test_normalize_single_cli_server() {

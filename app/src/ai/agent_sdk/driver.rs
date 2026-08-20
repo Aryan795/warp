@@ -121,27 +121,6 @@ use environment::PrepareEnvironmentError;
 pub(crate) use snapshot::upload_snapshot_for_handoff;
 use terminal::TerminalDriverEvent;
 
-async fn race_run_with_refresh_futures<F, G, B, T>(
-    run_future: F,
-    git_refresh: G,
-    bedrock_refresh: B,
-) -> T
-where
-    F: Future<Output = T>,
-    G: Future<Output = ()>,
-    B: Future<Output = ()>,
-{
-    let run_future = run_future.fuse();
-    let git_refresh = git_refresh.fuse();
-    let bedrock_refresh = bedrock_refresh.fuse();
-    futures::pin_mut!(run_future, git_refresh, bedrock_refresh);
-    futures::select! {
-        result = run_future => result,
-        _ = git_refresh => unreachable!("git credentials refresh loop resolved unexpectedly"),
-        _ = bedrock_refresh => unreachable!("Bedrock credentials refresh loop resolved unexpectedly"),
-    }
-}
-
 struct CredentialRefreshWrapperLifecycle {
     run_completed: bool,
 }
@@ -170,68 +149,68 @@ impl Drop for CredentialRefreshWrapperLifecycle {
 /// dropping the loops automatically when `run_future` resolves.
 ///
 /// Both refresh loops run forever when active; they are dropped when
-/// [`race_run_with_refresh_futures`] picks the `run_future` arm. This
-/// consolidates the otherwise-repeated 4-arm `match (git, bedrock)` pattern
-/// that would otherwise appear once per harness type.
-fn with_credential_refreshes<F, T>(
+/// `futures::select!` picks the `run_future` arm. This consolidates the
+/// otherwise-repeated 4-arm `match (git, bedrock)` pattern that would
+/// otherwise appear once per harness type.
+async fn with_credential_refreshes<F, T>(
     run_future: F,
     git_task_id: Option<String>,
     ai_client: Arc<dyn AIClient>,
     oidc_strategy: Option<(String, String, String)>,
     foreground: &ModelSpawner<AgentDriver>,
-) -> impl Future<Output = T>
+) -> T
 where
     F: Future<Output = T>,
 {
     let git_refresh_enabled = git_task_id.is_some();
-    let bedrock_refresh_enabled = oidc_strategy.is_some();
-    log::info!(
-        "Git credential refresh lifecycle: event=wrapper_created \
-         git_refresh_enabled={git_refresh_enabled} \
-         bedrock_refresh_enabled={bedrock_refresh_enabled}"
-    );
 
-    async move {
-        let mut wrapper_lifecycle = CredentialRefreshWrapperLifecycle::started();
-        let git_lifecycle = git_refresh_enabled.then(git_credentials::RefreshLoopLifecycle::new);
+    let mut wrapper_lifecycle = CredentialRefreshWrapperLifecycle::started();
+    let git_lifecycle = git_refresh_enabled.then(git_credentials::RefreshLoopLifecycle::new);
 
-        let git_refresh = async {
-            match git_task_id {
-                Some(task_id) => {
-                    git_credentials::refresh_loop(
-                        task_id,
-                        ai_client,
-                        git_lifecycle
-                            .clone()
-                            .expect("lifecycle exists when git refresh is enabled"),
-                    )
-                    .await
-                }
-                None => future::pending::<()>().await,
+    let git_refresh = async {
+        match git_task_id {
+            Some(task_id) => {
+                git_credentials::refresh_loop(
+                    task_id,
+                    ai_client,
+                    git_lifecycle
+                        .clone()
+                        .expect("lifecycle exists when git refresh is enabled"),
+                )
+                .await
             }
-        };
+            None => future::pending::<()>().await,
+        }
+    }
+    .fuse();
 
-        let bedrock_refresh = async move {
-            match oidc_strategy {
-                Some((task_id, role_arn, region)) => {
-                    bedrock_credentials::refresh_loop(task_id, role_arn, region, foreground).await
-                }
-                None => future::pending::<()>().await,
+    let bedrock_refresh = async move {
+        match oidc_strategy {
+            Some((task_id, role_arn, region)) => {
+                bedrock_credentials::refresh_loop(task_id, role_arn, region, foreground).await
             }
-        };
+            None => future::pending::<()>().await,
+        }
+    }
+    .fuse();
 
-        let run_future = async {
-            let result = run_future.await;
-            if let Some(lifecycle) = &git_lifecycle {
-                lifecycle.mark_run_future_completed();
-            }
-            result
-        };
-
-        let result = race_run_with_refresh_futures(run_future, git_refresh, bedrock_refresh).await;
-        wrapper_lifecycle.run_completed = true;
+    let run_future = async {
+        let result = run_future.await;
+        if let Some(lifecycle) = &git_lifecycle {
+            lifecycle.mark_run_future_completed();
+        }
         result
     }
+    .fuse();
+
+    futures::pin_mut!(run_future, git_refresh, bedrock_refresh);
+    let result = futures::select! {
+        result = run_future => result,
+        _ = git_refresh => unreachable!("git credentials refresh loop resolved unexpectedly"),
+        _ = bedrock_refresh => unreachable!("Bedrock credentials refresh loop resolved unexpectedly"),
+    };
+    wrapper_lifecycle.run_completed = true;
+    result
 }
 
 const MCP_SERVER_STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
@@ -2987,6 +2966,12 @@ impl AgentDriver {
         // loops for git credentials and Bedrock OIDC credentials via
         // `with_credential_refreshes`. Refresh futures never resolve on their own —
         // they are dropped automatically when the harness result resolves.
+        log::info!(
+            "Git credential refresh lifecycle: event=wrapper_created \
+             git_refresh_enabled={} bedrock_refresh_enabled={}",
+            task_id_for_refresh.is_some(),
+            oidc_strategy_for_refresh.is_some()
+        );
         match task.harness {
             HarnessKind::Oz => {
                 let status_rx = foreground
