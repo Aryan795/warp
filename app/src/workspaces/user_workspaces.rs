@@ -424,12 +424,6 @@ impl UserWorkspaces {
         self.team_from_uid(context.team_uid)
     }
 
-    /// Mutable counterpart to [`Self::team_for_context`], for operations that write back to
-    /// the team an operation was scoped to instead of every team in the workspace.
-    pub(crate) fn team_for_context_mut(&mut self, context: &TeamContext) -> Option<&mut Team> {
-        self.team_from_uid_mut(context.team_uid)
-    }
-
     /// Returns the windows whose team assignment changed.
     #[must_use]
     fn reconcile_window_team_assignments(&mut self) -> Vec<WindowId> {
@@ -1807,8 +1801,12 @@ impl UserWorkspaces {
         match result {
             Ok(fresh_ai_overages) => {
                 match scope {
+                    // Resolves the context's private `team_uid` and writes only the
+                    // `ai_overages` field, rather than handing out unrestricted `&mut Team`
+                    // access (which would leak the raw UID via `Team::uid` to any holder of
+                    // a `TeamContext`).
                     Some(context) => {
-                        if let Some(team) = self.team_for_context_mut(&context) {
+                        if let Some(team) = self.team_from_uid_mut(context.team_uid) {
                             team.billing_metadata.ai_overages = Some(fresh_ai_overages);
                         }
                     }

@@ -1205,6 +1205,12 @@ fn ai_overages_for_test(requests_used: i32) -> AiOverages {
 /// operation's result bleed into the other team's billing metadata, matching the
 /// acceptance criterion that a window's usage refresh cannot change another team's
 /// displayed or enforced state.
+///
+/// Window B is scoped to team B, which is *not* `workspace.teams[0]` (team A is). This
+/// deliberately rules out a resolver that silently fell back to the workspace's default
+/// team instead of honoring the captured context: such a bug would still leave team A's
+/// (the default's) billing metadata untouched, but it would also leave team B's
+/// untouched, so the assertion on team B catches it.
 #[test]
 fn test_refresh_ai_overages_scopes_the_write_to_the_captured_team_only() {
     let (team_a, team_b) = two_teams();
@@ -1228,18 +1234,23 @@ fn test_refresh_ai_overages_scopes_the_write_to_the_captured_team_only() {
             )
         });
 
-        let (window_a, view_a) = create_test_window(&mut app);
+        // Window A sits on the workspace's default team (A) and never triggers a
+        // refresh; it exists purely to prove the concurrent window's team is left alone.
+        let window_a = WindowId::new();
+        // Window B is the one that mints a context and triggers the refresh.
+        let (window_b, view_b) = create_test_window(&mut app);
         UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
             user_workspaces.set_team_for_window(window_a, team_a.uid, ctx);
+            user_workspaces.set_team_for_window(window_b, team_b.uid, ctx);
         });
-        let context_a = view_a
+        let context_b = view_b
             .update(&mut app, |_, ctx| {
                 UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
             })
-            .expect("a window assigned to team A should mint a context");
+            .expect("a window assigned to team B should mint a context");
 
         UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
-            user_workspaces.refresh_ai_overages(Some(context_a), ctx);
+            user_workspaces.refresh_ai_overages(Some(context_b), ctx);
         });
 
         warpui::r#async::Timer::after(Duration::from_millis(100)).await;
@@ -1248,17 +1259,18 @@ fn test_refresh_ai_overages_scopes_the_write_to_the_captured_team_only() {
             let user_workspaces = UserWorkspaces::as_ref(ctx);
             assert_eq!(
                 user_workspaces
-                    .team_from_uid(team_a.uid)
+                    .team_from_uid(team_b.uid)
                     .and_then(|team| team.billing_metadata.ai_overages.as_ref())
                     .map(|overages| overages.current_monthly_requests_used),
                 Some(7),
-                "the captured team should receive the refreshed overages"
+                "the captured team (B) should receive the refreshed overages"
             );
             assert!(
                 user_workspaces
-                    .team_from_uid(team_b.uid)
+                    .team_from_uid(team_a.uid)
                     .is_some_and(|team| team.billing_metadata.ai_overages.is_none()),
-                "a concurrent window's team must not be touched by another team's refresh"
+                "window A's team (also the workspace's default team) must not be touched by \
+                 window B's refresh"
             );
             assert!(
                 user_workspaces
