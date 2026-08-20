@@ -371,3 +371,52 @@ fn test_ignore_spaces_single_word_query() {
     );
     assert_eq!(regular_result.score, space_ignoring_result.score);
 }
+
+// SkimMatcherV2::fuzzy_indices builds an O(pattern_len * text_len) score matrix with no cap
+// by default, which lets a single pathologically long piece of text (e.g. a huge pasted blob
+// recorded as one shell history entry) drive that allocation into the gigabytes.
+// `element_limit` bounds it; these tests would hang or blow past a reasonable memory/time
+// budget without that bound.
+
+#[test]
+fn test_long_text_completes_quickly_without_unbounded_allocation() {
+    // Comfortably exceeds FUZZY_MATCH_ELEMENT_LIMIT (1_000_000 cells) for any non-trivial
+    // query, forcing the `element_limit` fallback instead of allocating a
+    // `query_len * text_len`-cell score matrix.
+    let text = "x".repeat(3_000_000);
+    let query = "xxxxx";
+
+    let start = instant::Instant::now();
+    let result = match_indices_case_insensitive(&text, query);
+    let elapsed = start.elapsed();
+
+    assert!(result.is_some());
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "fuzzy match against a long text took too long, suggesting an unbounded score matrix \
+         allocation: {elapsed:?}"
+    );
+}
+
+#[test]
+fn test_long_text_all_entry_points_stay_bounded() {
+    // All three public entry points build their own SkimMatcherV2, so each must set
+    // element_limit independently.
+    let text = "y".repeat(3_000_000);
+
+    assert!(match_indices(&text, "yyyyy").is_some());
+    assert!(match_indices_case_insensitive(&text, "yyyyy").is_some());
+    assert!(match_indices_case_insensitive_ignore_spaces(&text, "y y y").is_some());
+}
+
+#[test]
+fn test_ordinary_matches_unaffected_by_element_limit() {
+    // Ordinary, realistically-sized inputs stay well under the element limit and must keep
+    // producing the exact same results as before the bound was introduced.
+    let text = "git commit --amend --no-edit";
+    let query = "gcae";
+
+    let result = match_indices_case_insensitive(text, query).unwrap();
+    assert_eq!(result.matched_indices, vec![0, 4, 13, 15]);
+    assert!(result.score > 0);
+}
