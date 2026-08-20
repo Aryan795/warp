@@ -1,7 +1,9 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use warpui::App;
+use warpui::elements::Empty;
+use warpui::platform::WindowStyle;
+use warpui::{App, Element, TypedActionView, View, ViewHandle, WindowId};
 
 use super::*;
 use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
@@ -12,11 +14,16 @@ use crate::cloud_object::model::persistence::CloudModel;
 use crate::network::NetworkStatus;
 use crate::server::cloud_objects::update_manager::UpdateManager;
 use crate::server::server_api::ServerApiProvider;
+use crate::server::server_api::team::MockTeamClient;
+use crate::server::server_api::workspace::MockWorkspaceClient;
 use crate::server::sync_queue::SyncQueue;
+use crate::settings::PrivacySettings;
 use crate::terminal::input::models::query_model_picker_choices;
 use crate::test_util::settings::initialize_settings_for_tests;
+use crate::workspaces::team::{Team, TeamVisibility};
 use crate::workspaces::team_tester::TeamTesterStatus;
 use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::workspace::Workspace;
 use crate::{LaunchMode, TuiEntryPoint};
 
 // -- DisableReason::should_clear_preference tests --
@@ -1270,94 +1277,222 @@ fn explicit_child_model_pin_preserves_gui_behavior_and_only_emits_for_effective_
     });
 }
 
-// -- Per-team model catalog isolation (PR 3A: `models_by_team`) --
-//
-// These exercise the state layer directly with two independently resolved team scopes,
-// standing in for what two windows' own `TeamContext`s (see
-// `crate::workspaces::user_workspaces::UserWorkspaces::team_context_for_view`) would resolve
-// to. That resolution path is PR 0's own foundation and is already covered by
-// `user_workspaces_tests.rs`; what these tests own is whether `LLMPreferences` keeps two
-// concurrently-open teams' catalogs independent once a caller supplies their resolved scope.
+// -- Per-team model catalog lifecycle (PR 3A: `models_by_team`) --
 
-#[test]
-fn team_scoped_model_catalogs_stay_independent_for_two_concurrently_open_teams() {
-    let mut preferences = LLMPreferences::for_test(ModelsByFeature::default(), Vec::new());
+#[derive(Default)]
+struct TeamScopeTestView;
 
-    let team_a: Option<ServerId> = Some(111.into());
-    let team_b: Option<ServerId> = Some(222.into());
-    let models_a = ModelsByFeature {
-        agent_mode: available(
-            "auto",
-            vec![server_llm("auto", None), server_llm("team-a-model", None)],
-        ),
-        ..ModelsByFeature::default()
-    };
-    let models_b = ModelsByFeature {
-        agent_mode: available(
-            "auto",
-            vec![server_llm("auto", None), server_llm("team-b-model", None)],
-        ),
-        ..ModelsByFeature::default()
-    };
+impl Entity for TeamScopeTestView {
+    type Event = ();
+}
 
-    preferences.update_feature_model_choices_for_team(team_a, Ok(models_a.clone()));
-    preferences.update_feature_model_choices_for_team(team_b, Ok(models_b.clone()));
+impl View for TeamScopeTestView {
+    fn ui_name() -> &'static str {
+        "TeamScopeTestView"
+    }
 
-    assert_eq!(
-        preferences.models_by_feature_for_team(team_a),
-        &models_a,
-        "team A's entry should hold team A's catalog"
-    );
-    assert_eq!(
-        preferences.models_by_feature_for_team(team_b),
-        &models_b,
-        "team B's entry should hold team B's catalog, independent of team A's concurrent update"
-    );
-    assert_eq!(
-        preferences.models_by_feature(),
-        &ModelsByFeature::default(),
-        "the legacy bucket no accessor has migrated off of yet must not observe either team's update"
-    );
+    fn render(&self, _: &AppContext) -> Box<dyn Element> {
+        Empty::new().finish()
+    }
+}
+
+impl TypedActionView for TeamScopeTestView {
+    type Action = ();
+}
+
+fn create_team_scope_test_window(app: &mut App) -> (WindowId, ViewHandle<TeamScopeTestView>) {
+    app.add_window(WindowStyle::NotStealFocus, |_| TeamScopeTestView)
+}
+
+fn team_for_llms_test(uid: i64, name: &str) -> Team {
+    Team {
+        uid: uid.into(),
+        name: name.to_string(),
+        color: None,
+        invite_link: None,
+        members: vec![],
+        pending_email_invites: vec![],
+        invite_link_domain_restrictions: vec![],
+        billing_metadata: Default::default(),
+        stripe_customer_id: None,
+        settings: Default::default(),
+        is_eligible_for_discovery: false,
+        has_billing_history: false,
+        visibility: TeamVisibility::Open,
+    }
+}
+
+fn workspace_for_llms_test(teams: Vec<Team>) -> Workspace {
+    Workspace {
+        uid: "workspace_uid123456789".to_string().into(),
+        name: "test".to_string(),
+        stripe_customer_id: None,
+        teams,
+        billing_metadata: Default::default(),
+        bonus_grants_purchased_this_month: Default::default(),
+        billing_cycle_usage: None,
+        has_billing_history: false,
+        settings: Default::default(),
+        invite_link_domain_restrictions: vec![],
+        pending_email_invites: vec![],
+        is_eligible_for_discovery: false,
+        members: vec![],
+        total_requests_used_since_last_refresh: 0,
+    }
+}
+
+/// Registers the singletons `LLMPreferences::new` and `UserWorkspaces` team-context minting
+/// depend on, backed by `workspace`.
+fn initialize_team_scope_test_app(app: &mut App, workspace: Workspace) {
+    initialize_settings_for_tests(app);
+    app.add_singleton_model(|_| ServerApiProvider::new_for_test());
+    app.add_singleton_model(|_| AuthStateProvider::new_for_test());
+    app.add_singleton_model(AuthManager::new_for_test);
+    app.add_singleton_model(|_| NetworkStatus::new());
+    app.add_singleton_model(PrivacySettings::mock);
+    app.add_singleton_model(|ctx| {
+        UserWorkspaces::mock(
+            Arc::new(MockTeamClient::new()),
+            Arc::new(MockWorkspaceClient::new()),
+            vec![workspace],
+            ctx,
+        )
+    });
+    app.add_singleton_model(CloudModel::mock);
+    app.add_singleton_model(TeamTesterStatus::mock);
+    app.add_singleton_model(SyncQueue::mock);
+    app.add_singleton_model(UpdateManager::mock);
+    app.add_singleton_model(|_| TemplatableMCPServerManager::default());
+    app.add_singleton_model(|ctx| {
+        AIExecutionProfilesModel::new(&LaunchMode::new_for_unit_test(), ctx)
+    });
 }
 
 #[test]
-fn team_scoped_read_defaults_to_an_empty_catalog_before_any_fetch() {
-    let preferences = LLMPreferences::for_test(ModelsByFeature::default(), Vec::new());
-    let unvisited_team: Option<ServerId> = Some(333.into());
+fn team_scoped_catalogs_stay_independent_for_two_windows_on_different_teams() {
+    let team_a = team_for_llms_test(111, "team-a");
+    let team_b = team_for_llms_test(222, "team-b");
+    let workspace = workspace_for_llms_test(vec![team_a.clone(), team_b.clone()]);
 
-    assert_eq!(
-        preferences.models_by_feature_for_team(unvisited_team),
-        &ModelsByFeature::default(),
-        "a team scope with no fetch yet should read a shared empty default, not panic or borrow \
-         another team's data"
-    );
+    App::test((), |mut app| async move {
+        initialize_team_scope_test_app(&mut app, workspace);
+        let llm_preferences = app.add_singleton_model(LLMPreferences::new);
+
+        let (window_a, view_a) = create_team_scope_test_window(&mut app);
+        let (window_b, view_b) = create_team_scope_test_window(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window_a, team_a.uid, ctx);
+            user_workspaces.set_team_for_window(window_b, team_b.uid, ctx);
+        });
+
+        // Each window mints its own context through the same production path a real
+        // call site would use (`UserWorkspaces::team_context_for_view`).
+        let context_a = view_a
+            .update(&mut app, |_, ctx| {
+                UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+            })
+            .expect("window A has a team");
+        let context_b = view_b
+            .update(&mut app, |_, ctx| {
+                UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+            })
+            .expect("window B has a team");
+
+        let models_a = ModelsByFeature {
+            agent_mode: available(
+                "auto",
+                vec![server_llm("auto", None), server_llm("team-a-model", None)],
+            ),
+            ..ModelsByFeature::default()
+        };
+        let models_b = ModelsByFeature {
+            agent_mode: available(
+                "auto",
+                vec![server_llm("auto", None), server_llm("team-b-model", None)],
+            ),
+            ..ModelsByFeature::default()
+        };
+
+        llm_preferences.update(&mut app, |preferences, _| {
+            preferences
+                .update_feature_model_choices_for_context(Some(&context_a), Ok(models_a.clone()));
+            preferences
+                .update_feature_model_choices_for_context(Some(&context_b), Ok(models_b.clone()));
+        });
+
+        llm_preferences.read(&app, |preferences, _| {
+            assert_eq!(
+                preferences.models_by_feature_for_context(Some(&context_a)),
+                &models_a,
+                "window A's context should read window A's catalog"
+            );
+            assert_eq!(
+                preferences.models_by_feature_for_context(Some(&context_b)),
+                &models_b,
+                "window B's context should read window B's catalog, independent of window A's"
+            );
+            assert_eq!(
+                preferences.models_by_feature_for_context(None),
+                &ModelsByFeature::default(),
+                "a resolved no-team scope must stay independent of either team's catalog"
+            );
+            assert_eq!(
+                preferences.models_by_feature(),
+                &ModelsByFeature::default(),
+                "the legacy bucket must not observe either team's update"
+            );
+        });
+    });
 }
 
 #[test]
-fn agent_mode_models_unavailable_is_scoped_per_team() {
-    let mut preferences = LLMPreferences::for_test(ModelsByFeature::default(), Vec::new());
-    let team_a: Option<ServerId> = Some(111.into());
-    let team_b: Option<ServerId> = Some(222.into());
+fn teams_changed_prunes_a_removed_teams_scoped_catalog() {
+    let team = team_for_llms_test(111, "team-a");
+    let workspace = workspace_for_llms_test(vec![team.clone()]);
 
-    // Simulate a failed fetch recorded for team A only.
-    preferences.models_by_team.insert(
-        team_a,
-        TeamModelState {
-            models_by_feature: ModelsByFeature::default(),
-            agent_mode_models_unavailable: true,
-        },
-    );
+    App::test((), |mut app| async move {
+        initialize_team_scope_test_app(&mut app, workspace);
+        let llm_preferences = app.add_singleton_model(LLMPreferences::new);
+
+        // Seed a cached entry as if a caller had already fetched this team's catalog.
+        llm_preferences.update(&mut app, |preferences, _| {
+            preferences.models_by_team.insert(
+                Some(team.uid),
+                TeamModelState {
+                    models_by_feature: ModelsByFeature::default(),
+                    agent_mode_models_unavailable: false,
+                },
+            );
+        });
+
+        // The user leaves the team: no workspace has it anymore.
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.update_workspaces(vec![], ctx);
+        });
+
+        llm_preferences.read(&app, |preferences, _| {
+            assert!(
+                !preferences.models_by_team.contains_key(&Some(team.uid)),
+                "a team removed from every workspace should be pruned from models_by_team"
+            );
+        });
+    });
+}
+
+#[test]
+fn is_team_scope_still_valid_treats_no_team_as_always_valid_and_checks_membership() {
+    let current_team_uids: HashSet<ServerId> = [ServerId::from(111)].into_iter().collect();
 
     assert!(
-        preferences.agent_mode_models_unavailable_for_team(team_a),
-        "team A's failed fetch should be reflected in its own flag"
+        LLMPreferences::is_team_scope_still_valid(None, &current_team_uids),
+        "a resolved no-team scope is never pruned"
     );
     assert!(
-        !preferences.agent_mode_models_unavailable_for_team(team_b),
-        "team B, which never failed, must not observe team A's failure"
+        LLMPreferences::is_team_scope_still_valid(Some(111.into()), &current_team_uids),
+        "a current member team stays valid"
     );
     assert!(
-        !preferences.agent_mode_models_unavailable(),
-        "the legacy no-team bucket must not observe a per-team failure either"
+        !LLMPreferences::is_team_scope_still_valid(Some(222.into()), &current_team_uids),
+        "a team no longer in any workspace is invalid, e.g. dropping a stale in-flight fetch"
     );
 }

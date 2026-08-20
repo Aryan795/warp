@@ -21,7 +21,7 @@ use crate::network::{NetworkStatus, NetworkStatusEvent, NetworkStatusKind};
 use crate::server::ids::ServerId;
 use crate::server::server_api::ServerApiProvider;
 use crate::user_config::{WarpConfig, WarpConfigUpdateEvent};
-use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces, UserWorkspacesEvent};
 
 /// Checks if a user's' API key is being used for the given provider.
 /// Returns `true` if BYO API key is enabled and a key exists for the provider.
@@ -730,15 +730,6 @@ struct TeamModelState {
 
 /// Singleton model holding user/workspace LLM preferences, including the set of LLMs available for
 /// use as well as the user's preferred LLM for Agent Mode.
-///
-/// The model catalog for a genuinely resolved team scope is partitioned by team (see
-/// [`Self::models_by_team`]) so two windows on different teams can hold independent,
-/// concurrently valid catalogs in the same process. Most accessors below
-/// (`get_active_base_model`, `get_base_llm_choices_for_agent_mode`, ...) predate that
-/// partitioning and still read `legacy_models`, a single account-wide catalog with no team
-/// scope of its own; a caller with a resolved team should prefer
-/// [`Self::models_by_feature_for_team`] instead. See specs/multi-team-context/TECH.md, PR 3A,
-/// for why the two are not yet unified.
 pub struct LLMPreferences {
     /// The catalog read by every accessor that has not adopted an explicit team scope, and
     /// populated by the account-wide, unscoped model-choice fetch. Deliberately a separate
@@ -780,6 +771,7 @@ impl LLMPreferences {
             } = event
             {
                 me.refresh_authed_models(ctx);
+                me.refresh_scoped_teams(ctx);
             }
         });
 
@@ -790,6 +782,7 @@ impl LLMPreferences {
         ctx.subscribe_to_model(&AuthManager::handle(ctx), |me, _, event, ctx| {
             if let AuthManagerEvent::AuthComplete = event {
                 me.refresh_authed_models(ctx);
+                me.refresh_scoped_teams(ctx);
             }
         });
 
@@ -797,17 +790,7 @@ impl LLMPreferences {
             if let UserWorkspacesEvent::TeamsChanged = event {
                 me.sanitize_disabled_custom_model_preferences(ctx);
                 me.refresh_authed_models(ctx);
-                // A team policy change can also invalidate a catalog already cached for a
-                // real team scope (`models_by_team`). Re-fetch every such entry so it stays
-                // authoritative too, without guessing at a team no adopter has resolved.
-                // `models_by_team` has no seeding call site yet (see
-                // `Self::models_by_feature_for_team`), so today this loop runs zero times;
-                // it activates automatically once a real caller populates an entry.
-                let cached_team_uids: Vec<Option<ServerId>> =
-                    me.models_by_team.keys().copied().collect();
-                for team_uid in cached_team_uids {
-                    me.refresh_models_for_team(team_uid, ctx);
-                }
+                me.prune_and_refresh_scoped_teams(ctx);
             }
         });
 
@@ -887,36 +870,28 @@ impl LLMPreferences {
             .unwrap_or_else(|| DEFAULT.get_or_init(TeamModelState::default))
     }
 
-    /// The model catalog for a real, resolved team scope (`team_uid`), or for a resolved
-    /// "no team" operation when `team_uid` is `None`. Returns a shared empty default when
-    /// nothing has been fetched for that scope yet.
-    ///
-    /// This is the team-scoped read path a caller with a resolved [`TeamContext`] /
-    /// [`TeamRenderContext`] should use in place of the ambient accessors above
-    /// (`get_active_base_model` et al.). No call site adopts it yet: those accessors are
-    /// called from settings UI, execution-profile resolution, and request construction under
-    /// active migration in several other multi-team PRs (see specs/multi-team-context/TECH.md,
-    /// PR 3A) — changing their signatures here would conflict with that work rather than
-    /// coordinate it.
-    ///
-    /// [`TeamContext`]: crate::workspaces::user_workspaces::TeamContext
-    /// [`TeamRenderContext`]: crate::workspaces::user_workspaces::TeamRenderContext
-    #[allow(dead_code)] // No call site resolves an explicit team scope yet; see above.
-    pub(crate) fn models_by_feature_for_team(
+    /// The model catalog for a captured team-operation scope, or the resolved no-team scope
+    /// when `context` is `None`. Returns a shared empty default when nothing has been
+    /// fetched for that scope yet.
+    #[allow(dead_code)]
+    pub(crate) fn models_by_feature_for_context(
         &self,
-        team_uid: Option<ServerId>,
+        context: Option<&TeamContext>,
     ) -> &ModelsByFeature {
-        &self.team_state(team_uid).models_by_feature
+        &self
+            .team_state(context.map(TeamContext::team_uid_for_transport))
+            .models_by_feature
     }
 
-    /// Whether the most recent authed fetch for `team_uid`'s real, resolved team scope
-    /// failed. See [`Self::models_by_feature_for_team`].
-    #[allow(dead_code)] // No call site resolves an explicit team scope yet; see `models_by_feature_for_team`.
-    pub(crate) fn agent_mode_models_unavailable_for_team(
+    /// Whether the most recent authed fetch for `context`'s scope failed. See
+    /// [`Self::models_by_feature_for_context`].
+    #[allow(dead_code)]
+    pub(crate) fn agent_mode_models_unavailable_for_context(
         &self,
-        team_uid: Option<ServerId>,
+        context: Option<&TeamContext>,
     ) -> bool {
-        self.team_state(team_uid).agent_mode_models_unavailable
+        self.team_state(context.map(TeamContext::team_uid_for_transport))
+            .agent_mode_models_unavailable
     }
 
     /// Builds an `LLMPreferences` for unit tests that only need to set `legacy_models` and
@@ -1799,21 +1774,16 @@ impl LLMPreferences {
         );
     }
 
-    /// Fetches the latest model catalog for `team_uid`'s real, resolved team scope (or the
-    /// resolved no-team scope for `None`) and stores it under that scope's own entry in
-    /// `models_by_team`, leaving every other entry — including `legacy_models` — untouched.
+    /// Fetches the latest model catalog for `team_uid`'s scope and stores it under that
+    /// scope's own entry in `models_by_team`, leaving every other entry untouched. The
+    /// completion is dropped if `team_uid` is no longer a current team membership by the
+    /// time the response arrives, so a slow response cannot resurrect an entry that
+    /// [`Self::prune_and_refresh_scoped_teams`] just removed.
     ///
-    /// TODO(multi-team PR 3A): the transport call below does not yet accept a team scope.
-    /// That depends on PR 2B slice 2's wire-level fix (`get_feature_model_choices(team_uid)`,
-    /// #15359), which has not merged. Until then, every scope's fetch retrieves the same
-    /// account-wide response, so this proves out the per-scope cache/invalidation shape
-    /// without yet returning scope-correct data. Thread `team_uid` into the call below once
-    /// #15359 lands.
-    pub(crate) fn refresh_models_for_team(
-        &self,
-        team_uid: Option<ServerId>,
-        ctx: &mut ModelContext<Self>,
-    ) {
+    /// The transport call below does not yet accept a team scope, so every scope's fetch
+    /// currently retrieves the same account-wide response; this establishes the per-scope
+    /// cache/invalidation shape ahead of that.
+    fn refresh_models_for_team(&self, team_uid: Option<ServerId>, ctx: &mut ModelContext<Self>) {
         if !AuthStateProvider::as_ref(ctx).get().is_logged_in() {
             return;
         }
@@ -1821,17 +1791,63 @@ impl LLMPreferences {
         let ai_api_client = ServerApiProvider::as_ref(ctx).get_ai_client();
         ctx.spawn(
             async move { ai_api_client.get_feature_model_choices().await },
-            move |me, result, _ctx| match result {
-                Ok(update) => me.on_server_update_for_team(team_uid, update),
-                Err(e) => {
-                    report_error!(e.context("Failed to fetch LLMs from server"));
-                    me.models_by_team
-                        .entry(team_uid)
-                        .or_default()
-                        .agent_mode_models_unavailable = true;
+            move |me, result, ctx| {
+                let current_team_uids =
+                    UserWorkspaces::as_ref(ctx).team_uids_across_all_workspaces();
+                if !Self::is_team_scope_still_valid(team_uid, &current_team_uids) {
+                    return;
+                }
+                match result {
+                    Ok(update) => me.on_server_update_for_team(team_uid, update),
+                    Err(e) => {
+                        report_error!(e.context("Failed to fetch LLMs from server"));
+                        me.models_by_team
+                            .entry(team_uid)
+                            .or_default()
+                            .agent_mode_models_unavailable = true;
+                    }
                 }
             },
         );
+    }
+
+    /// The context-bearing counterpart to [`Self::refresh_models_for_team`], for a caller
+    /// holding a captured team-operation scope rather than a raw team UID.
+    #[allow(dead_code)]
+    pub(crate) fn refresh_models_for_context(
+        &self,
+        context: Option<&TeamContext>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.refresh_models_for_team(context.map(TeamContext::team_uid_for_transport), ctx);
+    }
+
+    /// Whether a fetch for `team_uid` should still be applied, given the team memberships
+    /// now on record. A resolved no-team scope (`None`) is always valid; a real team scope
+    /// is valid only while the team is still a current membership.
+    fn is_team_scope_still_valid(
+        team_uid: Option<ServerId>,
+        current_team_uids: &HashSet<ServerId>,
+    ) -> bool {
+        team_uid.is_none_or(|uid| current_team_uids.contains(&uid))
+    }
+
+    /// Re-fetches every team scope already cached in `models_by_team`, without pruning.
+    fn refresh_scoped_teams(&self, ctx: &mut ModelContext<Self>) {
+        let team_uids: Vec<Option<ServerId>> = self.models_by_team.keys().copied().collect();
+        for team_uid in team_uids {
+            self.refresh_models_for_team(team_uid, ctx);
+        }
+    }
+
+    /// Drops `models_by_team` entries for a team no longer present in any workspace, then
+    /// refreshes every entry that remains. Keeps a stale team's catalog from surviving
+    /// indefinitely and from being refetched forever after the user leaves it.
+    fn prune_and_refresh_scoped_teams(&mut self, ctx: &mut ModelContext<Self>) {
+        let current_team_uids = UserWorkspaces::as_ref(ctx).team_uids_across_all_workspaces();
+        self.models_by_team
+            .retain(|team_uid, _| Self::is_team_scope_still_valid(*team_uid, &current_team_uids));
+        self.refresh_scoped_teams(ctx);
     }
 
     /// No auth required (i.e. to populate the pre-login onboarding picker).
@@ -1870,16 +1886,19 @@ impl LLMPreferences {
         }
     }
 
-    /// Test-only counterpart to [`Self::update_feature_model_choices`] for a real, resolved
-    /// team scope. See [`Self::on_server_update_for_team`].
+    /// Test-only counterpart to [`Self::update_feature_model_choices`] for a captured
+    /// team-operation scope. See [`Self::on_server_update_for_team`].
     #[cfg(test)]
-    pub(crate) fn update_feature_model_choices_for_team(
+    pub(crate) fn update_feature_model_choices_for_context(
         &mut self,
-        team_uid: Option<ServerId>,
+        context: Option<&TeamContext>,
         choices_result: Result<ModelsByFeature, anyhow::Error>,
     ) {
         if let Ok(choices) = choices_result {
-            self.on_server_update_for_team(team_uid, choices);
+            self.on_server_update_for_team(
+                context.map(TeamContext::team_uid_for_transport),
+                choices,
+            );
         }
     }
 
@@ -1937,13 +1956,11 @@ impl LLMPreferences {
         ctx.emit(LLMPreferencesEvent::UpdatedAvailableLLMs);
     }
 
-    /// Applies a model-list update for a real, resolved team scope. Unlike
-    /// [`Self::on_server_update`] (the legacy, account-wide path), this does not persist to
-    /// the on-disk cache, reconcile execution-profile preferences, rebuild custom routers, or
-    /// track "new choices" popup state: those side effects all belong to the single legacy
-    /// catalog surfaced by `models_by_feature()`/`get_active_base_model()` et al., which a
-    /// per-team entry has no bearing on until a caller actually reads it through
-    /// [`Self::models_by_feature_for_team`].
+    /// Applies a model-list update for a real team scope. Unlike [`Self::on_server_update`]
+    /// (the legacy, account-wide path), this does not persist to the on-disk cache,
+    /// reconcile execution-profile preferences, rebuild custom routers, or track "new
+    /// choices" popup state: those side effects all belong to the single legacy catalog
+    /// surfaced by `models_by_feature()`, which a per-team entry has no bearing on.
     fn on_server_update_for_team(&mut self, team_uid: Option<ServerId>, update: ModelsByFeature) {
         let state = self.models_by_team.entry(team_uid).or_default();
         state.agent_mode_models_unavailable = false;

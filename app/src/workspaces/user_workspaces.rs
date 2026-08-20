@@ -176,6 +176,17 @@ pub(crate) struct TeamContext {
     team_uid: ServerId,
 }
 
+impl TeamContext {
+    /// Returns the captured team UID for trusted transport (e.g. a request header) or for
+    /// keying a trusted-transport-adjacent cache. General application code must go through
+    /// `UserWorkspaces` accessors instead of calling this directly; it exists so a boundary
+    /// that already needs the raw UID isn't forced to re-derive it from a window or view.
+    #[allow(dead_code)]
+    pub(crate) fn team_uid_for_transport(&self) -> ServerId {
+        self.team_uid
+    }
+}
+
 /// The team a view renders as, borrowed for the duration of a single render.
 ///
 /// Current-team UI must reflect the window's team as of this frame, so this is resolved
