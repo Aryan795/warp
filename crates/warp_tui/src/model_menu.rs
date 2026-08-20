@@ -258,7 +258,6 @@ impl TuiModelMenuModel {
             preferences,
             preferences.get_base_llm_choices_for_agent_mode(ctx),
             &query,
-            team_uid,
             ctx,
         );
         let rows = choices

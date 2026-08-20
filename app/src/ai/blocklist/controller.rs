@@ -433,6 +433,16 @@ impl BlocklistAIController {
         UserWorkspaces::as_ref(ctx).team_uid_for_window(self.window_id)
     }
 
+    /// Updates the window this controller's terminal surface lives in. Cross-window tab drag can
+    /// re-parent the terminal pane (and this model along with it) into another window, which
+    /// would otherwise leave [`Self::window_id`] pointing at the source window and resolve
+    /// [`Self::team_uid`] against the wrong window's team. The owning [`TerminalView`](crate::terminal::view::TerminalView)
+    /// calls this from its own `on_window_transferred` hook, since models don't receive that
+    /// notification directly.
+    pub(crate) fn set_window_id(&mut self, window_id: WindowId) {
+        self.window_id = window_id;
+    }
+
     /// Creates a controller for a terminal surface.
     #[allow(clippy::too_many_arguments)]
     pub fn new(

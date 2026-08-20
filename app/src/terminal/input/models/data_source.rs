@@ -30,9 +30,9 @@ use crate::ai::custom_model_routers::is_custom_router_id;
 use crate::ai::execution_profiles::model_menu_items::is_auto;
 use crate::ai::llms::{
     ByoKeySource, DisableReason, LLMId, LLMInfo, LLMPreferences, LLMProvider, LLMSpec,
-    ModelIconFlags, byo_key_source_for_model, model_leading_icon,
-    should_show_bedrock_icon_for_model,
-    should_show_gemini_enterprise_agent_platform_icon_for_model, should_show_key_icon_for_model,
+    ModelIconFlags, byo_key_source_for_model, is_using_first_party_key_for_provider,
+    model_leading_icon, should_show_bedrock_icon_for_model,
+    should_show_gemini_enterprise_agent_platform_icon_for_model,
 };
 use crate::auth::AuthStateProvider;
 use crate::features::FeatureFlag;
@@ -163,7 +163,6 @@ pub fn query_model_picker_choices<'a>(
     llm_preferences: &LLMPreferences,
     choices: impl IntoIterator<Item = &'a LLMInfo>,
     query_text: &str,
-    team_uid: Option<ServerId>,
     app: &AppContext,
 ) -> Vec<ModelPickerChoice> {
     let choices = ModelSelectorDataSource::order_model_choices(
@@ -186,8 +185,14 @@ pub fn query_model_picker_choices<'a>(
                 }
                 Some(result)
             };
+            // Deliberately ambient, not `team_uid`-scoped: this mirrors `is_usable_llm`'s
+            // selectability check elsewhere in `ai::llms`, which the same deferred-work note on
+            // `first_party_key_source_for_provider_for_team` applies to. Re-scoping which BYO
+            // credential unlocks a `RequiresUpgrade` model to a specific window's team is a
+            // larger, separate change; this picker's disabled state must keep agreeing with the
+            // (ambient) disabled state every other model menu renders for the same `LLMInfo`.
             let disable_reason = if llm.disable_reason == Some(DisableReason::RequiresUpgrade)
-                && should_show_key_icon_for_model(llm, team_uid, app)
+                && is_using_first_party_key_for_provider(&llm.provider, app)
             {
                 None
             } else {
@@ -327,7 +332,7 @@ impl SyncDataSource for ModelSelectorDataSource {
         };
         let team_uid = UserWorkspaces::as_ref(app).team_uid_for_window(self.window_id);
         Ok(
-            query_model_picker_choices(llm_preferences, choices, &query.text, team_uid, app)
+            query_model_picker_choices(llm_preferences, choices, &query.text, app)
                 .into_iter()
                 .map(|choice| {
                     QueryResult::from(ModelSearchItem::new(
