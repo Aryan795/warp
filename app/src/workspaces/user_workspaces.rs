@@ -1813,31 +1813,54 @@ impl UserWorkspaces {
         match result {
             Ok(fresh_ai_overages) => {
                 // TODO: We really need to stop having duplicate billing metadata...
-                match context
+                let updated = match context
                     .as_ref()
                     .and_then(|context| self.team_for_context(context))
                 {
                     Some(team) => {
                         let team_uid = team.uid;
-                        if let Some(team) = self.current_workspace_mut().and_then(|workspace| {
-                            workspace.teams.iter_mut().find(|team| team.uid == team_uid)
-                        }) {
-                            team.billing_metadata.ai_overages = Some(fresh_ai_overages);
-                        }
+                        self.current_workspace_mut()
+                            .and_then(|workspace| {
+                                workspace.teams.iter_mut().find(|team| team.uid == team_uid)
+                            })
+                            .is_some_and(|team| {
+                                team.billing_metadata.ai_overages = Some(fresh_ai_overages);
+                                true
+                            })
                     }
+                    // No team to attribute this value to. With more than one team, broadcasting
+                    // it to every team would put one team's overages onto another's — the exact
+                    // bug this migration exists to fix — so leave existing state alone instead.
+                    // A stale display beats a confidently wrong one. A single-team workspace has
+                    // no such ambiguity, so it keeps updating as before.
                     None => {
-                        if let Some(workspace) = self.current_workspace_mut() {
+                        let team_count = self
+                            .current_workspace()
+                            .map(|workspace| workspace.teams.len())
+                            .unwrap_or(0);
+                        if team_count > 1 {
+                            log::warn!(
+                                "Skipping unscoped AI overages refresh: the current workspace has \
+                                 {team_count} teams and no team was given to scope it to"
+                            );
+                            false
+                        } else if let Some(workspace) = self.current_workspace_mut() {
                             workspace.billing_metadata.ai_overages =
                                 Some(fresh_ai_overages.clone());
                             for team in &mut workspace.teams {
                                 team.billing_metadata.ai_overages = Some(fresh_ai_overages.clone());
                             }
+                            true
+                        } else {
+                            false
                         }
                     }
-                }
+                };
 
-                ctx.emit(UserWorkspacesEvent::AiOveragesUpdated);
-                ctx.notify();
+                if updated {
+                    ctx.emit(UserWorkspacesEvent::AiOveragesUpdated);
+                    ctx.notify();
+                }
             }
             Err(e) => {
                 log::warn!("Failed to refresh AI overages for workspace: {e:?}");

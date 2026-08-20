@@ -2060,13 +2060,68 @@ fn transfer_team_ownership_forwards_the_explicit_team_uid_and_email() {
 }
 
 /// Without a `TeamContext` (no window to infer a team from, e.g. an automatic background
-/// refresh), `refresh_ai_overages` must keep the legacy unscoped call and legacy blast-to-
-/// every-team update, unchanged from before this PR.
+/// refresh) and more than one team, `refresh_ai_overages` cannot know which team the fetched
+/// value belongs to. It must skip the write rather than stamp it onto every team — the cross-
+/// team bug this PR exists to fix — leaving existing billing metadata untouched.
 #[test]
-fn refresh_ai_overages_without_context_forwards_no_team_and_updates_every_team() {
+fn refresh_ai_overages_without_context_skips_the_update_when_multiple_teams_exist() {
     let (team_a, team_b) = two_teams();
     let mut workspace = workspace_for_test(&team_a);
     workspace.teams.push(team_b.clone());
+    let fresh_overages = AiOverages {
+        current_monthly_request_cost_cents: 500,
+        current_monthly_requests_used: 10,
+        current_period_end: chrono::Utc::now(),
+    };
+
+    App::test((), |mut app| async move {
+        let mut workspace_client = MockWorkspaceClient::new();
+        let fresh_overages = fresh_overages.clone();
+        workspace_client
+            .expect_refresh_ai_overages()
+            .withf(|team_uid: &Option<ServerId>| team_uid.is_none())
+            .times(1)
+            .returning(move |_| Ok(fresh_overages.clone()));
+
+        app.add_singleton_model(|ctx| {
+            UserWorkspaces::mock(
+                Arc::new(MockTeamClient::new()),
+                Arc::new(workspace_client),
+                vec![workspace],
+                ctx,
+            )
+        });
+
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.refresh_ai_overages(None, ctx);
+        });
+
+        warpui::r#async::Timer::after(Duration::from_millis(100)).await;
+
+        app.read(|ctx| {
+            let workspace = UserWorkspaces::as_ref(ctx)
+                .current_workspace()
+                .expect("workspace should exist");
+            assert!(
+                workspace.billing_metadata.ai_overages.is_none(),
+                "an unscoped refresh with multiple teams must not write workspace-level overages"
+            );
+            for team in &workspace.teams {
+                assert!(
+                    team.billing_metadata.ai_overages.is_none(),
+                    "an unscoped refresh with multiple teams must not stamp overages onto any team"
+                );
+            }
+        });
+    })
+}
+
+/// A single-team workspace has no ambiguity about which team an unscoped refresh belongs to,
+/// so it keeps updating exactly as it did before this PR.
+#[test]
+fn refresh_ai_overages_without_context_updates_the_sole_team() {
+    let team = team_for_test();
+    let workspace = workspace_for_test(&team);
     let fresh_overages = AiOverages {
         current_monthly_request_cost_cents: 500,
         current_monthly_requests_used: 10,
@@ -2108,18 +2163,17 @@ fn refresh_ai_overages_without_context_forwards_no_team_and_updates_every_team()
                     .as_ref()
                     .map(|overages| overages.current_monthly_requests_used),
                 Some(10),
-                "the legacy unscoped refresh should still update workspace-level overages"
+                "an unscoped refresh with a single team should still update workspace-level overages"
             );
-            for team in &workspace.teams {
-                assert_eq!(
-                    team.billing_metadata
-                        .ai_overages
-                        .as_ref()
-                        .map(|overages| overages.current_monthly_requests_used),
-                    Some(10),
-                    "the legacy unscoped refresh should still blast the same overages to every team"
-                );
-            }
+            assert_eq!(
+                workspace
+                    .teams
+                    .first()
+                    .and_then(|team| team.billing_metadata.ai_overages.as_ref())
+                    .map(|overages| overages.current_monthly_requests_used),
+                Some(10),
+                "an unscoped refresh with a single team should still update that team's overages"
+            );
         });
     })
 }
