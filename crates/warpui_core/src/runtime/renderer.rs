@@ -238,10 +238,20 @@ fn write_cell_run<'a, W: Write>(
         if let Some(url) = run_url {
             write_hyperlink_escape(backend, Some(url))?;
         }
-        backend.draw(cells[start..end].iter().copied())?;
+        let draw_result = backend.draw(cells[start..end].iter().copied());
         if run_url.is_some() {
-            write_hyperlink_escape(backend, None)?;
+            if draw_result.is_err() {
+                // The draw itself failed after the hyperlink was opened. Still
+                // attempt the close so a transient writer error can't leave
+                // every later line of output clickable; the close's own
+                // result is secondary; the draw error below is what the
+                // caller needs to see.
+                let _ = write_hyperlink_escape(backend, None);
+            } else {
+                write_hyperlink_escape(backend, None)?;
+            }
         }
+        draw_result?;
         start = end;
     }
     Ok(())
@@ -251,20 +261,25 @@ fn write_cell_run<'a, W: Write>(
 /// subsequently printed cells, `None` closes it. `CrosstermBackend` implements
 /// `io::Write` by forwarding to its inner writer, so this interleaves
 /// correctly with the `Backend::draw` calls around it in the same byte stream.
+/// Builds the complete escape into one buffer and writes it with a single
+/// `write_all` call rather than `write!`, since `write!`'s format
+/// interpolation can otherwise fragment one escape across multiple
+/// `Write::write` calls, which callers observing the raw byte stream (or a
+/// writer that fails mid-stream) should never see as a partial escape.
 fn write_hyperlink_escape<W: Write>(
     backend: &mut CrosstermBackend<&mut W>,
     url: Option<&str>,
 ) -> io::Result<()> {
-    match url {
+    let escape = match url {
         // Strips control bytes so a malformed or malicious URL can't inject
         // further escape sequences into the terminal stream.
-        Some(url) => write!(
-            backend,
+        Some(url) => format!(
             "\x1b]8;;{}\x1b\\",
             url.chars().filter(|c| !c.is_control()).collect::<String>()
         ),
-        None => write!(backend, "\x1b]8;;\x1b\\"),
-    }
+        None => "\x1b]8;;\x1b\\".to_owned(),
+    };
+    backend.write_all(escape.as_bytes())
 }
 
 #[cfg(test)]

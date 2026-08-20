@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::{self, Write};
 use std::rc::Rc;
 
 use ratatui::buffer::CellWidth;
@@ -25,10 +26,44 @@ fn draw_with_hyperlinks(
     hyperlinks: &HashMap<(u16, u16), Rc<str>>,
 ) -> String {
     let mut output = Vec::new();
-    renderer
-        .draw(&mut output, buffer, None, hyperlinks)
-        .unwrap();
+    renderer.draw(&mut output, buffer, None, hyperlinks).unwrap();
     String::from_utf8(output).unwrap()
+}
+
+/// A writer that fails every write once it has seen an OSC 8 open escape,
+/// until it fails exactly one call — simulating a transient error partway
+/// through the bracketed draw, after the open succeeded. Every other write
+/// (setup, the open/close escapes themselves, and anything after the single
+/// failure) succeeds, so the close attempt that follows the failure can be
+/// observed directly in `written`.
+#[derive(Default)]
+struct DrawFailingWriter {
+    written: Vec<u8>,
+    saw_open: bool,
+    failed_once: bool,
+}
+
+impl Write for DrawFailingWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let is_hyperlink_escape = buf.starts_with(b"\x1b]8;;");
+        if is_hyperlink_escape {
+            // An open escape carries a URL between the two `;;`/`\x1b\\`
+            // markers, so it's longer than the bare close escape.
+            self.saw_open = buf.len() > b"\x1b]8;;\x1b\\".len();
+            self.written.extend_from_slice(buf);
+            return Ok(buf.len());
+        }
+        if self.saw_open && !self.failed_once {
+            self.failed_once = true;
+            return Err(io::Error::other("simulated write failure"));
+        }
+        self.written.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// The CSI sequence crossterm emits to move the cursor to `(x, y)` (1-based).
@@ -360,6 +395,34 @@ fn resize_repaint_reemits_every_current_hyperlink() {
     assert!(
         output.contains(&open),
         "a resize's full repaint should re-emit every current hyperlink: {output:?}"
+    );
+}
+
+#[test]
+fn write_failure_during_the_draw_still_closes_the_hyperlink_and_propagates_the_original_error() {
+    let mut renderer = TuiFrameRenderer::new();
+    let buffer = line_buffer("abc");
+    let url: Rc<str> = "https://warp.dev".into();
+    let mut hyperlinks = HashMap::new();
+    hyperlinks.insert((1, 0), url.clone());
+
+    let mut writer = DrawFailingWriter::default();
+    let result = renderer.draw(&mut writer, &buffer, None, &hyperlinks);
+
+    assert!(
+        result.is_err(),
+        "the simulated write failure should propagate as the draw's error"
+    );
+    let output = String::from_utf8(writer.written).unwrap();
+    let open = format!("\u{1b}]8;;{url}\u{1b}\\");
+    let close = "\u{1b}]8;;\u{1b}\\";
+    assert!(
+        output.contains(&open),
+        "the open escape should have been written before the simulated failure: {output:?}"
+    );
+    assert!(
+        output.contains(close),
+        "the close escape must still be attempted (and here, succeed) even though the draw failed, so the hyperlink can't leak open: {output:?}"
     );
 }
 
