@@ -24780,10 +24780,16 @@ impl TerminalView {
                 .and_then(|item| item.block_index)
                 == Some(hovered_block_index);
 
+            let user_workspaces = UserWorkspaces::as_ref(app);
+            let is_enterprise_secret_redaction_enabled = user_workspaces
+                .is_enterprise_secret_redaction_enabled_for_team(
+                    user_workspaces.team_for_view_handle(&self.view_handle, app),
+                );
             element = element.with_hovered_index(
                 hovered_block_index,
                 model,
                 should_render_tooltip_below_button,
+                is_enterprise_secret_redaction_enabled,
                 app,
             );
         }

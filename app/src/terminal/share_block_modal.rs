@@ -44,16 +44,14 @@ use crate::send_telemetry_from_ctx;
 use crate::server::block::{Block as ServerBlock, DisplaySetting};
 use crate::server::server_api::block::BlockClient;
 use crate::server::telemetry::TelemetryEvent;
-use crate::settings::{
-    AISettings, EnforceMinimumContrast, FontSettings, FontSettingsChangedEvent, PrivacySettings,
-};
+use crate::settings::{AISettings, EnforceMinimumContrast, FontSettings, FontSettingsChangedEvent};
 use crate::settings_view::SettingsSection;
 use crate::terminal::TerminalModel;
 use crate::terminal::grid_renderer::{self};
 use crate::terminal::ligature_settings::{LigatureSettings, should_use_ligature_rendering};
 use crate::terminal::model::ObfuscateSecrets;
 use crate::terminal::model::terminal_model::BlockIndex;
-use crate::terminal::safe_mode_settings::get_secret_obfuscation_mode;
+use crate::terminal::safe_mode_settings::get_secret_obfuscation_mode_for_window;
 use crate::themes::theme::WarpTheme;
 use crate::ui_components::icons::Icon;
 use crate::util::bindings::CustomAction;
@@ -139,6 +137,10 @@ pub struct ShareBlockModal {
     embed_display_options: Vec<(String, DisplaySetting)>,
     show_prompt: bool,
     obfuscate_secrets: ObfuscateSecrets,
+    /// Whether the current window's team enforces enterprise secret redaction. Cached (rather
+    /// than read ambiently at render time) alongside `obfuscate_secrets`, since both are
+    /// resolved from the same window/team context and `render` only has `&AppContext`.
+    is_enterprise_secret_redaction_enabled: bool,
     /// We abort the block title generation requests early if the user updated the title text field
     /// before the request completes, rendering the current pending banner request irrelevant.
     title_generation_future_handle: Option<SpawnedFutureHandle>,
@@ -248,7 +250,11 @@ impl ShareBlockModal {
             embed_display_handles,
             embed_display_options,
             show_prompt: false,
-            obfuscate_secrets: get_secret_obfuscation_mode(ctx),
+            obfuscate_secrets: get_secret_obfuscation_mode_for_window(ctx.window_id(), ctx),
+            is_enterprise_secret_redaction_enabled: UserWorkspaces::as_ref(ctx)
+                .is_enterprise_secret_redaction_enabled_for_team(
+                    UserWorkspaces::as_ref(ctx).team_for_view(ctx),
+                ),
             title_generation_future_handle: None,
         }
     }
@@ -425,7 +431,11 @@ impl ShareBlockModal {
         ctx.focus_self();
         self.model = Some(model);
         self.selected_block = Some(block_id);
-        self.obfuscate_secrets = get_secret_obfuscation_mode(ctx);
+        self.obfuscate_secrets = get_secret_obfuscation_mode_for_window(ctx.window_id(), ctx);
+        self.is_enterprise_secret_redaction_enabled = UserWorkspaces::as_ref(ctx)
+            .is_enterprise_secret_redaction_enabled_for_team(
+                UserWorkspaces::as_ref(ctx).team_for_view(ctx),
+            );
         if self.obfuscate_secrets.is_visually_obfuscated() {
             self.scan_selected_block_for_secrets(ctx);
         }
@@ -1029,33 +1039,32 @@ impl ShareBlockModal {
         column.add_child(Shrinkable::new(1., single_block).finish());
 
         if !link_generated {
-            let redact_secrets_checkbox =
-                if PrivacySettings::as_ref(app).is_enterprise_secret_redaction_enabled() {
-                    // Force check the checkbox if enterprise secret redaction is enabled.
-                    appearance
-                        .ui_builder()
-                        .checkbox(
-                            self.mouse_state_handles.redact_secrets_mouse_state.clone(),
-                            Some(CHECKBOX_SIZE),
-                        )
-                        .check(true)
-                        .build()
-                        .disable()
-                        .finish()
-                } else {
-                    appearance
-                        .ui_builder()
-                        .checkbox(
-                            self.mouse_state_handles.redact_secrets_mouse_state.clone(),
-                            Some(CHECKBOX_SIZE),
-                        )
-                        .check(self.obfuscate_secrets.is_visually_obfuscated())
-                        .build()
-                        .on_click(move |ctx, _, _| {
-                            ctx.dispatch_typed_action(ShareBlockModalAction::ToggleObfuscateSecrets)
-                        })
-                        .finish()
-                };
+            let redact_secrets_checkbox = if self.is_enterprise_secret_redaction_enabled {
+                // Force check the checkbox if enterprise secret redaction is enabled.
+                appearance
+                    .ui_builder()
+                    .checkbox(
+                        self.mouse_state_handles.redact_secrets_mouse_state.clone(),
+                        Some(CHECKBOX_SIZE),
+                    )
+                    .check(true)
+                    .build()
+                    .disable()
+                    .finish()
+            } else {
+                appearance
+                    .ui_builder()
+                    .checkbox(
+                        self.mouse_state_handles.redact_secrets_mouse_state.clone(),
+                        Some(CHECKBOX_SIZE),
+                    )
+                    .check(self.obfuscate_secrets.is_visually_obfuscated())
+                    .build()
+                    .on_click(move |ctx, _, _| {
+                        ctx.dispatch_typed_action(ShareBlockModalAction::ToggleObfuscateSecrets)
+                    })
+                    .finish()
+            };
 
             let redact_secrets_description = appearance
                 .ui_builder()

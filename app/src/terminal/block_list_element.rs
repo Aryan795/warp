@@ -67,9 +67,7 @@ use crate::appearance::Appearance;
 use crate::drive::settings::WarpDriveSettings;
 use crate::features::FeatureFlag;
 use crate::pane_group::SplitPaneState;
-use crate::settings::{
-    AISettings, DebugSettings, EnforceMinimumContrast, PrivacySettings, TerminalSpacing,
-};
+use crate::settings::{AISettings, DebugSettings, EnforceMinimumContrast, TerminalSpacing};
 use crate::terminal::alt_screen::{should_intercept_mouse, should_intercept_scroll};
 use crate::terminal::block_list_viewport::AutoscrollBehavior;
 use crate::terminal::blockgrid_renderer::BlockGridParams;
@@ -1054,11 +1052,13 @@ impl BlockListElement {
     }
 
     /// Returns an updated version of the [`BlockListElement`] that renders the toolbelt on top of the hovered block.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_hovered_index(
         mut self,
         block_index: BlockIndex,
         model: &TerminalModel,
         should_render_tooltip_below_button: bool,
+        is_enterprise_secret_redaction_enabled: bool,
         app: &AppContext,
     ) -> Self {
         self.hovered_block_index = Some(block_index);
@@ -1211,7 +1211,7 @@ impl BlockListElement {
             )
             .with_uniform_padding(4.);
 
-            let element = if PrivacySettings::as_ref(app).is_enterprise_secret_redaction_enabled()
+            let element = if is_enterprise_secret_redaction_enabled
                 && model
                     .block_list()
                     .block_at(block_index)
