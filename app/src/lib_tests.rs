@@ -147,6 +147,56 @@ fn startup_auth_is_non_blocking_for_gui_and_tui() {
 }
 
 #[test]
+fn retry_gate_fires_when_iap_ready_arrives_before_attempt_settles() {
+    // Reproduces the reported race: IAP becomes ready while the optimistic
+    // attempt is still in flight. The retry must wait for the attempt to
+    // settle rather than firing immediately.
+    let mut gate = StartupAuthRetryGate::default();
+    assert!(!gate.on_iap_token_ready());
+    assert!(gate.on_first_attempt_settled(false));
+}
+
+#[test]
+fn retry_gate_fires_when_attempt_settles_before_iap_ready() {
+    let mut gate = StartupAuthRetryGate::default();
+    assert!(!gate.on_first_attempt_settled(false));
+    assert!(gate.on_iap_token_ready());
+}
+
+#[test]
+fn retry_gate_does_not_fire_when_first_attempt_already_authenticated() {
+    for iap_ready_first in [true, false] {
+        let mut gate = StartupAuthRetryGate::default();
+        if iap_ready_first {
+            assert!(!gate.on_iap_token_ready());
+            assert!(!gate.on_first_attempt_settled(true));
+        } else {
+            assert!(!gate.on_first_attempt_settled(true));
+            assert!(!gate.on_iap_token_ready());
+        }
+    }
+}
+
+#[test]
+fn retry_gate_fires_at_most_once() {
+    let mut gate = StartupAuthRetryGate::default();
+    assert!(!gate.on_first_attempt_settled(false));
+    assert!(gate.on_iap_token_ready());
+    // A later proactive refresh can report `StateChanged` again; the retry
+    // must not fire a second time.
+    assert!(!gate.on_iap_token_ready());
+}
+
+#[test]
+fn retry_gate_never_fires_if_iap_never_becomes_ready() {
+    // Mirrors what happens once `IapManager` exhausts its retries: the gate
+    // just sits idle rather than retrying or panicking.
+    let mut gate = StartupAuthRetryGate::default();
+    assert!(!gate.on_first_attempt_settled(false));
+    assert!(!gate.retried);
+}
+
+#[test]
 fn launch_modes_select_expected_logging_frontend() {
     let tui = LaunchMode::Tui {
         entrypoint: TuiEntryPoint::Interactive {
