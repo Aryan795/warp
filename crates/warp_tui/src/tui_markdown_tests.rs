@@ -1,4 +1,6 @@
 use std::cell::Cell;
+use std::collections::HashMap;
+use std::rc::Rc;
 
 use futures::channel::oneshot;
 use markdown_parser::{
@@ -78,6 +80,37 @@ fn renders_blocks_inline_styles_and_accessible_links_without_markers() {
             assert!(buffer[(8, 2)].modifier.contains(Modifier::ITALIC));
             assert!(buffer[(16, 2)].modifier.contains(Modifier::CROSSED_OUT));
             assert!(buffer[(32, 2)].modifier.contains(Modifier::UNDERLINED));
+        });
+    });
+}
+
+#[test]
+fn wrapped_link_text_carries_the_full_url_on_every_wrapped_row() {
+    App::test((), |app| async move {
+        app.add_singleton_model(|_| Appearance::mock());
+        app.read(|ctx| {
+            let url = "https://warp.dev/very/long/path/that/should/wrap/across/rows";
+            let formatted = parse_markdown(&format!("[click here]({url})"))
+                .expect("Markdown should parse");
+            let (lines, hyperlinks) = render_with_hyperlinks(&formatted, 20, ctx);
+            assert!(
+                lines.len() > 1,
+                "expected the link's display text plus URL suffix to wrap: {lines:?}"
+            );
+
+            let url: Rc<str> = url.into();
+            for (y, line) in lines.iter().enumerate() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let y = u16::try_from(y).unwrap();
+                let tagged = (0..u16::try_from(line.chars().count()).unwrap())
+                    .any(|x| hyperlinks.get(&(x, y)) == Some(&url));
+                assert!(
+                    tagged,
+                    "row {y} ({line:?}) should carry the link's full URL, not just a fragment of it"
+                );
+            }
         });
     });
 }
@@ -497,6 +530,33 @@ fn render(
     ctx: &AppContext,
 ) -> (Vec<String>, warpui_core::elements::tui::TuiBuffer) {
     render_with_hooks(formatted, width, &TuiMarkdownBlockHooks::default(), ctx)
+}
+
+/// Renders like [`render`], but returns the frame's hyperlink side table
+/// (buffer cell -> URL) instead of the buffer, for asserting on OSC 8
+/// hyperlink placement rather than visible text.
+fn render_with_hyperlinks(
+    formatted: &FormattedText,
+    width: u16,
+    ctx: &AppContext,
+) -> (Vec<String>, HashMap<(u16, u16), Rc<str>>) {
+    let palette = TuiMarkdownPalette::from_builder(&TuiUiBuilder::from_app(ctx));
+    let mut presenter = TuiPresenter::new();
+    let frame = presenter.present_element(
+        render_formatted_text(formatted, palette, &TuiMarkdownBlockHooks::default()),
+        TuiRect::new(0, 0, width, 40),
+        ctx,
+    );
+    let mut lines = frame
+        .buffer
+        .to_lines()
+        .into_iter()
+        .map(|line| line.trim_end().to_owned())
+        .collect::<Vec<_>>();
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    (lines, frame.hyperlinks)
 }
 
 fn render_with_hooks(
