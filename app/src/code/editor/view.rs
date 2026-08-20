@@ -933,8 +933,17 @@ impl CodeEditorView {
         true
     }
 
-    pub(crate) fn with_can_show_diff_ui(mut self, can_show_diff_ui: bool) -> Self {
+    pub(crate) fn with_can_show_diff_ui(
+        mut self,
+        can_show_diff_ui: bool,
+        ctx: &mut ViewContext<Self>,
+    ) -> Self {
         self.display_options.can_show_diff_ui = can_show_diff_ui;
+        // Diff UI is never shown for this editor, so disable diff tracking on the model to
+        // avoid the per-edit cost of materializing the full buffer text and diffing it.
+        self.model.update(ctx, |model, _ctx| {
+            model.set_diff_tracking_enabled(can_show_diff_ui);
+        });
         self
     }
 

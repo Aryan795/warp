@@ -619,6 +619,13 @@ impl DiffModel {
         self.abort_handle = Some((handle, version));
     }
 
+    /// Whether a diff computation is currently in flight (i.e. `compute_diff` scheduled an
+    /// async task that hasn't completed yet).
+    #[cfg(test)]
+    pub(crate) fn has_pending_diff_computation(&self) -> bool {
+        self.abort_handle.is_some()
+    }
+
     #[cfg(test)]
     async fn compute_diff_for_test(&mut self, new: String) {
         let Some(base_text) = self.base.clone() else {

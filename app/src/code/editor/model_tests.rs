@@ -110,6 +110,54 @@ fn test_no_trailing_newline() {
     })
 }
 
+/// Regression test for the memory issue where every content change materialized the full
+/// buffer text and recomputed the diff, even for editors that never need diff tracking.
+#[test]
+fn test_diff_tracking_disabled_skips_diff_computation() {
+    App::test((), |mut app| async move {
+        initialize_deps(&mut app);
+
+        // Diff tracking must be disabled before the editor is seeded with content, since
+        // resetting content emits a `ContentChanged` event just like a regular edit does.
+        let editor = app.add_model(|ctx| {
+            let styles = code_text_styles(Appearance::as_ref(ctx), FontSettings::as_ref(ctx), None);
+            let mut model = CodeEditorModel::new(styles, None, false, None, ctx);
+            model.set_diff_tracking_enabled(false);
+            let state =
+                InitialBufferState::plain_text("AAA\nBBB").with_version(ContentVersion::new());
+            model.reset_content(state, ctx);
+            model.diff().update(ctx, |diff, _| {
+                diff.set_base(MultilineString::apply("AAA\nBBB"));
+            });
+            model
+        });
+
+        editor.update(&mut app, |editor, ctx| {
+            editor.insert("X", EditOrigin::UserTyped, ctx);
+        });
+        editor.read(&app, |editor, ctx| {
+            assert!(
+                !editor.diff().as_ref(ctx).has_pending_diff_computation(),
+                "content changes must not schedule diff computation when tracking is disabled"
+            );
+        });
+
+        // Sanity check: with diff tracking left enabled (the default), the same edit does
+        // schedule a diff computation.
+        let tracked_editor =
+            mock_model_with_diff(&mut app, "AAA\nBBB", "AAA\nBBB", ContentVersion::new());
+        tracked_editor.update(&mut app, |editor, ctx| {
+            editor.insert("X", EditOrigin::UserTyped, ctx);
+        });
+        tracked_editor.read(&app, |editor, ctx| {
+            assert!(
+                editor.diff().as_ref(ctx).has_pending_diff_computation(),
+                "content changes should still schedule diff computation when tracking is enabled"
+            );
+        });
+    })
+}
+
 #[test]
 fn test_toggle_comment() {
     App::test((), |mut app| async move {

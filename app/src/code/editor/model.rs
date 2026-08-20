@@ -313,6 +313,11 @@ pub struct CodeEditorModel {
     lazy_layout_initialized: bool,
     /// Whether syntax parsing should be bootstrapped from the latest full buffer content.
     pending_syntax_tree_bootstrap: bool,
+    /// Whether this editor maintains diff state (base content + line-level diff status) as
+    /// content changes. Editors that can never show diff UI should disable this, since
+    /// otherwise every content change pays the cost of materializing the full buffer text and
+    /// diffing it against the base, regardless of whether anything reads the result.
+    diff_tracking_enabled: bool,
 }
 
 impl CodeEditorModel {
@@ -470,6 +475,7 @@ impl CodeEditorModel {
             lazy_layout_enabled,
             lazy_layout_initialized,
             pending_syntax_tree_bootstrap: false,
+            diff_tracking_enabled: true,
         }
     }
 
@@ -672,6 +678,13 @@ impl CodeEditorModel {
 
     pub fn diff(&self) -> &ModelHandle<DiffModel> {
         &self.diff
+    }
+
+    /// Enables or disables diff tracking (see the `diff_tracking_enabled` field's doc comment).
+    /// Should be set once, before the editor receives any content changes: editors that can
+    /// never show diff UI should disable it to skip the per-edit cost of maintaining diff state.
+    pub fn set_diff_tracking_enabled(&mut self, enabled: bool) {
+        self.diff_tracking_enabled = enabled;
     }
 
     pub fn hovered_symbol_range(&self) -> Option<&HoverableLink> {
@@ -1586,7 +1599,6 @@ impl CodeEditorModel {
                 selection_model_id,
             } => {
                 let buffer = self.content().as_ref(ctx);
-                let content = buffer.text();
                 if self.should_defer_syntax_tree_parsing() {
                     self.pending_syntax_tree_bootstrap = true;
                 } else {
@@ -1635,9 +1647,15 @@ impl CodeEditorModel {
                     }
                 }
 
-                self.diff.update(ctx, move |diff, ctx| {
-                    diff.compute_diff(content, *buffer_version, ctx)
-                });
+                // Computing the diff requires materializing the full buffer text on every edit
+                // (an O(document size) copy), so skip it entirely for editors that can never
+                // show diff UI rather than paying that cost on every keystroke.
+                if self.diff_tracking_enabled {
+                    let content = self.content().as_ref(ctx).text();
+                    self.diff.update(ctx, move |diff, ctx| {
+                        diff.compute_diff(content, *buffer_version, ctx)
+                    });
+                }
 
                 // If we are delaying rendering, push these updates to the delay rendering state. Otherwise, flush them to diff and rendering model.
                 if let Some(delay_rendering) = &mut self.delay_rendering {
