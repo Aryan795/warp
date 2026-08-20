@@ -1,8 +1,9 @@
+use pathfinder_color::ColorU;
 use string_offset::CharOffset;
 use sum_tree::SumTree;
 
-use super::{BufferCursor, BufferSumTree};
-use crate::content::text::{BufferBlockStyle, BufferText, BufferTextStyle, MarkerDir};
+use super::{BufferCursor, BufferSumTree, BufferTextBatch};
+use crate::content::text::{BufferBlockStyle, BufferText, BufferTextStyle, ColorMarker, MarkerDir};
 
 /// Helper function to count the number of Text fragments in a SumTree
 fn count_text_fragments(tree: &SumTree<BufferText>) -> usize {
@@ -181,8 +182,9 @@ fn seed_tree(shape: &str) -> SumTree<BufferText> {
 
 /// Asserts that no fragment's leading character would have fitted in the fragment before it,
 /// which is what it means for the text to be packed as tightly as [`TEXT_FRAGMENT_SIZE`]
-/// allows. Together with the content assertion this pins the fragmentation exactly, since
-/// maximal left-to-right packing of a given sequence is unique.
+/// allows. Together with the content and fragment-count assertions this pins the fragmentation
+/// exactly, since maximal left-to-right packing of a given sequence is unique. The count is
+/// load-bearing: this walker skips an empty fragment, whose leading character does not exist.
 fn assert_fragments_packed(tree: &SumTree<BufferText>, case: &str) {
     use crate::content::text::TEXT_FRAGMENT_SIZE;
 
@@ -242,6 +244,8 @@ fn test_append_str_fragmentation() {
         // `lines` strips the carriage return, so CRLF collapses to a single newline item.
         ("empty", "ab\r\ncd", "ab\\ncd".to_string(), 2),
         ("empty", "é", "é".to_string(), 1),
+        // A carriage return that is not followed by a newline is ordinary text.
+        ("empty", "a\rb", "a\rb".to_string(), 1),
         ("empty", &over_cap, over_cap.clone(), 2),
         ("empty", &snowmen, snowmen.clone(), 2),
         ("empty_fragment", "", String::new(), 1),
@@ -249,6 +253,9 @@ fn test_append_str_fragmentation() {
         ("room", "", "Init".to_string(), 1),
         ("room", " text", "Init text".to_string(), 1),
         ("room", "\n", "Init\\n".to_string(), 1),
+        // A non-empty top-up followed by a trailing newline: the one case where a mis-sliced
+        // remainder would lose the `Newline` item.
+        ("room", "ab\n", "Initab\\n".to_string(), 1),
         ("room", "ab\ncd", "Initab\\ncd".to_string(), 2),
         ("room", "ab\r\ncd", "Initab\\ncd".to_string(), 2),
         ("room", "é", "Inité".to_string(), 1),
@@ -272,6 +279,115 @@ fn test_append_str_fragmentation() {
         assert_eq!(count_text_fragments(&tree), expected_fragments, "{case}");
         assert_fragments_packed(&tree, &case);
     }
+}
+
+/// One step of a code-block rebuild: the only two things the rebuild loop emits.
+#[derive(Clone)]
+enum Step {
+    Marker(ColorMarker),
+    Char(char),
+}
+
+fn text_steps(s: &str) -> Vec<Step> {
+    s.chars().map(Step::Char).collect()
+}
+
+/// Appends each step on its own, the way the rebuild did before it batched.
+fn append_unbatched(steps: &[Step]) -> SumTree<BufferText> {
+    let mut tree: SumTree<BufferText> = SumTree::new();
+    for step in steps {
+        match step {
+            Step::Marker(marker) => tree.push(BufferText::Color(marker.clone())),
+            Step::Char(c) => tree.append_str(&c.to_string()),
+        }
+    }
+    tree
+}
+
+fn append_batched(steps: &[Step]) -> SumTree<BufferText> {
+    let mut tree: SumTree<BufferText> = SumTree::new();
+    let mut batch = BufferTextBatch::new(&mut tree);
+    for step in steps {
+        match step {
+            Step::Marker(marker) => batch.push_marker(marker.clone()),
+            Step::Char(c) => batch.push_char(*c),
+        }
+    }
+    batch.finish();
+    tree
+}
+
+/// Batching may only change how densely the items are stored, never the items themselves.
+///
+/// Carriage returns are the case worth pinning: [`str::lines`] drops one that precedes a
+/// newline, so buffering a run into a single string would delete a character that the
+/// character-at-a-time path stored as ordinary text.
+#[test]
+fn test_batched_appends_match_unbatched() {
+    use crate::content::text::TEXT_FRAGMENT_SIZE;
+
+    let start = Step::Marker(ColorMarker::Start(ColorU::white()));
+    let end = Step::Marker(ColorMarker::End);
+
+    let programs: Vec<Vec<Step>> = vec![
+        vec![],
+        text_steps("a\r\nb"),
+        text_steps("\r"),
+        text_steps("a\r"),
+        text_steps("\r\n"),
+        text_steps("a\r\r\nb"),
+        text_steps("a\r\n\r\nb"),
+        text_steps("ab\ncd"),
+        text_steps("ab\n"),
+        text_steps("é☃é"),
+        text_steps(&"a".repeat(TEXT_FRAGMENT_SIZE + 5)),
+        text_steps(&"☃".repeat(30)),
+        [
+            text_steps("ab"),
+            vec![start.clone()],
+            text_steps("cd"),
+            vec![end.clone()],
+            text_steps("ef"),
+        ]
+        .concat(),
+        [vec![start.clone()], text_steps("ab"), vec![end.clone()]].concat(),
+        [text_steps("a"), vec![end.clone()], text_steps("\nb")].concat(),
+        [vec![start.clone()], text_steps("a\r\nb"), vec![end.clone()]].concat(),
+        [
+            text_steps("a"),
+            vec![start],
+            text_steps("\r"),
+            vec![end],
+            text_steps("\nb"),
+        ]
+        .concat(),
+    ];
+
+    for (index, program) in programs.iter().enumerate() {
+        let unbatched = append_unbatched(program);
+        let batched = append_batched(program);
+
+        assert_eq!(batched.debug(), unbatched.debug(), "program {index}");
+        assert_eq!(
+            count_text_fragments(&batched),
+            count_text_fragments(&unbatched),
+            "program {index}: fragmentation differs"
+        );
+        assert_fragments_packed(&batched, &format!("program {index}"));
+        // The whole point of batching: the same items, in no more leaves than before.
+        assert!(
+            batched.node_stats().leaves <= unbatched.node_stats().leaves,
+            "program {index}: batching added leaves"
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "dropped without finish")]
+fn test_unfinished_batch_is_reported() {
+    let mut tree: SumTree<BufferText> = SumTree::new();
+    let mut batch = BufferTextBatch::new(&mut tree);
+    batch.push_char('a');
 }
 
 #[test]

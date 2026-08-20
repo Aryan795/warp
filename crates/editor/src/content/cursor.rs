@@ -1,3 +1,4 @@
+use std::mem;
 use std::ops::Range;
 
 use arrayvec::ArrayString;
@@ -448,6 +449,12 @@ impl<'a> BufferTextBatch<'a> {
     /// Queue a character. Consecutive characters are coalesced into as few text fragments as
     /// possible.
     pub(super) fn push_char(&mut self, c: char) {
+        // The queued text is split with `str::lines`, which drops a carriage return that comes
+        // right before a newline. Flushing between the two keeps the pair out of one split, so
+        // a lone carriage return stays ordinary text instead of silently disappearing.
+        if c == '\n' && self.text.ends_with('\r') {
+            self.flush_text();
+        }
         self.text.push(c);
     }
 
@@ -463,7 +470,7 @@ impl<'a> BufferTextBatch<'a> {
     /// Append everything queued so far to the destination tree.
     pub(super) fn finish(mut self) {
         self.flush_text();
-        self.content.extend(self.items);
+        self.content.extend(mem::take(&mut self.items));
     }
 
     fn flush_text(&mut self) {
@@ -482,6 +489,17 @@ impl<'a> BufferTextBatch<'a> {
         }
 
         self.text.clear();
+    }
+}
+
+impl Drop for BufferTextBatch<'_> {
+    /// Dropping a batch that still holds queued items would discard that content silently, so
+    /// catch a caller that returns early without calling [`BufferTextBatch::finish`].
+    fn drop(&mut self) {
+        debug_assert!(
+            self.items.is_empty() && self.text.is_empty(),
+            "BufferTextBatch dropped without finish(); the queued content would be lost"
+        );
     }
 }
 

@@ -14,7 +14,8 @@ const TREE_BASE: usize = 2;
 const TREE_BASE: usize = 6;
 
 /// The most items a single leaf can hold. [`SumTree::extend`] fills leaves up to this many
-/// items; [`SumTree::push`] appends a leaf holding one item regardless.
+/// items; [`SumTree::push`] appends a leaf holding one item regardless. Its value depends on
+/// the `test-util` feature.
 pub const MAX_LEAF_ITEMS: usize = 2 * TREE_BASE;
 
 pub trait Item: Clone + fmt::Debug {
