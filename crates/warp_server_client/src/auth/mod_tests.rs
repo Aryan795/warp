@@ -1,9 +1,12 @@
-use chrono::Utc;
+use futures::executor::block_on;
+use warp_core::channel::ChannelState;
 use warp_graphql::mutations::update_user_settings::UpdateUserSettingsResult;
-use warp_graphql::object_permissions::OwnerType;
-use warp_graphql::queries::api_keys::ApiKeyProperties;
+use warp_server_auth::auth_state::AuthState;
 
-use super::{AuthClientImpl, retain_personal_and_team_api_keys};
+use super::{AuthClient, AuthClientImpl};
+use crate::base_client::{
+    AuthenticatedGraphqlConfig, BaseClient, GraphqlRoutingConfig, TEAM_UID_HEADER,
+};
 
 #[test]
 fn unknown_settings_results_preserve_operation_context() {
@@ -23,45 +26,92 @@ fn unknown_settings_results_preserve_operation_context() {
     }
 }
 
-fn api_key(name: &str, owner_type: OwnerType) -> ApiKeyProperties {
-    let now = warp_graphql::scalars::Time::from(Utc::now());
-    ApiKeyProperties {
-        uid: cynic::Id::new(name),
-        name: name.to_string(),
-        key_suffix: "abcd".to_string(),
-        owner_type,
-        agent_info: None,
-        expires_at: None,
-        last_used_at: None,
-        created_at: now,
-    }
-}
-
-#[test]
-fn retains_only_personal_keys_when_no_team_selected() {
-    let keys = vec![
-        api_key("personal", OwnerType::User),
-        api_key("team", OwnerType::Team),
-    ];
-
-    let retained = retain_personal_and_team_api_keys(keys, None);
-
-    assert_eq!(
-        retained.into_iter().map(|k| k.name).collect::<Vec<_>>(),
-        vec!["personal".to_string()]
+/// Builds an `AuthClientImpl` whose requests land on the shared test mock server
+/// (`ChannelState::mock_server()`), for asserting on the exact headers a real request sends.
+fn auth_client_for_test() -> AuthClientImpl {
+    let (event_sender, _event_receiver) = async_channel::unbounded();
+    let base_client = BaseClient::new(
+        std::sync::Arc::new(http_client::Client::new()),
+        std::sync::Arc::new(AuthState::new_for_test()),
+        event_sender,
+        None,
+        GraphqlRoutingConfig::default(),
+        AuthenticatedGraphqlConfig::default(),
+        None,
     );
+    AuthClientImpl::new(std::sync::Arc::new(base_client))
+}
+
+/// A minimal GraphQL error response. Its shape doesn't matter to these tests: they only
+/// assert on the request mockito received, not on how the client interprets the response.
+const GRAPHQL_ERROR_BODY: &str = r#"{"errors":[{"message":"boom"}]}"#;
+
+#[test]
+fn list_api_keys_sends_no_team_header_when_personal() {
+    let mut server = ChannelState::mock_server();
+    let mock = server
+        .mock("POST", mockito::Matcher::Regex(r"^/graphql/v2".to_string()))
+        .match_header(TEAM_UID_HEADER, mockito::Matcher::Missing)
+        .with_status(200)
+        .with_body(GRAPHQL_ERROR_BODY)
+        .create();
+
+    let client = auth_client_for_test();
+    let _ = block_on(client.list_api_keys(None));
+
+    mock.assert();
 }
 
 #[test]
-fn retains_personal_and_team_keys_when_team_selected() {
-    let keys = vec![
-        api_key("personal", OwnerType::User),
-        api_key("team", OwnerType::Team),
-    ];
+fn list_api_keys_sends_selected_team_header() {
+    let mut server = ChannelState::mock_server();
+    let mock = server
+        .mock("POST", mockito::Matcher::Regex(r"^/graphql/v2".to_string()))
+        .match_header(TEAM_UID_HEADER, "team-a-uid")
+        .with_status(200)
+        .with_body(GRAPHQL_ERROR_BODY)
+        .create();
 
-    let retained = retain_personal_and_team_api_keys(keys, Some("some-team-uid"));
+    let client = auth_client_for_test();
+    let _ = block_on(client.list_api_keys(Some("team-a-uid")));
 
-    let mut names: Vec<_> = retained.into_iter().map(|k| k.name).collect();
-    names.sort();
-    assert_eq!(names, vec!["personal".to_string(), "team".to_string()]);
+    mock.assert();
+}
+
+#[test]
+fn create_api_key_sends_same_team_uid_in_header_and_body() {
+    let mut server = ChannelState::mock_server();
+    let mock = server
+        .mock("POST", mockito::Matcher::Regex(r"^/graphql/v2".to_string()))
+        .match_header(TEAM_UID_HEADER, "team-b-uid")
+        .match_body(mockito::Matcher::Regex("team-b-uid".to_string()))
+        .with_status(200)
+        .with_body(GRAPHQL_ERROR_BODY)
+        .create();
+
+    let client = auth_client_for_test();
+    let _ = block_on(client.create_api_key(
+        "ci-key".to_string(),
+        Some(cynic::Id::new("team-b-uid")),
+        None,
+        None,
+    ));
+
+    mock.assert();
+}
+
+#[test]
+fn create_api_key_sends_no_team_header_when_personal() {
+    let mut server = ChannelState::mock_server();
+    let mock = server
+        .mock("POST", mockito::Matcher::Regex(r"^/graphql/v2".to_string()))
+        .match_header(TEAM_UID_HEADER, mockito::Matcher::Missing)
+        .with_status(200)
+        .with_body(GRAPHQL_ERROR_BODY)
+        .create();
+
+    let client = auth_client_for_test();
+    let _ = block_on(client.create_api_key("ci-key".to_string(), None, None, None));
+
+    mock.assert();
 }
