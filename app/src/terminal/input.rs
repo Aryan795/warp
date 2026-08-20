@@ -121,7 +121,7 @@ use super::prompt_render_helper::{
     should_render_prompt_using_editor_decorator_elements,
 };
 use super::safe_mode_settings::{
-    SafeModeSettings, SafeModeSettingsChangedEvent, get_secret_obfuscation_mode,
+    SafeModeSettings, SafeModeSettingsChangedEvent, get_secret_obfuscation_mode_for_window,
 };
 use super::session_settings::{SessionSettings, SessionSettingsChangedEvent};
 use super::settings::{SpacingMode, TerminalSettings, TerminalSettingsChangedEvent};
@@ -3273,6 +3273,30 @@ impl Input {
         let safe_mode_settings = SafeModeSettings::handle(ctx);
         ctx.subscribe_to_model(&safe_mode_settings, |me, _, event, ctx| {
             me.handle_safe_mode_settings_changed_event(event, ctx)
+        });
+
+        // `create_terminal_model` mints the model before any window exists, so its initial
+        // obfuscation mode can only use the ambient (not-yet-per-team) default. Correct it now
+        // that this view's window is known, and keep it in sync with that window's current team
+        // afterwards: a team switch (or team policy data arriving late) must take effect without
+        // needing a Safe Mode settings change to trigger a resync.
+        let window_id = ctx.window_id();
+        model
+            .lock()
+            .set_obfuscate_secrets(get_secret_obfuscation_mode_for_window(window_id, ctx));
+        ctx.subscribe_to_model(&UserWorkspaces::handle(ctx), move |me, _, event, ctx| {
+            let team_policy_may_have_changed = match event {
+                UserWorkspacesEvent::WindowTeamChanged {
+                    window_id: changed_window_id,
+                } => *changed_window_id == window_id,
+                UserWorkspacesEvent::TeamsChanged => true,
+                _ => false,
+            };
+            if team_policy_may_have_changed {
+                me.model
+                    .lock()
+                    .set_obfuscate_secrets(get_secret_obfuscation_mode_for_window(window_id, ctx));
+            }
         });
 
         ctx.subscribe_to_model(&InputModeSettings::handle(ctx), |_, _, _, ctx| {
@@ -7201,9 +7225,10 @@ impl Input {
             SafeModeSettingsChangedEvent::SafeModeEnabled { .. }
             | SafeModeSettingsChangedEvent::HideSecretsInBlockList { .. }
             | SafeModeSettingsChangedEvent::SecretDisplayModeSetting { .. } => {
+                let window_id = ctx.window_id();
                 self.model
                     .lock()
-                    .set_obfuscate_secrets(get_secret_obfuscation_mode(ctx));
+                    .set_obfuscate_secrets(get_secret_obfuscation_mode_for_window(window_id, ctx));
             }
         }
     }
