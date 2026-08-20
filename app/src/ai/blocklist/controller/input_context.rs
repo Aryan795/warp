@@ -7,7 +7,7 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use warp_core::features::FeatureFlag;
 use warp_graphql::generic_string_object::GenericStringObjectFormat as GraphQLFormat;
-use warpui::{AppContext, EntityId, SingletonEntity, WindowId};
+use warpui::{AppContext, SingletonEntity};
 
 use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::agent::{
@@ -28,6 +28,7 @@ use crate::remote_server::codebase_index_model::RemoteCodebaseIndexModel;
 use crate::terminal::TerminalView;
 use crate::terminal::model::block::BlockId;
 use crate::terminal::model::session::active_session::ActiveSession;
+use crate::terminal::view::window_id_for_terminal_surface;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 
 lazy_static! {
@@ -99,46 +100,16 @@ pub(super) fn input_context_for_request(
     context.into()
 }
 
-/// Gates codebase-context exposure (bypass #1 in the multi-team-context effort) on the team
-/// currently assigned to the window that owns this request's terminal surface. Shared local
-/// index artifacts may be reused across allowed scopes, but a scope whose team currently
-/// disables codebase context must not see any index, including one another team created.
-///
-/// This re-resolves the window's *current* team at the moment the request is assembled rather
-/// than carrying a scope captured when the request began (see the PR description for why: the
-/// alternative would require threading a captured `TeamContext` through every one of
-/// `BlocklistAIController`'s public query/resume entry points and their many call sites in
-/// Group 1/2-owned surfaces). It therefore can never let a *currently* denied team's window see
-/// an index -- the residual risk is only that an async continuation of an already-started
-/// conversation (e.g. an auto-resume) is authorized against whatever team the window has since
-/// switched to, rather than the team the conversation started under.
-///
-/// `team_for_window` is one of the compatibility resolvers Group 4 plans to delete; this call
-/// site's gate must be preserved (e.g. replaced with `TeamContext`/`TeamRenderContext`) rather
-/// than dropped when that cleanup lands.
+/// Shared local index artifacts may be reused across allowed scopes, but a scope whose team
+/// currently disables codebase context must not see any index, including one another team
+/// created. Evaluated against the requesting window's current team, not a cached scope.
 fn is_codebase_context_enabled_for_requesting_window(
     context_model: &BlocklistAIContextModel,
     app: &AppContext,
 ) -> bool {
-    let requesting_team = window_id_for_terminal_surface(context_model.terminal_surface_id(), app)
+    let requesting_team = window_id_for_terminal_surface(app, context_model.terminal_surface_id())
         .and_then(|window_id| UserWorkspaces::as_ref(app).team_for_window(window_id));
     UserWorkspaces::as_ref(app).is_codebase_context_enabled_for_team(requesting_team, app)
-}
-
-/// Finds the window that owns the terminal view identified by `terminal_surface_id`, if it is
-/// still live. Mirrors the scan `find_block_attachment_in_all_terminals` already uses below.
-fn window_id_for_terminal_surface(
-    terminal_surface_id: EntityId,
-    app: &AppContext,
-) -> Option<WindowId> {
-    app.window_ids().find(|&window_id| {
-        app.views_of_type::<TerminalView>(window_id)
-            .is_some_and(|terminal_views| {
-                terminal_views
-                    .iter()
-                    .any(|view| view.id() == terminal_surface_id)
-            })
-    })
 }
 
 fn add_local_codebase_context(context: &mut Vec<AIAgentContext>, app: &AppContext) {

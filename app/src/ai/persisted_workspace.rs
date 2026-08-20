@@ -681,13 +681,8 @@ impl PersistedWorkspace {
         }
     }
 
-    /// NOTE: this is a coarse, process-wide "is any known team allowed to index at all" gate,
-    /// not per-window authorization. Repo detection (`DetectedRepositories`) and
-    /// `user_added_workspace` are not window-scoped today, so a repository can still be
-    /// *created and indexed* here while the scope that actually triggered it is denied,
-    /// provided some other known team scope allows indexing. Only retrieval and exposure
-    /// (`input_context.rs`, `trigger_incremental_sync_for_conversation`) are scoped to the
-    /// requesting window's own team by this change.
+    /// This authorizes creation with a process-wide check rather than the triggering window's
+    /// own team: repo detection and explicit navigation don't carry a window/team today.
     #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
     fn index_repo(&self, directory_path: PathBuf, ctx: &mut ModelContext<Self>) {
         ProjectContextModel::handle(ctx).update(ctx, |model, ctx| {
@@ -835,12 +830,8 @@ impl PersistedWorkspace {
     /// Triggers an incremental sync for the codebase context when a new conversation starts.
     /// This ensures that the codebase index is up-to-date before the conversation begins.
     ///
-    /// Authorizes against the team currently assigned to the window that owns
-    /// `terminal_view_id`, not the process-global codebase-context check: a window on a team
-    /// that disables codebase context must not sync (or later retrieve from) a shared index,
-    /// even when another team's window is allowed to. `team_for_window` is one of the
-    /// compatibility resolvers Group 4 plans to delete; this gate must be preserved across that
-    /// cleanup, not dropped along with the resolver.
+    /// Authorized against the team of the window that owns `terminal_view_id`: a denied team
+    /// must not sync a shared index even when another team's window is allowed to.
     fn trigger_incremental_sync_for_conversation(
         &mut self,
         terminal_view_id: warpui::EntityId,
@@ -1291,11 +1282,8 @@ impl PersistedWorkspace {
     }
 }
 
-/// Candidate roots for auto-indexing, restricted to windows whose *own* current team allows
-/// codebase context. Without this, auto-indexing could enqueue a repository visited only from
-/// a window whose team disables indexing, authorized solely because some other window's team
-/// allows it. `team_for_window` is one of the compatibility resolvers Group 4 plans to delete;
-/// this per-window filter must be preserved across that cleanup, not dropped with the resolver.
+/// Candidate roots for auto-indexing, restricted to windows whose own current team allows
+/// codebase context.
 #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
 pub fn all_working_directories(app: &AppContext) -> HashSet<PathBuf> {
     let user_workspaces = UserWorkspaces::as_ref(app);
