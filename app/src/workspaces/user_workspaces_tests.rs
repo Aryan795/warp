@@ -1194,6 +1194,117 @@ fn test_team_context_and_render_context_return_none_without_a_team() {
 }
 
 #[test]
+fn test_privacy_render_context_reads_each_windows_own_team() {
+    let (mut team_a, team_b) = two_teams();
+    team_a.settings.telemetry_settings.force_enabled = true;
+    team_a.settings.secret_redaction.enabled.value = true;
+    team_a.settings.secret_redaction.regexes.values = vec![EnterpriseSecretRegex {
+        pattern: "team-a-secret".to_string(),
+        name: None,
+    }];
+    team_a.settings.ugc_collection.value = UgcCollectionEnablementSetting::Disable;
+    team_a.settings.cloud_conversation_storage.value = AdminEnablementSetting::Enable;
+    team_a.billing_metadata.customer_type = CustomerType::Enterprise;
+    // team_b keeps default settings: telemetry not forced, secret redaction disabled,
+    // ugc/cloud-conversation-storage respecting the user, and a non-enterprise customer type.
+
+    let mut workspace = workspace_for_test(&team_a);
+    workspace.teams.push(team_b.clone());
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        let (window_a, view_a) = create_test_window(&mut app);
+        let (window_b, view_b) = create_test_window(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window_a, team_a.uid, ctx);
+            user_workspaces.set_team_for_window(window_b, team_b.uid, ctx);
+        });
+
+        let weak_a = view_a.downgrade();
+        let weak_b = view_b.downgrade();
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            let render_a = user_workspaces
+                .team_render_context_for_view_handle(&weak_a, ctx)
+                .expect("window A should resolve a render context");
+            let render_b = user_workspaces
+                .team_render_context_for_view_handle(&weak_b, ctx)
+                .expect("window B should resolve a render context");
+
+            assert!(render_a.is_telemetry_force_enabled());
+            assert!(!render_b.is_telemetry_force_enabled());
+
+            assert!(render_a.is_enterprise_secret_redaction_enabled());
+            assert!(!render_b.is_enterprise_secret_redaction_enabled());
+
+            assert_eq!(render_a.enterprise_secret_redaction_regexes().len(), 1);
+            assert_eq!(
+                render_a.enterprise_secret_redaction_regexes()[0].pattern,
+                "team-a-secret"
+            );
+            assert!(render_b.enterprise_secret_redaction_regexes().is_empty());
+
+            assert!(matches!(
+                render_a.ugc_collection_enablement_setting(),
+                UgcCollectionEnablementSetting::Disable
+            ));
+            assert!(matches!(
+                render_b.ugc_collection_enablement_setting(),
+                UgcCollectionEnablementSetting::RespectUserSetting
+            ));
+
+            assert_eq!(
+                render_a.cloud_conversation_storage_enablement_setting(),
+                &AdminEnablementSetting::Enable
+            );
+            assert_eq!(
+                render_b.cloud_conversation_storage_enablement_setting(),
+                &AdminEnablementSetting::RespectUserSetting
+            );
+
+            assert!(render_a.is_enterprise_customer());
+            assert!(!render_b.is_enterprise_customer());
+        });
+    })
+}
+
+#[test]
+fn test_enterprise_secret_redaction_regexes_for_context_reads_captured_team() {
+    let (mut team_a, team_b) = two_teams();
+    team_a.settings.secret_redaction.regexes.values = vec![EnterpriseSecretRegex {
+        pattern: "team-a-secret".to_string(),
+        name: None,
+    }];
+
+    let mut workspace = workspace_for_test(&team_a);
+    workspace.teams.push(team_b.clone());
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        let (window_a, view_a) = create_test_window(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window_a, team_a.uid, ctx);
+        });
+
+        let context_a = view_a
+            .update(&mut app, |_, ctx| {
+                UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+            })
+            .expect("a window assigned to team A should mint a context");
+
+        app.read(|ctx| {
+            let regexes = UserWorkspaces::as_ref(ctx)
+                .enterprise_secret_redaction_regexes_for_context(&context_a);
+            assert_eq!(regexes.len(), 1);
+            assert_eq!(regexes[0].pattern, "team-a-secret");
+        });
+    })
+}
+
+#[test]
 fn test_spaces_for_window_orders_selected_team_shared_and_personal() {
     let _flag = FeatureFlag::SharedWithMe.override_enabled(true);
     let first_team = team_for_test();

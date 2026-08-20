@@ -191,6 +191,37 @@ pub(crate) struct TeamRenderContext<'a> {
     team: &'a Team,
 }
 
+impl<'a> TeamRenderContext<'a> {
+    /// Window-scoped privacy policy reads for the privacy settings page. Prefer these over
+    /// `UserWorkspaces::is_telemetry_force_enabled` and its siblings, which read the
+    /// process-global current workspace rather than this context's team.
+    pub(crate) fn is_telemetry_force_enabled(&self) -> bool {
+        self.team.settings.telemetry_settings.force_enabled
+    }
+
+    pub(crate) fn is_enterprise_secret_redaction_enabled(&self) -> bool {
+        self.team.settings.secret_redaction.enabled.value
+    }
+
+    pub(crate) fn enterprise_secret_redaction_regexes(&self) -> &'a [EnterpriseSecretRegex] {
+        &self.team.settings.secret_redaction.regexes.values
+    }
+
+    pub(crate) fn ugc_collection_enablement_setting(&self) -> &'a UgcCollectionEnablementSetting {
+        &self.team.settings.ugc_collection.value
+    }
+
+    pub(crate) fn cloud_conversation_storage_enablement_setting(
+        &self,
+    ) -> &'a AdminEnablementSetting {
+        &self.team.settings.cloud_conversation_storage.value
+    }
+
+    pub(crate) fn is_enterprise_customer(&self) -> bool {
+        self.team.billing_metadata.customer_type == CustomerType::Enterprise
+    }
+}
+
 impl UserWorkspaces {
     #[cfg(any(test, all(feature = "tui", feature = "test-util")))]
     pub fn mock(
@@ -417,6 +448,18 @@ impl UserWorkspaces {
     #[allow(dead_code)]
     pub(crate) fn team_for_context(&self, context: &TeamContext) -> Option<&Team> {
         self.team_from_uid(context.team_uid)
+    }
+
+    /// A captured context's enterprise secret-redaction regexes, for operations that read
+    /// team policy after crossing into a model, where a [`TeamRenderContext`] borrow
+    /// would not survive.
+    pub(crate) fn enterprise_secret_redaction_regexes_for_context(
+        &self,
+        context: &TeamContext,
+    ) -> Vec<EnterpriseSecretRegex> {
+        self.team_for_context(context)
+            .map(|team| team.settings.secret_redaction.regexes.values.clone())
+            .unwrap_or_default()
     }
 
     /// Returns the windows whose team assignment changed.
