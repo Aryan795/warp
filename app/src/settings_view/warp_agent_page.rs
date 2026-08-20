@@ -107,7 +107,7 @@ use crate::view_components::action_button::{
     ActionButton, ButtonSize, DangerSecondaryTheme, SecondaryTheme,
 };
 use crate::view_components::{Dropdown, DropdownItem, FilterableDropdown};
-use crate::workspaces::user_workspaces::UserWorkspacesEvent;
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspacesEvent};
 use crate::workspaces::workspace::{AdminEnablementSetting, CustomerType};
 use crate::{TelemetryEvent, UserWorkspaces, send_telemetry_from_ctx};
 
@@ -556,11 +556,7 @@ pub fn init_actions_from_parent_view<T: Action + Clone>(
                 &(context.clone() & id!(flags::IS_ANY_AI_ENABLED)),
                 flags::WARP_CREDIT_FALLBACK_FLAG,
             )
-            .with_group(bindings::BindingGroup::WarpAi)
-            .is_supported_on_current_platform(
-                UserWorkspaces::as_ref(app).is_byo_api_key_enabled(app)
-                    || UserWorkspaces::as_ref(app).is_custom_inference_enabled(app),
-            ),
+            .with_group(bindings::BindingGroup::WarpAi),
         ],
         app,
     );
@@ -568,6 +564,7 @@ pub fn init_actions_from_parent_view<T: Action + Clone>(
 
 pub struct WarpAgentPageView {
     page: PageType<Self>,
+    team_context: Option<TeamContext>,
     voice_input_toggle_key_dropdown: ViewHandle<Dropdown<WarpAgentPageAction>>,
     voice_input_language_dropdown: ViewHandle<FilterableDropdown<WarpAgentPageAction>>,
     local_only_icon_tooltip_states: RefCell<HashMap<String, MouseStateHandle>>,
@@ -612,12 +609,23 @@ pub struct WarpAgentPageView {
 impl WarpAgentPageView {
     pub fn new(ctx: &mut ViewContext<Self>) -> Self {
         let is_any_ai_enabled = AISettings::as_ref(ctx).is_any_ai_enabled(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
 
         let workspace = UserWorkspaces::handle(ctx);
         ctx.subscribe_to_model(&workspace, |me, _workspace, event, ctx| {
-            if let UserWorkspacesEvent::TeamsChanged = event {
-                me.sync_custom_endpoint_buttons(ctx);
-                ctx.notify();
+            match event {
+                UserWorkspacesEvent::WindowTeamChanged { window_id }
+                    if *window_id == ctx.window_id() =>
+                {
+                    me.team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                    me.sync_custom_endpoint_buttons(ctx);
+                    ctx.notify();
+                }
+                UserWorkspacesEvent::TeamsChanged => {
+                    me.sync_custom_endpoint_buttons(ctx);
+                    ctx.notify();
+                }
+                _ => {}
             }
         });
 
@@ -911,9 +919,12 @@ impl WarpAgentPageView {
             });
         }
 
-        let custom_inference_controls_enabled = is_any_ai_enabled
-            && UserWorkspaces::as_ref(ctx).is_custom_inference_enabled(ctx)
-            && UserWorkspaces::as_ref(ctx).are_member_byo_endpoints_allowed();
+        let custom_inference_controls_enabled = team_context.as_ref().is_some_and(|team_context| {
+            is_any_ai_enabled
+                && UserWorkspaces::as_ref(ctx).is_custom_inference_enabled(team_context, ctx)
+                && UserWorkspaces::as_ref(ctx)
+                    .are_member_byo_endpoints_allowed(team_context)
+        });
         let custom_inference_add_button = ctx.add_typed_action_view(|_| {
             ActionButton::new("+ Add custom model", SecondaryTheme)
                 .with_size(ButtonSize::Small)
@@ -1095,6 +1106,7 @@ impl WarpAgentPageView {
 
         Self {
             page: Self::build_page(ctx),
+            team_context,
             voice_input_toggle_key_dropdown,
             voice_input_language_dropdown,
             autodetection_denylist_editor,
@@ -1143,6 +1155,10 @@ impl WarpAgentPageView {
                 }
             });
         ctx.notify();
+    }
+
+    fn team_context(&self) -> Option<&TeamContext> {
+        self.team_context.as_ref()
     }
 
     pub fn get_modal_content(&self, app: &AppContext) -> Option<Box<dyn Element>> {
@@ -1324,7 +1340,7 @@ impl WarpAgentPageView {
         endpoint_index: usize,
         ctx: &mut ViewContext<Self>,
     ) {
-        if !Self::can_use_custom_inference_controls(ctx) {
+        if !self.can_use_custom_inference_controls(ctx) {
             return;
         }
         if !Self::should_offer_default_model_switch(ctx) {
@@ -1365,7 +1381,7 @@ impl WarpAgentPageView {
     }
 
     fn sync_custom_endpoint_buttons(&mut self, ctx: &mut ViewContext<Self>) {
-        let enabled = Self::can_use_custom_inference_controls(ctx);
+        let enabled = self.can_use_custom_inference_controls(ctx);
 
         self.custom_inference_add_button.update(ctx, |button, ctx| {
             button.set_disabled(!enabled, ctx);
@@ -1408,14 +1424,18 @@ impl WarpAgentPageView {
             })
             .collect()
     }
-    fn can_use_custom_inference_controls(app: &AppContext) -> bool {
-        AISettings::as_ref(app).is_any_ai_enabled(app)
-            && UserWorkspaces::as_ref(app).is_custom_inference_enabled(app)
-            && UserWorkspaces::as_ref(app).are_member_byo_endpoints_allowed()
+    fn can_use_custom_inference_controls(&self, app: &AppContext) -> bool {
+        self.team_context().is_some_and(|team_context| {
+            AISettings::as_ref(app).is_any_ai_enabled(app)
+                && UserWorkspaces::as_ref(app)
+                    .is_custom_inference_enabled(team_context, app)
+                && UserWorkspaces::as_ref(app)
+                    .are_member_byo_endpoints_allowed(team_context)
+        })
     }
 
     fn show_add_custom_endpoint_modal(&mut self, ctx: &mut ViewContext<Self>) {
-        if !Self::can_use_custom_inference_controls(ctx) {
+        if !self.can_use_custom_inference_controls(ctx) {
             return;
         }
         self.remove_custom_endpoint_confirmation_dialog
@@ -1433,7 +1453,7 @@ impl WarpAgentPageView {
     }
 
     fn show_edit_custom_endpoint_modal(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
-        if !Self::can_use_custom_inference_controls(ctx) {
+        if !self.can_use_custom_inference_controls(ctx) {
             return;
         }
         let endpoint = ApiKeyManager::as_ref(ctx)
@@ -1494,7 +1514,7 @@ impl WarpAgentPageView {
                 schema,
                 models,
             } => {
-                if !Self::can_use_custom_inference_controls(ctx) {
+                if !self.can_use_custom_inference_controls(ctx) {
                     self.hide_custom_endpoint_modal(ctx);
                     return;
                 }
@@ -1537,7 +1557,7 @@ impl WarpAgentPageView {
                 schema,
                 models,
             } => {
-                if !Self::can_use_custom_inference_controls(ctx) {
+                if !self.can_use_custom_inference_controls(ctx) {
                     self.hide_custom_endpoint_modal(ctx);
                     return;
                 }
@@ -1567,7 +1587,7 @@ impl WarpAgentPageView {
                 ctx.notify();
             }
             CustomEndpointModalEvent::RemoveEndpoint { index } => {
-                if !Self::can_use_custom_inference_controls(ctx) {
+                if !self.can_use_custom_inference_controls(ctx) {
                     self.hide_custom_endpoint_modal(ctx);
                     return;
                 }
@@ -1582,7 +1602,7 @@ impl WarpAgentPageView {
         index: usize,
         ctx: &mut ViewContext<Self>,
     ) {
-        if !Self::can_use_custom_inference_controls(ctx) {
+        if !self.can_use_custom_inference_controls(ctx) {
             return;
         }
         let endpoint = ApiKeyManager::as_ref(ctx)
@@ -1624,7 +1644,7 @@ impl WarpAgentPageView {
                 ctx.notify();
             }
             RemoveCustomEndpointConfirmationDialogEvent::Confirm(index) => {
-                if !Self::can_use_custom_inference_controls(ctx) {
+                if !self.can_use_custom_inference_controls(ctx) {
                     self.pending_remove_custom_endpoint_index = None;
                     self.remove_custom_endpoint_confirmation_dialog
                         .update(ctx, |dialog, ctx| {
@@ -2678,7 +2698,7 @@ impl SettingsWidget for GlobalAIWidget {
 
     fn render(
         &self,
-        _view: &Self::View,
+        view: &Self::View,
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
@@ -3842,14 +3862,19 @@ impl SettingsWidget for AgentAttributionWidget {
 
     fn render(
         &self,
-        _view: &Self::View,
+        view: &Self::View,
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
         let ai_settings = AISettings::as_ref(app);
         let is_any_ai_enabled = ai_settings.is_any_ai_enabled(app);
 
-        let org_setting = UserWorkspaces::as_ref(app).get_agent_attribution_setting();
+        let org_setting = view
+            .team_context()
+            .map(|team_context| {
+                UserWorkspaces::as_ref(app).get_agent_attribution_setting(team_context)
+            })
+            .unwrap_or_default();
         let state = derive_agent_attribution_toggle_state(
             &org_setting,
             *ai_settings.agent_attribution_enabled,
@@ -3939,7 +3964,7 @@ impl SettingsWidget for CloudAgentComputerUseWidget {
 
     fn render(
         &self,
-        _view: &Self::View,
+        view: &Self::View,
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
@@ -4046,7 +4071,7 @@ impl SettingsWidget for CloudHandoffWidget {
 
     fn render(
         &self,
-        _view: &Self::View,
+        view: &Self::View,
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
@@ -4057,10 +4082,13 @@ impl SettingsWidget for CloudHandoffWidget {
 
         let privacy = PrivacySettings::as_ref(app);
         let cloud_convos_off = !privacy.is_cloud_conversation_storage_enabled
-            || matches!(
-                UserWorkspaces::as_ref(app).get_cloud_conversation_storage_enablement_setting(),
-                AdminEnablementSetting::Disable
-            );
+            || view.team_context().is_some_and(|team_context| {
+                matches!(
+                    UserWorkspaces::as_ref(app)
+                        .get_cloud_conversation_storage_enablement_setting(team_context),
+                    AdminEnablementSetting::Disable
+                )
+            });
         let is_force_disabled = !is_any_ai_enabled || cloud_convos_off;
 
         let tooltip_text = if cloud_convos_off {
@@ -4220,8 +4248,19 @@ impl ApiKeysWidget {
         let ai_settings = AISettings::as_ref(ctx);
         let workspace_handle = UserWorkspaces::handle(ctx);
         let is_any_ai_enabled = ai_settings.is_any_ai_enabled(ctx);
-        let is_byo_enabled = workspace_handle.as_ref(ctx).is_byo_api_key_enabled(ctx);
-        let member_byo_keys_allowed = workspace_handle.as_ref(ctx).are_member_byo_keys_allowed();
+        let team_context = workspace_handle.as_ref(ctx).team_context_for_view(ctx);
+        let is_byo_enabled = team_context
+            .as_ref()
+            .is_some_and(|team_context| {
+                workspace_handle
+                    .as_ref(ctx)
+                    .is_byo_api_key_enabled(team_context, ctx)
+            });
+        let member_byo_keys_allowed = team_context.as_ref().is_some_and(|team_context| {
+            workspace_handle
+                .as_ref(ctx)
+                .are_member_byo_keys_allowed(team_context)
+        });
 
         let provider_api_key_editors = LLMProvider::API_KEY_PROVIDERS
             .into_iter()
@@ -4273,13 +4312,22 @@ impl ApiKeysWidget {
                     }
                 });
                 let editor_clone = editor.clone();
-                ctx.subscribe_to_model(&workspace_handle, move |_, workspace, event, ctx| {
+                ctx.subscribe_to_model(&workspace_handle, move |view, workspace, event, ctx| {
                     if let UserWorkspacesEvent::TeamsChanged = event {
                         let is_any_ai_enabled =
                             AISettings::handle(ctx).as_ref(ctx).is_any_ai_enabled(ctx);
-                        let is_byo_enabled = workspace.as_ref(ctx).is_byo_api_key_enabled(ctx);
+                        let is_byo_enabled =
+                            view.team_context().is_some_and(|team_context| {
+                                workspace
+                                    .as_ref(ctx)
+                                    .is_byo_api_key_enabled(team_context, ctx)
+                            });
                         let member_byo_keys_allowed =
-                            workspace.as_ref(ctx).are_member_byo_keys_allowed();
+                            view.team_context().is_some_and(|team_context| {
+                                workspace
+                                    .as_ref(ctx)
+                                    .are_member_byo_keys_allowed(team_context)
+                            });
                         let is_enabled = is_any_ai_enabled && is_byo_enabled;
                         let has_key = !editor_clone.as_ref(ctx).is_empty(ctx);
                         if !is_byo_enabled && has_key {
@@ -4379,11 +4427,20 @@ impl ApiKeysWidget {
         // The Grok subscription is BYO auth, so keep the buttons' enablement
         // in sync with the BYO API key policy, like the editors above.
         let grok_buttons = [grok_connect_button.clone(), grok_disconnect_button.clone()];
-        ctx.subscribe_to_model(&workspace_handle, move |_, workspace, event, ctx| {
+        ctx.subscribe_to_model(&workspace_handle, move |view, workspace, event, ctx| {
             if let UserWorkspacesEvent::TeamsChanged = event {
                 let is_any_ai_enabled = AISettings::handle(ctx).as_ref(ctx).is_any_ai_enabled(ctx);
-                let is_byo_enabled = workspace.as_ref(ctx).is_byo_api_key_enabled(ctx);
-                let member_byo_keys_allowed = workspace.as_ref(ctx).are_member_byo_keys_allowed();
+                let is_byo_enabled = view.team_context().is_some_and(|team_context| {
+                    workspace
+                        .as_ref(ctx)
+                        .is_byo_api_key_enabled(team_context, ctx)
+                });
+                let member_byo_keys_allowed =
+                    view.team_context().is_some_and(|team_context| {
+                        workspace
+                            .as_ref(ctx)
+                            .are_member_byo_keys_allowed(team_context)
+                    });
                 for button in &grok_buttons {
                     button.update(ctx, |button, ctx| {
                         button.set_disabled(
@@ -4980,13 +5037,26 @@ struct CustomInferenceVisibility {
 }
 
 impl CustomInferenceVisibility {
-    fn compute(app: &AppContext) -> Self {
+    fn compute(team_context: Option<&TeamContext>, app: &AppContext) -> Self {
         let workspaces = UserWorkspaces::as_ref(app);
         let is_any_ai_enabled = AISettings::as_ref(app).is_any_ai_enabled(app);
-        let is_byo_enabled = workspaces.is_byo_api_key_enabled(app);
-        let is_custom_inference_enabled = workspaces.is_custom_inference_enabled(app);
-        let member_byo_keys_allowed = workspaces.are_member_byo_keys_allowed();
-        let member_byo_endpoints_allowed = workspaces.are_member_byo_endpoints_allowed();
+        let Some(team_context) = team_context else {
+            return Self {
+                is_any_ai_enabled,
+                is_byo_enabled: false,
+                show_provider_keys: false,
+                provider_keys_enabled: false,
+                show_custom_inference: false,
+                custom_inference_controls_enabled: false,
+                managed_byok_byoe_enabled: false,
+            };
+        };
+        let is_byo_enabled = workspaces.is_byo_api_key_enabled(team_context, app);
+        let is_custom_inference_enabled =
+            workspaces.is_custom_inference_enabled(team_context, app);
+        let member_byo_keys_allowed = workspaces.are_member_byo_keys_allowed(team_context);
+        let member_byo_endpoints_allowed =
+            workspaces.are_member_byo_endpoints_allowed(team_context);
 
         // BYOK: shown even when BYO is off so the upgrade CTA can render.
         let show_provider_keys = member_byo_keys_allowed;
@@ -5004,8 +5074,8 @@ impl CustomInferenceVisibility {
             show_custom_inference,
             custom_inference_controls_enabled,
             managed_byok_byoe_enabled: workspaces
-                .current_workspace()
-                .is_some_and(|workspace| workspace.billing_metadata.is_managed_byok_byoe_enabled()),
+                .team_billing_metadata(team_context)
+                .is_some_and(|billing| billing.is_managed_byok_byoe_enabled()),
         }
     }
 
@@ -5033,7 +5103,7 @@ impl SettingsWidget for ApiKeysWidget {
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
-        let visibility = CustomInferenceVisibility::compute(app);
+        let visibility = CustomInferenceVisibility::compute(view.team_context(), app);
         let CustomInferenceVisibility {
             is_any_ai_enabled,
             is_byo_enabled,
@@ -5298,11 +5368,15 @@ impl AwsBedrockWidget {
     fn new(ctx: &mut ViewContext<<Self as SettingsWidget>::View>) -> Self {
         let ai_settings = AISettings::as_ref(ctx);
         let is_any_ai_enabled = ai_settings.is_any_ai_enabled(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
 
         let aws_auth_refresh_command = ai_settings.aws_bedrock_auth_refresh_command.value().clone();
         let aws_auth_refresh_profile = ai_settings.aws_bedrock_profile.value().clone();
         let is_usage_enabled = is_any_ai_enabled
-            && UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_enabled(ctx);
+            && team_context.as_ref().is_some_and(|team_context| {
+                UserWorkspaces::as_ref(ctx)
+                    .is_aws_bedrock_credentials_enabled(team_context, ctx)
+            });
 
         let aws_auth_refresh_command_editor = ctx.add_typed_action_view(move |ctx| {
             let appearance = Appearance::as_ref(ctx);
@@ -5414,7 +5488,7 @@ impl AwsBedrockWidget {
         let aws_auth_refresh_command_editor_clone = aws_auth_refresh_command_editor.clone();
         let aws_auth_refresh_profile_editor_clone = aws_auth_refresh_profile_editor.clone();
         let refresh_credentials_button_clone = refresh_credentials_button.clone();
-        ctx.subscribe_to_model(&AISettings::handle(ctx), move |_, _, event, ctx| {
+        ctx.subscribe_to_model(&AISettings::handle(ctx), move |view, _, event, ctx| {
             if matches!(
                 event,
                 AISettingsChangedEvent::IsAnyAIEnabled { .. }
@@ -5422,7 +5496,10 @@ impl AwsBedrockWidget {
             ) {
                 let is_any_ai_enabled = AISettings::as_ref(ctx).is_any_ai_enabled(ctx);
                 let is_usage_enabled = is_any_ai_enabled
-                    && UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_enabled(ctx);
+                    && view.team_context().is_some_and(|team_context| {
+                        UserWorkspaces::as_ref(ctx)
+                            .is_aws_bedrock_credentials_enabled(team_context, ctx)
+                    });
 
                 update_editor_interaction_state(
                     aws_auth_refresh_command_editor_clone.clone(),
@@ -5447,13 +5524,15 @@ impl AwsBedrockWidget {
         let refresh_credentials_button_clone = refresh_credentials_button.clone();
         ctx.subscribe_to_model(
             &UserWorkspaces::handle(ctx),
-            move |_, workspace, event, ctx| {
+            move |view, workspace, event, ctx| {
                 if let UserWorkspacesEvent::TeamsChanged = event {
                     let is_any_ai_enabled = AISettings::as_ref(ctx).is_any_ai_enabled(ctx);
                     let is_usage_enabled = is_any_ai_enabled
-                        && workspace
-                            .as_ref(ctx)
-                            .is_aws_bedrock_credentials_enabled(ctx);
+                        && view.team_context().is_some_and(|team_context| {
+                            workspace
+                                .as_ref(ctx)
+                                .is_aws_bedrock_credentials_enabled(team_context, ctx)
+                        });
 
                     update_editor_interaction_state(
                         aws_auth_refresh_command_editor_clone.clone(),
@@ -5485,6 +5564,7 @@ impl AwsBedrockWidget {
 
     fn render_aws_bedrock_section(
         &self,
+        team_context: &TeamContext,
         appearance: &Appearance,
         app: &AppContext,
         is_bedrock_available: bool,
@@ -5494,12 +5574,13 @@ impl AwsBedrockWidget {
         let is_any_ai_enabled = ai_settings.is_any_ai_enabled(app);
         let is_section_enabled = is_any_ai_enabled && is_bedrock_available;
         let is_admin_enforced = matches!(
-            user_workspaces.aws_bedrock_host_enablement_setting(),
+            user_workspaces.aws_bedrock_host_enablement_setting(team_context),
             crate::workspaces::workspace::HostEnablementSetting::Enforce
         );
-        let is_toggleable =
-            is_section_enabled && user_workspaces.is_aws_bedrock_credentials_toggleable();
-        let are_credentials_enabled = user_workspaces.is_aws_bedrock_credentials_enabled(app);
+        let is_toggleable = is_section_enabled
+            && user_workspaces.is_aws_bedrock_credentials_toggleable(team_context);
+        let are_credentials_enabled =
+            user_workspaces.is_aws_bedrock_credentials_enabled(team_context, app);
         let is_usage_enabled = is_section_enabled && are_credentials_enabled;
         let toggle_description = if is_admin_enforced {
             "Warp loads and sends local AWS CLI credentials for Bedrock-supported models. This setting is managed by your organization.".to_string()
@@ -5690,21 +5771,23 @@ impl SettingsWidget for AwsBedrockWidget {
         "aws bedrock amazon credentials login profile"
     }
 
-    fn should_render(&self, app: &AppContext) -> bool {
-        // Only show if admin has enabled AWS Bedrock for the workspace
-        UserWorkspaces::as_ref(app).is_aws_bedrock_available_from_workspace()
+    fn should_render(&self, _app: &AppContext) -> bool {
+        true
     }
 
     fn render(
         &self,
-        _view: &Self::View,
+        view: &Self::View,
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
+        let Some(team_context) = view.team_context() else {
+            return Flex::column().finish();
+        };
         let ai_settings = AISettings::as_ref(app);
         let is_any_ai_enabled = ai_settings.is_any_ai_enabled(app);
         let is_bedrock_available =
-            UserWorkspaces::as_ref(app).is_aws_bedrock_available_from_workspace();
+            UserWorkspaces::as_ref(app).is_aws_bedrock_available_for_team(team_context);
 
         let column = Flex::column()
             .with_child(render_separator(appearance))
@@ -5717,7 +5800,12 @@ impl SettingsWidget for AwsBedrockWidget {
                 .with_padding_bottom(HEADER_PADDING)
                 .finish(),
             )
-            .with_child(self.render_aws_bedrock_section(appearance, app, is_bedrock_available));
+            .with_child(self.render_aws_bedrock_section(
+                team_context,
+                appearance,
+                app,
+                is_bedrock_available,
+            ));
 
         Container::new(column.finish())
             .with_margin_bottom(HEADER_PADDING)
@@ -5731,15 +5819,22 @@ struct GeminiEnterpriseWidget {
 }
 
 impl GeminiEnterpriseWidget {
-    fn is_refresh_enabled(app: &AppContext) -> bool {
-        AISettings::as_ref(app).is_any_ai_enabled(app)
-            && UserWorkspaces::as_ref(app).is_gemini_enterprise_credentials_enabled(app)
-            && !ApiKeyManager::as_ref(app)
-                .geap_credentials_state()
-                .requires_admin_action()
+    fn is_refresh_enabled(
+        team_context: Option<&TeamContext>,
+        app: &AppContext,
+    ) -> bool {
+        team_context.is_some_and(|team_context| {
+            AISettings::as_ref(app).is_any_ai_enabled(app)
+                && UserWorkspaces::as_ref(app)
+                    .is_gemini_enterprise_credentials_enabled(team_context, app)
+                && !ApiKeyManager::as_ref(app)
+                    .geap_credentials_state()
+                    .requires_admin_action()
+        })
     }
 
     fn new(ctx: &mut ViewContext<<Self as SettingsWidget>::View>) -> Self {
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         let refresh_credentials_button = ctx.add_typed_action_view(|_| {
             ActionButton::new("Refresh", SecondaryTheme)
                 .with_icon(Icon::RefreshCw04)
@@ -5751,42 +5846,54 @@ impl GeminiEnterpriseWidget {
                 })
         });
         refresh_credentials_button.update(ctx, |button, ctx| {
-            button.set_disabled(!Self::is_refresh_enabled(ctx), ctx);
+            button.set_disabled(
+                !Self::is_refresh_enabled(team_context.as_ref(), ctx),
+                ctx,
+            );
         });
 
         let refresh_credentials_button_clone = refresh_credentials_button.clone();
-        ctx.subscribe_to_model(&UserWorkspaces::handle(ctx), move |_, _, event, ctx| {
+        ctx.subscribe_to_model(&UserWorkspaces::handle(ctx), move |view, _, event, ctx| {
             if matches!(
                 event,
                 UserWorkspacesEvent::TeamsChanged
                     | UserWorkspacesEvent::UpdateWorkspaceSettingsSuccess
             ) {
                 refresh_credentials_button_clone.update(ctx, |button, ctx| {
-                    button.set_disabled(!Self::is_refresh_enabled(ctx), ctx);
+                    button.set_disabled(
+                        !Self::is_refresh_enabled(view.team_context(), ctx),
+                        ctx,
+                    );
                 });
                 ctx.notify();
             }
         });
 
         let refresh_credentials_button_clone = refresh_credentials_button.clone();
-        ctx.subscribe_to_model(&AISettings::handle(ctx), move |_, _, event, ctx| {
+        ctx.subscribe_to_model(&AISettings::handle(ctx), move |view, _, event, ctx| {
             if matches!(
                 event,
                 AISettingsChangedEvent::GeminiEnterpriseCredentialsEnabled { .. }
                     | AISettingsChangedEvent::IsAnyAIEnabled { .. }
             ) {
                 refresh_credentials_button_clone.update(ctx, |button, ctx| {
-                    button.set_disabled(!Self::is_refresh_enabled(ctx), ctx);
+                    button.set_disabled(
+                        !Self::is_refresh_enabled(view.team_context(), ctx),
+                        ctx,
+                    );
                 });
                 ctx.notify();
             }
         });
 
         let refresh_credentials_button_clone = refresh_credentials_button.clone();
-        ctx.subscribe_to_model(&ApiKeyManager::handle(ctx), move |_, _, event, ctx| {
+        ctx.subscribe_to_model(&ApiKeyManager::handle(ctx), move |view, _, event, ctx| {
             if matches!(event, ApiKeyManagerEvent::KeysUpdated) {
                 refresh_credentials_button_clone.update(ctx, |button, ctx| {
-                    button.set_disabled(!Self::is_refresh_enabled(ctx), ctx);
+                    button.set_disabled(
+                        !Self::is_refresh_enabled(view.team_context(), ctx),
+                        ctx,
+                    );
                 });
             }
         });
@@ -5799,6 +5906,7 @@ impl GeminiEnterpriseWidget {
 
     fn render_gemini_enterprise_section(
         &self,
+        team_context: &TeamContext,
         appearance: &Appearance,
         app: &AppContext,
         is_gemini_enterprise_available: bool,
@@ -5807,12 +5915,13 @@ impl GeminiEnterpriseWidget {
         let is_any_ai_enabled = AISettings::as_ref(app).is_any_ai_enabled(app);
         let is_section_enabled = is_any_ai_enabled && is_gemini_enterprise_available;
         let is_admin_enforced = matches!(
-            user_workspaces.gemini_enterprise_host_enablement_setting(),
+            user_workspaces.gemini_enterprise_host_enablement_setting(team_context),
             crate::workspaces::workspace::HostEnablementSetting::Enforce
         );
-        let is_toggleable =
-            is_section_enabled && user_workspaces.is_gemini_enterprise_credentials_toggleable();
-        let are_credentials_enabled = user_workspaces.is_gemini_enterprise_credentials_enabled(app);
+        let is_toggleable = is_section_enabled
+            && user_workspaces.is_gemini_enterprise_credentials_toggleable(team_context);
+        let are_credentials_enabled =
+            user_workspaces.is_gemini_enterprise_credentials_enabled(team_context, app);
         let toggle_description = if is_admin_enforced {
             "Warp routes eligible requests through your workspace's Gemini Enterprise Google Cloud \
              project. This setting is managed by your organization."
@@ -5931,20 +6040,22 @@ impl SettingsWidget for GeminiEnterpriseWidget {
         "gemini enterprise geap google vertex credentials"
     }
 
-    fn should_render(&self, app: &AppContext) -> bool {
+    fn should_render(&self, _app: &AppContext) -> bool {
         FeatureFlag::GeminiEnterprise.is_enabled()
-            && UserWorkspaces::as_ref(app).is_gemini_enterprise_available_from_workspace()
     }
 
     fn render(
         &self,
-        _view: &Self::View,
+        view: &Self::View,
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
+        let Some(team_context) = view.team_context() else {
+            return Flex::column().finish();
+        };
         let is_any_ai_enabled = AISettings::as_ref(app).is_any_ai_enabled(app);
         let is_gemini_enterprise_available =
-            UserWorkspaces::as_ref(app).is_gemini_enterprise_available_from_workspace();
+            UserWorkspaces::as_ref(app).is_gemini_enterprise_available_for_team(team_context);
         let column = Flex::column()
             .with_child(render_separator(appearance))
             .with_child(
@@ -5957,6 +6068,7 @@ impl SettingsWidget for GeminiEnterpriseWidget {
                 .finish(),
             )
             .with_child(self.render_gemini_enterprise_section(
+                team_context,
                 appearance,
                 app,
                 is_gemini_enterprise_available,

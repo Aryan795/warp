@@ -543,7 +543,7 @@ use crate::workspace::{
     CommandSearchOptions, ForkAIConversationParams, ForkFromExchange,
     ForkedConversationDestination, OneTimeModalModel, ToastStack, WorkspaceAction,
 };
-use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces, UserWorkspacesEvent};
 use crate::workspaces::workspace::CustomerType;
 use crate::{
     AIAgentActionResultType, AIRequestUsageModel, ActiveSession as WindowActiveSession, safe_error,
@@ -3548,8 +3548,7 @@ impl TerminalView {
                 ctx,
             )
         });
-        let team_context =
-            UserWorkspaces::as_ref(ctx).team_context_for_view(ctx).map(Arc::new);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         let ai_controller = ctx.add_model(|ctx| {
             BlocklistAIController::new(
                 ai_input_model.clone(),
@@ -4243,7 +4242,10 @@ impl TerminalView {
 
         ctx.subscribe_to_model(&AISettings::handle(ctx), |me, _, ai_settings_event, ctx| {
             if let AISettingsChangedEvent::AwsBedrockCredentialsEnabled { .. } = ai_settings_event
-                && !UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_enabled(ctx)
+                && !me.team_context(ctx).is_some_and(|team_context| {
+                    UserWorkspaces::as_ref(ctx)
+                        .is_aws_bedrock_credentials_enabled(team_context, ctx)
+                })
             {
                 me.remove_aws_bedrock_login_banner(ctx);
             }
@@ -8341,6 +8343,10 @@ impl TerminalView {
         self.model.lock().is_shared_session_viewer()
     }
 
+    pub(crate) fn team_context<'a>(&'a self, app: &'a AppContext) -> Option<&'a TeamContext> {
+        self.ai_controller.as_ref(app).team_context()
+    }
+
     pub(crate) fn apply_viewer_shared_session_input_update(
         &mut self,
         block_id: &BlockId,
@@ -8402,8 +8408,9 @@ impl TerminalView {
             return;
         }
 
-        let is_ai_allowed_in_remote_sessions =
-            UserWorkspaces::as_ref(ctx).is_ai_allowed_in_remote_sessions();
+        let is_ai_allowed_in_remote_sessions = self.team_context(ctx).is_none_or(|team_context| {
+            UserWorkspaces::as_ref(ctx).is_ai_allowed_in_remote_sessions(team_context)
+        });
 
         // Only update the FocusedTerminalInfo model if the user has disabled AI in remote sessions
         // because it's a potentially expensive operation.
@@ -10212,7 +10219,9 @@ impl TerminalView {
         };
 
         // Return early if we've run out of AI usage.
-        if !AIRequestUsageModel::as_ref(ctx).has_any_ai_remaining(ctx) {
+        if !AIRequestUsageModel::as_ref(ctx)
+            .has_any_ai_remaining(self.ai_controller.as_ref(ctx).team_context(), ctx)
+        {
             return false;
         }
 
@@ -10843,7 +10852,9 @@ impl TerminalView {
         }
 
         // Check if AWS Bedrock is available in the workspace
-        if !UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_enabled(ctx) {
+        if !self.team_context(ctx).is_some_and(|team_context| {
+            UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_enabled(team_context, ctx)
+        }) {
             return;
         }
 
@@ -11297,12 +11308,16 @@ impl TerminalView {
             return false;
         };
 
-        if UserWorkspaces::as_ref(app).is_ai_allowed_in_remote_sessions() {
+        let Some(team_context) = self.team_context(app) else {
+            return false;
+        };
+
+        if UserWorkspaces::as_ref(app).is_ai_allowed_in_remote_sessions(team_context) {
             // We don't check any regexes if the user is allowed to run AI in remote sessions.
             return false;
         }
-
-        let remote_session_regex_list = UserWorkspaces::as_ref(app).get_remote_session_regex_list();
+        let remote_session_regex_list =
+            UserWorkspaces::as_ref(app).get_remote_session_regex_list(team_context);
 
         // First check if the command matches any of the regexes in the list.
         if remote_session_regex_list
@@ -14151,7 +14166,9 @@ impl TerminalView {
             }
         });
 
-        let init_model = ctx.add_model(|ctx| InitProjectModel::new(pwd_path, path_env_var, ctx));
+        let ai_controller = self.ai_controller.clone();
+        let init_model =
+            ctx.add_model(|ctx| InitProjectModel::new(pwd_path, path_env_var, ai_controller, ctx));
         self.active_init_project_model = Some(init_model.clone());
 
         ctx.subscribe_to_model(&init_model, move |me, model, event, ctx| {
@@ -14624,7 +14641,11 @@ impl TerminalView {
             && is_repo
             && self.active_ai_block(ctx).is_none()
             && !is_remote_session
-            && InitProjectModel::should_have_available_steps(directory, ctx)
+            && InitProjectModel::should_have_available_steps(
+                directory,
+                self.team_context(ctx),
+                ctx,
+            )
     }
 
     #[cfg(not(feature = "local_fs"))]
@@ -23334,6 +23355,7 @@ impl TerminalView {
             .as_ref(ctx)
             .current_working_directory_location(ctx);
         let context = self.ai_context_model.as_ref(ctx).pending_context(
+            self.team_context(ctx),
             ctx,
             true, /* is_user_query */
             current_working_directory_location.as_ref(),
@@ -27661,7 +27683,10 @@ impl TypedActionView for TerminalView {
             SummarizeConversation => self.summarize_conversation(ctx),
             IndexProjectSpeedbump => {
                 let codebase_context_enabled =
-                    UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(ctx);
+                    self.team_context(ctx).is_some_and(|team_context| {
+                        UserWorkspaces::as_ref(ctx)
+                            .is_codebase_context_enabled(team_context, ctx)
+                    });
 
                 if FeatureFlag::FullSourceCodeEmbedding.is_enabled() && codebase_context_enabled {
                     #[cfg(feature = "local_fs")]

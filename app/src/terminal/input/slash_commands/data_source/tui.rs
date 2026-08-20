@@ -73,6 +73,7 @@ impl TuiSlashCommandDataSource {
             state: SlashCommandDataSourceState::new(
                 active_session,
                 cli_subagent_controller,
+                None,
                 terminal_view_id,
             ),
             terminal_model,

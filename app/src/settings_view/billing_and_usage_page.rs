@@ -1460,7 +1460,10 @@ impl BillingAndUsagePageView {
         has_admin_permissions: bool,
     ) -> Box<dyn Element> {
         let workspaces = UserWorkspaces::as_ref(app);
-        let usage_settings = workspaces.usage_based_pricing_settings();
+        let Some(team_context) = self.team_context.as_ref() else {
+            return warpui::elements::Empty::new().finish();
+        };
+        let usage_settings = workspaces.usage_based_pricing_settings(team_context);
 
         let spend_limit_text = if let Some(cents) = usage_settings.max_monthly_spend_cents {
             format!("${:.2}", cents as f64 / 100.0)
@@ -1740,9 +1743,11 @@ impl BillingAndUsagePageView {
             .finish();
 
         let workspaces = UserWorkspaces::as_ref(app);
-        let purchase_policy = workspaces.purchase_policy_for_team(
-            team_uid.and_then(|team_uid| workspaces.team_from_uid(team_uid)),
-        );
+        let purchase_policy = self
+            .team_context
+            .as_ref()
+            .and_then(|team_context| workspaces.purchase_policy_for_team(team_context))
+            .or_else(|| workspaces.purchase_policy_for_personal());
         let team_can_purchase_addon_credits =
             purchase_policy.is_some_and(|policy| policy.allows_purchases());
         let premium_bps = purchase_policy.map_or(0, |policy| policy.effective_premium_bps());
@@ -2905,7 +2910,10 @@ impl BillingAndUsagePageView {
             .user_email()
             .unwrap_or_default();
         let workspaces = UserWorkspaces::as_ref(app);
-        let team = workspaces.team_for_view_handle(&self.self_handle, app);
+        let team = self
+            .team_context
+            .as_ref()
+            .and_then(|team_context| workspaces.team_for_context(team_context));
         let billing_metadata = workspaces.current_workspace_billing_metadata();
         let has_admin_permissions =
             team.is_some_and(|team| team.has_admin_permissions(&current_user_email));
@@ -2996,8 +3004,11 @@ impl BillingAndUsagePageView {
         }
 
         let show_addon_credits_panel = workspace.is_some()
-            || workspaces
-                .purchase_policy_for_team(team)
+            || self
+                .team_context
+                .as_ref()
+                .and_then(|team_context| workspaces.purchase_policy_for_team(team_context))
+                .or_else(|| workspaces.purchase_policy_for_personal())
                 .is_some_and(|policy| policy.allows_purchases());
         if show_addon_credits_panel {
             let bonus_credit_balance = workspace.map_or_else(
@@ -3321,7 +3332,12 @@ impl BillingAndUsagePageView {
                 "Upgrade to the Build plan",
                 upgrade_url,
             )];
-            if UserWorkspaces::as_ref(app).is_byo_api_key_enabled(app) {
+            let workspaces = UserWorkspaces::as_ref(app);
+            let is_byo_api_key_enabled = self.team_context.as_ref().map_or_else(
+                || workspaces.is_byo_api_key_enabled_for_personal(app),
+                |team_context| workspaces.is_byo_api_key_enabled(team_context, app),
+            );
+            if is_byo_api_key_enabled {
                 fragments.push(FormattedTextFragment::plain_text(" or "));
                 fragments.push(FormattedTextFragment::hyperlink_action(
                     "bring your own key",
@@ -3380,7 +3396,11 @@ impl BillingAndUsagePageView {
         if let (Some(team), Some(billing_metadata)) = (team, billing_metadata)
             && billing_metadata.is_usage_based_pricing_toggleable()
         {
-            let usage_based_pricing_settings = workspaces.usage_based_pricing_settings();
+            let Some(team_context) = self.team_context.as_ref() else {
+                return usage.finish();
+            };
+            let usage_based_pricing_settings =
+                workspaces.usage_based_pricing_settings(team_context);
 
             let enabled = self
                 .usage_based_pricing_toggle_override

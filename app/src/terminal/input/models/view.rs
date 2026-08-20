@@ -26,6 +26,7 @@ use crate::terminal::input::inline_menu::{
     InlineMenuTabConfig, InlineMenuView,
 };
 use crate::terminal::input::models::data_source::{AcceptModel, ModelSelectorDataSource};
+use crate::ai::blocklist::BlocklistAIController;
 use crate::terminal::input::suggestions_mode_model::{
     InputSuggestionsModeEvent, InputSuggestionsModeModel,
 };
@@ -124,16 +125,16 @@ impl InlineModelSelectorView {
         ambient_agent_view_model: Option<ModelHandle<AmbientAgentViewModel>>,
         suggestions_mode_model: ModelHandle<InputSuggestionsModeModel>,
         agent_view_controller: ModelHandle<AgentViewController>,
+        ai_controller: ModelHandle<BlocklistAIController>,
         input_buffer_model: &ModelHandle<InputBufferModel>,
         cli_subagent_controller: ModelHandle<CLISubagentController>,
         positioner: &ModelHandle<InlineMenuPositioner>,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
-        let window_id = ctx.window_id();
         let data_source = ctx.add_model(move |_| {
             // Built without the ambient model; the setter (called below for construction and by
             // the lazy shared-session viewer path) is the single point that attaches it.
-            ModelSelectorDataSource::new(terminal_view_id, window_id, None)
+            ModelSelectorDataSource::new(terminal_view_id, ai_controller, None)
         });
 
         let tab_configs = TAB_CONFIGS.clone();

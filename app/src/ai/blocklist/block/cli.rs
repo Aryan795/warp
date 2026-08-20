@@ -1201,6 +1201,7 @@ impl View for CLISubagentView {
                 output_items.add_child(render_failed_output(
                     FailedOutputProps {
                         error,
+                        team_context: None,
                         is_ai_input_enabled: false,
                         invalid_api_key_button_handle: &self
                             .state_handles

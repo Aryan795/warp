@@ -58,7 +58,7 @@ use crate::view_components::action_button::{
     ActionButton, DangerNakedTheme, DangerSecondaryTheme, PrimaryTheme,
 };
 use crate::workspace::ToastStack;
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces, UserWorkspacesEvent};
 
 const DEFAULT_JSON_TEXT: &str = r#"{
     "": {
@@ -113,6 +113,7 @@ impl ServerModel {
 
 pub struct MCPServersEditPageView {
     handle: WeakViewHandle<Self>,
+    team_context: Option<TeamContext>,
     server_card_item_id: Option<ServerCardItemId>,
     server_model: ServerModel,
     save_button: ViewHandle<ActionButton>,
@@ -132,6 +133,16 @@ pub struct MCPServersEditPageView {
 
 impl MCPServersEditPageView {
     pub fn new(ctx: &mut ViewContext<Self>) -> Self {
+        ctx.subscribe_to_model(&UserWorkspaces::handle(ctx), |me, workspaces, event, ctx| {
+            if matches!(
+                event,
+                UserWorkspacesEvent::WindowTeamChanged { window_id }
+                    if *window_id == ctx.window_id()
+            ) {
+                me.team_context = workspaces.as_ref(ctx).team_context_for_view(ctx);
+                ctx.notify();
+            }
+        });
         let save_button = ctx.add_typed_action_view(|_| {
             ActionButton::new("Save", PrimaryTheme)
                 .with_icon(Icon::Check)
@@ -205,6 +216,7 @@ impl MCPServersEditPageView {
 
         Self {
             handle: ctx.handle(),
+            team_context: UserWorkspaces::as_ref(ctx).team_context_for_view(ctx),
             server_card_item_id: None,
             server_model: ServerModel::None,
             save_button,
@@ -537,8 +549,10 @@ impl MCPServersEditPageView {
         templatable_mcp_server: &TemplatableMCPServer,
     ) -> Result<(), String> {
         let safe_mode_enabled = *SafeModeSettings::as_ref(ctx).safe_mode_enabled.value();
-        let enterprise_enforced =
-            UserWorkspaces::as_ref(ctx).is_enterprise_secret_redaction_enabled();
+        let enterprise_enforced = self.team_context.as_ref().is_some_and(|team_context| {
+            UserWorkspaces::as_ref(ctx)
+                .is_enterprise_secret_redaction_enabled(team_context)
+        });
         let contains_secrets =
             !find_secrets_in_text(&templatable_mcp_server.template.json).is_empty();
 

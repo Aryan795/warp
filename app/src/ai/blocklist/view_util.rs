@@ -19,7 +19,7 @@ use crate::ai::AIRequestUsageModel;
 use crate::ai::agent::RenderableAIError;
 use crate::themes::theme::{AnsiColorIdentifier, Fill, WarpTheme};
 use crate::ui_components::icons::Icon;
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces};
 
 const PROVIDER_BUTTON_ICON_SIZE: f32 = 14.;
 const PROVIDER_BUTTON_ICON_TEXT_GAP: f32 = 8.;
@@ -88,6 +88,7 @@ pub enum FailedOutputPresentation {
 /// an alarming terminal error while an automatic resume is still in flight.
 pub fn failed_output_presentation(
     error: &RenderableAIError,
+    team_context: Option<&TeamContext>,
     app: &AppContext,
 ) -> Option<FailedOutputPresentation> {
     if error.should_suppress_during_recovery() {
@@ -99,11 +100,16 @@ pub fn failed_output_presentation(
             user_display_message,
         } => {
             if let Some(message) = user_display_message {
-                if should_show_subscribe_cta(app) {
+                if should_show_subscribe_cta(team_context, app) {
+                    let workspaces = UserWorkspaces::as_ref(app);
                     FailedOutputPresentation::OutOfCredits {
                         message: format!("{ERROR_APOLOGY_TEXT}\n\n{message}"),
-                        can_use_own_api_keys: UserWorkspaces::as_ref(app)
-                            .is_byo_api_key_enabled(app),
+                        can_use_own_api_keys: team_context.map_or_else(
+                            || workspaces.is_byo_api_key_enabled_for_personal(app),
+                            |team_context| {
+                                workspaces.is_byo_api_key_enabled(team_context, app)
+                            },
+                        ),
                     }
                 } else {
                     FailedOutputPresentation::Message(format!("{ERROR_APOLOGY_TEXT}\n\n{message}"))
@@ -188,10 +194,15 @@ pub fn should_show_failed_output_usage_notice(
 
 /// Whether to show the out-of-credits CTA: only for non-paid users. Paid users and the enterprise
 /// spend-limit variant of this message fall back to plain text.
-fn should_show_subscribe_cta(app: &AppContext) -> bool {
-    UserWorkspaces::as_ref(app)
-        .current_workspace()
-        .is_none_or(|workspace| !workspace.billing_metadata.is_user_on_paid_plan())
+fn should_show_subscribe_cta(
+    team_context: Option<&TeamContext>,
+    app: &AppContext,
+) -> bool {
+    team_context.is_none_or(|team_context| {
+        UserWorkspaces::as_ref(app)
+            .team_billing_metadata(team_context)
+            .is_none_or(|billing| !billing.is_user_on_paid_plan())
+    })
 }
 
 /// Returns the AI icon element to be rendered in AI output blocks and the terminal input when in

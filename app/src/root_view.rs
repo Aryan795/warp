@@ -109,7 +109,7 @@ use crate::workspace::view::OnboardingTutorial;
 use crate::workspace::{PaneViewLocator, Workspace, WorkspaceAction, WorkspaceRegistry};
 use crate::workspaces::team_tester::TeamTesterStatus;
 use crate::workspaces::update_manager::TeamUpdateManager;
-use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces, UserWorkspacesEvent};
 use crate::workspaces::workspace::FtueAccountClass;
 use crate::{
     ChannelState, GlobalResourceHandles, GlobalResourceHandlesProvider, UpdateQuakeModeEventArg,
@@ -1850,6 +1850,7 @@ enum AuthOnboardingState {
 }
 
 pub struct RootView {
+    team_context: Option<TeamContext>,
     auth_onboarding_state: AuthOnboardingState,
     server_time: Option<Arc<ServerTime>>,
     auth_view: ViewHandle<AuthView>,
@@ -1888,6 +1889,7 @@ impl RootView {
         UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
             user_workspaces.register_window(window_id, team_uid, ctx);
         });
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         let server_api_provider = ServerApiProvider::as_ref(ctx);
         let server_api = server_api_provider.get();
         let auth_state = AuthStateProvider::as_ref(ctx).get().clone();
@@ -1900,7 +1902,14 @@ impl RootView {
             me.handle_cloud_preferences_syncer_event(event, ctx);
         });
 
-        ctx.subscribe_to_model(&UserWorkspaces::handle(ctx), |me, _, event, ctx| {
+        ctx.subscribe_to_model(&UserWorkspaces::handle(ctx), |me, workspaces, event, ctx| {
+            if matches!(
+                event,
+                UserWorkspacesEvent::WindowTeamChanged { window_id }
+                    if *window_id == ctx.window_id()
+            ) {
+                me.team_context = workspaces.as_ref(ctx).team_context_for_view(ctx);
+            }
             me.handle_account_first_workspaces_event(event, ctx);
         });
 
@@ -1944,7 +1953,8 @@ impl RootView {
                         AuthOnboardingState::Auth(workspace_args.into())
                     } else if should_show_pre_login_onboarding {
                         let workspace_args_box: Box<WorkspaceArgs> = workspace_args.into();
-                        let onboarding_view = Self::create_agent_onboarding_view(ctx);
+                        let onboarding_view =
+                            Self::create_agent_onboarding_view(team_context.as_ref(), ctx);
                         onboarding_view.update(ctx, |view, ctx| {
                             view.start_onboarding(ctx);
                         });
@@ -1973,6 +1983,7 @@ impl RootView {
         };
 
         let root_view = Self {
+            team_context,
             auth_onboarding_state,
             server_time: None,
             auth_view,
@@ -2181,6 +2192,7 @@ impl RootView {
     }
 
     fn create_agent_onboarding_view(
+        team_context: Option<&TeamContext>,
         ctx: &mut ViewContext<Self>,
     ) -> ViewHandle<AgentOnboardingView> {
         LLMPreferences::handle(ctx).update(ctx, |prefs, ctx| {
@@ -2188,6 +2200,8 @@ impl RootView {
         });
 
         let themes = onboarding_theme_picker_themes();
+        let auth_state = current_onboarding_auth_state(team_context, ctx);
+        let credit_pack_options = onboarding_credit_packs(team_context, ctx);
         let onboarding_view = ctx.add_typed_action_view(move |ctx| {
             let (models, default_model_id) =
                 build_onboarding_models(LLMPreferences::as_ref(ctx), ctx);
@@ -2196,7 +2210,6 @@ impl RootView {
                 .ai_autonomy_settings()
                 .has_any_overrides();
 
-            let auth_state = current_onboarding_auth_state(ctx);
 
             let mut view = AgentOnboardingView::new(
                 themes.clone(),
@@ -2208,7 +2221,7 @@ impl RootView {
                 auth_state,
                 ctx,
             );
-            view.set_credit_pack_options(onboarding_credit_packs(ctx), ctx);
+            view.set_credit_pack_options(credit_pack_options, ctx);
             view.set_pricing_promotion_message(onboarding_pricing_promotion_message(ctx), ctx);
             view
         });
@@ -2216,9 +2229,9 @@ impl RootView {
         let onboarding_view_for_pricing = onboarding_view.clone();
         ctx.subscribe_to_model(
             &PricingInfoModel::handle(ctx),
-            move |_, _pricing, event, ctx| {
+            move |me, _pricing, event, ctx| {
                 let PricingInfoModelEvent::PricingInfoUpdated = event;
-                let options = onboarding_credit_packs(ctx);
+                let options = onboarding_credit_packs(me.team_context.as_ref(), ctx);
                 let promotion_message = onboarding_pricing_promotion_message(ctx);
                 onboarding_view_for_pricing.update(ctx, |onboarding_view, ctx| {
                     onboarding_view.set_credit_pack_options(options, ctx);
@@ -2249,7 +2262,7 @@ impl RootView {
         let onboarding_view_for_workspaces = onboarding_view.clone();
         ctx.subscribe_to_model(
             &UserWorkspaces::handle(ctx),
-            move |_, user_workspaces, event, ctx| {
+            move |me, user_workspaces, event, ctx| {
                 if matches!(event, UserWorkspacesEvent::UpdateWorkspaceSettingsSuccess) {
                     let workspace_enforces_autonomy = user_workspaces
                         .as_ref(ctx)
@@ -2265,8 +2278,9 @@ impl RootView {
                     event,
                     ctx,
                 );
-                let auth_state = current_onboarding_auth_state(ctx);
-                let credit_pack_options = onboarding_credit_packs(ctx);
+                let auth_state = current_onboarding_auth_state(me.team_context.as_ref(), ctx);
+                let credit_pack_options =
+                    onboarding_credit_packs(me.team_context.as_ref(), ctx);
                 onboarding_view_for_workspaces.update(ctx, |onboarding_view, ctx| {
                     onboarding_view.set_auth_state(auth_state, ctx);
                     // The purchase policy (and so the premium) comes from the
@@ -2282,11 +2296,12 @@ impl RootView {
         let onboarding_view_for_usage = onboarding_view.clone();
         ctx.subscribe_to_model(
             &AIRequestUsageModel::handle(ctx),
-            move |_, _usage, event, ctx| {
+            move |me, _usage, event, ctx| {
                 if !matches!(event, AIRequestUsageModelEvent::CreditAvailabilityUpdated) {
                     return;
                 }
-                let available = AIRequestUsageModel::as_ref(ctx).has_any_ai_remaining(ctx);
+                let available = AIRequestUsageModel::as_ref(ctx)
+                    .has_any_ai_remaining(me.team_context.as_ref(), ctx);
                 onboarding_view_for_usage.update(ctx, |onboarding_view, ctx| {
                     onboarding_view.on_ai_credit_availability_observed(available, ctx);
                 });
@@ -2296,12 +2311,13 @@ impl RootView {
         let onboarding_view_for_auth = onboarding_view.clone();
         ctx.subscribe_to_model(
             &AuthManager::handle(ctx),
-            move |_, _auth_manager, event, ctx| {
+            move |me, _auth_manager, event, ctx| {
                 if matches!(
                     event,
                     AuthManagerEvent::AuthComplete | AuthManagerEvent::SkippedLogin
                 ) {
-                    let auth_state = current_onboarding_auth_state(ctx);
+                    let auth_state =
+                        current_onboarding_auth_state(me.team_context.as_ref(), ctx);
                     onboarding_view_for_auth.update(ctx, |onboarding_view, ctx| {
                         onboarding_view.set_auth_state(auth_state, ctx);
                     });
@@ -2991,9 +3007,14 @@ impl RootView {
             },
             AgentOnboardingEvent::PurchaseCreditsRequested { credits } => {
                 let credits = *credits;
-                let team_uid = UserWorkspaces::as_ref(ctx).team_uid_for_window(ctx.window_id());
+                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
                 UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
-                    user_workspaces.purchase_addon_credits(team_uid, credits, ctx);
+                    match team_context {
+                        Some(team_context) => {
+                            user_workspaces.purchase_addon_credits(team_context, credits, ctx);
+                        }
+                        None => user_workspaces.purchase_personal_addon_credits(credits, ctx),
+                    }
                 });
             }
             AgentOnboardingEvent::OfferCreditsPurchased { variant } => match variant {
@@ -4204,7 +4225,9 @@ impl AuthOnboardingState {
             }
         };
 
-        let onboarding_view = RootView::create_agent_onboarding_view(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let onboarding_view =
+            RootView::create_agent_onboarding_view(team_context.as_ref(), ctx);
         onboarding_view.update(ctx, |view, ctx| {
             view.start_onboarding(ctx);
         });

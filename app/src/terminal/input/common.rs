@@ -485,8 +485,28 @@ pub(super) fn maybe_add_buy_credits_banner(
     app: &AppContext,
 ) {
     let workspaces = UserWorkspaces::as_ref(app);
-    let can_purchase_addon_credits = workspaces
-        .purchase_policy_for_team(workspaces.team_for_view_handle(input_view_handle, app))
+    let team_context = input_view_handle.upgrade(app).and_then(|input| {
+        input
+            .as_ref(app)
+            .ai_controller
+            .as_ref(app)
+            .team_context()
+    });
+    let purchase_policy = input_view_handle.upgrade(app).map_or_else(
+        || workspaces.purchase_policy_for_personal(),
+        |input| {
+            input
+                .as_ref(app)
+                .ai_controller
+                .as_ref(app)
+                .team_context()
+                .map_or_else(
+                    || workspaces.purchase_policy_for_personal(),
+                    |team_context| workspaces.purchase_policy_for_team(team_context),
+                )
+        },
+    );
+    let can_purchase_addon_credits = purchase_policy
         .is_some_and(|policy| policy.allows_purchases());
 
     // Show buy credits banner if billing policy allows purchasing, input is focused,
@@ -495,7 +515,7 @@ pub(super) fn maybe_add_buy_credits_banner(
     // 2. MonthlyLimitReached: Auto-reload enabled and is blocked by monthly limit
     let ai_request_usage = AIRequestUsageModel::as_ref(app);
     let should_show_banner = !matches!(
-        ai_request_usage.compute_buy_addon_credits_banner_display_state(app),
+        ai_request_usage.compute_buy_addon_credits_banner_display_state(team_context, app),
         BuyCreditsBannerDisplayState::Hidden
     );
     let is_using_api_key_for_current_model = should_show_key_icon_for_model(

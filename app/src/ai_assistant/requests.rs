@@ -14,11 +14,10 @@ use crate::ai::{RequestLimitInfo, RequestUsageInfo};
 use crate::ai_assistant::utils::{AssistantTranscriptPart, TranscriptPartSubType};
 use crate::auth::AuthStateProvider;
 use crate::send_telemetry_from_ctx;
-use crate::server::ids::ServerId;
 use crate::server::server_api::ServerApi;
 use crate::server::server_api::ai::AIClient;
 use crate::server::telemetry::{TelemetryEvent, WarpAIRequestResult};
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces};
 
 /// The key for the corresponding entry in UserDefaults.
 /// Not wiring through Settings for now since this data is only needed by the panel view.
@@ -68,6 +67,7 @@ pub enum GenerateDialogueResult {
 }
 
 pub struct Requests {
+    team_context: Option<TeamContext>,
     server_api: Arc<ServerApi>,
     ai_client: Arc<dyn AIClient>,
     request_status: RequestStatus,
@@ -111,6 +111,7 @@ impl Requests {
     pub fn new(
         server_api: Arc<ServerApi>,
         ai_client: Arc<dyn AIClient>,
+        team_context: Option<TeamContext>,
         ctx: &mut ModelContext<Self>,
     ) -> Self {
         // Check if the user has cached request limit info from before.
@@ -120,6 +121,7 @@ impl Requests {
         let request_limit_info = cached_request_limit_info.unwrap_or_default();
 
         let requests = Self {
+            team_context,
             server_api,
             ai_client,
             current_transcript: Vec::new(),
@@ -149,6 +151,14 @@ impl Requests {
         self.ai_execution_context = ai_execution_context;
     }
 
+    pub fn set_team_context(&mut self, team_context: Option<TeamContext>) {
+        self.team_context = team_context;
+    }
+
+    pub fn team_context(&self) -> Option<&TeamContext> {
+        self.team_context.as_ref()
+    }
+
     pub fn update_request_limit_info(
         &mut self,
         result: Result<RequestUsageInfo>,
@@ -170,9 +180,9 @@ impl Requests {
     pub fn issue_request(
         &mut self,
         request: String,
-        team_uid: Option<ServerId>,
         ctx: &mut ModelContext<Self>,
     ) {
+        let team_context = self.team_context.take();
         let server_api = self.server_api.clone();
         let raw_request = request.trim();
         let request_for_api = raw_request.to_string();
@@ -189,11 +199,19 @@ impl Requests {
         let future_handle = ctx.spawn(
             async move {
                 let start_time = Utc::now();
-                (start_time, server_api
-                    .generate_dialogue_answer(transcript, request_for_api, ai_execution_context)
-                    .await)
+                (
+                    start_time,
+                    server_api
+                        .generate_dialogue_answer(
+                            transcript,
+                            request_for_api,
+                            ai_execution_context,
+                        )
+                        .await,
+                    team_context,
+                )
             },
-            move |model, (start_time, response), ctx| {
+            move |model, (start_time, response, team_context), ctx| {
                 let succeeded = response.is_ok();
                 let end_time = Utc::now();
                 let mut current_request_status = RequestStatus::NotInFlight;
@@ -252,10 +270,12 @@ impl Requests {
                             };
 
                             let auth_state = AuthStateProvider::as_ref(ctx).get();
-                            let response = if let Some(team) = team_uid.and_then(|team_uid| {
-                                UserWorkspaces::as_ref(ctx)
-                                    .team_from_uid_across_all_workspaces(team_uid)
-                            }) {
+                            let response = if let Some(team) = team_context
+                                .as_ref()
+                                .and_then(|team_context| {
+                                    UserWorkspaces::as_ref(ctx).team_for_context(team_context)
+                                })
+                            {
                                 let current_user_email = auth_state.user_email().unwrap_or_default();
                                 let has_admin_permissions = team.has_admin_permissions(&current_user_email);
                                 if team.billing_metadata.can_upgrade_to_higher_tier_plan() {
@@ -322,6 +342,9 @@ impl Requests {
                     }
                 }
 
+                if model.team_context.is_none() {
+                    model.team_context = team_context;
+                }
                 ctx.emit(Event::RequestFinished { succeeded });
                 ctx.notify();
             },

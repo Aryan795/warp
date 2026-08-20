@@ -4111,7 +4111,12 @@ impl CodeReviewView {
             .repo_path()
             .and_then(LocalOrRemotePath::to_local_path)
             .map(|path| {
-                let has_steps = InitProjectModel::should_have_available_steps(path, app);
+                let focused_terminal = self.focused_terminal(app);
+                let team_context = focused_terminal
+                    .as_ref()
+                    .and_then(|view| view.as_ref(app).team_context(app));
+                let has_steps =
+                    InitProjectModel::should_have_available_steps(path, team_context, app);
                 let is_terminal_in_correct_dir = self
                     .focused_terminal(app)
                     .and_then(|view| {

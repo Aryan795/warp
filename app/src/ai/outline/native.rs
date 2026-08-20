@@ -139,7 +139,7 @@ impl RepoOutlines {
     /// outline codebase symbols for @ context menu settings.
     fn should_build_outlines(&self, ctx: &ModelContext<Self>) -> bool {
         self.indexing_enabled
-            && (UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(ctx)
+            && (UserWorkspaces::as_ref(ctx).is_codebase_context_enabled_for_personal(ctx)
                 || *InputSettings::as_ref(ctx)
                     .outline_codebase_symbols_for_at_context_menu
                     .value())

@@ -63,7 +63,9 @@ use crate::cloud_object::CloudObjectEventEntrypoint;
 use crate::server::graphql::{get_request_context, get_user_facing_error_message};
 use crate::server::ids::ServerId;
 use crate::workspaces::team::{DiscoverableTeam, MembershipRole};
-use crate::workspaces::user_workspaces::{CreateTeamResponse, WorkspacesMetadataWithPricing};
+use crate::workspaces::user_workspaces::{
+    CreateTeamResponse, TeamContext, WorkspacesMetadataWithPricing,
+};
 use crate::workspaces::workspace::Workspace;
 
 #[cfg_attr(test, automock)]
@@ -106,7 +108,7 @@ pub trait TeamClient: 'static + Send + Sync {
     async fn leave_team(
         &self,
         user_uid: UserUid,
-        team_uid: ServerId,
+        team_context: &TeamContext,
         entrypoint: CloudObjectEventEntrypoint,
     ) -> Result<WorkspacesMetadataWithPricing>;
 
@@ -354,13 +356,13 @@ impl TeamClient for ServerApi {
     async fn leave_team(
         &self,
         user_uid: UserUid,
-        team_uid: ServerId,
+        team_context: &TeamContext,
         entrypoint: CloudObjectEventEntrypoint,
     ) -> Result<WorkspacesMetadataWithPricing> {
         let variables = RemoveUserFromTeamVariables {
             input: RemoveUserFromTeamInput {
                 user_uid: user_uid.into(),
-                team_uid: team_uid.into(),
+                team_uid: team_context.team_uid().into(),
                 entrypoint: entrypoint.into(),
             },
             request_context: get_request_context(),

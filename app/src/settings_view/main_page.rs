@@ -229,8 +229,14 @@ impl TypedActionView for MainSettingsPageView {
                 }
             },
             MainPageAction::GenerateStripeBillingPortalLink { team_uid } => {
+                let _ = team_uid;
+                let Some(team_context) =
+                    UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+                else {
+                    return;
+                };
                 UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
-                    user_workspaces.generate_stripe_billing_portal_link(*team_uid, ctx);
+                    user_workspaces.generate_stripe_billing_portal_link(team_context, ctx);
                 });
             }
             MainPageAction::SignupAnonymousUser => {

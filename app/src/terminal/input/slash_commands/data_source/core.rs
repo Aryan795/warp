@@ -16,7 +16,9 @@ use warpui::{AppContext, Entity, EntityId, ModelContext, ModelHandle, SingletonE
 
 use crate::ai::agent_conversations_model::{AgentConversationsModel, AgentConversationsModelEvent};
 use crate::ai::blocklist::block::cli_controller::{CLISubagentController, CLISubagentEvent};
-use crate::ai::blocklist::{BlocklistAIHistoryEvent, BlocklistAIHistoryModel};
+use crate::ai::blocklist::{
+    BlocklistAIController, BlocklistAIHistoryEvent, BlocklistAIHistoryModel,
+};
 use crate::ai::skills::{SkillDescriptor, SkillManager};
 use crate::search::slash_command_menu::fuzzy_match::SlashCommandFuzzyMatchResult;
 use crate::search::slash_command_menu::static_commands::{Availability, commands};
@@ -34,7 +36,7 @@ use crate::terminal::input::slash_command_model::{
 use crate::terminal::input::slash_commands::AcceptSlashCommandOrSavedPrompt;
 use crate::terminal::model::session::SessionType;
 use crate::terminal::model::session::active_session::{ActiveSession, ActiveSessionEvent};
-use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces, UserWorkspacesEvent};
 
 /// Event emitted when the set of active slash commands changes.
 #[derive(Debug, Clone, Copy)]
@@ -169,6 +171,7 @@ pub(super) fn subscribe_to_shared_dependencies<T>(
 pub struct SlashCommandDataSourceState {
     active_session: ModelHandle<ActiveSession>,
     cli_subagent_controller: ModelHandle<CLISubagentController>,
+    ai_controller: Option<ModelHandle<BlocklistAIController>>,
     terminal_view_id: EntityId,
     active_commands_by_id: HashMap<SlashCommandId, StaticCommand>,
     active_repo_root: Option<PathBuf>,
@@ -177,11 +180,13 @@ impl SlashCommandDataSourceState {
     pub(super) fn new(
         active_session: ModelHandle<ActiveSession>,
         cli_subagent_controller: ModelHandle<CLISubagentController>,
+        ai_controller: Option<ModelHandle<BlocklistAIController>>,
         terminal_view_id: EntityId,
     ) -> Self {
         Self {
             active_session,
             cli_subagent_controller,
+            ai_controller,
             terminal_view_id,
             active_commands_by_id: HashMap::new(),
             active_repo_root: None,
@@ -205,6 +210,13 @@ pub trait SlashCommandDataSource {
 
     fn terminal_view_id(&self) -> EntityId {
         self.state().terminal_view_id
+    }
+
+    fn team_context<'a>(&'a self, ctx: &'a AppContext) -> Option<&'a TeamContext> {
+        self.state()
+            .ai_controller
+            .as_ref()
+            .and_then(|controller| controller.as_ref(ctx).team_context())
     }
 
     fn active_commands(&self) -> impl Iterator<Item = (&SlashCommandId, &StaticCommand)> {
@@ -339,7 +351,12 @@ pub trait SlashCommandDataSource {
             availability |= Availability::NO_LRC_CONTROL;
         }
 
-        if UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(ctx) {
+        let workspaces = UserWorkspaces::as_ref(ctx);
+        let is_codebase_context_enabled = self.team_context(ctx).map_or_else(
+            || workspaces.is_codebase_context_enabled_for_personal(ctx),
+            |team_context| workspaces.is_codebase_context_enabled(team_context, ctx),
+        );
+        if is_codebase_context_enabled {
             availability |= Availability::CODEBASE_CONTEXT;
         }
 
@@ -425,7 +442,12 @@ pub trait SlashCommandDataSource {
             .ok()
             .filter(|s| !s.is_empty())
             .is_some()
-            || UserWorkspaces::as_ref(ctx).default_host_slug().is_some();
+            || self
+                .team_context(ctx)
+                .and_then(|team_context| {
+                    UserWorkspaces::as_ref(ctx).default_host_slug(team_context)
+                })
+                .is_some();
         CommonCommandGates {
             is_orchestration_enabled: ai_settings.is_orchestration_enabled(ctx),
             is_cloud_handoff_enabled: ai_settings.is_cloud_handoff_enabled(ctx),

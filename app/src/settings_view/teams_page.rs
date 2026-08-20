@@ -609,8 +609,8 @@ impl TypedActionView for TeamsPageView {
             TeamsPageAction::GenerateUpgradeLink { team_uid } => {
                 self.generate_upgrade_link(*team_uid, ctx)
             }
-            TeamsPageAction::GenerateStripeBillingPortalLink { team_uid } => {
-                self.generate_stripe_billing_portal_link(*team_uid, ctx)
+            TeamsPageAction::GenerateStripeBillingPortalLink { .. } => {
+                self.generate_stripe_billing_portal_link(ctx)
             }
             TeamsPageAction::OpenAdminPanel { team_uid } => {
                 AdminActions::open_admin_panel(*team_uid, ctx);
@@ -1525,16 +1525,20 @@ impl TeamsPageView {
     }
 
     fn leave_team(&mut self, ctx: &mut ViewContext<Self>) {
-        let team_uid = self
+        let Some(team_context) = self
             .user_workspaces
             .as_ref(ctx)
-            .team_for_view(ctx)
-            .map(|team| team.uid);
-        if let Some(team_uid) = team_uid {
-            TeamUpdateManager::handle(ctx).update(ctx, |manager, ctx| {
-                manager.leave_team(team_uid, CloudObjectEventEntrypoint::TeamSettings, ctx)
-            });
-        }
+            .team_context_for_view(ctx)
+        else {
+            return;
+        };
+        TeamUpdateManager::handle(ctx).update(ctx, |manager, ctx| {
+            manager.leave_team(
+                team_context,
+                CloudObjectEventEntrypoint::TeamSettings,
+                ctx,
+            )
+        });
     }
 
     fn create_team(&mut self, ctx: &mut ViewContext<Self>) {
@@ -1708,14 +1712,17 @@ impl TeamsPageView {
             });
     }
 
-    fn generate_stripe_billing_portal_link(
-        &mut self,
-        team_uid: ServerId,
-        ctx: &mut ViewContext<Self>,
-    ) {
+    fn generate_stripe_billing_portal_link(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(team_context) = self
+            .user_workspaces
+            .as_ref(ctx)
+            .team_context_for_view(ctx)
+        else {
+            return;
+        };
         self.user_workspaces
             .update(ctx, move |user_workspaces, ctx| {
-                user_workspaces.generate_stripe_billing_portal_link(team_uid, ctx);
+                user_workspaces.generate_stripe_billing_portal_link(team_context, ctx);
             });
     }
 
@@ -2311,7 +2318,7 @@ impl TeamsWidget {
         let has_admin_permissions = team_metadata.has_admin_permissions(&current_user_email);
         let is_owner = team_metadata.has_owner_permissions(&current_user_email);
         let remaining_workspace_and_team_credits =
-            ai_request_usage_model.total_current_workspace_and_team_bonus_credits_remaining(app);
+            ai_request_usage_model.total_workspace_and_team_bonus_credits_remaining(workspace.uid);
         let delete_disabled_reason = team_metadata
             .get_delete_disabled_reason(&current_user_email, remaining_workspace_and_team_credits);
 

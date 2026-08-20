@@ -1074,6 +1074,7 @@ impl View for AIBlock {
         contents.add_child(output::render(
             output::Props {
                 model: self.model.as_ref(),
+                team_context: self.controller.as_ref(app).team_context(),
                 state_handles: &self.state_handles,
                 action_buttons: &self.action_buttons,
                 view_screenshot_buttons: &self.view_screenshot_buttons,

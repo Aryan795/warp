@@ -16,6 +16,7 @@ use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::agent_conversations_model::AgentConversationsModel;
 #[cfg(not(target_family = "wasm"))]
 use crate::ai::blocklist::BlocklistAIHistoryModel;
+use crate::ai::blocklist::BlocklistAIController;
 use crate::ai::blocklist::agent_view::{AgentViewController, AgentViewControllerEvent};
 use crate::ai::blocklist::block::cli_controller::CLISubagentController;
 use crate::search::SyncDataSource;
@@ -35,6 +36,7 @@ pub struct GuiDataSourceArgs {
     pub active_session: ModelHandle<ActiveSession>,
     pub agent_view_controller: ModelHandle<AgentViewController>,
     pub cli_subagent_controller: ModelHandle<CLISubagentController>,
+    pub ai_controller: ModelHandle<BlocklistAIController>,
     pub terminal_view_id: EntityId,
     pub ambient_agent_view_model: Option<ModelHandle<AmbientAgentViewModel>>,
 }
@@ -64,6 +66,7 @@ impl GuiSlashCommandDataSource {
             active_session,
             agent_view_controller,
             cli_subagent_controller,
+            ai_controller,
             terminal_view_id,
             ambient_agent_view_model,
         } = args;
@@ -104,6 +107,7 @@ impl GuiSlashCommandDataSource {
             state: SlashCommandDataSourceState::new(
                 active_session,
                 cli_subagent_controller,
+                Some(ai_controller),
                 terminal_view_id,
             ),
             agent_view_controller,

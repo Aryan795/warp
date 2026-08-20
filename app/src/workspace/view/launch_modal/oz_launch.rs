@@ -10,7 +10,7 @@ use crate::terminal::view::OnboardingIntention;
 use crate::ui_components::icons::Icon;
 use crate::workspace::action::WorkspaceAction;
 use crate::workspace::view::OnboardingTutorial;
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces};
 use crate::workspaces::workspace::{AdminEnablementSetting, UgcCollectionEnablementSetting};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -177,10 +177,18 @@ impl Slide for OzLaunchSlide {
         })
     }
 
-    fn should_show_checkbox(&self, app: &AppContext) -> bool {
+    fn should_show_checkbox(
+        &self,
+        team_context: Option<&TeamContext>,
+        app: &AppContext,
+    ) -> bool {
+        let Some(team_context) = team_context else {
+            return true;
+        };
+        let workspaces = UserWorkspaces::as_ref(app);
         let cloud_storage_setting =
-            UserWorkspaces::as_ref(app).get_cloud_conversation_storage_enablement_setting();
-        let ugc_setting = UserWorkspaces::as_ref(app).get_ugc_collection_enablement_setting();
+            workspaces.get_cloud_conversation_storage_enablement_setting(team_context);
+        let ugc_setting = workspaces.get_ugc_collection_enablement_setting(team_context);
 
         // Show checkbox only when user has control over cloud storage AND UGC is not force-enabled.
         matches!(

@@ -23,7 +23,7 @@ use crate::server::telemetry::{AutoReloadModalAction, TelemetryEvent};
 use crate::settings_view::create_discount_badge;
 use crate::ui_components::blended_colors;
 use crate::view_components::{Dropdown, DropdownAction, ToastFlavor};
-use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces, UserWorkspacesEvent};
 
 const DENOMINATION_DROPDOWN_WIDTH: f32 = MODAL_WIDTH - 2. * MODAL_PADDING;
 
@@ -35,6 +35,7 @@ struct MouseStates {
 
 /// The body content of the enable auto-reload modal
 pub struct EnableAutoReloadModalBody {
+    team_context: Option<TeamContext>,
     mouse_states: MouseStates,
     denomination_dropdown: ViewHandle<Dropdown<Action>>,
     addon_credits_options: Vec<AddonCreditsOption>,
@@ -75,12 +76,19 @@ impl EnableAutoReloadModalBody {
 
         ctx.subscribe_to_model(
             &UserWorkspaces::handle(ctx),
-            |me, _handle, event, ctx| {
+            |me, handle, event, ctx| {
                 match event {
                     UserWorkspacesEvent::TeamsChanged => {
                         // Pricing labels depend on the current team's purchase
                         // policy (premium surcharge), so rebuild them when
                         // teams change.
+                        me.update_addon_credits_options(ctx);
+                        ctx.notify();
+                    }
+                    UserWorkspacesEvent::WindowTeamChanged { window_id }
+                        if *window_id == ctx.window_id() =>
+                    {
+                        me.team_context = handle.as_ref(ctx).team_context_for_view(ctx);
                         me.update_addon_credits_options(ctx);
                         ctx.notify();
                     }
@@ -114,6 +122,7 @@ impl EnableAutoReloadModalBody {
                     }
                     UserWorkspacesEvent::UpdateWorkspaceSettingsRejected(_err) => {
                         if me.update_workspace_settings_loading {
+                            me.team_context = handle.as_ref(ctx).team_context_for_view(ctx);
                             me.update_workspace_settings_loading = false;
                             ctx.emit(EnableAutoReloadModalBodyEvent::ShowToast {
                                 message: "Failed to enable auto-reload. Please try updating your settings in Billing & usage.".to_string(),
@@ -135,6 +144,7 @@ impl EnableAutoReloadModalBody {
         });
 
         let mut me = Self {
+            team_context: UserWorkspaces::as_ref(ctx).team_context_for_view(ctx),
             mouse_states: Default::default(),
             denomination_dropdown,
             addon_credits_options: Default::default(),
@@ -152,8 +162,11 @@ impl EnableAutoReloadModalBody {
             .unwrap_or_default();
 
         let workspaces = UserWorkspaces::as_ref(ctx);
-        let premium_bps = workspaces
-            .purchase_policy_for_team(workspaces.team_for_view(ctx))
+        let purchase_policy = self.team_context.as_ref().map_or_else(
+            || workspaces.purchase_policy_for_personal(),
+            |team_context| workspaces.purchase_policy_for_team(team_context),
+        );
+        let premium_bps = purchase_policy
             .map_or(0, |policy| policy.effective_premium_bps());
         let base_rate = self
             .addon_credits_options
@@ -401,8 +414,7 @@ impl warpui::TypedActionView for EnableAutoReloadModalBody {
                 ctx.emit(EnableAutoReloadModalBodyEvent::Close);
             }
             Action::Enable => {
-                let workspaces = UserWorkspaces::as_ref(ctx);
-                let Some(team_context) = workspaces.team_context_for_view(ctx) else {
+                let Some(team_context) = self.team_context.take() else {
                     ctx.emit(EnableAutoReloadModalBodyEvent::ShowToast {
                         message: "Oops, something went wrong; your team's data could not be found."
                             .to_string(),

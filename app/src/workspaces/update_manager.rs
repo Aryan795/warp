@@ -12,7 +12,8 @@ use warpui::{
 
 use super::team_tester::{TeamTesterStatus, TeamTesterStatusEvent};
 use super::user_workspaces::{
-    CreateTeamResponse, UserWorkspaces, WorkspacesMetadataResponse, WorkspacesMetadataWithPricing,
+    CreateTeamResponse, TeamContext, UserWorkspaces, WorkspacesMetadataResponse,
+    WorkspacesMetadataWithPricing,
 };
 use super::workspace::WorkspaceUid;
 use crate::ai::llms::LLMPreferences;
@@ -311,7 +312,7 @@ impl TeamUpdateManager {
 
     pub fn leave_team(
         &mut self,
-        team_uid: ServerId,
+        team_context: TeamContext,
         entrypoint: CloudObjectEventEntrypoint,
         ctx: &mut ModelContext<Self>,
     ) {
@@ -321,13 +322,14 @@ impl TeamUpdateManager {
             let team_client = self.team_client.clone();
             let _ = ctx.spawn(
                 async move {
-                    team_client
-                        .leave_team(user_uid, team_uid, entrypoint)
+                    let result = team_client
+                        .leave_team(user_uid, &team_context, entrypoint)
                         .await
-                        .context("Error leaving team")
+                        .context("Error leaving team");
+                    (team_context, result)
                 },
-                move |me, result, ctx| {
-                    me.on_team_left(team_uid, result, ctx);
+                |me, (team_context, result), ctx| {
+                    me.on_team_left(team_context, result, ctx);
                 },
             );
         } else {
@@ -338,7 +340,7 @@ impl TeamUpdateManager {
 
     fn on_team_left(
         &mut self,
-        left_team_uid: ServerId,
+        team_context: TeamContext,
         result: Result<WorkspacesMetadataWithPricing>,
         ctx: &mut ModelContext<Self>,
     ) {
@@ -385,7 +387,7 @@ impl TeamUpdateManager {
                 UpdateManager::handle(ctx).update(ctx, |update_manager, ctx| {
                     // We first remove team objects from local state so that they're not shown to the user.
                     // Then, refresh all objects to fetch any that were independently shared.
-                    update_manager.remove_team_objects(left_team_uid, ctx);
+                    update_manager.remove_team_objects(team_context.team_uid(), ctx);
                     update_manager.refresh_updated_objects(ctx);
                 });
 

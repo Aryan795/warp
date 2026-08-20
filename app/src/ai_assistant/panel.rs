@@ -48,7 +48,7 @@ use crate::ui_components::blended_colors;
 use crate::ui_components::buttons::icon_button;
 use crate::util::bindings::{CustomAction, cmd_or_ctrl_shift};
 use crate::workspace::{ActiveSession, TAB_BAR_HEIGHT};
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
 
 const INFO_ICON_SVG_PATH: &str = "bundled/svg/info.svg";
 pub const HEXAGON_ALERT_SVG_PATH: &str = "bundled/svg/alert-hexagon.svg";
@@ -208,8 +208,23 @@ impl AIAssistantPanelView {
         let active_session_model = ActiveSession::handle(ctx);
         ctx.observe(&active_session_model, Self::on_active_session_change);
 
-        let requests_model =
-            ctx.add_model(|ctx| Requests::new(server_api.clone(), ai_client.clone(), ctx));
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let requests_model = ctx.add_model(|ctx| {
+            Requests::new(server_api.clone(), ai_client.clone(), team_context, ctx)
+        });
+        ctx.subscribe_to_model(&UserWorkspaces::handle(ctx), |me, workspaces, event, ctx| {
+            if matches!(
+                event,
+                UserWorkspacesEvent::WindowTeamChanged { window_id }
+                    if *window_id == ctx.window_id()
+            ) {
+                let team_context = workspaces.as_ref(ctx).team_context_for_view(ctx);
+                me.requests_model.update(ctx, |requests, _| {
+                    requests.set_team_context(team_context);
+                });
+                ctx.notify();
+            }
+        });
         ctx.subscribe_to_model(&requests_model, move |me, _, event, ctx| {
             me.handle_requests_model_event(event, ctx);
         });
@@ -615,11 +630,8 @@ impl AIAssistantPanelView {
     }
 
     fn issue_request(&mut self, request: String, ctx: &mut ViewContext<Self>) {
-        let team_uid = UserWorkspaces::as_ref(ctx)
-            .team_for_view(ctx)
-            .map(|team| team.uid);
         self.requests_model.update(ctx, |requests_model, ctx| {
-            requests_model.issue_request(request, team_uid, ctx);
+            requests_model.issue_request(request, ctx);
         });
         self.transcript_view.update(ctx, |transcript_view, ctx| {
             transcript_view.clear_selected_block(ctx);
@@ -913,7 +925,10 @@ impl AIAssistantPanelView {
                 .finish(),
             );
 
-        if AIRequestUsageModel::as_ref(app).has_any_ai_remaining(app) {
+        if AIRequestUsageModel::as_ref(app).has_any_ai_remaining(
+            self.requests_model.as_ref(app).team_context(),
+            app,
+        ) {
             column.add_children([
                 Container::new(render_prepared_response_button(
                     appearance,
@@ -987,9 +1002,13 @@ impl AIAssistantPanelView {
         );
 
         let user_workspaces = UserWorkspaces::as_ref(app);
-        let is_custom_llm_enabled = user_workspaces.is_custom_llm_enabled_for_team(
-            user_workspaces.team_for_view_handle(&self.view_handle, app),
-        );
+        let is_custom_llm_enabled = self
+            .requests_model
+            .as_ref(app)
+            .team_context()
+            .is_some_and(|team_context| {
+                user_workspaces.is_custom_llm_enabled_for_team(team_context)
+            });
 
         if !is_custom_llm_enabled {
             column.add_child(

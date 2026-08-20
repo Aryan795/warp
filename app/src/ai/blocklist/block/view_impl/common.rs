@@ -102,7 +102,7 @@ use crate::ui_components::icons::Icon;
 use crate::util::link_detection::{DetectedLinksState, add_link_detection_mouse_interactions};
 use crate::util::time_format::format_elapsed_seconds;
 use crate::workspace::WorkspaceAction;
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces};
 use crate::workspaces::workspace::CustomerType;
 
 pub const STATUS_ICON_SIZE_DELTA: f32 = 4.;
@@ -3043,6 +3043,7 @@ pub(crate) fn resolve_absolute_file_path(
 
 pub struct FailedOutputProps<'a> {
     pub error: &'a RenderableAIError,
+    pub team_context: Option<&'a TeamContext>,
     pub invalid_api_key_button_handle: &'a MouseStateHandle,
     pub subscribe_button_handle: &'a MouseStateHandle,
     pub aws_bedrock_credentials_error_view: Option<&'a ViewHandle<AwsBedrockCredentialsErrorView>>,
@@ -3054,7 +3055,9 @@ pub struct FailedOutputProps<'a> {
 
 pub fn render_failed_output(props: FailedOutputProps, app: &AppContext) -> Box<dyn Element> {
     let appearance = Appearance::as_ref(app);
-    let Some(presentation) = failed_output_presentation(props.error, app) else {
+    let Some(presentation) =
+        failed_output_presentation(props.error, props.team_context, app)
+    else {
         return Empty::new().finish();
     };
 

@@ -194,10 +194,9 @@ impl WorkspaceClient for ServerApi {
         max_monthly_spend_cents: Option<i32>,
         selected_auto_reload_credit_denomination: Option<i32>,
     ) -> Result<WorkspacesMetadataResponse> {
-        let team_uid = team_context.into_team_uid();
         let variables = UpdateWorkspaceSettingsVariables {
             input: UpdateWorkspaceSettingsInput {
-                workspace_uid: team_uid.to_string(),
+                workspace_uid: team_context.into_team_uid().to_string(),
                 set_usage_based_pricing_settings: None,
                 set_addon_credits_settings: Some(AddonCreditsSettingsInput {
                     auto_reload_enabled,

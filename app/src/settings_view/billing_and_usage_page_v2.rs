@@ -57,7 +57,7 @@ use crate::ui_components::tab_selector::{self, SettingsTab};
 use crate::view_components::ToastFlavor;
 use crate::view_components::action_button::{ActionButton, PrimaryTheme, SecondaryTheme};
 use crate::workspaces::update_manager::TeamUpdateManager;
-use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces, UserWorkspacesEvent};
 use crate::workspaces::workspace::{CustomerType, Workspace, WorkspaceUid};
 use crate::{WorkspaceAction, send_telemetry_from_ctx};
 
@@ -270,6 +270,7 @@ impl ClassifiedGrants {
 
 pub struct BillingAndUsagePageV2View {
     self_handle: WeakViewHandle<Self>,
+    team_context: Option<TeamContext>,
     auth_state: Arc<AuthState>,
     addon_credit_modal_state: ModalViewState<Modal<SpendingLimitModal>>,
     selected_tab: BillingUsageTab,
@@ -354,8 +355,10 @@ impl BillingAndUsagePageV2View {
         let billing_cycle_usage_section =
             ctx.add_typed_action_view(BillingCycleUsageSectionView::new);
 
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         let mut me = Self {
             self_handle: ctx.handle(),
+            team_context,
             auth_state,
             addon_credit_modal_state: ModalViewState::new(addon_credit_modal_view),
             selected_tab: BillingUsageTab::Overview,
@@ -421,6 +424,14 @@ impl BillingAndUsagePageV2View {
         ctx: &mut ViewContext<Self>,
     ) {
         match event {
+            UserWorkspacesEvent::WindowTeamChanged { window_id }
+                if *window_id == ctx.window_id() =>
+            {
+                self.team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                self.update_addon_credit_modal(ctx);
+                self.refresh_addon_credits_settings(ctx);
+                ctx.notify();
+            }
             UserWorkspacesEvent::TeamsChanged => {
                 self.update_addon_credit_modal(ctx);
             }
@@ -608,7 +619,10 @@ impl BillingAndUsagePageV2View {
         let workspaces = UserWorkspaces::as_ref(app);
         let workspace = workspaces.current_workspace();
         let billing_metadata = workspace.map(|workspace| &workspace.billing_metadata);
-        let team = workspaces.team_for_view_handle(&self.self_handle, app);
+        let team = self
+            .team_context
+            .as_ref()
+            .and_then(|team_context| workspaces.team_for_context(team_context));
         let presentation = plan_header_presentation(billing_metadata, team.is_some(), false);
         if let Some(badge_label) = presentation.badge_label {
             right_side.add_child(
@@ -1126,9 +1140,11 @@ impl BillingAndUsagePageV2View {
         app: &AppContext,
     ) -> AddonCreditsPanelState {
         let workspaces = UserWorkspaces::as_ref(app);
-        let purchase_policy = workspaces.purchase_policy_for_team(
-            team_uid.and_then(|team_uid| workspaces.team_from_uid(team_uid)),
-        );
+        let purchase_policy = self
+            .team_context
+            .as_ref()
+            .and_then(|team_context| workspaces.purchase_policy_for_team(team_context))
+            .or_else(|| workspaces.purchase_policy_for_personal());
         let team_can_purchase = purchase_policy.is_some_and(|policy| policy.allows_purchases());
         let premium_bps = purchase_policy.map_or(0, |policy| policy.effective_premium_bps());
         let can_upgrade = workspace
@@ -1167,8 +1183,10 @@ impl BillingAndUsagePageV2View {
                 .auto_reload_enabled
         });
 
-        let team_count = workspaces
-            .team_for_view_handle(&self.self_handle, app)
+        let team_count = self
+            .team_context
+            .as_ref()
+            .and_then(|team_context| workspaces.team_for_context(team_context))
             .map(|team| team.members.len())
             .unwrap_or(1);
         let description_text = if team_count > 1 {
@@ -1785,10 +1803,16 @@ impl BillingAndUsagePageV2View {
         });
 
         let ws = workspaces.current_workspace();
-        let team = workspaces.team_for_view_handle(&self.self_handle, app);
+        let team = self
+            .team_context
+            .as_ref()
+            .and_then(|team_context| workspaces.team_for_context(team_context));
         let show_addon_credits_panel = ws.is_some()
-            || workspaces
-                .purchase_policy_for_team(team)
+            || self
+                .team_context
+                .as_ref()
+                .and_then(|team_context| workspaces.purchase_policy_for_team(team_context))
+                .or_else(|| workspaces.purchase_policy_for_personal())
                 .is_some_and(|policy| policy.allows_purchases());
         if show_addon_credits_panel {
             let is_payg_zero = ws.is_some_and(|ws| {
@@ -2081,9 +2105,14 @@ impl TypedActionView for BillingAndUsagePageV2View {
                 None => ctx.open_url(&UserWorkspaces::upgrade_link(*user_id)),
             },
             BillingAndUsagePageAction::GenerateStripeBillingPortalLink { team_uid } => {
-                UserWorkspaces::handle(ctx).update(ctx, |ws, ctx| {
-                    ws.generate_stripe_billing_portal_link(*team_uid, ctx);
-                });
+                let _ = team_uid;
+                if let Some(team_context) =
+                    UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+                {
+                    UserWorkspaces::handle(ctx).update(ctx, |ws, ctx| {
+                        ws.generate_stripe_billing_portal_link(team_context, ctx);
+                    });
+                }
             }
             BillingAndUsagePageAction::OpenTeamAdminPanel { team_uid } => {
                 super::admin_actions::AdminActions::open_admin_panel(*team_uid, ctx);
@@ -2185,12 +2214,14 @@ impl TypedActionView for BillingAndUsagePageV2View {
                     .addon_credits
                     .options
                     .get(self.addon_credits.selected_denomination)
+                    && team_uid.is_some()
+                    && let Some(team_context) =
+                        UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
                 {
                     let credits = opt.credits;
-                    let purchase_team_uid = *team_uid;
                     self.addon_credits.purchase_loading = true;
                     UserWorkspaces::handle(ctx).update(ctx, |ws, ctx| {
-                        ws.purchase_addon_credits(purchase_team_uid, credits, ctx);
+                        ws.purchase_addon_credits(team_context, credits, ctx);
                     });
                     ctx.notify();
                 }

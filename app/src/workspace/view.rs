@@ -537,7 +537,7 @@ use crate::workspace::view::orchestration_launch_modal::{
 };
 use crate::workspace::view::right_panel::{RightPanelEvent, RightPanelView};
 use crate::workspace::{ForkFromExchange, ForkedConversationDestination};
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces, UserWorkspacesEvent};
 use crate::workspaces::workspace::AdminEnablementSetting;
 use crate::{
     AgentNotificationsModel, BlocklistAIHistoryModel, GlobalResourceHandles, TelemetryEvent,
@@ -1015,6 +1015,7 @@ enum TabBarSlot {
 
 pub struct Workspace {
     window_id: WindowId,
+    team_context: Option<TeamContext>,
     pub(crate) tabs: Vec<TabData>,
     active_tab_index: usize,
     /// Tracks tab activation order (most-recently-used first).
@@ -2860,6 +2861,16 @@ impl Workspace {
         // reads the sizes from the window snapshot. A new window initializes with all default sizes.
         let resizable_data = ResizableData::handle(ctx);
         let window_id = ctx.window_id();
+        ctx.subscribe_to_model(&UserWorkspaces::handle(ctx), |me, workspaces, event, ctx| {
+            if matches!(
+                event,
+                UserWorkspacesEvent::WindowTeamChanged { window_id }
+                    if *window_id == ctx.window_id()
+            ) {
+                me.team_context = workspaces.as_ref(ctx).team_context_for_view(ctx);
+                ctx.notify();
+            }
+        });
         let has_horizontal_split = workspace_setting.has_horizontal_split();
 
         let (left_panel_size, right_panel_size) =
@@ -3460,6 +3471,7 @@ impl Workspace {
             theme_deletion_modal,
             import_modal,
             window_id: ctx.window_id(),
+            team_context: UserWorkspaces::as_ref(ctx).team_context_for_view(ctx),
             toast_stack,
             agent_toast_stack,
             update_toast_stack,
@@ -23111,11 +23123,16 @@ impl Workspace {
         if *safe_mode_settings.safe_mode_enabled.value() {
             context.set.insert(flags::SAFE_MODE_FLAG);
         }
+        let cloud_conversation_storage_editable =
+            self.team_context.as_ref().is_none_or(|team_context| {
+                matches!(
+                    UserWorkspaces::as_ref(app)
+                        .get_cloud_conversation_storage_enablement_setting(team_context),
+                    AdminEnablementSetting::RespectUserSetting
+                )
+            });
         if !privacy_settings.is_telemetry_force_enabled()
-            && matches!(
-                UserWorkspaces::as_ref(app).get_cloud_conversation_storage_enablement_setting(),
-                AdminEnablementSetting::RespectUserSetting
-            )
+            && cloud_conversation_storage_editable
         {
             context
                 .set

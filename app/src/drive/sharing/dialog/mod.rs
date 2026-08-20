@@ -60,7 +60,7 @@ use crate::word_block_editor::{
     WordBlockStyles,
 };
 use crate::workspace::{ToastStack, WorkspaceAction};
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces, UserWorkspacesEvent};
 use crate::{TelemetryEvent, send_telemetry_from_ctx};
 
 mod inheritance;
@@ -172,6 +172,7 @@ struct EmailInviteForm {
 
 pub struct SharingDialog {
     self_handle: WeakViewHandle<SharingDialog>,
+    team_context: Option<TeamContext>,
     target: Option<ShareableObject>,
 
     invite_form: EmailInviteForm,
@@ -227,6 +228,16 @@ pub fn init(app: &mut AppContext) {
 
 impl SharingDialog {
     pub fn new(target: Option<ShareableObject>, ctx: &mut ViewContext<Self>) -> Self {
+        ctx.subscribe_to_model(&UserWorkspaces::handle(ctx), |me, workspaces, event, ctx| {
+            if matches!(
+                event,
+                UserWorkspacesEvent::WindowTeamChanged { window_id }
+                    if *window_id == ctx.window_id()
+            ) {
+                me.team_context = workspaces.as_ref(ctx).team_context_for_view(ctx);
+                ctx.notify();
+            }
+        });
         let link_sharing_menu =
             ctx.add_typed_action_view(|_ctx| Menu::new().with_drop_shadow().with_width(MENU_WIDTH));
         ctx.subscribe_to_view(&link_sharing_menu, |me, menu, event, ctx| {
@@ -288,6 +299,7 @@ impl SharingDialog {
 
         Self {
             self_handle: ctx.handle(),
+            team_context: UserWorkspaces::as_ref(ctx).team_context_for_view(ctx),
             target,
             invite_form,
             guest_states: vec![],
@@ -451,9 +463,11 @@ impl SharingDialog {
     }
 
     fn window_team_uid(&self, app: &AppContext) -> Option<ServerId> {
-        UserWorkspaces::as_ref(app)
-            .team_for_view_handle(&self.self_handle, app)
-            .map(|team| team.uid)
+        self.team_context.as_ref().and_then(|team_context| {
+            UserWorkspaces::as_ref(app)
+                .team_for_context(team_context)
+                .map(|team| team.uid)
+        })
     }
 
     /// The name of the targeted object.
@@ -476,11 +490,15 @@ impl SharingDialog {
     }
 
     fn can_anyone_with_link_share(&self, app: &AppContext) -> bool {
-        UserWorkspaces::as_ref(app).is_anyone_with_link_sharing_enabled()
+        self.team_context.as_ref().is_none_or(|team_context| {
+            UserWorkspaces::as_ref(app).is_anyone_with_link_sharing_enabled(team_context)
+        })
     }
 
     fn can_direct_link_share(&self, app: &AppContext) -> bool {
-        UserWorkspaces::as_ref(app).is_direct_link_sharing_enabled()
+        self.team_context.as_ref().is_none_or(|team_context| {
+            UserWorkspaces::as_ref(app).is_direct_link_sharing_enabled(team_context)
+        })
     }
 
     /// The editability state of the object.

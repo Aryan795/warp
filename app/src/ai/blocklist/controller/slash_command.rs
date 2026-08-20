@@ -110,6 +110,7 @@ impl SlashCommandRequest {
             is_invoke_skill,
             controller.context_model.as_ref(ctx),
             controller.active_session.as_ref(ctx),
+            controller.team_context.as_ref(),
             conversation_id,
             image_context,
             ctx,

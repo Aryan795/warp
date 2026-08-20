@@ -525,7 +525,6 @@ impl ResponseStream {
             use warpui::r#async::FutureExt as _;
 
             use crate::ai::llms::{LLMModelHost, LLMPreferences, LLMProvider};
-            use crate::workspaces::user_workspaces::UserWorkspaces;
 
             // Only touch the Grok token for requests that actually use the Grok
             // subscription. The subscription is the only client-side source of
@@ -535,12 +534,11 @@ impl ResponseStream {
                 .get_llm_info(&params.model)
                 .is_some_and(|info| info.provider == LLMProvider::Xai);
             if uses_grok_subscription {
-                let byo_allowed = UserWorkspaces::as_ref(ctx).is_byo_api_key_enabled(ctx);
                 // Reserve + start the shared refresh on `ApiKeyManager`'s context;
                 // the in-flight guard is released there even if this stream is
                 // dropped mid-refresh. `None` means the token is already usable.
                 let refresh_rx = ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
-                    manager.begin_expired_grok_refresh(byo_allowed, ctx)
+                    manager.begin_expired_grok_refresh(params.byo_api_key_enabled, ctx)
                 });
                 if let Some(refresh_rx) = refresh_rx {
                     let _ = ctx.spawn(
@@ -589,9 +587,7 @@ impl ResponseStream {
                         .get(&LLMModelHost::GeminiEnterprise)
                         .is_some_and(|host| host.enabled)
                 });
-            if uses_geap
-                && let Some(binding) =
-                    crate::ai::geap_credentials::current_geap_policy(ctx).mint_binding()
+            if uses_geap && let Some(binding) = params.geap_binding.clone()
             {
                 let refresh_binding = binding.clone();
                 let refresh_rx = ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {

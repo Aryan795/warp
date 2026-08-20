@@ -317,7 +317,7 @@ pub struct BlocklistAIController {
     context_model: ModelHandle<BlocklistAIContextModel>,
     action_model: ModelHandle<BlocklistAIActionModel>,
     terminal_model: Arc<FairMutex<TerminalModel>>,
-    team_context: Option<Arc<TeamContext>>,
+    team_context: Option<TeamContext>,
 
     in_flight_response_streams: PendingResponseStreams,
 
@@ -433,7 +433,7 @@ impl BlocklistAIController {
         active_session: ModelHandle<ActiveSession>,
         terminal_model: Arc<FairMutex<TerminalModel>>,
         terminal_surface_id: EntityId,
-        team_context: Option<Arc<TeamContext>>,
+        team_context: Option<TeamContext>,
         ctx: &mut ModelContext<Self>,
     ) -> Self {
         ctx.subscribe_to_model(&action_model, move |me, _, event, ctx| {
@@ -640,6 +640,10 @@ impl BlocklistAIController {
         }
     }
 
+    pub(crate) fn team_context(&self) -> Option<&TeamContext> {
+        self.team_context.as_ref()
+    }
+
     /// Internal method to send a query to the AI model. External callers should use either
     /// `send_user_query_in_conversation`, `send_user_in_conversation`, or
     /// `send_custom_ai_input_query` instead.
@@ -746,6 +750,7 @@ impl BlocklistAIController {
             false,
             self.context_model.as_ref(ctx),
             self.active_session.as_ref(ctx),
+            self.team_context.as_ref(),
             Some(conversation_id),
             vec![],
             ctx,
@@ -818,6 +823,7 @@ impl BlocklistAIController {
                     prompt_attachments,
                     self.context_model.as_ref(ctx),
                     self.active_session.as_ref(ctx),
+                    self.team_context.as_ref(),
                     ctx,
                 )
             }
@@ -1484,6 +1490,7 @@ impl BlocklistAIController {
             false,
             self.context_model.as_ref(ctx),
             self.active_session.as_ref(ctx),
+            self.team_context.as_ref(),
             None,
             vec![],
             ctx,
@@ -1522,6 +1529,7 @@ impl BlocklistAIController {
             false,
             self.context_model.as_ref(ctx),
             self.active_session.as_ref(ctx),
+            self.team_context.as_ref(),
             conversation_id,
             vec![],
             ctx,
@@ -1610,6 +1618,7 @@ impl BlocklistAIController {
             false,
             self.context_model.as_ref(ctx),
             self.active_session.as_ref(ctx),
+            self.team_context.as_ref(),
             Some(conversation_id),
             vec![],
             ctx,
@@ -2046,6 +2055,7 @@ impl BlocklistAIController {
             false,
             self.context_model.as_ref(ctx),
             self.active_session.as_ref(ctx),
+            self.team_context.as_ref(),
             Some(conversation_id),
             additional_context,
             ctx,
@@ -2250,6 +2260,7 @@ impl BlocklistAIController {
                 false,
                 self.context_model.as_ref(ctx),
                 self.active_session.as_ref(ctx),
+                self.team_context.as_ref(),
                 Some(conversation_id),
                 vec![],
                 ctx,
@@ -2279,7 +2290,7 @@ impl BlocklistAIController {
 
         let request_params = api::RequestParams::new(
             Some(self.terminal_surface_id),
-            self.team_context.clone(),
+            self.team_context.as_ref(),
             SessionContext::from_session(self.active_session.as_ref(ctx), ctx),
             &request_input,
             conversation_data,
@@ -2303,6 +2314,7 @@ impl BlocklistAIController {
                 false,
                 self.context_model.as_ref(ctx),
                 self.active_session.as_ref(ctx),
+                self.team_context.as_ref(),
                 None,
                 vec![],
                 ctx,
@@ -2515,7 +2527,7 @@ impl BlocklistAIController {
 
         let mut request_params = api::RequestParams::new(
             Some(self.terminal_surface_id),
-            self.team_context.clone(),
+            self.team_context.as_ref(),
             SessionContext::from_session(self.active_session.as_ref(ctx), ctx),
             &request_input,
             conversation_data.clone(),
@@ -3243,8 +3255,7 @@ impl BlocklistAIController {
     /// This is used to ensure the UI matches the state of the workspace,
     /// especially because overages are not real-time communicated to clients.
     fn maybe_refresh_ai_overages(&mut self, ctx: &mut ModelContext<Self>) {
-        let workspace = UserWorkspaces::as_ref(ctx).current_workspace();
-        let Some(workspace) = workspace else {
+        let Some(team_context) = self.team_context.as_ref() else {
             return;
         };
 
@@ -3256,16 +3267,20 @@ impl BlocklistAIController {
         let has_no_base_plan_requests_remaining =
             !AIRequestUsageModel::as_ref(ctx).has_base_plan_requests_remaining();
         // If overages aren't enabled, we're not going to reap the benefit of refreshing at all anyway.
-        let are_overages_enabled = workspace.are_overages_enabled();
+        let are_overages_enabled =
+            UserWorkspaces::as_ref(ctx).are_overages_enabled(team_context);
 
         if are_overages_enabled && has_no_base_plan_requests_remaining {
             // Give a one second delay to ensure that Stripe has been charged and the database is completely updated,
             // before syncing new AI overages data.
             ctx.spawn(
                 async move { Timer::after(Duration::from_secs(1)).await },
-                |_, _, ctx| {
+                |controller, _, ctx| {
+                    let Some(team_context) = controller.team_context.as_ref() else {
+                        return;
+                    };
                     UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
-                        user_workspaces.refresh_ai_overages(ctx);
+                        user_workspaces.refresh_ai_overages(team_context, ctx);
                     });
                 },
             );
@@ -3489,6 +3504,7 @@ fn input_for_query(
     prompt_attachments: Vec<PendingAttachment>,
     context_model: &BlocklistAIContextModel,
     active_session: &ActiveSession,
+    team_context: Option<&TeamContext>,
     app: &AppContext,
 ) -> AIAgentInput {
     // Split the resolved attachment set into image context (sent inline) and file references.
@@ -3505,6 +3521,7 @@ fn input_for_query(
         true,
         context_model,
         active_session,
+        team_context,
         Some(conversation_id),
         image_context,
         app,

@@ -28,6 +28,7 @@ use crate::remote_server::codebase_index_model::RemoteCodebaseIndexModel;
 use crate::terminal::TerminalView;
 use crate::terminal::model::block::BlockId;
 use crate::terminal::model::session::active_session::ActiveSession;
+use crate::workspaces::user_workspaces::TeamContext;
 
 lazy_static! {
     // Regex to match <block:[block_id]> patterns
@@ -48,12 +49,14 @@ pub(super) fn input_context_for_request(
     is_user_query: bool,
     context_model: &BlocklistAIContextModel,
     active_session: &ActiveSession,
+    team_context: Option<&TeamContext>,
     conversation_id: Option<AIConversationId>,
     additional_context: Vec<AIAgentContext>,
     app: &AppContext,
 ) -> Arc<[AIAgentContext]> {
     let current_working_directory_location = active_session.current_working_directory_location(app);
     let mut context = context_model.pending_context(
+        team_context,
         app,
         is_user_query,
         current_working_directory_location.as_ref(),

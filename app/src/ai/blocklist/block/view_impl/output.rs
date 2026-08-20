@@ -132,6 +132,7 @@ use crate::view_components::compactible_action_button::{
     CompactibleActionButton, RenderCompactibleActionButton, SMALL_SIZE_SWITCH_THRESHOLD,
 };
 use crate::workspace::WorkspaceAction;
+use crate::workspaces::user_workspaces::TeamContext;
 use crate::{AIAgentTodoList, FeatureFlag};
 
 const BLOCKED_ACTION_MESSAGE_FOR_UPLOADING_ARTIFACT: &str = "Grant access to upload this artifact?";
@@ -140,6 +141,7 @@ const BLOCKED_ACTION_MESSAGE_FOR_UPLOADING_ARTIFACT: &str = "Grant access to upl
 #[derive(Copy, Clone)]
 pub(crate) struct Props<'a> {
     pub(crate) model: &'a dyn AIBlockModel<View = AIBlock>,
+    pub(crate) team_context: Option<&'a TeamContext>,
     pub(super) state_handles: &'a AIBlockStateHandles,
     pub(super) action_buttons: &'a HashMap<AIAgentActionId, ActionButtons>,
     pub(super) view_screenshot_buttons: &'a HashMap<AIAgentActionId, ui_components::button::Button>,
@@ -1218,6 +1220,7 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
                 render_failed_output(
                     FailedOutputProps {
                         error,
+                        team_context: props.team_context,
                         is_ai_input_enabled: props.is_ai_input_enabled,
                         invalid_api_key_button_handle: &props
                             .state_handles

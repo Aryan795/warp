@@ -2327,6 +2327,7 @@ impl Input {
     /// eager (`Input::new`) and lazy (`SessionJoined`) paths.
     fn build_host_selector(
         view_model: ModelHandle<AmbientAgentViewModel>,
+        ai_controller: ModelHandle<BlocklistAIController>,
         menu_positioning_provider: Arc<dyn MenuPositioningProvider>,
         ctx: &mut ViewContext<Self>,
     ) -> ViewHandle<HostSelector> {
@@ -2337,8 +2338,12 @@ impl Input {
             .ok()
             .filter(|s| !s.is_empty())
             .or_else(|| {
-                UserWorkspaces::as_ref(ctx)
-                    .default_host_slug()
+                ai_controller
+                    .as_ref(ctx)
+                    .team_context()
+                    .and_then(|team_context| {
+                        UserWorkspaces::as_ref(ctx).default_host_slug(team_context)
+                    })
                     .map(String::from)
             });
         if let Some(slug) = &effective_host {
@@ -2377,6 +2382,7 @@ impl Input {
         // admin changes default_host_slug).
         let view_for_ws = view.clone();
         let vm_for_ws = view_model.clone();
+        let controller_for_ws = ai_controller;
         ctx.subscribe_to_model(&UserWorkspaces::handle(ctx), move |_me, _, event, ctx| {
             if !matches!(event, UserWorkspacesEvent::TeamsChanged) {
                 return;
@@ -2385,8 +2391,12 @@ impl Input {
                 .ok()
                 .filter(|s| !s.is_empty())
                 .or_else(|| {
-                    UserWorkspaces::as_ref(ctx)
-                        .default_host_slug()
+                    controller_for_ws
+                        .as_ref(ctx)
+                        .team_context()
+                        .and_then(|team_context| {
+                            UserWorkspaces::as_ref(ctx).default_host_slug(team_context)
+                        })
                         .map(String::from)
                 });
             if let Some(slug) = &effective_host {
@@ -2571,6 +2581,7 @@ impl Input {
         {
             let host_selector = Self::build_host_selector(
                 view_model.clone(),
+                self.ai_controller.clone(),
                 self.menu_positioning_provider.clone(),
                 ctx,
             );
@@ -3589,6 +3600,7 @@ impl Input {
                 active_session: active_session.clone(),
                 agent_view_controller: agent_view_controller.clone(),
                 cli_subagent_controller: cli_subagent_controller.clone(),
+                ai_controller: ai_controller.clone(),
                 terminal_view_id,
                 // Wired post-construction via `attach_ambient_agent_view_model`.
                 ambient_agent_view_model: None,
@@ -3609,6 +3621,7 @@ impl Input {
                     active_session: active_session.clone(),
                     agent_view_controller: agent_view_controller.clone(),
                     cli_subagent_controller: cli_subagent_controller.clone(),
+                    ai_controller: ai_controller.clone(),
                     terminal_view_id,
                     // Wired post-construction via `attach_ambient_agent_view_model`.
                     ambient_agent_view_model: None,
@@ -3669,6 +3682,7 @@ impl Input {
                 None,
                 suggestions_mode_model.clone(),
                 agent_view_controller.clone(),
+                ai_controller.clone(),
                 &buffer_model,
                 cli_subagent_controller.clone(),
                 &inline_terminal_menu_positioner,
@@ -6250,7 +6264,9 @@ impl Input {
         triggered_from: ZeroStatePromptSuggestionTriggeredFrom,
         ctx: &mut ViewContext<Self>,
     ) {
-        if !AIRequestUsageModel::as_ref(ctx).has_any_ai_remaining(ctx) {
+        if !AIRequestUsageModel::as_ref(ctx)
+            .has_any_ai_remaining(self.ai_controller.as_ref(ctx).team_context(), ctx)
+        {
             return;
         }
 
@@ -6765,8 +6781,14 @@ impl Input {
                 ctx.emit(Event::OpenSettings(SettingsSection::BillingAndUsage));
             }
             PromptAlertEvent::OpenBillingPortal { team_uid } => {
+                let _ = team_uid;
+                let Some(team_context) =
+                    UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+                else {
+                    return;
+                };
                 UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
-                    user_workspaces.generate_stripe_billing_portal_link(*team_uid, ctx);
+                    user_workspaces.generate_stripe_billing_portal_link(team_context, ctx);
                 });
             }
         }
@@ -14375,14 +14397,18 @@ impl Input {
             return;
         }
 
-        let has_any_ai = AIRequestUsageModel::as_ref(ctx).has_any_ai_remaining(ctx);
+        let has_any_ai = AIRequestUsageModel::as_ref(ctx)
+            .has_any_ai_remaining(self.ai_controller.as_ref(ctx).team_context(), ctx);
         if !has_any_ai {
             AIRequestUsageModel::handle(ctx).update(ctx, |model, ctx| {
                 model.enable_buy_credits_banner(ctx);
             });
         }
 
-        if PromptAlertView::does_alert_block_ai_requests(ctx) {
+        if PromptAlertView::does_alert_block_ai_requests(
+            self.ai_controller.as_ref(ctx).team_context(),
+            ctx,
+        ) {
             AIRequestUsageModel::handle(ctx).update(ctx, |usage_model, ctx| {
                 // Rate limit requests to fetch the user's AI usage if triggered by enter
                 // keypress.
@@ -14525,7 +14551,12 @@ impl Input {
         let attachments: Vec<AgentAttachment> = self
             .ai_context_model
             .as_ref(ctx)
-            .pending_context(ctx, true, None)
+            .pending_context(
+                self.ai_controller.as_ref(ctx).team_context(),
+                ctx,
+                true,
+                None,
+            )
             .into_iter()
             .filter_map(|context| match context {
                 AIAgentContext::Block(block) => Some(AgentAttachment::BlockReference {
@@ -15969,8 +16000,14 @@ impl Input {
                 ctx.emit(Event::OpenSettings(SettingsSection::BillingAndUsage))
             }
             PromptSuggestionsEvent::OpenBillingPortal { team_uid } => {
+                let _ = team_uid;
+                let Some(team_context) =
+                    UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+                else {
+                    return;
+                };
                 UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
-                    user_workspaces.generate_stripe_billing_portal_link(*team_uid, ctx);
+                    user_workspaces.generate_stripe_billing_portal_link(team_context, ctx);
                 });
             }
         }

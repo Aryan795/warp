@@ -32,6 +32,7 @@ use crate::ui_components::blended_colors;
 use crate::ui_components::icons::Icon;
 use crate::view_components::action_button::{ActionButton, PrimaryTheme, SecondaryTheme};
 use crate::workspace::view::launch_modal::cta_button::{CTAButton, CTAButtonAction};
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces, UserWorkspacesEvent};
 
 pub fn init<S: Slide>(app: &mut AppContext) {
     use warpui::keymap::macros::*;
@@ -101,7 +102,11 @@ where
 
     /// Returns whether the checkbox should be shown.
     /// This is checked in addition to checkbox_config() returning Some.
-    fn should_show_checkbox(&self, _app: &AppContext) -> bool {
+    fn should_show_checkbox(
+        &self,
+        _team_context: Option<&TeamContext>,
+        _app: &AppContext,
+    ) -> bool {
         false
     }
 
@@ -137,6 +142,7 @@ impl<S: Slide> Default for StateHandles<S> {
 }
 
 pub struct LaunchModal<S: Slide> {
+    team_context: Option<TeamContext>,
     slide: S,
     next_button: ViewHandle<ActionButton>,
     secondary_button: ViewHandle<ActionButton>,
@@ -145,10 +151,21 @@ pub struct LaunchModal<S: Slide> {
 
 impl<S: Slide> LaunchModal<S> {
     pub fn new(ctx: &mut ViewContext<Self>) -> Self {
+        ctx.subscribe_to_model(&UserWorkspaces::handle(ctx), |me, workspaces, event, ctx| {
+            if matches!(
+                event,
+                UserWorkspacesEvent::WindowTeamChanged { window_id }
+                    if *window_id == ctx.window_id()
+            ) {
+                me.team_context = workspaces.as_ref(ctx).team_context_for_view(ctx);
+                ctx.notify();
+            }
+        });
         let next_button = ctx.add_view(|_| ActionButton::new("", PrimaryTheme));
         let secondary_button = ctx.add_view(|_| ActionButton::new("", SecondaryTheme));
 
         let mut me = LaunchModal {
+            team_context: UserWorkspaces::as_ref(ctx).team_context_for_view(ctx),
             slide: S::first(),
             next_button,
             secondary_button,
@@ -214,7 +231,10 @@ impl<S: Slide> LaunchModal<S> {
     }
 
     fn render_checkbox(&self, app: &AppContext) -> Option<Box<dyn Element>> {
-        if !self.slide.should_show_checkbox(app) {
+        if !self
+            .slide
+            .should_show_checkbox(self.team_context.as_ref(), app)
+        {
             return None;
         }
         let checkbox_config = self.slide.checkbox_config()?;

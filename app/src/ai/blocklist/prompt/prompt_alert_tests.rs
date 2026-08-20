@@ -51,7 +51,7 @@ fn apply_server_availability(app: &mut App, availability: AICreditAvailability) 
 }
 
 fn determine_state(app: &mut App) -> PromptAlertState {
-    app.read(PromptAlertView::determine_state)
+    app.read(|ctx| PromptAlertView::determine_state(None, ctx))
 }
 
 #[test]

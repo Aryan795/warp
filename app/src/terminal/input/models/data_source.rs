@@ -18,7 +18,6 @@ use warpui::ui_components::button::ButtonVariant;
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
 use warpui::{
     AppContext, Element, Entity, EntityId, ModelContext, ModelHandle, SingletonEntity as _,
-    WindowId,
 };
 
 use super::model_spec_scores::{
@@ -27,6 +26,7 @@ use super::model_spec_scores::{
     render_model_spec_header, render_model_spec_scores,
 };
 use crate::ai::custom_model_routers::is_custom_router_id;
+use crate::ai::blocklist::BlocklistAIController;
 use crate::ai::execution_profiles::model_menu_items::is_auto;
 use crate::ai::llms::{
     ByoKeySource, DisableReason, LLMId, LLMInfo, LLMPreferences, LLMProvider, LLMSpec,
@@ -48,7 +48,7 @@ use crate::terminal::input::inline_menu::{
 use crate::terminal::input::message_bar::{Message, MessageItem};
 use crate::terminal::view::ambient_agent::AmbientAgentViewModel;
 use crate::workspace::WorkspaceAction;
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces};
 
 /// Auto models pick their concrete model server-side, so the cost line names the
 /// class of inference rather than a host the request may never reach.
@@ -209,19 +209,19 @@ pub fn query_model_picker_choices<'a>(
 
 pub struct ModelSelectorDataSource {
     terminal_view_id: EntityId,
-    window_id: WindowId,
+    ai_controller: ModelHandle<BlocklistAIController>,
     ambient_agent_view_model: Option<ModelHandle<AmbientAgentViewModel>>,
 }
 
 impl ModelSelectorDataSource {
     pub fn new(
         terminal_view_id: EntityId,
-        window_id: WindowId,
+        ai_controller: ModelHandle<BlocklistAIController>,
         ambient_agent_view_model: Option<ModelHandle<AmbientAgentViewModel>>,
     ) -> Self {
         Self {
             terminal_view_id,
-            window_id,
+            ai_controller,
             ambient_agent_view_model,
         }
     }
@@ -306,6 +306,7 @@ impl SyncDataSource for ModelSelectorDataSource {
         };
 
         let is_cloud_pane = self.ambient_agent_view_model.is_some();
+        let team_context = self.ai_controller.as_ref(app).team_context();
         let choices = if is_full_terminal {
             llm_preferences
                 .get_cli_agent_llm_choices(app)
@@ -330,7 +331,7 @@ impl SyncDataSource for ModelSelectorDataSource {
                     QueryResult::from(ModelSearchItem::new(
                         choice,
                         &active_llm_id,
-                        self.window_id,
+                        team_context,
                         app,
                     ))
                 })
@@ -346,7 +347,8 @@ impl Entity for ModelSelectorDataSource {
 #[derive(Clone)]
 struct ModelSearchItem {
     id: LLMId,
-    window_id: WindowId,
+    upgrade_url: String,
+    byok_available: bool,
     provider: LLMProvider,
     spec: Option<LLMSpec>,
     leading_icon: Icon,
@@ -372,7 +374,7 @@ impl ModelSearchItem {
     fn new(
         choice: ModelPickerChoice,
         active_llm_id: &LLMId,
-        window_id: WindowId,
+        team_context: Option<&TeamContext>,
         app: &AppContext,
     ) -> Self {
         let llm = &choice.llm;
@@ -394,9 +396,30 @@ impl ModelSearchItem {
         let is_using_cloud_host = is_using_bedrock || is_using_gemini_enterprise_agent_platform;
         let credential_icon =
             (!is_using_cloud_host && byo_key_source.is_some()).then_some(Icon::Key);
+        let workspaces = UserWorkspaces::as_ref(app);
+        let upgrade_url = team_context
+            .and_then(|team_context| workspaces.team_for_context(team_context))
+            .map_or_else(
+                || {
+                    let user_id = AuthStateProvider::as_ref(app)
+                        .get()
+                        .user_id()
+                        .unwrap_or_default();
+                    UserWorkspaces::upgrade_link(user_id)
+                },
+                |team| UserWorkspaces::upgrade_link_for_team(team.uid),
+            );
+        let byok_available = team_context.map_or_else(
+            || workspaces.is_byo_api_key_enabled_for_personal(app),
+            |team_context| workspaces.is_byo_api_key_enabled(team_context, app),
+        ) && matches!(
+            llm.provider,
+            LLMProvider::OpenAI | LLMProvider::Anthropic | LLMProvider::Google
+        );
         Self {
             id: llm.id.clone(),
-            window_id,
+            upgrade_url,
+            byok_available,
             provider: llm.provider,
             spec: llm.spec.clone(),
             leading_icon,
@@ -684,16 +707,6 @@ impl SearchItem for ModelSearchItem {
             .with_child(scores);
 
         if self.disable_reason.as_ref() == Some(&DisableReason::RequiresUpgrade) {
-            let upgrade_url =
-                if let Some(team) = UserWorkspaces::as_ref(app).team_for_window(self.window_id) {
-                    UserWorkspaces::upgrade_link_for_team(team.uid)
-                } else {
-                    let user_id = AuthStateProvider::as_ref(app)
-                        .get()
-                        .user_id()
-                        .unwrap_or_default();
-                    UserWorkspaces::upgrade_link(user_id)
-                };
 
             let mut display_name = self.display_text.clone();
             if let Some(first) = display_name.get_mut(..1) {
@@ -702,20 +715,15 @@ impl SearchItem for ModelSearchItem {
 
             // Show a BYOK option when the user's tier supports it and the provider
             // is one that accepts user-supplied API keys.
-            let byok_available = UserWorkspaces::as_ref(app).is_byo_api_key_enabled(app)
-                && matches!(
-                    self.provider,
-                    LLMProvider::OpenAI | LLMProvider::Anthropic | LLMProvider::Google
-                );
 
             let mut text_fragments = vec![
                 FormattedTextFragment::plain_text(format!(
                     "{display_name} is not available for free users. "
                 )),
-                FormattedTextFragment::hyperlink("Upgrade", upgrade_url),
+                FormattedTextFragment::hyperlink("Upgrade", self.upgrade_url.clone()),
             ];
 
-            if byok_available {
+            if self.byok_available {
                 text_fragments.push(FormattedTextFragment::plain_text(" or ".to_string()));
                 text_fragments.push(FormattedTextFragment::hyperlink_action(
                     "bring your own key",

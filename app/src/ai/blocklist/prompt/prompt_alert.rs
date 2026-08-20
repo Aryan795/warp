@@ -7,7 +7,6 @@ use warpui::elements::{
 };
 use warpui::{
     AppContext, Element, Entity, SingletonEntity, TypedActionView, View, ViewContext,
-    WeakViewHandle,
 };
 
 use crate::ai::AIRequestUsageModel;
@@ -19,7 +18,7 @@ use crate::server::ids::ServerId;
 use crate::settings_view::SettingsSection;
 use crate::ui_components::icons::Icon;
 use crate::workspace::WorkspaceAction;
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces, UserWorkspacesEvent};
 
 const ANONYMOUS_USER_REQUEST_LIMIT_SOFT_GATE_PERCENTAGE: f32 = 0.5;
 
@@ -78,7 +77,7 @@ pub enum PromptAlertState {
 }
 
 pub struct PromptAlertView {
-    view_handle: WeakViewHandle<Self>,
+    team_context: Option<TeamContext>,
     state: PromptAlertState,
     action_hyperlink: HighlightedHyperlink,
 }
@@ -91,33 +90,44 @@ impl PromptAlertView {
         let api_key_manager = ApiKeyManager::handle(ctx);
 
         ctx.subscribe_to_model(&request_usage_model, |me, _, _, ctx| {
-            me.state = Self::determine_state(ctx);
+            me.state = Self::determine_state(me.team_context.as_ref(), ctx);
             ctx.notify();
         });
-
-        ctx.subscribe_to_model(&user_workspaces, |me, _, _, ctx| {
-            me.state = Self::determine_state(ctx);
+        ctx.subscribe_to_model(&user_workspaces, |me, workspaces, event, ctx| {
+            if matches!(
+                event,
+                UserWorkspacesEvent::WindowTeamChanged { window_id }
+                    if *window_id == ctx.window_id()
+            ) {
+                me.team_context = workspaces.as_ref(ctx).team_context_for_view(ctx);
+            }
+            me.state = Self::determine_state(me.team_context.as_ref(), ctx);
             ctx.notify();
         });
 
         ctx.subscribe_to_model(&network_status, |me, _, _, ctx| {
-            me.state = Self::determine_state(ctx);
+            me.state = Self::determine_state(me.team_context.as_ref(), ctx);
             ctx.notify();
         });
 
         ctx.subscribe_to_model(&api_key_manager, |me, _, _, ctx| {
-            me.state = Self::determine_state(ctx);
+            me.state = Self::determine_state(me.team_context.as_ref(), ctx);
             ctx.notify();
         });
 
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let state = Self::determine_state(team_context.as_ref(), ctx);
         Self {
-            view_handle: ctx.handle(),
-            state: Self::determine_state(ctx),
+            team_context,
+            state,
             action_hyperlink: Default::default(),
         }
     }
 
-    pub fn determine_state(app: &AppContext) -> PromptAlertState {
+    pub fn determine_state(
+        team_context: Option<&TeamContext>,
+        app: &AppContext,
+    ) -> PromptAlertState {
         // First, if the user is offline, no AI features will work.
         if !NetworkStatus::as_ref(app).is_online() {
             return PromptAlertState::NoConnection;
@@ -149,7 +159,7 @@ impl PromptAlertView {
         // The server-authoritative availability decision drives the alert once
         // it has been fetched; local data below is only a pre-fetch fallback.
         if let Some(availability) = request_usage_model.server_availability() {
-            return Self::state_from_server_availability(availability, app);
+            return Self::state_from_server_availability(availability, team_context, app);
         }
 
         // Legacy locally derived fallback, used only before the first
@@ -157,17 +167,20 @@ impl PromptAlertView {
         // servers that don't support the availability field yet).
 
         // Next, make sure the user isn't delinquent in their plan.
-        let workspace = UserWorkspaces::as_ref(app).current_workspace();
-        if workspace.is_some_and(|w| w.billing_metadata.is_delinquent_due_to_payment_issue()) {
+        let workspaces = UserWorkspaces::as_ref(app);
+        if team_context
+            .and_then(|team_context| workspaces.team_billing_metadata(team_context))
+            .is_some_and(|billing| billing.is_delinquent_due_to_payment_issue())
+        {
             return PromptAlertState::DelinquentDueToPaymentIssue;
         }
 
         // If there is ever any ai remaining, no alert
-        if request_usage_model.has_any_ai_remaining(app) {
+        if request_usage_model.has_any_ai_remaining(team_context, app) {
             return PromptAlertState::NoAlert;
         }
 
-        Self::out_of_credits_presentation(app)
+        Self::out_of_credits_presentation(team_context, app)
     }
 
     /// Maps the server-authoritative availability decision to presentation
@@ -175,6 +188,7 @@ impl PromptAlertView {
     /// only shapes the call-to-action copy.
     fn state_from_server_availability(
         availability: AICreditAvailability,
+        team_context: Option<&TeamContext>,
         app: &AppContext,
     ) -> PromptAlertState {
         if availability.available {
@@ -194,21 +208,25 @@ impl PromptAlertView {
                 // An out-of-credits denial only means the server found no path
                 // it can see; a locally stored API key still permits requests,
                 // which `has_any_ai_remaining` accounts for.
-                if AIRequestUsageModel::as_ref(app).has_any_ai_remaining(app) {
+                if AIRequestUsageModel::as_ref(app).has_any_ai_remaining(team_context, app) {
                     return PromptAlertState::NoAlert;
                 }
-                Self::out_of_credits_presentation(app)
+                Self::out_of_credits_presentation(team_context, app)
             }
         }
     }
 
     /// Picks the most actionable presentation for an out-of-credits denial
     /// based on the current workspace's overage policy.
-    fn out_of_credits_presentation(app: &AppContext) -> PromptAlertState {
+    fn out_of_credits_presentation(
+        team_context: Option<&TeamContext>,
+        app: &AppContext,
+    ) -> PromptAlertState {
         // Check if overages are available.
-        if let Some(workspace) = UserWorkspaces::as_ref(app).current_workspace() {
-            let are_overages_toggleable = workspace.are_overages_toggleable();
-            let are_overages_enabled = workspace.are_overages_enabled();
+        if let Some(team_context) = team_context {
+            let workspaces = UserWorkspaces::as_ref(app);
+            let are_overages_toggleable = workspaces.are_overages_toggleable(team_context);
+            let are_overages_enabled = workspaces.are_overages_enabled(team_context);
 
             if are_overages_toggleable {
                 if are_overages_enabled {
@@ -232,8 +250,11 @@ impl PromptAlertView {
         &self.state
     }
 
-    pub fn does_alert_block_ai_requests(app: &AppContext) -> bool {
-        does_alert_block_ai_requests(&Self::determine_state(app))
+    pub fn does_alert_block_ai_requests(
+        team_context: Option<&TeamContext>,
+        app: &AppContext,
+    ) -> bool {
+        does_alert_block_ai_requests(&Self::determine_state(team_context, app))
     }
 
     fn primary_text(
@@ -285,7 +306,11 @@ impl PromptAlertView {
         app: &AppContext,
     ) {
         let auth_state = AuthStateProvider::as_ref(app).get();
-        let current_team = UserWorkspaces::as_ref(app).team_for_view_handle(&self.view_handle, app);
+        let workspaces = UserWorkspaces::as_ref(app);
+        let current_team = self
+            .team_context
+            .as_ref()
+            .and_then(|team_context| workspaces.team_for_context(team_context));
         let has_admin_permissions = current_team.is_some_and(|team| {
             team.has_admin_permissions(&auth_state.user_email().unwrap_or_default())
         });
@@ -381,7 +406,14 @@ impl PromptAlertView {
                         };
                     text_fragments.push(FormattedTextFragment::hyperlink(label, upgrade_url));
                 }
-                if UserWorkspaces::as_ref(app).is_byo_api_key_enabled(app) {
+                let is_byo_api_key_enabled = self
+                    .team_context
+                    .as_ref()
+                    .map_or_else(
+                        || workspaces.is_byo_api_key_enabled_for_personal(app),
+                        |team_context| workspaces.is_byo_api_key_enabled(team_context, app),
+                    );
+                if is_byo_api_key_enabled {
                     text_fragments.push(FormattedTextFragment::plain_text(" or "));
                     text_fragments.push(FormattedTextFragment::hyperlink_action(
                         "use your own API keys",
@@ -420,14 +452,17 @@ impl View for PromptAlertView {
 
     fn render(&self, app: &AppContext) -> Box<dyn Element> {
         let appearance = Appearance::as_ref(app);
-        let state = Self::determine_state(app);
+        let state = &self.state;
         let mut text_fragments = vec![];
 
-        self.primary_text(&state, &mut text_fragments);
+        self.primary_text(state, &mut text_fragments);
 
         let auth_state = AuthStateProvider::as_ref(app).get();
         let workspaces = UserWorkspaces::as_ref(app);
-        let current_team = workspaces.team_for_view_handle(&self.view_handle, app);
+        let current_team = self
+            .team_context
+            .as_ref()
+            .and_then(|team_context| workspaces.team_for_context(team_context));
         // A teamless user can be considered the admin of their non-existent team.
         let has_admin_permissions = current_team.is_none_or(|team| {
             auth_state
@@ -435,14 +470,17 @@ impl View for PromptAlertView {
                 .is_some_and(|email| team.has_admin_permissions(&email))
         });
 
-        let can_purchase_addon_credits = workspaces
-            .purchase_policy_for_team(current_team)
+        let purchase_policy = self.team_context.as_ref().map_or_else(
+            || workspaces.purchase_policy_for_personal(),
+            |team_context| workspaces.purchase_policy_for_team(team_context),
+        );
+        let can_purchase_addon_credits = purchase_policy
             .is_some_and(|policy| policy.allows_purchases());
 
         let suggest_buy_credits = can_purchase_addon_credits
             && has_admin_permissions
             && matches!(
-                state,
+                *state,
                 PromptAlertState::RequestLimitReached
                     | PromptAlertState::OveragesToggleableButNotEnabled
                     | PromptAlertState::MonthlyOveragesSpendLimitReached
@@ -455,7 +493,7 @@ impl View for PromptAlertView {
                 WorkspaceAction::ShowSettingsPage(SettingsSection::BillingAndUsage),
             ));
         } else {
-            self.action_hyperlink(&state, &mut text_fragments, app);
+            self.action_hyperlink(state, &mut text_fragments, app);
         }
 
         let formatted_text_element = FormattedTextElement::new(

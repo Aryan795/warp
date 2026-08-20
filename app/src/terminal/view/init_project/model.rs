@@ -7,8 +7,9 @@ use lsp::supported_servers::LSPServerType;
 #[cfg(not(target_family = "wasm"))]
 use repo_metadata::repositories::DetectedRepositories;
 use warp_util::local_or_remote_path::LocalOrRemotePath;
-use warpui::{Entity, ModelContext, SingletonEntity as _};
+use warpui::{Entity, ModelContext, ModelHandle, SingletonEntity as _};
 
+use crate::ai::blocklist::BlocklistAIController;
 use crate::ai::persisted_workspace::PersistedWorkspace;
 use crate::settings::CodeSettings;
 use crate::terminal::view::init_project::lsp_server_selector::LSPServerInfo;
@@ -16,7 +17,7 @@ use crate::terminal::view::init_project::{
     CodebaseIndexingResult, CreateEnvironmentResult, FILES_TO_CHECK, InitActionResult,
     LINKABLE_FILES, LanguageServersResult, ProjectScopedRulesResult,
 };
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces};
 
 const INIT_STEP_COUNT: usize = enum_iterator::cardinality::<InitStepKind>();
 
@@ -115,6 +116,7 @@ pub struct InitProjectModel {
     #[cfg(feature = "local_fs")]
     root_path: PathBuf,
     path_env_var: Option<String>,
+    ai_controller: ModelHandle<BlocklistAIController>,
 }
 
 impl InitProjectModel {
@@ -122,9 +124,14 @@ impl InitProjectModel {
     pub fn new(
         pwd_path: PathBuf,
         path_env_var: Option<String>,
+        ai_controller: ModelHandle<BlocklistAIController>,
         ctx: &mut ModelContext<Self>,
     ) -> Self {
-        let is_already_setup = !Self::should_have_available_steps(&pwd_path, ctx);
+        let is_already_setup = !Self::should_have_available_steps(
+            &pwd_path,
+            ai_controller.as_ref(ctx).team_context(),
+            ctx,
+        );
 
         Self {
             steps: [None, None, None, None, None],
@@ -134,6 +141,7 @@ impl InitProjectModel {
             #[cfg(feature = "local_fs")]
             root_path: pwd_path,
             path_env_var,
+            ai_controller,
         }
     }
 
@@ -175,11 +183,19 @@ impl InitProjectModel {
     }
 
     /// Check if there are any steps that need user action
-    pub fn should_have_available_steps(path: &Path, ctx: &warpui::AppContext) -> bool {
+    pub fn should_have_available_steps(
+        path: &Path,
+        team_context: Option<&TeamContext>,
+        ctx: &warpui::AppContext,
+    ) -> bool {
         // Note that we consider auto-indexing setting to true to satisfy the codebase context step.
         // This avoids the potential race condition with the banner showing just when we start auto-indexing.
-        let has_pending_codebase_context = UserWorkspaces::as_ref(ctx)
-            .is_codebase_context_enabled(ctx)
+        let workspaces = UserWorkspaces::as_ref(ctx);
+        let codebase_context_enabled = team_context.map_or_else(
+            || workspaces.is_codebase_context_enabled_for_personal(ctx),
+            |team_context| workspaces.is_codebase_context_enabled(team_context, ctx),
+        );
+        let has_pending_codebase_context = codebase_context_enabled
             && CodebaseIndexManager::as_ref(ctx)
                 .get_codebase_index_status_for_path(path, ctx)
                 .is_none()
@@ -363,7 +379,16 @@ impl InitProjectModel {
     }
 
     fn compute_codebase_context_step(&mut self, pwd_path: &Path, ctx: &mut ModelContext<Self>) {
-        if !UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(ctx) {
+        let workspaces = UserWorkspaces::as_ref(ctx);
+        let is_codebase_context_enabled = self
+            .ai_controller
+            .as_ref(ctx)
+            .team_context()
+            .map_or_else(
+                || workspaces.is_codebase_context_enabled_for_personal(ctx),
+                |team_context| workspaces.is_codebase_context_enabled(team_context, ctx),
+            );
+        if !is_codebase_context_enabled {
             // Feature disabled, leave as None
             return;
         }

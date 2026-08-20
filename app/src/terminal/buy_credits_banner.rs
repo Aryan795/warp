@@ -32,11 +32,10 @@ use crate::features::FeatureFlag;
 use crate::menu::MenuItemFields;
 use crate::pricing::{PricingInfoModel, PricingInfoModelEvent};
 use crate::send_telemetry_from_ctx;
-use crate::server::ids::ServerId;
 use crate::server::telemetry::{OutOfCreditsBannerAction, TelemetryEvent};
 use crate::settings_view::create_discount_badge;
 use crate::view_components::{Dropdown, DropdownAction};
-use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces, UserWorkspacesEvent};
 
 #[derive(Default)]
 struct MouseStates {
@@ -49,6 +48,7 @@ struct MouseStates {
 
 pub struct BuyCreditsBanner {
     view_handle: WeakViewHandle<Self>,
+    team_context: Option<TeamContext>,
     mouse_states: MouseStates,
     denomination_dropdown: ViewHandle<Dropdown<Action>>,
     addon_credits_options: Vec<AddonCreditsOption>,
@@ -87,7 +87,10 @@ impl BuyCreditsBanner {
                     if me.checkout_pending
                         && matches!(
                             AIRequestUsageModel::as_ref(ctx)
-                                .compute_buy_addon_credits_banner_display_state(ctx),
+                                .compute_buy_addon_credits_banner_display_state(
+                                    me.team_context.as_ref(),
+                                    ctx,
+                                ),
                             BuyCreditsBannerDisplayState::Hidden
                         )
                     {
@@ -127,8 +130,10 @@ impl BuyCreditsBanner {
             }
         });
 
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         let mut me = Self {
             view_handle: ctx.handle(),
+            team_context,
             mouse_states: Default::default(),
             denomination_dropdown,
             addon_credits_options: Default::default(),
@@ -151,6 +156,13 @@ impl BuyCreditsBanner {
         ctx: &mut ViewContext<Self>,
     ) {
         match event {
+            UserWorkspacesEvent::WindowTeamChanged { window_id }
+                if *window_id == ctx.window_id() =>
+            {
+                self.team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                self.update_addon_credits_options(ctx);
+                ctx.notify();
+            }
             UserWorkspacesEvent::TeamsChanged => {
                 // Pricing labels depend on the current team's purchase policy
                 // (premium surcharge), so rebuild them when teams change.
@@ -180,7 +192,11 @@ impl BuyCreditsBanner {
                     .map(|option| option.credits);
                 let has_admin_permissions = {
                     let auth_state = AuthStateProvider::as_ref(ctx).get();
-                    let current_team = UserWorkspaces::as_ref(ctx).team_for_view(ctx);
+                    let workspaces = UserWorkspaces::as_ref(ctx);
+                    let current_team = self
+                        .team_context
+                        .as_ref()
+                        .and_then(|team_context| workspaces.team_for_context(team_context));
                     auth_state
                         .user_email()
                         .zip(current_team)
@@ -262,7 +278,11 @@ impl BuyCreditsBanner {
 
         let has_admin_permissions = {
             let auth_state = AuthStateProvider::as_ref(ctx).get();
-            let current_team = UserWorkspaces::as_ref(ctx).team_for_view(ctx);
+            let workspaces = UserWorkspaces::as_ref(ctx);
+            let current_team = self
+                .team_context
+                .as_ref()
+                .and_then(|team_context| workspaces.team_for_context(team_context));
             auth_state
                 .user_email()
                 .zip(current_team)
@@ -385,8 +405,11 @@ impl BuyCreditsBanner {
             .unwrap_or_default();
 
         let workspaces = UserWorkspaces::as_ref(ctx);
-        let premium_bps = workspaces
-            .purchase_policy_for_team(workspaces.team_for_view(ctx))
+        let premium_bps = self
+            .team_context
+            .as_ref()
+            .and_then(|team_context| workspaces.purchase_policy_for_team(team_context))
+            .or_else(|| workspaces.purchase_policy_for_personal())
             .map_or(0, |policy| policy.effective_premium_bps());
         let base_rate = self
             .addon_credits_options
@@ -480,7 +503,11 @@ impl BuyCreditsBanner {
         .finish();
 
         let auth_state = AuthStateProvider::as_ref(app).get();
-        let current_team = UserWorkspaces::as_ref(app).team_for_view_handle(&self.view_handle, app);
+        let workspaces = UserWorkspaces::as_ref(app);
+        let current_team = self
+            .team_context
+            .as_ref()
+            .and_then(|team_context| workspaces.team_for_context(team_context));
         let has_admin_permissions = auth_state
             .user_email()
             .zip(current_team)
@@ -674,14 +701,19 @@ impl BuyCreditsBanner {
 
         let auth_state = AuthStateProvider::as_ref(app).get();
         let workspaces = UserWorkspaces::as_ref(app);
-        let current_team = workspaces.team_for_view_handle(&self.view_handle, app);
+        let current_team = self
+            .team_context
+            .as_ref()
+            .and_then(|team_context| workspaces.team_for_context(team_context));
         let has_admin_permissions = current_team.is_none_or(|team| {
             auth_state
                 .user_email()
                 .is_some_and(|email| team.has_admin_permissions(&email))
         });
-        let delinquent_due_to_payment_issue = workspaces
-            .team_billing_metadata(current_team)
+        let delinquent_due_to_payment_issue = self
+            .team_context
+            .as_ref()
+            .and_then(|team_context| workspaces.team_billing_metadata(team_context))
             .is_some_and(|billing| billing.is_delinquent_due_to_payment_issue());
         let auto_reload_banner_toggle_ff =
             FeatureFlag::BuildPlanAutoReloadBannerToggle.is_enabled();
@@ -694,7 +726,13 @@ impl BuyCreditsBanner {
 
         // Check if the selected purchase would reach/exceed the monthly limit
         let premium_bps = workspaces
-            .purchase_policy_for_team(current_team)
+            .purchase_policy_for_personal()
+            .filter(|_| self.team_context.is_none())
+            .or_else(|| {
+                self.team_context
+                    .as_ref()
+                    .and_then(|team_context| workspaces.purchase_policy_for_team(team_context))
+            })
             .map_or(0, |policy| policy.effective_premium_bps());
         let selected_option = self
             .addon_credits_options
@@ -790,7 +828,6 @@ impl BuyCreditsBanner {
         };
 
         let make_buy_button = || {
-            let team_uid = current_team.map(|team| team.uid);
 
             let buy_button_disabled = self.purchase_addon_credits_loading
                 || delinquent_due_to_payment_issue
@@ -832,7 +869,7 @@ impl BuyCreditsBanner {
                 .with_text_label(button_text)
                 .build()
                 .on_click(move |ctx, _, _| {
-                    ctx.dispatch_typed_action(Action::PurchaseAddonCredits { team_uid });
+                    ctx.dispatch_typed_action(Action::PurchaseAddonCredits);
                 });
 
             if buy_button_disabled {
@@ -975,7 +1012,10 @@ impl View for BuyCreditsBanner {
         let display_state = if self.should_display_banner {
             BuyCreditsBannerDisplayState::MonthlyLimitReached
         } else {
-            ai_request_usage.compute_buy_addon_credits_banner_display_state(app)
+            ai_request_usage.compute_buy_addon_credits_banner_display_state(
+                self.team_context.as_ref(),
+                app,
+            )
         };
 
         match display_state {
@@ -1000,7 +1040,7 @@ impl View for BuyCreditsBanner {
 pub enum Action {
     SelectDenomination(usize),
     Close,
-    PurchaseAddonCredits { team_uid: Option<ServerId> },
+    PurchaseAddonCredits,
     ManageBilling,
     ToggleAutoReload,
 }
@@ -1043,15 +1083,17 @@ impl warpui::TypedActionView for BuyCreditsBanner {
                 });
                 ctx.notify();
             }
-            Action::PurchaseAddonCredits { team_uid } => {
+            Action::PurchaseAddonCredits => {
                 if let Some(option) = self
                     .addon_credits_options
                     .get(self.selected_denomination_index)
+                    && let Some(team_context) =
+                        UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
                 {
                     let credits = option.credits;
                     self.purchase_addon_credits_loading = true;
                     UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
-                        user_workspaces.purchase_addon_credits(*team_uid, credits, ctx);
+                        user_workspaces.purchase_addon_credits(team_context, credits, ctx);
                     });
                     ctx.notify();
                 }

@@ -9,7 +9,7 @@ use warpui::{AppContext, SingletonEntity};
 use super::llms::{LLMInfo, LLMPreferences};
 use crate::auth::AuthStateProvider;
 use crate::pricing::{PricingInfoModel, onboarding_credit_pack_options};
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces};
 
 impl From<&LLMInfo> for OnboardingModelInfo {
     fn from(llm: &LLMInfo) -> Self {
@@ -38,15 +38,19 @@ pub fn build_onboarding_models(
     (models, default_id)
 }
 
-pub fn current_onboarding_auth_state(ctx: &AppContext) -> OnboardingAuthState {
+pub fn current_onboarding_auth_state(
+    team_context: Option<&TeamContext>,
+    ctx: &AppContext,
+) -> OnboardingAuthState {
     let auth_state = AuthStateProvider::as_ref(ctx).get();
     if auth_state.is_anonymous_or_logged_out() {
         return OnboardingAuthState::LoggedOut;
     }
-    let is_on_paid_plan = UserWorkspaces::as_ref(ctx)
-        .current_workspace()
-        .map(|w| w.billing_metadata.is_user_on_paid_plan())
-        .unwrap_or(false);
+    let is_on_paid_plan = team_context
+        .and_then(|team_context| {
+            UserWorkspaces::as_ref(ctx).team_billing_metadata(team_context)
+        })
+        .is_some_and(|billing| billing.is_user_on_paid_plan());
     if is_on_paid_plan {
         OnboardingAuthState::PayingUser
     } else {
@@ -57,9 +61,14 @@ pub fn current_onboarding_auth_state(ctx: &AppContext) -> OnboardingAuthState {
 /// The ad-hoc credit packs to offer during onboarding, priced for the current
 /// viewer. Empty when the server hasn't sent pricing yet or the viewer's plan
 /// can't buy packs at all, which hides the option.
-pub fn onboarding_credit_packs(ctx: &AppContext) -> Vec<CreditPackOption> {
+pub fn onboarding_credit_packs(
+    team_context: Option<&TeamContext>,
+    ctx: &AppContext,
+) -> Vec<CreditPackOption> {
     let workspaces = UserWorkspaces::as_ref(ctx);
-    let Some(policy) = workspaces.purchase_policy() else {
+    let Some(policy) = team_context.and_then(|team_context| {
+        workspaces.purchase_policy_for_team(team_context)
+    }) else {
         return Vec::new();
     };
     if !policy.allows_purchases() {

@@ -32,6 +32,7 @@ use crate::terminal::TerminalModel;
 use crate::terminal::event::{BlockCompletedEvent, BlockType};
 use crate::terminal::model::block::{BlockId, BlockMetadata};
 use crate::terminal::model::session::Sessions;
+use crate::workspaces::user_workspaces::TeamContext;
 use crate::terminal::model_events::{ModelEvent, ModelEventDispatcher};
 use crate::util::git::{PrInfo, RepositoryInfo};
 use crate::workspaces::user_workspaces::UserWorkspaces;
@@ -338,6 +339,7 @@ impl BlocklistAIContextModel {
     /// If false, excludes these user-specific contexts but includes everything else.
     pub fn pending_context(
         &self,
+        team_context: Option<&TeamContext>,
         app: &AppContext,
         is_user_query: bool,
         current_working_directory_location: Option<&LocalOrRemotePath>,
@@ -350,7 +352,9 @@ impl BlocklistAIContextModel {
             // source code embedding based context is still available.
             false
         } else {
-            UserWorkspaces::as_ref(app).is_codebase_context_enabled(app)
+            team_context.is_none_or(|team_context| {
+                UserWorkspaces::as_ref(app).is_codebase_context_enabled(team_context, app)
+            })
                 && pwd.as_ref().is_some_and(|pwd| {
                     RepoOutlines::as_ref(app).is_directory_indexed(Path::new(&pwd))
                 })

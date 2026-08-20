@@ -155,7 +155,10 @@ pub struct CreateTeamResponse {
     pub workspace: Workspace,
     pub team: Team,
 }
-#[derive(Debug, Clone)]
+/// Carries one captured team identity through one logical operation.
+///
+/// This type intentionally does not implement [`Clone`] or [`Copy`].
+#[derive(Debug)]
 pub struct TeamContext {
     team_uid: ServerId,
 }
@@ -194,6 +197,11 @@ impl UserWorkspaces {
             team_client,
             workspace_client,
         }
+    }
+
+    pub fn is_codebase_context_enabled_for_personal(&self, app: &AppContext) -> bool {
+        AISettings::as_ref(app).is_any_ai_enabled(app)
+            && *CodeSettings::as_ref(app).codebase_context_enabled.value()
     }
 
     #[cfg(test)]
@@ -414,8 +422,13 @@ impl UserWorkspaces {
             .find(|t| t.uid == team_uid)
     }
 
-    fn team_for_context(&self, team_context: &TeamContext) -> Option<&Team> {
+    pub fn team_for_context(&self, team_context: &TeamContext) -> Option<&Team> {
         self.team_from_uid_across_all_workspaces(team_context.team_uid)
+    }
+    pub fn workspace_for_context(&self, team_context: &TeamContext) -> Option<&Workspace> {
+        self.workspaces
+            .iter()
+            .find(|workspace| workspace.teams.iter().any(|team| team.uid == team_context.team_uid))
     }
 
     fn team_for_context_mut(&mut self, team_context: &TeamContext) -> Option<&mut Team> {
@@ -839,6 +852,21 @@ impl UserWorkspaces {
         self.aws_bedrock_host_settings(team_context)
             .map(|settings| settings.enablement_setting.clone())
             .unwrap_or_default()
+    }
+
+    pub fn are_overages_enabled(&self, team_context: &TeamContext) -> bool {
+        self.team_for_context(team_context)
+            .is_some_and(|team| team.settings.usage_based_pricing_settings.enabled)
+    }
+
+    pub fn are_overages_toggleable(&self, team_context: &TeamContext) -> bool {
+        self.team_for_context(team_context)
+            .is_some_and(|team| {
+                team.billing_metadata
+                    .tier
+                    .usage_based_pricing_policy
+                    .is_some_and(|policy| policy.toggleable)
+            })
     }
 
     pub fn addon_credits_settings(
@@ -1742,9 +1770,10 @@ impl UserWorkspaces {
 
     pub fn refresh_ai_overages(
         &mut self,
-        team_context: TeamContext,
+        team_context: &TeamContext,
         ctx: &mut ModelContext<Self>,
     ) {
+        let team_context = TeamContext::new(team_context.team_uid());
         let workspace_client = self.workspace_client.clone();
         let _ = ctx.spawn(
             async move {

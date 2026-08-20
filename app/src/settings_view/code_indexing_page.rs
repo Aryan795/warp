@@ -62,7 +62,7 @@ use crate::view_components::DismissibleToast;
 use crate::view_components::action_button::{ActionButton, SecondaryTheme};
 use crate::workspace::ToastStack;
 use crate::workspaces::update_manager::TeamUpdateManager;
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces, UserWorkspacesEvent};
 use crate::workspaces::workspace::AdminEnablementSetting;
 use crate::{TelemetryEvent, send_telemetry_from_ctx};
 
@@ -95,6 +95,21 @@ fn remote_codebase_index_limit_reached(status: &RemoteCodebaseIndexStatus) -> bo
         .failure_message
         .as_deref()
         .is_some_and(|message| message.contains(REMOTE_CODEBASE_INDEX_LIMIT_REACHED_FAILURE))
+}
+
+fn is_codebase_context_enabled(
+    team_context: Option<&TeamContext>,
+    app: &AppContext,
+) -> bool {
+    team_context.map_or_else(
+        || {
+            AISettings::as_ref(app).is_any_ai_enabled(app)
+                && *CodeSettings::as_ref(app).codebase_context_enabled
+        },
+        |team_context| {
+            UserWorkspaces::as_ref(app).is_codebase_context_enabled(team_context, app)
+        },
+    )
 }
 
 #[cfg(all(test, not(target_family = "wasm")))]
@@ -141,6 +156,7 @@ enum IndexingRefreshAction {
     Resync,
 }
 pub struct CodeIndexingPageView {
+    team_context: Option<TeamContext>,
     page: PageType<Self>,
     codebase_manual_resync_mouse_states: Vec<MouseStateHandle>,
     codebase_delete_mouse_states: Vec<MouseStateHandle>,
@@ -163,6 +179,13 @@ pub struct CodeIndexingPageView {
 
 impl CodeIndexingPageView {
     pub fn new(ctx: &mut ViewContext<CodeIndexingPageView>) -> Self {
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        ctx.subscribe_to_model(&UserWorkspaces::handle(ctx), |view, _, event, ctx| {
+            if matches!(event, UserWorkspacesEvent::WindowTeamChanged { .. }) {
+                view.team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                ctx.notify();
+            }
+        });
         let index_manager = CodebaseIndexManager::handle(ctx);
         let codebase_count = index_manager
             .as_ref(ctx)
@@ -298,6 +321,7 @@ impl CodeIndexingPageView {
         let workspace_count = PersistedWorkspace::as_ref(ctx).workspaces().count();
 
         Self {
+            team_context,
             page: Self::build_page(ctx),
             codebase_manual_resync_mouse_states: (0..codebase_count)
                 .map(|_| Default::default())
@@ -446,7 +470,13 @@ impl TypedActionView for CodeIndexingPageView {
         match action {
             CodeIndexingPageAction::ToggleCodebaseContext => {
                 // If the organization has an explicit setting (on or off), ignore user toggles.
-                let setting = UserWorkspaces::as_ref(ctx).team_allows_codebase_context();
+                let setting = self
+                    .team_context
+                    .as_ref()
+                    .map(|team_context| {
+                        UserWorkspaces::as_ref(ctx).team_allows_codebase_context(team_context)
+                    })
+                    .unwrap_or(AdminEnablementSetting::RespectUserSetting);
                 match setting {
                     AdminEnablementSetting::Enable | AdminEnablementSetting::Disable => {
                         return;
@@ -724,6 +754,7 @@ impl SettingsWidget for CodePageWidget {
         content.add_child(render_separator(appearance));
         content.add_child(self.render_initialization_settings_header(appearance));
         content.add_child(self.render_codebase_indexing_toggle_row(
+            view.team_context.as_ref(),
             global_ai_enabled,
             appearance,
             app,
@@ -739,9 +770,14 @@ impl SettingsWidget for CodePageWidget {
             appearance,
         ));
 
-        let codebase_context_enabled = UserWorkspaces::as_ref(app).is_codebase_context_enabled(app);
+        let codebase_context_enabled =
+            is_codebase_context_enabled(view.team_context.as_ref(), app);
         if global_ai_enabled && codebase_context_enabled {
-            content.add_children(self.render_autoindexing_rows(appearance, app));
+            content.add_children(self.render_autoindexing_rows(
+                view.team_context.as_ref(),
+                appearance,
+                app,
+            ));
         }
 
         // Initialized / indexed folders section
@@ -773,12 +809,12 @@ impl SettingsWidget for CodePageWidget {
 impl CodePageWidget {
     fn render_autoindexing_rows(
         &self,
+        team_context: Option<&TeamContext>,
         appearance: &Appearance,
         app: &AppContext,
     ) -> Vec<Box<dyn Element>> {
         let auto_indexing_enabled = *CodeSettings::as_ref(app).auto_indexing_enabled;
-        let codebase_indexing_enabled =
-            UserWorkspaces::as_ref(app).is_codebase_context_enabled(app);
+        let codebase_indexing_enabled = is_codebase_context_enabled(team_context, app);
 
         let mut rows = vec![
             self.render_autoindex_row(
@@ -928,13 +964,18 @@ impl CodePageWidget {
     /// Renders the "Codebase indexing" toggle row (legacy layout).
     fn render_codebase_indexing_toggle_row(
         &self,
+        team_context: Option<&TeamContext>,
         global_ai_enabled: bool,
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
         let ui_builder = appearance.ui_builder();
         let theme = appearance.theme();
-        let admin_setting = UserWorkspaces::as_ref(app).team_allows_codebase_context();
+        let admin_setting = team_context
+            .map(|team_context| {
+                UserWorkspaces::as_ref(app).team_allows_codebase_context(team_context)
+            })
+            .unwrap_or(AdminEnablementSetting::RespectUserSetting);
 
         let label = ui_builder
             .span(CODEBASE_INDEXING_LABEL)
@@ -949,7 +990,7 @@ impl CodePageWidget {
 
         let switch = ui_builder
             .switch(self.switch_state.clone())
-            .check(UserWorkspaces::as_ref(app).is_codebase_context_enabled(app));
+            .check(is_codebase_context_enabled(team_context, app));
 
         let disabled_tooltip_text = match admin_setting {
             AdminEnablementSetting::Enable => Some(INDEXING_WORKSPACE_ENABLED_ADMIN_TEXT),
@@ -2155,12 +2196,19 @@ impl SettingsWidget for CodeIndexingPageWidget {
     ) -> Box<dyn Element> {
         let ui_builder = appearance.ui_builder();
         let global_ai_enabled = AISettings::as_ref(app).is_any_ai_enabled(app);
-        let codebase_context_enabled = UserWorkspaces::as_ref(app).is_codebase_context_enabled(app);
+        let codebase_context_enabled =
+            is_codebase_context_enabled(view.team_context.as_ref(), app);
 
         let mut content = Flex::column();
 
         // Codebase indexing toggle using render_body_item for consistent styling
-        let admin_setting = UserWorkspaces::as_ref(app).team_allows_codebase_context();
+        let admin_setting = view
+            .team_context
+            .as_ref()
+            .map(|team_context| {
+                UserWorkspaces::as_ref(app).team_allows_codebase_context(team_context)
+            })
+            .unwrap_or(AdminEnablementSetting::RespectUserSetting);
         let switch = ui_builder
             .switch(self.inner.switch_state.clone())
             .check(codebase_context_enabled);

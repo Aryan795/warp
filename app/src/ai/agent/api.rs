@@ -120,7 +120,6 @@ impl TryFrom<ServerConversationToken>
 
 #[derive(Debug, Clone)]
 pub struct RequestParams {
-    pub(crate) team_context: Option<Arc<TeamContext>>,
     pub input: Vec<AIAgentInput>,
     pub conversation_token: Option<ServerConversationToken>,
     pub forked_from_conversation_token: Option<ServerConversationToken>,
@@ -150,6 +149,9 @@ pub struct RequestParams {
     /// `custom_model_providers`: the selected model's `config_key` indexes into this
     /// registry. `None` when no custom router is selected.
     pub custom_model_routers: Option<warp_multi_agent_api::request::settings::CustomModelRouters>,
+    pub byo_api_key_enabled: bool,
+    #[cfg(not(target_family = "wasm"))]
+    pub geap_binding: Option<::ai::api_keys::GeapMintBinding>,
     pub allow_use_of_warp_credits: bool,
     pub autonomy_level: warp_multi_agent_api::AutonomyLevel,
     pub isolation_level: warp_multi_agent_api::IsolationLevel,
@@ -190,7 +192,6 @@ impl RequestParams {
     #[cfg(test)]
     pub fn new_for_test() -> Self {
         Self {
-            team_context: None,
             input: vec![],
             conversation_token: None,
             forked_from_conversation_token: None,
@@ -212,6 +213,9 @@ impl RequestParams {
             api_keys: None,
             custom_model_providers: None,
             custom_model_routers: None,
+            byo_api_key_enabled: false,
+            #[cfg(not(target_family = "wasm"))]
+            geap_binding: None,
             allow_use_of_warp_credits: false,
             autonomy_level: Default::default(),
             isolation_level: Default::default(),
@@ -228,7 +232,7 @@ impl RequestParams {
 
     pub fn new(
         terminal_view_id: Option<EntityId>,
-        team_context: Option<Arc<TeamContext>>,
+        team_context: Option<&TeamContext>,
         session_context: SessionContext,
         request_input: &RequestInput,
         conversation: ConversationData,
@@ -312,28 +316,27 @@ impl RequestParams {
 
         let user_workspaces = UserWorkspaces::as_ref(app);
         let api_key_manager = ApiKeyManager::as_ref(app);
-        let is_byo_enabled = match team_context.as_deref() {
+        let is_byo_enabled = match team_context {
             Some(team_context) => user_workspaces.is_byo_api_key_enabled(team_context, app),
             None => user_workspaces.is_byo_api_key_enabled_for_personal(app),
         };
         #[cfg(not(target_family = "wasm"))]
         let geap_binding = team_context
-            .as_deref()
             .and_then(|team_context| {
                 crate::ai::geap_credentials::current_geap_policy_for_team(team_context, app)
                     .mint_binding()
             });
         #[cfg(target_family = "wasm")]
         let geap_binding: Option<::ai::api_keys::GeapMintBinding> = None;
-        let is_aws_bedrock_credentials_enabled = team_context.as_deref().is_some_and(|team_context| {
+        let is_aws_bedrock_credentials_enabled = team_context.is_some_and(|team_context| {
             user_workspaces.is_aws_bedrock_credentials_enabled(team_context, app)
         });
         let api_keys = api_key_manager.api_keys_for_request(
             is_byo_enabled,
             is_aws_bedrock_credentials_enabled,
-            geap_binding,
+            geap_binding.clone(),
         );
-        let is_custom_inference_enabled = team_context.as_deref().is_some_and(|team_context| {
+        let is_custom_inference_enabled = team_context.is_some_and(|team_context| {
             user_workspaces.is_custom_inference_enabled(team_context, app)
         });
         let custom_model_providers =
@@ -400,7 +403,6 @@ impl RequestParams {
             .context_window_limit_for_request(app);
 
         Self {
-            team_context,
             input: request_input.all_inputs().cloned().collect(),
             conversation_token: conversation.server_conversation_token,
             forked_from_conversation_token: conversation.forked_from_conversation_token,
@@ -422,6 +424,9 @@ impl RequestParams {
             api_keys,
             custom_model_providers,
             custom_model_routers,
+            byo_api_key_enabled: is_byo_enabled,
+            #[cfg(not(target_family = "wasm"))]
+            geap_binding,
             allow_use_of_warp_credits,
             autonomy_level,
             isolation_level,

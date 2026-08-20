@@ -1160,7 +1160,10 @@ fn should_send_title_gen_request(ctx: &ViewContext<ShareBlockModal>) -> bool {
     let workspaces = UserWorkspaces::as_ref(ctx);
     FeatureFlag::SharedBlockTitleGeneration.is_enabled()
         && AISettings::as_ref(ctx).is_shared_block_title_generation_enabled(ctx)
-        && UserWorkspaces::ai_allowed_for_team(workspaces.team_for_view(ctx))
+        && workspaces
+            .team_context_for_view(ctx)
+            .as_ref()
+            .is_some_and(|team_context| workspaces.ai_allowed_for_team(team_context))
 }
 
 struct SingleBlock {
