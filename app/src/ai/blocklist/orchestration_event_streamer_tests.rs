@@ -964,6 +964,88 @@ fn handle_event_batch_persists_max_seq_to_history_model() {
     });
 }
 
+/// A server-authoritative parent-completion success on this conversation's own run must be
+/// delivered as `ParentCompletionSucceeded` (not silently dropped like every other self-scoped
+/// event), and the run must be tombstoned so a later, out-of-order buffered event cannot
+/// resurrect an earlier local status.
+#[test]
+fn handle_event_batch_emits_parent_completion_succeeded_for_self_scoped_event() {
+    App::test((), |mut app| async move {
+        initialize_settings_for_tests(&mut app);
+        let (sender, _receiver) = std::sync::mpsc::sync_channel::<ModelEvent>(4);
+        let mut global_resource_handles = GlobalResourceHandles::mock(&mut app);
+        global_resource_handles.model_event_sender = Some(sender);
+        app.add_singleton_model(|_| GlobalResourceHandlesProvider::new(global_resource_handles));
+
+        let history_model =
+            app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
+
+        let self_run_id = "550e8400-e29b-41d4-a716-446655440900".to_string();
+        let mut conversation = AIConversation::new(false, false);
+        conversation.set_run_id(self_run_id.clone());
+        let conversation_id = conversation.id();
+        let terminal_view_id = warpui::EntityId::new();
+        history_model.update(&mut app, |model, ctx| {
+            model.restore_conversations(terminal_view_id, vec![conversation], ctx);
+        });
+
+        let mut mock = MockAIClient::new();
+        mock.expect_update_event_sequence_on_server()
+            .returning(|_, _| Ok(()));
+        let ai_client: Arc<dyn AIClient> = Arc::new(mock);
+        let server_api = ServerApiProvider::new_for_test().get();
+
+        let streamer = app.add_singleton_model(|ctx| {
+            OrchestrationEventStreamer::new_with_clients_for_test(ai_client, server_api, ctx)
+        });
+
+        let captured: std::sync::Arc<parking_lot::Mutex<Vec<AIConversationId>>> =
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let captured_for_closure = captured.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_model(&streamer, move |_, event, _| {
+                if let OrchestrationEventStreamerEvent::ParentCompletionSucceeded {
+                    conversation_id,
+                } = event
+                {
+                    captured_for_closure.lock().push(*conversation_id);
+                }
+            })
+        });
+
+        streamer.update(&mut app, |me, ctx| {
+            me.streams.entry(conversation_id).or_default();
+            me.handle_event_batch(
+                conversation_id,
+                &self_run_id,
+                0,
+                vec![AgentRunEvent {
+                    event_type: EVENT_RUN_SUCCEEDED_BY_PARENT_COMPLETION.to_string(),
+                    run_id: self_run_id.clone(),
+                    ref_id: None,
+                    execution_id: None,
+                    occurred_at: "2026-01-01T00:00:00Z".to_string(),
+                    sequence: 5,
+                }],
+                vec![],
+                ctx,
+            );
+        });
+
+        assert_eq!(
+            captured.lock().clone(),
+            vec![conversation_id],
+            "the self-scoped parent-completion event must emit ParentCompletionSucceeded exactly once"
+        );
+        streamer.read(&app, |me, _| {
+            assert!(
+                me.killed_run_ids.contains(&self_run_id),
+                "the run must be tombstoned so a later out-of-order event cannot restore an earlier status"
+            );
+        });
+    });
+}
+
 #[test]
 fn handle_event_batch_drops_events_for_killed_run_ids_after_persisting_cursor() {
     App::test((), |mut app| async move {
