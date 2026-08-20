@@ -141,6 +141,13 @@ impl PrivacyPageView {
             me.update_secret_display_dropdown(ctx);
             ctx.notify();
         });
+        // The page's team-derived reads resolve `TeamRenderContext` fresh on every render, but
+        // that only takes effect if a render actually happens. A window team change (including
+        // reconciliation away from a removed team) or an update to team policy both notify on
+        // `UserWorkspaces` without otherwise touching this view, so observe it directly.
+        ctx.observe(&UserWorkspaces::handle(ctx), |_, _, ctx| {
+            ctx.notify();
+        });
 
         let add_regex_body = ctx.add_typed_action_view(AddRegexModal::new);
         ctx.subscribe_to_view(&add_regex_body, |me, _, event, ctx| {
@@ -2103,3 +2110,7 @@ mod styles {
 fn description_text_color(theme: &WarpTheme) -> warp_core::ui::theme::Fill {
     theme.sub_text_color(theme.surface_2())
 }
+
+#[cfg(test)]
+#[path = "privacy_page_tests.rs"]
+mod tests;
