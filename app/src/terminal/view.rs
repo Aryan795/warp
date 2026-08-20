@@ -28684,6 +28684,21 @@ impl View for TerminalView {
         }
     }
 
+    /// Cross-window tab drag transfers this view (and the models it owns) to a different
+    /// window without recreating them, so `self.window_id` and the AI controller's own copy
+    /// must be updated here rather than only set once at construction.
+    fn on_window_transferred(
+        &mut self,
+        _source_window_id: WindowId,
+        target_window_id: WindowId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.window_id = target_window_id;
+        self.ai_controller.update(ctx, |ai_controller, _| {
+            ai_controller.set_window_id(target_window_id);
+        });
+    }
+
     fn keymap_context(&self, app: &AppContext) -> warpui::keymap::Context {
         let mut context = Self::default_keymap_context();
         context.map.insert(

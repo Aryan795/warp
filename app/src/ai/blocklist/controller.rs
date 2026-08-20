@@ -443,6 +443,16 @@ impl BlocklistAIController {
         UserWorkspaces::as_ref(app).team_uid_for_window(self.window_id)
     }
 
+    /// Updates the window this controller resolves its team scope from. Cross-window tab drag
+    /// transfers `TerminalView` (and this controller with it) to a different window without
+    /// recreating either; the owning `TerminalView` calls this from its own
+    /// `on_window_transferred` hook, since models don't receive that notification directly.
+    /// Without this, [`Self::team_uid`] would keep resolving the source window's team
+    /// indefinitely after a drag.
+    pub(crate) fn set_window_id(&mut self, window_id: WindowId) {
+        self.window_id = window_id;
+    }
+
     /// Creates a controller for a terminal surface.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
