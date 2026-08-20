@@ -174,7 +174,7 @@ use crate::ai::blocklist::handoff::{
     HandoffLaunchAttachments, PendingCloudLaunch, suggest_handoff_environment,
 };
 use crate::ai::blocklist::prompt::prompt_alert::{PromptAlertEvent, PromptAlertView};
-use crate::ai::blocklist::telemetry_banner::should_collect_ai_ugc_telemetry;
+use crate::ai::blocklist::telemetry_banner::should_collect_ai_ugc_telemetry_for_team;
 use crate::ai::blocklist::{
     AttachmentType, BLOCK_CONTEXT_ATTACHMENT_REGEX, BlocklistAIActionModel,
     BlocklistAIContextEvent, BlocklistAIContextModel, BlocklistAIController,
@@ -7696,8 +7696,8 @@ impl Input {
                         predicted_command: response.most_likely_action.clone(),
                     });
 
-                let should_collect_ugc = should_collect_ai_ugc_telemetry(
-                    ctx,
+                let should_collect_ugc = should_collect_ai_ugc_telemetry_for_team(
+                    UserWorkspaces::as_ref(ctx).team_for_view(ctx),
                     PrivacySettings::as_ref(ctx).is_telemetry_enabled,
                 );
                 send_telemetry_from_ctx!(
@@ -9524,9 +9524,11 @@ impl Input {
     ) {
         let input_buffer_text = self.buffer_text(ctx);
         let buffer_length = input_buffer_text.len();
-        let input =
-            should_collect_ai_ugc_telemetry(ctx, PrivacySettings::as_ref(ctx).is_telemetry_enabled)
-                .then_some(input_buffer_text);
+        let input = should_collect_ai_ugc_telemetry_for_team(
+            UserWorkspaces::as_ref(ctx).team_for_view(ctx),
+            PrivacySettings::as_ref(ctx).is_telemetry_enabled,
+        )
+        .then_some(input_buffer_text);
         let is_udi_enabled = InputSettings::as_ref(ctx).is_universal_developer_input_enabled(ctx);
         send_telemetry_from_ctx!(
             TelemetryEvent::AgentModeChangedInputType {
