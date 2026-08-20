@@ -309,6 +309,17 @@ impl ResponseStream {
             event,
         ))));
     }
+
+    /// Emits this stream's own natural-completion event (mirrors the tail of
+    /// `on_response_stream_complete`), without needing a real spawned request behind it.
+    /// Lets tests drive the gap between a `Finished` response event being processed (which
+    /// does not clear the stream's `PendingResponseStreams`/`added_exchanges_by_response`
+    /// bookkeeping) and that bookkeeping actually being cleared.
+    #[cfg(test)]
+    pub fn emit_stream_finished_for_test(&mut self, ctx: &mut ModelContext<Self>) {
+        ctx.emit(ResponseStreamEvent::AfterStreamFinished { cancellation: None });
+        self.cancellation_tx = None;
+    }
     #[cfg(test)]
     pub fn new_for_test(id: ResponseStreamId) -> Self {
         let (cancellation_tx, _rx) = oneshot::channel();

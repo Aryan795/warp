@@ -1578,6 +1578,15 @@ impl BlocklistAIController {
             .in_flight_response_streams
             .has_active_stream_for_conversation(conversation_id, ctx)
         {
+            // The triggering stream's own `StreamFinished` hasn't been processed yet (e.g. a
+            // fast-resolving action, such as a `FetchConversation` fetch served from an
+            // already in-memory conversation, can finish before that event is processed).
+            // This defers rather than drops: `flush_stranded_follow_up_for_conversation`
+            // retries once the stream is actually cleaned up.
+            log::info!(
+                "Deferring follow-up for conversation_id={conversation_id:?}: its triggering \
+                 response stream is still considered active."
+            );
             return;
         }
 
@@ -1664,6 +1673,54 @@ impl BlocklistAIController {
         }
 
         self.pending_passive_follow_ups.remove(&conversation_id);
+    }
+
+    /// Recovers a follow-up that `send_follow_up_for_conversation` deferred because its
+    /// triggering stream still looked active at the time.
+    ///
+    /// Call this only after that stream's own completion has been fully processed (its
+    /// bookkeeping entry removed from `PendingResponseStreams`), i.e. from the
+    /// `AfterStreamFinished` normal-completion path. Without this, a result whose
+    /// `FinishedAction` was processed *before* the triggering stream's `StreamFinished`
+    /// event is processed (a plain scheduling race between two independently spawned
+    /// futures, not anything user-driven) is left in `finished_action_results` with
+    /// nothing left to ever revisit it, stranding it indefinitely.
+    fn flush_stranded_follow_up_for_conversation(
+        &mut self,
+        conversation_id: AIConversationId,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if self
+            .in_flight_response_streams
+            .has_active_stream_for_conversation(conversation_id, ctx)
+        {
+            // A new stream already started for this conversation; that request owns
+            // delivering any results now.
+            return;
+        }
+        if self
+            .action_model
+            .as_ref(ctx)
+            .has_unfinished_actions_for_conversation(conversation_id)
+        {
+            // Still executing (or another action is); its own `FinishedAction` will drive
+            // the follow-up once everything settles.
+            return;
+        }
+        let has_finished_results = self
+            .action_model
+            .as_ref(ctx)
+            .get_finished_action_results(conversation_id)
+            .is_some_and(|results| !results.is_empty());
+        if !has_finished_results {
+            return;
+        }
+        log::info!(
+            "Flushing stranded action result(s) for conversation_id={conversation_id:?}: a \
+             follow-up was deferred while its triggering stream still looked active, and \
+             that stream has now finished without anything else redelivering the result."
+        );
+        self.send_follow_up_for_conversation(conversation_id, ctx);
     }
 
     fn conversation_ready_for_pending_events(
@@ -3179,6 +3236,10 @@ impl BlocklistAIController {
                     // Now that the stream is cleaned up, re-check for pending
                     // orchestration events that couldn't be drained earlier.
                     self.handle_pending_events_ready(conversation_id, ctx);
+
+                    // Also recover any follow-up that deferred because this stream still
+                    // looked active when its action finished (see the method doc).
+                    self.flush_stranded_follow_up_for_conversation(conversation_id, ctx);
                 }
 
                 // Before cleaning up the response stream, check if we should attempt to resume.

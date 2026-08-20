@@ -10,8 +10,9 @@ use super::response_stream::{PendingResume, RecoveryBudget};
 use crate::ai::agent::conversation::{AIConversationId, ConversationStatus};
 use crate::ai::agent::task::TaskId;
 use crate::ai::agent::{
-    AIAgentAction, AIAgentActionId, AIAgentActionType, AIAgentAttachment, AIAgentContext,
-    AIAgentInput, CancellationReason, ImageContext, PassiveSuggestionTrigger, UserQueryMode,
+    AIAgentAction, AIAgentActionId, AIAgentActionResult, AIAgentActionResultType,
+    AIAgentActionType, AIAgentAttachment, AIAgentContext, AIAgentInput, CancellationReason,
+    FetchConversationResult, ImageContext, PassiveSuggestionTrigger, UserQueryMode,
 };
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::blocklist::{
@@ -656,5 +657,166 @@ fn collateral_cancel_of_pending_fetch_conversation_reports_explicit_error_via_ow
                 )
             )
         ));
+    });
+}
+
+/// A fast-resolving action (e.g. a `FetchConversation` fetch served from an already
+/// in-memory conversation) can have its `FinishedAction` processed *before* the response
+/// stream that dispatched it has finished processing its own `StreamFinished` event --
+/// receiving that response event marks the exchange complete but does not yet clear the
+/// stream's bookkeeping (see `ConversationStatus`'s `mark_request_completed` vs.
+/// `cleanup_completed_response_stream`, only the latter of which runs on
+/// `AfterStreamFinished`). `send_follow_up_for_conversation` correctly defers in that
+/// window rather than dropping the result, but without a retry, the deferred result would
+/// be stranded forever once the window closes. This proves
+/// `flush_stranded_follow_up_for_conversation` (called from the `AfterStreamFinished`
+/// normal-completion path) recovers it.
+#[test]
+fn stranded_action_result_is_flushed_once_triggering_stream_completes() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+
+        let sent_requests = Arc::new(Mutex::new(0usize));
+        let sent_requests_for_subscription = Arc::clone(&sent_requests);
+
+        let (conversation_id, stream) = terminal.update(&mut app, |view, ctx| {
+            let controller_handle = view.ai_controller().clone();
+            ctx.subscribe_to_model(&controller_handle, move |_, _, event, _| {
+                if matches!(event, super::BlocklistAIControllerEvent::SentRequest { .. }) {
+                    *sent_requests_for_subscription.lock().unwrap() += 1;
+                }
+            });
+
+            let terminal_surface_id = view.id();
+            let stream_id = ResponseStreamId::new_for_test();
+            let conversation_id =
+                BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+                    let conversation_id = history.start_new_conversation(
+                        terminal_surface_id,
+                        false,
+                        false,
+                        false,
+                        ctx,
+                    );
+                    let task_id = history
+                        .conversation(&conversation_id)
+                        .unwrap()
+                        .get_root_task_id()
+                        .clone();
+                    history
+                        .update_conversation_for_new_request_input(
+                            RequestInput {
+                                conversation_id,
+                                input_messages: HashMap::from([(task_id, vec![])]),
+                                working_directory: None,
+                                model_id: LLMId::from("test-model"),
+                                coding_model_id: LLMId::from("test-coding-model"),
+                                cli_agent_model_id: LLMId::from("test-cli-agent-model"),
+                                computer_use_model_id: LLMId::from("test-computer-use-model"),
+                                shared_session_response_initiator: None,
+                                request_start_ts: Local::now(),
+                                supported_tools_override: None,
+                            },
+                            stream_id.clone(),
+                            terminal_surface_id,
+                            ctx,
+                        )
+                        .unwrap();
+                    conversation_id
+                });
+            let stream = ctx.add_model(|_| ResponseStream::new_for_test(stream_id.clone()));
+            view.ai_controller().update(ctx, |controller, ctx| {
+                controller.register_mock_stream_for_test(
+                    stream_id,
+                    conversation_id,
+                    stream.clone(),
+                    ctx,
+                );
+            });
+            (conversation_id, stream)
+        });
+
+        // The response event carrying `Finished(Done)` is processed -- this marks the
+        // exchange complete, but (deliberately, matching production) does not yet clear
+        // this stream's `PendingResponseStreams`/`added_exchanges_by_response` bookkeeping.
+        stream.update(&mut app, |stream, ctx| {
+            stream.emit_response_event_for_test(
+                warp_multi_agent_api::ResponseEvent {
+                    r#type: Some(response_event::Type::Finished(
+                        response_event::StreamFinished {
+                            reason: Some(response_event::stream_finished::Reason::Done(
+                                response_event::stream_finished::Done {},
+                            )),
+                            conversation_usage_metadata: None,
+                            token_usage: vec![],
+                            should_refresh_model_config: false,
+                            #[allow(deprecated)]
+                            request_cost: None,
+                            request_charges: None,
+                        },
+                    )),
+                },
+                ctx,
+            );
+        });
+
+        // Simulate the fast-resolving action's own completion landing in this window: its
+        // `FinishedAction` is processed while the stream still looks active.
+        terminal.update(&mut app, |view, ctx| {
+            view.ai_controller().update(ctx, |controller, ctx| {
+                controller.action_model.update(ctx, |action_model, ctx| {
+                    action_model.apply_finished_action_result(
+                        conversation_id,
+                        AIAgentActionResult {
+                            id: AIAgentActionId::from("fetch-conversation-1".to_owned()),
+                            task_id: TaskId::new("task".to_owned()),
+                            result: AIAgentActionResultType::FetchConversation(
+                                FetchConversationResult::Success {
+                                    directory_path: "/tmp/conversation".to_owned(),
+                                },
+                            ),
+                        },
+                        ctx,
+                    );
+                });
+            });
+        });
+
+        // Deferred, not delivered: no request has been sent yet, and the result is still
+        // sitting undelivered.
+        assert_eq!(*sent_requests.lock().unwrap(), 0);
+        terminal.update(&mut app, |view, ctx| {
+            view.ai_controller().update(ctx, |controller, ctx| {
+                assert!(
+                    controller
+                        .action_model
+                        .as_ref(ctx)
+                        .get_finished_action_results(conversation_id)
+                        .is_some_and(|results| !results.is_empty()),
+                    "the result should still be pending delivery"
+                );
+            });
+        });
+
+        // The stream's own completion is now fully processed, clearing its bookkeeping.
+        stream.update(&mut app, |stream, ctx| {
+            stream.emit_stream_finished_for_test(ctx);
+        });
+
+        // The flush recovers it: exactly one follow-up request went out, and nothing is
+        // left stranded.
+        assert_eq!(*sent_requests.lock().unwrap(), 1);
+        terminal.update(&mut app, |view, ctx| {
+            view.ai_controller().update(ctx, |controller, ctx| {
+                assert!(
+                    controller
+                        .action_model
+                        .as_ref(ctx)
+                        .get_finished_action_results(conversation_id)
+                        .is_none_or(|results| results.is_empty())
+                );
+            });
+        });
     });
 }
