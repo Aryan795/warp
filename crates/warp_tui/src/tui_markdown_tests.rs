@@ -535,6 +535,7 @@ fn render(
 /// Renders like [`render`], but returns the frame's hyperlink side table
 /// (buffer cell -> URL) instead of the buffer, for asserting on OSC 8
 /// hyperlink placement rather than visible text.
+#[allow(clippy::type_complexity)]
 fn render_with_hyperlinks(
     formatted: &FormattedText,
     width: u16,
