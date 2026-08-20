@@ -61,7 +61,7 @@ use crate::ai::agent::{
     AIAgentAction, AIAgentActionId, AIAgentActionResult, AIAgentActionResultType,
     AIAgentActionType, AIAgentActionTypeDiscriminants, AIAgentExchange, AIAgentInput,
     CancellationOutcome, CancellationReason, CreateDocumentsResult, EditDocumentsResult,
-    RequestCommandOutputResult,
+    FetchConversationResult, RequestCommandOutputResult,
 };
 use crate::ai::blocklist::action_model::execute::suggest_new_conversation::SuggestNewConversationExecutor;
 use crate::ai::blocklist::telemetry::send_run_agents_completed_telemetry;
@@ -1356,6 +1356,22 @@ impl BlocklistAIActionModel {
         }
 
         let action_id = action_result.id.clone();
+
+        // FetchConversation is a nested, server-driven tool call inside a
+        // ConversationSearch subagent flow with no user checkpoint of its own;
+        // a cancellation here is always a side effect of some other teardown
+        // (a new query, stop, handoff, etc.), never a direct user action on
+        // this tool call itself. Log the reason so a spurious cancellation
+        // report can identify the trigger without needing to reproduce it.
+        if matches!(
+            action_result.result,
+            AIAgentActionResultType::FetchConversation(FetchConversationResult::Cancelled)
+        ) {
+            log::warn!(
+                "FetchConversation cancelled: conversation_id={conversation_id:?} \
+                 action_id={action_id:?} reason={cancellation_reason:?}"
+            );
+        }
 
         // Every terminal outcome (success, failure, cancellation — from any
         // path) funnels through here, so this is the one place executor-held

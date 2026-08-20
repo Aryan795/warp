@@ -13,9 +13,9 @@ use warpui::App;
 use watcher::HomeDirectoryWatcher;
 
 use super::{
-    RecordingCardText, format_upload_artifact_text, parsed_skill_for_common_locations,
-    read_skill_display_text, should_decorate_recorded_use_computer, start_recording_card_text,
-    stop_recording_card_text,
+    ConversationSearchStatus, RecordingCardText, format_upload_artifact_text,
+    parsed_skill_for_common_locations, read_skill_display_text,
+    should_decorate_recorded_use_computer, start_recording_card_text, stop_recording_card_text,
 };
 use crate::ai::agent::{
     RecordingStarted, RecordingStopped, StartRecordingResult, StopRecordingResult,
@@ -319,4 +319,35 @@ fn parsed_skill_for_common_locations_does_not_mix_remote_hosts() {
             parsed_skill_for_common_locations(locations, ctx).is_none()
         }));
     });
+}
+
+#[test]
+fn conversation_search_status_finished_wins_over_a_stale_cancelled_exchange() {
+    // A nested FetchConversation exchange can have had its response stream
+    // interrupted along the way (e.g. superseded by a follow-up) even though
+    // the subagent has since finished with an answer or a reported error.
+    // The card must show the resolved outcome, not a spurious cancellation.
+    assert_eq!(
+        ConversationSearchStatus::from_flags(true, true),
+        ConversationSearchStatus::Finished
+    );
+    assert!(ConversationSearchStatus::from_flags(true, true).is_done());
+}
+
+#[test]
+fn conversation_search_status_cancelled_only_when_not_finished() {
+    assert_eq!(
+        ConversationSearchStatus::from_flags(false, true),
+        ConversationSearchStatus::Cancelled
+    );
+    assert!(ConversationSearchStatus::from_flags(false, true).is_done());
+}
+
+#[test]
+fn conversation_search_status_running_when_neither_finished_nor_cancelled() {
+    assert_eq!(
+        ConversationSearchStatus::from_flags(false, false),
+        ConversationSearchStatus::Running
+    );
+    assert!(!ConversationSearchStatus::from_flags(false, false).is_done());
 }

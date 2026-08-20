@@ -932,7 +932,16 @@ impl AIAgentActionResultType {
 
     /// Returns `true` if this completion of this action result should trigger a follow-up request.
     pub fn should_trigger_request_upon_completion(&self) -> bool {
-        !self.is_cancelled()
+        // FetchConversation is a nested, server-driven tool call inside a
+        // ConversationSearch subagent flow: there is no user checkpoint between
+        // its cancellation and the server needing a result. A cancelled
+        // FetchConversation is always converted to an error result (see
+        // convert.rs) that must reach the server via a follow-up, or the
+        // subagent is left hanging instead of finishing deterministically.
+        matches!(
+            self,
+            Self::FetchConversation(FetchConversationResult::Cancelled)
+        ) || !self.is_cancelled()
     }
 
     pub fn is_requested_command(&self) -> bool {

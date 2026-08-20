@@ -983,18 +983,32 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
                                     .ok()
                                 })
                                 .unwrap_or(false);
-                            let is_cancelled = conversation.is_some_and(|c| {
-                                let subagent_task_id = TaskId::new(subagent_task_id.clone());
-                                c.get_task(&subagent_task_id).is_some_and(|task| {
-                                    task.exchanges().any(|e| e.output_status.is_cancelled())
-                                })
-                            });
-                            let icon = if is_cancelled {
-                                inline_action_icons::cancelled_icon(appearance)
-                            } else if is_finished {
-                                inline_action_icons::green_check_icon(appearance)
-                            } else {
-                                icons::yellow_running_icon(appearance)
+                            // Only relevant when the subagent hasn't finished: an
+                            // exchange along the way (e.g. a superseded nested
+                            // FetchConversation) can have had its response stream
+                            // interrupted without the subagent itself ending in a
+                            // genuine cancellation.
+                            let has_cancelled_exchange = !is_finished
+                                && conversation.is_some_and(|c| {
+                                    let subagent_task_id = TaskId::new(subagent_task_id.clone());
+                                    c.get_task(&subagent_task_id).is_some_and(|task| {
+                                        task.exchanges().any(|e| e.output_status.is_cancelled())
+                                    })
+                                });
+                            let search_status = ConversationSearchStatus::from_flags(
+                                is_finished,
+                                has_cancelled_exchange,
+                            );
+                            let icon = match search_status {
+                                ConversationSearchStatus::Finished => {
+                                    inline_action_icons::green_check_icon(appearance)
+                                }
+                                ConversationSearchStatus::Cancelled => {
+                                    inline_action_icons::cancelled_icon(appearance)
+                                }
+                                ConversationSearchStatus::Running => {
+                                    icons::yellow_running_icon(appearance)
+                                }
                             };
 
                             // Resolve which conversation is being searched. Conversation IDs use
@@ -1041,7 +1055,7 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
                                     ))
                                 });
 
-                            let done = is_finished || is_cancelled;
+                            let done = search_status.is_done();
                             let verb = if done { "Searched" } else { "Searching" };
 
                             let mut fragments: Vec<FormattedTextFragment> =
@@ -1092,7 +1106,7 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
                                     .with_icon(icon.finish());
 
                             // Add a footer with the current phase status when in progress.
-                            if !is_finished && !is_cancelled {
+                            if !done {
                                 let phase = conversation
                                     .and_then(|c| {
                                         c.get_task(&TaskId::new(subagent_task_id.clone()))
@@ -4220,6 +4234,35 @@ fn render_collapsible_debug_output(
 }
 
 // --- Conversation search phase detection ---
+
+/// The outcome of a `ConversationSearch` subagent, as shown by its inline card.
+///
+/// A subagent that has since finished (with an answer or a server-reported
+/// error) always takes priority over an earlier exchange whose response
+/// stream was itself interrupted along the way (e.g. a follow-up request
+/// superseding it), so a resolved search is never shown as cancelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConversationSearchStatus {
+    Running,
+    Finished,
+    Cancelled,
+}
+
+impl ConversationSearchStatus {
+    fn from_flags(is_finished: bool, has_cancelled_exchange: bool) -> Self {
+        if is_finished {
+            Self::Finished
+        } else if has_cancelled_exchange {
+            Self::Cancelled
+        } else {
+            Self::Running
+        }
+    }
+
+    fn is_done(self) -> bool {
+        !matches!(self, Self::Running)
+    }
+}
 
 enum ConversationSearchPhase {
     ListingMessages,
