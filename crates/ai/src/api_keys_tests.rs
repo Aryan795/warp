@@ -884,6 +884,64 @@ fn begin_expired_geap_refresh_is_single_flight() {
 
 #[cfg(not(target_family = "wasm"))]
 #[test]
+fn begin_expired_geap_refresh_is_independent_across_teams() {
+    // Companion to `begin_expired_geap_refresh_is_single_flight`: that test proves
+    // same-team coalescing; this proves the opposite must NOT happen across teams. If the
+    // team-keyed waiter map ever regressed to one process-wide list, team B would coalesce
+    // behind team A's in-flight mint and resume with team A's credential — exactly the
+    // cross-team leak this PR exists to prevent — while every same-team test still passes.
+    App::test((), |mut app| async move {
+        let binding_a = geap_gate();
+        let mut binding_b = geap_gate();
+        binding_b.team_uid = "team-b".into();
+
+        let manager = app.add_model(|_| {
+            let mut manager = make_manager(ApiKeys::default());
+            manager
+                .geap_team_states
+                .entry(binding_a.team_uid.clone())
+                .or_default()
+                .credentials = geap_loaded("expired-a", Some(0));
+            manager
+                .geap_team_states
+                .entry(binding_b.team_uid.clone())
+                .or_default()
+                .credentials = GeapCredentialsState::Loaded {
+                credentials: geap_credentials("expired-b", Some(0)),
+                loaded_at: SystemTime::now(),
+                minted_for: binding_b.clone(),
+            };
+            manager
+        });
+        manager.update(&mut app, |manager, ctx| {
+            let mut kickoff_count = 0;
+            let rx_a = manager.begin_expired_geap_refresh(&binding_a, ctx, |manager, waiter, _| {
+                kickoff_count += 1;
+                manager.install_geap_refresh_waiter(&binding_a.team_uid, Some(waiter));
+            });
+            let rx_b = manager.begin_expired_geap_refresh(&binding_b, ctx, |manager, waiter, _| {
+                kickoff_count += 1;
+                manager.install_geap_refresh_waiter(&binding_b.team_uid, Some(waiter));
+            });
+
+            assert!(rx_a.is_some());
+            assert!(rx_b.is_some());
+            // Each team started its own mint instead of team B attaching to team A's.
+            assert_eq!(kickoff_count, 2);
+            assert_eq!(
+                manager.take_geap_refresh_waiters(&binding_a.team_uid).len(),
+                1
+            );
+            assert_eq!(
+                manager.take_geap_refresh_waiters(&binding_b.team_uid).len(),
+                1
+            );
+        });
+    });
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[test]
 fn declined_geap_kickoff_leaves_no_in_flight_window() {
     App::test((), |mut app| async move {
         let manager = app.add_model(|_| make_manager_with_geap(geap_loaded("expired", Some(0))));
