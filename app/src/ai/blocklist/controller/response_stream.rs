@@ -330,6 +330,15 @@ impl ResponseStream {
     pub fn set_pending_resume_for_test(&mut self, resume: PendingResume) {
         self.pending_resume = Some(resume);
     }
+
+    /// The recovery budget this stream's request is currently running with. Lets tests
+    /// verify that a request inherited a specific budget (e.g. one charged for an earlier
+    /// resume) instead of starting fresh.
+    #[cfg(test)]
+    pub(super) fn recovery_for_test(&self) -> RecoveryBudget {
+        self.recovery
+    }
+
     #[cfg(test)]
     pub fn new_for_test(id: ResponseStreamId) -> Self {
         let (cancellation_tx, _rx) = oneshot::channel();

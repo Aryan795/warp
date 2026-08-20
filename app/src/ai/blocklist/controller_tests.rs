@@ -659,7 +659,7 @@ fn stranded_action_result_is_flushed_once_triggering_stream_completes() {
         let sent_requests = Arc::new(Mutex::new(0usize));
         let sent_requests_for_subscription = Arc::clone(&sent_requests);
 
-        let (conversation_id, stream) = terminal.update(&mut app, |view, ctx| {
+        let (conversation_id, task_id, stream) = terminal.update(&mut app, |view, ctx| {
             let controller_handle = view.ai_controller().clone();
             ctx.subscribe_to_model(&controller_handle, move |_, _, event, _| {
                 if matches!(event, super::BlocklistAIControllerEvent::SentRequest { .. }) {
@@ -669,7 +669,7 @@ fn stranded_action_result_is_flushed_once_triggering_stream_completes() {
 
             let terminal_surface_id = view.id();
             let stream_id = ResponseStreamId::new_for_test();
-            let conversation_id =
+            let (conversation_id, task_id) =
                 BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
                     let conversation_id = history.start_new_conversation(
                         terminal_surface_id,
@@ -687,7 +687,7 @@ fn stranded_action_result_is_flushed_once_triggering_stream_completes() {
                         .update_conversation_for_new_request_input(
                             RequestInput {
                                 conversation_id,
-                                input_messages: HashMap::from([(task_id, vec![])]),
+                                input_messages: HashMap::from([(task_id.clone(), vec![])]),
                                 working_directory: None,
                                 model_id: LLMId::from("test-model"),
                                 coding_model_id: LLMId::from("test-coding-model"),
@@ -702,7 +702,7 @@ fn stranded_action_result_is_flushed_once_triggering_stream_completes() {
                             ctx,
                         )
                         .unwrap();
-                    conversation_id
+                    (conversation_id, task_id)
                 });
             let stream = ctx.add_model(|_| ResponseStream::new_for_test(stream_id.clone()));
             view.ai_controller().update(ctx, |controller, ctx| {
@@ -713,7 +713,7 @@ fn stranded_action_result_is_flushed_once_triggering_stream_completes() {
                     ctx,
                 );
             });
-            (conversation_id, stream)
+            (conversation_id, task_id, stream)
         });
 
         // The response event carrying `Finished(Done)` is processed -- this marks the
@@ -749,7 +749,7 @@ fn stranded_action_result_is_flushed_once_triggering_stream_completes() {
                         conversation_id,
                         AIAgentActionResult {
                             id: AIAgentActionId::from("fetch-conversation-1".to_owned()),
-                            task_id: TaskId::new("task".to_owned()),
+                            task_id: task_id.clone(),
                             result: AIAgentActionResultType::FetchConversation(
                                 FetchConversationResult::Success {
                                     directory_path: "/tmp/conversation".to_owned(),
@@ -815,7 +815,7 @@ fn flushed_stranded_result_suppresses_a_scheduled_resume_for_the_same_stream() {
         let sent_requests = Arc::new(Mutex::new(0usize));
         let sent_requests_for_subscription = Arc::clone(&sent_requests);
 
-        let (conversation_id, stream) = terminal.update(&mut app, |view, ctx| {
+        let (conversation_id, task_id, stream) = terminal.update(&mut app, |view, ctx| {
             let controller_handle = view.ai_controller().clone();
             ctx.subscribe_to_model(&controller_handle, move |_, _, event, _| {
                 if matches!(event, super::BlocklistAIControllerEvent::SentRequest { .. }) {
@@ -825,7 +825,7 @@ fn flushed_stranded_result_suppresses_a_scheduled_resume_for_the_same_stream() {
 
             let terminal_surface_id = view.id();
             let stream_id = ResponseStreamId::new_for_test();
-            let conversation_id =
+            let (conversation_id, task_id) =
                 BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
                     let conversation_id = history.start_new_conversation(
                         terminal_surface_id,
@@ -843,7 +843,7 @@ fn flushed_stranded_result_suppresses_a_scheduled_resume_for_the_same_stream() {
                         .update_conversation_for_new_request_input(
                             RequestInput {
                                 conversation_id,
-                                input_messages: HashMap::from([(task_id, vec![])]),
+                                input_messages: HashMap::from([(task_id.clone(), vec![])]),
                                 working_directory: None,
                                 model_id: LLMId::from("test-model"),
                                 coding_model_id: LLMId::from("test-coding-model"),
@@ -858,7 +858,7 @@ fn flushed_stranded_result_suppresses_a_scheduled_resume_for_the_same_stream() {
                             ctx,
                         )
                         .unwrap();
-                    conversation_id
+                    (conversation_id, task_id)
                 });
             let stream = ctx.add_model(|_| ResponseStream::new_for_test(stream_id.clone()));
             view.ai_controller().update(ctx, |controller, ctx| {
@@ -869,7 +869,7 @@ fn flushed_stranded_result_suppresses_a_scheduled_resume_for_the_same_stream() {
                     ctx,
                 );
             });
-            (conversation_id, stream)
+            (conversation_id, task_id, stream)
         });
 
         // A fast action finishes and is deferred, exactly as in the stranding test above.
@@ -880,7 +880,7 @@ fn flushed_stranded_result_suppresses_a_scheduled_resume_for_the_same_stream() {
                         conversation_id,
                         AIAgentActionResult {
                             id: AIAgentActionId::from("fetch-conversation-1".to_owned()),
-                            task_id: TaskId::new("task".to_owned()),
+                            task_id: task_id.clone(),
                             result: AIAgentActionResultType::FetchConversation(
                                 FetchConversationResult::Success {
                                     directory_path: "/tmp/conversation".to_owned(),
@@ -908,12 +908,31 @@ fn flushed_stranded_result_suppresses_a_scheduled_resume_for_the_same_stream() {
         // conversation, so the scheduled resume must not also be armed.
         assert_eq!(*sent_requests.lock().unwrap(), 1);
         terminal.update(&mut app, |view, ctx| {
-            view.ai_controller().update(ctx, |controller, _| {
+            view.ai_controller().update(ctx, |controller, ctx| {
                 assert!(
                     !controller
                         .pending_auto_resume_handles
                         .contains_key(&conversation_id),
                     "the scheduled resume must have been suppressed, not armed alongside the flush"
+                );
+
+                // The flushed request must not have reset the shared recovery counter: it
+                // has to inherit the resume's already-charged budget (one attempt used),
+                // not start over at zero.
+                let new_stream_id = controller
+                    .in_flight_response_streams
+                    .stream_ids_for_conversation(conversation_id, ctx)
+                    .into_iter()
+                    .next()
+                    .expect("the flush should have registered a new stream");
+                let new_stream = controller
+                    .in_flight_response_streams
+                    .stream_for_test(&new_stream_id)
+                    .expect("the new stream should be registered");
+                assert_eq!(
+                    new_stream.as_ref(ctx).recovery_for_test().attempts_used(),
+                    1,
+                    "the flushed request must inherit the suppressed resume's charged budget"
                 );
             });
         });
