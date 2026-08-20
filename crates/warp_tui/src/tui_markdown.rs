@@ -197,7 +197,8 @@ fn inline_text(
     base: TuiStyle,
     palette: TuiMarkdownPalette,
 ) -> Box<dyn TuiElement> {
-    let (spans, hyperlinks) = inline_spans(inline, base, palette);
+    let mut hyperlinks = Vec::new();
+    let spans = inline_spans(inline, base, palette, &mut hyperlinks);
     TuiText::from_spans(spans)
         .with_hyperlinks(hyperlinks)
         .finish()
@@ -234,9 +235,9 @@ fn inline_spans(
     inline: &FormattedTextInline,
     base: TuiStyle,
     palette: TuiMarkdownPalette,
-) -> (Vec<(String, TuiStyle)>, Vec<Rc<str>>) {
+    hyperlinks: &mut Vec<Rc<str>>,
+) -> Vec<(String, TuiStyle)> {
     let mut spans = Vec::new();
-    let mut hyperlinks = Vec::new();
     let mut active_url: Option<(String, String)> = None;
 
     for fragment in inline {
@@ -245,7 +246,7 @@ fn inline_spans(
             Some(Hyperlink::Action(_)) | None => None,
         };
         if active_url.as_ref().map(|(url, _)| url.as_str()) != fragment_url {
-            finish_link(&mut spans, active_url.take(), palette.link, &mut hyperlinks);
+            finish_link(&mut spans, active_url.take(), palette.link, hyperlinks);
             if let Some(url) = fragment_url {
                 active_url = Some((url.to_owned(), String::new()));
             }
@@ -256,12 +257,12 @@ fn inline_spans(
 
         let mut style = fragment_style(fragment, base, palette);
         if let Some(url) = fragment_url {
-            style = sentinel_style(style, url, &mut hyperlinks);
+            style = sentinel_style(style, url, hyperlinks);
         }
         push_span(&mut spans, fragment.text.clone(), style);
     }
-    finish_link(&mut spans, active_url, palette.link, &mut hyperlinks);
-    (spans, hyperlinks)
+    finish_link(&mut spans, active_url, palette.link, hyperlinks);
+    spans
 }
 
 fn finish_link(
