@@ -158,6 +158,14 @@ pub struct TuiPaintContext<'a> {
     /// the side table `TuiFrameRenderer` consumes to bracket the matching
     /// cell runs in OSC 8 escapes.
     hyperlinks: HashMap<(u16, u16), Rc<str>>,
+    /// Stack-local captures of hyperlinks recorded while painting a child into
+    /// a scratch buffer whose coordinates are local to that buffer (e.g.
+    /// `TuiStack`, which paints each child into its own layer before
+    /// compositing). A hyperlink recorded during such a paint is *not* a final
+    /// buffer coordinate, so it must never reach `hyperlinks` directly; the
+    /// compositing caller drains the capture and translates or drops each
+    /// entry as it copies the corresponding cell to the real destination.
+    hyperlink_captures: Vec<HashMap<(u16, u16), Rc<str>>>,
 }
 
 /// The soonest an element may request a repaint after the current paint.
@@ -176,6 +184,7 @@ impl<'a> TuiPaintContext<'a> {
             terminal_cursor: None,
             opaque_region_captures: Vec::new(),
             hyperlinks: HashMap::new(),
+            hyperlink_captures: Vec::new(),
         }
     }
     /// Attaches the active scene layer to an absolute screen position.
@@ -201,9 +210,50 @@ impl<'a> TuiPaintContext<'a> {
 
     /// Records the URL a painted buffer cell should carry as an OSC 8
     /// hyperlink. Called by elements (e.g. `TuiText`) once they know which
-    /// cell a hyperlink span landed in.
+    /// cell a hyperlink span landed in. Writes into the innermost active
+    /// [`capture_hyperlinks`](Self::capture_hyperlinks) scope if one is open,
+    /// so a child painting into a stack layer's scratch buffer never pollutes
+    /// the frame-wide table with untranslated local coordinates.
     pub(crate) fn record_hyperlink(&mut self, position: TuiPoint, url: Rc<str>) {
-        self.hyperlinks.insert((position.x, position.y), url);
+        self.set_hyperlink(position, Some(url));
+    }
+
+    /// Sets or clears the hyperlink at a buffer cell (same capture-aware
+    /// target as [`record_hyperlink`](Self::record_hyperlink)). Clearing lets
+    /// a compositing caller drop a lower layer's hyperlink from the final
+    /// table when a later, opaque, non-hyperlinked cell covers it.
+    pub(crate) fn set_hyperlink(&mut self, position: TuiPoint, url: Option<Rc<str>>) {
+        let table = self
+            .hyperlink_captures
+            .last_mut()
+            .unwrap_or(&mut self.hyperlinks);
+        match url {
+            Some(url) => {
+                table.insert((position.x, position.y), url);
+            }
+            None => {
+                table.remove(&(position.x, position.y));
+            }
+        }
+    }
+
+    /// Captures hyperlinks recorded by `f` into a fresh, isolated table
+    /// instead of the frame-wide one. Used by a container that paints a child
+    /// into a scratch buffer (`TuiStack`): the child's `record_hyperlink`
+    /// calls land here, keyed by that scratch buffer's own local coordinates,
+    /// so the container can translate (or drop, if occluded) each entry while
+    /// compositing the scratch buffer's cells onto the real destination.
+    pub(crate) fn capture_hyperlinks<R>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> (R, HashMap<(u16, u16), Rc<str>>) {
+        self.hyperlink_captures.push(HashMap::new());
+        let result = f(self);
+        let captured = self
+            .hyperlink_captures
+            .pop()
+            .expect("a hyperlink capture is active");
+        (result, captured)
     }
 
     /// Runs `f` inside a clipped normal scene layer.
@@ -293,6 +343,7 @@ impl<'a> TuiPaintContext<'a> {
         HashMap<(u16, u16), Rc<str>>,
     ) {
         debug_assert!(self.scene.is_at_root_layer());
+        debug_assert!(self.hyperlink_captures.is_empty());
         (
             self.scene,
             self.repaint_at,
