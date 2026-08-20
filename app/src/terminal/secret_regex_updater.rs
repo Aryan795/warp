@@ -29,9 +29,16 @@ impl CustomSecretRegexUpdater {
         // `PrivacySettings` -- see the doc comment on
         // `PrivacySettings::is_enterprise_secret_redaction_enabled` -- so it must be
         // recomputed whenever team data changes rather than via a `PrivacySettings` event.
+        // `WindowTeamChanged` is included alongside `TeamsChanged` because opening a new
+        // window on a different team (or a window reconciling onto one) changes which teams'
+        // regexes belong in the union without necessarily changing the set of teams the user
+        // is on at all.
         let user_workspaces = UserWorkspaces::handle(ctx);
         ctx.subscribe_to_model(&user_workspaces, |me, _, evt, ctx| {
-            if let UserWorkspacesEvent::TeamsChanged = evt {
+            if matches!(
+                evt,
+                UserWorkspacesEvent::TeamsChanged | UserWorkspacesEvent::WindowTeamChanged { .. }
+            ) {
                 me.update_custom_secret_regex_list(ctx);
             }
         });
@@ -47,8 +54,11 @@ impl CustomSecretRegexUpdater {
             .cloned()
             .collect();
 
+        // Scoped to the teams the user currently has any window open on, not the ambient
+        // `current_workspace()` baseline -- see the doc comment on
+        // `enterprise_secret_redaction_regexes_for_open_windows` for why.
         let enterprise_secrets: Vec<Regex> = UserWorkspaces::as_ref(ctx)
-            .get_enterprise_secret_redaction_regex_list()
+            .enterprise_secret_redaction_regexes_for_open_windows()
             .into_iter()
             .filter_map(
                 |enterprise_regex| match Regex::new(&enterprise_regex.pattern) {

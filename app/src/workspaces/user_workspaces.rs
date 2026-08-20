@@ -703,6 +703,30 @@ impl UserWorkspaces {
             .unwrap_or_default()
     }
 
+    /// The union of enterprise secret-redaction regex patterns for every team the user
+    /// currently has a window open on, deduplicated by pattern.
+    ///
+    /// The terminal secret scanner compiles this into a single process-wide pattern list
+    /// rather than a per-team one: the grid scanner runs per-cell, per-visible-row, per-frame,
+    /// per-terminal, and multiplying that hot path by N compiled patterns per team is not
+    /// affordable. Scoping the union to the teams actually in view (rather than
+    /// `current_workspace()`, the workspace-wide ambient baseline) means a team's own rules
+    /// are never absent from its own terminal, and a team nobody has a window open on doesn't
+    /// leave its patterns lingering in every terminal's scan.
+    pub(crate) fn enterprise_secret_redaction_regexes_for_open_windows(
+        &self,
+    ) -> Vec<EnterpriseSecretRegex> {
+        let mut seen_patterns = HashSet::new();
+        self.window_team_uids
+            .values()
+            .filter_map(|team_uid| *team_uid)
+            .filter_map(|team_uid| self.team_from_uid(team_uid))
+            .flat_map(|team| team.settings.secret_redaction.regexes.values.iter())
+            .filter(|regex| seen_patterns.insert(regex.pattern.clone()))
+            .cloned()
+            .collect()
+    }
+
     /// The add-on credits purchase policy for the current viewer context: the
     /// current workspace's policy when one exists, else the user-level policy
     /// from the workspaces-metadata response (how teamless users get one).
