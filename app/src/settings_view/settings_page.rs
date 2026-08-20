@@ -1800,14 +1800,6 @@ impl<V: warpui::View> PageType<V> {
                 highlighted_widget_id,
                 ..
             } => {
-                // `get_filtered` drops a category once no widget matched the search query,
-                // but a widget can still be in `category.widgets` while its own
-                // `should_render` says no right now (that's re-checked independently below,
-                // same as for Uncategorized). Before any search has run, every widget starts
-                // out counted as "matched" (see `new_categorized`), so a category whose sole
-                // widget currently opts out would otherwise still draw its header over an
-                // empty body. Drop those here so the untouched page and an empty-query page
-                // render identically.
                 let categories = categories_with_visible_content(categories, app);
 
                 let mut page = Flex::column();
@@ -1993,16 +1985,6 @@ pub(super) struct FilteredCategory<'a, V: warpui::View> {
     pub(super) widgets: Vec<&'a dyn SettingsWidget<View = V>>,
 }
 
-/// Keeps only the categories that currently have something to draw: at least one widget
-/// whose `should_render` is true right now.
-///
-/// `get_filtered` already drops a category once no widget matched the search query, but that
-/// alone isn't enough: a widget can survive the query match while its own `should_render` says
-/// no independently (the same double-check `render_page` already does per widget elsewhere).
-/// Before any search has run, [`PageType::new_categorized`] seeds every category with every
-/// widget index, so a category whose sole widget currently opts out would otherwise still draw
-/// its header over an empty body until the first search pass recomputes the filter. This makes
-/// the untouched page and an empty-query page agree.
 pub(super) fn categories_with_visible_content<'a, V: warpui::View>(
     categories: Vec<FilteredCategory<'a, V>>,
     app: &AppContext,

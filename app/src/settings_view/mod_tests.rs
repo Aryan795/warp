@@ -899,16 +899,6 @@ fn empty_query_after_reapply_shows_all_widgets() {
     });
 }
 
-// ── Empty-category headers before any filter pass ──────────────────────────────────
-// A category's header is drawn once, unconditionally, before its widgets are
-// individually checked against `should_render`. `new_categorized` seeds every
-// category's filter with every widget index before any search has run, so a
-// category whose sole widget currently opts out of rendering would otherwise
-// still draw a header over an empty body until the first search pass (even an
-// empty one) recomputes the filter and drops it.
-
-/// A widget that always matches search but never renders: `should_render` is
-/// always false, independent of the search filter that only checks the query.
 struct NeverRendersWidget {
     terms: &'static str,
 }
@@ -940,8 +930,6 @@ fn category_whose_sole_widget_cannot_render_has_no_visible_content_before_any_fi
             let page =
                 PageType::new_categorized(vec![Category::new("Cloud Handoff", children)], None);
 
-            // No update_filter call: this is the page exactly as constructed, before any
-            // search (even an empty one) has run.
             let FilteredPageType::Categorized { categories, .. } = page.get_filtered() else {
                 panic!("expected Categorized page");
             };
@@ -960,10 +948,6 @@ fn category_whose_sole_widget_cannot_render_has_no_visible_content_before_any_fi
 
 #[test]
 fn category_whose_sole_widget_cannot_render_has_no_visible_content_after_an_empty_query() {
-    // The untouched page and an empty-query page must agree: calling update_filter("")
-    // recomputes the same widget_indices (should_render is checked regardless of the
-    // query), so this should already have been dropped even without the render-time fix,
-    // demonstrating the asymmetry the fix removes.
     App::test((), |mut app| async move {
         app.update(|ctx| {
             let children: Vec<Box<dyn SettingsWidget<View = TestSettingsView>>> =
