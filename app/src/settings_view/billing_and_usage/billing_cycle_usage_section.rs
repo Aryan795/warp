@@ -132,7 +132,9 @@ impl BillingCycleUsageSectionView {
 
     /// The team this settings window is pointed at.
     fn selected_team<'a>(&self, app: &'a AppContext) -> Option<&'a Team> {
-        UserWorkspaces::as_ref(app).team_for_view_handle(&self.self_handle, app)
+        UserWorkspaces::as_ref(app)
+            .team_render_context_for_view_handle(&self.self_handle, app)
+            .map(|render_context| render_context.team())
     }
 
     fn visible_entries(

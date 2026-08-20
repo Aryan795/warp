@@ -1193,6 +1193,48 @@ fn test_team_context_and_render_context_return_none_without_a_team() {
     })
 }
 
+/// `TeamRenderContext::team()` is the accessor billing/usage presentation call sites use
+/// instead of reading the struct's private field directly (as the tests above do). Window-team
+/// change and no-team behavior for this same resolution are already covered above; this only
+/// checks that the accessor exposes what was resolved for each window.
+#[test]
+fn test_team_render_context_team_accessor_matches_each_windows_own_team() {
+    let (team_a, team_b) = two_teams();
+    let mut workspace = workspace_for_test(&team_a);
+    workspace.teams.push(team_b.clone());
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        let (window_a, view_a) = create_test_window(&mut app);
+        let (window_b, view_b) = create_test_window(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window_a, team_a.uid, ctx);
+            user_workspaces.set_team_for_window(window_b, team_b.uid, ctx);
+        });
+
+        let weak_view_a = view_a.downgrade();
+        let weak_view_b = view_b.downgrade();
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert_eq!(
+                user_workspaces
+                    .team_render_context_for_view_handle(&weak_view_a, ctx)
+                    .map(|render| render.team().uid),
+                Some(team_a.uid),
+                "team() should expose window A's resolved team"
+            );
+            assert_eq!(
+                user_workspaces
+                    .team_render_context_for_view_handle(&weak_view_b, ctx)
+                    .map(|render| render.team().uid),
+                Some(team_b.uid),
+                "team() should expose window B's resolved team"
+            );
+        });
+    })
+}
+
 #[test]
 fn test_spaces_for_window_orders_selected_team_shared_and_personal() {
     let _flag = FeatureFlag::SharedWithMe.override_enabled(true);

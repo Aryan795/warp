@@ -608,7 +608,9 @@ impl BillingAndUsagePageV2View {
         let workspaces = UserWorkspaces::as_ref(app);
         let workspace = workspaces.current_workspace();
         let billing_metadata = workspace.map(|workspace| &workspace.billing_metadata);
-        let team = workspaces.team_for_view_handle(&self.self_handle, app);
+        let team = workspaces
+            .team_render_context_for_view_handle(&self.self_handle, app)
+            .map(|render_context| render_context.team());
         let presentation = plan_header_presentation(billing_metadata, team.is_some(), false);
         if let Some(badge_label) = presentation.badge_label {
             right_side.add_child(
@@ -1168,8 +1170,8 @@ impl BillingAndUsagePageV2View {
         });
 
         let team_count = workspaces
-            .team_for_view_handle(&self.self_handle, app)
-            .map(|team| team.members.len())
+            .team_render_context_for_view_handle(&self.self_handle, app)
+            .map(|render_context| render_context.team().members.len())
             .unwrap_or(1);
         let description_text = if team_count > 1 {
             format!("{ADDON_CREDITS_DESCRIPTION} {ADDITIONAL_ADDON_CREDITS_DESCRIPTION_FOR_TEAM}")
@@ -1785,7 +1787,9 @@ impl BillingAndUsagePageV2View {
         });
 
         let ws = workspaces.current_workspace();
-        let team = workspaces.team_for_view_handle(&self.self_handle, app);
+        let team = workspaces
+            .team_render_context_for_view_handle(&self.self_handle, app)
+            .map(|render_context| render_context.team());
         let show_addon_credits_panel = ws.is_some()
             || workspaces
                 .purchase_policy_for_team(team)
@@ -2148,7 +2152,10 @@ impl TypedActionView for BillingAndUsagePageV2View {
                 self.addon_credits.selected_denomination = *i;
                 self.update_denomination_buttons_focus(ctx);
                 let workspaces = UserWorkspaces::as_ref(ctx);
-                let team = workspaces.team_for_view(ctx);
+                let team_context = workspaces.team_context_for_view(ctx);
+                let team = team_context
+                    .as_ref()
+                    .and_then(|team_context| workspaces.team_for_context(team_context));
                 let has_admin_permissions = team.is_some_and(|team| {
                     AuthStateProvider::as_ref(ctx)
                         .get()

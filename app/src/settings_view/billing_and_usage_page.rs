@@ -2861,7 +2861,9 @@ impl BillingAndUsagePageView {
             .user_email()
             .unwrap_or_default();
         let workspaces = UserWorkspaces::as_ref(app);
-        let team = workspaces.team_for_view_handle(&self.self_handle, app);
+        let team = workspaces
+            .team_render_context_for_view_handle(&self.self_handle, app)
+            .map(|render_context| render_context.team());
         let billing_metadata = workspaces.current_workspace_billing_metadata();
         let has_admin_permissions =
             team.is_some_and(|team| team.has_admin_permissions(&current_user_email));
@@ -3670,7 +3672,10 @@ impl BillingAndUsagePageView {
             right_side.add_child(plan_badge);
         }
 
-        if let Some(team) = workspaces.team_for_view_handle(&self.self_handle, app) {
+        if let Some(team) = workspaces
+            .team_render_context_for_view_handle(&self.self_handle, app)
+            .map(|render_context| render_context.team())
+        {
             let current_user_email = auth_state.user_email().unwrap_or_default();
             let has_admin_permissions = team.has_admin_permissions(&current_user_email);
 

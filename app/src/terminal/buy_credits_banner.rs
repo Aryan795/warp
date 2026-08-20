@@ -179,8 +179,11 @@ impl BuyCreditsBanner {
                     .get(self.selected_denomination_index)
                     .map(|option| option.credits);
                 let has_admin_permissions = {
+                    let workspaces = UserWorkspaces::as_ref(ctx);
+                    let current_team = workspaces
+                        .team_context_for_view(ctx)
+                        .and_then(|team_context| workspaces.team_for_context(&team_context));
                     let auth_state = AuthStateProvider::as_ref(ctx).get();
-                    let current_team = UserWorkspaces::as_ref(ctx).team_for_view(ctx);
                     auth_state
                         .user_email()
                         .zip(current_team)
@@ -260,9 +263,14 @@ impl BuyCreditsBanner {
             return;
         }
 
+        let workspaces = UserWorkspaces::as_ref(ctx);
+        let team_context = workspaces.team_context_for_view(ctx);
+        let current_team = team_context
+            .as_ref()
+            .and_then(|team_context| workspaces.team_for_context(team_context));
+
         let has_admin_permissions = {
             let auth_state = AuthStateProvider::as_ref(ctx).get();
-            let current_team = UserWorkspaces::as_ref(ctx).team_for_view(ctx);
             auth_state
                 .user_email()
                 .zip(current_team)
@@ -279,10 +287,7 @@ impl BuyCreditsBanner {
             .map(|option| option.credits);
         self.banner_auto_reload_update_in_flight = true;
 
-        if let Some(team_uid) = UserWorkspaces::as_ref(ctx)
-            .team_for_view(ctx)
-            .map(|team| team.uid)
-        {
+        if let Some(team_uid) = current_team.map(|team| team.uid) {
             UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
                 user_workspaces.update_addon_credits_settings(
                     team_uid,
@@ -483,7 +488,9 @@ impl BuyCreditsBanner {
         .finish();
 
         let auth_state = AuthStateProvider::as_ref(app).get();
-        let current_team = UserWorkspaces::as_ref(app).team_for_view_handle(&self.view_handle, app);
+        let current_team = UserWorkspaces::as_ref(app)
+            .team_render_context_for_view_handle(&self.view_handle, app)
+            .map(|render_context| render_context.team());
         let has_admin_permissions = auth_state
             .user_email()
             .zip(current_team)
@@ -677,7 +684,9 @@ impl BuyCreditsBanner {
 
         let auth_state = AuthStateProvider::as_ref(app).get();
         let workspaces = UserWorkspaces::as_ref(app);
-        let current_team = workspaces.team_for_view_handle(&self.view_handle, app);
+        let current_team = workspaces
+            .team_render_context_for_view_handle(&self.view_handle, app)
+            .map(|render_context| render_context.team());
         let has_admin_permissions = current_team.is_none_or(|team| {
             auth_state
                 .user_email()

@@ -191,6 +191,15 @@ pub(crate) struct TeamRenderContext<'a> {
     team: &'a Team,
 }
 
+impl<'a> TeamRenderContext<'a> {
+    /// The borrowed current-render team, for presentation and policy-read call sites that
+    /// already work with `Option<&Team>`. This is not a UID conversion: the borrow, and thus
+    /// the render scope it comes from, travels with the reference.
+    pub(crate) fn team(&self) -> &'a Team {
+        self.team
+    }
+}
+
 impl UserWorkspaces {
     #[cfg(any(test, all(feature = "tui", feature = "test-util")))]
     pub fn mock(
