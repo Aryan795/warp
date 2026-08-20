@@ -1,4 +1,12 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
+use anyhow::anyhow;
+use warp_core::channel::IapConfig;
+use warp_server_client::iap::PathResolver;
+
 use super::*;
+use crate::server::server_api::auth::{MockAuthClient, UserAuthenticationError};
 
 #[test]
 fn app_api_key_requires_validation() {
@@ -194,6 +202,96 @@ fn retry_gate_never_fires_if_iap_never_becomes_ready() {
     let mut gate = StartupAuthRetryGate::default();
     assert!(!gate.on_first_attempt_settled(false));
     assert!(!gate.retried);
+}
+
+/// Exercises the real production wiring in `authenticate_user_after_iap_access`'s
+/// non-blocking branch - the actual `AuthManager` and `IapManager` subscriptions,
+/// not just `StartupAuthRetryGate` in isolation. A real `AuthManager` (backed by a
+/// mocked `AuthClient`) and a real `IapManager` (with its background gcloud refresh
+/// left permanently pending, so it can't race with the test) fire an `AuthFailed`
+/// and an IAP-ready `StateChanged` back to back. The mocked auth client resolves on
+/// a background executor, so which of the two the wiring observes first isn't
+/// pinned down here (that ordering is covered deterministically by the
+/// `StartupAuthRetryGate` unit tests above) - but the wiring must produce exactly
+/// one retry regardless of the order. `MockAuthClient::times(2)` is the regression
+/// signal: it fails the test if the wiring never retries, or double-fires.
+#[test]
+fn non_blocking_startup_auth_retries_exactly_once_through_real_wiring() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|_| ServerApiProvider::new_for_test());
+        app.add_singleton_model(|_| AuthStateProvider::new_for_test());
+
+        let fetch_user_calls = Arc::new(AtomicUsize::new(0));
+        let fetch_user_calls_for_mock = fetch_user_calls.clone();
+        let mut mock_auth_client = MockAuthClient::new();
+        mock_auth_client
+            .expect_fetch_user()
+            .times(2)
+            .returning(move |_, _| {
+                fetch_user_calls_for_mock.fetch_add(1, Ordering::SeqCst);
+                Err(UserAuthenticationError::Unexpected(anyhow!(
+                    "blocked by IAP challenge"
+                )))
+            });
+
+        let server_api = app.read(|ctx| ServerApiProvider::as_ref(ctx).get());
+        app.add_singleton_model(move |ctx| {
+            AuthManager::new(server_api, Arc::new(mock_auth_client), ctx)
+        });
+
+        let iap_config = IapConfig {
+            audiences: "test-audience".into(),
+            service_account_email: "test-sa@example.com".into(),
+        };
+        let iap_state = Arc::new(IapState::new(&iap_config));
+        let iap_state_for_test = iap_state.clone();
+        app.add_singleton_model(move |ctx| {
+            // Never resolves, so `IapManager`'s own background gcloud-refresh
+            // attempt (which would fail anyway, since gcloud isn't installed)
+            // can never reach far enough to race with this test's manual
+            // `set_valid_token_for_test` + `StateChanged` below.
+            let path_resolver: PathResolver =
+                Box::new(|_ctx: &mut AppContext| Box::pin(futures::future::pending()));
+            IapManager::new(Some(iap_state), path_resolver, None, ctx)
+        });
+
+        app.update(|ctx| {
+            authenticate_user_after_iap_access(
+                StartupUserAuthentication::ApiKey("fake-key".to_owned()),
+                true,
+                ctx,
+            );
+        });
+
+        // Fire the IAP-ready signal right away, without waiting for the
+        // optimistic `fetch_user` to settle first - this is what reproduces
+        // the reported race instead of just the already-settled case.
+        iap_state_for_test.set_valid_token_for_test("fake-iap-token");
+        app.update(|ctx| {
+            IapManager::handle(ctx).update(ctx, |_, ctx| ctx.emit(IapManagerEvent::StateChanged));
+        });
+
+        // Let the optimistic `fetch_user` resolve (on whichever side of the
+        // `StateChanged` emit above it actually settles); its `AuthFailed`
+        // should result in the deferred retry firing exactly once either way.
+        warpui::r#async::Timer::after(Duration::from_millis(200)).await;
+        assert_eq!(
+            fetch_user_calls.load(Ordering::SeqCst),
+            2,
+            "expected exactly one retry (2 total fetch_user calls)"
+        );
+
+        // A later `StateChanged` (e.g. a proactive refresh) must not retry again.
+        app.update(|ctx| {
+            IapManager::handle(ctx).update(ctx, |_, ctx| ctx.emit(IapManagerEvent::StateChanged));
+        });
+        warpui::r#async::Timer::after(Duration::from_millis(200)).await;
+        assert_eq!(
+            fetch_user_calls.load(Ordering::SeqCst),
+            2,
+            "no further retries should fire"
+        );
+    });
 }
 
 #[test]
