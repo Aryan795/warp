@@ -64,6 +64,14 @@ end
 
 
 # warp_hex_encode_string hex-encodes the given string with `od`.
+#
+# Uses `printf '%s'` rather than `echo`: fish's builtin `echo`, like bash's, treats an
+# argument that looks like one of its own flags (`-n`, `-e`, `-E`) as that flag instead of
+# literal text -- measured, `kubectl -`/`ssh -`/`npm -` all offer exactly such a candidate as
+# a real completion -- so `-n` encoded to nothing and `-e`/`-E` encoded to just `echo`'s own
+# trailing newline; `echo` itself also appended that trailing newline to every payload
+# (latent until now, since a JSON parser or this OSC protocol's own consumers happened to
+# tolerate it). `printf '%s'` has neither problem.
 function warp_hex_encode_string 
   printf '%s' "$argv" | od -An -v -tx1 | command tr -d ' \n'
 end
