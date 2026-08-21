@@ -10,7 +10,7 @@ use warpui::elements::{
     Shrinkable, Text, Wrap,
 };
 use warpui::fonts::Weight;
-use warpui::keymap::{DescriptionContext, Keystroke, Trigger};
+use warpui::keymap::{BindingId, DescriptionContext, Keystroke, Trigger};
 use warpui::presenter::ChildView;
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
 use warpui::units::Pixels;
@@ -599,7 +599,7 @@ impl KeybindingsView {
             // Persist the keybinding into the `.warp` directory so that it will last beyond
             // this session
             write_custom_keybinding(row.binding.name.clone(), UserDefinedKeybinding::Removed);
-            update_binding_list(&row.binding.name, None, &mut self.bindings);
+            update_binding_list(row.binding.id, None, &mut self.bindings);
             row.binding.trigger = None;
 
             send_telemetry_from_ctx!(
@@ -617,14 +617,11 @@ impl KeybindingsView {
 
     fn reset_to_default_keystroke(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
         if let Some(row) = self.rows.as_mut().and_then(|rows| rows.get_mut(index)) {
-            let default_trigger = reset_keybinding_to_default(&row.binding.name, ctx);
+            let default_trigger =
+                reset_keybinding_to_default(&row.binding.name, row.binding.id, ctx);
             self.conflict_map
                 .update(&row.binding.trigger, default_trigger.clone());
-            update_binding_list(
-                &row.binding.name,
-                default_trigger.clone(),
-                &mut self.bindings,
-            );
+            update_binding_list(row.binding.id, default_trigger.clone(), &mut self.bindings);
             row.binding.trigger = default_trigger;
 
             send_telemetry_from_ctx!(
@@ -650,7 +647,7 @@ impl KeybindingsView {
                         keybinding_state.current_binding.clone(),
                     );
                     update_binding_list(
-                        &row.binding.name,
+                        row.binding.id,
                         keybinding_state.current_binding.clone(),
                         &mut self.bindings,
                     );
@@ -673,11 +670,7 @@ impl KeybindingsView {
                 Some(keybinding_state) => {
                     if let Some(key) = keybinding_state.unsaved_binding {
                         set_custom_keybinding(&row.binding.name, &key, ctx);
-                        update_binding_list(
-                            &row.binding.name,
-                            Some(key.clone()),
-                            &mut self.bindings,
-                        );
+                        update_binding_list(row.binding.id, Some(key.clone()), &mut self.bindings);
                         row.binding.trigger = Some(key.clone());
                         send_telemetry_from_ctx!(
                             TelemetryEvent::KeybindingChanged {
@@ -928,17 +921,20 @@ fn render_text(
     text.build().finish()
 }
 
-/// Update the provided binding list by changing the binding with the given name to use a new
+/// Update the provided binding list by changing the binding with the given id to use a new
 /// trigger.
+///
+/// Bindings are looked up by [`BindingId`] rather than name because multiple bindings can share
+/// the same name (for example, the same action registered separately per view/context); matching
+/// by name alone could update a different entry than the one that was actually edited.
 fn update_binding_list(
-    name: &str,
+    id: BindingId,
     trigger: Option<Keystroke>,
     list: &mut Option<Vec<CommandBinding>>,
 ) {
-    let found_binding = list.as_mut().and_then(|vec| {
-        vec.iter_mut()
-            .find(|binding| !name.is_empty() && binding.name == name)
-    });
+    let found_binding = list
+        .as_mut()
+        .and_then(|vec| vec.iter_mut().find(|binding| binding.id == id));
 
     if let Some(binding) = found_binding {
         binding.trigger = trigger;
@@ -1088,6 +1084,10 @@ impl KeybindingsWidget {
         Empty::new().finish()
     }
 }
+
+#[cfg(test)]
+#[path = "keybindings_tests.rs"]
+mod tests;
 
 impl SettingsWidget for KeybindingsWidget {
     type View = KeybindingsView;

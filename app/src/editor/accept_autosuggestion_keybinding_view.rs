@@ -184,7 +184,16 @@ impl TypedActionView for AcceptAutosuggestionKeybinding {
                 // When set to right arrow, we reset to the default (clears keybinding)
                 // so that it's still possible to use right arrow to navigate the input when the cursor isn't at the end of the line.
                 if keystroke.displayed() == "→" {
-                    reset_keybinding_to_default(ACCEPT_AUTOSUGGESTION_KEYBINDING_NAME, ctx);
+                    if let Some(binding_id) = ctx
+                        .get_binding_by_name(ACCEPT_AUTOSUGGESTION_KEYBINDING_NAME)
+                        .map(|binding| binding.id)
+                    {
+                        reset_keybinding_to_default(
+                            ACCEPT_AUTOSUGGESTION_KEYBINDING_NAME,
+                            binding_id,
+                            ctx,
+                        );
+                    }
                 } else {
                     // Whatever keybinding is set here will always work regardless of where the cursor is.
                     set_custom_keybinding(ACCEPT_AUTOSUGGESTION_KEYBINDING_NAME, keystroke, ctx);
@@ -210,7 +219,16 @@ impl TypedActionView for AcceptAutosuggestionKeybinding {
                 {
                     // If we're setting accept autosuggestion to anything other than tab, switch open completions back to tab if it was set to ctrl-space above.
                     // Note that we can't tell if the user explicitly set it to ctrl-space vs we did it as a default above.
-                    reset_keybinding_to_default(OPEN_COMPLETIONS_KEYBINDING_NAME, ctx);
+                    if let Some(binding_id) = ctx
+                        .get_binding_by_name(OPEN_COMPLETIONS_KEYBINDING_NAME)
+                        .map(|binding| binding.id)
+                    {
+                        reset_keybinding_to_default(
+                            OPEN_COMPLETIONS_KEYBINDING_NAME,
+                            binding_id,
+                            ctx,
+                        );
+                    }
                 }
             }
             AcceptAutosuggestionKeybindingAction::OpenSettingsForCustomKeybinding => ctx

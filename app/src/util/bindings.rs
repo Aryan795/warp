@@ -515,13 +515,22 @@ pub fn set_custom_keybinding(binding_name: &str, keystroke: &Keystroke, ctx: &mu
 /// Reset an editable binding back to its default trigger. Will persist this change to
 /// the user's config file and emit a KeybindingChangedEvent with the default trigger.
 /// Returns the default keystroke for the binding.
-pub fn reset_keybinding_to_default(binding_name: &str, ctx: &mut AppContext) -> Option<Keystroke> {
+///
+/// `binding_id` identifies the specific [`EditableBinding`](warpui::keymap::EditableBinding)
+/// registration to restore. The same action name can be registered multiple times (for example,
+/// once per view/context), each with its own default trigger; looking the default up by name
+/// alone could resolve to a different registration than the one being edited and return the
+/// wrong (or no) default.
+pub fn reset_keybinding_to_default(
+    binding_name: &str,
+    binding_id: BindingId,
+    ctx: &mut AppContext,
+) -> Option<Keystroke> {
     ctx.remove_custom_trigger(binding_name);
     remove_custom_keybinding(binding_name);
 
     let default_keystroke = ctx
-        .editable_bindings()
-        .find(|binding| binding.name == binding_name)
+        .editable_binding_by_id(binding_id)
         .and_then(|binding| trigger_to_keystroke(binding.trigger));
 
     KeybindingChangedNotifier::handle(ctx).update(ctx, |_, ctx| {

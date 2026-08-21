@@ -385,6 +385,19 @@ impl Keymap {
         })
     }
 
+    /// Returns the editable binding with the given [`BindingId`], regardless of its enabled
+    /// state.
+    ///
+    /// Unlike [`Self::get_binding_by_name`] or [`Self::editable_bindings`], this unambiguously
+    /// identifies a single registration even when multiple [`EditableBinding`]s share the same
+    /// name (for example, the same action registered separately per view/context).
+    pub fn editable_binding_by_id(&self, id: BindingId) -> Option<EditableBindingLens<'_>> {
+        self.editable_bindings
+            .iter()
+            .map(|binding| binding.as_lens())
+            .find(|binding| binding.id == id)
+    }
+
     /// Add new fixed bindings to the keymap
     ///
     /// These bindings are internal and cannot be changed once they are added

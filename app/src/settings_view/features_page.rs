@@ -3691,8 +3691,16 @@ impl FeaturesPageView {
                 // Set the binding for opening completions to Tab. If accepting autosuggestions
                 // was previously bound to Tab, unbind it. We unbind because autosuggestions
                 // are accepted via right arrow by default, so we don't need another binding.
-                if *self.autosuggestions_keystroke == TAB_KEYSTROKE_STR {
-                    reset_keybinding_to_default(ACCEPT_AUTOSUGGESTION_KEYBINDING_NAME, ctx);
+                if *self.autosuggestions_keystroke == TAB_KEYSTROKE_STR
+                    && let Some(binding_id) = ctx
+                        .get_binding_by_name(ACCEPT_AUTOSUGGESTION_KEYBINDING_NAME)
+                        .map(|binding| binding.id)
+                {
+                    reset_keybinding_to_default(
+                        ACCEPT_AUTOSUGGESTION_KEYBINDING_NAME,
+                        binding_id,
+                        ctx,
+                    );
                 }
                 set_custom_keybinding(OPEN_COMPLETIONS_KEYBINDING_NAME, &TAB_KEYSTROKE, ctx);
             }

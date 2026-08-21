@@ -2,9 +2,88 @@ use warpui::App;
 use warpui::keymap::{EditableBinding, Keystroke, Trigger};
 use warpui::platform::OperatingSystem;
 
+use crate::settings_view::keybindings::KeybindingChangedNotifier;
 use crate::terminal;
-use crate::util::bindings::{keybinding_name_to_display_string, trigger_to_keystroke};
+use crate::util::bindings::{
+    keybinding_name_to_display_string, reset_keybinding_to_default, trigger_to_keystroke,
+};
 use crate::workspace::WorkspaceAction;
+
+#[test]
+fn test_reset_to_default_after_clear() {
+    App::test((), |mut app| async move {
+        app.update(|ctx| {
+            ctx.add_singleton_model(|_| KeybindingChangedNotifier::mock());
+            ctx.register_editable_bindings([EditableBinding::new(
+                "workspace:show_settings",
+                "Open settings",
+                WorkspaceAction::ShowSettings,
+            )
+            .with_key_binding("cmd-,")]);
+
+            let binding_id = ctx
+                .get_binding_by_name("workspace:show_settings")
+                .expect("binding should be registered")
+                .id;
+
+            // Simulate clicking "Clear".
+            ctx.set_custom_trigger("workspace:show_settings".to_owned(), Trigger::Empty);
+            assert_eq!(
+                None,
+                keybinding_name_to_display_string("workspace:show_settings", ctx)
+            );
+
+            // Simulate clicking "Default".
+            let restored = reset_keybinding_to_default("workspace:show_settings", binding_id, ctx);
+            assert_eq!(restored, Keystroke::parse("cmd-,").ok());
+        });
+    });
+}
+
+#[test]
+fn test_reset_to_default_after_clear_resolves_correct_binding_when_names_collide() {
+    // Two editable bindings can share the same name when registered for different
+    // views/contexts (see the dedup comment in `KeybindingsView::on_page_selected`). Resolving
+    // the default trigger by name alone can non-deterministically pick the wrong registration's
+    // default; resolving by the binding's own `BindingId` must always restore the correct one.
+    App::test((), |mut app| async move {
+        app.update(|ctx| {
+            ctx.add_singleton_model(|_| KeybindingChangedNotifier::mock());
+            ctx.register_editable_bindings([
+                EditableBinding::new(
+                    "shared:action",
+                    "Shared action",
+                    WorkspaceAction::ShowSettings,
+                )
+                .with_key_binding("cmd-,"),
+                // Registered later, so it takes precedence in `editable_bindings()`'s
+                // reverse-registration-order iteration. It has no default trigger.
+                EditableBinding::new(
+                    "shared:action",
+                    "Shared action",
+                    WorkspaceAction::ToggleResourceCenter,
+                ),
+            ]);
+
+            let binding_id = ctx
+                .editable_bindings()
+                .find(|binding| {
+                    binding.name == "shared:action" && binding.trigger != &Trigger::Empty
+                })
+                .expect("the binding with a real default should be registered")
+                .id;
+
+            ctx.set_custom_trigger("shared:action".to_owned(), Trigger::Empty);
+            let restored = reset_keybinding_to_default("shared:action", binding_id, ctx);
+            assert_eq!(
+                restored,
+                Keystroke::parse("cmd-,").ok(),
+                "should restore the specific binding's own default, not another same-named \
+                 registration's"
+            );
+        });
+    });
+}
 
 #[test]
 fn test_keybinding_name_to_display_string() {

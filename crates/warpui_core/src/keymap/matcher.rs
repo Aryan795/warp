@@ -3,8 +3,8 @@ use std::sync::Arc;
 use itertools::Either;
 
 use super::{
-    BindingLens, Context, CustomTag, EditableBinding, EditableBindingLens, FixedBinding, Keymap,
-    Keystroke, Trigger,
+    BindingId, BindingLens, Context, CustomTag, EditableBinding, EditableBindingLens, FixedBinding,
+    Keymap, Keystroke, Trigger,
 };
 use crate::actions::StandardAction;
 use crate::{Action, EntityId, EntityIdMap};
@@ -272,6 +272,12 @@ impl Matcher {
 
     pub fn get_binding_by_name(&self, name: &str) -> Option<BindingLens<'_>> {
         self.keymap.get_binding_by_name(name)
+    }
+
+    /// Returns the editable binding with the given [`BindingId`]. See
+    /// [`Keymap::editable_binding_by_id`].
+    pub fn editable_binding_by_id(&self, id: BindingId) -> Option<EditableBindingLens<'_>> {
+        self.keymap.editable_binding_by_id(id)
     }
 
     /// Returns an iterator of lenses to key bindings that apply to the given context.

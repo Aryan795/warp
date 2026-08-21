@@ -38,8 +38,8 @@ use crate::event::KeyState;
 use crate::fonts::{self, ExternalFontFamily, FallbackFontModel, RequestedFallbackFontSource};
 use crate::image_cache::{self, ImageCache};
 use crate::keymap::{
-    BindingLens, Context, CustomTag, DescriptionContext, EditableBinding, EditableBindingLens,
-    FixedBinding, IsBindingValid, Keystroke, MatchResult, Matcher, Trigger,
+    BindingId, BindingLens, Context, CustomTag, DescriptionContext, EditableBinding,
+    EditableBindingLens, FixedBinding, IsBindingValid, Keystroke, MatchResult, Matcher, Trigger,
 };
 use crate::modals::{
     AlertDialog, AlertDialogWithCallbacks, AppModalCallback, ModalId, PlatformModalResponseData,
@@ -1960,6 +1960,12 @@ impl AppContext {
     /// registered editable binding will have the highest precedence
     pub fn editable_bindings(&self) -> impl Iterator<Item = EditableBindingLens<'_>> {
         self.keystroke_matcher.editable_bindings()
+    }
+
+    /// Returns the editable binding with the given [`BindingId`]. See
+    /// [`Keymap::editable_binding_by_id`](crate::keymap::Keymap::editable_binding_by_id).
+    pub fn editable_binding_by_id(&self, id: BindingId) -> Option<EditableBindingLens<'_>> {
+        self.keystroke_matcher.editable_binding_by_id(id)
     }
 
     /// Overrides any registered binding with has a [`Trigger::Custom`] to one that is keystroke
