@@ -6,7 +6,7 @@ use ai::api_keys::{
 };
 use warp_core::channel::{Channel, ChannelState};
 use warp_core::features::FeatureFlag;
-use warpui::{App, SingletonEntity as _, WindowId};
+use warpui::{App, SingletonEntity as _};
 
 use super::{RequestParams, ServerConversationToken};
 use crate::ai::agent::ServerOutputId;
@@ -17,7 +17,7 @@ use crate::server::server_api::team::MockTeamClient;
 use crate::server::server_api::workspace::MockWorkspaceClient;
 use crate::settings::AISettings;
 use crate::workspaces::team::Team;
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces};
 use crate::workspaces::workspace::{
     BillingMetadata, HostEnablementSetting, LlmHostSettings, ManagedByokByoePolicy,
     TeamByoSettings, TeamSettings, Tier, Workspace,
@@ -169,23 +169,8 @@ fn apply_team_byo_policy_gates_member_credentials_by_team_policy() {
                 ctx,
             )
         });
-        let window_a = WindowId::new();
-        let window_b = WindowId::new();
-        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
-            user_workspaces.set_team_for_window(window_a, team_a.uid, ctx);
-            user_workspaces.set_team_for_window(window_b, team_b.uid, ctx);
-        });
-        let (team_context_a, team_context_b) = app.read(|ctx| {
-            let user_workspaces = UserWorkspaces::as_ref(ctx);
-            (
-                user_workspaces
-                    .team_context_for_window(window_a)
-                    .expect("window A should capture team A"),
-                user_workspaces
-                    .team_context_for_window(window_b)
-                    .expect("window B should capture team B"),
-            )
-        });
+        let team_context_a = TeamContext::new_for_test(team_a.uid);
+        let team_context_b = TeamContext::new_for_test(team_b.uid);
         let api_key_manager = app.add_singleton_model(ApiKeyManager::new);
         api_key_manager.update(&mut app, |manager, ctx| {
             manager

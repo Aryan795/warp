@@ -6022,12 +6022,14 @@ impl Input {
             });
         }
 
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         self.ai_controller.update(ctx, move |controller, ctx| {
             controller.send_resolved_skill_invocation(
                 skill,
                 user_query,
                 queued_query_id,
                 conversation_id_override,
+                team_context,
                 ctx,
             );
         });
@@ -6340,12 +6342,14 @@ impl Input {
             PromptDisplayEvent::RunAgentQuery(query) => {
                 self.cancel_active_conversation(ctx, CancellationReason::UserCommandExecuted);
                 let query = query.clone();
+                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
                 self.ai_controller.update(ctx, |controller, ctx| {
                     controller.send_user_query_in_new_conversation(
                         query,
                         None,
                         EntrypointType::UserInitiated,
                         None,
+                        team_context,
                         ctx,
                     );
                 });
@@ -13303,8 +13307,9 @@ impl Input {
                     controller.try_enter_agent_view(None, AgentViewEntryOrigin::ProjectEntry, ctx);
             });
         }
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         self.ai_controller.update(ctx, move |controller, ctx| {
-            controller.send_create_new_project_request(ai_query, ctx)
+            controller.send_create_new_project_request(ai_query, team_context, ctx)
         });
     }
 
@@ -13317,8 +13322,13 @@ impl Input {
                     controller.try_enter_agent_view(None, AgentViewEntryOrigin::ProjectEntry, ctx);
             });
         }
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         self.ai_controller.update(ctx, move |controller, ctx| {
-            controller.send_slash_command_request(SlashCommandRequest::CloneRepository { url }, ctx)
+            controller.send_slash_command_request(
+                SlashCommandRequest::CloneRepository { url },
+                team_context,
+                ctx,
+            )
         });
     }
 
@@ -14022,12 +14032,14 @@ impl Input {
         // A fired queued row always belongs to the existing conversation that finished, so we
         // submit into that conversation directly rather than re-deriving from the current UI
         // selection (which may point at a different conversation the user navigated to).
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         self.ai_controller.update(ctx, move |controller, ctx| {
             controller.send_queued_user_query_in_conversation(
                 prompt,
                 conversation_id,
                 None,
                 query_id,
+                team_context,
                 ctx,
             );
         });
@@ -14040,13 +14052,20 @@ impl Input {
     /// not-in-progress fallback and the legacy pending-user-query submission paths, which are
     /// immediate sends (not queued-row fires) and therefore reset their live staging.
     pub(crate) fn submit_user_query_now(&mut self, prompt: String, ctx: &mut ViewContext<Self>) {
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         if let Some(conversation_id) = self
             .ai_context_model
             .as_ref(ctx)
             .selected_conversation_id(ctx)
         {
             self.ai_controller.update(ctx, move |controller, ctx| {
-                controller.send_user_query_in_conversation(prompt, conversation_id, None, ctx);
+                controller.send_user_query_in_conversation(
+                    prompt,
+                    conversation_id,
+                    None,
+                    team_context,
+                    ctx,
+                );
             });
         } else {
             self.ai_controller.update(ctx, move |controller, ctx| {
@@ -14055,6 +14074,7 @@ impl Input {
                     None,
                     EntrypointType::UserInitiated,
                     None,
+                    team_context,
                     ctx,
                 );
             });
@@ -14453,9 +14473,14 @@ impl Input {
             return;
         }
 
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         if let Some(zero_state_prompt_suggestion_type) = zero_state_prompt_suggestion_type {
             return self.ai_controller.update(ctx, move |controller, ctx| {
-                controller.send_zero_state_prompt_suggestion(zero_state_prompt_suggestion_type, ctx)
+                controller.send_zero_state_prompt_suggestion(
+                    zero_state_prompt_suggestion_type,
+                    team_context,
+                    ctx,
+                )
             });
         }
 
@@ -14483,7 +14508,13 @@ impl Input {
             .selected_conversation_id(ctx)
         {
             self.ai_controller.update(ctx, move |controller, ctx| {
-                controller.send_user_query_in_conversation(ai_query, conversation_id, None, ctx)
+                controller.send_user_query_in_conversation(
+                    ai_query,
+                    conversation_id,
+                    None,
+                    team_context,
+                    ctx,
+                )
             });
         } else {
             self.ai_controller.update(ctx, move |controller, ctx| {
@@ -14492,6 +14523,7 @@ impl Input {
                     None,
                     EntrypointType::UserInitiated,
                     None,
+                    team_context,
                     ctx,
                 );
             });

@@ -102,6 +102,7 @@ use crate::terminal::cli_agent_sessions::{
 };
 use crate::terminal::model::BlockId;
 use crate::terminal::view::ConversationRestorationInNewPaneType;
+use crate::workspaces::user_workspaces::UserWorkspaces;
 
 pub(crate) mod attachments;
 #[cfg(feature = "local_fs")]
@@ -4121,17 +4122,21 @@ impl AgentDriver {
                             return;
                         };
                         let ambient_run_id = task_id.to_string();
-                        terminal.ai_controller().update(ctx, |controller, ctx| {
-                            controller.send_ai_input_with_context(
-                                |context| AIAgentInput::StartFromAmbientRunPrompt {
-                                    ambient_run_id: ambient_run_id.clone(),
-                                    context,
-                                    runtime_skill: skill.clone(),
-                                    attachments_dir: attachments_dir.clone(),
-                                },
-                                ctx,
-                            );
-                        });
+                        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                        terminal
+                            .ai_controller()
+                            .update(ctx, move |controller, ctx| {
+                                controller.send_ai_input_with_context(
+                                    |context| AIAgentInput::StartFromAmbientRunPrompt {
+                                        ambient_run_id: ambient_run_id.clone(),
+                                        context,
+                                        runtime_skill: skill.clone(),
+                                        attachments_dir: attachments_dir.clone(),
+                                    },
+                                    team_context,
+                                    ctx,
+                                );
+                            });
                     }
                 })
             });

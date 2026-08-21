@@ -65,6 +65,8 @@ use crate::view_components::ToastFlavor;
 use crate::workspace::sync_inputs::SyncedInputState;
 use crate::workspace::{PaneViewLocator, WorkspaceRegistry};
 #[cfg(not(target_family = "wasm"))]
+use crate::workspaces::user_workspaces::UserWorkspaces;
+#[cfg(not(target_family = "wasm"))]
 use crate::{
     pane_group::child_agent::{
         HiddenChildAgentConversation, HiddenChildAgentConversationRequest,
@@ -1688,12 +1690,14 @@ fn launch_local_no_harness_child(
                     });
 
                     new_terminal_view.update(ctx, |terminal_view, ctx| {
+                        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
                         terminal_view
                             .ai_controller()
-                            .update(ctx, |controller, ctx| {
+                            .update(ctx, move |controller, ctx| {
                                 controller.send_agent_query_in_conversation(
                                     prompt.clone(),
                                     conversation_id,
+                                    team_context,
                                     ctx,
                                 );
                             });

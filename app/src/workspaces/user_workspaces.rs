@@ -169,8 +169,15 @@ pub struct CreateTeamResponse {
 /// share a lifetime, restructure so they share the single owner instead.
 ///
 /// This is scope, not authority: the server still authorizes every request made under it.
-pub(crate) struct TeamContext {
+pub struct TeamContext {
     team_uid: ServerId,
+}
+
+#[cfg(test)]
+impl TeamContext {
+    pub(crate) fn new_for_test(team_uid: ServerId) -> Self {
+        Self { team_uid }
+    }
 }
 
 /// The team a view renders as, borrowed for the duration of a single render.
@@ -380,15 +387,8 @@ impl UserWorkspaces {
 
     /// Captures the team selected in `ctx`'s window as an operation's [`TeamContext`]. This
     /// is the only way application code mints one.
-    pub(crate) fn team_context_for_view<T: Entity>(
-        &self,
-        ctx: &ViewContext<T>,
-    ) -> Option<TeamContext> {
-        self.team_context_for_window(ctx.window_id())
-    }
-
-    pub(crate) fn team_context_for_window(&self, window_id: WindowId) -> Option<TeamContext> {
-        self.team_uid_for_window(window_id)
+    pub fn team_context_for_view<T: Entity>(&self, ctx: &ViewContext<T>) -> Option<TeamContext> {
+        self.team_uid_for_window(ctx.window_id())
             .map(|team_uid| TeamContext { team_uid })
     }
 
@@ -619,10 +619,7 @@ impl UserWorkspaces {
         }
     }
 
-    pub(crate) fn llm_settings_for_context(
-        &self,
-        context: Option<&TeamContext>,
-    ) -> Option<&LlmSettings> {
+    pub(crate) fn llm_settings(&self, context: Option<&TeamContext>) -> Option<&LlmSettings> {
         match context {
             Some(context) => self
                 .team_for_context(context)
@@ -647,8 +644,11 @@ impl UserWorkspaces {
         }
     }
 
-    pub fn is_custom_llm_enabled_for_team(&self, team: Option<&Team>) -> bool {
-        self.llm_settings_for_team(team)
+    pub(crate) fn is_custom_llm_enabled(
+        &self,
+        team_render_context: Option<TeamRenderContext<'_>>,
+    ) -> bool {
+        self.llm_settings_for_team(team_render_context.map(|t| t.team))
             .is_some_and(|settings| settings.enabled)
     }
 
@@ -1058,7 +1058,7 @@ impl UserWorkspaces {
         app: &AppContext,
     ) -> bool {
         Self::host_credentials_enabled(
-            self.llm_settings_for_context(context),
+            self.llm_settings(context),
             LLMModelHost::AwsBedrock,
             *AISettings::as_ref(app)
                 .aws_bedrock_credentials_enabled
@@ -1114,10 +1114,7 @@ impl UserWorkspaces {
         &self,
         context: Option<&TeamContext>,
     ) -> Option<&LlmHostSettings> {
-        Self::host_settings(
-            self.llm_settings_for_context(context),
-            LLMModelHost::GeminiEnterprise,
-        )
+        Self::host_settings(self.llm_settings(context), LLMModelHost::GeminiEnterprise)
     }
 
     pub(crate) fn gemini_enterprise_host_settings_for_render_context<'a>(
@@ -1144,7 +1141,7 @@ impl UserWorkspaces {
         }
 
         Self::host_credentials_enabled(
-            self.llm_settings_for_context(context),
+            self.llm_settings(context),
             LLMModelHost::GeminiEnterprise,
             *AISettings::as_ref(app)
                 .gemini_enterprise_credentials_enabled

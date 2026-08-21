@@ -23,6 +23,7 @@ use crate::ai::blocklist::agent_view::AgentViewEntryOrigin;
 use crate::ai::blocklist::history_model::BlocklistAIHistoryModel;
 use crate::server::server_api::ServerApiProvider;
 use crate::terminal::model::block::BlockId;
+use crate::workspaces::user_workspaces::TeamContext;
 
 #[derive(Default)]
 pub(super) struct SharedSessionState {
@@ -664,6 +665,7 @@ impl BlocklistAIController {
         server_conversation_token: Option<ServerConversationToken>,
         attachments: Vec<AgentAttachment>,
         participant_id: ParticipantId,
+        team_context: Option<TeamContext>,
         ctx: &mut ModelContext<Self>,
     ) {
         // Map server token to sharer's local conversation ID
@@ -726,6 +728,7 @@ impl BlocklistAIController {
                 conversation_id,
                 participant_id,
                 HashMap::new(),
+                team_context,
                 ctx,
             );
             return;
@@ -741,6 +744,7 @@ impl BlocklistAIController {
                 conversation_id,
                 participant_id,
                 HashMap::new(),
+                team_context,
                 ctx,
             );
             return;
@@ -752,6 +756,7 @@ impl BlocklistAIController {
                 conversation_id,
                 participant_id,
                 HashMap::new(),
+                team_context,
                 ctx,
             );
             return;
@@ -824,6 +829,7 @@ impl BlocklistAIController {
                     conversation_id,
                     participant_id,
                     file_attachments,
+                    team_context,
                     ctx,
                 );
             },
@@ -838,6 +844,7 @@ impl BlocklistAIController {
         conversation_id: Option<AIConversationId>,
         participant_id: ParticipantId,
         file_attachments: HashMap<String, AIAgentAttachment>,
+        team_context: Option<TeamContext>,
         ctx: &mut ModelContext<Self>,
     ) {
         if let Some(conversation_id) = conversation_id {
@@ -857,6 +864,7 @@ impl BlocklistAIController {
                 conversation_id,
                 Some(participant_id),
                 file_attachments,
+                team_context,
                 ctx,
             );
         } else {
@@ -894,6 +902,7 @@ impl BlocklistAIController {
                     conversation_id,
                     Some(participant_id),
                     file_attachments,
+                    team_context,
                     ctx,
                 );
                 return;
@@ -904,6 +913,7 @@ impl BlocklistAIController {
                 None,
                 EntrypointType::SharedSession,
                 Some(participant_id),
+                team_context,
                 ctx,
             );
         }

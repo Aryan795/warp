@@ -63,40 +63,45 @@ fn passive_suggestions_request_params_omit_ambient_agent_task_id() {
                 BlocklistAIHistoryModel::handle(ctx).update(ctx, |history_model, ctx| {
                     history_model.start_new_conversation(terminal.id(), false, false, false, ctx)
                 });
+            let existing_conversation_context =
+                UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+            let new_conversation_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
 
-            terminal.ai_controller().update(ctx, |controller, ctx| {
-                controller.set_ambient_agent_task_id(Some(task_id), ctx);
+            terminal
+                .ai_controller()
+                .update(ctx, move |controller, ctx| {
+                    controller.set_ambient_agent_task_id(Some(task_id), ctx);
 
-                assert_eq!(controller.get_ambient_agent_task_id(), Some(task_id));
-                assert_eq!(
-                    controller
-                        .build_passive_suggestions_request_params(
-                            Some(conversation_id),
-                            PassiveSuggestionTrigger::FilesChanged,
-                            vec![],
-                            controller.capture_team_context_for_request(ctx),
-                            ctx,
-                        )
-                        .expect("existing conversation should build passive suggestion params")
-                        .1
-                        .ambient_agent_task_id,
-                    None
-                );
-                assert_eq!(
-                    controller
-                        .build_passive_suggestions_request_params(
-                            None,
-                            PassiveSuggestionTrigger::FilesChanged,
-                            vec![],
-                            controller.capture_team_context_for_request(ctx),
-                            ctx,
-                        )
-                        .expect("new conversation should build passive suggestion params")
-                        .1
-                        .ambient_agent_task_id,
-                    None
-                );
-            });
+                    assert_eq!(controller.get_ambient_agent_task_id(), Some(task_id));
+                    assert_eq!(
+                        controller
+                            .build_passive_suggestions_request_params(
+                                Some(conversation_id),
+                                PassiveSuggestionTrigger::FilesChanged,
+                                vec![],
+                                existing_conversation_context,
+                                ctx,
+                            )
+                            .expect("existing conversation should build passive suggestion params")
+                            .1
+                            .ambient_agent_task_id,
+                        None
+                    );
+                    assert_eq!(
+                        controller
+                            .build_passive_suggestions_request_params(
+                                None,
+                                PassiveSuggestionTrigger::FilesChanged,
+                                vec![],
+                                new_conversation_context,
+                                ctx,
+                            )
+                            .expect("new conversation should build passive suggestion params")
+                            .1
+                            .ambient_agent_task_id,
+                        None
+                    );
+                });
         });
     });
 }
@@ -162,11 +167,11 @@ fn request_and_continuation_scopes_do_not_follow_window_reassignment() {
             TerminalView::new_for_test(tips_model, None, ctx)
         });
         let (team_a_action_context, team_a_resume_context) =
-            terminal.update(&mut app, |terminal, ctx| {
-                let controller = terminal.ai_controller();
+            terminal.update(&mut app, |_terminal, ctx| {
+                let user_workspaces = UserWorkspaces::as_ref(ctx);
                 (
-                    controller.as_ref(ctx).capture_team_context_for_request(ctx),
-                    controller.as_ref(ctx).capture_team_context_for_request(ctx),
+                    user_workspaces.team_context_for_view(ctx),
+                    user_workspaces.team_context_for_view(ctx),
                 )
             });
         let team_a_action_context =
@@ -180,16 +185,16 @@ fn request_and_continuation_scopes_do_not_follow_window_reassignment() {
             user_workspaces.update_workspaces(vec![reassigned_workspace], ctx);
         });
 
-        let replacement_context = app.read(|ctx| {
-            let user_workspaces = UserWorkspaces::as_ref(ctx);
-            assert_eq!(
-                user_workspaces.team_uid_for_window(window_id),
-                Some(team_b.uid)
-            );
-            user_workspaces
-                .team_context_for_window(window_id)
-                .expect("the reassigned window should capture team B for new operations")
-        });
+        let replacement_context = terminal
+            .update(&mut app, |_terminal, ctx| {
+                let user_workspaces = UserWorkspaces::as_ref(ctx);
+                assert_eq!(
+                    user_workspaces.team_uid_for_window(window_id),
+                    Some(team_b.uid)
+                );
+                user_workspaces.team_context_for_view(ctx)
+            })
+            .expect("the reassigned window should capture team B for new operations");
         app.read(|ctx| {
             let user_workspaces = UserWorkspaces::as_ref(ctx);
             assert!(
@@ -245,13 +250,14 @@ fn request_and_continuation_scopes_do_not_follow_window_reassignment() {
             })
         });
         let team_b_request_params = terminal.update(&mut app, |terminal, ctx| {
+            let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
             terminal.ai_controller().update(ctx, |controller, ctx| {
                 controller
                     .build_passive_suggestions_request_params(
                         None,
                         PassiveSuggestionTrigger::FilesChanged,
                         vec![],
-                        controller.capture_team_context_for_request(ctx),
+                        team_context,
                         ctx,
                     )
                     .expect("the controller should build team B request params")

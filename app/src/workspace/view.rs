@@ -14018,13 +14018,16 @@ impl Workspace {
 
         terminal_view.update(ctx, |terminal_view, terminal_view_ctx| {
             if summarize_after_fork {
+                let team_context = UserWorkspaces::as_ref(terminal_view_ctx)
+                    .team_context_for_view(terminal_view_ctx);
                 terminal_view
                     .ai_controller()
-                    .update(terminal_view_ctx, |controller, ctx| {
+                    .update(terminal_view_ctx, move |controller, ctx| {
                         controller.send_slash_command_request(
                             SlashCommandRequest::Summarize {
                                 prompt: summarization_prompt,
                             },
+                            team_context,
                             ctx,
                         );
                     });
@@ -14048,13 +14051,16 @@ impl Workspace {
                         },
                     );
                 }
+                let team_context = UserWorkspaces::as_ref(terminal_view_ctx)
+                    .team_context_for_view(terminal_view_ctx);
                 terminal_view
                     .ai_controller()
-                    .update(terminal_view_ctx, |controller, ctx| {
+                    .update(terminal_view_ctx, move |controller, ctx| {
                         controller.send_user_query_in_conversation_no_lrc_subagent(
                             prompt,
                             forked_conversation_id,
                             None,
+                            team_context,
                             ctx,
                         );
                     });
@@ -14127,10 +14133,16 @@ impl Workspace {
         };
 
         terminal_view.update(ctx, |terminal, ctx| {
-            terminal.ai_controller().update(ctx, |controller, ctx| {
-                controller
-                    .send_slash_command_request(SlashCommandRequest::Summarize { prompt }, ctx);
-            });
+            let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+            terminal
+                .ai_controller()
+                .update(ctx, move |controller, ctx| {
+                    controller.send_slash_command_request(
+                        SlashCommandRequest::Summarize { prompt },
+                        team_context,
+                        ctx,
+                    );
+                });
 
             if let Some(prompt) = initial_prompt {
                 // The slash-command handler at
@@ -24335,14 +24347,17 @@ impl TypedActionView for Workspace {
                             // The modify-settings skill should always be available for
                             // production builds.
                             if let Some(skill) = modify_settings_skill {
+                                let team_context = UserWorkspaces::as_ref(terminal_view_ctx)
+                                    .team_context_for_view(terminal_view_ctx);
                                 terminal_view.ai_controller().update(
                                     terminal_view_ctx,
-                                    |controller, ctx| {
+                                    move |controller, ctx| {
                                         controller.send_slash_command_request(
                                             SlashCommandRequest::InvokeSkill {
                                                 skill,
                                                 user_query: Some(query),
                                             },
+                                            team_context,
                                             ctx,
                                         );
                                     },
@@ -24350,13 +24365,16 @@ impl TypedActionView for Workspace {
                             } else if let Some(conversation_id) =
                                 terminal_view.active_conversation_id(terminal_view_ctx)
                             {
+                                let team_context = UserWorkspaces::as_ref(terminal_view_ctx)
+                                    .team_context_for_view(terminal_view_ctx);
                                 terminal_view.ai_controller().update(
                                     terminal_view_ctx,
-                                    |controller, ctx| {
+                                    move |controller, ctx| {
                                         controller.send_user_query_in_conversation(
                                             query,
                                             conversation_id,
                                             None,
+                                            team_context,
                                             ctx,
                                         );
                                     },
@@ -25359,14 +25377,17 @@ impl TypedActionView for Workspace {
                     pane_group.add_terminal_pane_in_agent_mode(None, None, ctx);
                     if let Some(terminal_view) = pane_group.focused_session_view(ctx) {
                         terminal_view.update(ctx, |terminal_view, terminal_view_ctx| {
+                            let team_context = UserWorkspaces::as_ref(terminal_view_ctx)
+                                .team_context_for_view(terminal_view_ctx);
                             terminal_view.ai_controller().update(
                                 terminal_view_ctx,
-                                |controller, ctx| {
+                                move |controller, ctx| {
                                     controller.send_user_query_in_new_conversation(
                                         query.to_owned(),
                                         None,
                                         EntrypointType::UserInitiated,
                                         None,
+                                        team_context,
                                         ctx,
                                     );
                                 },

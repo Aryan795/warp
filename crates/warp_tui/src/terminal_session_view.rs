@@ -42,8 +42,8 @@ use warp::tui_export::{
     TuiMcpAction, TuiMcpManager, TuiMcpServerId, TuiMcpVariableValue, TuiOnboardingMarker,
     TuiOnboardingMarkers, TuiOnboardingMarkersEvent, TuiSlashCommandDataSource,
     TuiSlashCommandDataSourceArgs, TuiUpArrowHistoryItemKind, TuiUserInfoManager,
-    TuiUserInfoManagerEvent, TuiZeroStateDataSource, UserTakeOverReason, WAKEUP_THROTTLE_PERIOD,
-    WarpConfig, WarpConfigUpdateEvent, block_context_from_terminal_model,
+    TuiUserInfoManagerEvent, TuiZeroStateDataSource, UserTakeOverReason, UserWorkspaces,
+    WAKEUP_THROTTLE_PERIOD, WarpConfig, WarpConfigUpdateEvent, block_context_from_terminal_model,
     build_slash_command_mixer, detect_possible_git_repo, export_conversation_markdown,
     loaded_subtree_rollup, log_out_tui, maybe_build_ai_query_upsert_event,
     prepare_conversation_block_restoration, record_autodetection_toggle_from_slash_command,
@@ -1193,7 +1193,11 @@ impl TuiTerminalSessionView {
                 .collect()
         };
         self.ai_controller.update(ctx, |controller, ctx| {
-            controller.resume_conversation(conversation_id, resume_context, ctx);
+            controller.resume_conversation_with_stored_team_context(
+                conversation_id,
+                resume_context,
+                ctx,
+            );
         });
     }
     fn handle_block_completed(&mut self, block_id: &BlockId, ctx: &mut ViewContext<Self>) {
@@ -1454,8 +1458,16 @@ impl TuiTerminalSessionView {
         self.input_view.update(ctx, |input, ctx| input.clear(ctx));
         ctx.notify();
 
-        let dispatched = self.ai_controller.update(ctx, |controller, ctx| {
-            controller.send_user_query_in_conversation(prompt.clone(), conversation_id, None, ctx)
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let request_prompt = prompt.clone();
+        let dispatched = self.ai_controller.update(ctx, move |controller, ctx| {
+            controller.send_user_query_in_conversation(
+                request_prompt,
+                conversation_id,
+                None,
+                team_context,
+                ctx,
+            )
         });
         if !dispatched {
             self.cli_subagent_controller.update(ctx, |controller, ctx| {
@@ -1500,6 +1512,7 @@ impl TuiTerminalSessionView {
         });
 
         let terminal_surface_id: EntityId = ctx.view_id();
+        let window_id = ctx.window_id();
         let active_session =
             ctx.add_model(|ctx| ActiveSession::new(sessions.clone(), model_events.clone(), ctx));
         let zero_state_animation_config = ZeroStateAnimationConfig::handle(ctx);
@@ -1570,8 +1583,6 @@ impl TuiTerminalSessionView {
                 });
             }
         });
-        let window_id = ctx.window_id();
-        let terminal_view = ctx.handle();
         let ai_controller = ctx.add_model(|ctx| {
             BlocklistAIController::new_for_tui(
                 ai_input_model.clone(),
@@ -1581,7 +1592,6 @@ impl TuiTerminalSessionView {
                 active_session.clone(),
                 model.clone(),
                 terminal_surface_id,
-                terminal_view,
                 ctx,
             )
         });
@@ -1913,11 +1923,13 @@ impl TuiTerminalSessionView {
                 conversation_id,
                 text,
             } => {
-                view.ai_controller.update(ctx, |controller, ctx| {
+                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                view.ai_controller.update(ctx, move |controller, ctx| {
                     controller.send_user_query_in_conversation(
                         text.clone(),
                         *conversation_id,
                         None,
+                        team_context,
                         ctx,
                     );
                 });
@@ -2359,9 +2371,10 @@ impl TuiTerminalSessionView {
         conversation_id: AIConversationId,
         ctx: &mut ViewContext<Self>,
     ) {
-        self.ai_controller.update(ctx, |controller, ctx| {
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        self.ai_controller.update(ctx, move |controller, ctx| {
             controller.set_ambient_agent_task_id(Some(task_id), ctx);
-            controller.send_agent_query_in_conversation(prompt, conversation_id, ctx);
+            controller.send_agent_query_in_conversation(prompt, conversation_id, team_context, ctx);
         });
     }
 
@@ -4006,8 +4019,16 @@ impl TuiTerminalSessionView {
             report_error!("TUI prompt submitted without an eagerly selected conversation");
             return;
         };
-        let dispatched = self.ai_controller.update(ctx, |controller, ctx| {
-            controller.send_user_query_in_conversation(prompt.clone(), conversation_id, None, ctx)
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let request_prompt = prompt.clone();
+        let dispatched = self.ai_controller.update(ctx, move |controller, ctx| {
+            controller.send_user_query_in_conversation(
+                request_prompt,
+                conversation_id,
+                None,
+                team_context,
+                ctx,
+            )
         });
         if dispatched && let Some(publisher) = &self.cli_agent_osc_event_publisher {
             publisher
@@ -4191,8 +4212,9 @@ impl TuiTerminalSessionView {
             self.show_transient_hint(LOCAL_SKILLS_REMOTE_EXECUTION_ERROR_MESSAGE.to_owned(), ctx);
             return;
         }
-        let result = self.ai_controller.update(ctx, |controller, ctx| {
-            controller.send_invoke_skill_request(reference, user_query, ctx)
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let result = self.ai_controller.update(ctx, move |controller, ctx| {
+            controller.send_invoke_skill_request(reference, user_query, team_context, ctx)
         });
         match result {
             Ok(()) => {
@@ -4710,8 +4732,9 @@ impl TuiTerminalSessionView {
                     );
                     return;
                 };
-                self.ai_controller.update(ctx, |controller, ctx| {
-                    controller.send_create_new_project_request(query.to_owned(), ctx);
+                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                self.ai_controller.update(ctx, move |controller, ctx| {
+                    controller.send_create_new_project_request(query.to_owned(), team_context, ctx);
                 });
                 self.input_view.update(ctx, |input, ctx| input.clear(ctx));
                 record_static_slash_command_accepted(command.name, true, ctx);

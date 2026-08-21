@@ -822,23 +822,8 @@ fn test_llm_policy_uses_team_context_with_teamless_fallback_and_no_stale_fallbac
             Arc::new(MockWorkspaceClient::new()),
         );
 
-        let window_a = WindowId::new();
-        let window_b = WindowId::new();
-        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
-            user_workspaces.set_team_for_window(window_a, team_a.uid, ctx);
-            user_workspaces.set_team_for_window(window_b, team_b.uid, ctx);
-        });
-        let (context_a, context_b) = app.read(|ctx| {
-            let user_workspaces = UserWorkspaces::as_ref(ctx);
-            (
-                user_workspaces
-                    .team_context_for_window(window_a)
-                    .expect("window A should capture team A"),
-                user_workspaces
-                    .team_context_for_window(window_b)
-                    .expect("window B should capture team B"),
-            )
-        });
+        let context_a = TeamContext::new_for_test(team_a.uid);
+        let context_b = TeamContext::new_for_test(team_b.uid);
 
         app.read(|ctx| {
             let user_workspaces = UserWorkspaces::as_ref(ctx);
@@ -1470,8 +1455,10 @@ fn test_agent_settings_are_member_byo_keys_allowed_follows_window_team_change() 
         UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
             user_workspaces.set_team_for_window(window_id, team_a.uid, ctx);
         });
-        let operation_context = app
-            .read(|ctx| UserWorkspaces::as_ref(ctx).team_context_for_window(window_id))
+        let operation_context = view
+            .update(&mut app, |_, ctx| {
+                UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+            })
             .expect("the operation should capture team A");
 
         app.read(|ctx| {
@@ -2746,7 +2733,7 @@ fn test_teamless_user_falls_back_to_workspace_settings() {
                 "an admin with no membership should end up teamless"
             );
             assert!(
-                user_workspaces.is_custom_llm_enabled_for_team(None),
+                user_workspaces.is_custom_llm_enabled(None),
                 "workspace settings should supply the teamless default"
             );
         });
@@ -2771,8 +2758,9 @@ fn test_member_team_settings_win_over_workspace_settings() {
             let user_workspaces = UserWorkspaces::as_ref(ctx);
             let team = user_workspaces.sole_team();
             assert!(team.is_some(), "the member team should survive filtering");
+            let team_render_context = team.map(|team| TeamRenderContext { team });
             assert!(
-                !user_workspaces.is_custom_llm_enabled_for_team(team),
+                !user_workspaces.is_custom_llm_enabled(team_render_context),
                 "the team's own settings should win when the user has a team"
             );
         });

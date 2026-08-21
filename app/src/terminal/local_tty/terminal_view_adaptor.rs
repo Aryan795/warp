@@ -70,6 +70,7 @@ use crate::terminal::view::{ConversationRestorationInNewPaneType, Event as Termi
 use crate::terminal::writeable_pty::terminal_manager_util::wire_up_remote_server_controller_with_view;
 use crate::terminal::{TerminalManager as TerminalManagerTrait, TerminalModel, TerminalView};
 use crate::view_components::ToastFlavor;
+use crate::workspaces::user_workspaces::UserWorkspaces;
 
 const ACL_UPDATE_FAILURE_RESPONSE: &str = "Something went wrong. Please try again.";
 
@@ -1380,6 +1381,7 @@ impl TerminalManager<TerminalView> {
 
                 // Execute the agent prompt in the Oz-harness case
                 terminal_view.update(ctx, |view, ctx| {
+                    let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
                     // Restore the sharer's frozen visual state. The buffer is cleared by
                     // system_clear_buffer when SentRequest fires from execute_agent_prompt_for_shared_session.
                     view.input().update(ctx, |input, ctx| {
@@ -1392,6 +1394,7 @@ impl TerminalManager<TerminalView> {
                             request.server_conversation_token,
                             request.attachments.clone(),
                             participant_id.clone(),
+                            team_context,
                             ctx,
                         );
                     });
