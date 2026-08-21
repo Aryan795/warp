@@ -186,6 +186,19 @@ pub fn init(app: &mut AppContext) {
             CodeEditorViewAction::MoveForwardsByWord,
             text_entry.clone(),
         ),
+        // Same accommodation for word deletion, matching the main editor's `meta-backspace`
+        // binding (see `editor::view::init`), so `alt-backspace`/`alt-delete` keep deleting a
+        // word once "Left/Right Option is Meta" rewrites the `alt` modifier to `meta`.
+        FixedBinding::new(
+            "meta-backspace",
+            CodeEditorViewAction::CutWordLeft,
+            text_entry.clone(),
+        ),
+        FixedBinding::new(
+            "meta-delete",
+            CodeEditorViewAction::CutWordRight,
+            text_entry.clone(),
+        ),
         FixedBinding::new_per_platform(
             PerPlatformKeystroke {
                 mac: "shift-alt-left",

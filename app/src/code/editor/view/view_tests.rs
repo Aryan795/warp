@@ -5,6 +5,7 @@ use warp_editor::render::element::VerticalExpansionBehavior;
 use warp_util::user_input::UserInput;
 use warpui::elements::ScrollbarWidth;
 use warpui::elements::new_scrollable::ScrollableAppearance;
+use warpui::keymap::Keystroke;
 use warpui::platform::WindowStyle;
 use warpui::{App, TypedActionView, ViewHandle, WindowId};
 
@@ -85,5 +86,59 @@ fn test_interaction_state_prevents_editing() {
         });
 
         assert_eq!(text.as_str(), "abc");
+    });
+}
+
+// Regression test for https://github.com/warpdotdev/warp/issues/15413: with "Left/Right Option
+// is Meta" enabled, physical Option-Backspace/Option-Delete arrive as `meta-backspace`/
+// `meta-delete` (see `apply_extra_meta_keys`). `CodeEditorView` must bind those keystrokes to
+// word deletion, matching `alt-backspace`/`alt-delete`.
+#[test]
+fn meta_backspace_and_meta_delete_dispatch_word_deletion() {
+    App::test((), |mut app| async move {
+        app.update(|ctx| {
+            crate::code::editor::view::init(ctx);
+        });
+        let (window_id, editor_view) = initialize_editor(&mut app);
+
+        editor_view.update(&mut app, |view, ctx| {
+            view.handle_action(
+                &CodeEditorViewAction::UserTyped(UserInput::new("hello world")),
+                ctx,
+            );
+        });
+
+        let handled = app
+            .dispatch_keystroke(
+                window_id,
+                &[editor_view.id()],
+                &Keystroke::parse("meta-backspace").expect("valid keystroke"),
+                false,
+            )
+            .expect("dispatch should succeed");
+        assert!(
+            handled,
+            "meta-backspace should be handled by CodeEditorView"
+        );
+
+        let text = editor_view.read(&app, |view, ctx| view.text(ctx));
+        assert_eq!(text.as_str(), "hello ");
+
+        editor_view.update(&mut app, |view, ctx| {
+            view.handle_action(&CodeEditorViewAction::MoveToLineStart, ctx);
+        });
+
+        let handled = app
+            .dispatch_keystroke(
+                window_id,
+                &[editor_view.id()],
+                &Keystroke::parse("meta-delete").expect("valid keystroke"),
+                false,
+            )
+            .expect("dispatch should succeed");
+        assert!(handled, "meta-delete should be handled by CodeEditorView");
+
+        let text = editor_view.read(&app, |view, ctx| view.text(ctx));
+        assert_eq!(text.as_str(), " ");
     });
 }
