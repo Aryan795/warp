@@ -845,6 +845,17 @@ impl LLMPreferences {
 
         me
     }
+    #[cfg(test)]
+    fn for_test(models_by_feature: ModelsByFeature, custom_llms: Vec<LLMInfo>) -> Self {
+        Self {
+            models_by_feature,
+            agent_mode_models_unavailable: false,
+            last_update: None,
+            base_llm_for_terminal_view: HashMap::new(),
+            custom_llms,
+            custom_model_routers: Vec::new(),
+        }
+    }
 
     /// Returns the `LLMInfo` for the base LLM to be used for an Agent Mode request.
     pub fn get_active_base_model<'a>(
