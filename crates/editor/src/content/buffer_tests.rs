@@ -9988,6 +9988,91 @@ fn test_invalidate_layout_for_range_scopes_to_whole_non_plain_text_block() {
     });
 }
 
+/// Asserts that scoping `invalidate_layout_for_range` to the mermaid code block in `markdown`
+/// produces exactly the same styled block a full rebuild would, without touching any
+/// neighboring content.
+fn assert_mermaid_block_rebuild_matches_full(markdown: &'static str) {
+    App::test((), |mut app| async move {
+        let _flag = warp_core::features::FeatureFlag::MarkdownMermaid.override_enabled(true);
+        let (buffer, _selection) = Buffer::mock_from_markdown(
+            markdown,
+            None,
+            Box::new(|_, _| IndentBehavior::Ignore),
+            &mut app,
+        );
+        buffer.update(&mut app, |buffer, _ctx| {
+            let full_delta = buffer.invalidate_layout();
+            let mermaid_index = full_delta
+                .new_lines
+                .iter()
+                .position(|block| {
+                    matches!(
+                        block,
+                        StyledBufferBlock::Text(StyledTextBlock {
+                            style: BufferBlockStyle::CodeBlock {
+                                code_block_type: CodeBlockType::Mermaid
+                            },
+                            ..
+                        })
+                    )
+                })
+                .unwrap_or_else(|| panic!("Expected a mermaid block in {markdown:?}"));
+
+            let mermaid_start = CharOffset::from(1)
+                + full_delta.new_lines[..mermaid_index]
+                    .iter()
+                    .fold(CharOffset::zero(), |sum, block| {
+                        sum + block.content_length()
+                    });
+            let mermaid_end = mermaid_start + full_delta.new_lines[mermaid_index].content_length();
+            assert!(
+                mermaid_end - mermaid_start > CharOffset::from(2),
+                "test fixture should have a multi-character mermaid block in {markdown:?}"
+            );
+
+            // Probe from a point strictly inside the block (not touching either boundary) --
+            // `invalidate_layout_for_range` should still snap outward to the exact block.
+            let inner_range =
+                (mermaid_start + CharOffset::from(1))..(mermaid_end - CharOffset::from(1));
+            let scoped_delta = buffer.invalidate_layout_for_range(inner_range);
+
+            assert_eq!(
+                scoped_delta.old_offset,
+                mermaid_start..mermaid_end,
+                "scoped rebuild should not expand past the mermaid block in {markdown:?}"
+            );
+            assert_eq!(
+                scoped_delta.new_lines,
+                vec![full_delta.new_lines[mermaid_index].clone()],
+                "scoped rebuild should match the full rebuild's block in {markdown:?}"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_invalidate_layout_for_range_scopes_to_mermaid_block_at_document_start() {
+    assert_mermaid_block_rebuild_matches_full("```mermaid\ngraph TD\nA-->B\n```\n\nafter\n");
+}
+
+#[test]
+fn test_invalidate_layout_for_range_scopes_to_mermaid_block_at_document_middle() {
+    assert_mermaid_block_rebuild_matches_full(
+        "before\n\n```mermaid\ngraph TD\nA-->B\n```\n\nafter\n",
+    );
+}
+
+#[test]
+fn test_invalidate_layout_for_range_scopes_to_mermaid_block_at_document_end() {
+    // The mermaid block is the last content in the buffer -- nothing trails it.
+    assert_mermaid_block_rebuild_matches_full("before\n\n```mermaid\ngraph TD\nA-->B\n```\n");
+}
+
+#[test]
+fn test_invalidate_layout_for_range_scopes_to_mermaid_block_filling_entire_buffer() {
+    assert_mermaid_block_rebuild_matches_full("```mermaid\ngraph TD\nA-->B\n```\n");
+}
+
 // Regression test for CLD-782.
 #[test]
 fn test_export_markdown_multiple_indentation_level() {

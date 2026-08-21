@@ -1601,6 +1601,13 @@ pub trait LaidOutEmbeddedItem: std::fmt::Debug + Send + Sync {
     fn spacing(&self) -> BlockSpacing;
     /// Returns this object as a ref to the Any type.  Needed for typecasts.
     fn as_any(&self) -> &dyn Any;
+    /// Whether this embed currently renders a character that resolved to a fallback or missing
+    /// glyph. Defaults to `true` (conservative: assume a fallback font could still be relevant)
+    /// since most implementors don't own any `TextFrame`s directly and can't answer this
+    /// precisely; override it when they do.
+    fn has_missing_glyphs(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Default, Debug, Clone, Copy, PartialEq)]
@@ -4666,9 +4673,9 @@ impl BlockItem {
     }
 
     /// Whether this block currently has a character that resolved to a fallback or missing
-    /// glyph. `Embedded` blocks are excluded: an embedded notebook/workflow lays out its own
-    /// content independently and subscribes to font-fallback events on its own, so its glyphs
-    /// aren't reachable (or relevant) from the parent document's render tree.
+    /// glyph. `Embedded` blocks delegate to [`LaidOutEmbeddedItem::has_missing_glyphs`], since
+    /// some embed kinds (e.g. workflow cards) render their own `TextFrame`s directly into this
+    /// document's render tree rather than through an independent subscriber.
     pub fn has_missing_glyphs(&self) -> bool {
         match self {
             BlockItem::Paragraph(paragraph)
@@ -4684,8 +4691,8 @@ impl BlockItem {
                 paragraph_block, ..
             } => paragraph_block.has_missing_glyphs(),
             BlockItem::Table(laid_out_table) => laid_out_table.has_missing_glyphs(),
+            BlockItem::Embedded(embedded_item) => embedded_item.has_missing_glyphs(),
             BlockItem::MermaidDiagram { .. }
-            | BlockItem::Embedded(_)
             | BlockItem::HorizontalRule(_)
             | BlockItem::Image { .. }
             | BlockItem::TrailingNewLine(_)
@@ -5850,6 +5857,11 @@ impl LaidOutEmbeddedItem for BrokenBlockEmbedding {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn has_missing_glyphs(&self) -> bool {
+        // A broken-embed placeholder renders no text of its own.
+        false
     }
 }
 

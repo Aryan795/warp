@@ -14,6 +14,7 @@ use warp_util::user_input::UserInput;
 use warpui::assets::asset_cache::{AssetCache, AssetState};
 use warpui::r#async::block_on;
 use warpui::event::ModifiersState;
+use warpui::fonts::{FallbackFontEvent, FallbackFontModel};
 use warpui::image_cache::ImageType;
 use warpui::platform::WindowStyle;
 use warpui::presenter::ChildView;
@@ -243,6 +244,49 @@ fn test_render_range_to_buffer_range_shifts_by_one() {
         RichTextEditorView::render_range_to_buffer_range(CharOffset::zero()..CharOffset::from(3)),
         CharOffset::from(1)..CharOffset::from(4)
     );
+}
+
+#[test]
+fn test_fallback_font_loaded_does_not_rebuild_layout_without_missing_glyphs() {
+    App::test((), |mut app| async move {
+        let (_, editor_view, _) = initialize_editor(&mut app);
+        reset_editor_with_markdown(&mut app, &editor_view, "Hello world").await;
+
+        let render_state = editor_view.read(&app, |editor, ctx| {
+            editor.model.as_ref(ctx).render_state().clone()
+        });
+
+        // Sanity-check the premise: this document has no missing glyphs to begin with, so
+        // `handle_fallback_font_event` should have nothing to gain from a rebuild.
+        app.read(|ctx| {
+            assert!(!render_state.as_ref(ctx).content().has_missing_glyphs());
+        });
+
+        let layouts = {
+            let (tx, rx) = async_channel::unbounded();
+            app.update(|ctx| {
+                ctx.subscribe_to_model(&render_state, move |_, event, _| {
+                    if let RenderEvent::LayoutUpdated = event {
+                        block_on(tx.send(*event)).unwrap();
+                    }
+                })
+            });
+            rx
+        };
+
+        // Simulate an external fallback font family finishing loading, exactly as
+        // `App::load_fallback_family_and_redraw` does after a successful load.
+        FallbackFontModel::handle(&app).update(&mut app, |_, ctx| {
+            ctx.emit(FallbackFontEvent::Loaded);
+        });
+
+        assert_eq!(
+            layouts.try_recv().unwrap_err(),
+            TryRecvError::Empty,
+            "a FallbackFontEvent::Loaded with no missing glyphs in this document should not \
+             trigger a layout rebuild"
+        );
+    });
 }
 
 #[test]
