@@ -229,6 +229,40 @@ fn test_loaded_mermaid_diagram_with_placeholder_height_needs_relayout() {
 }
 
 #[test]
+fn test_render_range_to_buffer_range_shifts_by_one() {
+    // Matches the empirically-verified relationship between `RenderState`'s block-tree
+    // `CharOffset`s (indexed from zero) and `Buffer`'s own `CharOffset` space (indexed from
+    // one): a mermaid block reported by `RenderState` as `7..24` corresponds to `8..25` in
+    // `Buffer`'s coordinate space (see `RenderState::layout_pending_edit`'s `-1` translation
+    // in the other direction).
+    assert_eq!(
+        RichTextEditorView::render_range_to_buffer_range(CharOffset::from(7)..CharOffset::from(24)),
+        CharOffset::from(8)..CharOffset::from(25)
+    );
+    assert_eq!(
+        RichTextEditorView::render_range_to_buffer_range(CharOffset::zero()..CharOffset::from(3)),
+        CharOffset::from(1)..CharOffset::from(4)
+    );
+}
+
+#[test]
+fn test_merge_ranges() {
+    assert_eq!(RichTextEditorView::merge_ranges(&[]), None);
+    assert_eq!(
+        RichTextEditorView::merge_ranges(&[CharOffset::from(5)..CharOffset::from(10)]),
+        Some(CharOffset::from(5)..CharOffset::from(10))
+    );
+    assert_eq!(
+        RichTextEditorView::merge_ranges(&[
+            CharOffset::from(10)..CharOffset::from(15),
+            CharOffset::from(2)..CharOffset::from(6),
+            CharOffset::from(20)..CharOffset::from(25),
+        ]),
+        Some(CharOffset::from(2)..CharOffset::from(25))
+    );
+}
+
+#[test]
 fn layout_affecting_asset_loads_rebuild_selectable_and_editable_layouts() {
     assert!(
         RichTextEditorView::should_rebuild_layout_after_layout_affecting_asset_load(

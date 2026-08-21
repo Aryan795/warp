@@ -9893,6 +9893,101 @@ fn test_invalidate_content() {
     });
 }
 
+#[test]
+fn test_invalidate_layout_for_range_scopes_to_containing_block() {
+    App::test((), |mut app| async move {
+        let (buffer, _selection) = Buffer::mock_from_markdown(
+            "one\n\ntwo\n\nthree\n",
+            None,
+            Box::new(|_, _| IndentBehavior::Ignore),
+            &mut app,
+        );
+        buffer.update(&mut app, |buffer, _ctx| {
+            let full_delta = buffer.invalidate_layout();
+            // A plain-text buffer yields one styled block per *line* ("one\n", "\n", "two\n",
+            // "\n", "three"); `invalidate_layout_for_range` scopes to the containing line here,
+            // since `block_or_line_start`/`_end` snap to the line for `BufferBlockStyle::PlainText`.
+            assert_eq!(
+                full_delta.new_lines.len(),
+                5,
+                "expected one styled block per line"
+            );
+
+            // Compute the exact buffer range of the "two\n" line from the full rebuild.
+            let preceding_len =
+                full_delta.new_lines[0].content_length() + full_delta.new_lines[1].content_length();
+            let line_start = CharOffset::from(1) + preceding_len;
+            let line_end = line_start + full_delta.new_lines[2].content_length();
+
+            // A range that falls entirely inside the "two\n" line should snap outward to the
+            // whole line, without touching its neighbors.
+            let inner_range = (line_start + CharOffset::from(1))..(line_end - CharOffset::from(1));
+            let scoped_delta = buffer.invalidate_layout_for_range(inner_range);
+
+            assert_eq!(scoped_delta.old_offset, line_start..line_end);
+            assert_eq!(
+                scoped_delta.new_lines,
+                vec![full_delta.new_lines[2].clone()]
+            );
+
+            // The scoped rebuild must be strictly smaller than a full rebuild for a
+            // multi-line document -- that's the entire point of the optimization.
+            assert!(scoped_delta.old_offset.start > CharOffset::from(1));
+            assert!(scoped_delta.old_offset.end < buffer.max_charoffset());
+        });
+    });
+}
+
+#[test]
+fn test_invalidate_layout_for_range_scopes_to_whole_non_plain_text_block() {
+    App::test((), |mut app| async move {
+        let (buffer, _selection) = Buffer::mock_from_markdown(
+            "before\n\n```\nfirst\nsecond\n```\n\nafter\n",
+            None,
+            Box::new(|_, _| IndentBehavior::Ignore),
+            &mut app,
+        );
+        buffer.update(&mut app, |buffer, _ctx| {
+            let full_delta = buffer.invalidate_layout();
+            let code_block_index = full_delta
+                .new_lines
+                .iter()
+                .position(|block| {
+                    matches!(
+                        block,
+                        StyledBufferBlock::Text(StyledTextBlock {
+                            style: BufferBlockStyle::CodeBlock { .. },
+                            ..
+                        })
+                    )
+                })
+                .expect("Expected a code block");
+            let code_block_start = CharOffset::from(1)
+                + full_delta.new_lines[..code_block_index]
+                    .iter()
+                    .fold(CharOffset::zero(), |sum, block| {
+                        sum + block.content_length()
+                    });
+            let code_block_end =
+                code_block_start + full_delta.new_lines[code_block_index].content_length();
+
+            // A range inside just the first line of the (multi-line) code block should still
+            // snap outward to the entire block, unlike the plain-text, line-scoped case above.
+            let inner_range =
+                (code_block_start + CharOffset::from(1))..(code_block_start + CharOffset::from(2));
+            let scoped_delta = buffer.invalidate_layout_for_range(inner_range);
+
+            assert_eq!(scoped_delta.old_offset, code_block_start..code_block_end);
+            assert_eq!(
+                scoped_delta.new_lines,
+                vec![full_delta.new_lines[code_block_index].clone()]
+            );
+            assert!(scoped_delta.old_offset.start > CharOffset::from(1));
+            assert!(scoped_delta.old_offset.end < buffer.max_charoffset());
+        });
+    });
+}
+
 // Regression test for CLD-782.
 #[test]
 fn test_export_markdown_multiple_indentation_level() {

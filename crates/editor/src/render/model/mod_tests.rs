@@ -26,7 +26,9 @@ use crate::content::edit::ParsedUrl;
 use crate::content::text::{
     BufferBlockStyle, CodeBlockType, FormattedTable, FormattedTextFragment, table_cell_offset_maps,
 };
-use crate::render::model::test_utils::{TEST_STYLES, laid_out_paragraph, mock_paragraph};
+use crate::render::model::test_utils::{
+    TEST_STYLES, laid_out_paragraph, mock_paragraph, mock_paragraph_with_missing_glyphs,
+};
 use crate::render::model::{
     ColumnUnit, Height, LayoutSummary, LineCount, RenderedSelection, SoftWrapPoint, TEXT_SPACING,
 };
@@ -72,6 +74,30 @@ fn test_height() {
             item_count: 4,
         }
     );
+}
+
+#[test]
+fn test_content_has_missing_glyphs_false_when_no_block_reports_one() {
+    let mut render_state =
+        RenderState::new_for_test(TEST_STYLES, 10.0.into_pixels(), 10.0.into_pixels());
+    let mut content = SumTree::new();
+    content.push(mock_paragraph(24., 1., 1));
+    content.push(mock_paragraph(24., 1., 2));
+    render_state.set_content(content);
+
+    assert!(!render_state.content().has_missing_glyphs());
+}
+
+#[test]
+fn test_content_has_missing_glyphs_true_when_a_block_reports_one() {
+    let mut render_state =
+        RenderState::new_for_test(TEST_STYLES, 10.0.into_pixels(), 10.0.into_pixels());
+    let mut content = SumTree::new();
+    content.push(mock_paragraph(24., 1., 1));
+    content.push(mock_paragraph_with_missing_glyphs(24., 1., 2));
+    render_state.set_content(content);
+
+    assert!(render_state.content().has_missing_glyphs());
 }
 
 #[test]

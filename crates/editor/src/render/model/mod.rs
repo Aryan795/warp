@@ -254,6 +254,13 @@ impl<'a> RenderContentTreeRef<'a> {
             Some(item)
         })
     }
+
+    /// Whether any currently laid-out block has a character that resolved to a fallback or
+    /// missing glyph. Used to skip a layout rebuild that a font becoming available cannot
+    /// possibly change.
+    pub fn has_missing_glyphs(&self) -> bool {
+        self.block_items().any(BlockItem::has_missing_glyphs)
+    }
     /// Iterator over items visible in the current viewport.
     ///
     /// This returns both the `ViewportItem` and the backing `BlockItem`, for identifying what kind
@@ -1667,6 +1674,10 @@ impl ParagraphBlock {
             })
     }
 
+    fn has_missing_glyphs(&self) -> bool {
+        self.paragraphs.iter().any(Paragraph::has_missing_glyphs)
+    }
+
     pub fn width(&self) -> Pixels {
         self.paragraphs
             .iter()
@@ -1772,6 +1783,10 @@ impl Paragraph {
 
     pub(super) fn frame(&self) -> &TextFrame {
         &self.frame
+    }
+
+    fn has_missing_glyphs(&self) -> bool {
+        self.frame.has_missing_glyphs()
     }
 
     /// Whether or not this paragraph is effectively empty.
@@ -2005,6 +2020,13 @@ impl LaidOutTable {
 
     pub fn content_length(&self) -> CharOffset {
         self.content_length
+    }
+
+    fn has_missing_glyphs(&self) -> bool {
+        self.cell_text_frames
+            .iter()
+            .flatten()
+            .any(|frame| frame.has_missing_glyphs())
     }
 
     pub fn viewport_width(&self, viewport_width: Pixels) -> Pixels {
@@ -4641,6 +4663,34 @@ impl BlockItem {
 
     pub fn is_trailing_newline(&self) -> bool {
         matches!(self, BlockItem::TrailingNewLine(_))
+    }
+
+    /// Whether this block currently has a character that resolved to a fallback or missing
+    /// glyph. `Embedded` blocks are excluded: an embedded notebook/workflow lays out its own
+    /// content independently and subscribes to font-fallback events on its own, so its glyphs
+    /// aren't reachable (or relevant) from the parent document's render tree.
+    pub fn has_missing_glyphs(&self) -> bool {
+        match self {
+            BlockItem::Paragraph(paragraph)
+            | BlockItem::Header { paragraph, .. }
+            | BlockItem::UnorderedList { paragraph, .. }
+            | BlockItem::OrderedList { paragraph, .. }
+            | BlockItem::TaskList { paragraph, .. } => paragraph.has_missing_glyphs(),
+            BlockItem::TextBlock { paragraph_block }
+            | BlockItem::RunnableCodeBlock {
+                paragraph_block, ..
+            }
+            | BlockItem::TemporaryBlock {
+                paragraph_block, ..
+            } => paragraph_block.has_missing_glyphs(),
+            BlockItem::Table(laid_out_table) => laid_out_table.has_missing_glyphs(),
+            BlockItem::MermaidDiagram { .. }
+            | BlockItem::Embedded(_)
+            | BlockItem::HorizontalRule(_)
+            | BlockItem::Image { .. }
+            | BlockItem::TrailingNewLine(_)
+            | BlockItem::Hidden(_) => false,
+        }
     }
 }
 
