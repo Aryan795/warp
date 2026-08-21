@@ -13,6 +13,7 @@ use warp_graphql::mutations::upsert_runner::{
 };
 use warp_graphql::object::SpaceType;
 use warp_graphql::object_permissions::Owner as GqlOwner;
+use warp_graphql::queries::get_runner::RunnerSelector;
 use warp_graphql::queries::get_runners::{
     Runner, RunnerArch, RunnerConfig, RunnerMacOsVersion, RunnerOs, RunnerSortBy,
 };
@@ -141,13 +142,11 @@ impl RunnerCommandRunner {
 
         ctx.spawn(
             async move {
-                // Fetch existing runners so we can resolve the target and preserve
-                // any fields that aren't being changed (the server upsert takes a
-                // full runner config).
-                let runners = factory.get_runners(None).await?;
-
-                let existing =
-                    resolve_runner(&runners, args.identifier.as_deref(), args.name.as_deref())?;
+                // Resolve the target runner server-side, preserving any fields
+                // that aren't being changed (the server upsert takes a full
+                // runner config).
+                let selector = update_selector(&args);
+                let existing = factory.get_runner(selector).await?;
                 let uid = existing.uid.inner().to_string();
 
                 let runner = build_update_input(&args, &existing.config)?;
@@ -190,11 +189,11 @@ impl RunnerCommandRunner {
 
         ctx.spawn(
             async move {
-                let runners = factory.get_runners(None).await?;
-                let uid = resolve_runner(&runners, Some(identifier.as_str()), None)?
-                    .uid
-                    .inner()
-                    .to_string();
+                let selector = RunnerSelector {
+                    uid: Some(cynic::Id::new(&identifier)),
+                    name: Some(identifier),
+                };
+                let uid = factory.get_runner(selector).await?.uid.inner().to_string();
                 let deleted_uid = factory.delete_runner(uid).await?;
                 println!("Runner deleted successfully: {deleted_uid}");
                 Ok(())
@@ -227,38 +226,22 @@ fn confirm_delete(uid: &str, is_terminal: bool) -> Result<bool> {
         .unwrap_or_default())
 }
 
-/// Resolve a runner by UID or name from a fetched list.
-pub(super) fn resolve_runner<'a>(
-    runners: &'a [Runner],
-    identifier: Option<&str>,
-    name: Option<&str>,
-) -> Result<&'a Runner> {
-    if let Some(identifier) = identifier {
-        if let Some(runner) = runners
-            .iter()
-            .find(|runner| runner.uid.inner() == identifier)
-        {
-            return Ok(runner);
-        }
-        return resolve_runner_by_name(runners, identifier);
-    }
-
-    let name = name.ok_or_else(|| anyhow!("A runner UID or name is required"))?;
-    resolve_runner_by_name(runners, name)
-}
-
-/// Resolve a runner by an unambiguous name match.
-fn resolve_runner_by_name<'a>(runners: &'a [Runner], name: &str) -> Result<&'a Runner> {
-    let matches: Vec<&Runner> = runners
-        .iter()
-        .filter(|runner| runner.config.name == name)
-        .collect();
-    match matches.as_slice() {
-        [] => Err(anyhow!("Runner '{name}' not found")),
-        [runner] => Ok(runner),
-        _ => Err(anyhow!(
-            "Multiple runners match '{name}'; specify the runner by UID"
-        )),
+/// Build the [`RunnerSelector`] for an `update` call from the CLI args:
+/// the positional identifier (if given) feeds both `uid` and `name`
+/// The server tries uid first and
+/// falls back to name. When no identifier is given, `--name` is required and
+/// becomes the sole (name-only) selector, matching `resolve_updated_name`'s
+/// treatment of that case as a lookup key rather than a rename.
+fn update_selector(args: &UpdateRunnerArgs) -> RunnerSelector {
+    match &args.identifier {
+        Some(identifier) => RunnerSelector {
+            uid: Some(cynic::Id::new(identifier)),
+            name: Some(identifier.clone()),
+        },
+        None => RunnerSelector {
+            uid: None,
+            name: args.name.clone(),
+        },
     }
 }
 

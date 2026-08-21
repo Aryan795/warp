@@ -1,31 +1,22 @@
-use warp_graphql::object::Space;
-use warp_graphql::scalars::Time;
+use warp_cli::runner::UpdateRunnerArgs;
 
 use super::{
-    Runner, RunnerArch, RunnerArchArg, RunnerConfig, RunnerOs, RunnerOsArg, SpaceType,
-    confirm_delete, merge_instance_shape, resolve_arch, resolve_runner, resolve_updated_name,
+    RunnerArch, RunnerArchArg, RunnerOsArg, confirm_delete, merge_instance_shape, resolve_arch,
+    resolve_updated_name, update_selector,
 };
 
-fn make_runner(uid: &str, name: &str) -> Runner {
-    Runner {
-        uid: cynic::Id::new(uid),
-        config: RunnerConfig {
-            name: name.to_string(),
-            description: None,
-            setup_commands: None,
-            instance_shape: None,
-            os: RunnerOs::Linux,
-            arch: RunnerArch::X8664,
-            mac: None,
-            linux: None,
-        },
-        last_updated: Time::new(chrono::Utc::now()),
-        scope: Space {
-            uid: cynic::Id::new("space-uid"),
-            type_: SpaceType::User,
-        },
-        creator: None,
-        last_editor: None,
+fn update_args(identifier: Option<&str>, name: Option<&str>) -> UpdateRunnerArgs {
+    UpdateRunnerArgs {
+        identifier: identifier.map(str::to_string),
+        name: name.map(str::to_string),
+        description: None,
+        setup_command: Vec::new(),
+        os: None,
+        arch: None,
+        docker_image: None,
+        macos_version: None,
+        vcpus: None,
+        memory_gb: None,
     }
 }
 
@@ -106,53 +97,35 @@ fn resolve_updated_name_renames_only_with_uid() {
 }
 
 #[test]
-fn resolve_runner_matches_exact_uid() {
-    let runners = vec![make_runner("uid-1", "alpha"), make_runner("uid-2", "beta")];
-    let resolved = resolve_runner(&runners, Some("uid-2"), None).unwrap();
-    assert_eq!(resolved.uid.inner(), "uid-2");
-}
-
-#[test]
-fn resolve_runner_falls_back_to_name_when_identifier_is_not_a_uid() {
-    let runners = vec![make_runner("uid-1", "alpha"), make_runner("uid-2", "beta")];
-    let resolved = resolve_runner(&runners, Some("beta"), None).unwrap();
-    assert_eq!(resolved.uid.inner(), "uid-2");
-}
-
-#[test]
-fn resolve_runner_prefers_uid_match_over_name_param() {
-    let runners = vec![make_runner("uid-1", "alpha"), make_runner("uid-2", "beta")];
-    let resolved = resolve_runner(&runners, Some("uid-1"), Some("new-name")).unwrap();
-    assert_eq!(resolved.uid.inner(), "uid-1");
-}
-
-#[test]
-fn resolve_runner_uses_name_arg_when_identifier_is_absent() {
-    let runners = vec![make_runner("uid-1", "alpha")];
-    let resolved = resolve_runner(&runners, None, Some("alpha")).unwrap();
-    assert_eq!(resolved.uid.inner(), "uid-1");
-}
-
-#[test]
-fn resolve_runner_errors_when_name_is_ambiguous() {
-    let runners = vec![make_runner("uid-1", "dup"), make_runner("uid-2", "dup")];
-    let err = resolve_runner(&runners, Some("dup"), None).unwrap_err();
-    assert!(
-        err.to_string().contains("Multiple runners match"),
-        "got: {err}"
+fn update_selector_uses_identifier_for_both_uid_and_name() {
+    // identifier is ambiguous (uid or name), so it feeds both fields; the
+    // server tries uid first and falls back to name.
+    let args = update_args(Some("uid-or-name"), None);
+    let selector = update_selector(&args);
+    assert_eq!(
+        selector.uid.map(|id| id.inner().to_string()),
+        Some("uid-or-name".to_string())
     );
+    assert_eq!(selector.name.as_deref(), Some("uid-or-name"));
 }
 
 #[test]
-fn resolve_runner_errors_when_not_found() {
-    let runners = vec![make_runner("uid-1", "alpha")];
-    let err = resolve_runner(&runners, Some("missing"), None).unwrap_err();
-    assert!(err.to_string().contains("not found"), "got: {err}");
+fn update_selector_ignores_rename_value_when_identifier_is_given() {
+    // --name alongside a positional identifier is a rename instruction, not a
+    // lookup key, so it must not leak into the selector's name field.
+    let args = update_args(Some("uid-1"), Some("renamed"));
+    let selector = update_selector(&args);
+    assert_eq!(
+        selector.uid.map(|id| id.inner().to_string()),
+        Some("uid-1".to_string())
+    );
+    assert_eq!(selector.name.as_deref(), Some("uid-1"));
 }
 
 #[test]
-fn resolve_runner_errors_when_neither_identifier_nor_name_given() {
-    let runners = vec![make_runner("uid-1", "alpha")];
-    let err = resolve_runner(&runners, None, None).unwrap_err();
-    assert!(err.to_string().contains("required"), "got: {err}");
+fn update_selector_uses_name_flag_as_sole_selector_when_identifier_is_absent() {
+    let args = update_args(None, Some("by-name"));
+    let selector = update_selector(&args);
+    assert_eq!(selector.uid, None);
+    assert_eq!(selector.name.as_deref(), Some("by-name"));
 }
