@@ -298,6 +298,14 @@ pub fn format_credits(credits: f32) -> String {
     }
 }
 
+/// Formats an accumulated cost in US cents as dollars (`3.2` cents ->
+/// `$0.03`), matching the TUI's equivalent helper
+/// (`crates/warp_tui/src/usage.rs::format_cost`) so the same underlying
+/// number reads identically in both front-ends.
+pub fn format_cost(cost_in_cents: f32) -> String {
+    format!("${:.2}", cost_in_cents / 100.0)
+}
+
 /// Builds the `"12,345 tokens, $0.36"`-style parenthetical shared by
 /// [`format_credits_with_cost`] and the conversation details panel's
 /// compact "Credits used" line, gated by `FeatureFlag::PricingTransparency`.
@@ -327,7 +335,7 @@ pub fn format_usage_parenthetical(
     let token_part = tokens
         .filter(|&tokens| tokens > 0)
         .map(|tokens| format!("{} tokens", tokens.separate_with_commas()));
-    let cost_part = cost_in_cents.map(|cost_in_cents| format!("${:.2}", cost_in_cents / 100.0));
+    let cost_part = cost_in_cents.map(format_cost);
     match (token_part, cost_part) {
         (Some(token_part), Some(cost_part)) => Some(format!("{token_part}, {cost_part}")),
         (Some(token_part), None) => Some(token_part),
