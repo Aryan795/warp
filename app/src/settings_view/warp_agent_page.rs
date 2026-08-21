@@ -1965,10 +1965,13 @@ impl WarpAgentPageView {
             ],
         ));
 
+        let custom_inference_header_view_handle = ctx.handle();
         categories.push(Category::with_header(
             CategoryHeader::new("Custom Inference").with_trailing_element(
-                |view: &Self, _appearance, app| {
-                    if CustomInferenceVisibility::compute(app).show_custom_inference {
+                move |view: &Self, _appearance, app| {
+                    if CustomInferenceVisibility::compute(&custom_inference_header_view_handle, app)
+                        .show_custom_inference
+                    {
                         view.custom_inference_add_button.as_ref(app).render(app)
                     } else {
                         Empty::new().finish()
@@ -5290,7 +5293,7 @@ impl SettingsWidget for ApiKeysWidget {
     }
 
     fn should_render(&self, app: &AppContext) -> bool {
-        let visibility = CustomInferenceVisibility::compute(app);
+        let visibility = CustomInferenceVisibility::compute(&self.view_handle, app);
         visibility.show_section() || visibility.managed_byok_byoe_enabled
     }
 
