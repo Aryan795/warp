@@ -5166,6 +5166,34 @@ impl AIBlock {
         )
     }
 
+    /// Fully selects this block's `SelectableArea`, from its top-left corner to its bottom-right
+    /// corner. Used instead of [`Self::start_selection_at_min_point`] when priming for a direct
+    /// (non-drag) cross-block Shift+click extension, which won't emit a subsequent drag event to
+    /// establish a precise tail the way a physical drag does.
+    pub fn fully_select_from_min_point(&self, selection_type: SelectionType) {
+        self.state_handles
+            .selection_handle
+            .select_full_bounds_outside(
+                SelectionBound::TopLeft,
+                SelectionBound::BottomRight,
+                selection_type,
+            )
+    }
+
+    /// Fully selects this block's `SelectableArea`, from its bottom-right corner to its top-left
+    /// corner. Used instead of [`Self::start_selection_at_max_point`] when priming for a direct
+    /// (non-drag) cross-block Shift+click extension, which won't emit a subsequent drag event to
+    /// establish a precise tail the way a physical drag does.
+    pub fn fully_select_from_max_point(&self, selection_type: SelectionType) {
+        self.state_handles
+            .selection_handle
+            .select_full_bounds_outside(
+                SelectionBound::BottomRight,
+                SelectionBound::TopLeft,
+                selection_type,
+            )
+    }
+
     /// Clears all text selections in all components within this `AIBlock`'s view sub-hierarchy.
     /// This includes the `AIBlock` level and all child views (code blocks, etc.).
     pub fn clear_all_selections(&mut self, ctx: &mut ViewContext<Self>) {

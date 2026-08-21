@@ -18918,6 +18918,10 @@ impl TerminalView {
             point,
             selection_type,
             position,
+            // A drag will continue to emit `LeftMouseDragged` events, which establish a precise
+            // tail for any rich-content block the drag passes through; head-only priming is
+            // enough here, and preserves today's progressive-highlight-while-dragging behavior.
+            false,
             ctx,
         );
 
@@ -18969,6 +18973,13 @@ impl TerminalView {
             head_point,
             SelectionType::Simple,
             position,
+            // A direct Shift+click extension has no guarantee of a subsequent drag event to
+            // establish a rich-content block's tail (unlike `begin_block_text_selection`, whose
+            // caller drags immediately after mouse-down in the common case). Fully select any
+            // rich-content block this extension passes through so it renders and copies
+            // correctly even if the gesture ends here as a plain click. A later real drag tick
+            // (if one occurs) still overrides this with a precise position, same as today.
+            true,
             ctx,
         );
 
@@ -18983,11 +18994,16 @@ impl TerminalView {
     ///
     /// `reference_point` is the point relative to which each AI block's position is compared: the
     /// click point when starting a fresh selection, or the fixed head point when extending one.
+    ///
+    /// When `fully_select` is `true`, each primed block's tail is also set to the opposite
+    /// extreme corner, so the block renders and copies as fully selected immediately rather than
+    /// waiting on a drag event that may never arrive (see [`Self::extend_block_text_selection`]).
     fn prime_rich_content_selections_for_cross_block_selection(
         &mut self,
         reference_point: BlockListPoint,
         selection_type: SelectionType,
         position: Vector2F,
+        fully_select: bool,
         ctx: &mut ViewContext<Self>,
     ) {
         if self.rich_content_views.is_empty() {
@@ -19030,12 +19046,20 @@ impl TerminalView {
                     if (ai_block_total_index < reference_total_index && !is_inverted_blocklist)
                         || (ai_block_total_index > reference_total_index && is_inverted_blocklist)
                     {
-                        ai_block_view.start_selection_at_max_point(selection_type, x_pos);
+                        if fully_select {
+                            ai_block_view.fully_select_from_max_point(selection_type);
+                        } else {
+                            ai_block_view.start_selection_at_max_point(selection_type, x_pos);
+                        }
                     } else if (ai_block_total_index > reference_total_index
                         && !is_inverted_blocklist)
                         || (ai_block_total_index < reference_total_index && is_inverted_blocklist)
                     {
-                        ai_block_view.start_selection_at_min_point(selection_type, x_pos);
+                        if fully_select {
+                            ai_block_view.fully_select_from_min_point(selection_type);
+                        } else {
+                            ai_block_view.start_selection_at_min_point(selection_type, x_pos);
+                        }
                     }
                 }
 

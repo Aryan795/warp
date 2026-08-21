@@ -191,6 +191,29 @@ impl SelectionHandle {
         selection.is_selecting = true;
     }
 
+    /// Primes this area with a complete external selection spanning its entire visible extent,
+    /// with `head` fixed at one extreme corner and `tail` at the opposite corner. Unlike
+    /// [`Self::start_selection_outside`] (which only sets the head and relies on a subsequent
+    /// drag event to establish the tail), this is used when a cross-block point-based selection
+    /// needs this area to render and copy as fully selected immediately, without waiting for a
+    /// drag event that may never arrive (e.g. a direct Shift+click extension).
+    pub fn select_full_bounds_outside(
+        &self,
+        head: SelectionBound,
+        tail: SelectionBound,
+        unit: SelectionType,
+    ) {
+        let mut selection = self.selection.lock().expect("Should not be poisoned.");
+        selection.head = Some(head);
+        selection.tail = Some(tail);
+        selection.is_reversed = matches!(
+            head,
+            SelectionBound::BottomRight | SelectionBound::Bottom { .. }
+        );
+        selection.unit = unit;
+        selection.is_selecting = true;
+    }
+
     /// Whether there is an active selection in the SelectableArea.
     /// An active selection is not necessarily a non-empty selection.
     pub fn is_selecting(&self) -> bool {
@@ -211,6 +234,26 @@ impl SelectionHandle {
     pub fn selection_type(&self) -> SelectionType {
         self.selection.lock().expect("Mutex is not poisoned.").unit
     }
+}
+
+/// How a Shift+click at an in-bounds `SelectableArea` should be handled.
+enum ShiftClickHandling {
+    /// Extend this area's own completed, non-empty local selection to the clicked position,
+    /// keeping its fixed head. Applies when the fixed endpoint (head) is relative to this area,
+    /// i.e. an earlier plain click-and-drag selected text entirely within it.
+    ExtendLocally,
+    /// This area's head was installed externally (see
+    /// [`SelectionHandle::start_selection_outside`]) by a point-based selection (e.g. the
+    /// terminal block list) that crosses through this area. That point-based selection owns
+    /// this gesture: do nothing here (no local extend, no clear-and-begin) and let the event
+    /// continue to the block list, whose own `Extend` action re-primes this area's bound for
+    /// the new endpoint. This is correct whether or not the point-based selection is still
+    /// "live" (`is_selecting`), since a completed point-based selection leaves participating
+    /// areas with an external bound but `is_selecting = false`.
+    DeferToPointBasedSelection,
+    /// No applicable non-empty selection to extend; use the current click behavior
+    /// (clear-and-begin).
+    NotApplicable,
 }
 
 impl SelectableArea {
@@ -277,32 +320,25 @@ impl SelectableArea {
         }
     }
 
-    /// Returns whether a Shift+click at this (in-bounds) area should extend the current
-    /// selection rather than clear it and begin a new one. Applies when either:
-    /// - This area owns a non-empty selection whose fixed endpoint (head) is relative to it,
-    ///   i.e. an earlier plain click-and-drag selected text entirely within this area; or
-    /// - This area has an externally installed minimum/maximum bound (see
-    ///   [`SelectionHandle::start_selection_outside`]) installed by a point-based selection
-    ///   (e.g. the terminal block list) that crosses through this area.
-    fn shift_click_extends_selection(&self) -> bool {
-        let (head, is_selecting) = {
-            let selection_state = self
-                .selectable_area_state
-                .selection
-                .lock()
-                .expect("Should not be poisoned.");
-            (selection_state.head, selection_state.is_selecting)
-        };
+    fn shift_click_handling(&self) -> ShiftClickHandling {
+        let head = self
+            .selectable_area_state
+            .selection
+            .lock()
+            .expect("Should not be poisoned.")
+            .head;
 
         match head {
-            Some(SelectionBound::Relative(_)) => !self.is_current_selection_empty(),
+            Some(SelectionBound::Relative(_)) if !self.is_current_selection_empty() => {
+                ShiftClickHandling::ExtendLocally
+            }
+            Some(SelectionBound::Relative(_)) | None => ShiftClickHandling::NotApplicable,
             Some(
                 SelectionBound::TopLeft
                 | SelectionBound::BottomRight
                 | SelectionBound::Top { .. }
                 | SelectionBound::Bottom { .. },
-            ) => is_selecting,
-            None => false,
+            ) => ShiftClickHandling::DeferToPointBasedSelection,
         }
     }
 
@@ -347,8 +383,14 @@ impl SelectableArea {
     ) -> bool {
         let in_bounds = is_mouse_in(self.origin, self.size, ctx, position);
 
-        if modifiers.shift && in_bounds && self.shift_click_extends_selection() {
-            return self.extend_selection_on_shift_click(position);
+        if modifiers.shift && in_bounds {
+            match self.shift_click_handling() {
+                ShiftClickHandling::ExtendLocally => {
+                    return self.extend_selection_on_shift_click(position);
+                }
+                ShiftClickHandling::DeferToPointBasedSelection => return false,
+                ShiftClickHandling::NotApplicable => {}
+            }
         }
 
         let Some(selectable_child_ref) = self.child.as_selectable_element() else {
@@ -968,7 +1010,10 @@ mod tests {
             state.unit = SelectionType::Simple;
             state.is_selecting = false;
         }
-        assert!(area.shift_click_extends_selection());
+        assert!(matches!(
+            area.shift_click_handling(),
+            ShiftClickHandling::ExtendLocally
+        ));
 
         // Shift+click extends the tail to char index 6 ("hello "), keeping the head fixed.
         let new_tail_position = point_for_char_index(origin, 6);
@@ -1041,41 +1086,86 @@ mod tests {
             state.unit = SelectionType::Simple;
             state.is_selecting = false;
         }
-        assert!(!area.shift_click_extends_selection());
+        assert!(matches!(
+            area.shift_click_handling(),
+            ShiftClickHandling::NotApplicable
+        ));
     }
 
     #[test]
-    fn shift_click_extends_an_active_externally_primed_bound() {
+    fn shift_click_defers_an_externally_primed_bound_to_the_point_based_selection() {
         let origin = vec2f(100.0, 200.0);
-        let (mut area, handle) = selectable_area_over_hello_world(origin);
+        let (area, handle) = selectable_area_over_hello_world(origin);
 
         // A point-based selection elsewhere (e.g. the terminal block list) primed this area
         // with an external bound while its gesture is still active, as
         // `TerminalView::extend_block_text_selection` does for intervening rich-content blocks.
+        // `on_mouse_down` must not handle this locally: it defers entirely to the block list's
+        // own `Extend` action (see `BlockListElement::mouse_down`), which re-primes this area's
+        // bound for the new endpoint (see `select_full_bounds_outside_*` tests below).
         handle.start_selection_outside(SelectionBound::TopLeft, SelectionType::Simple);
-        assert!(area.shift_click_extends_selection());
+        assert!(matches!(
+            area.shift_click_handling(),
+            ShiftClickHandling::DeferToPointBasedSelection
+        ));
+    }
 
-        assert!(area.extend_selection_on_shift_click(point_for_char_index(origin, 4)));
-        let state = handle.selection.lock().unwrap();
-        assert_eq!(state.head, Some(SelectionBound::TopLeft));
+    #[test]
+    fn shift_click_defers_a_completed_externally_primed_bound_regardless_of_is_selecting() {
+        let origin = vec2f(100.0, 200.0);
+        let (area, handle) = selectable_area_over_hello_world(origin);
+
+        // A completed point-based terminal selection leaves this area with an external bound but
+        // resets `is_selecting` to `false` on mouse-up. A later Shift+click landing here must
+        // still defer to the block list (not fall back to clear-and-begin), since the block list
+        // is the source of truth for whether its own selection is still relevant.
+        handle.start_selection_outside(SelectionBound::TopLeft, SelectionType::Simple);
+        handle.selection.lock().unwrap().is_selecting = false;
+
+        assert!(matches!(
+            area.shift_click_handling(),
+            ShiftClickHandling::DeferToPointBasedSelection
+        ));
+    }
+
+    #[test]
+    fn select_full_bounds_outside_fully_selects_the_area() {
+        let origin = vec2f(100.0, 200.0);
+        let (area, handle) = selectable_area_over_hello_world(origin);
+
+        // Used by `TerminalView::extend_block_text_selection` for a direct (non-drag) Shift+click
+        // extension that crosses this area, since that gesture won't emit a subsequent drag event
+        // to establish a precise tail via `update_selection`.
+        handle.select_full_bounds_outside(
+            SelectionBound::TopLeft,
+            SelectionBound::BottomRight,
+            SelectionType::Simple,
+        );
+
         assert_eq!(
-            state.tail,
-            Some(SelectionBound::Relative(
-                point_for_char_index(origin, 4) - origin
-            ))
+            area.get_current_selection_text_fragments()
+                .and_then(|fragments| fragments.into_iter().next())
+                .map(|fragment| fragment.text),
+            Some("hello world".to_string())
         );
     }
 
     #[test]
-    fn shift_click_does_not_extend_a_stale_externally_primed_bound() {
+    fn select_full_bounds_outside_reverses_when_head_is_the_bottom_right() {
         let origin = vec2f(100.0, 200.0);
-        let (_area, handle) = selectable_area_over_hello_world(origin);
+        let (area, handle) = selectable_area_over_hello_world(origin);
 
-        // A bound was primed by a prior, now-completed gesture (`is_selecting` was reset to
-        // `false` by that gesture's mouse-up). It is no longer a live anchor to extend from.
-        handle.start_selection_outside(SelectionBound::TopLeft, SelectionType::Simple);
-        handle.selection.lock().unwrap().is_selecting = false;
+        handle.select_full_bounds_outside(
+            SelectionBound::BottomRight,
+            SelectionBound::TopLeft,
+            SelectionType::Simple,
+        );
 
-        assert!(!_area.shift_click_extends_selection());
+        assert_eq!(
+            area.get_current_selection_text_fragments()
+                .and_then(|fragments| fragments.into_iter().next())
+                .map(|fragment| fragment.text),
+            Some("hello world".to_string())
+        );
     }
 }
