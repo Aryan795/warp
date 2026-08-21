@@ -181,6 +181,7 @@ fn register_tests() -> HashMap<&'static str, BoxedBuilderFn> {
     register_test!(test_waterfall_input);
     register_test!(test_waterfall_input_text_selection);
     register_test!(test_shift_click_extends_previous_selection_then_plain_click_resets);
+    register_test!(test_shift_click_extend_selection_recording);
     register_test!(test_waterfall_input_scrolling);
     register_test!(test_waterfall_input_after_command_execution);
     register_test!(test_waterfall_input_alt_grid);

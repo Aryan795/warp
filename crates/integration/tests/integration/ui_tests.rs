@@ -45,6 +45,11 @@ integration_tests! {
     // `test_waterfall_input_text_selection` above.
     #[ignore]
     test_shift_click_extends_previous_selection_then_plain_click_resets,
+    // Manual test: records a video of every Shift+click extend scenario from
+    // specs/CORE-762/PRODUCT.md; requires a real display for frame capture, same as
+    // `test_video_recording` below.
+    #[ignore = "Manual test: requires real display for frame capture"]
+    test_shift_click_extend_selection_recording,
     #[ignore = "Affected by agent_view feature flag UI changes"]
     test_waterfall_input_scrolling,
     #[ignore = "Flakes in CI"]
