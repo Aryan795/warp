@@ -1479,12 +1479,15 @@ impl BlockListElement {
     /// selection or fall back to whole-block range selection. Applies when there is a current,
     /// non-empty point-based selection; rich-content-only selections are resolved separately by
     /// their owning `SelectableArea`.
-    fn shift_click_extends_text_selection(&self, modifiers: &ModifiersState) -> bool {
+    /// Callers must pass the already-locked `BlockList` rather than locking `self.model` again:
+    /// this is always called from within `mouse_down`'s own `self.model.lock()` scope, and
+    /// `FairMutex` is not reentrant.
+    fn shift_click_extends_text_selection(
+        modifiers: &ModifiersState,
+        block_list: &BlockList,
+    ) -> bool {
         modifiers.shift
-            && self
-                .model
-                .lock()
-                .block_list()
+            && block_list
                 .selection()
                 .is_some_and(|selection| !selection.is_empty())
     }
@@ -1644,21 +1647,23 @@ impl BlockListElement {
                                 });
                             }
 
-                            let text_select_action =
-                                if self.shift_click_extends_text_selection(modifiers) {
-                                    BlockTextSelectAction::Extend {
-                                        point,
-                                        side,
-                                        position,
-                                    }
-                                } else {
-                                    BlockTextSelectAction::Begin {
-                                        point,
-                                        side,
-                                        selection_type,
-                                        position,
-                                    }
-                                };
+                            let text_select_action = if Self::shift_click_extends_text_selection(
+                                modifiers,
+                                model.block_list(),
+                            ) {
+                                BlockTextSelectAction::Extend {
+                                    point,
+                                    side,
+                                    position,
+                                }
+                            } else {
+                                BlockTextSelectAction::Begin {
+                                    point,
+                                    side,
+                                    selection_type,
+                                    position,
+                                }
+                            };
                             ctx.dispatch_typed_action(TerminalAction::BlockTextSelect(
                                 text_select_action,
                             ));
@@ -1694,21 +1699,23 @@ impl BlockListElement {
                                 action: BlockSelectAction::MouseDown(None),
                                 should_redetermine_focus,
                             });
-                            let text_select_action =
-                                if self.shift_click_extends_text_selection(modifiers) {
-                                    BlockTextSelectAction::Extend {
-                                        point,
-                                        side,
-                                        position,
-                                    }
-                                } else {
-                                    BlockTextSelectAction::Begin {
-                                        point,
-                                        side,
-                                        selection_type,
-                                        position,
-                                    }
-                                };
+                            let text_select_action = if Self::shift_click_extends_text_selection(
+                                modifiers,
+                                model.block_list(),
+                            ) {
+                                BlockTextSelectAction::Extend {
+                                    point,
+                                    side,
+                                    position,
+                                }
+                            } else {
+                                BlockTextSelectAction::Begin {
+                                    point,
+                                    side,
+                                    selection_type,
+                                    position,
+                                }
+                            };
                             ctx.dispatch_typed_action(TerminalAction::BlockTextSelect(
                                 text_select_action,
                             ));
