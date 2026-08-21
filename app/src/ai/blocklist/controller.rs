@@ -27,7 +27,7 @@ use warp_core::assertions::safe_assert;
 use warp_errors::report_error;
 use warp_multi_agent_api::{Task, ToolType, message};
 use warpui::r#async::{SpawnedFutureHandle, Timer};
-use warpui::{AppContext, Entity, EntityId, ModelContext, ModelHandle, SingletonEntity, WindowId};
+use warpui::{AppContext, Entity, EntityId, ModelContext, ModelHandle, SingletonEntity};
 
 use self::response_stream::{PendingResume, RecoveryBudget, ResponseStream, ResponseStreamEvent};
 use super::action_model::{BlocklistAIActionEvent, BlocklistAIActionModel};
@@ -68,7 +68,6 @@ use crate::network::NetworkStatus;
 use crate::notebooks::editor::model::FileLinkResolutionContext;
 use crate::persistence::ModelEvent;
 use crate::send_telemetry_from_ctx;
-use crate::server::ids::ServerId;
 use crate::server::server_api::AIApiError;
 #[cfg(not(target_family = "wasm"))]
 use crate::server::server_api::ServerApiProvider;
@@ -83,7 +82,7 @@ use crate::terminal::model::terminal_model::TerminalModel;
 use crate::terminal::view::inline_banner::ZeroStatePromptSuggestionType;
 use crate::workspace::OneTimeModalModel;
 use crate::workspaces::update_manager::TeamUpdateManager;
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces};
 
 #[derive(Debug, Clone)]
 pub struct SessionContext {
@@ -324,9 +323,7 @@ pub struct BlocklistAIController {
     /// The ID of the terminal surface this controller is associated with.
     terminal_surface_id: EntityId,
 
-    /// The window this controller's terminal surface lives in, used to resolve the requesting
-    /// window's currently-selected team fresh at request time (see [`Self::team_uid`]).
-    window_id: WindowId,
+    team_context: Option<TeamContext>,
 
     should_refresh_available_llms_on_stream_finish: bool,
 
@@ -427,25 +424,9 @@ impl BlocklistAIController {
         SessionContext::from_session(self.active_session.as_ref(ctx), ctx).skill_path_origin()
     }
 
-    /// The team currently selected for this controller's window, resolved fresh from `ctx` so
-    /// callers always see the window's current team rather than one captured earlier.
-    pub(crate) fn team_uid(&self, ctx: &AppContext) -> Option<ServerId> {
-        UserWorkspaces::as_ref(ctx).team_uid_for_window(self.window_id)
-    }
-
-    /// Updates the window this controller's terminal surface lives in. Cross-window tab drag can
-    /// re-parent the terminal pane (and this model along with it) into another window, which
-    /// would otherwise leave [`Self::window_id`] pointing at the source window and resolve
-    /// [`Self::team_uid`] against the wrong window's team. The owning [`TerminalView`](crate::terminal::view::TerminalView)
-    /// calls this from its own `on_window_transferred` hook, since models don't receive that
-    /// notification directly.
-    pub(crate) fn set_window_id(&mut self, window_id: WindowId) {
-        self.window_id = window_id;
-    }
-
     /// Creates a controller for a terminal surface.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         input_model: ModelHandle<BlocklistAIInputModel>,
         context_model: ModelHandle<BlocklistAIContextModel>,
         conversation_selection: ConversationSelectionHandle,
@@ -453,7 +434,7 @@ impl BlocklistAIController {
         active_session: ModelHandle<ActiveSession>,
         terminal_model: Arc<FairMutex<TerminalModel>>,
         terminal_surface_id: EntityId,
-        window_id: WindowId,
+        team_context: Option<TeamContext>,
         ctx: &mut ModelContext<Self>,
     ) -> Self {
         ctx.subscribe_to_model(&action_model, move |me, _, event, ctx| {
@@ -648,7 +629,7 @@ impl BlocklistAIController {
             terminal_model,
             in_flight_response_streams: PendingResponseStreams::new(),
             terminal_surface_id,
-            window_id,
+            team_context,
             should_refresh_available_llms_on_stream_finish: false,
             shared_session_state: shared_session::SharedSessionState::default(),
             ambient_agent_task_id: None,
@@ -2299,13 +2280,14 @@ impl BlocklistAIController {
 
         let mut request_params = api::RequestParams::new(
             Some(self.terminal_surface_id),
+            self.team_context.as_ref(),
             SessionContext::from_session(self.active_session.as_ref(ctx), ctx),
             &request_input,
             conversation_data,
             metadata,
             ctx,
         );
-        request_params.apply_team_byo_policy(self.team_uid(ctx), ctx);
+        request_params.apply_team_byo_policy(self.team_context.as_ref(), ctx);
 
         Ok((conversation_id, request_params))
     }
@@ -2375,6 +2357,19 @@ impl BlocklistAIController {
     /// Set the per-session directory for downloading file attachments.
     pub fn set_attachments_download_dir(&mut self, dir: std::path::PathBuf) {
         self.attachments_download_dir = Some(dir);
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn force_refresh_geap_credentials(&mut self, ctx: &mut ModelContext<Self>) {
+        use ::ai::api_keys::ApiKeyManager;
+
+        ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
+            crate::ai::geap_credentials::force_refresh_geap_credentials_for_context(
+                manager,
+                self.team_context.as_ref(),
+                ctx,
+            );
+        });
     }
 
     fn start_new_conversation_for_request<'a>(
@@ -2519,29 +2514,29 @@ impl BlocklistAIController {
             &conversation_data.server_conversation_token,
         );
 
-        // Safety net: re-arm the Gemini Enterprise (GEAP) credential refresh
-        // chain if it was parked or never armed, so upcoming requests can
-        // authenticate. The connected Grok subscription's request-time OAuth
-        // refresh is handled in the response stream's send path
-        // (`ResponseStream::spawn_request`).
-        #[cfg(not(target_family = "wasm"))]
-        {
-            use ::ai::api_keys::ApiKeyManager;
-
-            ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
-                crate::ai::geap_credentials::refresh_geap_credentials_if_needed(manager, ctx);
-            });
-        }
-
         let mut request_params = api::RequestParams::new(
             Some(self.terminal_surface_id),
+            self.team_context.as_ref(),
             SessionContext::from_session(self.active_session.as_ref(ctx), ctx),
             &request_input,
             conversation_data.clone(),
             query_metadata,
             ctx,
         );
-        request_params.apply_team_byo_policy(self.team_uid(ctx), ctx);
+        request_params.apply_team_byo_policy(self.team_context.as_ref(), ctx);
+
+        #[cfg(not(target_family = "wasm"))]
+        {
+            use ::ai::api_keys::ApiKeyManager;
+
+            ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
+                crate::ai::geap_credentials::refresh_geap_credentials_if_needed_for_binding(
+                    manager,
+                    request_params.geap_mint_binding.as_ref(),
+                    ctx,
+                );
+            });
+        }
         request_params.parent_agent_id = parent_agent_id;
         request_params.agent_name = agent_name;
 

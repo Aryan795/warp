@@ -31,11 +31,10 @@ use crate::ai::execution_profiles::AIExecutionProfileAppExt;
 use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
 use crate::ai::llms::{LLMId, LLMPreferences};
 use crate::ai::mcp::TemplatableMCPServerManager;
-use crate::server::ids::ServerId;
 use crate::server::server_api::AIApiError;
 use crate::settings::AISettings;
 use crate::terminal::safe_mode_settings::get_secret_obfuscation_mode;
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces};
 
 /// Unique, server-generated conversation-scoped token to be roundtripped to the API when sending
 /// requests that follow-up within a given conversation.
@@ -143,6 +142,7 @@ pub struct RequestParams {
 
     /// User-provided API keys for AI providers (BYO API Key).
     pub api_keys: Option<warp_multi_agent_api::request::settings::ApiKeys>,
+    pub(crate) geap_mint_binding: Option<::ai::api_keys::GeapMintBinding>,
     /// User-provided custom model providers (BYOK endpoints).
     pub custom_model_providers:
         Option<warp_multi_agent_api::request::settings::CustomModelProviders>,
@@ -209,6 +209,7 @@ impl RequestParams {
             planning_enabled: false,
             should_redact_secrets: false,
             api_keys: None,
+            geap_mint_binding: None,
             custom_model_providers: None,
             custom_model_routers: None,
             allow_use_of_warp_credits: false,
@@ -225,8 +226,9 @@ impl RequestParams {
         }
     }
 
-    pub fn new(
+    pub(crate) fn new(
         terminal_view_id: Option<EntityId>,
+        team_context: Option<&TeamContext>,
         session_context: SessionContext,
         request_input: &RequestInput,
         conversation: ConversationData,
@@ -315,13 +317,14 @@ impl RequestParams {
         // struct is cloned across call sites and has no window to resolve a team from.
         let is_byo_enabled = user_workspaces.is_byo_api_key_enabled(app);
         #[cfg(not(target_family = "wasm"))]
-        let geap_binding = crate::ai::geap_credentials::current_geap_policy(app).mint_binding();
+        let geap_binding =
+            crate::ai::geap_credentials::geap_policy_for_context(team_context, app).mint_binding();
         #[cfg(target_family = "wasm")]
         let geap_binding: Option<::ai::api_keys::GeapMintBinding> = None;
         let api_keys = api_key_manager.api_keys_for_request(
             is_byo_enabled,
-            user_workspaces.is_aws_bedrock_credentials_enabled(app),
-            geap_binding,
+            user_workspaces.is_aws_bedrock_credentials_enabled_for_context(team_context, app),
+            geap_binding.clone(),
         );
         let is_custom_inference_enabled = user_workspaces.is_custom_inference_enabled(app);
         let custom_model_providers =
@@ -407,6 +410,7 @@ impl RequestParams {
             planning_enabled: true,
             should_redact_secrets,
             api_keys,
+            geap_mint_binding: geap_binding,
             custom_model_providers,
             custom_model_routers,
             allow_use_of_warp_credits,
@@ -423,28 +427,33 @@ impl RequestParams {
         }
     }
 
-    /// Applies `team_uid`'s team `team_byo` policy on top of the workspace entitlement already
+    /// Applies `context`'s team `team_byo` policy on top of the workspace entitlement already
     /// baked into `self`'s credentials, stripping member-provided credentials `team_byo`
-    /// disallows. Callers resolve `team_uid` fresh from the requesting window immediately before
-    /// calling this, since `self` may have been constructed earlier and cloned.
-    pub(crate) fn apply_team_byo_policy(&mut self, team_uid: Option<ServerId>, app: &AppContext) {
+    /// disallows. The caller supplies the same operation scope used to construct `self`.
+    pub(crate) fn apply_team_byo_policy(
+        &mut self,
+        context: Option<&TeamContext>,
+        app: &AppContext,
+    ) {
         let user_workspaces = UserWorkspaces::as_ref(app);
         if self.api_keys.is_some()
-            && !user_workspaces.are_member_byo_keys_allowed_for_team(team_uid)
+            && !user_workspaces.are_member_byo_keys_allowed_for_context(context)
         {
             let api_key_manager = ApiKeyManager::as_ref(app);
             #[cfg(not(target_family = "wasm"))]
-            let geap_binding = crate::ai::geap_credentials::current_geap_policy(app).mint_binding();
+            let geap_binding =
+                crate::ai::geap_credentials::geap_policy_for_context(context, app).mint_binding();
             #[cfg(target_family = "wasm")]
             let geap_binding: Option<::ai::api_keys::GeapMintBinding> = None;
             self.api_keys = api_key_manager.api_keys_for_request(
                 false,
-                user_workspaces.is_aws_bedrock_credentials_enabled(app),
-                geap_binding,
+                user_workspaces.is_aws_bedrock_credentials_enabled_for_context(context, app),
+                geap_binding.clone(),
             );
+            self.geap_mint_binding = geap_binding;
         }
         if self.custom_model_providers.is_some()
-            && !user_workspaces.are_member_byo_endpoints_allowed_for_team(team_uid)
+            && !user_workspaces.are_member_byo_endpoints_allowed_for_context(context)
         {
             self.custom_model_providers = None;
         }

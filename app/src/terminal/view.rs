@@ -3549,6 +3549,7 @@ impl TerminalView {
             )
         });
         let window_id = ctx.window_id();
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_window(window_id);
         let ai_controller = ctx.add_model(|ctx| {
             BlocklistAIController::new(
                 ai_input_model.clone(),
@@ -3558,7 +3559,7 @@ impl TerminalView {
                 active_session.clone(),
                 model.clone(),
                 terminal_view_id,
-                window_id,
+                team_context,
                 ctx,
             )
         });
@@ -4242,7 +4243,15 @@ impl TerminalView {
 
         ctx.subscribe_to_model(&AISettings::handle(ctx), |me, _, ai_settings_event, ctx| {
             if let AISettingsChangedEvent::AwsBedrockCredentialsEnabled { .. } = ai_settings_event
-                && !UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_enabled(ctx)
+                && {
+                    let workspaces = UserWorkspaces::as_ref(ctx);
+                    let context =
+                        workspaces.team_render_context_for_view_handle(&ctx.handle(), ctx);
+                    !workspaces.is_aws_bedrock_credentials_enabled_for_render_context(
+                        context.as_ref(),
+                        ctx,
+                    )
+                }
             {
                 me.remove_aws_bedrock_login_banner(ctx);
             }
@@ -10853,8 +10862,10 @@ impl TerminalView {
             return;
         }
 
-        // Check if AWS Bedrock is available in the workspace
-        if !UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_enabled(ctx) {
+        let workspaces = UserWorkspaces::as_ref(ctx);
+        let context = workspaces.team_render_context_for_view_handle(&ctx.handle(), ctx);
+        if !workspaces.is_aws_bedrock_credentials_enabled_for_render_context(context.as_ref(), ctx)
+        {
             return;
         }
 
@@ -28664,12 +28675,9 @@ impl View for TerminalView {
         &mut self,
         _source_window_id: WindowId,
         target_window_id: WindowId,
-        ctx: &mut ViewContext<Self>,
+        _: &mut ViewContext<Self>,
     ) {
         self.window_id = target_window_id;
-        self.ai_controller.update(ctx, |ai_controller, _| {
-            ai_controller.set_window_id(target_window_id);
-        });
     }
 
     fn on_focus(&mut self, focus_ctx: &FocusContext, ctx: &mut ViewContext<Self>) {

@@ -41,6 +41,13 @@ const GROK_REFRESH_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::f
 /// giving up and sending anyway.
 #[cfg(not(target_family = "wasm"))]
 const GEAP_REFRESH_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+#[cfg(not(target_family = "wasm"))]
+fn should_rearm_geap_request_after_refresh(
+    outcome: ::ai::api_keys::GeapRefreshOutcome,
+    failure_applies_to_binding: bool,
+) -> bool {
+    outcome == ::ai::api_keys::GeapRefreshOutcome::Failed && !failure_applies_to_binding
+}
 
 /// The recovery budget for one request and the retries and resumes that recover it,
 /// carried forward across each of those attempts.
@@ -506,12 +513,8 @@ impl ResponseStream {
         );
     }
 
-    /// Sends the request for `request_id`. When the request's model is served by
-    /// the connected Grok subscription or may route to Gemini Enterprise, and
-    /// that credential is already past hard expiry, this first blocks on a
-    /// single shared refresh (owned by `ApiKeyManager`, so only one runs at a
-    /// time) before sending. Requests with valid credentials, and requests for
-    /// other providers, are sent directly.
+    /// Sends the request for `request_id`, waiting on the shared credential refresh when a
+    /// required Grok token is expired or the captured Gemini binding lacks a usable token.
     fn spawn_request(
         request_id: Uuid,
         params: api::RequestParams,
@@ -589,17 +592,22 @@ impl ResponseStream {
                         .get(&LLMModelHost::GeminiEnterprise)
                         .is_some_and(|host| host.enabled)
                 });
-            if uses_geap
-                && let Some(binding) =
-                    crate::ai::geap_credentials::current_geap_policy(ctx).mint_binding()
-            {
+            if uses_geap && let Some(binding) = params.geap_mint_binding.clone() {
                 let refresh_binding = binding.clone();
-                let refresh_rx = ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
-                    manager.begin_expired_geap_refresh(&binding, ctx, |manager, waiter, ctx| {
-                        crate::ai::geap_credentials::start_geap_refresh_for_waiter(
-                            manager, waiter, ctx,
-                        );
-                    })
+                let mint_binding = binding.clone();
+                let refresh_rx = ApiKeyManager::handle(ctx).update(ctx, move |manager, ctx| {
+                    manager.begin_geap_request_refresh(
+                        &binding,
+                        ctx,
+                        move |manager, waiter, ctx| {
+                            crate::ai::geap_credentials::start_geap_refresh_for_waiter(
+                                manager,
+                                mint_binding,
+                                waiter,
+                                ctx,
+                            );
+                        },
+                    )
                 });
                 if let Some(refresh_rx) = refresh_rx {
                     let _ = ctx.spawn(
@@ -613,16 +621,54 @@ impl ResponseStream {
                             // the wait, so re-read just the GEAP credential and
                             // leave every other key alone.
                             //
-                            // Unlike the Grok branch above, a mint failure, a
-                            // timeout, or a dropped sender is never surfaced as a
-                            // terminal error — the request goes out with the
-                            // snapshot untouched, and it is the job of the server
-                            // to respond with an error if the GEAP credentials are bad.
-                            if matches!(result, Ok(Ok(GeapRefreshOutcome::Refreshed)))
-                                && let Some(credentials) = ApiKeyManager::as_ref(ctx)
-                                    .geap_credentials_for_request(&refresh_binding)
-                            {
-                                apply_geap_refresh_to_params(&mut me.params, Some(credentials));
+                            // Unlike the Grok branch above, a mint failure,
+                            // timeout, or dropped sender is not surfaced as a
+                            // terminal error. An unrelated mint completion
+                            // re-arms this binding; otherwise the request sends
+                            // with the best matching credential now available.
+                            match result {
+                                Ok(Ok(GeapRefreshOutcome::Refreshed)) => {
+                                    if let Some(credentials) = ApiKeyManager::as_ref(ctx)
+                                        .geap_credentials_for_request(&refresh_binding)
+                                    {
+                                        apply_geap_refresh_to_params(
+                                            &mut me.params,
+                                            Some(credentials),
+                                        );
+                                    } else {
+                                        Self::spawn_request(
+                                            request_id,
+                                            me.params.clone(),
+                                            cancellation_rx,
+                                            ctx,
+                                        );
+                                        return;
+                                    }
+                                }
+                                Ok(Ok(GeapRefreshOutcome::Failed)) => {
+                                    let manager = ApiKeyManager::as_ref(ctx);
+                                    if let Some(credentials) =
+                                        manager.geap_credentials_for_request(&refresh_binding)
+                                    {
+                                        apply_geap_refresh_to_params(
+                                            &mut me.params,
+                                            Some(credentials),
+                                        );
+                                    } else if should_rearm_geap_request_after_refresh(
+                                        GeapRefreshOutcome::Failed,
+                                        manager
+                                            .geap_mint_failure_applies_to_binding(&refresh_binding),
+                                    ) {
+                                        Self::spawn_request(
+                                            request_id,
+                                            me.params.clone(),
+                                            cancellation_rx,
+                                            ctx,
+                                        );
+                                        return;
+                                    }
+                                }
+                                Ok(Err(_)) | Err(_) => {}
                             }
                             Self::spawn_generate(
                                 request_id,

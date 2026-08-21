@@ -6,15 +6,16 @@ use ai::api_keys::{
 };
 use warp_core::channel::{Channel, ChannelState};
 use warp_core::features::FeatureFlag;
-use warpui::{App, SingletonEntity as _};
+use warpui::{App, SingletonEntity as _, WindowId};
 
 use super::{RequestParams, ServerConversationToken};
 use crate::ai::agent::ServerOutputId;
-use crate::ai::geap_credentials::{GeapPolicy, current_geap_policy};
+use crate::ai::geap_credentials::{GeapPolicy, geap_policy_for_context};
 use crate::ai::llms::{LLMModelHost, LLMProvider};
 use crate::auth::AuthStateProvider;
 use crate::server::server_api::team::MockTeamClient;
 use crate::server::server_api::workspace::MockWorkspaceClient;
+use crate::settings::AISettings;
 use crate::workspaces::team::Team;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::workspaces::workspace::{
@@ -27,12 +28,12 @@ use crate::workspaces::workspace::{
 const GEAP_TEST_AUDIENCE: &str = "//iam.googleapis.com/projects/123456/locations/global/workloadIdentityPools/warp-pool/providers/warp-provider";
 const GEAP_TEST_SA_EMAIL: &str = "warp-geap@test-project.iam.gserviceaccount.com";
 
-/// Enables AWS Bedrock and Gemini Enterprise (GEAP) at the workspace level, both enforced
+/// Enables AWS Bedrock and Gemini Enterprise (GEAP) at the team level, both enforced
 /// (bypassing the per-user `AISettings` toggle), so `apply_team_byo_policy`'s preservation of
 /// these org-level credentials can be exercised independently of `team_byo` member policy.
-fn enable_aws_and_geap_hosts(workspace: &mut Workspace) {
-    workspace.settings.llm_settings.enabled = true;
-    workspace.settings.llm_settings.host_configs.insert(
+fn enable_aws_and_geap_hosts(team: &mut Team) {
+    team.settings.llm_settings.enabled = true;
+    team.settings.llm_settings.host_configs.insert(
         LLMModelHost::AwsBedrock,
         LlmHostSettings {
             enabled: true,
@@ -41,7 +42,7 @@ fn enable_aws_and_geap_hosts(workspace: &mut Workspace) {
             gcp_sa_email: None,
         },
     );
-    workspace.settings.llm_settings.host_configs.insert(
+    team.settings.llm_settings.host_configs.insert(
         LLMModelHost::GeminiEnterprise,
         LlmHostSettings {
             enabled: true,
@@ -148,7 +149,9 @@ fn workspace_with_two_teams_of_opposing_byo_policy() -> (Team, Team, Workspace) 
 #[test]
 fn apply_team_byo_policy_gates_member_credentials_by_team_policy() {
     let (team_a, team_b, mut workspace) = workspace_with_two_teams_of_opposing_byo_policy();
-    enable_aws_and_geap_hosts(&mut workspace);
+    for team in &mut workspace.teams {
+        enable_aws_and_geap_hosts(team);
+    }
 
     App::test((), |mut app| async move {
         let _geap_flag = FeatureFlag::GeminiEnterprise.override_enabled(true);
@@ -157,12 +160,30 @@ fn apply_team_byo_policy_gates_member_credentials_by_team_policy() {
             warp_core::telemetry::testing::MockTelemetryContextProvider::register(ctx);
         });
         app.add_singleton_model(|_| AuthStateProvider::new_for_test());
+        app.add_singleton_model(AISettings::new_with_defaults);
         app.add_singleton_model(|ctx| {
             UserWorkspaces::mock(
                 Arc::new(MockTeamClient::new()),
                 Arc::new(MockWorkspaceClient::new()),
                 vec![workspace],
                 ctx,
+            )
+        });
+        let window_a = WindowId::new();
+        let window_b = WindowId::new();
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window_a, team_a.uid, ctx);
+            user_workspaces.set_team_for_window(window_b, team_b.uid, ctx);
+        });
+        let (team_context_a, team_context_b) = app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            (
+                user_workspaces
+                    .team_context_for_window(window_a)
+                    .expect("window A should capture team A"),
+                user_workspaces
+                    .team_context_for_window(window_b)
+                    .expect("window B should capture team B"),
             )
         });
         let api_key_manager = app.add_singleton_model(ApiKeyManager::new);
@@ -196,7 +217,7 @@ fn apply_team_byo_policy_gates_member_credentials_by_team_policy() {
                 },
                 ctx,
             );
-            let binding = match current_geap_policy(ctx) {
+            let binding = match geap_policy_for_context(Some(&team_context_a), ctx) {
                 GeapPolicy::Mintable(binding) => binding,
                 other => panic!("expected a mintable GEAP policy, got {other:?}"),
             };
@@ -213,11 +234,15 @@ fn apply_team_byo_policy_gates_member_credentials_by_team_policy() {
         let mut request_params = RequestParams::new_for_test();
         app.read(|ctx| {
             let api_key_manager = ApiKeyManager::as_ref(ctx);
-            let is_aws_bedrock_enabled =
-                UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_enabled(ctx);
-            let geap_binding = current_geap_policy(ctx).mint_binding();
-            request_params.api_keys =
-                api_key_manager.api_keys_for_request(true, is_aws_bedrock_enabled, geap_binding);
+            let is_aws_bedrock_enabled = UserWorkspaces::as_ref(ctx)
+                .is_aws_bedrock_credentials_enabled_for_context(Some(&team_context_a), ctx);
+            let geap_binding = geap_policy_for_context(Some(&team_context_a), ctx).mint_binding();
+            request_params.api_keys = api_key_manager.api_keys_for_request(
+                true,
+                is_aws_bedrock_enabled,
+                geap_binding.clone(),
+            );
+            request_params.geap_mint_binding = geap_binding;
             request_params.custom_model_providers =
                 api_key_manager.custom_model_providers_for_request(true);
         });
@@ -238,7 +263,7 @@ fn apply_team_byo_policy_gates_member_credentials_by_team_policy() {
 
         app.read(|ctx| {
             let mut allowed = request_params.clone();
-            allowed.apply_team_byo_policy(Some(team_a.uid), ctx);
+            allowed.apply_team_byo_policy(Some(&team_context_a), ctx);
             let allowed_keys = allowed
                 .api_keys
                 .expect("team A's policy allows members to use their own keys");
@@ -260,7 +285,7 @@ fn apply_team_byo_policy_gates_member_credentials_by_team_policy() {
             );
 
             let mut disallowed = request_params.clone();
-            disallowed.apply_team_byo_policy(Some(team_b.uid), ctx);
+            disallowed.apply_team_byo_policy(Some(&team_context_b), ctx);
             let disallowed_keys = disallowed.api_keys.expect(
                 "Bedrock/GEAP credentials must keep api_keys populated even once member keys are stripped",
             );

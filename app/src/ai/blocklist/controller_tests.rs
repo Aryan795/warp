@@ -1,9 +1,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
+use ai::api_keys::{ApiKeyManager, AwsCredentials, AwsCredentialsState};
 use chrono::Local;
 use uuid::Uuid;
+use warp_core::features::FeatureFlag;
 use warp_multi_agent_api::response_event;
+use warpui::platform::WindowStyle;
 use warpui::{App, SingletonEntity};
 
 use super::response_stream::{PendingResume, RecoveryBudget};
@@ -18,8 +22,13 @@ use crate::ai::blocklist::{
     BlocklistAIHistoryEvent, BlocklistAIHistoryModel, PendingAttachment, PendingFile, RequestInput,
     ResponseStream, ResponseStreamId,
 };
-use crate::ai::llms::LLMId;
+use crate::ai::geap_credentials::{GeapPolicy, geap_policy_for_context};
+use crate::ai::llms::{LLMId, LLMModelHost};
+use crate::terminal::TerminalView;
 use crate::test_util::terminal::{add_window_with_terminal, initialize_app_for_terminal_view};
+use crate::workspaces::team::Team;
+use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::workspace::{HostEnablementSetting, LlmHostSettings, Workspace};
 
 fn new_ambient_agent_task_id() -> AmbientAgentTaskId {
     Uuid::new_v4().to_string().parse().unwrap()
@@ -90,6 +99,118 @@ fn passive_suggestions_request_params_omit_ambient_agent_task_id() {
     });
 }
 
+#[test]
+fn controller_request_scope_does_not_follow_window_reassignment() {
+    const AUDIENCE: &str = "//iam.googleapis.com/projects/123456/locations/global/workloadIdentityPools/warp-pool/providers/warp-provider";
+    let _geap_flag = FeatureFlag::GeminiEnterprise.override_enabled(true);
+    let mut team_a = Team::from_local_cache(111.into(), "team-a".to_string(), None, None, None);
+    team_a.settings.llm_settings.enabled = true;
+    let mut team_b = Team::from_local_cache(222.into(), "team-b".to_string(), None, None, None);
+    team_b.settings.llm_settings.enabled = true;
+    team_b.settings.llm_settings.host_configs.insert(
+        LLMModelHost::AwsBedrock,
+        LlmHostSettings {
+            enabled: true,
+            enablement_setting: HostEnablementSetting::Enforce,
+            ..Default::default()
+        },
+    );
+    team_b.settings.llm_settings.host_configs.insert(
+        LLMModelHost::GeminiEnterprise,
+        LlmHostSettings {
+            enabled: true,
+            enablement_setting: HostEnablementSetting::Enforce,
+            gcp_audience: Some(AUDIENCE.to_string()),
+            gcp_sa_email: None,
+        },
+    );
+    let workspace = Workspace::from_local_cache(
+        "workspace_uid123456789".to_string().into(),
+        "workspace".to_string(),
+        Some(vec![team_a.clone(), team_b.clone()]),
+    );
+
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.update_workspaces(vec![workspace.clone()], ctx);
+            user_workspaces.set_current_workspace_uid(workspace.uid, ctx);
+        });
+        ApiKeyManager::handle(&app).update(&mut app, |manager, ctx| {
+            manager.set_aws_credentials_state(
+                AwsCredentialsState::Loaded {
+                    credentials: AwsCredentials::new(
+                        "access-key".to_string(),
+                        "secret-key".to_string(),
+                        None,
+                        None,
+                    ),
+                    loaded_at: SystemTime::now(),
+                },
+                ctx,
+            );
+        });
+
+        let tips_model = app.add_model(|_| Default::default());
+        let (window_id, terminal) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
+            let window_id = ctx.window_id();
+            UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
+                user_workspaces.register_window(window_id, Some(team_a.uid), ctx);
+            });
+            TerminalView::new_for_test(tips_model, None, ctx)
+        });
+
+        let mut reassigned_workspace = workspace;
+        reassigned_workspace.teams = vec![team_b.clone()];
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.update_workspaces(vec![reassigned_workspace], ctx);
+        });
+
+        let replacement_context = app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert_eq!(
+                user_workspaces.team_uid_for_window(window_id),
+                Some(team_b.uid)
+            );
+            user_workspaces
+                .team_context_for_window(window_id)
+                .expect("the reassigned window should capture team B for new operations")
+        });
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert!(
+                user_workspaces.is_aws_bedrock_credentials_enabled_for_context(
+                    Some(&replacement_context),
+                    ctx,
+                )
+            );
+            assert!(matches!(
+                geap_policy_for_context(Some(&replacement_context), ctx),
+                GeapPolicy::Mintable(_)
+            ));
+        });
+
+        let request_params = terminal.update(&mut app, |terminal, ctx| {
+            terminal.ai_controller().update(ctx, |controller, ctx| {
+                controller
+                    .build_passive_suggestions_request_params(
+                        None,
+                        PassiveSuggestionTrigger::FilesChanged,
+                        vec![],
+                        ctx,
+                    )
+                    .expect("the controller should build passive request params")
+                    .1
+            })
+        });
+        assert!(request_params.geap_mint_binding.is_none());
+        assert!(
+            request_params
+                .api_keys
+                .is_none_or(|api_keys| api_keys.aws_credentials.is_none())
+        );
+    });
+}
 #[test]
 fn input_for_query_converts_prompt_attachments_and_ignores_live_staging() {
     // `input_for_query` builds its image/file context purely from the explicitly-provided

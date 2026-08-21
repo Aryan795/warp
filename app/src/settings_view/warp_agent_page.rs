@@ -12,7 +12,11 @@ use std::ops::Not;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
-use ::ai::api_keys::{ApiKeyManager, ApiKeyManagerEvent, ApiKeys, CustomEndpointParams};
+#[cfg(not(target_family = "wasm"))]
+use ::ai::api_keys::GeapRecoveryAction;
+use ::ai::api_keys::{
+    ApiKeyManager, ApiKeyManagerEvent, ApiKeys, CustomEndpointParams, GeapCredentialsState,
+};
 #[cfg(not(target_family = "wasm"))]
 use ::ai::grok_subscription::oauth::{self, ManualCodeExchange};
 use chrono::{DateTime, Local};
@@ -76,7 +80,9 @@ use crate::ai::blocklist::agent_view::agent_input_footer::editor::{
 };
 use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
 #[cfg(not(target_family = "wasm"))]
-use crate::ai::geap_credentials::force_refresh_geap_credentials;
+use crate::ai::geap_credentials::{
+    GeapPolicy, force_refresh_geap_credentials_for_context, geap_policy_for_render_context,
+};
 use crate::ai::llms::{LLMId, LLMPreferences, LLMProvider, is_using_api_key_for_provider};
 use crate::appearance::{Appearance, AppearanceEvent};
 use crate::auth::AuthStateProvider;
@@ -2506,8 +2512,10 @@ impl TypedActionView for WarpAgentPageView {
             }
             WarpAgentPageAction::RefreshGeminiEnterpriseCredentials => {
                 #[cfg(not(target_family = "wasm"))]
+                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                #[cfg(not(target_family = "wasm"))]
                 ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
-                    force_refresh_geap_credentials(manager, ctx);
+                    force_refresh_geap_credentials_for_context(manager, team_context.as_ref(), ctx);
                 });
                 ctx.notify();
             }
@@ -5324,6 +5332,7 @@ impl SettingsWidget for ApiKeysWidget {
 }
 
 struct AwsBedrockWidget {
+    view_handle: WeakViewHandle<WarpAgentPageView>,
     aws_auth_refresh_command_editor: ViewHandle<EditorView>,
     aws_auth_refresh_profile_editor: ViewHandle<EditorView>,
     credentials_enabled_toggle: SwitchStateHandle,
@@ -5333,13 +5342,17 @@ struct AwsBedrockWidget {
 
 impl AwsBedrockWidget {
     fn new(ctx: &mut ViewContext<<Self as SettingsWidget>::View>) -> Self {
+        let view_handle = ctx.handle();
         let ai_settings = AISettings::as_ref(ctx);
         let is_any_ai_enabled = ai_settings.is_any_ai_enabled(ctx);
 
         let aws_auth_refresh_command = ai_settings.aws_bedrock_auth_refresh_command.value().clone();
         let aws_auth_refresh_profile = ai_settings.aws_bedrock_profile.value().clone();
+        let workspaces = UserWorkspaces::as_ref(ctx);
+        let team_context = workspaces.team_render_context_for_view_handle(&view_handle, ctx);
         let is_usage_enabled = is_any_ai_enabled
-            && UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_enabled(ctx);
+            && workspaces
+                .is_aws_bedrock_credentials_enabled_for_render_context(team_context.as_ref(), ctx);
 
         let aws_auth_refresh_command_editor = ctx.add_typed_action_view(move |ctx| {
             let appearance = Appearance::as_ref(ctx);
@@ -5450,6 +5463,7 @@ impl AwsBedrockWidget {
         // Keep enablement in sync with the Global AI toggle.
         let aws_auth_refresh_command_editor_clone = aws_auth_refresh_command_editor.clone();
         let aws_auth_refresh_profile_editor_clone = aws_auth_refresh_profile_editor.clone();
+        let view_handle_clone = view_handle.clone();
         let refresh_credentials_button_clone = refresh_credentials_button.clone();
         ctx.subscribe_to_model(&AISettings::handle(ctx), move |_, _, event, ctx| {
             if matches!(
@@ -5458,8 +5472,14 @@ impl AwsBedrockWidget {
                     | AISettingsChangedEvent::AwsBedrockCredentialsEnabled { .. }
             ) {
                 let is_any_ai_enabled = AISettings::as_ref(ctx).is_any_ai_enabled(ctx);
+                let workspaces = UserWorkspaces::as_ref(ctx);
+                let team_context =
+                    workspaces.team_render_context_for_view_handle(&view_handle_clone, ctx);
                 let is_usage_enabled = is_any_ai_enabled
-                    && UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_enabled(ctx);
+                    && workspaces.is_aws_bedrock_credentials_enabled_for_render_context(
+                        team_context.as_ref(),
+                        ctx,
+                    );
 
                 update_editor_interaction_state(
                     aws_auth_refresh_command_editor_clone.clone(),
@@ -5481,16 +5501,21 @@ impl AwsBedrockWidget {
 
         let aws_auth_refresh_command_editor_clone = aws_auth_refresh_command_editor.clone();
         let aws_auth_refresh_profile_editor_clone = aws_auth_refresh_profile_editor.clone();
+        let view_handle_clone = view_handle.clone();
         let refresh_credentials_button_clone = refresh_credentials_button.clone();
         ctx.subscribe_to_model(
             &UserWorkspaces::handle(ctx),
             move |_, workspace, event, ctx| {
                 if let UserWorkspacesEvent::TeamsChanged = event {
                     let is_any_ai_enabled = AISettings::as_ref(ctx).is_any_ai_enabled(ctx);
+                    let workspaces = workspace.as_ref(ctx);
+                    let team_context =
+                        workspaces.team_render_context_for_view_handle(&view_handle_clone, ctx);
                     let is_usage_enabled = is_any_ai_enabled
-                        && workspace
-                            .as_ref(ctx)
-                            .is_aws_bedrock_credentials_enabled(ctx);
+                        && workspaces.is_aws_bedrock_credentials_enabled_for_render_context(
+                            team_context.as_ref(),
+                            ctx,
+                        );
 
                     update_editor_interaction_state(
                         aws_auth_refresh_command_editor_clone.clone(),
@@ -5512,6 +5537,7 @@ impl AwsBedrockWidget {
         );
 
         Self {
+            view_handle,
             aws_auth_refresh_command_editor,
             aws_auth_refresh_profile_editor,
             credentials_enabled_toggle: SwitchStateHandle::default(),
@@ -5528,15 +5554,20 @@ impl AwsBedrockWidget {
     ) -> Box<dyn Element> {
         let ai_settings = AISettings::as_ref(app);
         let user_workspaces = UserWorkspaces::as_ref(app);
+        let team_context =
+            user_workspaces.team_render_context_for_view_handle(&self.view_handle, app);
         let is_any_ai_enabled = ai_settings.is_any_ai_enabled(app);
         let is_section_enabled = is_any_ai_enabled && is_bedrock_available;
         let is_admin_enforced = matches!(
-            user_workspaces.aws_bedrock_host_enablement_setting(),
+            user_workspaces
+                .aws_bedrock_host_enablement_setting_for_render_context(team_context.as_ref()),
             crate::workspaces::workspace::HostEnablementSetting::Enforce
         );
-        let is_toggleable =
-            is_section_enabled && user_workspaces.is_aws_bedrock_credentials_toggleable();
-        let are_credentials_enabled = user_workspaces.is_aws_bedrock_credentials_enabled(app);
+        let is_toggleable = is_section_enabled
+            && user_workspaces
+                .is_aws_bedrock_credentials_toggleable_for_render_context(team_context.as_ref());
+        let are_credentials_enabled = user_workspaces
+            .is_aws_bedrock_credentials_enabled_for_render_context(team_context.as_ref(), app);
         let is_usage_enabled = is_section_enabled && are_credentials_enabled;
         let toggle_description = if is_admin_enforced {
             "Warp loads and sends local AWS CLI credentials for Bedrock-supported models. This setting is managed by your organization.".to_string()
@@ -5728,8 +5759,9 @@ impl SettingsWidget for AwsBedrockWidget {
     }
 
     fn should_render(&self, app: &AppContext) -> bool {
-        // Only show if admin has enabled AWS Bedrock for the workspace
-        UserWorkspaces::as_ref(app).is_aws_bedrock_available_from_workspace()
+        let workspaces = UserWorkspaces::as_ref(app);
+        let context = workspaces.team_render_context_for_view_handle(&self.view_handle, app);
+        workspaces.is_aws_bedrock_available_for_render_context(context.as_ref())
     }
 
     fn render(
@@ -5740,8 +5772,10 @@ impl SettingsWidget for AwsBedrockWidget {
     ) -> Box<dyn Element> {
         let ai_settings = AISettings::as_ref(app);
         let is_any_ai_enabled = ai_settings.is_any_ai_enabled(app);
+        let workspaces = UserWorkspaces::as_ref(app);
+        let context = workspaces.team_render_context_for_view_handle(&self.view_handle, app);
         let is_bedrock_available =
-            UserWorkspaces::as_ref(app).is_aws_bedrock_available_from_workspace();
+            workspaces.is_aws_bedrock_available_for_render_context(context.as_ref());
 
         let column = Flex::column()
             .with_child(render_separator(appearance))
@@ -5763,20 +5797,44 @@ impl SettingsWidget for AwsBedrockWidget {
 }
 
 struct GeminiEnterpriseWidget {
+    view_handle: WeakViewHandle<WarpAgentPageView>,
     credentials_enabled_toggle: SwitchStateHandle,
     refresh_credentials_button: ViewHandle<ActionButton>,
 }
 
 impl GeminiEnterpriseWidget {
-    fn is_refresh_enabled(app: &AppContext) -> bool {
+    fn is_refresh_enabled(
+        view_handle: &WeakViewHandle<WarpAgentPageView>,
+        app: &AppContext,
+    ) -> bool {
+        let workspaces = UserWorkspaces::as_ref(app);
+        let context = workspaces.team_render_context_for_view_handle(view_handle, app);
+        #[cfg(not(target_family = "wasm"))]
+        let policy = geap_policy_for_render_context(context.as_ref(), app);
+        #[cfg(not(target_family = "wasm"))]
+        let requires_admin_action =
+            match (policy, ApiKeyManager::as_ref(app).geap_credentials_state()) {
+                (
+                    GeapPolicy::Mintable(binding),
+                    GeapCredentialsState::Failed { minted_for, error },
+                ) if *minted_for == binding => {
+                    error.recovery_action() == GeapRecoveryAction::ContactAdmin
+                }
+                (GeapPolicy::Unconfigured, _) => true,
+                (GeapPolicy::Disabled | GeapPolicy::Mintable(_), _) => false,
+            };
+        #[cfg(target_family = "wasm")]
+        let requires_admin_action = ApiKeyManager::as_ref(app)
+            .geap_credentials_state()
+            .requires_admin_action();
         AISettings::as_ref(app).is_any_ai_enabled(app)
-            && UserWorkspaces::as_ref(app).is_gemini_enterprise_credentials_enabled(app)
-            && !ApiKeyManager::as_ref(app)
-                .geap_credentials_state()
-                .requires_admin_action()
+            && workspaces
+                .is_gemini_enterprise_credentials_enabled_for_render_context(context.as_ref(), app)
+            && !requires_admin_action
     }
 
     fn new(ctx: &mut ViewContext<<Self as SettingsWidget>::View>) -> Self {
+        let view_handle = ctx.handle();
         let refresh_credentials_button = ctx.add_typed_action_view(|_| {
             ActionButton::new("Refresh", SecondaryTheme)
                 .with_icon(Icon::RefreshCw04)
@@ -5788,9 +5846,10 @@ impl GeminiEnterpriseWidget {
                 })
         });
         refresh_credentials_button.update(ctx, |button, ctx| {
-            button.set_disabled(!Self::is_refresh_enabled(ctx), ctx);
+            button.set_disabled(!Self::is_refresh_enabled(&view_handle, ctx), ctx);
         });
 
+        let view_handle_clone = view_handle.clone();
         let refresh_credentials_button_clone = refresh_credentials_button.clone();
         ctx.subscribe_to_model(&UserWorkspaces::handle(ctx), move |_, _, event, ctx| {
             if matches!(
@@ -5799,11 +5858,12 @@ impl GeminiEnterpriseWidget {
                     | UserWorkspacesEvent::UpdateWorkspaceSettingsSuccess
             ) {
                 refresh_credentials_button_clone.update(ctx, |button, ctx| {
-                    button.set_disabled(!Self::is_refresh_enabled(ctx), ctx);
+                    button.set_disabled(!Self::is_refresh_enabled(&view_handle_clone, ctx), ctx);
                 });
                 ctx.notify();
             }
         });
+        let view_handle_clone = view_handle.clone();
 
         let refresh_credentials_button_clone = refresh_credentials_button.clone();
         ctx.subscribe_to_model(&AISettings::handle(ctx), move |_, _, event, ctx| {
@@ -5813,22 +5873,24 @@ impl GeminiEnterpriseWidget {
                     | AISettingsChangedEvent::IsAnyAIEnabled { .. }
             ) {
                 refresh_credentials_button_clone.update(ctx, |button, ctx| {
-                    button.set_disabled(!Self::is_refresh_enabled(ctx), ctx);
+                    button.set_disabled(!Self::is_refresh_enabled(&view_handle_clone, ctx), ctx);
                 });
                 ctx.notify();
             }
         });
 
+        let view_handle_clone = view_handle.clone();
         let refresh_credentials_button_clone = refresh_credentials_button.clone();
         ctx.subscribe_to_model(&ApiKeyManager::handle(ctx), move |_, _, event, ctx| {
             if matches!(event, ApiKeyManagerEvent::KeysUpdated) {
                 refresh_credentials_button_clone.update(ctx, |button, ctx| {
-                    button.set_disabled(!Self::is_refresh_enabled(ctx), ctx);
+                    button.set_disabled(!Self::is_refresh_enabled(&view_handle_clone, ctx), ctx);
                 });
             }
         });
 
         Self {
+            view_handle,
             credentials_enabled_toggle: SwitchStateHandle::default(),
             refresh_credentials_button,
         }
@@ -5841,21 +5903,25 @@ impl GeminiEnterpriseWidget {
         is_gemini_enterprise_available: bool,
     ) -> Box<dyn Element> {
         let user_workspaces = UserWorkspaces::as_ref(app);
+        let context = user_workspaces.team_render_context_for_view_handle(&self.view_handle, app);
         let is_any_ai_enabled = AISettings::as_ref(app).is_any_ai_enabled(app);
         let is_section_enabled = is_any_ai_enabled && is_gemini_enterprise_available;
         let is_admin_enforced = matches!(
-            user_workspaces.gemini_enterprise_host_enablement_setting(),
+            user_workspaces
+                .gemini_enterprise_host_enablement_setting_for_render_context(context.as_ref()),
             crate::workspaces::workspace::HostEnablementSetting::Enforce
         );
-        let is_toggleable =
-            is_section_enabled && user_workspaces.is_gemini_enterprise_credentials_toggleable();
-        let are_credentials_enabled = user_workspaces.is_gemini_enterprise_credentials_enabled(app);
+        let is_toggleable = is_section_enabled
+            && user_workspaces
+                .is_gemini_enterprise_credentials_toggleable_for_render_context(context.as_ref());
+        let are_credentials_enabled = user_workspaces
+            .is_gemini_enterprise_credentials_enabled_for_render_context(context.as_ref(), app);
         let toggle_description = if is_admin_enforced {
-            "Warp routes eligible requests through your workspace's Gemini Enterprise Google Cloud \
+            "Warp routes eligible requests through your team's Gemini Enterprise Google Cloud \
              project. This setting is managed by your organization."
                 .to_string()
         } else {
-            "Warp routes eligible requests through your workspace's Gemini Enterprise Google Cloud \
+            "Warp routes eligible requests through your team's Gemini Enterprise Google Cloud \
              project."
                 .to_string()
         };
@@ -5901,8 +5967,35 @@ impl GeminiEnterpriseWidget {
         app: &AppContext,
     ) -> Box<dyn Element> {
         let manager = ApiKeyManager::as_ref(app);
+        #[cfg(not(target_family = "wasm"))]
+        let workspaces = UserWorkspaces::as_ref(app);
+        #[cfg(not(target_family = "wasm"))]
+        let context = workspaces.team_render_context_for_view_handle(&self.view_handle, app);
+        let state = manager.geap_credentials_state();
+        #[cfg(not(target_family = "wasm"))]
         let (title_text, detail_text, icon) =
-            manager.geap_credentials_state().user_facing_components();
+            match geap_policy_for_render_context(context.as_ref(), app) {
+                GeapPolicy::Disabled => GeapCredentialsState::Disabled.user_facing_components(),
+                GeapPolicy::Unconfigured => {
+                    GeapCredentialsState::Unconfigured.user_facing_components()
+                }
+                GeapPolicy::Mintable(binding) => match state {
+                    GeapCredentialsState::Loaded { minted_for, .. } if *minted_for != binding => {
+                        GeapCredentialsState::Missing.user_facing_components()
+                    }
+                    GeapCredentialsState::Refreshing {
+                        previous: Some((_, minted_for)),
+                    } if *minted_for != binding => {
+                        GeapCredentialsState::Missing.user_facing_components()
+                    }
+                    GeapCredentialsState::Failed { minted_for, .. } if *minted_for != binding => {
+                        GeapCredentialsState::Missing.user_facing_components()
+                    }
+                    _ => state.user_facing_components(),
+                },
+            };
+        #[cfg(target_family = "wasm")]
+        let (title_text, detail_text, icon) = state.user_facing_components();
 
         let (title_color, detail_color) = (
             styles::header_font_color(are_credentials_enabled, app),
@@ -5969,8 +6062,10 @@ impl SettingsWidget for GeminiEnterpriseWidget {
     }
 
     fn should_render(&self, app: &AppContext) -> bool {
+        let workspaces = UserWorkspaces::as_ref(app);
+        let context = workspaces.team_render_context_for_view_handle(&self.view_handle, app);
         FeatureFlag::GeminiEnterprise.is_enabled()
-            && UserWorkspaces::as_ref(app).is_gemini_enterprise_available_from_workspace()
+            && workspaces.is_gemini_enterprise_available_for_render_context(context.as_ref())
     }
 
     fn render(
@@ -5980,8 +6075,10 @@ impl SettingsWidget for GeminiEnterpriseWidget {
         app: &AppContext,
     ) -> Box<dyn Element> {
         let is_any_ai_enabled = AISettings::as_ref(app).is_any_ai_enabled(app);
+        let workspaces = UserWorkspaces::as_ref(app);
+        let context = workspaces.team_render_context_for_view_handle(&self.view_handle, app);
         let is_gemini_enterprise_available =
-            UserWorkspaces::as_ref(app).is_gemini_enterprise_available_from_workspace();
+            workspaces.is_gemini_enterprise_available_for_render_context(context.as_ref());
         let column = Flex::column()
             .with_child(render_separator(appearance))
             .with_child(
