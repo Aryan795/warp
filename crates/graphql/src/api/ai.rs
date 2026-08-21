@@ -220,6 +220,8 @@ impl From<&ConversationUsageMetadata> for persistence::model::ConversationUsageM
             token_usage: convert_token_usage(&gql.warp_token_usage, &gql.byok_token_usage),
             tool_usage_metadata: (&gql.tool_usage_metadata).into(),
             context_window_segments: gql.context_window_segments.iter().map(Into::into).collect(),
+            // No turn-scoped baseline is available from server-hydrated usage snapshots.
+            turn_usage_baseline: None,
         }
     }
 }

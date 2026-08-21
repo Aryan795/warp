@@ -255,6 +255,9 @@ use crate::ai::blocklist::telemetry_banner::{TelemetryBanner, should_collect_ai_
 use crate::ai::blocklist::usage::conversation_usage_view::{
     ConversationUsageInfo, ConversationUsageView, TimingInfo,
 };
+use crate::ai::blocklist::usage::turn_usage_view::{
+    TurnUsageInfo, TurnUsageView, TurnUsageViewEvent,
+};
 use crate::ai::blocklist::{
     AIBlock, AIBlockEvent, ATTACH_AS_AGENT_MODE_CONTEXT_TEXT, AutofireAction,
     BlocklistAIActionEvent, BlocklistAIActionModel, BlocklistAIContextEvent,
@@ -2729,6 +2732,11 @@ pub struct TerminalView {
     /// Cached view ids for usage footers keyed by the AI block view id that owns them.
     usage_footer_view_ids: HashMap<EntityId, EntityId>,
 
+    /// Cached view ids for turn-scoped "Turn" panels (Surface 3 of the
+    /// pricing-transparency usage surfaces), keyed by the AI block view id
+    /// that owns them. Mirrors `usage_footer_view_ids`.
+    turn_panel_view_ids: HashMap<EntityId, EntityId>,
+
     // Whether the block onboarding view is active or not.
     block_onboarding_active: bool,
 
@@ -4396,6 +4404,7 @@ impl TerminalView {
             last_observed_conversation_status: Default::default(),
             last_observed_active_subagent: Default::default(),
             usage_footer_view_ids: Default::default(),
+            turn_panel_view_ids: Default::default(),
             block_onboarding_active: false,
             onboarding_prompt_block: None,
             settings_import_onboarding_block: None,
@@ -6179,6 +6188,23 @@ impl TerminalView {
                     }
                 }
 
+                // Close any open turn panel(s) when a new AI block is added, mirroring the
+                // usage footer's close-on-new-exchange behavior above.
+                if !self.turn_panel_view_ids.is_empty() {
+                    let owner_block_ids: Vec<EntityId> =
+                        self.turn_panel_view_ids.keys().copied().collect();
+                    for owner_id in &owner_block_ids {
+                        if let Some(ai_block_handle) = self.ai_block_handle_by_view_id(*owner_id) {
+                            ai_block_handle.update(ctx, |block, ctx| {
+                                block.handle_action(
+                                    &AIBlockAction::ToggleIsTurnPanelExpanded,
+                                    ctx,
+                                );
+                            });
+                        }
+                    }
+                }
+
                 if self.is_ambient_agent_session(ctx)
                     && self
                         .model
@@ -7036,6 +7062,144 @@ impl TerminalView {
                 None,
                 usage_view,
                 Some(RichContentMetadata::UsageFooter),
+                RichContentInsertionPosition::Append {
+                    insert_below_long_running_block: true,
+                },
+                ctx,
+            );
+        }
+
+        ctx.notify();
+    }
+
+    /// Handle the opening and closing of the turn-scoped "Turn" panel
+    /// (Surface 3 of the pricing-transparency usage surfaces). Mirrors
+    /// `handle_usage_footer_toggled`, but is a fully independent surface: a
+    /// separate rich-content item, tracked in its own `turn_panel_view_ids`
+    /// map, with no cross-navigation to the usage footer / "Conversation"
+    /// popover.
+    fn handle_turn_panel_toggled(
+        &mut self,
+        source_ai_block_view_id: EntityId,
+        conversation_id: AIConversationId,
+        is_expanded: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        // Close any existing turn panel for this specific AI block.
+        if let Some(id) = self.turn_panel_view_ids.remove(&source_ai_block_view_id) {
+            let mut model = self.model.lock();
+            model.block_list_mut().remove_rich_content(id);
+            drop(model);
+            self.rich_content_views.retain(|rc| rc.view_id() != id);
+        }
+
+        if !is_expanded {
+            // If the goal was to close the turn panel, we've done that above.
+            ctx.notify();
+            return;
+        }
+
+        let Some(conversation) =
+            BlocklistAIHistoryModel::as_ref(ctx).conversation(&conversation_id)
+        else {
+            report_error!("Could not find conversation for turn panel");
+            return;
+        };
+
+        // Turn-scoped tool-call/diff/command stats, per the spec's resolved
+        // decision to invest in genuine per-turn data rather than relabeling
+        // conversation-cumulative values. Fall back to 0 when no baseline
+        // has been captured yet (shouldn't normally happen, since the
+        // trigger icon itself is gated on this being `Some`).
+        let tool_calls = conversation.tool_calls_for_last_block().unwrap_or(0);
+        let files_changed = conversation.files_changed_for_last_block().unwrap_or(0);
+        let lines_added = conversation.lines_added_for_last_block().unwrap_or(0);
+        let lines_removed = conversation.lines_removed_for_last_block().unwrap_or(0);
+        let commands_executed = conversation.commands_executed_for_last_block().unwrap_or(0);
+        let tokens = conversation.tokens_for_last_block().unwrap_or(0);
+        let cost_in_cents = conversation.provider_cost_in_cents_for_last_block();
+
+        // The active model for this turn. Multi-model turns (e.g. full
+        // terminal use alongside the primary agent) aren't disambiguated
+        // here -- we show the most recently used model, which matches the
+        // common single-model-per-turn case the mockup depicts.
+        let model_id = conversation
+            .token_usage()
+            .last()
+            .map(|m| m.model_id.clone())
+            .unwrap_or_else(|| "auto".to_string());
+
+        let turn_usage_info = TurnUsageInfo {
+            model_id,
+            tokens,
+            cost_in_cents,
+            context_window_usage: conversation.context_window_usage(),
+            tool_calls,
+            files_changed,
+            lines_added,
+            lines_removed,
+            commands_executed,
+        };
+
+        let timing_info = TimingInfo {
+            time_to_first_token_ms: conversation.time_to_first_token_for_last_user_query_ms(),
+            total_agent_response_time_ms: conversation
+                .total_agent_response_time_since_last_user_query_ms(),
+            wall_to_wall_response_time_ms: conversation
+                .wall_to_wall_response_time_since_last_query(),
+        };
+
+        let turn_usage_view =
+            ctx.add_typed_action_view(|_ctx| TurnUsageView::new(turn_usage_info, Some(timing_info)));
+
+        // Close the panel when the user clicks its "X" button, by toggling
+        // the same flag/action the trigger icon uses.
+        ctx.subscribe_to_view(&turn_usage_view, move |me, _, event, ctx| match event {
+            TurnUsageViewEvent::CloseRequested => {
+                if let Some(ai_block_handle) =
+                    me.ai_block_handle_by_view_id(source_ai_block_view_id)
+                {
+                    ai_block_handle.update(ctx, |block, ctx| {
+                        block.handle_action(&AIBlockAction::ToggleIsTurnPanelExpanded, ctx);
+                    });
+                }
+            }
+        });
+
+        self.turn_panel_view_ids
+            .insert(source_ai_block_view_id, turn_usage_view.id());
+
+        let agent_view_conversation_id = self
+            .agent_view_controller
+            .as_ref(ctx)
+            .agent_view_state()
+            .active_conversation_id();
+
+        let item = RichContentItem::new(
+            None,
+            turn_usage_view.id(),
+            agent_view_conversation_id,
+            false,
+        );
+
+        let mut model = self.model.lock();
+        let inserted = model.block_list_mut().insert_rich_content_after_item(
+            RemovableBlocklistItem::RichContent(source_ai_block_view_id),
+            item,
+        );
+        drop(model);
+
+        if inserted {
+            self.rich_content_views.push(
+                RichContent::new(turn_usage_view, agent_view_conversation_id)
+                    .with_metadata(RichContentMetadata::TurnPanel),
+            );
+        } else {
+            // Fallback: append the turn panel to the end of the blocklist.
+            self.insert_rich_content(
+                None,
+                turn_usage_view,
+                Some(RichContentMetadata::TurnPanel),
                 RichContentInsertionPosition::Append {
                     insert_below_long_running_block: true,
                 },
@@ -15336,6 +15500,11 @@ impl TerminalView {
                     block.handle_action(&AIBlockAction::ToggleIsUsageFooterExpanded, ctx);
                 });
             }
+            if self.turn_panel_view_ids.contains_key(view_id) {
+                handle.update(ctx, |block, ctx| {
+                    block.handle_action(&AIBlockAction::ToggleIsTurnPanelExpanded, ctx);
+                });
+            }
         }
 
         blocks_to_remove.into_iter().for_each(|(view_id, handle)| {
@@ -20720,6 +20889,12 @@ impl TerminalView {
             } => {
                 self.handle_usage_footer_toggled(block.id(), *conversation_id, *is_expanded, ctx);
             }
+            AIBlockEvent::TurnPanelToggled {
+                conversation_id,
+                is_expanded,
+            } => {
+                self.handle_turn_panel_toggled(block.id(), *conversation_id, *is_expanded, ctx);
+            }
             AIBlockEvent::OpenSettings => {
                 ctx.emit(Event::OpenSettings(SettingsSection::WarpAgent));
             }
@@ -20925,12 +21100,13 @@ impl TerminalView {
     }
 
     fn active_ai_block(&self, ctx: &AppContext) -> Option<&ViewHandle<AIBlock>> {
-        // Skip trailing non-AI items (usage footers) as they don't impact the conversation state.
+        // Skip trailing non-AI items (usage footers, turn panels) as they don't impact the
+        // conversation state.
         let candidate = self
             .rich_content_views
             .iter()
             .rev()
-            .find(|rc| !rc.is_usage_footer() && !rc.is_pending_user_query());
+            .find(|rc| !rc.is_usage_footer() && !rc.is_turn_panel() && !rc.is_pending_user_query());
 
         candidate.and_then(|rich_content| {
             let ai_metadata = rich_content.ai_block_metadata()?;
@@ -23269,7 +23445,7 @@ impl TerminalView {
         self.rich_content_views
             .iter()
             .rev()
-            .find(|rc| !rc.is_usage_footer() && !rc.is_pending_user_query())
+            .find(|rc| !rc.is_usage_footer() && !rc.is_turn_panel() && !rc.is_pending_user_query())
             .and_then(|rich_content| rich_content.ai_block_metadata())
             .map(|ai_metadata| ai_metadata.ai_block_handle.clone())
     }

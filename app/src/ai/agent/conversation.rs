@@ -67,7 +67,7 @@ use crate::notebooks::NotebookId;
 use crate::persistence::ModelEvent;
 use crate::persistence::model::{
     AgentConversationData, ContextWindowSegment, ConversationUsageMetadata, ModelTokenUsage,
-    PersistedAutoexecuteMode, ToolUsageMetadata,
+    PersistedAutoexecuteMode, ToolUsageMetadata, TurnUsageBaseline,
 };
 use crate::server::ids::ServerId;
 use crate::terminal::general_settings::GeneralSettings;
@@ -821,6 +821,103 @@ impl AIConversation {
         self.conversation_usage_metadata
             .credits_spent_for_last_block
             .map(|credits| (credits * 10.0).round() / 10.0)
+    }
+
+    /// Sums the total token count (warp + byok + custom endpoint) across all
+    /// models in a token-usage snapshot. Used both to compute the current
+    /// cumulative total and to snapshot the turn-usage baseline.
+    fn total_tokens_from_model_usage(models: &[ModelTokenUsage]) -> u64 {
+        models
+            .iter()
+            .map(|m| (m.warp_tokens + m.byok_tokens + m.custom_endpoint_tokens) as u64)
+            .sum()
+    }
+
+    /// Tool calls made during the last block (turn), i.e. since the most
+    /// recent user input. `None` until the first block completes.
+    ///
+    /// This is a genuinely turn-scoped value, computed as the delta between
+    /// the conversation-cumulative tool-call count and the baseline
+    /// snapshotted at the start of the block -- unlike
+    /// `tool_usage_metadata().total_tool_calls()`, which is always the
+    /// conversation-cumulative total.
+    pub fn tool_calls_for_last_block(&self) -> Option<i32> {
+        let baseline = self.conversation_usage_metadata.turn_usage_baseline.as_ref()?;
+        Some(self.conversation_usage_metadata.total_tool_calls() - baseline.tool_calls)
+    }
+
+    /// Files changed during the last block (turn). See
+    /// [`Self::tool_calls_for_last_block`] for scoping semantics.
+    pub fn files_changed_for_last_block(&self) -> Option<i32> {
+        let baseline = self.conversation_usage_metadata.turn_usage_baseline.as_ref()?;
+        Some(
+            self.conversation_usage_metadata
+                .tool_usage_metadata
+                .apply_file_diff_stats
+                .files_changed
+                - baseline.files_changed,
+        )
+    }
+
+    /// Lines added during the last block (turn). See
+    /// [`Self::tool_calls_for_last_block`] for scoping semantics.
+    pub fn lines_added_for_last_block(&self) -> Option<i32> {
+        let baseline = self.conversation_usage_metadata.turn_usage_baseline.as_ref()?;
+        Some(
+            self.conversation_usage_metadata
+                .tool_usage_metadata
+                .apply_file_diff_stats
+                .lines_added
+                - baseline.lines_added,
+        )
+    }
+
+    /// Lines removed during the last block (turn). See
+    /// [`Self::tool_calls_for_last_block`] for scoping semantics.
+    pub fn lines_removed_for_last_block(&self) -> Option<i32> {
+        let baseline = self.conversation_usage_metadata.turn_usage_baseline.as_ref()?;
+        Some(
+            self.conversation_usage_metadata
+                .tool_usage_metadata
+                .apply_file_diff_stats
+                .lines_removed
+                - baseline.lines_removed,
+        )
+    }
+
+    /// Commands executed during the last block (turn). See
+    /// [`Self::tool_calls_for_last_block`] for scoping semantics.
+    pub fn commands_executed_for_last_block(&self) -> Option<i32> {
+        let baseline = self.conversation_usage_metadata.turn_usage_baseline.as_ref()?;
+        Some(
+            self.conversation_usage_metadata
+                .tool_usage_metadata
+                .run_command_stats
+                .commands_executed
+                - baseline.commands_executed,
+        )
+    }
+
+    /// Total tokens (warp + byok + custom endpoint, across all models) used
+    /// during the last block (turn). See [`Self::tool_calls_for_last_block`]
+    /// for scoping semantics.
+    pub fn tokens_for_last_block(&self) -> Option<u64> {
+        let baseline = self.conversation_usage_metadata.turn_usage_baseline.as_ref()?;
+        let current = Self::total_tokens_from_model_usage(&self.conversation_usage_metadata.token_usage);
+        Some(current.saturating_sub(baseline.total_tokens))
+    }
+
+    /// Provider cost in cents incurred during the last block (turn). `None`
+    /// when there is no baseline yet, or when either the baseline or current
+    /// provider cost is unknown (legacy conversations without a
+    /// server-provided cost baseline) -- this must not be treated as
+    /// numeric zero. See [`Self::tool_calls_for_last_block`] for scoping
+    /// semantics.
+    pub fn provider_cost_in_cents_for_last_block(&self) -> Option<f32> {
+        let baseline = self.conversation_usage_metadata.turn_usage_baseline.as_ref()?;
+        let baseline_cost = baseline.provider_cost_in_cents?;
+        let current_cost = self.total_provider_cost_in_cents?;
+        Some(current_cost - baseline_cost)
     }
 
     /// Time to first token for the last completed set of agent responses
@@ -2203,6 +2300,44 @@ impl AIConversation {
         was_user_initiated_request: bool,
         ctx: &AppContext,
     ) -> Result<(), UpdateConversationError> {
+        // A new block (turn) begins whenever a user query initiates the
+        // request. Snapshot the conversation-cumulative totals *before* any
+        // of this call's updates land, so turn-scoped ("last block") values
+        // can later be derived as `current - baseline`. This mirrors the
+        // reset performed below for `credits_spent_for_last_block`, but via
+        // subtraction rather than addition, since the server only reports
+        // cumulative totals (not per-request deltas) for these fields. See
+        // `ConversationUsageMetadata::turn_usage_baseline`.
+        if was_user_initiated_request {
+            self.conversation_usage_metadata.turn_usage_baseline = Some(TurnUsageBaseline {
+                tool_calls: self.conversation_usage_metadata.total_tool_calls(),
+                files_changed: self
+                    .conversation_usage_metadata
+                    .tool_usage_metadata
+                    .apply_file_diff_stats
+                    .files_changed,
+                lines_added: self
+                    .conversation_usage_metadata
+                    .tool_usage_metadata
+                    .apply_file_diff_stats
+                    .lines_added,
+                lines_removed: self
+                    .conversation_usage_metadata
+                    .tool_usage_metadata
+                    .apply_file_diff_stats
+                    .lines_removed,
+                commands_executed: self
+                    .conversation_usage_metadata
+                    .tool_usage_metadata
+                    .run_command_stats
+                    .commands_executed,
+                total_tokens: Self::total_tokens_from_model_usage(
+                    &self.conversation_usage_metadata.token_usage,
+                ),
+                provider_cost_in_cents: self.total_provider_cost_in_cents,
+            });
+        }
+
         self.has_usage_metadata |=
             request_cost.is_some() || usage_metadata.is_some() || !token_usage.is_empty();
         for usage in token_usage.into_iter() {

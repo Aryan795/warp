@@ -1625,12 +1625,42 @@ pub struct ConversationUsageMetadata {
     pub tool_usage_metadata: ToolUsageMetadata,
     #[serde(default)]
     pub context_window_segments: Vec<ContextWindowSegment>,
+    /// Snapshot of conversation-cumulative tool-call/diff/command/token/cost
+    /// totals as of the start of the current turn ("last block", i.e. the
+    /// most recent user-initiated request). The client-only fields the
+    /// server reports (tool calls, files changed, lines added/removed,
+    /// commands executed, tokens, provider cost) are otherwise only
+    /// available as conversation-cumulative totals, so turn-scoped values
+    /// are derived by subtracting this baseline from the current cumulative
+    /// totals. `None` until the first block completes. Mirrors the pattern
+    /// used by `credits_spent_for_last_block`, which is additive rather than
+    /// baseline-subtracted because the server reports per-request deltas for
+    /// credits but only cumulative totals for these other fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_usage_baseline: Option<TurnUsageBaseline>,
 }
 
 impl ConversationUsageMetadata {
     pub fn total_tool_calls(&self) -> i32 {
         self.tool_usage_metadata.total_tool_calls()
     }
+}
+
+/// See [`ConversationUsageMetadata::turn_usage_baseline`].
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+pub struct TurnUsageBaseline {
+    pub tool_calls: i32,
+    pub files_changed: i32,
+    pub lines_added: i32,
+    pub lines_removed: i32,
+    pub commands_executed: i32,
+    pub total_tokens: u64,
+    /// Provider cost in cents as of the start of the block. `None` when the
+    /// server hadn't yet provided a historical cost baseline (mirrors
+    /// `ConversationUsageMetadata::total_provider_cost_in_cents`'s
+    /// semantics), in which case a turn-scoped cost cannot be derived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_cost_in_cents: Option<f32>,
 }
 
 #[derive(Debug, Insertable)]

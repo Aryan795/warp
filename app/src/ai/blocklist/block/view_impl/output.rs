@@ -183,6 +183,7 @@ pub(crate) struct Props<'a> {
     pub(super) has_accepted_edits: bool,
     pub(super) finish_reason: Option<&'a FinishReason>,
     pub(super) is_usage_footer_expanded: bool,
+    pub(super) is_turn_panel_expanded: bool,
     pub(super) shared_session_status: &'a SharedSessionStatus,
     pub(super) terminal_view_id: EntityId,
     pub(super) is_conversation_transcript_viewer: bool,
@@ -3638,6 +3639,7 @@ fn render_response_footer(props: Props, app: &AppContext) -> Option<Box<dyn Elem
     }
 
     flex.add_child(render_usage_button(props, app));
+    flex.add_child(render_turn_panel_button(props, app));
 
     // Review changes button.
     if props.has_accepted_edits && !props.shared_session_status.is_viewer() {
@@ -3818,6 +3820,84 @@ fn render_usage_button(props: Props, app: &AppContext) -> Box<dyn Element> {
     )
     .on_click(|ctx, _, _| {
         ctx.dispatch_typed_action(AIBlockAction::ToggleIsUsageFooterExpanded);
+    })
+    .with_cursor(Cursor::PointingHand)
+    .finish()
+}
+
+/// Renders the per-turn icon that, on click, opens/closes the docked "Turn"
+/// panel (Surface 3 of the pricing-transparency usage surfaces). Per the
+/// resolved spec decision, this uses the same hover-tooltip/click-to-open
+/// pattern as the usage button above, but is otherwise an independent
+/// trigger with no cross-navigation to the usage footer / "Conversation"
+/// popover.
+fn render_turn_panel_button(props: Props, app: &AppContext) -> Box<dyn Element> {
+    let Some(conversation) = props.model.conversation(app) else {
+        return Empty::new().finish();
+    };
+
+    // Only show the trigger once turn-scoped data actually exists (i.e. at
+    // least one block has completed since a user query kicked it off).
+    if conversation.tool_calls_for_last_block().is_none() {
+        return Empty::new().finish();
+    }
+
+    let appearance = Appearance::as_ref(app);
+    let ui_builder = appearance.ui_builder().clone();
+    let icon_size = icon_size(app);
+    let icon_color = appearance
+        .theme()
+        .sub_text_color(appearance.theme().background());
+
+    let is_turn_panel_expanded = props.is_turn_panel_expanded;
+    Hoverable::new(
+        props.state_handles.turn_panel_button_handle.clone(),
+        move |mouse_state| {
+            let icon_element = ConstrainedBox::new(Icon::Clock.to_warpui_icon(icon_color).finish())
+                .with_width(icon_size)
+                .with_height(icon_size)
+                .finish();
+            let mut content = Container::new(icon_element).with_uniform_padding(2.);
+
+            // Keep the trigger visibly "active" while the panel is open, not
+            // just while hovered/clicked, so the icon stays legible as the
+            // panel's open/closed toggle.
+            if is_turn_panel_expanded || mouse_state.is_hovered() || mouse_state.is_clicked() {
+                let background = if is_turn_panel_expanded || mouse_state.is_clicked() {
+                    appearance.theme().background()
+                } else {
+                    blended_colors::neutral_4(appearance.theme()).into()
+                };
+
+                content = content
+                    .with_background(background)
+                    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)));
+
+                let mut stack = Stack::new().with_child(content.finish());
+                let tooltip = ui_builder
+                    .tool_tip("Show turn usage details".to_string())
+                    .build()
+                    .finish();
+                if mouse_state.is_hovered() {
+                    stack.add_positioned_overlay_child(
+                        tooltip,
+                        OffsetPositioning::offset_from_parent(
+                            vec2f(0., 8.),
+                            ParentOffsetBounds::WindowByPosition,
+                            ParentAnchor::BottomMiddle,
+                            ChildAnchor::TopMiddle,
+                        ),
+                    );
+                }
+
+                stack.finish()
+            } else {
+                content.finish()
+            }
+        },
+    )
+    .on_click(|ctx, _, _| {
+        ctx.dispatch_typed_action(AIBlockAction::ToggleIsTurnPanelExpanded);
     })
     .with_cursor(Cursor::PointingHand)
     .finish()

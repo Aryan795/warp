@@ -370,6 +370,7 @@ fn test_server_conversation_metadata(
             token_usage: vec![],
             tool_usage_metadata: Default::default(),
             context_window_segments: Vec::new(),
+            turn_usage_baseline: None,
         },
         metadata: mock_server_metadata(),
         creator: None,
