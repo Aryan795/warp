@@ -1572,7 +1572,7 @@ impl TuiTerminalSessionView {
         });
         let window_id = ctx.window_id();
         let ai_controller = ctx.add_model(|ctx| {
-            BlocklistAIController::new(
+            BlocklistAIController::new_for_tui(
                 ai_input_model.clone(),
                 context_model.clone(),
                 conversation_selection.clone(),

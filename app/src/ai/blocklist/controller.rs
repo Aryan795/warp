@@ -423,6 +423,32 @@ impl BlocklistAIController {
     pub fn skill_path_origin(&self, ctx: &AppContext) -> SkillPathOrigin {
         SessionContext::from_session(self.active_session.as_ref(ctx), ctx).skill_path_origin()
     }
+    #[cfg(feature = "tui")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_for_tui(
+        input_model: ModelHandle<BlocklistAIInputModel>,
+        context_model: ModelHandle<BlocklistAIContextModel>,
+        conversation_selection: ConversationSelectionHandle,
+        action_model: ModelHandle<BlocklistAIActionModel>,
+        active_session: ModelHandle<ActiveSession>,
+        terminal_model: Arc<FairMutex<TerminalModel>>,
+        terminal_surface_id: EntityId,
+        window_id: warpui::WindowId,
+        ctx: &mut ModelContext<Self>,
+    ) -> Self {
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_window(window_id);
+        Self::new(
+            input_model,
+            context_model,
+            conversation_selection,
+            action_model,
+            active_session,
+            terminal_model,
+            terminal_surface_id,
+            team_context,
+            ctx,
+        )
+    }
 
     /// Creates a controller for a terminal surface.
     #[allow(clippy::too_many_arguments)]
