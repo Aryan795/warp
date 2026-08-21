@@ -3,8 +3,7 @@ use pathfinder_geometry::vector::Vector2F;
 use super::*;
 
 /// Regression test for https://github.com/warpdotdev/warp/issues/15379: reopening a closed
-/// window (e.g. via "Reopen Closed Session") must apply the caller-supplied background blur
-/// settings to the recreated window, rather than the hardcoded `None`/`false` it used to pass.
+/// window applies the caller-supplied background blur settings.
 #[test]
 fn test_reopen_closed_window_applies_caller_supplied_background_blur_settings() {
     #[derive(Default)]
