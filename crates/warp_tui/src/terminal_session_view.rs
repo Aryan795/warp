@@ -1571,6 +1571,7 @@ impl TuiTerminalSessionView {
             }
         });
         let window_id = ctx.window_id();
+        let terminal_view = ctx.handle();
         let ai_controller = ctx.add_model(|ctx| {
             BlocklistAIController::new_for_tui(
                 ai_input_model.clone(),
@@ -1580,7 +1581,7 @@ impl TuiTerminalSessionView {
                 active_session.clone(),
                 model.clone(),
                 terminal_surface_id,
-                window_id,
+                terminal_view,
                 ctx,
             )
         });

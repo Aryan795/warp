@@ -74,6 +74,7 @@ fn passive_suggestions_request_params_omit_ambient_agent_task_id() {
                             Some(conversation_id),
                             PassiveSuggestionTrigger::FilesChanged,
                             vec![],
+                            controller.capture_team_context_for_request(ctx),
                             ctx,
                         )
                         .expect("existing conversation should build passive suggestion params")
@@ -87,6 +88,7 @@ fn passive_suggestions_request_params_omit_ambient_agent_task_id() {
                             None,
                             PassiveSuggestionTrigger::FilesChanged,
                             vec![],
+                            controller.capture_team_context_for_request(ctx),
                             ctx,
                         )
                         .expect("new conversation should build passive suggestion params")
@@ -100,7 +102,7 @@ fn passive_suggestions_request_params_omit_ambient_agent_task_id() {
 }
 
 #[test]
-fn controller_request_scope_does_not_follow_window_reassignment() {
+fn request_and_continuation_scopes_do_not_follow_window_reassignment() {
     const AUDIENCE: &str = "//iam.googleapis.com/projects/123456/locations/global/workloadIdentityPools/warp-pool/providers/warp-provider";
     let _geap_flag = FeatureFlag::GeminiEnterprise.override_enabled(true);
     let mut team_a = Team::from_local_cache(111.into(), "team-a".to_string(), None, None, None);
@@ -159,6 +161,18 @@ fn controller_request_scope_does_not_follow_window_reassignment() {
             });
             TerminalView::new_for_test(tips_model, None, ctx)
         });
+        let (team_a_action_context, team_a_resume_context) =
+            terminal.update(&mut app, |terminal, ctx| {
+                let controller = terminal.ai_controller();
+                (
+                    controller.as_ref(ctx).capture_team_context_for_request(ctx),
+                    controller.as_ref(ctx).capture_team_context_for_request(ctx),
+                )
+            });
+        let team_a_action_context =
+            team_a_action_context.expect("the initial action request should capture team A");
+        let team_a_resume_context =
+            team_a_resume_context.expect("the initial resumed request should capture team A");
 
         let mut reassigned_workspace = workspace;
         reassigned_workspace.teams = vec![team_b.clone()];
@@ -190,24 +204,83 @@ fn controller_request_scope_does_not_follow_window_reassignment() {
             ));
         });
 
-        let request_params = terminal.update(&mut app, |terminal, ctx| {
+        let conversation_id = AIConversationId::new();
+        let team_a_request_params = terminal.update(&mut app, |terminal, ctx| {
+            terminal.ai_controller().update(ctx, |controller, ctx| {
+                controller.action_model.update(ctx, |action_model, _| {
+                    action_model
+                        .set_request_team_context(conversation_id, Some(team_a_action_context));
+                });
+                let inherited_context =
+                    controller.take_team_context_for_continuation(conversation_id, ctx);
+                controller
+                    .build_passive_suggestions_request_params(
+                        None,
+                        PassiveSuggestionTrigger::FilesChanged,
+                        vec![],
+                        inherited_context,
+                        ctx,
+                    )
+                    .expect("the captured request should keep team A")
+                    .1
+            })
+        });
+        let team_a_resume_request_params = terminal.update(&mut app, |terminal, ctx| {
+            let resume = PendingResume::new_for_test(
+                RecoveryBudget::fresh().next_attempt(),
+                std::time::Duration::ZERO,
+                Some(team_a_resume_context),
+            );
             terminal.ai_controller().update(ctx, |controller, ctx| {
                 controller
                     .build_passive_suggestions_request_params(
                         None,
                         PassiveSuggestionTrigger::FilesChanged,
                         vec![],
+                        resume.into_team_context(),
                         ctx,
                     )
-                    .expect("the controller should build passive request params")
+                    .expect("the resumed request should keep team A")
                     .1
             })
         });
-        assert!(request_params.geap_mint_binding.is_none());
+        let team_b_request_params = terminal.update(&mut app, |terminal, ctx| {
+            terminal.ai_controller().update(ctx, |controller, ctx| {
+                controller
+                    .build_passive_suggestions_request_params(
+                        None,
+                        PassiveSuggestionTrigger::FilesChanged,
+                        vec![],
+                        controller.capture_team_context_for_request(ctx),
+                        ctx,
+                    )
+                    .expect("the controller should build team B request params")
+                    .1
+            })
+        });
+        assert!(team_a_request_params.geap_mint_binding.is_none());
         assert!(
-            request_params
+            team_a_request_params
                 .api_keys
                 .is_none_or(|api_keys| api_keys.aws_credentials.is_none())
+        );
+        assert!(team_a_resume_request_params.geap_mint_binding.is_none());
+        assert!(
+            team_a_resume_request_params
+                .api_keys
+                .is_none_or(|api_keys| api_keys.aws_credentials.is_none())
+        );
+        assert_eq!(
+            team_b_request_params
+                .geap_mint_binding
+                .expect("the new request should use team B's GEAP policy")
+                .audience,
+            AUDIENCE
+        );
+        assert!(
+            team_b_request_params
+                .api_keys
+                .is_some_and(|api_keys| api_keys.aws_credentials.is_some())
         );
     });
 }
@@ -318,6 +391,7 @@ fn cancelling_conversation_aborts_pending_auto_resume() {
                 let resume = PendingResume::new_for_test(
                     RecoveryBudget::fresh().next_attempt(),
                     std::time::Duration::from_millis(1),
+                    None,
                 );
                 controller.schedule_auto_resume_after_error(conversation_id, resume, ctx);
                 assert!(

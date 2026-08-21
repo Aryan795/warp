@@ -22,6 +22,7 @@ use crate::ai::blocklist::context_model::{
 use crate::ai::blocklist::queued_query::{QueuedQueryId, QueuedQueryModel};
 use crate::search::slash_command_menu::static_commands::commands;
 use crate::terminal::input::slash_commands::SlashCommandTrigger;
+use crate::workspaces::user_workspaces::TeamContext;
 
 pub enum SlashCommandRequest {
     CreateNewProject {
@@ -69,6 +70,7 @@ impl SlashCommandRequest {
         controller: &mut BlocklistAIController,
         queued_query_id: Option<QueuedQueryId>,
         conversation_id_override: Option<AIConversationId>,
+        team_context: Option<TeamContext>,
         ctx: &mut ModelContext<BlocklistAIController>,
     ) {
         let is_queued_prompt = queued_query_id.is_some();
@@ -183,6 +185,7 @@ impl SlashCommandRequest {
 
         match controller.send_request_input(
             request_input,
+            team_context,
             Some(RequestMetadata {
                 is_autodetected_user_query: false,
                 entrypoint,

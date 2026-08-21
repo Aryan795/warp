@@ -4196,7 +4196,7 @@ impl AIBlock {
             GeminiEnterpriseCredentialsErrorEvent::RefreshCredentials => {
                 #[cfg(not(target_family = "wasm"))]
                 me.controller.update(ctx, |controller, ctx| {
-                    controller.force_refresh_geap_credentials(ctx)
+                    controller.force_refresh_geap_credentials(me.client_ids.conversation_id, ctx)
                 });
             }
             GeminiEnterpriseCredentialsErrorEvent::OpenSettings => {

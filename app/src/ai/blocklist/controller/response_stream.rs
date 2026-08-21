@@ -20,6 +20,7 @@ use crate::network::NetworkStatus;
 use crate::send_telemetry_from_ctx;
 use crate::server::retry_strategies::backoff_after_attempts;
 use crate::server::server_api::{AIApiError, ServerApiProvider};
+use crate::workspaces::user_workspaces::TeamContext;
 
 /// Maximum number of recovery attempts spent on one request before the failure is
 /// surfaced.
@@ -111,26 +112,38 @@ impl RecoveryBudget {
 /// The wait is decided here, where the recovery decision is made, rather than recomputed
 /// at send time — the schedule is jittered, so recomputing would produce a different
 /// duration than the one that was logged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PendingResume {
     recovery: RecoveryBudget,
     backoff: Duration,
+    team_context: Option<TeamContext>,
 }
 
 impl PendingResume {
     /// The budget the resumed request runs with, already charged for this resume.
-    pub(crate) fn recovery(self) -> RecoveryBudget {
+    pub(crate) fn recovery(&self) -> RecoveryBudget {
         self.recovery
     }
 
     /// How long to wait before sending the resume.
-    pub(crate) fn backoff(self) -> Duration {
+    pub(crate) fn backoff(&self) -> Duration {
         self.backoff
     }
 
     #[cfg(test)]
-    pub(crate) fn new_for_test(recovery: RecoveryBudget, backoff: Duration) -> Self {
-        Self { recovery, backoff }
+    pub(crate) fn new_for_test(
+        recovery: RecoveryBudget,
+        backoff: Duration,
+        team_context: Option<TeamContext>,
+    ) -> Self {
+        Self {
+            recovery,
+            backoff,
+            team_context,
+        }
+    }
+
+    pub(crate) fn into_team_context(self) -> Option<TeamContext> {
+        self.team_context
     }
 }
 
@@ -255,6 +268,7 @@ impl ResponseStreamId {
 pub struct ResponseStream {
     id: ResponseStreamId,
     params: api::RequestParams,
+    team_context: Option<TeamContext>,
     /// The shared retry/resume budget for this request, inherited from the request this one
     /// recovers (if any) and charged for each retry sent from this stream.
     recovery: RecoveryBudget,
@@ -322,6 +336,7 @@ impl ResponseStream {
         Self {
             id,
             params: api::RequestParams::new_for_test(),
+            team_context: None,
             recovery: RecoveryBudget::fresh().without_resume(),
             retries_sent: 0,
             start_time: Local::now(),
@@ -338,8 +353,9 @@ impl ResponseStream {
         }
     }
 
-    pub fn new(
+    pub(crate) fn new(
         params: api::RequestParams,
+        team_context: Option<TeamContext>,
         ai_identifiers: AIIdentifiers,
         recovery: RecoveryBudget,
         ctx: &mut ModelContext<Self>,
@@ -352,6 +368,7 @@ impl ResponseStream {
         Self {
             id: ResponseStreamId(Uuid::new_v4().to_string()),
             params,
+            team_context,
             start_time,
             time_to_latest_event: TimeDelta::seconds(0),
             cancellation_tx: Some(cancellation_tx),
@@ -380,8 +397,12 @@ impl ResponseStream {
     /// The resume to send once the stream finishes, if one was scheduled. It carries this
     /// request's budget with the resume already charged against it, so the resumed request
     /// can't restart recovery from scratch.
-    pub(super) fn pending_resume(&self) -> Option<PendingResume> {
-        self.pending_resume
+    pub(super) fn take_pending_resume(&mut self) -> Option<PendingResume> {
+        self.pending_resume.take()
+    }
+
+    pub(super) fn take_team_context(&mut self) -> Option<TeamContext> {
+        self.team_context.take()
     }
 
     /// Whether the request that just failed was the turn's own request or an automatic
@@ -425,7 +446,9 @@ impl ResponseStream {
         // eventsource closes on its first error, so a `Resume` decision is never followed by
         // another error on the same stream), but that depends on a transport detail several
         // crates away, and the retry backoff widens the window it holds in.
-        self.pending_resume = None;
+        if let Some(pending_resume) = self.pending_resume.take() {
+            self.team_context = pending_resume.into_team_context();
+        }
 
         let (cancellation_tx, cancellation_rx) = oneshot::channel();
         if let Some(old_cancellation_tx) = self.cancellation_tx.take() {
@@ -476,6 +499,7 @@ impl ResponseStream {
                 self.pending_resume = Some(PendingResume {
                     recovery: self.recovery.next_attempt(),
                     backoff: delay,
+                    team_context: self.team_context.take(),
                 });
                 self.log_recovery(action, &format!("after_stream_finished+{delay:?}"), error);
                 self.error_event_emitted = true;

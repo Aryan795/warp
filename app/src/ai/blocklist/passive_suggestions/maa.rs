@@ -30,7 +30,7 @@ use crate::terminal::model::session::active_session::ActiveSession;
 use crate::terminal::model::terminal_model::TerminalModel;
 use crate::terminal::model_events::{ModelEvent, ModelEventDispatcher};
 use crate::terminal::view::ambient_agent::AmbientAgentViewModel;
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces};
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "local_fs")] {
@@ -175,6 +175,7 @@ impl PassiveSuggestionsModel {
         followup_conversation_id: Option<AIConversationId>,
         trigger: PassiveSuggestionTrigger,
         supported_tools: Vec<warp_multi_agent_api::ToolType>,
+        team_context: Option<TeamContext>,
         ctx: &mut ModelContext<Self>,
     ) {
         // Capture before the call — `Some` means there's a real conversation
@@ -186,6 +187,7 @@ impl PassiveSuggestionsModel {
                     followup_conversation_id,
                     trigger.clone(),
                     supported_tools,
+                    team_context,
                     ctx,
                 )
             })
@@ -434,12 +436,17 @@ impl PassiveSuggestionsModel {
 
         let status = conversation.status();
         if status.is_done() {
+            let team_context = self
+                .ai_controller
+                .as_ref(ctx)
+                .capture_team_context_for_request(ctx);
             self.send_request(
                 Some(conversation_id),
                 PassiveSuggestionTrigger::AgentResponseCompleted {
                     exchange_id: latest_exchange_id,
                 },
                 vec![warp_multi_agent_api::ToolType::SuggestPrompt],
+                team_context,
                 ctx,
             );
         }
@@ -458,7 +465,11 @@ impl PassiveSuggestionsModel {
                 executed_shell_command: block_context,
                 relevant_files,
             });
-        self.send_request(conversation_id, trigger, supported_tools, ctx);
+        let team_context = self
+            .ai_controller
+            .as_ref(ctx)
+            .capture_team_context_for_request(ctx);
+        self.send_request(conversation_id, trigger, supported_tools, team_context, ctx);
     }
 
     fn handle_user_block_completed(

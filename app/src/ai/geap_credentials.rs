@@ -194,14 +194,15 @@ pub(crate) fn force_refresh_geap_credentials_for_context(
     context: Option<&TeamContext>,
     ctx: &mut ModelContext<ApiKeyManager>,
 ) {
-    refresh_geap_credentials_for_policy(
-        manager,
-        geap_policy_for_context(context, ctx),
-        true,
-        None,
-        false,
-        ctx,
-    );
+    force_refresh_geap_credentials_for_policy(manager, geap_policy_for_context(context, ctx), ctx);
+}
+
+pub(crate) fn force_refresh_geap_credentials_for_policy(
+    manager: &mut ApiKeyManager,
+    policy: GeapPolicy,
+    ctx: &mut ModelContext<ApiKeyManager>,
+) {
+    refresh_geap_credentials_for_policy(manager, policy, true, None, false, ctx);
 }
 
 /// Mint kickoff for a request blocked on an expired credential.
