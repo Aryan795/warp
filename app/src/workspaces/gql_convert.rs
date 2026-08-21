@@ -41,14 +41,14 @@ use warp_graphql::workspace::{
     InviteLinkDomainRestriction as GqlInviteLinkDomainRestriction,
     MembershipRole as GqlMembershipRole, StringListSettingInfo as GqlStringListSettingInfo,
     Team as GqlTeam, TeamByoSettings as GqlTeamByoSettings, TeamMember as GqlTeamMember,
-    TeamSettings as GqlTeamSettings,
+    TeamSettings as GqlTeamSettings, TeamVisibility as GqlTeamVisibility,
     UgcCollectionEnablementSetting as GqlUgcCollectionEnablementSetting, Workspace as GqlWorkspace,
     WorkspaceMember as GqlWorkspaceMember, WorkspaceMemberUsageInfo as GqlWorkspaceMemberUsageInfo,
     WorkspaceSettings as GqlWorkspaceSettings,
     WriteToPtyAutonomyValue as GqlWriteToPtyAutonomyValue,
 };
 
-use super::team::{DiscoverableTeam, MembershipRole, Team, TeamMember};
+use super::team::{DiscoverableTeam, MembershipRole, Team, TeamMember, TeamVisibility};
 use super::user_workspaces::WorkspacesMetadataResponse;
 use super::workspace::{
     AIAutonomyPolicy, AddonCreditsSettings, AdminEnablementSetting, AiAutonomySettings,
@@ -194,6 +194,26 @@ impl From<MembershipRole> for GqlMembershipRole {
     }
 }
 
+impl From<GqlTeamVisibility> for TeamVisibility {
+    fn from(visibility: GqlTeamVisibility) -> Self {
+        match visibility {
+            GqlTeamVisibility::Open => TeamVisibility::Open,
+            GqlTeamVisibility::Private => TeamVisibility::Private,
+            GqlTeamVisibility::Hidden => TeamVisibility::Hidden,
+            GqlTeamVisibility::Other(value) => {
+                report_error!(
+                    "Invalid TeamVisibility from server; treating as Private",
+                    extra: { "value" => %value },
+                    warp_errors::ReportErrorLogMode::OncePerRun
+                );
+                // Fail closed: an unrecognized value must not be treated as Open,
+                // since that would surface the invite-by-link control.
+                TeamVisibility::Private
+            }
+        }
+    }
+}
+
 impl From<GqlWorkspaceMemberUsageInfo> for WorkspaceMemberUsageInfo {
     fn from(
         gql_workspace_member_usage_info: GqlWorkspaceMemberUsageInfo,
@@ -224,6 +244,9 @@ impl From<GqlEmailInvite> for EmailInvite {
         Self {
             invitee_email: gql_email_invite.email,
             expired: gql_email_invite.expired,
+            team_uid: gql_email_invite
+                .team_uid
+                .map(|uid| ServerId::from_string_lossy(uid.into_inner())),
         }
     }
 }
@@ -343,6 +366,13 @@ impl From<&gql_usage::ConversationUsage> for ConversationUsageInfo {
             lines_added: tool.apply_file_diff_stats.lines_added,
             lines_removed: tool.apply_file_diff_stats.lines_removed,
             commands_executed: tool.run_command_stats.commands_executed,
+            // GAP: the settings usage-history surface sources this view from
+            // a GraphQL query that does not yet expose a token count or
+            // per-category cost breakdown (Milestone 3 / vertical B).
+            total_tokens: None,
+            total_cost_in_cents: None,
+            tokens_for_last_block: None,
+            cost_in_cents_for_last_block: None,
         }
     }
 }
@@ -1293,6 +1323,18 @@ pub(crate) fn team_settings_from_gql(team_settings: GqlTeamSettings) -> TeamSett
     team_settings.into()
 }
 
+pub(crate) fn team_pending_email_invites_from_gql(
+    workspace_pending_email_invites: &[GqlEmailInvite],
+    team_uid: &cynic::Id,
+) -> Vec<EmailInvite> {
+    workspace_pending_email_invites
+        .iter()
+        .filter(|invite| invite.team_uid.as_ref() == Some(team_uid))
+        .cloned()
+        .map(Into::into)
+        .collect()
+}
+
 impl Team {
     pub fn from_gql(gql_workspace: GqlWorkspace, gql_team: GqlTeam) -> Team {
         Self {
@@ -1306,12 +1348,10 @@ impl Team {
                 .map(|gql_member| gql_member.into())
                 .collect(),
             invite_link: gql_team.invite_link.clone(),
-            pending_email_invites: gql_workspace
-                .pending_email_invites
-                .clone()
-                .into_iter()
-                .map(|gql_email_invite| gql_email_invite.into())
-                .collect(),
+            pending_email_invites: team_pending_email_invites_from_gql(
+                &gql_workspace.pending_email_invites,
+                &gql_team.uid,
+            ),
             invite_link_domain_restrictions: gql_workspace
                 .invite_link_domain_restrictions
                 .clone()
@@ -1328,6 +1368,7 @@ impl Team {
             settings: team_settings_from_gql(gql_team.settings),
             is_eligible_for_discovery: gql_workspace.is_eligible_for_discovery,
             has_billing_history: gql_workspace.has_billing_history,
+            visibility: gql_team.visibility.into(),
         }
     }
 }
