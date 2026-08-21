@@ -1927,7 +1927,10 @@ impl UserWorkspaces {
 
     /// Shared resolution from an org (workspace/team) `AdminEnablementSetting` plus global AI
     /// enablement and the user's own toggle to a final enabled/disabled answer.
-    fn resolve_codebase_context_enabled(org_setting: AdminEnablementSetting, app: &AppContext) -> bool {
+    fn resolve_codebase_context_enabled(
+        org_setting: AdminEnablementSetting,
+        app: &AppContext,
+    ) -> bool {
         let ai_globally_enabled = AISettings::as_ref(app).is_any_ai_enabled(app);
         match org_setting {
             AdminEnablementSetting::Enable => ai_globally_enabled,
