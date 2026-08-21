@@ -456,3 +456,207 @@ async fn num_lines_in_file_if_non_binary_errors_for_directory() {
     let result = LocalDiffStateModel::num_lines_in_file_if_non_binary(dir.path()).await;
     assert!(result.is_err());
 }
+
+#[tokio::test]
+async fn bounded_git_status_returns_untruncated_entries_under_budget() {
+    let repo_dir = tempfile::tempdir().expect("create temp repo dir");
+    let repo_path = repo_dir.path();
+    run_git_command(repo_path, &["init", "-q"])
+        .await
+        .expect("git init");
+    for i in 0..5 {
+        std::fs::write(repo_path.join(format!("file{i}.txt")), "x").expect("write file");
+    }
+
+    let (entries, truncated) = LocalDiffStateModel::bounded_git_status(
+        repo_path,
+        &["status", "--untracked-files=all", "--porcelain=2", "-z"],
+        // Comfortably above the real output for 5 short-named files.
+        64 * 1024,
+    )
+    .await
+    .expect("bounded_git_status should succeed under budget");
+
+    assert!(!truncated);
+    assert_eq!(entries.len(), 5);
+    assert!(
+        entries
+            .iter()
+            .all(|(_, status)| matches!(status, GitFileStatus::Untracked))
+    );
+}
+
+/// Pure-logic regression guard for the corruption hazard APP-5462 explicitly
+/// calls out: naively truncating `git status -z` output at an arbitrary
+/// byte offset can cut a record in half, so a broken parser might return a
+/// garbled path or silently panic on it. This proves the trimming
+/// `bounded_git_status` and `get_diff_metadata_using_numstat` both apply on
+/// overshoot always lands on a delimiter boundary — whatever fragment
+/// follows the last complete record is dropped, never fed to a parser —
+/// without needing a real subprocess to exercise it.
+#[test]
+fn complete_records_before_cutoff_drops_trailing_partial_record() {
+    assert_eq!(
+        LocalDiffStateModel::complete_records_before_cutoff("?a\0?b\0?partial", '\0'),
+        "?a\0?b\0"
+    );
+    // A cut that lands exactly on a delimiter has no partial trailer to drop.
+    assert_eq!(
+        LocalDiffStateModel::complete_records_before_cutoff("?a\0?b\0", '\0'),
+        "?a\0?b\0"
+    );
+    // No complete record at all — the single record itself was cut off.
+    assert_eq!(
+        LocalDiffStateModel::complete_records_before_cutoff("?partial", '\0'),
+        ""
+    );
+    assert_eq!(
+        LocalDiffStateModel::complete_records_before_cutoff("", '\0'),
+        ""
+    );
+}
+
+/// End-to-end proof that a real, oversized `git status -z` read is actually
+/// cut short (not silently absorbed in one large read) and that every
+/// entry recovered from the cut is still a complete, correctly-parsed
+/// record — the untracked-tree amplifier APP-5462 and APP-4827 describe.
+#[tokio::test]
+async fn bounded_git_status_drops_trailing_partial_record_on_overflow() {
+    let repo_dir = tempfile::tempdir().expect("create temp repo dir");
+    let repo_path = repo_dir.path();
+    run_git_command(repo_path, &["init", "-q"])
+        .await
+        .expect("git init");
+    // Long names so the combined `-z` output comfortably exceeds a single
+    // 64KB read chunk, guaranteeing the first chunk alone already trips a
+    // tiny budget — unlike a small total output, which a single read can
+    // capture in full even past the requested budget.
+    const TOTAL_FILES: usize = 1200;
+    let padding = "x".repeat(70);
+    for i in 0..TOTAL_FILES {
+        std::fs::write(repo_path.join(format!("{padding}{i:04}.txt")), "x").expect("write file");
+    }
+
+    let (entries, truncated) = LocalDiffStateModel::bounded_git_status(
+        repo_path,
+        &["status", "--untracked-files=all", "--porcelain=2", "-z"],
+        1_000,
+    )
+    .await
+    .expect("bounded_git_status should succeed even when the budget is exceeded");
+
+    assert!(truncated);
+    // Fewer than the true total — proves a cut actually happened rather
+    // than the read silently absorbing everything anyway.
+    assert!(
+        entries.len() < TOTAL_FILES,
+        "expected fewer than {TOTAL_FILES} entries, got {}",
+        entries.len()
+    );
+    assert!(!entries.is_empty());
+    // Every returned entry parsed as a complete, valid untracked record —
+    // none are corrupted fragments of a cut-off record.
+    for (path, status) in &entries {
+        assert!(matches!(status, GitFileStatus::Untracked));
+        assert!(path.starts_with(&padding) && path.ends_with(".txt"));
+    }
+}
+
+/// Protects the split this builder makes between "cheap to keep exact"
+/// (the overall count, and tracked-file totals from numstat) and
+/// "deliberately bounded" (untracked per-file line counts, and the
+/// retained `files` list) — see APP-5462. A test that only checked
+/// `files.len()` after the fact could pass even if the count or the
+/// tracked totals were wrongly capped too, which is exactly the silent
+/// undercount APP-5462 warns against.
+#[tokio::test]
+async fn build_diff_metadata_against_base_keeps_exact_count_and_tracked_totals_while_capping_files()
+{
+    let dir = tempfile::tempdir().expect("create temp dir");
+    // Untracked files needing a real per-file line count if retained.
+    std::fs::write(dir.path().join("untracked_a.txt"), "one\ntwo\n").expect("write file");
+    std::fs::write(dir.path().join("untracked_b.txt"), "one\ntwo\nthree\n").expect("write file");
+
+    let changed_files = vec![
+        ("tracked_a.txt".to_string(), GitFileStatus::Modified),
+        ("tracked_b.txt".to_string(), GitFileStatus::Modified),
+        ("untracked_a.txt".to_string(), GitFileStatus::Untracked),
+        ("untracked_b.txt".to_string(), GitFileStatus::Untracked),
+    ];
+    let mut num_stat_metadata = HashMap::new();
+    num_stat_metadata.insert(
+        "tracked_a.txt".to_string(),
+        GitNumStatMetadata {
+            lines_added: 10,
+            lines_removed: 3,
+            is_binary_file: false,
+        },
+    );
+    num_stat_metadata.insert(
+        "tracked_b.txt".to_string(),
+        GitNumStatMetadata {
+            lines_added: 20,
+            lines_removed: 7,
+            is_binary_file: false,
+        },
+    );
+
+    // Retain only 1 entry, well under the 4 real changed files.
+    let result = LocalDiffStateModel::build_diff_metadata_against_base(
+        dir.path(),
+        changed_files,
+        &num_stat_metadata,
+        1,
+        false,
+    )
+    .await;
+
+    // The count reflects every changed file, not just the retained one.
+    assert_eq!(result.aggregate_stats.files_changed, 4);
+    // The retained list is capped exactly at max_retained.
+    assert_eq!(result.files.len(), 1);
+    assert_eq!(result.files[0].path, "tracked_a.txt");
+    // Tracked totals are exact from numstat regardless of the cap — both
+    // tracked_a.txt and tracked_b.txt count, even though tracked_b.txt
+    // isn't in the retained `files` list.
+    assert_eq!(result.aggregate_stats.total_additions, 30);
+    assert_eq!(result.aggregate_stats.total_deletions, 10);
+    assert!(!result.files_truncated);
+}
+
+#[tokio::test]
+async fn build_diff_metadata_against_base_counts_retained_untracked_lines() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    std::fs::write(dir.path().join("untracked.txt"), "one\ntwo\nthree\n").expect("write file");
+
+    let changed_files = vec![("untracked.txt".to_string(), GitFileStatus::Untracked)];
+    let result = LocalDiffStateModel::build_diff_metadata_against_base(
+        dir.path(),
+        changed_files,
+        &HashMap::new(),
+        MAX_STATUS_ENTRIES,
+        false,
+    )
+    .await;
+
+    assert_eq!(result.aggregate_stats.files_changed, 1);
+    assert_eq!(result.aggregate_stats.total_additions, 3);
+    assert_eq!(result.aggregate_stats.total_deletions, 0);
+    assert_eq!(result.files.len(), 1);
+    assert_eq!(result.files[0].additions, 3);
+}
+
+#[tokio::test]
+async fn build_diff_metadata_against_base_propagates_truncated_flag() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let result = LocalDiffStateModel::build_diff_metadata_against_base(
+        dir.path(),
+        Vec::new(),
+        &HashMap::new(),
+        MAX_STATUS_ENTRIES,
+        true,
+    )
+    .await;
+
+    assert!(result.files_truncated);
+}
