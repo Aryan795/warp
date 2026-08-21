@@ -5860,7 +5860,9 @@ impl LaidOutEmbeddedItem for BrokenBlockEmbedding {
     }
 
     fn has_missing_glyphs(&self) -> bool {
-        // A broken-embed placeholder renders no text of its own.
+        // The placeholder's "Embed not found" label (see `RenderableBrokenEmbedding::new`) is
+        // fixed ASCII text, which the app's fallback font mapping never routes to an external
+        // family for (see `font_fallback::fallback_font_fn`'s char ranges).
         false
     }
 }

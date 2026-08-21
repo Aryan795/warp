@@ -652,3 +652,7 @@ impl RenderableBlock for RenderableEmbeddedWorkflow {
         self.footer.dispatch_event(event, ctx, app)
     }
 }
+
+#[cfg(test)]
+#[path = "embedded_item_tests.rs"]
+mod tests;
