@@ -41,6 +41,10 @@ integration_tests! {
     test_waterfall_input,
     #[ignore]
     test_waterfall_input_text_selection,
+    // Verified passing locally; ignored for the same reason as its sibling
+    // `test_waterfall_input_text_selection` above.
+    #[ignore]
+    test_shift_click_extends_previous_selection_then_plain_click_resets,
     #[ignore = "Affected by agent_view feature flag UI changes"]
     test_waterfall_input_scrolling,
     #[ignore = "Flakes in CI"]
@@ -328,6 +332,16 @@ integration_tests! {
     test_selection_last_to_ai_semantic,
     #[ignore = "Affected by agent_view feature flag UI changes"]
     test_selection_last_to_ai_lines,
+    // These reuse the same fixture and pixel coordinates as their `_through_ai_*`/`_to_ai_*`
+    // siblings above, so they're affected by the same agent_view feature flag UI changes.
+    #[ignore = "Affected by agent_view feature flag UI changes"]
+    test_shift_click_extends_through_ai_block_to_last_block,
+    #[ignore = "Affected by agent_view feature flag UI changes"]
+    test_shift_click_extends_from_first_block_into_ai_block,
+    #[ignore = "Affected by agent_view feature flag UI changes"]
+    test_shift_click_extends_backward_through_ai_block_to_first_block,
+    #[ignore = "Affected by agent_view feature flag UI changes"]
+    test_shift_click_reextends_within_a_previously_crossed_ai_block,
     test_restored_ai_block_renders_mermaid_and_local_images,
     test_cancelled_run_agents_card_renders_cancelled_state,
 

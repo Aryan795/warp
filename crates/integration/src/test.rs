@@ -188,7 +188,7 @@ use warp::workspace::{
     NEW_SESSION_MENU_BUTTON_POSITION_ID, NEW_TAB_BUTTON_POSITION_ID, Workspace, WorkspaceAction,
 };
 use warp::{AgentModeEntrypoint, cmd_or_ctrl_shift};
-use warpui_core::event::KeyState;
+use warpui_core::event::{KeyState, ModifiersState};
 use warpui_core::integration::{AssertionOutcome, StepData, TestStep};
 use warpui_core::keymap::{Keystroke, PerPlatformKeystroke, Trigger};
 use warpui_core::platform::keyboard::KeyCode;
@@ -1044,6 +1044,155 @@ pub fn test_waterfall_input_text_selection() -> Builder {
                     modifiers: Default::default(),
                 })
                 .add_assertion(assert_view_has_text_selection(false)),
+        )
+}
+
+/// Exercises Shift+click extension end to end through the real mouse-event dispatch path
+/// (`BlockListElement::mouse_down`, `SelectAction::Extend`, `SelectableArea::on_mouse_down`),
+/// rather than calling model/helper primitives directly. Covers PRODUCT rules 1, 2, 3, and 10:
+/// a completed non-empty selection can be extended by a later Shift+click (which keeps its
+/// fixed head), and a subsequent plain click replaces it.
+pub fn test_shift_click_extends_previous_selection_then_plain_click_resets() -> Builder {
+    new_builder()
+        .with_user_defaults(HashMap::from([(
+            INPUT_MODE.to_owned(),
+            serde_json::to_string(&InputMode::Waterfall)
+                .expect("input_mode value should convert to json string"),
+        )]))
+        .with_step(
+            wait_until_bootstrapped_single_pane_for_tab(0)
+                .add_assertion(assert_input_mode(InputMode::Waterfall)),
+        )
+        .with_step(clear_blocklist_to_remove_bootstrapped_blocks())
+        .with_step(execute_echo(0))
+        .with_step(
+            new_step_with_default_assertions("Clear viewport using ctrl-l")
+                .with_keystrokes(&["ctrl-l"])
+                .add_assertion(assert_gap_exists(true))
+                .add_assertion(assert_input_at_top_of_terminal()),
+        )
+        // Run three commands after the clear, matching `test_waterfall_input_text_selection`'s
+        // proven-working fixture and coordinates.
+        .with_step(execute_echo(0))
+        .with_step(execute_echo(0))
+        .with_step(execute_echo(0).add_assertion(|app, window_id| {
+            let terminal_view = single_terminal_view_for_tab(app, window_id, 0);
+            terminal_view.read(app, |view, _ctx| {
+                async_assert!(!view.is_selecting(), "Should not be selecting",)
+            })
+        }))
+        .with_step(
+            // Drag from the top left to the bottom right, matching the proven-working
+            // coordinates from `test_waterfall_input_text_selection`.
+            new_step_with_default_assertions("start selecting")
+                .with_event(Event::LeftMouseDown {
+                    position: Vector2F::new(415., 50.),
+                    modifiers: Default::default(),
+                    click_count: 1,
+                    is_first_mouse: false,
+                })
+                .with_event(Event::LeftMouseDragged {
+                    position: Vector2F::new(400., 300.),
+                    modifiers: Default::default(),
+                })
+                .add_assertion(assert_view_has_text_selection(true)),
+        )
+        .with_step(
+            new_step_with_default_assertions("end selecting")
+                .with_event(Event::LeftMouseUp {
+                    position: Vector2F::new(400., 300.),
+                    modifiers: Default::default(),
+                })
+                .add_assertion(assert_view_has_text_selection(false))
+                .add_named_assertion_with_data_from_prior_step(
+                    "capture the non-empty selected text after the drag",
+                    |app, window_id, step_data| {
+                        let terminal_view = single_terminal_view_for_tab(app, window_id, 0);
+                        let selected_text =
+                            terminal_view.read(app, |view, ctx| view.selected_text(ctx));
+                        let Some(selected_text) = selected_text.filter(|text| !text.is_empty())
+                        else {
+                            return AssertionOutcome::failure(
+                                "Expected non-empty selected text after the initial drag"
+                                    .to_owned(),
+                            );
+                        };
+                        step_data.insert("text_after_drag", selected_text);
+                        AssertionOutcome::Success
+                    },
+                ),
+        )
+        .with_step(
+            // A Shift+click (mouse down and up at the same position, no drag) moves the active
+            // endpoint of the completed selection instead of starting a new one, keeping the
+            // fixed head from the earlier drag in place. The new (shorter) selection should
+            // still start with the same text as before, proving the fixed head did not move,
+            // while its shorter length proves the active endpoint (tail) did move.
+            new_step_with_default_assertions("Shift+click moves the active endpoint")
+                .with_event(Event::LeftMouseDown {
+                    position: Vector2F::new(400., 150.),
+                    modifiers: ModifiersState {
+                        shift: true,
+                        ..Default::default()
+                    },
+                    click_count: 1,
+                    is_first_mouse: false,
+                })
+                .with_event(Event::LeftMouseUp {
+                    position: Vector2F::new(400., 150.),
+                    modifiers: ModifiersState {
+                        shift: true,
+                        ..Default::default()
+                    },
+                })
+                .add_assertion(assert_view_has_text_selection(false))
+                .add_named_assertion_with_data_from_prior_step(
+                    "the fixed head is unchanged and the selection shrank",
+                    |app, window_id, step_data| {
+                        let text_after_drag: String = step_data
+                            .get::<_, String>("text_after_drag")
+                            .expect("text_after_drag should be set by the prior step")
+                            .clone();
+                        let terminal_view = single_terminal_view_for_tab(app, window_id, 0);
+                        let selected_text =
+                            terminal_view.read(app, |view, ctx| view.selected_text(ctx));
+                        async_assert!(
+                            selected_text.as_ref().is_some_and(|text| !text.is_empty()
+                                && text.len() < text_after_drag.len()
+                                && text_after_drag.starts_with(text.as_str())),
+                            "Expected a shorter selection (now {:?}) with the same starting \
+                             text as after the initial drag ({:?}), proving the fixed head did \
+                             not move while the active endpoint did",
+                            selected_text,
+                            text_after_drag
+                        )
+                    },
+                ),
+        )
+        .with_step(
+            // A plain (non-Shift) click replaces the extended selection.
+            new_step_with_default_assertions("plain click replaces the selection")
+                .with_event(Event::LeftMouseDown {
+                    position: Vector2F::new(415., 50.),
+                    modifiers: Default::default(),
+                    click_count: 1,
+                    is_first_mouse: false,
+                })
+                .with_event(Event::LeftMouseUp {
+                    position: Vector2F::new(415., 50.),
+                    modifiers: Default::default(),
+                })
+                .add_assertion(|app, window_id| {
+                    let terminal_view = single_terminal_view_for_tab(app, window_id, 0);
+                    terminal_view.read(app, |view, ctx| {
+                        let selected_text = view.selected_text(ctx);
+                        async_assert!(
+                            selected_text.is_none_or(|text| text.is_empty()),
+                            "A plain click should replace the extended selection with an empty \
+                             one"
+                        )
+                    })
+                }),
         )
 }
 
