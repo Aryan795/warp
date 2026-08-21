@@ -18916,12 +18916,14 @@ impl TerminalView {
 
         self.prime_rich_content_selections_for_cross_block_selection(
             point,
+            // A drag will continue to emit `LeftMouseDragged` events, which establish a precise
+            // tail for any rich-content block the drag passes through; head-only priming for
+            // every rich-content block (not just intervening ones, since the eventual drag
+            // destination isn't known yet) is enough here, and preserves today's
+            // progressive-highlight-while-dragging behavior.
+            None,
             selection_type,
             position,
-            // A drag will continue to emit `LeftMouseDragged` events, which establish a precise
-            // tail for any rich-content block the drag passes through; head-only priming is
-            // enough here, and preserves today's progressive-highlight-while-dragging behavior.
-            false,
             ctx,
         );
 
@@ -18971,39 +18973,46 @@ impl TerminalView {
 
         self.prime_rich_content_selections_for_cross_block_selection(
             head_point,
-            SelectionType::Simple,
-            position,
             // A direct Shift+click extension has no guarantee of a subsequent drag event to
             // establish a rich-content block's tail (unlike `begin_block_text_selection`, whose
-            // caller drags immediately after mouse-down in the common case). Fully select any
-            // rich-content block this extension passes through so it renders and copies
-            // correctly even if the gesture ends here as a plain click. A later real drag tick
-            // (if one occurs) still overrides this with a precise position, same as today.
-            true,
+            // caller drags immediately after mouse-down in the common case), so pass the actual
+            // clicked destination: any block strictly between the head and this point is fully
+            // selected (it's passed through entirely), the destination block itself (if any) has
+            // its tail moved to the exact click position, and anything beyond the destination is
+            // cleared rather than swallowed. A later real drag tick (if one occurs) still
+            // overrides this with a precise position, same as today.
+            Some(point),
+            SelectionType::Simple,
+            position,
             ctx,
         );
 
         ctx.notify();
     }
 
-    /// Loops over each rich-content (AI) block in the block list and, for any that don't contain
-    /// `reference_point`, primes it with an external cross-block selection bound at its minimum
-    /// (top left) or maximum (bottom right) point. This is needed to support point-based
-    /// selections that span command blocks and AI blocks, since a `SelectableArea` can't start a
-    /// selection outside of its own bounds on its own.
+    /// Loops over each rich-content (AI) block in the block list and coordinates its selection
+    /// state relative to `reference_point` (the fixed head) and, when extending an existing
+    /// selection, `destination_point` (the clicked active endpoint). This is needed to support
+    /// point-based selections that span command blocks and AI blocks, since a `SelectableArea`
+    /// can't start a selection outside of its own bounds on its own.
     ///
-    /// `reference_point` is the point relative to which each AI block's position is compared: the
-    /// click point when starting a fresh selection, or the fixed head point when extending one.
-    ///
-    /// When `fully_select` is `true`, each primed block's tail is also set to the opposite
-    /// extreme corner, so the block renders and copies as fully selected immediately rather than
-    /// waiting on a drag event that may never arrive (see [`Self::extend_block_text_selection`]).
+    /// - When `destination_point` is `None` (starting a fresh drag, whose eventual endpoint isn't
+    ///   known yet), every rich-content block other than the one containing `reference_point` is
+    ///   primed with a head-only bound at whichever extreme corner faces `reference_point`; a
+    ///   later `LeftMouseDragged` tick establishes a precise tail for whichever block the drag
+    ///   actually reaches.
+    /// - When `destination_point` is `Some` (a direct, non-drag Shift+click extension), only
+    ///   blocks strictly between the head and the destination are fully selected (they're passed
+    ///   through entirely); the block containing the destination itself, if any, has its tail
+    ///   moved to the exact clicked position instead of being fully selected; and any
+    ///   rich-content block beyond the destination has its (possibly stale, externally-primed)
+    ///   selection cleared, since it's no longer part of the range.
     fn prime_rich_content_selections_for_cross_block_selection(
         &mut self,
         reference_point: BlockListPoint,
+        destination_point: Option<BlockListPoint>,
         selection_type: SelectionType,
         position: Vector2F,
-        fully_select: bool,
         ctx: &mut ViewContext<Self>,
     ) {
         if self.rich_content_views.is_empty() {
@@ -19018,45 +19027,97 @@ impl TerminalView {
             .cursor::<BlockHeight, BlockHeightSummary>();
         block_cursor.seek(&BlockHeight::from(0.), SeekBias::Right);
 
-        let reference_total_index = {
-            let mut reference_cursor = block_list
+        let total_index_at_row = |row| {
+            let mut cursor = block_list
                 .block_heights()
                 .cursor::<BlockHeight, BlockHeightSummary>();
-            reference_cursor.seek(&BlockHeight::from(reference_point.row), SeekBias::Right);
-            reference_cursor.start().total_count
+            cursor.seek(&BlockHeight::from(row), SeekBias::Right);
+            cursor.start().total_count
         };
+        let reference_total_index = total_index_at_row(reference_point.row);
+        let destination_total_index = destination_point.map(|p| total_index_at_row(p.row));
+        let intervening_range = destination_total_index.map(|destination| {
+            reference_total_index.min(destination)..reference_total_index.max(destination)
+        });
 
-        // Loop over each item in the block list. If it's an AI block which doesn't include the
-        // reference point, prime a selection at either the maximum (bottom right) or minimum
-        // (top left) point in the block.
+        // Loop over each item in the block list, coordinating each AI block's selection state
+        // relative to the reference (head) and, when extending, the destination point.
         if let Some(active_window_id) = ctx.windows().active_window() {
             while let Some(block_height_item) = block_cursor.item() {
                 if let BlockHeightItem::RichContent(RichContentItem { view_id, .. }) =
                     block_height_item
                     && let Some(ai_block) = ctx.view_with_id::<AIBlock>(active_window_id, *view_id)
                 {
+                    let ai_block_total_index = block_cursor.start().total_count;
+                    // The block containing the head is never primed here: it either already owns
+                    // its own local selection state, or (for a fresh drag) will establish one
+                    // itself once the drag actually reaches it.
+                    if ai_block_total_index == reference_total_index {
+                        block_cursor.next();
+                        continue;
+                    }
+
                     let x_pos = match selection_type {
                         SelectionType::Rect => Some(position.x()),
                         _ => None,
                     };
-
                     let ai_block_view = ctx.view(&ai_block);
-                    let ai_block_total_index = block_cursor.start().total_count;
+                    let is_before_head = (ai_block_total_index < reference_total_index
+                        && !is_inverted_blocklist)
+                        || (ai_block_total_index > reference_total_index && is_inverted_blocklist);
 
-                    if (ai_block_total_index < reference_total_index && !is_inverted_blocklist)
-                        || (ai_block_total_index > reference_total_index && is_inverted_blocklist)
+                    if Some(ai_block_total_index) == destination_total_index {
+                        // The block containing the clicked destination: move its tail to the
+                        // exact click position instead of fully selecting it, so the selection
+                        // ends where the user actually clicked (PRODUCT rule 11).
+                        let relative_tail = ctx
+                            .element_position_by_id_at_last_frame(
+                                active_window_id,
+                                get_rich_content_position_id(view_id),
+                            )
+                            .map(|rect| position - rect.origin());
+                        match relative_tail {
+                            Some(relative_tail) if is_before_head => {
+                                ai_block_view.extend_selection_from_max_point_to(
+                                    selection_type,
+                                    relative_tail,
+                                );
+                            }
+                            Some(relative_tail) => {
+                                ai_block_view.extend_selection_from_min_point_to(
+                                    selection_type,
+                                    relative_tail,
+                                );
+                            }
+                            // Couldn't resolve this block's on-screen position (e.g. not laid out
+                            // yet); fall back to fully selecting it rather than leaving it blank.
+                            None if is_before_head => {
+                                ai_block_view.fully_select_from_max_point(selection_type);
+                            }
+                            None => {
+                                ai_block_view.fully_select_from_min_point(selection_type);
+                            }
+                        }
+                    } else if intervening_range
+                        .as_ref()
+                        .is_some_and(|range| range.contains(&ai_block_total_index))
                     {
-                        if fully_select {
+                        // Strictly between the head and the destination: passed through
+                        // entirely, so fully select it.
+                        if is_before_head {
                             ai_block_view.fully_select_from_max_point(selection_type);
                         } else {
-                            ai_block_view.start_selection_at_max_point(selection_type, x_pos);
-                        }
-                    } else if (ai_block_total_index > reference_total_index
-                        && !is_inverted_blocklist)
-                        || (ai_block_total_index < reference_total_index && is_inverted_blocklist)
-                    {
-                        if fully_select {
                             ai_block_view.fully_select_from_min_point(selection_type);
+                        }
+                    } else if destination_total_index.is_some() {
+                        // Beyond the destination: not part of the range. Clear any stale
+                        // external priming left over from a wider or reversed extension.
+                        ai_block_view.clear_external_selection();
+                    } else {
+                        // No destination yet (fresh drag): prime a head-only bound so whichever
+                        // block the drag eventually reaches already has a fixed anchor.
+                        if is_before_head {
+                            ai_block_view.start_selection_at_max_point(selection_type, x_pos);
                         } else {
                             ai_block_view.start_selection_at_min_point(selection_type, x_pos);
                         }

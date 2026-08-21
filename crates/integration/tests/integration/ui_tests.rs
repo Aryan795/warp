@@ -41,9 +41,12 @@ integration_tests! {
     test_waterfall_input,
     #[ignore]
     test_waterfall_input_text_selection,
-    // Verified passing locally; ignored for the same reason as its sibling
-    // `test_waterfall_input_text_selection` above.
-    #[ignore]
+    // Unlike its sibling `test_waterfall_input_text_selection` above, this exercises the
+    // real mouse-dispatch path end to end (`BlockListElement::mouse_down` -> `SelectAction::Extend`
+    // -> `SelectableArea::on_mouse_down`) and is the only CI coverage for the terminal-only
+    // Shift+click extend/reversal/reset regression. Verified reliable across repeated local runs
+    // and does not depend on rich-content (AI block) rendering, so it isn't affected by the
+    // agent_view feature flag issue that blocks the rich-content cases below.
     test_shift_click_extends_previous_selection_then_plain_click_resets,
     // Manual test: records a video of every Shift+click extend scenario from
     // specs/CORE-762/PRODUCT.md; requires a real display for frame capture, same as
@@ -337,8 +340,15 @@ integration_tests! {
     test_selection_last_to_ai_semantic,
     #[ignore = "Affected by agent_view feature flag UI changes"]
     test_selection_last_to_ai_lines,
-    // These reuse the same fixture and pixel coordinates as their `_through_ai_*`/`_to_ai_*`
-    // siblings above, so they're affected by the same agent_view feature flag UI changes.
+    // These reuse the same `builder_with_setup()` fixture and pixel coordinates as the dozen
+    // `_through_ai_*`/`_to_ai_*` siblings immediately above (all pre-existing, all similarly
+    // ignored), so they're blocked by the same systemic agent_view feature flag UI/positioning
+    // issue affecting that entire fixture, not by anything specific to Shift+click. Verified
+    // locally that this is the same failure mode as an unmodified sibling
+    // (`test_selection_last_to_ai_simple`): both fail to establish/verify a rich-content
+    // selection in this environment. Un-ignoring these ahead of a fix to that shared fixture
+    // would just add more permanently-red tests without any real coverage benefit; they should
+    // come back in CI together with their pre-existing siblings once that's addressed.
     #[ignore = "Affected by agent_view feature flag UI changes"]
     test_shift_click_extends_through_ai_block_to_last_block,
     #[ignore = "Affected by agent_view feature flag UI changes"]

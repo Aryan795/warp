@@ -214,6 +214,30 @@ impl SelectionHandle {
         selection.is_selecting = true;
     }
 
+    /// Primes this area with an externally-anchored `head` at one extreme corner, and an
+    /// explicit `tail` at `tail_relative_position` (relative to this area's own origin). Unlike
+    /// [`Self::select_full_bounds_outside`] (which anchors the tail at the opposite extreme
+    /// corner), this is used when a cross-block point-based selection's active endpoint (e.g. a
+    /// direct Shift+click destination) lands inside this area, so it gets the same precise
+    /// per-character tail a real drag into it would produce, without waiting for a drag event
+    /// that may never arrive.
+    pub fn select_to_relative_tail_outside(
+        &self,
+        head: SelectionBound,
+        tail_relative_position: Vector2F,
+        unit: SelectionType,
+    ) {
+        let mut selection = self.selection.lock().expect("Should not be poisoned.");
+        selection.head = Some(head);
+        selection.tail = Some(SelectionBound::Relative(tail_relative_position));
+        selection.is_reversed = matches!(
+            head,
+            SelectionBound::BottomRight | SelectionBound::Bottom { .. }
+        );
+        selection.unit = unit;
+        selection.is_selecting = true;
+    }
+
     /// Whether there is an active selection in the SelectableArea.
     /// An active selection is not necessarily a non-empty selection.
     pub fn is_selecting(&self) -> bool {
@@ -1166,6 +1190,52 @@ mod tests {
                 .and_then(|fragments| fragments.into_iter().next())
                 .map(|fragment| fragment.text),
             Some("hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn select_to_relative_tail_outside_ends_exactly_at_the_given_tail() {
+        let origin = vec2f(100.0, 200.0);
+        let (area, handle) = selectable_area_over_hello_world(origin);
+
+        // Used by `TerminalView::prime_rich_content_selections_for_cross_block_selection` when
+        // a direct (non-drag) cross-block Shift+click's clicked destination lands inside this
+        // area: unlike `select_full_bounds_outside`, the tail stops at the given relative
+        // position instead of the opposite extreme corner, so the selection doesn't swallow the
+        // whole area (PRODUCT rule 11).
+        handle.select_to_relative_tail_outside(
+            SelectionBound::TopLeft,
+            vec2f(3.0 * CHAR_WIDTH, 0.0),
+            SelectionType::Simple,
+        );
+
+        assert_eq!(
+            area.get_current_selection_text_fragments()
+                .and_then(|fragments| fragments.into_iter().next())
+                .map(|fragment| fragment.text),
+            Some("hel".to_string())
+        );
+    }
+
+    #[test]
+    fn select_to_relative_tail_outside_reverses_when_head_is_the_bottom_right() {
+        let origin = vec2f(100.0, 200.0);
+        let (area, handle) = selectable_area_over_hello_world(origin);
+
+        // Head anchored at the far corner (the point-based selection is extending backward
+        // into this area), with the tail stopping partway through instead of at the opposite
+        // extreme corner.
+        handle.select_to_relative_tail_outside(
+            SelectionBound::BottomRight,
+            vec2f(8.0 * CHAR_WIDTH, 0.0),
+            SelectionType::Simple,
+        );
+
+        assert_eq!(
+            area.get_current_selection_text_fragments()
+                .and_then(|fragments| fragments.into_iter().next())
+                .map(|fragment| fragment.text),
+            Some("rld".to_string())
         );
     }
 }

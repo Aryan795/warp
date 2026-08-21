@@ -20,9 +20,9 @@ use warp::integration_testing::view_getters::single_terminal_view_for_tab;
 use warp::settings::SelectionSettings;
 use warp_multi_agent_api as api;
 use warpui_core::event::ModifiersState;
-use warpui_core::integration::TestStep;
+use warpui_core::integration::{AssertionOutcome, TestStep};
 use warpui_core::text::SelectionType;
-use warpui_core::{Event, SingletonEntity, async_assert};
+use warpui_core::{Event, SingletonEntity, async_assert, async_assert_eq};
 
 use super::new_builder;
 use crate::Builder;
@@ -1569,9 +1569,10 @@ hello Im the third block",
 }
 
 /// Direct (non-drag) Shift+click extension from a command block landing inside the AI block
-/// (PRODUCT rule 1's third bullet; finding 2's "direct command→rich" case). The AI block is
-/// fully selected rather than partially selected up to the click position, since a plain click
-/// never emits the drag event that would establish a precise sub-block endpoint.
+/// (PRODUCT rule 1's third bullet; finding 2's "direct command→rich" case). The selection ends
+/// exactly where the user clicked (PRODUCT rule 11: simple cell/character extension), not the
+/// whole block — the destination block's tail is moved to the click position via the same
+/// mechanism a real drag into it would use, instead of being fully selected.
 pub fn test_shift_click_extends_from_first_block_into_ai_block() -> Builder {
     builder_with_setup()
         .with_step(drag_and_release_small_selection_in_first_block(
@@ -1583,36 +1584,58 @@ pub fn test_shift_click_extends_from_first_block_into_ai_block() -> Builder {
                 *MIDDLE_OF_MODE_POSITION,
             )
             .add_assertion(assert_view_has_text_selection(false))
-            .add_assertion(|app, window_id| {
-                let terminal_view = single_terminal_view_for_tab(app, window_id, 0);
-                terminal_view.read(app, |terminal_view, ctx| {
-                    let ai_block = terminal_view.last_ai_block().expect("AI block exists");
-                    ai_block.read(ctx, |ai_block, ctx| {
-                        let is_selected_text_correct = ai_block
-                            .selected_text(ctx)
-                            .is_some_and(|selected_text| selected_text == FULL_AI_BLOCK_TEXT);
-                        async_assert!(
-                            is_selected_text_correct,
-                            "AI block should be fully selected"
-                        )
+            .add_named_assertion_with_data_from_prior_step(
+                "AI block is selected up to the click position, not the whole block",
+                |app, window_id, step_data| {
+                    let terminal_view = single_terminal_view_for_tab(app, window_id, 0);
+                    terminal_view.read(app, |terminal_view, ctx| {
+                        let ai_block = terminal_view.last_ai_block().expect("AI block exists");
+                        ai_block.read(ctx, |ai_block, ctx| {
+                            let Some(selected_text) = ai_block.selected_text(ctx) else {
+                                return AssertionOutcome::failure(
+                                    "Expected a non-empty AI block selection".to_owned(),
+                                );
+                            };
+                            if !selected_text.is_empty()
+                                && selected_text.len() < FULL_AI_BLOCK_TEXT.len()
+                                && FULL_AI_BLOCK_TEXT.starts_with(&selected_text)
+                            {
+                                step_data.insert("ai_block_selected_text", selected_text);
+                                AssertionOutcome::Success
+                            } else {
+                                AssertionOutcome::failure(format!(
+                                    "Expected a non-empty selection shorter than the full AI \
+                                     block and matching its start, got {selected_text:?}"
+                                ))
+                            }
+                        })
                     })
-                })
-            }),
+                },
+            ),
         )
         .with_step(
             new_step_with_default_assertions("Copy selection")
                 .with_keystrokes(&[cmd_or_ctrl_shift("c")])
-                .add_assertion(assert_clipboard_contains_string(
-                    "echo \"this is the first block\"
+                .add_named_assertion_with_data_from_prior_step(
+                    "clipboard matches the partial AI block selection",
+                    |app, _window_id, step_data| {
+                        let ai_block_selected_text: String = step_data
+                            .get::<_, String>("ai_block_selected_text")
+                            .expect("ai_block_selected_text should be set")
+                            .clone();
+                        let expected = "echo \"this is the first block\"
 this is the first block
 echo \"now its the second block\"
 now its the second block
 "
-                    .to_owned()
-                        + FULL_AI_BLOCK_TEXT,
-                ))
-                // Extending only as far as the AI block must not also pull in the trailing
-                // command block.
+                        .to_owned()
+                            + &ai_block_selected_text;
+                        let clipboard = app.update(|ctx| ctx.clipboard().read());
+                        async_assert_eq!(clipboard.plain_text, expected)
+                    },
+                )
+                // Extending only as far as the click position must not also pull in the
+                // trailing command block.
                 .add_named_assertion("does not include the last block", |app, window_id| {
                     let terminal_view = single_terminal_view_for_tab(app, window_id, 0);
                     terminal_view.read(app, |view, ctx| {
@@ -1739,21 +1762,34 @@ pub fn test_shift_click_reextends_within_a_previously_crossed_ai_block() -> Buil
                 *MIDDLE_OF_MODE_POSITION,
             )
             .add_assertion(assert_view_has_text_selection(false))
-            .add_assertion(|app, window_id| {
-                let terminal_view = single_terminal_view_for_tab(app, window_id, 0);
-                terminal_view.read(app, |terminal_view, ctx| {
-                    let ai_block = terminal_view.last_ai_block().expect("AI block exists");
-                    ai_block.read(ctx, |ai_block, ctx| {
-                        let is_selected_text_correct = ai_block
-                            .selected_text(ctx)
-                            .is_some_and(|selected_text| selected_text == FULL_AI_BLOCK_TEXT);
-                        async_assert!(
-                            is_selected_text_correct,
-                            "AI block should be fully selected after re-extending into it"
-                        )
+            .add_named_assertion_with_data_from_prior_step(
+                "AI block is selected up to the click position after re-extending into it",
+                |app, window_id, step_data| {
+                    let terminal_view = single_terminal_view_for_tab(app, window_id, 0);
+                    terminal_view.read(app, |terminal_view, ctx| {
+                        let ai_block = terminal_view.last_ai_block().expect("AI block exists");
+                        ai_block.read(ctx, |ai_block, ctx| {
+                            let Some(selected_text) = ai_block.selected_text(ctx) else {
+                                return AssertionOutcome::failure(
+                                    "Expected a non-empty AI block selection".to_owned(),
+                                );
+                            };
+                            if !selected_text.is_empty()
+                                && selected_text.len() < FULL_AI_BLOCK_TEXT.len()
+                                && FULL_AI_BLOCK_TEXT.starts_with(&selected_text)
+                            {
+                                step_data.insert("ai_block_selected_text", selected_text);
+                                AssertionOutcome::Success
+                            } else {
+                                AssertionOutcome::failure(format!(
+                                    "Expected a non-empty selection shorter than the full AI \
+                                     block and matching its start, got {selected_text:?}"
+                                ))
+                            }
+                        })
                     })
-                })
-            })
+                },
+            )
             .add_named_assertion(
                 "no longer includes the last block",
                 |app, window_id| {
@@ -1774,15 +1810,24 @@ pub fn test_shift_click_reextends_within_a_previously_crossed_ai_block() -> Buil
         .with_step(
             new_step_with_default_assertions("Copy selection")
                 .with_keystrokes(&[cmd_or_ctrl_shift("c")])
-                .add_assertion(assert_clipboard_contains_string(
-                    "echo \"this is the first block\"
+                .add_named_assertion_with_data_from_prior_step(
+                    "clipboard matches the partial AI block selection",
+                    |app, _window_id, step_data| {
+                        let ai_block_selected_text: String = step_data
+                            .get::<_, String>("ai_block_selected_text")
+                            .expect("ai_block_selected_text should be set")
+                            .clone();
+                        let expected = "echo \"this is the first block\"
 this is the first block
 echo \"now its the second block\"
 now its the second block
 "
-                    .to_owned()
-                        + FULL_AI_BLOCK_TEXT,
-                )),
+                        .to_owned()
+                            + &ai_block_selected_text;
+                        let clipboard = app.update(|ctx| ctx.clipboard().read());
+                        async_assert_eq!(clipboard.plain_text, expected)
+                    },
+                ),
         )
 }
 
