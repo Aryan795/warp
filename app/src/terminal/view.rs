@@ -7910,10 +7910,15 @@ impl TerminalView {
                 .as_ref()
                 .and_then(BlockMetadata::current_working_directory)
                 .and_then(|cwd| {
-                    let active_session = self.active_block_session_id().and_then(|active_session_id| {
-                        self.sessions.as_ref(ctx).get(active_session_id)
-                    });
-                    match active_session.as_ref().and_then(|session| session.launch_data()) {
+                    let active_session =
+                        self.active_block_session_id()
+                            .and_then(|active_session_id| {
+                                self.sessions.as_ref(ctx).get(active_session_id)
+                            });
+                    match active_session
+                        .as_ref()
+                        .and_then(|session| session.launch_data())
+                    {
                         Some(launch_data) => launch_data.maybe_convert_absolute_path(cwd),
                         // The session hasn't reported launch data yet (e.g. the shell hasn't
                         // attached after a restore), so there's no shell-informed conversion to
