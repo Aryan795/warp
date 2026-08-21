@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 #[cfg(not(target_family = "wasm"))]
 use std::path::Path;
 use std::time::Duration;
@@ -64,13 +64,14 @@ use warp_graphql::mutations::request_bonus::{
     ProvideNegativeFeedbackResponseForAiConversationVariables, RequestsRefundedResult,
 };
 use warp_graphql::mutations::update_agent_task::{
-    AgentTaskStatusMessageInput, PlatformErrorInput, PlatformErrorMetadataInput, UpdateAgentTask,
-    UpdateAgentTaskInput, UpdateAgentTaskResult, UpdateAgentTaskVariables,
+    AgentTaskStatusMessageInput, UpdateAgentTask, UpdateAgentTaskInput, UpdateAgentTaskResult,
+    UpdateAgentTaskVariables,
 };
 use warp_graphql::mutations::update_merkle_tree::{
     MerkleTreeNode, UpdateMerkleTree, UpdateMerkleTreeInput, UpdateMerkleTreeResult,
     UpdateMerkleTreeVariables,
 };
+use warp_graphql::platform_error::PlatformErrorInfo;
 use warp_graphql::queries::codebase_context_config::{
     CodebaseContextConfigQuery, CodebaseContextConfigResult, CodebaseContextConfigVariables,
 };
@@ -169,13 +170,7 @@ const AI_ASSISTANT_REQUEST_TIMEOUT_SECONDS: u64 = 30;
 pub struct TaskStatusUpdate {
     pub message: String,
     pub error_code: Option<PlatformErrorCode>,
-    pub platform_error: Option<TaskPlatformError>,
-}
-
-pub struct TaskPlatformError {
-    pub code: PlatformErrorCode,
-    pub retryable: bool,
-    pub metadata: BTreeMap<String, String>,
+    pub platform_error: Option<PlatformErrorInfo>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -184,10 +179,7 @@ pub enum TaskGitCredentialsError {
     Platform {
         message: String,
         detail: Option<String>,
-        code: PlatformErrorCode,
-        retryable: bool,
-        metadata: BTreeMap<String, String>,
-        debug: Option<String>,
+        info: PlatformErrorInfo,
     },
     #[error("{message}")]
     Unstructured { message: String },
@@ -205,15 +197,7 @@ impl TaskGitCredentialsError {
             UserFacingErrorInterface::PlatformError(error) => Self::Platform {
                 message: error.message,
                 detail: error.detail,
-                code: error.info.code,
-                retryable: error.info.retryable,
-                metadata: error
-                    .info
-                    .metadata
-                    .into_iter()
-                    .map(|entry| (entry.key, entry.value))
-                    .collect(),
-                debug: error.info.debug,
+                info: error.info.into(),
             },
             error => Self::Unstructured {
                 message: get_user_facing_error_message(UserFacingError {
@@ -226,7 +210,7 @@ impl TaskGitCredentialsError {
 
     pub fn retryable(&self) -> bool {
         match self {
-            Self::Platform { retryable, .. } => *retryable,
+            Self::Platform { info, .. } => info.retryable,
             Self::Request(error) => {
                 !error
                     .downcast_ref::<IsolationPlatformError>()
@@ -242,17 +226,14 @@ impl TaskGitCredentialsError {
         match self {
             Self::Platform {
                 message,
-                code,
-                retryable,
                 detail,
-                metadata,
-                ..
+                info,
             } => {
                 let message = match detail {
                     Some(detail) if !detail.is_empty() => format!("{message} ({detail})"),
                     _ => message.clone(),
                 };
-                let state = match code {
+                let state = match info.code {
                     PlatformErrorCode::AuthenticationRequired
                     | PlatformErrorCode::InternalError
                     | PlatformErrorCode::ResourceUnavailable => AgentTaskState::Error,
@@ -272,12 +253,8 @@ impl TaskGitCredentialsError {
                     state,
                     TaskStatusUpdate {
                         message,
-                        error_code: Some(*code),
-                        platform_error: Some(TaskPlatformError {
-                            code: *code,
-                            retryable: *retryable,
-                            metadata: metadata.clone(),
-                        }),
+                        error_code: Some(info.code),
+                        platform_error: Some(info.clone().without_debug()),
                     },
                 )
             }
@@ -286,11 +263,10 @@ impl TaskGitCredentialsError {
                 TaskStatusUpdate {
                     message: message.clone(),
                     error_code: Some(PlatformErrorCode::InvalidRequest),
-                    platform_error: Some(TaskPlatformError {
-                        code: PlatformErrorCode::InvalidRequest,
-                        retryable: false,
-                        metadata: BTreeMap::new(),
-                    }),
+                    platform_error: Some(PlatformErrorInfo::new(
+                        PlatformErrorCode::InvalidRequest,
+                        false,
+                    )),
                 },
             ),
             Self::Request(_) => (
@@ -298,11 +274,10 @@ impl TaskGitCredentialsError {
                 TaskStatusUpdate {
                     message: self.to_string(),
                     error_code: Some(PlatformErrorCode::InternalError),
-                    platform_error: Some(TaskPlatformError {
-                        code: PlatformErrorCode::InternalError,
-                        retryable: true,
-                        metadata: BTreeMap::new(),
-                    }),
+                    platform_error: Some(PlatformErrorInfo::new(
+                        PlatformErrorCode::InternalError,
+                        true,
+                    )),
                 },
             ),
         }
@@ -333,20 +308,10 @@ fn parse_task_git_credentials_result(
 }
 
 fn agent_task_status_message_input(update: TaskStatusUpdate) -> AgentTaskStatusMessageInput {
-    let error = update.platform_error.map(|error| PlatformErrorInput {
-        code: error.code,
-        retryable: error.retryable,
-        metadata: error
-            .metadata
-            .into_iter()
-            .map(|(key, value)| PlatformErrorMetadataInput { key, value })
-            .collect(),
-        debug: None,
-    });
     AgentTaskStatusMessageInput {
         message: update.message,
         error_code: update.error_code,
-        error,
+        error: update.platform_error.map(Into::into),
     }
 }
 fn public_api_user_query_mode(mode: UserQueryMode) -> &'static str {
