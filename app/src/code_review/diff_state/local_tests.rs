@@ -487,32 +487,103 @@ async fn bounded_git_status_returns_untruncated_entries_under_budget() {
 }
 
 /// Pure-logic regression guard for the corruption hazard APP-5462 explicitly
-/// calls out: naively truncating `git status -z` output at an arbitrary
-/// byte offset can cut a record in half, so a broken parser might return a
-/// garbled path or silently panic on it. This proves the trimming
-/// `bounded_git_status` and `get_diff_metadata_using_numstat` both apply on
-/// overshoot always lands on a delimiter boundary — whatever fragment
-/// follows the last complete record is dropped, never fed to a parser —
-/// without needing a real subprocess to exercise it.
+/// calls out: naively truncating `git diff --numstat` output at an
+/// arbitrary byte offset can cut a line in half. This proves
+/// `get_diff_metadata_using_numstat`'s trim always lands on a delimiter
+/// boundary — whatever fragment follows the last complete line is
+/// dropped, never fed to a parser — without needing a real subprocess to
+/// exercise it. `git status -z` records are NOT single-field like this,
+/// so `bounded_git_status` does not use this trim — see
+/// `complete_status_records_before_cutoff_*` below.
 #[test]
-fn complete_records_before_cutoff_drops_trailing_partial_record() {
+fn complete_lines_before_cutoff_drops_trailing_partial_line() {
     assert_eq!(
-        LocalDiffStateModel::complete_records_before_cutoff("?a\0?b\0?partial", '\0'),
-        "?a\0?b\0"
+        LocalDiffStateModel::complete_lines_before_cutoff("a\nb\npartial", '\n'),
+        "a\nb\n"
     );
     // A cut that lands exactly on a delimiter has no partial trailer to drop.
     assert_eq!(
-        LocalDiffStateModel::complete_records_before_cutoff("?a\0?b\0", '\0'),
-        "?a\0?b\0"
+        LocalDiffStateModel::complete_lines_before_cutoff("a\nb\n", '\n'),
+        "a\nb\n"
     );
-    // No complete record at all — the single record itself was cut off.
+    // No complete line at all — the single line itself was cut off.
     assert_eq!(
-        LocalDiffStateModel::complete_records_before_cutoff("?partial", '\0'),
+        LocalDiffStateModel::complete_lines_before_cutoff("partial", '\n'),
         ""
     );
     assert_eq!(
-        LocalDiffStateModel::complete_records_before_cutoff("", '\0'),
+        LocalDiffStateModel::complete_lines_before_cutoff("", '\n'),
         ""
+    );
+}
+
+/// Critical regression guard (APP-5462 review): a porcelain v2 rename/copy
+/// ('2') record spans *two* NUL-terminated fields — the main entry, then
+/// the old path — unlike every other record shape, which is one field.
+/// A delimiter-oblivious trim (keep everything through the last NUL) can
+/// therefore keep a '2' record's first field while silently dropping its
+/// second, which `parse_git_status` then reads as an empty (or
+/// unrelated) old path instead of erroring: silent data corruption, not a
+/// visible failure. This proves `complete_status_records_before_cutoff`
+/// drops such an in-progress record in its entirety instead.
+#[test]
+fn complete_status_records_before_cutoff_drops_in_progress_rename() {
+    // A complete untracked entry, a complete rename (both fields), then a
+    // rename whose second field (the old path) was cut off mid-way.
+    let text = "? a.txt\0\
+         2 R. N... 100644 100644 100644 abc1234 def5678 R100 new.txt\0old.txt\0\
+         2 R. N... 100644 100644 100644 abc1234 def5678 R100 new2.txt\0old2.t";
+
+    let trimmed = LocalDiffStateModel::complete_status_records_before_cutoff(text);
+    let entries = LocalDiffStateModel::parse_git_status(trimmed)
+        .expect("trimmed text should always be valid porcelain v2 input");
+
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0], ("a.txt".to_string(), GitFileStatus::Untracked));
+    assert_eq!(
+        entries[1],
+        (
+            "new.txt".to_string(),
+            GitFileStatus::Renamed {
+                old_path: "old.txt".to_string()
+            }
+        )
+    );
+    // The critical property: no entry ever carries a corrupted (empty or
+    // wrong) old_path from the dropped, in-progress third record.
+    for (_, status) in &entries {
+        if let GitFileStatus::Renamed { old_path } | GitFileStatus::Copied { old_path } = status {
+            assert!(
+                !old_path.is_empty(),
+                "a retained rename/copy must keep its real old_path"
+            );
+        }
+    }
+}
+
+/// A cut that lands before a rename record's second field even starts (no
+/// second NUL anywhere in the remainder) must drop that record entirely,
+/// down to an empty result if it's the only record — never keep just the
+/// first field.
+#[test]
+fn complete_status_records_before_cutoff_drops_lone_rename_missing_old_path() {
+    let text = "2 R. N... 100644 100644 100644 abc1234 def5678 R100 new.txt\0old.t";
+    assert_eq!(
+        LocalDiffStateModel::complete_status_records_before_cutoff(text),
+        ""
+    );
+}
+
+/// Single-field record shapes ('u' unmerged here, matching the reviewer's
+/// request to cover it explicitly) trim safely with the same last-NUL
+/// logic as any other single-field record.
+#[test]
+fn complete_status_records_before_cutoff_trims_single_field_unmerged_record() {
+    let text =
+        "u UU N... 100644 100644 100644 100644 abc1234 def5678 ghi9012 conflict.txt\0partial";
+    assert_eq!(
+        LocalDiffStateModel::complete_status_records_before_cutoff(text),
+        "u UU N... 100644 100644 100644 100644 abc1234 def5678 ghi9012 conflict.txt\0"
     );
 }
 
@@ -560,6 +631,65 @@ async fn bounded_git_status_drops_trailing_partial_record_on_overflow() {
         assert!(matches!(status, GitFileStatus::Untracked));
         assert!(path.starts_with(&padding) && path.ends_with(".txt"));
     }
+}
+
+/// Important regression guard (APP-5462 review): `get_diff_metadata_using_numstat`'s
+/// own overshoot must be surfaced through its own truncation flag —
+/// previously it was silently dropped, so callers could report
+/// `files_truncated == false` while tracked-file totals were actually a
+/// lower bound. Uses a real, oversized `git diff --numstat` read (not a
+/// fabricated string) so the whole path — the bounded read, the trim, and
+/// the flag — is exercised together.
+#[tokio::test]
+async fn get_diff_metadata_using_numstat_reports_its_own_truncation() {
+    let repo_dir = tempfile::tempdir().expect("create temp repo dir");
+    let repo_path = repo_dir.path();
+    run_git_command(repo_path, &["init", "-q"])
+        .await
+        .expect("git init");
+    run_git_command(repo_path, &["config", "user.email", "test@test.com"])
+        .await
+        .expect("git config email");
+    run_git_command(repo_path, &["config", "user.name", "Test"])
+        .await
+        .expect("git config name");
+
+    // Long names so the combined `--numstat` output comfortably exceeds a
+    // single 64KB read chunk, same reasoning as the status overflow test
+    // above.
+    const TOTAL_FILES: usize = 1200;
+    let padding = "y".repeat(70);
+    for i in 0..TOTAL_FILES {
+        std::fs::write(repo_path.join(format!("{padding}{i:04}.txt")), "line one\n")
+            .expect("write file");
+    }
+    run_git_command(repo_path, &["add", "."])
+        .await
+        .expect("git add");
+    run_git_command(repo_path, &["commit", "-q", "-m", "initial"])
+        .await
+        .expect("git commit");
+    for i in 0..TOTAL_FILES {
+        std::fs::write(
+            repo_path.join(format!("{padding}{i:04}.txt")),
+            "line one\nline two\n",
+        )
+        .expect("modify file");
+    }
+
+    let (num_stat_metadata, truncated) =
+        LocalDiffStateModel::get_diff_metadata_using_numstat(repo_path, "HEAD", 1_000)
+            .await
+            .expect("get_diff_metadata_using_numstat should succeed even when exceeded");
+
+    assert!(truncated);
+    // Fewer than the true total — proves a cut actually happened.
+    assert!(
+        num_stat_metadata.len() < TOTAL_FILES,
+        "expected fewer than {TOTAL_FILES} numstat entries, got {}",
+        num_stat_metadata.len()
+    );
+    assert!(!num_stat_metadata.is_empty());
 }
 
 /// Protects the split this builder makes between "cheap to keep exact"

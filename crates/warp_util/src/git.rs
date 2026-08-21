@@ -35,6 +35,10 @@ pub enum BoundedGitOutput {
     /// discarded: a caller dealing in whole delimited records (e.g. `git
     /// status ... -z`) can still make use of every complete record that
     /// fit within the budget instead of treating the whole read as a loss.
+    /// A caller that trims this text down to only its complete records
+    /// before parsing (as it must, to avoid parsing a record that was cut
+    /// off mid-way) will end up with something shorter than this bound,
+    /// not exactly at it.
     Exceeded(String),
 }
 

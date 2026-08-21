@@ -33,6 +33,26 @@ fn translate(args: &[&str], cwd: &str, env: &[(&str, &str)]) -> WslGitCommand {
     translate_for_wsl_unc_cwd(args, Path::new(cwd), env).expect("expected translation")
 }
 
+/// Regression guard mirroring `run_git_command_capped`'s own future-size
+/// test (see APP-5462): a large stack buffer crossing an `.await` point
+/// makes this future's stack footprint scale with the buffer size, which
+/// can overflow a real worker thread's stack even though it's invisible
+/// in a shallow unit test. `read_bounded` already heap-allocates its chunk
+/// buffer (mirroring `read_capped`'s fix); this asserts the future stays
+/// small rather than silently regressing back to a stack array.
+#[test]
+fn run_git_command_bounded_future_stays_small() {
+    let repo = Path::new("/tmp");
+    let fut = run_git_command_bounded(repo, &["status"], 10);
+    let size = std::mem::size_of_val(&fut);
+    assert!(
+        size < 4096,
+        "run_git_command_bounded's future grew to {size} bytes; a large stack buffer \
+         crossing an .await point here can overflow a real worker thread's stack \
+         even though it's invisible in unit tests (see APP-5462)"
+    );
+}
+
 #[test]
 fn bounded_command_returns_complete_output_under_budget() {
     let repo_dir = tempfile::tempdir().expect("create temp repo dir");

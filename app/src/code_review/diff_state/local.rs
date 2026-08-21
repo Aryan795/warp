@@ -2180,7 +2180,7 @@ impl LocalDiffStateModel {
             return Ok(DiffMetadataAgainstBase::default());
         }
 
-        let num_stat_metadata = Self::get_diff_metadata_using_numstat(
+        let (num_stat_metadata, numstat_truncated) = Self::get_diff_metadata_using_numstat(
             repo_path,
             &merge_base,
             METADATA_STATUS_BYTE_BUDGET,
@@ -2192,7 +2192,7 @@ impl LocalDiffStateModel {
             changed_files,
             &num_stat_metadata,
             MAX_STATUS_ENTRIES,
-            files_truncated,
+            files_truncated || numstat_truncated,
         )
         .await)
     }
@@ -2780,18 +2780,59 @@ impl LocalDiffStateModel {
         Ok(files)
     }
 
-    /// Drops any trailing record that may have been cut off mid-way when
+    /// Drops any trailing line that may have been cut off mid-way when
     /// `text` came from a [`BoundedGitOutput::Exceeded`] overshoot,
-    /// splitting on `delimiter`, so only complete records are ever handed
-    /// to a parser — e.g. [`Self::parse_git_status`], which expects only
-    /// whole `-z`-delimited records (see APP-5462: naively truncating raw
-    /// bytes at an arbitrary offset can cut a record in half). Returns an
-    /// empty string when `text` contains no complete record at all.
-    fn complete_records_before_cutoff(text: &str, delimiter: char) -> &str {
+    /// splitting on `delimiter`, so only complete lines are ever handed to
+    /// a single-field-per-record parser (e.g. `git diff --numstat`'s
+    /// tab-separated lines). Returns an empty string when `text` contains
+    /// no complete line at all.
+    ///
+    /// Not for porcelain v2 `git status -z` records: use
+    /// [`Self::complete_status_records_before_cutoff`] there instead, since
+    /// a rename/copy ('2') record spans two NUL-terminated fields and this
+    /// delimiter-oblivious trim would keep the first while dropping the
+    /// second.
+    fn complete_lines_before_cutoff(text: &str, delimiter: char) -> &str {
         match text.rfind(delimiter) {
             Some(last) => &text[..=last],
             None => "",
         }
+    }
+
+    /// Like [`Self::complete_lines_before_cutoff`], but aware of porcelain
+    /// v2 `git status -z` record shapes (see APP-5462): every record is one
+    /// NUL-terminated field *except* a rename/copy ('2') record, which is
+    /// two — the main entry, then the old path. Trimming to the last NUL
+    /// blindly (as a delimiter-oblivious cut would) can keep a '2' record's
+    /// first field while cutting off its second mid-way; fed to
+    /// [`Self::parse_git_status`], that reads the *next*, unrelated field
+    /// as the old path (or, if there is no next field, silently produces
+    /// `Renamed`/`Copied` with an empty `old_path`) instead of erroring —
+    /// silent data corruption that then flows into `git show` and restore
+    /// paths. This instead drops an in-progress multi-field record in its
+    /// entirety when its second field never completed.
+    fn complete_status_records_before_cutoff(text: &str) -> &str {
+        let mut end = 0;
+        let mut cursor = 0;
+        while let Some(rel) = text[cursor..].find('\0') {
+            let field = &text[cursor..cursor + rel];
+            let after_field = cursor + rel + 1;
+            let is_rename_or_copy = field.starts_with('2');
+            if is_rename_or_copy {
+                // Needs a second NUL-terminated field (the old path).
+                match text[after_field..].find('\0') {
+                    Some(rel2) => {
+                        end = after_field + rel2 + 1;
+                        cursor = end;
+                    }
+                    None => break, // Old-path field never completed; drop the whole record.
+                }
+            } else {
+                end = after_field;
+                cursor = after_field;
+            }
+        }
+        &text[..end]
     }
 
     /// Get binary files using git diff --numstat against a specific commit.
@@ -2807,20 +2848,25 @@ impl LocalDiffStateModel {
     ///
     /// `max_bytes` is a parameter (production callers pass
     /// `METADATA_STATUS_BYTE_BUDGET`) purely so tests can force the
-    /// overshoot path deterministically.
+    /// overshoot path deterministically. Returns whether the read was cut
+    /// short as the second tuple element, alongside the map — a caller
+    /// must fold this into its own truncation signal (see APP-5462 review:
+    /// this path's own overshoot was previously dropped on the floor,
+    /// leaving totals silently short while `files_truncated` stayed
+    /// `false`).
     async fn get_diff_metadata_using_numstat(
         repo_path: &Path,
         commit: &str,
         max_bytes: usize,
-    ) -> Result<HashMap<String, GitNumStatMetadata>> {
+    ) -> Result<(HashMap<String, GitNumStatMetadata>, bool)> {
         log::debug!(
             "[GIT OPERATION] local.rs get_diff_metadata_using_numstat git diff --numstat {commit}"
         );
-        let numstat_output =
+        let (numstat_output, truncated) =
             match run_git_command_bounded(repo_path, &["diff", "--numstat", commit], max_bytes)
                 .await
             {
-                Ok(BoundedGitOutput::Complete(text)) => text,
+                Ok(BoundedGitOutput::Complete(text)) => (text, false),
                 Ok(BoundedGitOutput::Exceeded(text)) => {
                     log::warn!(
                         "LocalDiffStateModel: git diff --numstat output exceeded \
@@ -2830,11 +2876,14 @@ impl LocalDiffStateModel {
                     // A trailing partial line would parse as a bogus entry
                     // (wrong path, or a `.parse().unwrap_or(0)` count that
                     // isn't actually 0); drop it rather than the whole read.
-                    Self::complete_records_before_cutoff(&text, '\n').to_string()
+                    (
+                        Self::complete_lines_before_cutoff(&text, '\n').to_string(),
+                        true,
+                    )
                 }
                 Err(_) => {
                     // If numstat fails, return empty set
-                    return Ok(HashMap::new());
+                    return Ok((HashMap::new(), false));
                 }
             };
 
@@ -2861,7 +2910,7 @@ impl LocalDiffStateModel {
             }
         }
 
-        Ok(diff_metadata)
+        Ok((diff_metadata, truncated))
     }
 
     /// Computes changed-file status entries the same way `git status
@@ -2896,7 +2945,7 @@ impl LocalDiffStateModel {
                     "LocalDiffStateModel: git status output exceeded {max_bytes} bytes; \
                      diff metadata for this load is a lower bound (see APP-5462)"
                 );
-                let complete = Self::complete_records_before_cutoff(&text, '\0');
+                let complete = Self::complete_status_records_before_cutoff(&text);
                 Ok((Self::parse_git_status(complete)?, true))
             }
         }
@@ -2916,15 +2965,16 @@ impl LocalDiffStateModel {
     /// files beyond `max_retained` are excluded from the totals: getting
     /// their line counts is a real disk read per file, and doing that for
     /// an unbounded number of untracked files is exactly the unbounded
-    /// work APP-5462 flags. `status_read_truncated` — whether the
-    /// underlying git read itself was cut short before `changed_files` was
-    /// even fully known — flows straight into `files_truncated`.
+    /// work APP-5462 flags. `truncated` — whether *either* underlying git
+    /// read (the status call or the numstat call) was cut short — flows
+    /// straight into `files_truncated`; the caller is responsible for
+    /// folding both reads' outcomes into this one flag before calling.
     async fn build_diff_metadata_against_base(
         repo_path: &Path,
         mut changed_files: Vec<(String, GitFileStatus)>,
         num_stat_metadata: &HashMap<String, GitNumStatMetadata>,
         max_retained: usize,
-        status_read_truncated: bool,
+        truncated: bool,
     ) -> DiffMetadataAgainstBase {
         let files_changed = changed_files.len();
         changed_files.truncate(max_retained);
@@ -2967,7 +3017,7 @@ impl LocalDiffStateModel {
                 total_deletions,
             },
             files,
-            files_truncated: status_read_truncated,
+            files_truncated: truncated,
         }
     }
 
@@ -2976,7 +3026,11 @@ impl LocalDiffStateModel {
         repo_path: &Path,
         commit: &str,
     ) -> Result<std::collections::HashSet<String>> {
-        let diff_metadata =
+        // Binary detection doesn't need a truncation signal of its own: a
+        // file missing from a truncated numstat map is simply not flagged
+        // binary, matching how any other file numstat doesn't report is
+        // already handled.
+        let (diff_metadata, _truncated) =
             Self::get_diff_metadata_using_numstat(repo_path, commit, METADATA_STATUS_BYTE_BUDGET)
                 .await?;
 
@@ -3031,19 +3085,20 @@ pub(crate) async fn diff_metadata_against_head(
     )
     .await?;
 
-    let num_stat_metadata = LocalDiffStateModel::get_diff_metadata_using_numstat(
-        repo_path,
-        "HEAD",
-        METADATA_STATUS_BYTE_BUDGET,
-    )
-    .await?;
+    let (num_stat_metadata, numstat_truncated) =
+        LocalDiffStateModel::get_diff_metadata_using_numstat(
+            repo_path,
+            "HEAD",
+            METADATA_STATUS_BYTE_BUDGET,
+        )
+        .await?;
 
     Ok(LocalDiffStateModel::build_diff_metadata_against_base(
         repo_path,
         changed_files,
         &num_stat_metadata,
         MAX_STATUS_ENTRIES,
-        files_truncated,
+        files_truncated || numstat_truncated,
     )
     .await)
 }
