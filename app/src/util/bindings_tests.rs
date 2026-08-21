@@ -26,14 +26,12 @@ fn test_reset_to_default_after_clear() {
                 .expect("binding should be registered")
                 .id;
 
-            // Simulate clicking "Clear".
             ctx.set_custom_trigger("workspace:show_settings".to_owned(), Trigger::Empty);
             assert_eq!(
                 None,
                 keybinding_name_to_display_string("workspace:show_settings", ctx)
             );
 
-            // Simulate clicking "Default".
             let restored = reset_keybinding_to_default("workspace:show_settings", binding_id, ctx);
             assert_eq!(restored, Keystroke::parse("cmd-,").ok());
         });

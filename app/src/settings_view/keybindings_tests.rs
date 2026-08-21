@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use warpui::keymap::{EditableBinding, Keystroke};
 use warpui::platform::WindowStyle;
 use warpui::{App, TypedActionView};
@@ -162,5 +165,174 @@ fn test_reset_to_default_after_clear_restores_custom_trigger_binding() {
         });
 
         let _ = window_id;
+    });
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ProbeAction {
+    NonEmptyDefault,
+    NoDefault,
+}
+
+/// Minimal root view used to prove a keystroke actually dispatches through the real matcher,
+/// rather than only checking the resolved `Trigger`.
+struct DispatchProbeView {
+    dispatched: Rc<RefCell<Vec<ProbeAction>>>,
+}
+
+impl Entity for DispatchProbeView {
+    type Event = ();
+}
+
+impl View for DispatchProbeView {
+    fn ui_name() -> &'static str {
+        "DispatchProbeView"
+    }
+
+    fn render(&self, _ctx: &AppContext) -> Box<dyn Element> {
+        Empty::new().finish()
+    }
+}
+
+impl TypedActionView for DispatchProbeView {
+    type Action = ProbeAction;
+
+    fn handle_action(&mut self, action: &Self::Action, _ctx: &mut ViewContext<Self>) {
+        self.dispatched.borrow_mut().push(action.clone());
+    }
+}
+
+#[test]
+fn test_reset_to_default_after_clear_resolves_collision_and_dispatches_via_matcher() {
+    // Two `EditableBinding`s can share a name when registered per-view/context (see the dedup
+    // comment in `on_page_selected`). With distinct descriptions they render as separate rows,
+    // each with its own default. Clear -> Default on the row with a real default must restore
+    // *that* default -- not the other same-named registration's -- in both the row, the
+    // `KeybindingsView`'s internal binding-list cache, and the live matcher.
+    const SHARED_NAME: &str = "shared:duplicate_action";
+    const NON_EMPTY_DESCRIPTION: &str = "Shared action with a default";
+    const EMPTY_DESCRIPTION: &str = "Shared action without a default";
+    const DEFAULT_KEYSTROKE: &str = "cmd-,";
+
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+
+        let dispatched = Rc::new(RefCell::new(Vec::new()));
+        let dispatched_for_view = dispatched.clone();
+
+        app.update(|ctx| {
+            ctx.register_editable_bindings([
+                EditableBinding::new(
+                    SHARED_NAME,
+                    NON_EMPTY_DESCRIPTION,
+                    ProbeAction::NonEmptyDefault,
+                )
+                .with_key_binding(DEFAULT_KEYSTROKE),
+                EditableBinding::new(SHARED_NAME, EMPTY_DESCRIPTION, ProbeAction::NoDefault),
+            ]);
+        });
+
+        let (probe_window_id, probe_view) =
+            app.add_window(WindowStyle::NotStealFocus, |_ctx| DispatchProbeView {
+                dispatched: dispatched_for_view,
+            });
+        let probe_view_id = probe_view.id();
+
+        let (_, view_handle) = app.add_window(WindowStyle::NotStealFocus, KeybindingsView::new);
+        app.update(|ctx| {
+            view_handle.update(ctx, |view, ctx| {
+                view.on_page_selected(false, ctx);
+            });
+        });
+
+        let index = app.read(|ctx| {
+            view_handle
+                .as_ref(ctx)
+                .rows
+                .as_ref()
+                .unwrap()
+                .iter()
+                .position(|row| row.binding.name == SHARED_NAME && row.binding.trigger.is_some())
+                .expect("expected a row for the registration with a real default")
+        });
+        let other_id = app.read(|ctx| {
+            view_handle
+                .as_ref(ctx)
+                .rows
+                .as_ref()
+                .unwrap()
+                .iter()
+                .find(|row| row.binding.name == SHARED_NAME && row.binding.trigger.is_none())
+                .expect("expected a row for the registration without a default")
+                .binding
+                .id
+        });
+
+        app.update(|ctx| {
+            view_handle.update(ctx, |view, ctx| {
+                view.handle_action(&KeybindingsViewAction::KeybindingRowClicked(index), ctx);
+                view.handle_action(&KeybindingsViewAction::RemoveKeyStroke(index), ctx);
+            });
+        });
+        app.update(|ctx| {
+            view_handle.update(ctx, |view, ctx| {
+                view.handle_action(&KeybindingsViewAction::KeybindingRowClicked(index), ctx);
+                view.handle_action(&KeybindingsViewAction::ResetToDefaultKeyStroke(index), ctx);
+            });
+        });
+
+        let expected_keystroke = Keystroke::parse(DEFAULT_KEYSTROKE).unwrap();
+        app.read(|ctx| {
+            let view = view_handle.as_ref(ctx);
+            let row = &view.rows.as_ref().unwrap()[index];
+            assert_eq!(
+                row.binding.trigger,
+                Some(expected_keystroke.clone()),
+                "the row for the non-empty registration should show its own restored default"
+            );
+
+            let cached = view
+                .bindings
+                .as_ref()
+                .unwrap()
+                .iter()
+                .find(|binding| binding.id == row.binding.id)
+                .expect("the edited binding should still be present in the cache");
+            assert_eq!(
+                cached.trigger,
+                Some(expected_keystroke.clone()),
+                "the internal binding-list cache should be updated for the edited registration"
+            );
+
+            let other_cached = view
+                .bindings
+                .as_ref()
+                .unwrap()
+                .iter()
+                .find(|binding| binding.id == other_id)
+                .expect("the other same-named registration should still be present");
+            assert_eq!(
+                other_cached.trigger, None,
+                "the other same-named registration's own (empty) default must be unaffected"
+            );
+        });
+
+        let handled = app
+            .dispatch_keystroke(
+                probe_window_id,
+                &[probe_view_id],
+                &expected_keystroke,
+                false,
+            )
+            .expect("dispatch should succeed");
+        assert!(
+            handled,
+            "the restored default keystroke should dispatch through the real matcher"
+        );
+        assert_eq!(
+            dispatched.borrow().as_slice(),
+            [ProbeAction::NonEmptyDefault],
+            "the keystroke should dispatch the non-empty registration's action, not the other's"
+        );
     });
 }

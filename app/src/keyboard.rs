@@ -1,14 +1,13 @@
 #[cfg(not(test))]
 use std::env::var_os;
+use std::path::Path;
 
 use anyhow::Context;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use vec1::{Vec1, vec1};
 use warpui::AppContext;
-use warpui::keymap::Keystroke;
-#[cfg(not(test))]
-use warpui::keymap::Trigger;
+use warpui::keymap::{Keystroke, Trigger};
 
 /// Environment variable to disable saving keybindings to file (used in integration tests)
 pub const DISABLE_SAVE_ENV_VAR: &str = "WARP_TEST_DISABLE_KEYBINDING_SAVE";
@@ -32,10 +31,22 @@ impl UserDefinedKeybinding {
 
 const KEYBINDINGS_FILE_NAME: &str = "keybindings.yaml";
 
-/// Load all stored custom keybindings into the UI framework so that they are used
+/// Load all stored custom keybindings into the UI framework so that they are used.
+///
+/// No-ops in unit tests, so tests never depend on (or clobber) the real user's keybindings
+/// file. Tests that need to exercise the real load logic against a fixture file can call
+/// `load_custom_keybindings_from_path` directly; unlike the write/remove side (which is gated
+/// behind `crate::util::file::create_file`, deliberately unusable under `#[cfg(test)]`), reading
+/// a file with `std::fs::File::open` is not restricted in tests.
 #[cfg(not(test))]
 pub fn load_custom_keybindings(app: &mut AppContext) {
-    if let Some(keybindings) = read_custom_keybindings() {
+    load_custom_keybindings_from_path(&keybinding_file_path(), app);
+}
+#[cfg(test)]
+pub fn load_custom_keybindings(_: &mut AppContext) {}
+
+fn load_custom_keybindings_from_path(path: &Path, app: &mut AppContext) {
+    if let Some(keybindings) = read_custom_keybindings_from_path(path) {
         for (name, trigger) in keybindings.0 {
             let keybinding_type = UserDefinedKeybinding::try_from(trigger.clone());
 
@@ -68,10 +79,17 @@ pub fn write_custom_keybinding(name: String, keybinding: UserDefinedKeybinding) 
         return;
     }
 
-    let mut map = read_custom_keybindings().unwrap_or_default();
+    write_custom_keybinding_to_path(&keybinding_file_path(), name, keybinding);
+}
+#[cfg(test)]
+pub fn write_custom_keybinding(_: String, _: UserDefinedKeybinding) {}
+
+#[cfg(not(test))]
+fn write_custom_keybinding_to_path(path: &Path, name: String, keybinding: UserDefinedKeybinding) {
+    let mut map = read_custom_keybindings_from_path(path).unwrap_or_default();
 
     map.0.insert(name, keybinding.into());
-    save_custom_keybindings(map);
+    save_custom_keybindings_to_path(path, map);
 }
 
 /// Remove a custom keybinding from disk.
@@ -86,10 +104,24 @@ where
         return;
     }
 
-    let mut map = read_custom_keybindings().unwrap_or_default();
+    remove_custom_keybinding_from_path(&keybinding_file_path(), name);
+}
+#[cfg(test)]
+pub fn remove_custom_keybinding<N>(_: N)
+where
+    N: AsRef<str>,
+{
+}
+
+#[cfg(not(test))]
+fn remove_custom_keybinding_from_path<N>(path: &Path, name: N)
+where
+    N: AsRef<str>,
+{
+    let mut map = read_custom_keybindings_from_path(path).unwrap_or_default();
 
     map.0.remove(name.as_ref());
-    save_custom_keybindings(map);
+    save_custom_keybindings_to_path(path, map);
 }
 
 pub fn keybinding_file_path() -> std::path::PathBuf {
@@ -100,10 +132,10 @@ pub fn keybinding_file_path() -> std::path::PathBuf {
 #[cfg(not(test))]
 // Allow unused variables when no local filesystem exists as the arg is unused.
 #[cfg_attr(not(feature = "local_fs"), allow(unused_variables))]
-fn save_custom_keybindings(map: CustomKeybindings) {
+fn save_custom_keybindings_to_path(path: &Path, map: CustomKeybindings) {
     cfg_if::cfg_if! {
         if #[cfg(feature = "local_fs")] {
-            let file = match crate::util::file::create_file(keybinding_file_path()) {
+            let file = match crate::util::file::create_file(path) {
                 Ok(f) => f,
                 Err(e) => {
                     log::warn!("Unable to open file for storing custom keybindings: {e}");
@@ -121,12 +153,11 @@ fn save_custom_keybindings(map: CustomKeybindings) {
     }
 }
 
-/// Read the stored custom keybindings from disk into a map of Editable Binding Name -> Trigger
+/// Read the stored custom keybindings from a file into a map of Editable Binding Name -> Trigger
 ///
 /// Returns `None` if the file can't be read or the deserialization fails
-#[cfg(not(test))]
-fn read_custom_keybindings() -> Option<CustomKeybindings> {
-    let file = std::fs::File::open(keybinding_file_path()).ok()?;
+fn read_custom_keybindings_from_path(path: &Path) -> Option<CustomKeybindings> {
+    let file = std::fs::File::open(path).ok()?;
     let reader = std::io::BufReader::new(file);
 
     match serde_yaml::from_reader(reader) {
@@ -136,20 +167,6 @@ fn read_custom_keybindings() -> Option<CustomKeybindings> {
             None
         }
     }
-}
-
-// For tests, we don't want to read or write from the filesystem.
-//
-// Unit tests are run with #[cfg(test)] enabled, so we can define custom no-op implementations
-#[cfg(test)]
-pub fn load_custom_keybindings(_: &mut AppContext) {}
-#[cfg(test)]
-pub fn write_custom_keybinding(_: String, _: UserDefinedKeybinding) {}
-#[cfg(test)]
-pub fn remove_custom_keybinding<N>(_: N)
-where
-    N: AsRef<str>,
-{
 }
 
 /// Struct that represents the full custom keybindings file for (de-)serialization
@@ -165,7 +182,6 @@ where
 /// "editor:delete_all_left": cmd-shift-A
 /// "editor:delete_all_right": cmd-shift-D escape
 #[derive(Serialize, Deserialize, Default)]
-#[cfg(not(test))]
 struct CustomKeybindings(std::collections::HashMap<String, PersistedTrigger>);
 
 /// The normalized version of a keystroke or series of keystrokes that is written into the
