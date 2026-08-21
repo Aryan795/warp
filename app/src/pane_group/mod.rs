@@ -3742,9 +3742,7 @@ impl PaneGroup {
         );
     }
 
-    /// Marks the conversation viewer created by
-    /// `new_for_conversation_transcript_viewer_loading` as failed, replacing its loading
-    /// spinner with a persistent error state. Uses the active session view as the target.
+    /// Marks the active conversation transcript viewer as failed.
     pub fn fail_conversation_transcript_viewer(&mut self, ctx: &mut ViewContext<Self>) {
         let Some(terminal_view) = self.active_session_view(ctx) else {
             report_error!("No active terminal view to mark as a failed conversation load");
