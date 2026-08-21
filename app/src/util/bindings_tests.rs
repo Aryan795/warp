@@ -2,8 +2,12 @@ use warpui::App;
 use warpui::keymap::{EditableBinding, Keystroke, Trigger};
 use warpui::platform::OperatingSystem;
 
+use crate::settings_view::keybindings::KeybindingChangedNotifier;
 use crate::terminal;
-use crate::util::bindings::{keybinding_name_to_display_string, trigger_to_keystroke};
+use crate::util::bindings::{
+    CustomAction, custom_tag_to_keystroke, keybinding_name_to_display_string,
+    reset_keybinding_to_default, trigger_to_keystroke,
+};
 use crate::workspace::WorkspaceAction;
 
 #[test]
@@ -69,6 +73,80 @@ fn test_keybinding_name_to_display_string() {
                 keybinding_name_to_display_string("workspace:toggle_resource_center", ctx)
                     .as_deref()
             );
+        });
+    });
+}
+
+#[test]
+fn test_reset_keybinding_to_default_after_clearing() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|_| KeybindingChangedNotifier::mock());
+
+        app.update(|ctx| {
+            ctx.register_editable_bindings([EditableBinding::new(
+                "workspace:show_settings",
+                "Open settings",
+                WorkspaceAction::ShowSettings,
+            )
+            .with_key_binding("cmd-,")]);
+
+            // Simulate clicking "Clear": the binding is disabled via an empty custom trigger.
+            ctx.set_custom_trigger("workspace:show_settings".to_owned(), Trigger::Empty);
+            assert_eq!(
+                None,
+                keybinding_name_to_display_string("workspace:show_settings", ctx)
+            );
+
+            // Simulate clicking "Default" afterwards: the original keystroke should come back.
+            let restored = reset_keybinding_to_default("workspace:show_settings", ctx);
+            let displayed_keybinding = if OperatingSystem::get().is_mac() {
+                "⌘,"
+            } else {
+                "Logo ,"
+            };
+            assert_eq!(restored, Keystroke::parse("cmd-,").ok());
+            assert_eq!(
+                Some(displayed_keybinding),
+                keybinding_name_to_display_string("workspace:show_settings", ctx).as_deref()
+            );
+        });
+    });
+}
+
+#[test]
+fn test_reset_custom_action_keybinding_to_default_after_clearing() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|_| KeybindingChangedNotifier::mock());
+
+        app.update(|ctx| {
+            ctx.register_editable_bindings([EditableBinding::new(
+                "terminal:clear_blocks",
+                "Clear blocks",
+                WorkspaceAction::ShowSettings,
+            )
+            .with_custom_action(CustomAction::ClearBlocks)]);
+
+            let expected_default = custom_tag_to_keystroke(CustomAction::ClearBlocks.into());
+            assert_eq!(
+                expected_default,
+                trigger_to_keystroke(
+                    ctx.get_binding_by_name("terminal:clear_blocks")
+                        .unwrap()
+                        .trigger
+                )
+            );
+
+            // Simulate clicking "Clear": the binding is disabled via an empty custom trigger.
+            ctx.set_custom_trigger("terminal:clear_blocks".to_owned(), Trigger::Empty);
+            assert_eq!(
+                None,
+                keybinding_name_to_display_string("terminal:clear_blocks", ctx)
+            );
+
+            // Simulate clicking "Default" afterwards: the custom action's keystroke should come
+            // back, not stay cleared.
+            let restored = reset_keybinding_to_default("terminal:clear_blocks", ctx);
+            assert_eq!(restored, expected_default);
         });
     });
 }

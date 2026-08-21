@@ -1149,3 +1149,7 @@ impl SettingsWidget for KeybindingsWidget {
             .finish()
     }
 }
+
+#[cfg(test)]
+#[path = "keybindings_tests.rs"]
+mod tests;
