@@ -357,6 +357,8 @@ integration_tests! {
     test_shift_click_extends_backward_through_ai_block_to_first_block,
     #[ignore = "Affected by agent_view feature flag UI changes"]
     test_shift_click_reextends_within_a_previously_crossed_ai_block,
+    #[ignore = "Affected by agent_view feature flag UI changes"]
+    test_shift_click_extends_backward_from_last_block_into_ai_block,
     test_restored_ai_block_renders_mermaid_and_local_images,
     test_cancelled_run_agents_card_renders_cancelled_state,
 

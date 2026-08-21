@@ -129,6 +129,34 @@ impl InternalSelection {
     pub fn clear(&mut self) {
         *self = InternalSelection::default();
     }
+
+    /// Installs a fresh externally-coordinated `head`/`tail` pair (see
+    /// [`SelectionHandle::start_selection_outside`], [`SelectionHandle::select_full_bounds_outside`],
+    /// and [`SelectionHandle::select_to_relative_tail_outside`]), resetting all state derived
+    /// from whatever selection this area held before. Without this, a stale `expanded_head`,
+    /// `expanded_tail`, or `initial_smart_selection` from an earlier local drag or double-click
+    /// would keep taking priority over the newly-installed head/tail in [`Self::start`] and
+    /// [`Self::end`].
+    fn install_external_bounds(
+        &mut self,
+        head: SelectionBound,
+        tail: Option<SelectionBound>,
+        unit: SelectionType,
+    ) {
+        self.head = Some(head);
+        self.tail = tail;
+        self.expanded_head = None;
+        self.expanded_tail = None;
+        self.initial_smart_selection = None;
+        self.should_use_smart_start = false;
+        self.should_use_smart_end = false;
+        self.is_reversed = matches!(
+            head,
+            SelectionBound::BottomRight | SelectionBound::Bottom { .. }
+        );
+        self.unit = unit;
+        self.is_selecting = true;
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -186,9 +214,7 @@ impl SelectionHandle {
     /// outside the SelectableArea's bounds and the SelectableArea's start point needs to be clamped manually.
     pub fn start_selection_outside(&self, bound: SelectionBound, unit: SelectionType) {
         let mut selection = self.selection.lock().expect("Should not be poisoned.");
-        selection.head = Some(bound);
-        selection.unit = unit;
-        selection.is_selecting = true;
+        selection.install_external_bounds(bound, None, unit);
     }
 
     /// Primes this area with a complete external selection spanning its entire visible extent,
@@ -204,14 +230,7 @@ impl SelectionHandle {
         unit: SelectionType,
     ) {
         let mut selection = self.selection.lock().expect("Should not be poisoned.");
-        selection.head = Some(head);
-        selection.tail = Some(tail);
-        selection.is_reversed = matches!(
-            head,
-            SelectionBound::BottomRight | SelectionBound::Bottom { .. }
-        );
-        selection.unit = unit;
-        selection.is_selecting = true;
+        selection.install_external_bounds(head, Some(tail), unit);
     }
 
     /// Primes this area with an externally-anchored `head` at one extreme corner, and an
@@ -228,14 +247,11 @@ impl SelectionHandle {
         unit: SelectionType,
     ) {
         let mut selection = self.selection.lock().expect("Should not be poisoned.");
-        selection.head = Some(head);
-        selection.tail = Some(SelectionBound::Relative(tail_relative_position));
-        selection.is_reversed = matches!(
+        selection.install_external_bounds(
             head,
-            SelectionBound::BottomRight | SelectionBound::Bottom { .. }
+            Some(SelectionBound::Relative(tail_relative_position)),
+            unit,
         );
-        selection.unit = unit;
-        selection.is_selecting = true;
     }
 
     /// Whether there is an active selection in the SelectableArea.
@@ -1230,6 +1246,102 @@ mod tests {
             vec2f(8.0 * CHAR_WIDTH, 0.0),
             SelectionType::Simple,
         );
+
+        assert_eq!(
+            area.get_current_selection_text_fragments()
+                .and_then(|fragments| fragments.into_iter().next())
+                .map(|fragment| fragment.text),
+            Some("rld".to_string())
+        );
+    }
+
+    #[test]
+    fn select_to_relative_tail_outside_overrides_a_stale_expanded_tail_from_an_earlier_selection() {
+        let origin = vec2f(100.0, 200.0);
+        let (area, handle) = selectable_area_over_hello_world(origin);
+
+        // This area previously had its own completed, semantically-expanded selection (e.g. a
+        // double-click) that expanded all the way to the end of the line. `InternalSelection::end`
+        // prefers `expanded_tail` over `tail`, so if a later external prime failed to clear it,
+        // the area would keep rendering and copying that stale endpoint instead of the tail this
+        // call installs.
+        {
+            let mut state = handle.selection.lock().unwrap();
+            state.head = Some(SelectionBound::Relative(vec2f(0.0, 0.0)));
+            state.tail = Some(SelectionBound::Relative(vec2f(5.0 * CHAR_WIDTH, 0.0)));
+            state.expanded_head = Some(SelectionBound::Relative(vec2f(0.0, 0.0)));
+            state.expanded_tail = Some(SelectionBound::Relative(vec2f(11.0 * CHAR_WIDTH, 0.0)));
+            state.initial_smart_selection = Some(InitialSmartSelection {
+                start: SelectionBound::Relative(vec2f(0.0, 0.0)),
+                end: SelectionBound::Relative(vec2f(11.0 * CHAR_WIDTH, 0.0)),
+            });
+            state.should_use_smart_start = true;
+            state.should_use_smart_end = true;
+            state.unit = SelectionType::Semantic;
+            state.is_selecting = false;
+        }
+
+        handle.select_to_relative_tail_outside(
+            SelectionBound::TopLeft,
+            vec2f(3.0 * CHAR_WIDTH, 0.0),
+            SelectionType::Simple,
+        );
+
+        let state = handle.selection.lock().unwrap();
+        assert_eq!(state.head, Some(SelectionBound::TopLeft));
+        assert_eq!(
+            state.tail,
+            Some(SelectionBound::Relative(vec2f(3.0 * CHAR_WIDTH, 0.0)))
+        );
+        assert_eq!(state.expanded_head, None);
+        assert_eq!(state.expanded_tail, None);
+        assert!(state.initial_smart_selection.is_none());
+        assert!(!state.should_use_smart_start);
+        assert!(!state.should_use_smart_end);
+        assert!(!state.is_reversed);
+        drop(state);
+
+        assert_eq!(
+            area.get_current_selection_text_fragments()
+                .and_then(|fragments| fragments.into_iter().next())
+                .map(|fragment| fragment.text),
+            Some("hel".to_string())
+        );
+    }
+
+    #[test]
+    fn select_to_relative_tail_outside_overrides_a_stale_expanded_head_when_reversed() {
+        let origin = vec2f(100.0, 200.0);
+        let (area, handle) = selectable_area_over_hello_world(origin);
+
+        // Same as above, but for the reversed-head direction: a stale `expanded_head` from an
+        // earlier selection must not survive to be preferred by `InternalSelection::start`.
+        {
+            let mut state = handle.selection.lock().unwrap();
+            state.head = Some(SelectionBound::Relative(vec2f(11.0 * CHAR_WIDTH, 0.0)));
+            state.tail = Some(SelectionBound::Relative(vec2f(6.0 * CHAR_WIDTH, 0.0)));
+            state.expanded_head = Some(SelectionBound::Relative(vec2f(11.0 * CHAR_WIDTH, 0.0)));
+            state.expanded_tail = Some(SelectionBound::Relative(vec2f(0.0, 0.0)));
+            state.is_reversed = true;
+            state.unit = SelectionType::Semantic;
+            state.is_selecting = false;
+        }
+
+        handle.select_to_relative_tail_outside(
+            SelectionBound::BottomRight,
+            vec2f(8.0 * CHAR_WIDTH, 0.0),
+            SelectionType::Simple,
+        );
+
+        let state = handle.selection.lock().unwrap();
+        assert_eq!(state.head, Some(SelectionBound::BottomRight));
+        assert_eq!(
+            state.tail,
+            Some(SelectionBound::Relative(vec2f(8.0 * CHAR_WIDTH, 0.0)))
+        );
+        assert_eq!(state.expanded_head, None);
+        assert_eq!(state.expanded_tail, None);
+        drop(state);
 
         assert_eq!(
             area.get_current_selection_text_fragments()
