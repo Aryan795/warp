@@ -89,12 +89,8 @@ fn test_interaction_state_prevents_editing() {
     });
 }
 
-// Regression test for https://github.com/warpdotdev/warp/issues/15413: with "Left/Right Option
-// is Meta" enabled, physical Option-Backspace/Option-Delete arrive as `meta-backspace`/
-// `meta-delete` (see `apply_extra_meta_keys`). `CodeEditorView` must bind those keystrokes to
-// word deletion, matching `alt-backspace`/`alt-delete`.
 #[test]
-fn meta_backspace_and_meta_delete_dispatch_word_deletion() {
+fn meta_backspace_deletes_previous_word() {
     App::test((), |mut app| async move {
         app.update(|ctx| {
             crate::code::editor::view::init(ctx);
@@ -123,8 +119,22 @@ fn meta_backspace_and_meta_delete_dispatch_word_deletion() {
 
         let text = editor_view.read(&app, |view, ctx| view.text(ctx));
         assert_eq!(text.as_str(), "hello ");
+    });
+}
+
+#[test]
+fn meta_delete_deletes_next_word() {
+    App::test((), |mut app| async move {
+        app.update(|ctx| {
+            crate::code::editor::view::init(ctx);
+        });
+        let (window_id, editor_view) = initialize_editor(&mut app);
 
         editor_view.update(&mut app, |view, ctx| {
+            view.handle_action(
+                &CodeEditorViewAction::UserTyped(UserInput::new("hello world")),
+                ctx,
+            );
             view.handle_action(&CodeEditorViewAction::MoveToLineStart, ctx);
         });
 
@@ -139,6 +149,6 @@ fn meta_backspace_and_meta_delete_dispatch_word_deletion() {
         assert!(handled, "meta-delete should be handled by CodeEditorView");
 
         let text = editor_view.read(&app, |view, ctx| view.text(ctx));
-        assert_eq!(text.as_str(), " ");
+        assert_eq!(text.as_str(), " world");
     });
 }
