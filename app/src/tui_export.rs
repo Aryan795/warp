@@ -50,7 +50,7 @@ pub use crate::ai::agent_conversations_model::{
 };
 pub use crate::ai::ambient_agents::AmbientAgentTaskId;
 pub use crate::ai::ambient_agents::telemetry::{
-    CloudAgentTelemetryEvent, HandoffEntryPoint, HandoffSurface,
+    CloudAgentTelemetryEvent, HandoffEntryPoint, HandoffOrigin, HandoffSurface,
 };
 pub use crate::ai::blocklist::agent_view::{
     AgentViewController, AgentViewDisplayMode, AgentViewEntryOrigin, EnterAgentViewError,

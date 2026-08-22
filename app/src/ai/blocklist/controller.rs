@@ -3381,19 +3381,17 @@ impl BlocklistAIController {
                     response_stream.update(ctx, |stream, _| stream.take_pending_resume());
                 if let Some(resume) = pending_resume {
                     self.schedule_auto_resume_after_error(conversation_id, resume, ctx);
+                } else if let Some(team_context) =
+                    response_stream.update(ctx, |stream, _| stream.take_team_context())
+                {
+                    self.action_model.update(ctx, |action_model, _| {
+                        action_model.set_request_team_context(conversation_id, team_context);
+                    });
                 } else {
-                    if let Some(team_context) =
-                        response_stream.update(ctx, |stream, _| stream.take_team_context())
-                    {
-                        self.action_model.update(ctx, |action_model, _| {
-                            action_model.set_request_team_context(conversation_id, team_context);
-                        });
-                    } else {
-                        report_error!(
-                            "Response stream completed without its team context",
-                            extra: { "conversation_id" => ?conversation_id }
-                        );
-                    }
+                    report_error!(
+                        "Response stream completed without its team context",
+                        extra: { "conversation_id" => ?conversation_id }
+                    );
                 }
 
                 // Cancelled streams will handle pending_response_stream updates synchronously.

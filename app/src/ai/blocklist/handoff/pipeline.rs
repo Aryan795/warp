@@ -38,7 +38,7 @@ use crate::ai::agent::conversation::{AIConversation, AIConversationId};
 use crate::ai::agent::{CancellationReason, extract_user_query_mode};
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::ambient_agents::telemetry::{
-    CloudAgentTelemetryEvent, HandoffEntryPoint, HandoffInjectionPath, HandoffSurface,
+    CloudAgentTelemetryEvent, HandoffInjectionPath, HandoffOrigin,
 };
 use crate::ai::blocklist::orchestration_topology::descendant_conversation_ids_in_spawn_order;
 use crate::ai::blocklist::{
@@ -84,8 +84,7 @@ pub struct HandoffPrepareInput {
     transfer_pending_attachments: bool,
     environment_id: Option<SyncId>,
     environment_required: bool,
-    entry_point: HandoffEntryPoint,
-    surface: HandoffSurface,
+    origin: HandoffOrigin,
     cancellation_reason: CancellationReason,
     require_in_progress_source: bool,
     team_context: TeamContextForOperation,
@@ -98,8 +97,7 @@ impl HandoffPrepareInput {
         controller: ModelHandle<BlocklistAIController>,
         context: ModelHandle<BlocklistAIContextModel>,
         snapshot_target: SnapshotUploadTarget,
-        entry_point: HandoffEntryPoint,
-        surface: HandoffSurface,
+        origin: HandoffOrigin,
         team_context: TeamContextForOperation,
     ) -> Self {
         Self {
@@ -116,8 +114,7 @@ impl HandoffPrepareInput {
             transfer_pending_attachments: true,
             environment_id: None,
             environment_required: false,
-            entry_point,
-            surface,
+            origin,
             cancellation_reason: CancellationReason::ManuallyCancelled,
             require_in_progress_source: false,
             team_context,
@@ -406,8 +403,7 @@ pub fn prepare_handoff(
         transfer_pending_attachments,
         environment_id: selected_environment_id,
         environment_required,
-        entry_point,
-        surface,
+        origin,
         cancellation_reason,
         require_in_progress_source,
         team_context,
@@ -570,8 +566,8 @@ pub fn prepare_handoff(
     };
     send_telemetry_from_ctx!(
         CloudAgentTelemetryEvent::HandoffInitiated {
-            entry_point,
-            surface,
+            entry_point: origin.entry_point,
+            surface: origin.surface,
             forked_existing_conversation: source_conversation.is_some(),
             empty_prompt,
             injection_path,

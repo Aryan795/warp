@@ -17,8 +17,8 @@ use warp::tui_export::{
     AIConversationId, AISettingsChangedEvent, AttachmentInput, BlocklistAIContextModel,
     BlocklistAIController, BlocklistAIHistoryModel, CloudAgentTelemetryEvent,
     CloudEnvironmentCatalog, HandoffCommitOutcome, HandoffEntryPoint, HandoffLaunchAttachments,
-    HandoffPrepareError, HandoffPrepareInput, HandoffRestoration, HandoffSurface, LLMId,
-    LLMPreferences, LLMPreferencesEvent, OptionRow, OptionSnapshot, OptionSourceStatus,
+    HandoffOrigin, HandoffPrepareError, HandoffPrepareInput, HandoffRestoration, HandoffSurface,
+    LLMId, LLMPreferences, LLMPreferencesEvent, OptionRow, OptionSnapshot, OptionSourceStatus,
     PendingCloudLaunch, PendingHandoff, ServerApiProvider, SnapshotUploadTarget,
     TeamContextForOperation, TerminalModel, UserWorkspaces, UserWorkspacesEvent, execute_handoff,
     handoff_dispatch_error, oz_model_snapshot, prepare_handoff, suggest_handoff_environment,
@@ -164,8 +164,7 @@ impl TuiHandoffModel {
                     ai_client: provider.get_ai_client(),
                     http: provider.get_http_client(),
                 },
-                HandoffEntryPoint::SlashCommand,
-                HandoffSurface::Tui,
+                HandoffOrigin::new(HandoffEntryPoint::SlashCommand, HandoffSurface::Tui),
                 team_context,
             )
             .with_expected_conversation_id(source_conversation_id)
