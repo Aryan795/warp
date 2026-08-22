@@ -762,10 +762,7 @@ impl ExecutionProfileEditorView {
                         |prefs, app| prefs.get_base_llm_choices_for_agent_mode(app).collect_vec(),
                         |id| ExecutionProfileEditorViewAction::SetBaseModel { id },
                         |prefs, team_context, app| {
-                            prefs
-                                .get_default_base_model(team_context, app)
-                                .id
-                                .clone()
+                            prefs.get_default_base_model(team_context, app).id.clone()
                         },
                         &me.upgrade_footer_mouse_state,
                         ctx,
@@ -812,10 +809,7 @@ impl ExecutionProfileEditorView {
                         |prefs, app| prefs.get_base_llm_choices_for_agent_mode(app).collect_vec(),
                         |id| ExecutionProfileEditorViewAction::SetBaseModel { id },
                         |prefs, team_context, app| {
-                            prefs
-                                .get_default_base_model(team_context, app)
-                                .id
-                                .clone()
+                            prefs.get_default_base_model(team_context, app).id.clone()
                         },
                         &me.upgrade_footer_mouse_state,
                         ctx,
@@ -845,10 +839,7 @@ impl ExecutionProfileEditorView {
                     |prefs, app| prefs.get_base_llm_choices_for_agent_mode(app).collect_vec(),
                     |id| ExecutionProfileEditorViewAction::SetBaseModel { id },
                     |prefs, team_context, app| {
-                        prefs
-                            .get_default_base_model(team_context, app)
-                            .id
-                            .clone()
+                        prefs.get_default_base_model(team_context, app).id.clone()
                     },
                     &me.upgrade_footer_mouse_state,
                     ctx,
@@ -973,12 +964,7 @@ impl ExecutionProfileEditorView {
             current_permissions.base_model.clone(),
             |prefs, app| prefs.get_base_llm_choices_for_agent_mode(app).collect_vec(),
             |id| ExecutionProfileEditorViewAction::SetBaseModel { id },
-            |prefs, team_context, app| {
-                prefs
-                    .get_default_base_model(team_context, app)
-                    .id
-                    .clone()
-            },
+            |prefs, team_context, app| prefs.get_default_base_model(team_context, app).id.clone(),
             &self.upgrade_footer_mouse_state,
             ctx,
         );
@@ -1264,9 +1250,8 @@ impl ExecutionProfileEditorView {
 
             let llm_prefs = LLMPreferences::handle(ctx);
             let llm_prefs = llm_prefs.as_ref(ctx);
-            let model_to_select = profile_model.unwrap_or_else(|| {
-                get_default_id(llm_prefs, team_context.as_ref(), ctx)
-            });
+            let model_to_select = profile_model
+                .unwrap_or_else(|| get_default_id(llm_prefs, team_context.as_ref(), ctx));
             dropdown.set_selected_by_action(create_action(model_to_select), ctx);
             ctx.notify();
         });
@@ -1453,24 +1438,20 @@ impl ExecutionProfileEditorView {
         });
     }
 
-    fn configurable_context_window_for_render(
-        &self,
-        app: &AppContext,
-    ) -> Option<LLMContextWindow> {
+    fn configurable_context_window_for_render(&self, app: &AppContext) -> Option<LLMContextWindow> {
         let profile =
             BlocklistAIPermissions::as_ref(app).permissions_profile_for_id(app, &self.profile_id);
-        let team_render_context = UserWorkspaces::as_ref(app)
-            .team_render_context_for_view_handle(&self.weak_self, app);
+        let team_render_context =
+            UserWorkspaces::as_ref(app).team_render_context_for_view_handle(&self.weak_self, app);
         profile.configurable_context_window_for_render_context(team_render_context.as_ref(), app)
     }
 
     fn current_context_window_display_value_for_render(&self, app: &AppContext) -> Option<u32> {
         let profile =
             BlocklistAIPermissions::as_ref(app).permissions_profile_for_id(app, &self.profile_id);
-        let team_render_context = UserWorkspaces::as_ref(app)
-            .team_render_context_for_view_handle(&self.weak_self, app);
-        profile
-            .context_window_display_value_for_render_context(team_render_context.as_ref(), app)
+        let team_render_context =
+            UserWorkspaces::as_ref(app).team_render_context_for_view_handle(&self.weak_self, app);
+        profile.context_window_display_value_for_render_context(team_render_context.as_ref(), app)
     }
 
     fn configurable_context_window_for_action(
@@ -1479,8 +1460,8 @@ impl ExecutionProfileEditorView {
     ) -> Option<LLMContextWindow> {
         let profile =
             BlocklistAIPermissions::as_ref(ctx).permissions_profile_for_id(ctx, &self.profile_id);
-        let team_render_context = UserWorkspaces::as_ref(ctx)
-            .team_render_context_for_view_handle(&self.weak_self, ctx);
+        let team_render_context =
+            UserWorkspaces::as_ref(ctx).team_render_context_for_view_handle(&self.weak_self, ctx);
         profile.configurable_context_window_for_render_context(team_render_context.as_ref(), ctx)
     }
 
@@ -1490,8 +1471,8 @@ impl ExecutionProfileEditorView {
     ) -> Option<u32> {
         let profile =
             BlocklistAIPermissions::as_ref(ctx).permissions_profile_for_id(ctx, &self.profile_id);
-        let team_render_context = UserWorkspaces::as_ref(ctx)
-            .team_render_context_for_view_handle(&self.weak_self, ctx);
+        let team_render_context =
+            UserWorkspaces::as_ref(ctx).team_render_context_for_view_handle(&self.weak_self, ctx);
         profile.context_window_display_value_for_render_context(team_render_context.as_ref(), ctx)
     }
 

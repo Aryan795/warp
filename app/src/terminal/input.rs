@@ -4679,13 +4679,11 @@ impl Input {
     #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
     fn block_cloud_handoff_if_model_unsupported(&self, ctx: &mut ViewContext<Self>) -> bool {
         let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
-        if LLMPreferences::as_ref(ctx)
-            .is_active_base_model_cloud_runnable(
-                self.terminal_view_id,
-                team_context.as_ref(),
-                ctx,
-            )
-        {
+        if LLMPreferences::as_ref(ctx).is_active_base_model_cloud_runnable(
+            self.terminal_view_id,
+            team_context.as_ref(),
+            ctx,
+        ) {
             return false;
         }
         let window_id = ctx.window_id();
@@ -5166,8 +5164,7 @@ impl Input {
 
                 match selected_tab {
                     InlineModelSelectorTab::BaseAgent => {
-                        let team_context =
-                            UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
                         LLMPreferences::handle(ctx).update(ctx, |preferences, ctx| {
                             preferences.update_preferred_agent_mode_llm(
                                 id,
@@ -6169,11 +6166,8 @@ impl Input {
 
         let llm_prefs = LLMPreferences::as_ref(ctx);
         let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
-        let vision_supported = llm_prefs.vision_supported(
-            Some(self.terminal_view_id),
-            team_context.as_ref(),
-            ctx,
-        );
+        let vision_supported =
+            llm_prefs.vision_supported(Some(self.terminal_view_id), team_context.as_ref(), ctx);
 
         let num_images_attached = self.ai_context_model.as_ref(ctx).pending_images().len();
 

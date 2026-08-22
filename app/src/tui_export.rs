@@ -278,6 +278,105 @@ pub use crate::voice::transcriber::{Transcriber, VoiceTranscriber};
 pub use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces, UserWorkspacesEvent};
 pub use crate::workspaces::workspace::{AiCreditsUsageAndCostType, UsageVisibilityGranularity};
 
+#[derive(Debug, Clone)]
+pub struct TuiModelPickerPresentation {
+    pub id: LLMId,
+    pub title: String,
+    pub is_selectable: bool,
+    pub is_key_connected: bool,
+    pub is_profile_default: bool,
+    pub discount_percentage: Option<f32>,
+}
+
+pub fn tui_model_picker_catalog_ids(query: &str, app: &warpui::AppContext) -> Vec<LLMId> {
+    let preferences = crate::ai::llms::LLMPreferences::as_ref(app);
+    crate::terminal::input::models::query_model_picker_catalog_choices(
+        preferences,
+        preferences.get_base_llm_choices_for_agent_mode_catalog(),
+        query,
+    )
+    .into_iter()
+    .map(|choice| choice.llm.id)
+    .collect()
+}
+
+pub fn tui_model_picker_presentation_for_view<T: warpui::Entity>(
+    owner_view: &warpui::WeakViewHandle<T>,
+    terminal_view_id: warpui::EntityId,
+    id: &LLMId,
+    app: &warpui::AppContext,
+) -> Option<TuiModelPickerPresentation> {
+    let workspaces = crate::workspaces::user_workspaces::UserWorkspaces::as_ref(app);
+    let team_context = workspaces.team_render_context_for_view_handle(owner_view, app);
+    let preferences = crate::ai::llms::LLMPreferences::as_ref(app);
+    let llm = preferences.get_llm_info(id)?;
+    if !preferences
+        .get_base_llm_choices_for_agent_mode_for_render_context(team_context.as_ref(), app)
+        .any(|choice| choice.id == llm.id)
+    {
+        return None;
+    }
+
+    let is_profile_default = preferences
+        .get_active_profile_base_model_for_render_context(
+            Some(terminal_view_id),
+            team_context.as_ref(),
+            app,
+        )
+        .id
+        == llm.id;
+    let is_key_connected = crate::ai::llms::should_show_key_icon_for_model_for_render_context(
+        llm,
+        team_context.as_ref(),
+        app,
+    );
+    let uses_external_inference = is_key_connected
+        || crate::ai::llms::should_show_bedrock_icon_for_model_for_render_context(
+            llm,
+            team_context.as_ref(),
+            app,
+        )
+        || crate::ai::llms::
+            should_show_gemini_enterprise_agent_platform_icon_for_model_for_render_context(
+                llm,
+                team_context.as_ref(),
+                app,
+            );
+
+    Some(TuiModelPickerPresentation {
+        id: llm.id.clone(),
+        title: llm.display_name.clone(),
+        is_selectable: crate::ai::llms::effective_model_disable_reason_for_render_context(
+            llm,
+            team_context.as_ref(),
+            app,
+        )
+        .is_none(),
+        is_key_connected,
+        is_profile_default,
+        discount_percentage: llm
+            .discount_percentage
+            .filter(|_| !uses_external_inference),
+    })
+}
+
+pub fn tui_active_model_id_for_view<T: warpui::Entity>(
+    owner_view: &warpui::WeakViewHandle<T>,
+    terminal_view_id: warpui::EntityId,
+    app: &warpui::AppContext,
+) -> LLMId {
+    let workspaces = crate::workspaces::user_workspaces::UserWorkspaces::as_ref(app);
+    let team_context = workspaces.team_render_context_for_view_handle(owner_view, app);
+    crate::ai::llms::LLMPreferences::as_ref(app)
+        .get_active_base_model_for_render_context(
+            Some(terminal_view_id),
+            team_context.as_ref(),
+            app,
+        )
+        .id
+        .clone()
+}
+
 pub fn format_usage_cost_cents(cents: i64) -> String {
     crate::settings_view::format_cost_cents(cents)
 }

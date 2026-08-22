@@ -603,11 +603,7 @@ impl TerminalManager {
                 let selected_model_id: String = view.update(ctx, |_, ctx| {
                     let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
                     LLMPreferences::as_ref(ctx)
-                        .get_active_base_model(
-                            Some(terminal_view_id),
-                            team_context.as_ref(),
-                            ctx,
-                        )
+                        .get_active_base_model(Some(terminal_view_id), team_context.as_ref(), ctx)
                         .id
                         .clone()
                         .into()
@@ -1538,7 +1534,6 @@ impl TerminalManager {
         guard: &ActiveRemoteUpdate,
         ctx: &mut AppContext,
     ) {
-
         apply_selected_agent_model_update(weak_view_handle, selected_model, guard, ctx);
     }
 

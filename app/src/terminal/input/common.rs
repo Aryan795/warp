@@ -15,9 +15,7 @@ use warpui::presenter::ChildView;
 use warpui::ui_components::components::{UiComponent, UiComponentStyles};
 use warpui::{AppContext, SingletonEntity, ViewHandle, WeakViewHandle};
 
-use crate::ai::llms::{
-    LLMPreferences, should_show_key_icon_for_model_for_render_context,
-};
+use crate::ai::llms::{LLMPreferences, should_show_key_icon_for_model_for_render_context};
 use crate::ai::{AIRequestUsageModel, BuyCreditsBannerDisplayState};
 use crate::appearance::Appearance;
 use crate::settings::{AISettings, InputSettings};

@@ -419,11 +419,7 @@ impl ModelSelector {
                 })
                 .unwrap_or_else(|| "default".to_string()),
             _ => LLMPreferences::as_ref(ctx)
-                .get_active_base_model(
-                    Some(self.terminal_view_id),
-                    team_context.as_ref(),
-                    ctx,
-                )
+                .get_active_base_model(Some(self.terminal_view_id), team_context.as_ref(), ctx)
                 .display_name
                 .clone(),
         };
@@ -487,11 +483,7 @@ impl ModelSelector {
         let llm_preferences = LLMPreferences::as_ref(ctx);
         let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         let active_llm_id = llm_preferences
-            .get_active_base_model(
-                Some(self.terminal_view_id),
-                team_context.as_ref(),
-                ctx,
-            )
+            .get_active_base_model(Some(self.terminal_view_id), team_context.as_ref(), ctx)
             .id
             .clone();
 

@@ -1510,6 +1510,7 @@ impl TuiTerminalSessionView {
                 view.show_settings_file_error(error, ctx);
             }
         });
+        let model_menu_owner = ctx.handle();
 
         let terminal_surface_id: EntityId = ctx.view_id();
         let window_id = ctx.window_id();
@@ -1541,7 +1542,6 @@ impl TuiTerminalSessionView {
                 sessions.clone(),
                 &model_events,
                 model.clone(),
-                terminal_surface_id,
                 conversation_selection.clone(),
                 ctx,
             )
@@ -1700,6 +1700,7 @@ impl TuiTerminalSessionView {
                 input_editor_model.clone(),
                 suggestions_mode.clone(),
                 terminal_surface_id,
+                model_menu_owner,
                 ctx,
             )
         });
@@ -3855,12 +3856,11 @@ impl TuiTerminalSessionView {
     /// the same menu `/model` surfaces. The model's existing open/dismiss paths
     /// preserve active-menu arbitration, input cleanup, and selection handling.
     fn toggle_model_menu(&mut self, ctx: &mut ViewContext<Self>) {
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         self.model_menu.update(ctx, |menu, ctx| {
             if menu.is_open(ctx) {
                 menu.dismiss(ctx);
             } else {
-                menu.open(team_context, ctx);
+                menu.open(ctx);
             }
         });
     }
@@ -4642,9 +4642,7 @@ impl TuiTerminalSessionView {
                 record_static_slash_command_accepted(command.name, true, ctx);
             }
             SlashCommandKind::Model => {
-                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
-                self.model_menu
-                    .update(ctx, |menu, ctx| menu.open(team_context, ctx));
+                self.model_menu.update(ctx, |menu, ctx| menu.open(ctx));
                 record_static_slash_command_accepted(command.name, true, ctx);
             }
             SlashCommandKind::InvokeSkill => {

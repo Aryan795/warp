@@ -318,11 +318,7 @@ fn wire_up_terminal_view_session_sharing(
             let selected_model_id: String = view.update(ctx, |_, ctx| {
                 let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
                 LLMPreferences::as_ref(ctx)
-                    .get_active_base_model(
-                        Some(terminal_view_id),
-                        team_context.as_ref(),
-                        ctx,
-                    )
+                    .get_active_base_model(Some(terminal_view_id), team_context.as_ref(), ctx)
                     .id
                     .clone()
                     .into()

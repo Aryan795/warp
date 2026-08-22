@@ -3507,7 +3507,6 @@ impl TerminalView {
                 sessions.clone(),
                 &model_events_handle,
                 model.clone(),
-                terminal_view_id,
                 conversation_selection.clone(),
                 ctx,
             )

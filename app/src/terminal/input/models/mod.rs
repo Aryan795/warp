@@ -5,4 +5,5 @@ mod view;
 pub use data_source::{
     AcceptModel, ModelPickerChoice, ModelSelectorDataSource, query_model_picker_choices,
 };
+pub(crate) use data_source::query_model_picker_catalog_choices;
 pub use view::{InlineModelSelectorEvent, InlineModelSelectorTab, InlineModelSelectorView};

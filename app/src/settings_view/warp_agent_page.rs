@@ -80,8 +80,7 @@ use crate::ai::geap_credentials::{
     GeapPolicy, force_refresh_geap_credentials_for_context, geap_policy_for_render_context,
 };
 use crate::ai::llms::{
-    LLMId, LLMPreferences, LLMProvider, byo_key_source_for_model,
-    is_using_api_key_for_provider,
+    LLMId, LLMPreferences, LLMProvider, byo_key_source_for_model, is_using_api_key_for_provider,
 };
 use crate::appearance::{Appearance, AppearanceEvent};
 use crate::auth::AuthStateProvider;
@@ -1237,11 +1236,8 @@ impl WarpAgentPageView {
     /// they always consume Warp credits.
     fn active_base_model_is_byo_covered(ctx: &ViewContext<Self>) -> bool {
         let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
-        let active = LLMPreferences::as_ref(ctx).get_active_base_model(
-            None,
-            team_context.as_ref(),
-            ctx,
-        );
+        let active =
+            LLMPreferences::as_ref(ctx).get_active_base_model(None, team_context.as_ref(), ctx);
         byo_key_source_for_model(active, team_context.as_ref(), ctx).is_some()
     }
 

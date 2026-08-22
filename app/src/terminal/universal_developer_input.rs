@@ -778,7 +778,6 @@ impl UniversalDeveloperInputButtonBar {
         self.profile_model_selector_full.as_ref(ctx).is_open()
             || self.profile_model_selector_compact.as_ref(ctx).is_open()
     }
-
 }
 
 // Implement Entity trait for UniversalDeveloperInputButtonBar

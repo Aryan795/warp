@@ -283,6 +283,16 @@ impl UserWorkspaces {
         )
     }
 
+    pub(crate) fn upgrade_link_for_render_context(
+        context: Option<&TeamRenderContext<'_>>,
+        user_id: UserUid,
+    ) -> String {
+        context.map_or_else(
+            || Self::upgrade_link(user_id),
+            |context| Self::upgrade_link_for_team(context.team.uid),
+        )
+    }
+
     pub fn warp_agent_cli_upgrade_link(user_id: Option<UserUid>) -> String {
         let upgrade_link = user_id.map_or_else(
             || {
@@ -659,7 +669,6 @@ impl UserWorkspaces {
         self.llm_settings_for_team(context.map(|context| context.team))
     }
 
-
     pub(crate) fn is_custom_llm_enabled(
         &self,
         team_render_context: Option<TeamRenderContext<'_>>,
@@ -819,10 +828,7 @@ impl UserWorkspaces {
                         .is_some_and(|policy| policy.is_voice_enabled)
                 })
     }
-    pub fn are_member_byo_keys_allowed_for_context(
-        &self,
-        context: Option<&TeamContext>,
-    ) -> bool {
+    pub fn are_member_byo_keys_allowed_for_context(&self, context: Option<&TeamContext>) -> bool {
         self.are_member_byo_keys_allowed_for_team(context.map(|context| context.team_uid))
     }
 
@@ -1182,7 +1188,6 @@ impl UserWorkspaces {
             HostEnablementSetting::RespectUserSetting
         )
     }
-
 
     pub(crate) fn is_aws_bedrock_credentials_enabled_for_any_scope(
         &self,

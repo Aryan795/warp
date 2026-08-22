@@ -196,11 +196,7 @@ impl TuiApiKeysMenuModel {
             && self.suggestions_mode.as_ref(ctx).mode() == TuiInputSuggestionsMode::ApiKeys
     }
 
-    pub(crate) fn open(
-        &mut self,
-        team_context: Option<TeamContext>,
-        ctx: &mut ModelContext<Self>,
-    ) {
+    pub(crate) fn open(&mut self, team_context: Option<TeamContext>, ctx: &mut ModelContext<Self>) {
         if self.is_open(ctx) {
             return;
         }

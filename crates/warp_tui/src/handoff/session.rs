@@ -5,9 +5,7 @@
 //! session-specific outcomes such as restoring input or persisting the
 //! completed card into the transcript.
 
-use warp::tui_export::{
-    HandoffRestoration, UserWorkspaces, record_static_slash_command_accepted,
-};
+use warp::tui_export::{HandoffRestoration, UserWorkspaces, record_static_slash_command_accepted};
 use warpui_core::{AppContext, ViewContext, ViewHandle};
 
 use super::TuiTerminalSessionView;

@@ -278,7 +278,6 @@ impl ProfileModelSelector {
             .with_icon(Icon::Psychology)
         });
 
-
         let profile_compact_button = ctx.add_typed_action_view(|_| {
             ActionButton::new("", PromptIconButtonTheme::new(false))
                 .with_icon(Icon::Psychology)
@@ -636,7 +635,6 @@ impl ProfileModelSelector {
     pub fn is_open(&self) -> bool {
         self.is_profile_menu_open || self.is_model_menu_open
     }
-
 
     pub fn model_menu_item_position_id(&self, llm_id: &LLMId) -> String {
         format!("{PROFILE_SELECTOR_POSITION_ID}_{llm_id}")

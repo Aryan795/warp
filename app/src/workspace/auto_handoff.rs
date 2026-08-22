@@ -330,7 +330,6 @@ impl AutoCloudHandoffController {
             return Err(AutoCloudHandoffSkipReason::LongRunningCommand);
         }
 
-
         let can_handoff_to_cloud = AISettings::as_ref(ctx).is_cloud_handoff_enabled(ctx);
         let active_model_not_cloud_runnable = terminal_view.update(ctx, |_, ctx| {
             let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);

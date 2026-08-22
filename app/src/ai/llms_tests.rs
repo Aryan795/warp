@@ -1419,7 +1419,6 @@ fn credential_source_for_model_differs_by_window_team_policy() {
             UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
         });
         app.read(|ctx| {
-
             assert_eq!(
                 byo_key_source_for_model(&anthropic_llm, team_context_a.as_ref(), ctx),
                 Some(ByoKeySource::TeamProvided),
