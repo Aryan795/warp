@@ -127,10 +127,12 @@ pub fn init(app: &mut AppContext) {
 
 const PADDING: f32 = 4.;
 
-/// Renders a byte count in human-readable units (e.g. `8.6 GB`), used for the
-/// "file too large to open" toast message.
+/// Renders a byte count in human-readable binary units (e.g. `8.0 GiB`), used for the "file
+/// too large to open" toast message. Uses `GiB`/`MiB`/etc. (1024-based), matching the divisor
+/// below and [`warp_util::file::MAX_LOADABLE_FILE_SIZE_BYTES`], which is itself defined as a
+/// binary multiple (`100 * 1024 * 1024`).
 fn format_file_size(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut size = bytes as f64;
     let mut unit_index = 0;
     while size >= 1024.0 && unit_index < UNITS.len() - 1 {
@@ -146,26 +148,20 @@ fn format_file_size(bytes: u64) -> String {
 
 /// Renders the "file too large to open" toast message for a [`FileLoadError::TooLarge`].
 ///
-/// The comparative form (e.g. `8.6 GB > 100.0 MB limit`) is only used when the reported size
-/// is [`ReportedSize::Exact`] *and* still reads as larger than the limit after formatting.
-/// [`ReportedSize::AtLeast`] (a lower bound from a capped read, e.g. for a device, FIFO, or a
-/// file that changed size mid-read) isn't presented as if it were the file's true size, and an
-/// exact size that happens to round to the same displayed value as the limit isn't presented as
-/// a comparison that would otherwise read as false.
-fn format_too_large_message(size: warp_util::file::ReportedSize, limit_bytes: u64) -> String {
-    if let warp_util::file::ReportedSize::Exact(size_bytes) = size {
-        let formatted_size = format_file_size(size_bytes);
-        let formatted_limit = format_file_size(limit_bytes);
-        if formatted_size != formatted_limit {
-            return format!(
-                "File is too large to open ({formatted_size} > {formatted_limit} limit)."
-            );
-        }
+/// `size_estimate` (from `stat`) is never authoritative -- a regular file's on-disk size can
+/// change between the `stat` and the read that rejected it finishing, and it's altogether
+/// absent for a device, FIFO, or other non-regular file. It is therefore surfaced only as a
+/// rough, explicitly-labeled estimate, never as a fact and never as one side of a comparison
+/// against `limit_bytes` (which would present both as if they were measured the same way).
+fn format_too_large_message(size_estimate: Option<u64>, limit_bytes: u64) -> String {
+    let limit = format_file_size(limit_bytes);
+    match size_estimate {
+        Some(size_bytes) => format!(
+            "File is larger than the {limit} limit (reported size ~{}).",
+            format_file_size(size_bytes)
+        ),
+        None => format!("File is larger than the {limit} limit."),
     }
-    format!(
-        "File is larger than the {} limit.",
-        format_file_size(limit_bytes)
-    )
 }
 
 pub use crate::util::openable_file_type::is_binary_file;
@@ -990,9 +986,10 @@ impl CodeView {
         ctx: &mut ViewContext<Self>,
     ) {
         let message = match error {
-            warp_util::file::FileLoadError::TooLarge { size, limit_bytes } => {
-                format_too_large_message(*size, *limit_bytes)
-            }
+            warp_util::file::FileLoadError::TooLarge {
+                size_estimate,
+                limit_bytes,
+            } => format_too_large_message(*size_estimate, *limit_bytes),
             warp_util::file::FileLoadError::DoesNotExist
             | warp_util::file::FileLoadError::IOError(_) => "Failed to load file.".to_string(),
         };

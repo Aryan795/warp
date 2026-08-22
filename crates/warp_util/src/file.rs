@@ -41,27 +41,25 @@ register_error!(FileSaveError);
 /// attempting the read.
 pub const MAX_LOADABLE_FILE_SIZE_BYTES: u64 = 100 * 1024 * 1024;
 
-/// A rejected oversized file's reported size: either the file's exact on-disk size, or (when
-/// that can't be trusted) only a lower bound.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum ReportedSize {
-    /// The exact on-disk size, from `stat`-ing a regular file.
-    Exact(u64),
-    /// Not necessarily the file's true size: `stat` either failed or (for a FIFO, character
-    /// device, or other non-regular file) cannot be trusted, so this is only known to be a
-    /// lower bound on the actual size.
-    AtLeast(u64),
-}
-
 #[derive(thiserror::Error, Debug)]
 pub enum FileLoadError {
     #[error("File does not exist")]
     DoesNotExist,
     #[error("IO error when loading file.")]
     IOError(#[from] io::Error),
-    #[error("File is too large to open (limit is {limit_bytes} bytes, reported size: {size:?})")]
+    #[error(
+        "File is too large to open (limit is {limit_bytes} bytes; reported size estimate: {size_estimate:?} bytes)"
+    )]
     TooLarge {
-        size: ReportedSize,
+        /// A rough, best-effort estimate of the file's on-disk size from `stat`, present only
+        /// when `stat` succeeded, the path is a regular file, and it itself reported something
+        /// past the limit. Never authoritative: a regular file's size can still change between
+        /// this `stat` and [`read_capped`] finishing its read, so this must never be presented
+        /// as the file's exact size, nor compared against `limit_bytes` as if both were
+        /// measured the same way. `None` when no such estimate is available (`stat` failed, or
+        /// the path is a FIFO, character device, or other non-regular file, which commonly
+        /// report a misleading length — often 0 — regardless of how much data they yield).
+        size_estimate: Option<u64>,
         limit_bytes: u64,
     },
 }
@@ -75,8 +73,9 @@ pub enum FileLoadError {
 /// much data it actually yields, and a regular file's size can change (or the path can be
 /// atomically replaced) between the `stat` and a later, separate open. `metadata` is still
 /// queried here, but only as a best-effort allocation-size hint, capped so an inflated or
-/// unrelated `stat` length can never itself cause an over-cap reservation, and to report an
-/// exact size in [`FileLoadError::TooLarge`] when it can be trusted.
+/// unrelated `stat` length can never itself cause an over-cap reservation, and to offer a
+/// rough size estimate in [`FileLoadError::TooLarge`] — never an exact size, since the file
+/// can still change between this `stat` and the read finishing.
 pub async fn read_capped(path: &Path, max_bytes: u64) -> Result<Vec<u8>, FileLoadError> {
     let file = async_fs::File::open(path).await?;
     let read_limit = max_bytes.saturating_add(1);
@@ -85,19 +84,16 @@ pub async fn read_capped(path: &Path, max_bytes: u64) -> Result<Vec<u8>, FileLoa
     let mut buffer = Vec::with_capacity(metadata_len.min(read_limit) as usize);
     file.take(read_limit).read_to_end(&mut buffer).await?;
     if buffer.len() as u64 > max_bytes {
-        // `stat` isn't trusted for the accept/reject decision above. It's only trusted to
-        // report the file's *size* when it succeeded, the path is a regular file (a FIFO or
-        // character device commonly reports a misleading length, often 0), and it itself
-        // reports something past the limit; otherwise all that's actually known is the lower
-        // bound proven by the capped read.
-        let size = match &metadata {
-            Some(metadata) if metadata.is_file() && metadata.len() > max_bytes => {
-                ReportedSize::Exact(metadata.len())
-            }
-            _ => ReportedSize::AtLeast(buffer.len() as u64),
-        };
+        // Never trusted for the accept/reject decision above, and never presented as an exact
+        // size either -- a regular file's on-disk size can still change between this `stat` and
+        // the read above finishing. Only offered as a rough estimate, and only when `stat`
+        // succeeded, the path is a regular file (a FIFO or character device commonly reports a
+        // misleading length, often 0), and it itself reported something past the limit.
+        let size_estimate = metadata
+            .filter(|metadata| metadata.is_file() && metadata.len() > max_bytes)
+            .map(|metadata| metadata.len());
         return Err(FileLoadError::TooLarge {
-            size,
+            size_estimate,
             limit_bytes: max_bytes,
         });
     }
