@@ -339,26 +339,24 @@ impl SyncDataSource for ModelSelectorDataSource {
                 })
                 .collect_vec()
         };
-        Ok(
-            query_model_picker_choices(
-                llm_preferences,
-                choices,
-                &query.text,
-                |llm, app| should_show_key_icon_for_model(llm, &self.view_handle, app),
-                app,
-            )
-            .into_iter()
-            .map(|choice| {
-                QueryResult::from(ModelSearchItem::new(
-                    choice,
-                    &active_llm_id,
-                    self.window_id,
-                    &self.view_handle,
-                    app,
-                ))
-            })
-            .collect(),
+        Ok(query_model_picker_choices(
+            llm_preferences,
+            choices,
+            &query.text,
+            |llm, app| should_show_key_icon_for_model(llm, &self.view_handle, app),
+            app,
         )
+        .into_iter()
+        .map(|choice| {
+            QueryResult::from(ModelSearchItem::new(
+                choice,
+                &active_llm_id,
+                self.window_id,
+                &self.view_handle,
+                app,
+            ))
+        })
+        .collect())
     }
 }
 

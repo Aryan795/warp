@@ -1067,6 +1067,7 @@ fn shared_model_picker_query_orders_filters_and_marks_disabled_choices() {
             preferences,
             preferences.get_base_llm_choices_for_agent_mode(app),
             "",
+            |_, _| false,
             app,
         );
         assert_eq!(
@@ -1083,6 +1084,7 @@ fn shared_model_picker_query_orders_filters_and_marks_disabled_choices() {
             preferences,
             preferences.get_base_llm_choices_for_agent_mode(app),
             "gpt 5",
+            |_, _| false,
             app,
         );
         assert_eq!(filtered.len(), 1);

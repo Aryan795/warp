@@ -19,8 +19,8 @@ use super::team::{DiscoverableTeam, MembershipRole, Team};
 use super::workspace::WorkspaceMemberUsageInfo;
 use super::workspace::{
     AdminEnablementSetting, BillingMetadata, CustomerType, EnterpriseSecretRegex,
-    HostEnablementSetting, LlmHostSettings, LlmSettings, UgcCollectionEnablementSetting,
-    Workspace, WorkspaceUid,
+    HostEnablementSetting, LlmHostSettings, LlmSettings, UgcCollectionEnablementSetting, Workspace,
+    WorkspaceUid,
 };
 use crate::ai::credit_availability::AICreditAvailability;
 use crate::ai::llms::{LLMId, LLMModelHost, LLMProvider};

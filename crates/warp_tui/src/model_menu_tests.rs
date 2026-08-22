@@ -108,8 +108,9 @@ fn provider_key_controls_key_connected_callout() {
     App::test((), |mut app| async move {
         let _byok = FeatureFlag::SoloUserByok.override_enabled(true);
         register_tui_session_view_test_singletons(&mut app);
-        let (_window_id, surface) =
-            app.update(|ctx| ctx.add_tui_window(AddWindowOptions::default(), |_| ModelMenuTestSurface));
+        let (_window_id, surface) = app.update(|ctx| {
+            ctx.add_tui_window(AddWindowOptions::default(), |_| ModelMenuTestSurface)
+        });
         let credential_icons = model_credential_icon_resolver(surface.downgrade());
         let mut llm = app.read(|ctx| {
             LLMPreferences::as_ref(ctx)
@@ -132,7 +133,12 @@ fn provider_key_controls_key_connected_callout() {
                 ctx,
             )
             .remove(0);
-            model_menu_row(choice, &LLMId::from("profile-default"), &credential_icons, ctx)
+            model_menu_row(
+                choice,
+                &LLMId::from("profile-default"),
+                &credential_icons,
+                ctx,
+            )
         });
         assert_eq!(
             snapshot_row(&connected_row).state_suffix.as_deref(),
@@ -153,7 +159,12 @@ fn provider_key_controls_key_connected_callout() {
                 ctx,
             )
             .remove(0);
-            model_menu_row(choice, &LLMId::from("profile-default"), &credential_icons, ctx)
+            model_menu_row(
+                choice,
+                &LLMId::from("profile-default"),
+                &credential_icons,
+                ctx,
+            )
         });
         assert_eq!(snapshot_row(&disconnected_row).state_suffix, None);
     });
