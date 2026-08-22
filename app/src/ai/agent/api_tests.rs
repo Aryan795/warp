@@ -255,7 +255,7 @@ fn apply_team_byo_policy_gates_member_credentials_by_the_requesting_windows_team
 
             let mut allowed = request_params.clone();
             allowed.apply_team_byo_policy(
-                &user_workspaces.team_context_for_window(window_on_team_a),
+                &user_workspaces.team_context_for_window_for_test(window_on_team_a),
                 ctx,
             );
             let allowed_keys = allowed
@@ -280,7 +280,7 @@ fn apply_team_byo_policy_gates_member_credentials_by_the_requesting_windows_team
 
             let mut disallowed = request_params.clone();
             disallowed.apply_team_byo_policy(
-                &user_workspaces.team_context_for_window(window_on_team_b),
+                &user_workspaces.team_context_for_window_for_test(window_on_team_b),
                 ctx,
             );
             let disallowed_keys = disallowed.api_keys.expect(
@@ -360,7 +360,7 @@ fn apply_team_byo_policy_is_inert_for_an_unregistered_window() {
                  restriction not applying"
             );
             let unregistered_window = WindowId::new();
-            let team_scope = user_workspaces.team_context_for_window(unregistered_window);
+            let team_scope = user_workspaces.team_context_for_window_for_test(unregistered_window);
             request_params.apply_team_byo_policy(&team_scope, ctx);
             assert!(
                 request_params
@@ -404,8 +404,10 @@ fn apply_team_byo_policy_rebinds_after_the_window_changes_team() {
         app.read(|ctx| {
             let user_workspaces = UserWorkspaces::as_ref(ctx);
             let mut on_team_a = request_params.clone();
-            on_team_a
-                .apply_team_byo_policy(&user_workspaces.team_context_for_window(window_id), ctx);
+            on_team_a.apply_team_byo_policy(
+                &user_workspaces.team_context_for_window_for_test(window_id),
+                ctx,
+            );
             assert!(
                 on_team_a
                     .api_keys
@@ -414,8 +416,8 @@ fn apply_team_byo_policy_rebinds_after_the_window_changes_team() {
             );
         });
 
-        // A window only changes team by reconciling away from a team that has left the
-        // workspace, so drop team A to move this window onto team B.
+        // Reconciliation is what moves a window between teams, so drive it by replacing the
+        // workspace's team list with one that no longer contains team A.
         UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
             user_workspaces
                 .update_workspaces(vec![workspace_with_teams(vec![team_b.clone()])], ctx);
@@ -424,8 +426,10 @@ fn apply_team_byo_policy_rebinds_after_the_window_changes_team() {
         app.read(|ctx| {
             let user_workspaces = UserWorkspaces::as_ref(ctx);
             let mut on_team_b = request_params.clone();
-            on_team_b
-                .apply_team_byo_policy(&user_workspaces.team_context_for_window(window_id), ctx);
+            on_team_b.apply_team_byo_policy(
+                &user_workspaces.team_context_for_window_for_test(window_id),
+                ctx,
+            );
             assert!(
                 on_team_b
                     .api_keys

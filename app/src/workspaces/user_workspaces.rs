@@ -477,36 +477,48 @@ impl UserWorkspaces {
     /// `None` means `view` is not in a window, which the caller has to confront: there is no
     /// scope to read a team setting for, and the workspace-level value is not a substitute.
     /// A view is also not yet in a window during its own construction, so a read that has a
-    /// [`ViewContext`] should go through [`Self::team_context_for_window`] instead.
+    /// [`ViewContext`] should go through [`Self::team_context_for_view`] instead.
     pub(crate) fn team_context<'a, T: Entity>(
         &'a self,
         view: &WeakViewHandle<T>,
         app: &AppContext,
     ) -> Option<TeamContext<'a>> {
         let window_id = view.window_id(app)?;
-        Some(self.team_context_for_window(window_id))
+        Some(self.team_context_for_window_id(window_id))
     }
 
-    /// [`Self::team_context`] for a caller that holds a [`WindowId`] rather than a view handle:
-    /// a model owned by a window's view tree, or a view still inside its own constructor.
+    /// [`Self::team_context`] for a view that is still inside its own constructor.
     ///
-    /// Same borrow discipline, so a caller still re-resolves on every read and follows the
-    /// window. Unlike [`Self::team_context`] it cannot fail: a `WindowId` names a window
-    /// whether or not this model has a team assignment for it, and a window with no team
-    /// selected yields a scope whose `team_uid()` is `None`. A window assigned to a team that
-    /// has since left the workspace also yields `None`, because the team is resolved here
-    /// rather than by the getter.
+    /// A view is not in `view_to_window` until construction finishes, so a [`WeakViewHandle`]
+    /// resolves to nothing there and [`Self::team_context`] returns `None`.
+    /// [`ViewContext::window_id`] is a plain field and is valid throughout, which is why this
+    /// takes the context rather than a handle, and why it cannot fail: a window with no team
+    /// selected, or one this model has no assignment for, yields a scope whose `team_uid()`
+    /// is `None`.
     ///
-    /// A stored `WindowId` is weaker evidence than a live [`ViewContext`]: dragging a tab
-    /// between windows re-parents the pane and the models it owns, so whoever stores one owes
-    /// it an update on re-parent.
-    pub(crate) fn team_context_for_window(&self, window_id: WindowId) -> TeamContext<'_> {
+    /// The exchange for a scope is deliberately a view or a `ViewContext`, never a raw
+    /// [`WindowId`]: an id-taking form would incentivise passing ids around, and an id is
+    /// weaker evidence than a live context because a pane dragged between windows carries its
+    /// models with it.
+    pub(crate) fn team_context_for_view<T: Entity>(&self, ctx: &ViewContext<T>) -> TeamContext<'_> {
+        self.team_context_for_window_id(ctx.window_id())
+    }
+
+    fn team_context_for_window_id(&self, window_id: WindowId) -> TeamContext<'_> {
         TeamContext {
             team_uid: self
                 .team_uid_for_window(window_id)
                 .and_then(|team_uid| self.team_from_uid(team_uid))
                 .map(|team| &team.uid),
         }
+    }
+
+    /// [`Self::team_context_for_view`] for tests, which build scopes for bare windows rather
+    /// than standing up a view for each one. Production exchanges a view or a [`ViewContext`]
+    /// for a scope; this is `#[cfg(test)]` precisely so that contract holds.
+    #[cfg(test)]
+    pub(crate) fn team_context_for_window_for_test(&self, window_id: WindowId) -> TeamContext<'_> {
+        self.team_context_for_window_id(window_id)
     }
 
     /// The team a scope names, when it names one that is still in the current workspace.
@@ -965,15 +977,8 @@ impl UserWorkspaces {
     /// member key is used.
     ///
     /// A scope with no team is not on a team, so no team policy restricts it and the plan's
-    /// entitlement alone decides.
-    ///
-    /// The `Some(_)` arm denies rather than falling back when the named team cannot be found,
-    /// so a scope can never inherit some other team's `team_byo`. No scope this module hands
-    /// out reaches it: [`Self::team_context_for_window`] resolves the uid through
-    /// [`Self::team_from_uid`] before storing it, so a team that has left the workspace is
-    /// already indistinguishable from teamless by the time a getter sees it. The arm exists
-    /// for [`TeamContextForOperation`], which carries a uid captured earlier and can outlive
-    /// the team it names.
+    /// entitlement alone decides. A scope that names a team resolves that team's policy or
+    /// nothing; it never falls back to another team's.
     pub(crate) fn are_member_byo_keys_allowed_for_scope<S: TeamScope + ?Sized>(
         &self,
         scope: &S,

@@ -590,12 +590,12 @@ fn is_team_policy_change_for_window(event: &UserWorkspacesEvent, window_id: Wind
 
 /// Whether `ctx`'s window's team allows its members to use their own provider API keys.
 ///
-/// Resolves the scope from [`ViewContext::window_id`] rather than a view handle so it is
-/// usable both while the page is being constructed -- when the page is not yet in
-/// `view_to_window` and a handle resolves to nothing -- and from its event subscriptions.
-fn member_byo_keys_allowed_for_window(ctx: &ViewContext<WarpAgentPageView>) -> bool {
+/// Exchanges the [`ViewContext`] for a scope rather than a view handle so it is usable both
+/// while the page is being constructed -- when the page is not yet in `view_to_window` and a
+/// handle resolves to nothing -- and from its event subscriptions.
+fn member_byo_keys_allowed_for_view(ctx: &ViewContext<WarpAgentPageView>) -> bool {
     let workspaces = UserWorkspaces::as_ref(ctx);
-    let team_scope = workspaces.team_context_for_window(ctx.window_id());
+    let team_scope = workspaces.team_context_for_view(ctx);
     workspaces.are_member_byo_keys_allowed_for_scope(&team_scope)
 }
 
@@ -1443,13 +1443,13 @@ impl WarpAgentPageView {
     ///
     /// Takes a [`ViewContext`] rather than a view handle because the page reads this while it
     /// is still being constructed, when it is not yet in `view_to_window` and a handle cannot
-    /// resolve a window. `ViewContext::window_id` always can.
+    /// resolve a window.
     fn can_use_custom_inference_controls(ctx: &ViewContext<Self>) -> bool {
         if !AISettings::as_ref(ctx).is_any_ai_enabled(ctx) {
             return false;
         }
         let workspaces = UserWorkspaces::as_ref(ctx);
-        let team_scope = workspaces.team_context_for_window(ctx.window_id());
+        let team_scope = workspaces.team_context_for_view(ctx);
         workspaces.is_custom_inference_enabled(ctx)
             && workspaces.are_member_byo_endpoints_allowed_for_scope(&team_scope)
     }
@@ -4628,7 +4628,7 @@ impl ApiKeysWidget {
         let workspace_handle = UserWorkspaces::handle(ctx);
         let is_any_ai_enabled = ai_settings.is_any_ai_enabled(ctx);
         let is_byo_enabled = workspace_handle.as_ref(ctx).is_byo_api_key_enabled(ctx);
-        let member_byo_keys_allowed = member_byo_keys_allowed_for_window(ctx);
+        let member_byo_keys_allowed = member_byo_keys_allowed_for_view(ctx);
 
         let provider_api_key_editors = LLMProvider::API_KEY_PROVIDERS
             .into_iter()
@@ -4685,7 +4685,7 @@ impl ApiKeysWidget {
                         let is_any_ai_enabled =
                             AISettings::handle(ctx).as_ref(ctx).is_any_ai_enabled(ctx);
                         let is_byo_enabled = workspace.as_ref(ctx).is_byo_api_key_enabled(ctx);
-                        let member_byo_keys_allowed = member_byo_keys_allowed_for_window(ctx);
+                        let member_byo_keys_allowed = member_byo_keys_allowed_for_view(ctx);
                         let is_enabled = is_any_ai_enabled && is_byo_enabled;
                         let has_key = !editor_clone.as_ref(ctx).is_empty(ctx);
                         if !is_byo_enabled && has_key {
@@ -4789,7 +4789,7 @@ impl ApiKeysWidget {
             if is_team_policy_change_for_window(event, ctx.window_id()) {
                 let is_any_ai_enabled = AISettings::handle(ctx).as_ref(ctx).is_any_ai_enabled(ctx);
                 let is_byo_enabled = workspace.as_ref(ctx).is_byo_api_key_enabled(ctx);
-                let member_byo_keys_allowed = member_byo_keys_allowed_for_window(ctx);
+                let member_byo_keys_allowed = member_byo_keys_allowed_for_view(ctx);
                 for button in &grok_buttons {
                     button.update(ctx, |button, ctx| {
                         button.set_disabled(
