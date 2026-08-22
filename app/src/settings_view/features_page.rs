@@ -70,13 +70,14 @@ use crate::settings::{
     CopyOnSelect, CtrlTabBehavior, DEFAULT_QUAKE_MODE_SIZE_PERCENTAGES, DefaultSessionMode,
     EnableSlashCommandsInTerminal, ErrorUnderliningEnabled, ExtraMetaKeys, GPUSettings,
     GlobalHotkeyMode, InputSettings, InputSettingsChangedEvent, LinuxSelectionClipboard,
-    MiddleClickPasteEnabled, MouseScrollMultiplier, OutlineCodebaseSymbolsForAtContextMenu,
-    PreferLowPowerGPU, PreferredGraphicsBackend, QUAKE_WINDOW_AUTOHIDE_SUPPORTED,
-    QuakeModeSettings, RightClickBehavior, RightClickBehaviorSetting, ScrollSettings,
-    ScrollSettingsChangedEvent, SelectionSettings, SelectionSettingsChangedEvent,
-    ShowAutosuggestionIgnoreButton, ShowChangelogAfterUpdate, ShowTerminalInputMessageBar,
-    SshSettings, SyntaxHighlighting, TabBehavior, UserNativeRedirectPreference, VimModeEnabled,
-    VimStatusBar, VimUnnamedSystemClipboard,
+    MiddleClickPasteEnabled, MouseScrollMultiplier, NativeShellCompletionsEnabled,
+    OutlineCodebaseSymbolsForAtContextMenu, PreferLowPowerGPU, PreferredGraphicsBackend,
+    QUAKE_WINDOW_AUTOHIDE_SUPPORTED, QuakeModeSettings, RightClickBehavior,
+    RightClickBehaviorSetting, ScrollSettings, ScrollSettingsChangedEvent, SelectionSettings,
+    SelectionSettingsChangedEvent, ShowAutosuggestionIgnoreButton, ShowChangelogAfterUpdate,
+    ShowTerminalInputMessageBar, SshSettings, SyntaxHighlighting, TabBehavior,
+    UserNativeRedirectPreference, VimModeEnabled, VimStatusBar, VimUnnamedSystemClipboard,
+    WarpCompletionsEnabled,
 };
 use crate::terminal::alt_screen_reporting::{
     AltScreenReporting, FocusReportingEnabled, MouseReportingEnabled, ScrollReportingEnabled,
@@ -225,6 +226,24 @@ pub fn init_actions_from_parent_view<T: Action + Clone>(
                 .completions_open_while_typing
                 .is_supported_on_current_platform(),
         ),
+        ToggleSettingActionPair::new(
+            "warp completions",
+            builder(SettingsAction::FeaturesPageToggle(
+                FeaturesPageAction::ToggleWarpCompletions,
+            )),
+            context,
+            flags::WARP_COMPLETIONS_CONTEXT_FLAG,
+        )
+        .with_enabled(|| FeatureFlag::NativeShellCompletions.is_enabled()),
+        ToggleSettingActionPair::new(
+            "native shell completions",
+            builder(SettingsAction::FeaturesPageToggle(
+                FeaturesPageAction::ToggleNativeShellCompletions,
+            )),
+            context,
+            flags::NATIVE_SHELL_COMPLETIONS_CONTEXT_FLAG,
+        )
+        .with_enabled(|| FeatureFlag::NativeShellCompletions.is_enabled()),
         ToggleSettingActionPair::new(
             "command corrections",
             builder(SettingsAction::FeaturesPageToggle(
@@ -738,6 +757,8 @@ pub enum FeaturesPageAction {
     ToggleSnackbar,
     ToggleLinkTooltip,
     ToggleCompletionsOpenWhileTyping,
+    ToggleWarpCompletions,
+    ToggleNativeShellCompletions,
     ToggleCommandCorrections,
     ToggleErrorUnderlining,
     ToggleSyntaxHighlighting,
@@ -943,6 +964,14 @@ impl FeaturesPageAction {
             Self::ToggleCompletionsOpenWhileTyping => TelemetryEvent::FeaturesPageAction {
                 action: "ToggleCompletionsOpenWhileTyping".to_string(),
                 value: to_string(*input_settings.completions_open_while_typing.value()),
+            },
+            Self::ToggleWarpCompletions => TelemetryEvent::FeaturesPageAction {
+                action: "ToggleWarpCompletions".to_string(),
+                value: to_string(*input_settings.warp_completions_enabled.value()),
+            },
+            Self::ToggleNativeShellCompletions => TelemetryEvent::FeaturesPageAction {
+                action: "ToggleNativeShellCompletions".to_string(),
+                value: to_string(*input_settings.native_shell_completions_enabled.value()),
             },
             Self::ToggleCommandCorrections => TelemetryEvent::FeaturesPageAction {
                 action: "ToggleCommandCorrections".to_string(),
@@ -1843,6 +1872,24 @@ impl TypedActionView for FeaturesPageView {
                     report_if_error!(
                         input_settings
                             .completions_open_while_typing
+                            .toggle_and_save_value(ctx)
+                    );
+                });
+            }
+            ToggleWarpCompletions => {
+                InputSettings::handle(ctx).update(ctx, |input_settings, ctx| {
+                    report_if_error!(
+                        input_settings
+                            .warp_completions_enabled
+                            .toggle_and_save_value(ctx)
+                    );
+                });
+            }
+            ToggleNativeShellCompletions => {
+                InputSettings::handle(ctx).update(ctx, |input_settings, ctx| {
+                    report_if_error!(
+                        input_settings
+                            .native_shell_completions_enabled
                             .toggle_and_save_value(ctx)
                     );
                 });
@@ -2949,11 +2996,17 @@ impl FeaturesPageView {
         {
             editor_widgets.push(Box::new(SyntaxHighlightingWidget::default()))
         }
+        if FeatureFlag::NativeShellCompletions.is_enabled() {
+            editor_widgets.push(Box::new(WarpCompletionsWidget::default()));
+        }
         if input_settings
             .completions_open_while_typing
             .is_supported_on_current_platform()
         {
             editor_widgets.push(Box::new(CompletionsMenuWhileTypingWidget::default()));
+        }
+        if FeatureFlag::NativeShellCompletions.is_enabled() {
+            editor_widgets.push(Box::new(NativeShellCompletionsWidget::default()));
         }
         if input_settings
             .command_corrections
@@ -6081,8 +6134,17 @@ impl SettingsWidget for CompletionsMenuWhileTypingWidget {
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
+        // As-you-type only governs Warp's own completions, so when the native-completions feature
+        // is on this setting is nested under the Warp completions toggle and hidden when that
+        // toggle is off. With the feature off there is no Warp/native split, so it renders as a
+        // normal top-level switch, exactly as before.
+        let nested = FeatureFlag::NativeShellCompletions.is_enabled();
+        if nested && !*InputSettings::as_ref(app).warp_completions_enabled.value() {
+            return Flex::column().finish();
+        }
+
         let ui_builder = appearance.ui_builder();
-        render_body_item::<FeaturesPageAction>(
+        let toggle = render_body_item::<FeaturesPageAction>(
             "Open completions menu as you type".into(),
             None,
             LocalOnlyIconState::for_setting(
@@ -6109,6 +6171,129 @@ impl SettingsWidget for CompletionsMenuWhileTypingWidget {
                 })
                 .finish(),
             None,
+        );
+
+        if nested {
+            render_group(vec![toggle], appearance)
+        } else {
+            toggle
+        }
+    }
+}
+
+#[derive(Default)]
+struct WarpCompletionsWidget {
+    switch_state: SwitchStateHandle,
+}
+
+impl SettingsWidget for WarpCompletionsWidget {
+    type View = FeaturesPageView;
+
+    fn search_terms(&self) -> &str {
+        "warp completions built-in shell command suggestions"
+    }
+
+    fn render(
+        &self,
+        view: &Self::View,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let ui_builder = appearance.ui_builder();
+        render_body_item::<FeaturesPageAction>(
+            "Warp completions".into(),
+            None,
+            LocalOnlyIconState::for_setting(
+                WarpCompletionsEnabled::storage_key(),
+                WarpCompletionsEnabled::sync_to_cloud(),
+                &mut view
+                    .button_mouse_states
+                    .local_only_icon_tooltip_states
+                    .borrow_mut(),
+                app,
+            ),
+            ToggleState::Enabled,
+            appearance,
+            ui_builder
+                .switch(self.switch_state.clone())
+                .check(*InputSettings::as_ref(app).warp_completions_enabled.value())
+                .build()
+                .on_click(move |ctx, _, _| {
+                    ctx.dispatch_typed_action(FeaturesPageAction::ToggleWarpCompletions);
+                })
+                .finish(),
+            Some(
+                "Show Warp's built-in completions for shell commands. Turn this and native shell completions both off to disable command completions."
+                    .to_string(),
+            ),
+        )
+    }
+}
+
+#[derive(Default)]
+struct NativeShellCompletionsWidget {
+    switch_state: SwitchStateHandle,
+}
+
+impl SettingsWidget for NativeShellCompletionsWidget {
+    type View = FeaturesPageView;
+
+    fn search_terms(&self) -> &str {
+        "native shell completions your shell command suggestions"
+    }
+
+    fn render(
+        &self,
+        view: &Self::View,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let input_settings = InputSettings::as_ref(app);
+        let native_on = *input_settings.native_shell_completions_enabled.value();
+        let warp_on = *input_settings.warp_completions_enabled.value();
+        let as_you_type_on = *input_settings.completions_open_while_typing.value();
+
+        // The base description keeps the both-off behavior legible. When as-you-type is actually in
+        // effect -- Warp completions on and as-you-type on -- alongside native completions, swap in
+        // a clarification that the shell is asked only on the completions keybinding, never as you
+        // type, rendering the user's live binding (or a generic phrasing if they have unbound it).
+        let description = if warp_on && as_you_type_on && native_on {
+            let keystroke = &*view.completions_keystroke;
+            if keystroke.is_empty() {
+                "Ask your shell for its own completions for shell commands. Native shell completions aren't generated as you type; open the completion menu to fetch them.".to_string()
+            } else {
+                format!(
+                    "Ask your shell for its own completions for shell commands. Native shell completions aren't generated as you type; press {keystroke} to fetch them."
+                )
+            }
+        } else {
+            "Ask your shell for its own completions for shell commands. Turn this and Warp completions both off to disable command completions.".to_string()
+        };
+
+        let ui_builder = appearance.ui_builder();
+        render_body_item::<FeaturesPageAction>(
+            "Native shell completions".into(),
+            None,
+            LocalOnlyIconState::for_setting(
+                NativeShellCompletionsEnabled::storage_key(),
+                NativeShellCompletionsEnabled::sync_to_cloud(),
+                &mut view
+                    .button_mouse_states
+                    .local_only_icon_tooltip_states
+                    .borrow_mut(),
+                app,
+            ),
+            ToggleState::Enabled,
+            appearance,
+            ui_builder
+                .switch(self.switch_state.clone())
+                .check(native_on)
+                .build()
+                .on_click(move |ctx, _, _| {
+                    ctx.dispatch_typed_action(FeaturesPageAction::ToggleNativeShellCompletions);
+                })
+                .finish(),
+            Some(description),
         )
     }
 }
