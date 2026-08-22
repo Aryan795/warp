@@ -25,7 +25,6 @@ use crate::ai::agent::{
 };
 use crate::ai::block_context::BlockContext;
 use crate::ai::document::ai_document_model::AIDocumentId;
-use crate::ai::llms::{LLMPreferences, LLMPreferencesEvent};
 use crate::ai::outline::RepoOutlines;
 use crate::code_review::github_repo_model::GitHubRepoModel;
 use crate::terminal::TerminalModel;

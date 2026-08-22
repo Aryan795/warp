@@ -17,21 +17,29 @@ use crate::terminal::cli_agent_sessions::{
     CLIAgentSessionContext, CLIAgentSessionStatus, CLIAgentSessionsModel,
 };
 use crate::terminal::{CLIAgent, TerminalView};
+use crate::workspaces::user_workspaces::UserWorkspaces;
 
 /// Handles updating the local LLM preferences when a selected agent model update is received.
 /// This function is shared between the viewer and sharer to ensure consistent behavior.
 pub(crate) fn apply_selected_agent_model_update(
-    terminal_view_id: warpui::EntityId,
+    weak_view_handle: &WeakViewHandle<TerminalView>,
     selected_model: &SelectedAgentModel,
     _guard: &ActiveRemoteUpdate,
     ctx: &mut AppContext,
 ) {
+    let Some(view) = weak_view_handle.upgrade(ctx) else {
+        return;
+    };
+    let terminal_view_id = view.id();
+    let team_context = view.update(ctx, |_, ctx| {
+        UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+    });
     let model_id = LLMId::from(selected_model.model_id().to_owned());
 
     // Check if this is already our current model - if so, skip the update to avoid loops
     let llm_prefs = LLMPreferences::as_ref(ctx);
     let current_model_id = llm_prefs
-        .get_active_base_model(ctx, Some(terminal_view_id))
+        .get_active_base_model(Some(terminal_view_id), team_context.as_ref(), ctx)
         .id
         .clone();
     if current_model_id == model_id {
@@ -51,8 +59,13 @@ pub(crate) fn apply_selected_agent_model_update(
     log::info!("Selecting base agent model {model_id} (from session sharing update)");
 
     // Update the local LLMPreferences to match the selected model
-    LLMPreferences::handle(ctx).update(ctx, |prefs, ctx| {
-        prefs.update_preferred_agent_mode_llm(&model_id, terminal_view_id, ctx);
+    LLMPreferences::handle(ctx).update(ctx, move |prefs, ctx| {
+        prefs.update_preferred_agent_mode_llm(
+            &model_id,
+            terminal_view_id,
+            team_context.as_ref(),
+            ctx,
+        );
     });
 }
 

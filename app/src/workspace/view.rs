@@ -15479,10 +15479,11 @@ impl Workspace {
                         Some((prompt, attachments))
                     })
                 });
-                model_handle.update(ctx, |model, ctx| {
+                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                model_handle.update(ctx, move |model, ctx| {
                     model.set_environment_id(Some(env_id), ctx);
                     if let Some((prompt, attachments)) = pending {
-                        model.spawn_agent(prompt, attachments, ctx);
+                        model.spawn_agent(prompt, attachments, team_context, ctx);
                     }
                 });
             }
@@ -15704,6 +15705,7 @@ impl Workspace {
         } else {
             CancellationReason::ManuallyCancelled
         };
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         let prepare_input = HandoffPrepareInput::new(
             terminal_surface_id,
             history,
@@ -15721,7 +15723,8 @@ impl Workspace {
         .with_transfer_pending_attachments(intent.shows_user_feedback())
         .with_environment_id(environment_id)
         .with_cancellation_reason(cancellation_reason)
-        .with_require_in_progress_source(intent.expected_conversation_id().is_some());
+        .with_require_in_progress_source(intent.expected_conversation_id().is_some())
+        .with_team_context(team_context);
         let pending = match prepare_handoff(prepare_input, ctx) {
             Ok(pending) => pending,
             Err(error) => {
@@ -15855,10 +15858,12 @@ impl Workspace {
             ctx,
         );
         let handoff_terminal_view_id = model_handle.as_ref(ctx).terminal_view_id();
-        LLMPreferences::handle(ctx).update(ctx, |preferences, ctx| {
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        LLMPreferences::handle(ctx).update(ctx, move |preferences, ctx| {
             preferences.update_preferred_agent_mode_llm(
                 &HandoffLLMId::from(presentation.model_id.as_str()),
                 handoff_terminal_view_id,
+                team_context.as_ref(),
                 ctx,
             );
         });

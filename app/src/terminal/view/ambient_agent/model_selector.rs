@@ -32,6 +32,7 @@ use crate::terminal::input::{MenuPositioning, MenuPositioningProvider};
 use crate::terminal::view::ambient_agent::{AmbientAgentViewModel, AmbientAgentViewModelEvent};
 use crate::ui_components::icons::Icon;
 use crate::view_components::action_button::{ActionButton, ButtonSize};
+use crate::workspaces::user_workspaces::UserWorkspaces;
 
 const ITEM_FONT_SIZE: f32 = 14.;
 
@@ -399,6 +400,7 @@ impl ModelSelector {
             button.set_disabled(!is_configuring, ctx);
         });
 
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         let active_label = match self.active_harness(ctx) {
             Some(harness) if !matches!(harness, Harness::Oz | Harness::Unknown) => self
                 .resolved_harness_selection(harness, ctx)
@@ -417,7 +419,11 @@ impl ModelSelector {
                 })
                 .unwrap_or_else(|| "default".to_string()),
             _ => LLMPreferences::as_ref(ctx)
-                .get_active_base_model(ctx, Some(self.terminal_view_id))
+                .get_active_base_model(
+                    Some(self.terminal_view_id),
+                    team_context.as_ref(),
+                    ctx,
+                )
                 .display_name
                 .clone(),
         };
@@ -476,11 +482,16 @@ impl ModelSelector {
         &self,
         query: &str,
         hover_background: Fill,
-        ctx: &AppContext,
+        ctx: &ViewContext<Self>,
     ) -> (Vec<MenuItem<ModelSelectorAction>>, ModelSelectorAction) {
         let llm_preferences = LLMPreferences::as_ref(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         let active_llm_id = llm_preferences
-            .get_active_base_model(ctx, Some(self.terminal_view_id))
+            .get_active_base_model(
+                Some(self.terminal_view_id),
+                team_context.as_ref(),
+                ctx,
+            )
             .id
             .clone();
 
@@ -655,8 +666,14 @@ impl TypedActionView for ModelSelector {
             ModelSelectorAction::SelectModel(llm_id) => {
                 let terminal_view_id = self.terminal_view_id;
                 let id_for_update = llm_id.clone();
-                LLMPreferences::handle(ctx).update(ctx, |prefs, ctx| {
-                    prefs.update_preferred_agent_mode_llm(&id_for_update, terminal_view_id, ctx);
+                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                LLMPreferences::handle(ctx).update(ctx, move |prefs, ctx| {
+                    prefs.update_preferred_agent_mode_llm(
+                        &id_for_update,
+                        terminal_view_id,
+                        team_context.as_ref(),
+                        ctx,
+                    );
                 });
                 self.set_menu_visibility(false, ctx);
             }

@@ -272,6 +272,17 @@ fn is_usable_llm(
         .as_ref()
         .is_none_or(|reason| !reason.should_clear_preference(has_byok_key))
 }
+fn is_usable_llm_for_render_context(
+    info: &LLMInfo,
+    team_context: Option<&TeamRenderContext<'_>>,
+    app: &AppContext,
+) -> bool {
+    let has_byok_key =
+        byo_key_source_for_model_for_render_context(info, team_context, app).is_some();
+    info.disable_reason
+        .as_ref()
+        .is_none_or(|reason| !reason.should_clear_preference(has_byok_key))
+}
 
 fn is_unconditionally_usable_llm(info: &LLMInfo) -> bool {
     !matches!(
@@ -553,8 +564,15 @@ impl AvailableLLMs {
         team_context: Option<&TeamContext>,
         app: &AppContext,
     ) -> Option<&LLMInfo> {
-        self.info_for_id(id)
-            .filter(|info| is_usable_llm(info, team_context, app))
+        self.usable_info_for_id_with(id, &|info| is_usable_llm(info, team_context, app))
+    }
+
+    fn usable_info_for_id_with(
+        &self,
+        id: &LLMId,
+        is_usable: &impl Fn(&LLMInfo) -> bool,
+    ) -> Option<&LLMInfo> {
+        self.info_for_id(id).filter(|info| is_usable(info))
     }
 
     /// Disable-aware default: the server default when usable, otherwise the
@@ -565,12 +583,15 @@ impl AvailableLLMs {
         team_context: Option<&TeamContext>,
         app: &AppContext,
     ) -> Option<&LLMInfo> {
-        self.usable_info_for_id(&self.default_id, team_context, app)
-            .or_else(|| {
-                self.choices
-                    .iter()
-                    .find(|info| is_usable_llm(info, team_context, app))
-            })
+        self.usable_default_llm_info_with(&|info| is_usable_llm(info, team_context, app))
+    }
+
+    fn usable_default_llm_info_with(
+        &self,
+        is_usable: &impl Fn(&LLMInfo) -> bool,
+    ) -> Option<&LLMInfo> {
+        self.usable_info_for_id_with(&self.default_id, is_usable)
+            .or_else(|| self.choices.iter().find(|info| is_usable(info)))
     }
 
     fn default_llm_info(&self) -> &LLMInfo {
@@ -876,32 +897,60 @@ impl LLMPreferences {
         team_context: Option<&TeamContext>,
         app: &'a AppContext,
     ) -> &'a LLMInfo {
-        self.get_preferred_base_model(terminal_view_id, team_context, app)
+        let is_usable = |info: &LLMInfo| is_usable_llm(info, team_context, app);
+        self.get_preferred_base_model_with(
+            terminal_view_id,
+            &is_usable,
+            self.custom_inference_enabled_for_context(team_context, app),
+            app,
+        )
+    }
+
+    pub(crate) fn get_active_base_model_for_render_context<'a>(
+        &'a self,
+        terminal_view_id: Option<EntityId>,
+        team_context: Option<&TeamRenderContext<'_>>,
+        app: &'a AppContext,
+    ) -> &'a LLMInfo {
+        let is_usable =
+            |info: &LLMInfo| is_usable_llm_for_render_context(info, team_context, app);
+        self.get_preferred_base_model_with(
+            terminal_view_id,
+            &is_usable,
+            self.custom_inference_enabled_for_render_context(team_context, app),
+            app,
+        )
     }
 
     /// Returns `LLMInfo` for the currently selected LLM to be used for Agent Mode.
-    fn get_preferred_base_model<'a>(
+    fn get_preferred_base_model_with<'a>(
         &'a self,
         terminal_view_id: Option<EntityId>,
-        team_context: Option<&TeamContext>,
+        is_usable: &impl Fn(&LLMInfo) -> bool,
+        custom_inference_enabled: bool,
         app: &'a AppContext,
     ) -> &'a LLMInfo {
         if let Some(terminal_view_id) = terminal_view_id {
             let raw_override = self.base_llm_for_terminal_view.get(&terminal_view_id);
             if let Some(llm_id) = raw_override
                 && let Some(llm_info) =
-                    self.model_info_for_id(
+                    self.model_info_for_id_with(
                         &self.models_by_feature.agent_mode,
                         llm_id,
-                        team_context,
+                        is_usable,
+                        custom_inference_enabled,
                         app,
                     )
             {
                 return llm_info;
             }
         }
-
-        self.get_active_profile_base_model(terminal_view_id, team_context, app)
+        self.get_active_profile_base_model_with(
+            terminal_view_id,
+            is_usable,
+            custom_inference_enabled,
+            app,
+        )
     }
 
     /// Returns the active execution profile's effective base model without applying a
@@ -912,6 +961,22 @@ impl LLMPreferences {
         team_context: Option<&TeamContext>,
         app: &'a AppContext,
     ) -> &'a LLMInfo {
+        let is_usable = |info: &LLMInfo| is_usable_llm(info, team_context, app);
+        self.get_active_profile_base_model_with(
+            terminal_view_id,
+            &is_usable,
+            self.custom_inference_enabled_for_context(team_context, app),
+            app,
+        )
+    }
+
+    fn get_active_profile_base_model_with<'a>(
+        &'a self,
+        terminal_view_id: Option<EntityId>,
+        is_usable: &impl Fn(&LLMInfo) -> bool,
+        custom_inference_enabled: bool,
+        app: &'a AppContext,
+    ) -> &'a LLMInfo {
         let profile = AIExecutionProfilesModel::as_ref(app).active_profile(terminal_view_id, app);
 
         profile
@@ -919,15 +984,21 @@ impl LLMPreferences {
             .base_model
             .clone()
             .and_then(|id| {
-                self.model_info_for_id(
+                self.model_info_for_id_with(
                     &self.models_by_feature.agent_mode,
                     &id,
-                    team_context,
+                    is_usable,
+                    custom_inference_enabled,
                     app,
                 )
             })
             .unwrap_or_else(|| {
-                self.fallback_llm_info(&self.models_by_feature.agent_mode, team_context, app)
+                self.fallback_llm_info_with(
+                    &self.models_by_feature.agent_mode,
+                    is_usable,
+                    custom_inference_enabled,
+                    app,
+                )
             })
     }
 
@@ -941,10 +1012,66 @@ impl LLMPreferences {
         team_context: Option<&TeamContext>,
         app: &AppContext,
     ) -> &'a LLMInfo {
+        let is_usable = |info: &LLMInfo| is_usable_llm(info, team_context, app);
+        self.fallback_llm_info_with(
+            available,
+            &is_usable,
+            self.custom_inference_enabled_for_context(team_context, app),
+            app,
+        )
+    }
+
+    fn fallback_llm_info_for_render_context<'a>(
+        &'a self,
+        available: &'a AvailableLLMs,
+        team_context: Option<&TeamRenderContext<'_>>,
+        app: &AppContext,
+    ) -> &'a LLMInfo {
+        let is_usable =
+            |info: &LLMInfo| is_usable_llm_for_render_context(info, team_context, app);
+        self.fallback_llm_info_with(
+            available,
+            &is_usable,
+            self.custom_inference_enabled_for_render_context(team_context, app),
+            app,
+        )
+    }
+
+    fn fallback_llm_info_with<'a>(
+        &'a self,
+        available: &'a AvailableLLMs,
+        is_usable: &impl Fn(&LLMInfo) -> bool,
+        custom_inference_enabled: bool,
+        _app: &AppContext,
+    ) -> &'a LLMInfo {
         available
-            .usable_default_llm_info(team_context, app)
-            .or_else(|| self.custom_llm_choices(app).next())
+            .usable_default_llm_info_with(is_usable)
+            .or_else(|| custom_inference_enabled.then(|| self.custom_llms.first()).flatten())
             .unwrap_or_else(|| available.default_llm_info())
+    }
+
+    pub(crate) fn effective_computer_use_model_for_profile_for_render_context<'a>(
+        &'a self,
+        profile: &AIExecutionProfile,
+        team_context: Option<&TeamRenderContext<'_>>,
+        app: &'a AppContext,
+    ) -> &'a LLMInfo {
+        let available = self.get_computer_use_available();
+        let is_usable =
+            |info: &LLMInfo| is_usable_llm_for_render_context(info, team_context, app);
+
+        profile
+            .computer_use_model
+            .as_ref()
+            .and_then(|id| {
+                Self::server_info_for_id_router_gated(available, id)
+                    .filter(|info| is_usable(info))
+            })
+            .unwrap_or_else(|| {
+                available
+                    .usable_default_llm_info_with(&is_usable)
+                    .unwrap_or_else(|| available.default_llm_info())
+            })
     }
 
     /// Resolves `id` against `available` (a feature's server-provided model
@@ -961,9 +1088,31 @@ impl LLMPreferences {
         team_context: Option<&TeamContext>,
         app: &AppContext,
     ) -> Option<&'a LLMInfo> {
+        let is_usable = |info: &LLMInfo| is_usable_llm(info, team_context, app);
+        self.model_info_for_id_with(
+            available,
+            id,
+            &is_usable,
+            self.custom_inference_enabled_for_context(team_context, app),
+            app,
+        )
+    }
+
+    fn model_info_for_id_with<'a>(
+        &'a self,
+        available: &'a AvailableLLMs,
+        id: &LLMId,
+        is_usable: &impl Fn(&LLMInfo) -> bool,
+        custom_inference_enabled: bool,
+        _app: &AppContext,
+    ) -> Option<&'a LLMInfo> {
         Self::server_info_for_id_router_gated(available, id)
-            .filter(|info| is_usable_llm(info, team_context, app))
-            .or_else(|| self.custom_llm_info_for_id_if_enabled(id, app))
+            .filter(|info| is_usable(info))
+            .or_else(|| {
+                custom_inference_enabled
+                    .then(|| self.custom_llm_info_for_id(id))
+                    .flatten()
+            })
             .or_else(|| self.custom_router_llm_info_for_id_if_enabled(id))
     }
 
@@ -985,6 +1134,38 @@ impl LLMPreferences {
                 )
             })
             .unwrap_or_else(|| self.get_default_base_model(team_context, app))
+    }
+
+    pub(crate) fn effective_base_model_for_profile_for_render_context<'a>(
+        &'a self,
+        profile: &AIExecutionProfile,
+        team_context: Option<&TeamRenderContext<'_>>,
+        app: &'a AppContext,
+    ) -> &'a LLMInfo {
+        let is_usable =
+            |info: &LLMInfo| is_usable_llm_for_render_context(info, team_context, app);
+        let custom_inference_enabled =
+            self.custom_inference_enabled_for_render_context(team_context, app);
+        profile
+            .base_model
+            .as_ref()
+            .and_then(|id| {
+                self.model_info_for_id_with(
+                    &self.models_by_feature.agent_mode,
+                    id,
+                    &is_usable,
+                    custom_inference_enabled,
+                    app,
+                )
+            })
+            .unwrap_or_else(|| {
+                self.fallback_llm_info_with(
+                    &self.models_by_feature.agent_mode,
+                    &is_usable,
+                    custom_inference_enabled,
+                    app,
+                )
+            })
     }
 
     pub fn get_active_coding_model<'a>(
@@ -1115,6 +1296,41 @@ impl LLMPreferences {
             })
             .unwrap_or_else(|| self.fallback_llm_info(available, team_context, app))
     }
+    pub(crate) fn get_active_cli_agent_model_for_render_context<'a>(
+        &'a self,
+        terminal_view_id: Option<EntityId>,
+        team_context: Option<&TeamRenderContext<'_>>,
+        app: &'a AppContext,
+    ) -> &'a LLMInfo {
+        let profile = AIExecutionProfilesModel::as_ref(app).active_profile(terminal_view_id, app);
+        let available = self.get_cli_agent_available();
+        let is_usable =
+            |info: &LLMInfo| is_usable_llm_for_render_context(info, team_context, app);
+        let custom_inference_enabled =
+            self.custom_inference_enabled_for_render_context(team_context, app);
+
+        profile
+            .data()
+            .cli_agent_model
+            .as_ref()
+            .and_then(|id| {
+                Self::server_info_for_id_router_gated(available, id)
+                    .filter(|info| is_usable(info))
+                    .or_else(|| {
+                        custom_inference_enabled
+                            .then(|| self.custom_llm_info_for_id(id))
+                            .flatten()
+                    })
+            })
+            .unwrap_or_else(|| {
+                self.fallback_llm_info_with(
+                    available,
+                    &is_usable,
+                    custom_inference_enabled,
+                    app,
+                )
+            })
+    }
 
     /// Returns the effective default CLI agent model as a fallback
     /// (disable-aware, see [`Self::fallback_llm_info`]).
@@ -1124,6 +1340,18 @@ impl LLMPreferences {
         app: &AppContext,
     ) -> &LLMInfo {
         self.fallback_llm_info(self.get_cli_agent_available(), team_context, app)
+    }
+
+    pub(crate) fn get_default_cli_agent_model_for_render_context(
+        &self,
+        team_context: Option<&TeamRenderContext<'_>>,
+        app: &AppContext,
+    ) -> &LLMInfo {
+        self.fallback_llm_info_for_render_context(
+            self.get_cli_agent_available(),
+            team_context,
+            app,
+        )
     }
 
     /// Helper to get the AvailableLLMs for cli_agent, falling back to agent_mode.
@@ -1169,6 +1397,53 @@ impl LLMPreferences {
         let available = self.get_computer_use_available();
         available
             .usable_default_llm_info(team_context, app)
+            .unwrap_or_else(|| available.default_llm_info())
+    }
+
+
+    pub(crate) fn effective_cli_agent_model_for_profile_for_render_context<'a>(
+        &'a self,
+        profile: &AIExecutionProfile,
+        team_context: Option<&TeamRenderContext<'_>>,
+        app: &'a AppContext,
+    ) -> &'a LLMInfo {
+        let available = self.get_cli_agent_available();
+        let is_usable =
+            |info: &LLMInfo| is_usable_llm_for_render_context(info, team_context, app);
+        let custom_inference_enabled =
+            self.custom_inference_enabled_for_render_context(team_context, app);
+
+        profile
+            .cli_agent_model
+            .as_ref()
+            .and_then(|id| {
+                Self::server_info_for_id_router_gated(available, id)
+                    .filter(|info| is_usable(info))
+                    .or_else(|| {
+                        custom_inference_enabled
+                            .then(|| self.custom_llm_info_for_id(id))
+                            .flatten()
+                    })
+            })
+            .unwrap_or_else(|| {
+                self.fallback_llm_info_with(
+                    available,
+                    &is_usable,
+                    custom_inference_enabled,
+                    app,
+                )
+            })
+    }
+    pub(crate) fn get_default_computer_use_model_for_render_context(
+        &self,
+        team_context: Option<&TeamRenderContext<'_>>,
+        app: &AppContext,
+    ) -> &LLMInfo {
+        let available = self.get_computer_use_available();
+        available
+            .usable_default_llm_info_with(&|info| {
+                is_usable_llm_for_render_context(info, team_context, app)
+            })
             .unwrap_or_else(|| available.default_llm_info())
     }
 
@@ -1273,6 +1548,26 @@ impl LLMPreferences {
     fn custom_inference_enabled(app: &AppContext) -> bool {
         let workspaces = UserWorkspaces::as_ref(app);
         workspaces.is_custom_inference_enabled(app) && workspaces.are_member_byo_endpoints_allowed()
+    }
+
+    fn custom_inference_enabled_for_context(
+        &self,
+        team_context: Option<&TeamContext>,
+        app: &AppContext,
+    ) -> bool {
+        let workspaces = UserWorkspaces::as_ref(app);
+        workspaces.is_custom_inference_enabled(app)
+            && workspaces.are_member_byo_endpoints_allowed_for_context(team_context)
+    }
+
+    fn custom_inference_enabled_for_render_context(
+        &self,
+        team_context: Option<&TeamRenderContext<'_>>,
+        app: &AppContext,
+    ) -> bool {
+        let workspaces = UserWorkspaces::as_ref(app);
+        workspaces.is_custom_inference_enabled(app)
+            && workspaces.agent_settings_are_member_byo_endpoints_allowed(team_context)
     }
 
     /// Resolves a custom model router by its `config_key`/`LLMId`.
@@ -1521,6 +1816,22 @@ impl LLMPreferences {
         app: &AppContext,
     ) -> &LLMInfo {
         self.fallback_llm_info(&self.models_by_feature.agent_mode, team_context, app)
+    }
+
+    pub(crate) fn get_default_base_model_for_render_context(
+        &self,
+        team_context: Option<&TeamRenderContext<'_>>,
+        app: &AppContext,
+    ) -> &LLMInfo {
+        self.fallback_llm_info_for_render_context(
+            &self.models_by_feature.agent_mode,
+            team_context,
+            app,
+        )
+    }
+
+    pub(crate) fn get_raw_default_base_model(&self) -> &LLMInfo {
+        self.models_by_feature.agent_mode.default_llm_info()
     }
 
     /// Returns the effective default coding model as a fallback

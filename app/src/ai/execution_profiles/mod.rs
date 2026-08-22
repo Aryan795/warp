@@ -15,7 +15,7 @@ use crate::cloud_object::{
 };
 use crate::server::sync_queue::QueueItem;
 use crate::settings::AISettings;
-use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces};
+use crate::workspaces::user_workspaces::{TeamContext, TeamRenderContext, UserWorkspaces};
 /// This threshold currently only applies to GPT 5.4 and GPT 5.5 models
 pub const LONG_CONTEXT_WARNING_THRESHOLD: u32 = 272_000;
 pub(crate) const LONG_CONTEXT_PRICING_WARNING_URL: &str =
@@ -49,6 +49,15 @@ fn effective_base_model<'a>(
     app: &'a AppContext,
 ) -> &'a LLMInfo {
     LLMPreferences::as_ref(app).effective_base_model_for_profile(profile, team_context, app)
+}
+
+fn effective_base_model_for_render_context<'a>(
+    profile: &AIExecutionProfile,
+    team_context: Option<&TeamRenderContext<'_>>,
+    app: &'a AppContext,
+) -> &'a LLMInfo {
+    LLMPreferences::as_ref(app)
+        .effective_base_model_for_profile_for_render_context(profile, team_context, app)
 }
 
 /// Resolves the effective cloud agent computer use state by reading the workspace
@@ -144,6 +153,16 @@ pub trait AIExecutionProfileAppExt {
         team_context: Option<&TeamContext>,
         app: &AppContext,
     ) -> Option<u32>;
+    fn configurable_context_window_for_render_context(
+        &self,
+        team_context: Option<&TeamRenderContext<'_>>,
+        app: &AppContext,
+    ) -> Option<LLMContextWindow>;
+    fn context_window_display_value_for_render_context(
+        &self,
+        team_context: Option<&TeamRenderContext<'_>>,
+        app: &AppContext,
+    ) -> Option<u32>;
     fn context_window_limit_for_request(
         &self,
         team_context: Option<&TeamContext>,
@@ -153,6 +172,12 @@ pub trait AIExecutionProfileAppExt {
         &self,
         context_window_limit: Option<u32>,
         team_context: Option<&TeamContext>,
+        app: &AppContext,
+    ) -> bool;
+    fn should_show_long_context_pricing_warning_for_render_context(
+        &self,
+        context_window_limit: Option<u32>,
+        team_context: Option<&TeamRenderContext<'_>>,
         app: &AppContext,
     ) -> bool;
 }
@@ -182,6 +207,28 @@ impl AIExecutionProfileAppExt for AIExecutionProfile {
         let cw = self.configurable_context_window(team_context, app)?;
         Some(self.context_window_limit.unwrap_or(cw.default_max))
     }
+
+    fn configurable_context_window_for_render_context(
+        &self,
+        team_context: Option<&TeamRenderContext<'_>>,
+        app: &AppContext,
+    ) -> Option<LLMContextWindow> {
+        let llm = effective_base_model_for_render_context(self, team_context, app);
+        has_configurable_context_window(
+            llm,
+            FeatureFlag::GPTConfigurableContextWindow.is_enabled(),
+        )
+        .then(|| llm.context_window.clone())
+    }
+
+    fn context_window_display_value_for_render_context(
+        &self,
+        team_context: Option<&TeamRenderContext<'_>>,
+        app: &AppContext,
+    ) -> Option<u32> {
+        let cw = self.configurable_context_window_for_render_context(team_context, app)?;
+        Some(self.context_window_limit.unwrap_or(cw.default_max))
+    }
     fn context_window_limit_for_request(
         &self,
         team_context: Option<&TeamContext>,
@@ -206,6 +253,24 @@ impl AIExecutionProfileAppExt for AIExecutionProfile {
         app: &AppContext,
     ) -> bool {
         let llm = effective_base_model(self, team_context, app);
+        should_show_long_context_pricing_warning(
+            llm,
+            Some(
+                context_window_limit
+                    .or(self.context_window_limit)
+                    .unwrap_or(llm.context_window.default_max),
+            ),
+            FeatureFlag::GPTConfigurableContextWindow.is_enabled(),
+        )
+    }
+
+    fn should_show_long_context_pricing_warning_for_render_context(
+        &self,
+        context_window_limit: Option<u32>,
+        team_context: Option<&TeamRenderContext<'_>>,
+        app: &AppContext,
+    ) -> bool {
+        let llm = effective_base_model_for_render_context(self, team_context, app);
         should_show_long_context_pricing_warning(
             llm,
             Some(

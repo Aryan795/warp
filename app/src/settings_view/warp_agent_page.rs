@@ -79,7 +79,10 @@ use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
 use crate::ai::geap_credentials::{
     GeapPolicy, force_refresh_geap_credentials_for_context, geap_policy_for_render_context,
 };
-use crate::ai::llms::{LLMId, LLMPreferences, LLMProvider, is_using_api_key_for_provider};
+use crate::ai::llms::{
+    LLMId, LLMPreferences, LLMProvider, byo_key_source_for_model,
+    is_using_api_key_for_provider,
+};
 use crate::appearance::{Appearance, AppearanceEvent};
 use crate::auth::AuthStateProvider;
 use crate::editor::{
@@ -1232,26 +1235,22 @@ impl WarpAgentPageView {
     /// by a credential the user has: a BYO key/subscription for its provider, or
     /// one of their custom-endpoint models. `auto` models report `false` since
     /// they always consume Warp credits.
-    fn active_base_model_is_byo_covered(ctx: &AppContext) -> bool {
-        let (active_id, active_provider) = {
-            let prefs = LLMPreferences::as_ref(ctx);
-            let active = prefs.get_active_base_model(ctx, None);
-            (active.id.clone(), active.provider)
-        };
-        if LLMPreferences::as_ref(ctx)
-            .custom_llm_info_for_id(&active_id)
-            .is_some()
-        {
-            return true;
-        }
-        is_using_api_key_for_provider(&active_provider, ctx)
+    fn active_base_model_is_byo_covered(ctx: &ViewContext<Self>) -> bool {
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let active = LLMPreferences::as_ref(ctx).get_active_base_model(
+            None,
+            team_context.as_ref(),
+            ctx,
+        );
+        byo_key_source_for_model(active, team_context.as_ref(), ctx).is_some()
     }
 
     /// The display name of the user's current default Agent Mode model, used in
     /// the prompt copy (e.g. "auto (cost-efficient)").
-    fn active_base_model_display_name(ctx: &AppContext) -> String {
+    fn active_base_model_display_name(ctx: &ViewContext<Self>) -> String {
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         LLMPreferences::as_ref(ctx)
-            .get_active_base_model(ctx, None)
+            .get_active_base_model(None, team_context.as_ref(), ctx)
             .display_name
             .clone()
     }
@@ -1260,7 +1259,7 @@ impl WarpAgentPageView {
     /// who are out of monthly (base-plan) credits, since only they hit the
     /// "no credits" error with an `auto` model. Also skips when the current
     /// default is already served by a BYO credential.
-    fn should_offer_default_model_switch(ctx: &AppContext) -> bool {
+    fn should_offer_default_model_switch(ctx: &ViewContext<Self>) -> bool {
         // Exclude only confirmed paid plans. Solo/individual users have no
         // `current_workspace`, and billing may not have loaded yet (Unknown), so
         // treat both as eligible and rely on the out-of-credits check below to

@@ -1989,7 +1989,8 @@ fn launch_remote_child(
         }
     };
 
-    new_terminal_view.update(ctx, |terminal_view, ctx| {
+    let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+    new_terminal_view.update(ctx, move |terminal_view, ctx| {
         terminal_view.enter_agent_view(
             None,
             Some(conversation_id),
@@ -1999,7 +2000,7 @@ fn launch_remote_child(
         if let Some(ambient_agent_view_model) = terminal_view.ambient_agent_view_model() {
             ambient_agent_view_model.update(ctx, |model, ctx| {
                 model.set_conversation_id(Some(conversation_id));
-                model.spawn_agent_with_request(prepared.spawn_request, ctx);
+                model.spawn_agent_with_request(prepared.spawn_request, team_context, ctx);
             });
         } else {
             report_error!("Remote StartAgent child pane missing ambient agent view model");

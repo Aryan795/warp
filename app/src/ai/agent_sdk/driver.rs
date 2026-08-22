@@ -3727,11 +3727,20 @@ impl AgentDriver {
         model_id: LLMId,
         ctx: &mut ModelContext<Self>,
     ) -> Result<(), AgentDriverError> {
-        let terminal_view_id = self.terminal_driver.as_ref(ctx).terminal_view().id();
         log::info!("Selecting base agent model {model_id} (from agent driver)");
-
-        LLMPreferences::handle(ctx).update(ctx, |preferences, ctx| {
-            preferences.update_preferred_agent_mode_llm(&model_id, terminal_view_id, ctx);
+        self.terminal_driver.update(ctx, |driver, ctx| {
+            driver.with_terminal_view(ctx, |terminal_view, ctx| {
+                let terminal_view_id = terminal_view.id();
+                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                LLMPreferences::handle(ctx).update(ctx, move |preferences, ctx| {
+                    preferences.update_preferred_agent_mode_llm(
+                        &model_id,
+                        terminal_view_id,
+                        team_context.as_ref(),
+                        ctx,
+                    );
+                });
+            });
         });
         Ok(())
     }

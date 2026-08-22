@@ -167,6 +167,7 @@ use crate::util::openable_file_type::FileTarget;
 use crate::view_components::ToastFlavor;
 use crate::workflows::workflow::Workflow;
 use crate::workflows::{WorkflowSelectionSource, WorkflowSource, WorkflowType};
+use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::workspace::tab_group::TabGroupId;
 use crate::workspace::{
     self, CommandSearchOptions, PaneViewLocator, TabBarLocation, WorkspaceAction,
@@ -1752,9 +1753,18 @@ impl PaneGroup {
                     && let Ok(llm_id) = serde_json::from_str::<LLMId>(llm_override)
                 {
                     log::info!("Selecting base agent model {llm_id} (from terminal snapshot)");
-                    crate::ai::llms::LLMPreferences::handle(ctx).update(ctx, |llm_prefs, ctx| {
-                        llm_prefs.update_preferred_agent_mode_llm(&llm_id, terminal_view_id, ctx);
-                    });
+                    let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                    crate::ai::llms::LLMPreferences::handle(ctx).update(
+                        ctx,
+                        move |llm_prefs, ctx| {
+                            llm_prefs.update_preferred_agent_mode_llm(
+                                &llm_id,
+                                terminal_view_id,
+                                team_context.as_ref(),
+                                ctx,
+                            );
+                        },
+                    );
                 }
 
                 if let Some(active_profile_sync_id) = &terminal_snapshot.active_profile_id {
@@ -5511,7 +5521,8 @@ impl PaneGroup {
             model.get_or_async_fetch_task_data(&task_id, ctx);
         });
         let mut conversation_id = None;
-        terminal_view.update(ctx, |view, ctx| {
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        terminal_view.update(ctx, move |view, ctx| {
             // The cloud-mode terminal model starts with
             // `is_executing_oz_environment_startup_commands = true`. Clear it
             // before restoring so that `maybe_insert_setup_command_blocks`
@@ -5580,7 +5591,7 @@ impl PaneGroup {
             if let Some(ambient_agent_view_model) = view.ambient_agent_view_model().cloned() {
                 ambient_agent_view_model.update(ctx, |model, ctx| {
                     model.set_conversation_id(conversation_id);
-                    model.enter_viewing_existing_session(task_id, ctx);
+                    model.enter_viewing_existing_session(task_id, team_context, ctx);
                 });
             }
             let status = if view.owned_ambient_agent_task_id(ctx).is_some() {

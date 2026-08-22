@@ -35,7 +35,6 @@ use crate::ai::blocklist::{
     BlocklistAIController, BlocklistAIControllerEvent, BlocklistAIInputEvent, BlocklistAIInputModel,
 };
 use crate::ai::cloud_agent_settings::CloudAgentSettings;
-use crate::ai::custom_model_routers::is_custom_router_id;
 use crate::ai::execution_profiles::ExecutionProfileId;
 use crate::ai::execution_profiles::model_menu_items::{
     available_model_menu_items, has_reasoning_variants, is_auto,
@@ -165,7 +164,6 @@ impl ActionButtonTheme for SelectorChipTheme {
 /// into a single component.
 pub struct ProfileModelSelector {
     profile_button: ViewHandle<ActionButton>,
-    model_button: ViewHandle<ActionButton>,
     profile_compact_button: ViewHandle<ActionButton>,
     model_compact_button: ViewHandle<ActionButton>,
     profile_dropdown: ViewHandle<Menu<ProfileModelSelectorAction>>,
@@ -175,8 +173,6 @@ pub struct ProfileModelSelector {
     is_model_menu_open: bool,
     terminal_view_id: EntityId,
     weak_self: WeakViewHandle<Self>,
-    base_model_display_name: String,
-    cli_agent_model_display_name: String,
     profile_mouse_state: MouseStateHandle,
     model_mouse_state: MouseStateHandle,
     menu_positioning_provider: Arc<dyn MenuPositioningProvider>,
@@ -282,32 +278,6 @@ impl ProfileModelSelector {
             .with_icon(Icon::Psychology)
         });
 
-        let model_button = ctx.add_typed_action_view(|ctx| {
-            let appearance = Appearance::as_ref(ctx);
-            ActionButton::new(
-                "",
-                SelectorChipTheme {
-                    text_color: ButtonTextColor::Fill(
-                        appearance
-                            .theme()
-                            .sub_text_color(appearance.theme().surface_1()),
-                    ),
-                    is_blurred: false,
-                },
-            )
-            .with_disabled_theme(SelectorChipTheme {
-                text_color: ButtonTextColor::Fill(
-                    internal_colors::text_disabled(
-                        appearance.theme(),
-                        appearance.theme().surface_1(),
-                    )
-                    .into(),
-                ),
-                is_blurred: false,
-            })
-            .with_tooltip(MODEL_PICKER_TOOLTIP)
-            .with_size(ButtonSize::UDIButton)
-        });
 
         let profile_compact_button = ctx.add_typed_action_view(|_| {
             ActionButton::new("", PromptIconButtonTheme::new(false))
@@ -559,7 +529,6 @@ impl ProfileModelSelector {
 
         let mut me = Self {
             profile_button,
-            model_button,
             profile_compact_button,
             model_compact_button,
             profile_dropdown,
@@ -573,8 +542,6 @@ impl ProfileModelSelector {
             is_model_menu_open: false,
             terminal_view_id,
             weak_self: ctx.handle(),
-            base_model_display_name: String::new(),
-            cli_agent_model_display_name: String::new(),
             profile_mouse_state: Default::default(),
             model_mouse_state: Default::default(),
             menu_positioning_provider,
@@ -726,52 +693,6 @@ impl ProfileModelSelector {
             });
         }
 
-        let team_context = Self::team_context(ctx);
-        let llm_preferences = LLMPreferences::as_ref(ctx);
-        let base_llm = llm_preferences.get_active_base_model(
-            Some(self.terminal_view_id),
-            team_context.as_ref(),
-            ctx,
-        );
-        let cli_agent_llm = llm_preferences.get_active_cli_agent_model(
-            Some(self.terminal_view_id),
-            team_context.as_ref(),
-            ctx,
-        );
-        self.base_model_display_name = base_llm.menu_display_name();
-        self.cli_agent_model_display_name = cli_agent_llm.menu_display_name();
-
-        let model_name = if self.is_third_party_harness(ctx) {
-            self.harness_model_display_name(ctx)
-        } else {
-            let active_llm = if FeatureFlag::InlineMenuHeaders.is_enabled()
-                && self
-                    .terminal_model
-                    .lock()
-                    .block_list()
-                    .active_block()
-                    .is_agent_in_control_or_tagged_in()
-            {
-                cli_agent_llm
-            } else {
-                base_llm
-            };
-
-            // Don't append description for custom model routers — it would add a
-            // redundant "(Custom auto · Local)" suffix to the button label.
-            if !is_custom_router_id(active_llm.id.as_str()) {
-                if let Some(description) = &active_llm.description {
-                    format!("{} ({})", active_llm.display_name, description)
-                } else {
-                    active_llm.display_name.clone()
-                }
-            } else {
-                active_llm.display_name.clone()
-            }
-        };
-
-        // Non-Oz runs lock silently: the harness owns model selection, and the
-        // user already knows that, so no tooltip is shown.
         let model_tooltip: Option<&str> = if self.is_locked_for_cloud_followup(ctx) {
             Some(MODEL_LOCKED_FOR_FOLLOWUP_TOOLTIP)
         } else if self.is_locked_for_non_oz_run(ctx) {
@@ -780,14 +701,6 @@ impl ProfileModelSelector {
             Some(MODEL_PICKER_TOOLTIP)
         };
         let locked = self.is_model_locked(ctx);
-        self.model_button.update(ctx, |button, ctx| {
-            button.set_label(model_name, ctx);
-            button.set_disabled(locked, ctx);
-            match model_tooltip {
-                Some(t) => button.set_tooltip(Some(t), ctx),
-                None => button.clear_tooltip(ctx),
-            }
-        });
         self.model_compact_button.update(ctx, |button, ctx| {
             button.set_disabled(locked, ctx);
             match model_tooltip {
@@ -846,11 +759,6 @@ impl ProfileModelSelector {
             });
         }
 
-        self.model_button.update(ctx, |button, ctx| {
-            button.set_theme(new_theme.clone(), ctx);
-            button.set_disabled_theme(new_disabled_theme.clone(), ctx);
-            button.set_disabled(self.is_blurred, ctx);
-        });
         ctx.notify();
     }
 
@@ -1725,6 +1633,10 @@ impl ProfileModelSelector {
     fn render_model_section(&self, app: &AppContext) -> Box<dyn Element> {
         let appearance = Appearance::as_ref(app);
         let theme = appearance.theme();
+        let workspaces = UserWorkspaces::as_ref(app);
+        let team_render_context =
+            workspaces.team_render_context_for_view_handle(&self.weak_self, app);
+        let llm_preferences = LLMPreferences::as_ref(app);
 
         // Allow editing if composing an ambient agent query, or if the user has edit access
         // in a shared session (i.e., not a viewer, or is an executor).
@@ -1750,9 +1662,21 @@ impl ProfileModelSelector {
         let model_display_name = if self.is_third_party_harness(app) {
             self.harness_model_display_name(app)
         } else if is_lrc {
-            self.cli_agent_model_display_name.clone()
+            llm_preferences
+                .get_active_cli_agent_model_for_render_context(
+                    Some(self.terminal_view_id),
+                    team_render_context.as_ref(),
+                    app,
+                )
+                .menu_display_name()
         } else {
-            self.base_model_display_name.clone()
+            llm_preferences
+                .get_active_base_model_for_render_context(
+                    Some(self.terminal_view_id),
+                    team_render_context.as_ref(),
+                    app,
+                )
+                .menu_display_name()
         };
 
         let text_color = if self.is_blurred {

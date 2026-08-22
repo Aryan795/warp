@@ -13667,8 +13667,9 @@ impl Input {
                 });
 
                 if let Some(ambient_agent_view_model) = self.ambient_agent_view_model() {
-                    ambient_agent_view_model.update(ctx, |state, ctx| {
-                        state.spawn_agent(prompt, attachments, ctx);
+                    let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                    ambient_agent_view_model.update(ctx, move |state, ctx| {
+                        state.spawn_agent(prompt, attachments, team_context, ctx);
                     });
                 }
                 return;

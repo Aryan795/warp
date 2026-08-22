@@ -8098,8 +8098,9 @@ impl TerminalView {
         ctx: &mut ViewContext<Self>,
     ) {
         let model = self.ensure_ambient_agent_view_model(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         model.update(ctx, |model, ctx| {
-            model.enter_viewing_existing_session(task_id, ctx);
+            model.enter_viewing_existing_session(task_id, team_context, ctx);
             model.set_live_execution_session(session_id);
         });
     }

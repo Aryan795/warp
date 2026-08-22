@@ -58,6 +58,7 @@ use crate::server::server_api::ai::{
     AIClient, AgentConfigSnapshot, AttachmentInput, InitialSnapshotToken, SpawnAgentRequest,
 };
 use crate::settings::AISettings;
+use crate::workspaces::user_workspaces::TeamContext;
 
 const HANDOFF_CONTINUE_PROMPT: &str = "Continue";
 const HANDOFF_APPLY_SNAPSHOT_PROMPT: &str = "Apply the workspace changes from my previous session.";
@@ -87,6 +88,7 @@ pub struct HandoffPrepareInput {
     surface: HandoffSurface,
     cancellation_reason: CancellationReason,
     require_in_progress_source: bool,
+    team_context: Option<TeamContext>,
 }
 
 impl HandoffPrepareInput {
@@ -117,6 +119,7 @@ impl HandoffPrepareInput {
             surface,
             cancellation_reason: CancellationReason::ManuallyCancelled,
             require_in_progress_source: false,
+            team_context: None,
         }
     }
 
@@ -181,6 +184,11 @@ impl HandoffPrepareInput {
 
     pub fn with_require_in_progress_source(mut self, require_in_progress_source: bool) -> Self {
         self.require_in_progress_source = require_in_progress_source;
+        self
+    }
+
+    pub fn with_team_context(mut self, team_context: Option<TeamContext>) -> Self {
+        self.team_context = team_context;
         self
     }
 }
@@ -406,6 +414,7 @@ pub fn prepare_handoff(
         surface,
         cancellation_reason,
         require_in_progress_source,
+        team_context,
     } = input;
 
     let selected_id = match (expected_conversation_id, source_conversation_id) {
@@ -542,7 +551,7 @@ pub fn prepare_handoff(
         .collect();
     let preferences = LLMPreferences::as_ref(ctx);
     let active_model_id = &preferences
-        .get_active_base_model(ctx, Some(terminal_surface_id))
+        .get_active_base_model(Some(terminal_surface_id), team_context.as_ref(), ctx)
         .id;
     let model_id = preferences.cloud_runnable_oz_model_id_or_fallback(active_model_id);
     let model_is_cloud_runnable =

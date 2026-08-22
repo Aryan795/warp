@@ -5,7 +5,9 @@
 //! session-specific outcomes such as restoring input or persisting the
 //! completed card into the transcript.
 
-use warp::tui_export::{HandoffRestoration, record_static_slash_command_accepted};
+use warp::tui_export::{
+    HandoffRestoration, UserWorkspaces, record_static_slash_command_accepted,
+};
 use warpui_core::{AppContext, ViewContext, ViewHandle};
 
 use super::TuiTerminalSessionView;
@@ -27,6 +29,7 @@ impl TuiTerminalSessionView {
             return;
         }
         let current_working_directory = self.current_working_directory(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         let model = match TuiHandoffModel::new(
             self.terminal_surface_id,
             self.terminal_model.clone(),
@@ -34,6 +37,7 @@ impl TuiTerminalSessionView {
             self.ai_context_model.clone(),
             current_working_directory,
             argument.cloned(),
+            team_context,
             ctx,
         ) {
             Ok(model) => model,

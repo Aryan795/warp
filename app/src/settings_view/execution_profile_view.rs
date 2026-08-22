@@ -9,6 +9,7 @@ use warpui::elements::{
 use warpui::fonts::{Properties, Weight};
 use warpui::{
     AppContext, Element, Entity, SingletonEntity, TypedActionView, View, ViewContext, ViewHandle,
+    WeakViewHandle,
 };
 
 use crate::TemplatableMCPServerManager;
@@ -26,7 +27,7 @@ use crate::cloud_object::model::generic_string_model::StringModel;
 use crate::settings::AISettings;
 use crate::ui_components::icons::Icon;
 use crate::view_components::action_button::{ActionButton, ButtonSize, SecondaryTheme};
-use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces, UserWorkspacesEvent};
+use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
 
 #[derive(Debug, Clone)]
 pub enum ExecutionProfileViewAction {
@@ -39,21 +40,19 @@ pub enum ExecutionProfileViewEvent {
 
 pub struct ExecutionProfileView {
     profile_id: ExecutionProfileId,
-    team_context: Option<TeamContext>,
+    weak_self: WeakViewHandle<Self>,
     edit_button: ViewHandle<ActionButton>,
 }
 
 impl ExecutionProfileView {
     pub fn new(profile_id: ExecutionProfileId, ctx: &mut ViewContext<Self>) -> Self {
         let workspaces = UserWorkspaces::handle(ctx);
-        let team_context = workspaces.as_ref(ctx).team_context_for_view(ctx);
-        ctx.subscribe_to_model(&workspaces, |me, workspaces, event, ctx| {
+        ctx.subscribe_to_model(&workspaces, |_me, _workspaces, event, ctx| {
             if matches!(
                 event,
                 UserWorkspacesEvent::WindowTeamChanged { window_id }
                     if *window_id == ctx.window_id()
             ) {
-                me.team_context = workspaces.as_ref(ctx).team_context_for_view(ctx);
                 ctx.notify();
             }
         });
@@ -92,7 +91,7 @@ impl ExecutionProfileView {
 
         Self {
             profile_id,
-            team_context,
+            weak_self: ctx.handle(),
             edit_button,
         }
     }
@@ -115,42 +114,32 @@ impl View for ExecutionProfileView {
         let profile = permissions.permissions_profile_for_id(app, &self.profile_id);
 
         let llm_preferences = LLMPreferences::as_ref(app);
-
-        let base_model = profile
-            .base_model
-            .as_ref()
-            .and_then(|id| llm_preferences.get_llm_info(id))
-            .map(|info| info.display_name.clone())
-            .unwrap_or_else(|| {
-                llm_preferences
-                    .get_default_base_model(self.team_context.as_ref(), app)
-                    .display_name
-                    .clone()
-            });
-
-        let cli_agent_model = profile
-            .cli_agent_model
-            .as_ref()
-            .and_then(|id| llm_preferences.get_llm_info(id))
-            .map(|info| info.display_name.clone())
-            .unwrap_or_else(|| {
-                llm_preferences
-                    .get_default_cli_agent_model(self.team_context.as_ref(), app)
-                    .display_name
-                    .clone()
-            });
-
-        let computer_use_model = profile
-            .computer_use_model
-            .as_ref()
-            .and_then(|id| llm_preferences.get_llm_info(id))
-            .map(|info| info.display_name.clone())
-            .unwrap_or_else(|| {
-                llm_preferences
-                    .get_default_computer_use_model(self.team_context.as_ref(), app)
-                    .display_name
-                    .clone()
-            });
+        let team_render_context = UserWorkspaces::as_ref(app)
+            .team_render_context_for_view_handle(&self.weak_self, app);
+        let base_model = llm_preferences
+            .effective_base_model_for_profile_for_render_context(
+                &profile,
+                team_render_context.as_ref(),
+                app,
+            )
+            .display_name
+            .clone();
+        let cli_agent_model = llm_preferences
+            .effective_cli_agent_model_for_profile_for_render_context(
+                &profile,
+                team_render_context.as_ref(),
+                app,
+            )
+            .display_name
+            .clone();
+        let computer_use_model = llm_preferences
+            .effective_computer_use_model_for_profile_for_render_context(
+                &profile,
+                team_render_context.as_ref(),
+                app,
+            )
+            .display_name
+            .clone();
 
         Container::new(
             Flex::column()

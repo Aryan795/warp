@@ -16,7 +16,7 @@ use warpui::ui_components::slider::SliderStateHandle;
 use warpui::ui_components::switch::SwitchStateHandle;
 use warpui::{
     AppContext, Element, Entity, ModelHandle, SingletonEntity, TypedActionView, View, ViewContext,
-    ViewHandle,
+    ViewHandle, WeakViewHandle,
 };
 
 use crate::ai::blocklist::BlocklistAIPermissions;
@@ -237,7 +237,7 @@ pub enum ExecutionProfileEditorViewAction {
 
 pub struct ExecutionProfileEditorView {
     profile_id: ExecutionProfileId,
-    team_context: Option<TeamContext>,
+    weak_self: WeakViewHandle<Self>,
     pane_configuration: ModelHandle<PaneConfiguration>,
     focus_handle: Option<PaneFocusHandle>,
     clipped_scroll_state: ClippedScrollStateHandle,
@@ -647,7 +647,7 @@ impl ExecutionProfileEditorView {
 
         let mut view = Self {
             profile_id,
-            team_context,
+            weak_self: ctx.handle(),
             pane_configuration,
             focus_handle: None,
             clipped_scroll_state: Default::default(),
@@ -880,7 +880,6 @@ impl ExecutionProfileEditorView {
                 UserWorkspacesEvent::WindowTeamChanged { window_id }
                     if *window_id == ctx.window_id()
             ) {
-                me.team_context = workspace.as_ref(ctx).team_context_for_view(ctx);
                 me.refresh_profile_state(ctx);
             }
             if let UserWorkspacesEvent::TeamsChanged = event {
@@ -1454,16 +1453,46 @@ impl ExecutionProfileEditorView {
         });
     }
 
-    fn configurable_context_window(&self, app: &AppContext) -> Option<LLMContextWindow> {
+    fn configurable_context_window_for_render(
+        &self,
+        app: &AppContext,
+    ) -> Option<LLMContextWindow> {
         let profile =
             BlocklistAIPermissions::as_ref(app).permissions_profile_for_id(app, &self.profile_id);
-        profile.configurable_context_window(self.team_context.as_ref(), app)
+        let team_render_context = UserWorkspaces::as_ref(app)
+            .team_render_context_for_view_handle(&self.weak_self, app);
+        profile.configurable_context_window_for_render_context(team_render_context.as_ref(), app)
     }
 
-    fn current_context_window_display_value(&self, app: &AppContext) -> Option<u32> {
+    fn current_context_window_display_value_for_render(&self, app: &AppContext) -> Option<u32> {
         let profile =
             BlocklistAIPermissions::as_ref(app).permissions_profile_for_id(app, &self.profile_id);
-        profile.context_window_display_value(self.team_context.as_ref(), app)
+        let team_render_context = UserWorkspaces::as_ref(app)
+            .team_render_context_for_view_handle(&self.weak_self, app);
+        profile
+            .context_window_display_value_for_render_context(team_render_context.as_ref(), app)
+    }
+
+    fn configurable_context_window_for_action(
+        &self,
+        ctx: &ViewContext<Self>,
+    ) -> Option<LLMContextWindow> {
+        let profile =
+            BlocklistAIPermissions::as_ref(ctx).permissions_profile_for_id(ctx, &self.profile_id);
+        let team_render_context = UserWorkspaces::as_ref(ctx)
+            .team_render_context_for_view_handle(&self.weak_self, ctx);
+        profile.configurable_context_window_for_render_context(team_render_context.as_ref(), ctx)
+    }
+
+    fn current_context_window_display_value_for_action(
+        &self,
+        ctx: &ViewContext<Self>,
+    ) -> Option<u32> {
+        let profile =
+            BlocklistAIPermissions::as_ref(ctx).permissions_profile_for_id(ctx, &self.profile_id);
+        let team_render_context = UserWorkspaces::as_ref(ctx)
+            .team_render_context_for_view_handle(&self.weak_self, ctx);
+        profile.context_window_display_value_for_render_context(team_render_context.as_ref(), ctx)
     }
 
     fn handle_context_window_editor_event(
@@ -1477,7 +1506,7 @@ impl ExecutionProfileEditorView {
                     self.sync_context_window_editor(ctx, true);
                     return;
                 }
-                let Some(cw) = self.configurable_context_window(ctx) else {
+                let Some(cw) = self.configurable_context_window_for_action(ctx) else {
                     return;
                 };
                 let buffer_text = self.context_window_editor.as_ref(ctx).buffer_text(ctx);
@@ -1487,7 +1516,7 @@ impl ExecutionProfileEditorView {
                     .collect();
                 if let Ok(parsed) = cleaned.parse::<u32>() {
                     let clamped = parsed.clamp(cw.min, cw.max);
-                    if Some(clamped) != self.current_context_window_display_value(ctx) {
+                    if Some(clamped) != self.current_context_window_display_value_for_action(ctx) {
                         AIExecutionProfilesModel::handle(ctx).update(ctx, |profiles_model, ctx| {
                             profiles_model.set_context_window_limit(
                                 &self.profile_id,
@@ -1506,7 +1535,7 @@ impl ExecutionProfileEditorView {
 
     fn sync_context_window_editor(&mut self, ctx: &mut ViewContext<Self>, force: bool) {
         self.dragged_context_window_value = None;
-        let Some(value) = self.current_context_window_display_value(ctx) else {
+        let Some(value) = self.current_context_window_display_value_for_action(ctx) else {
             self.last_synced_context_window_editor_value = None;
             self.context_window_slider_state.reset_offset();
             ctx.notify();
@@ -1642,7 +1671,7 @@ impl TypedActionView for ExecutionProfileEditorView {
                 // Transient drag update: reflect the current slider position
                 // in the input box without persisting to the profile yet.
                 // Persistence happens on SetContextWindowSize (drop / commit).
-                if self.configurable_context_window(ctx).is_some() {
+                if self.configurable_context_window_for_action(ctx).is_some() {
                     self.dragged_context_window_value = Some(*value);
                     let formatted = value.separate_with_commas();
                     self.context_window_editor.update(ctx, |editor, ctx| {
@@ -1657,7 +1686,7 @@ impl TypedActionView for ExecutionProfileEditorView {
                     self.sync_context_window_editor(ctx, true);
                     return;
                 }
-                let Some(cw) = self.configurable_context_window(ctx) else {
+                let Some(cw) = self.configurable_context_window_for_action(ctx) else {
                     return;
                 };
                 let clamped = (*value).clamp(cw.min, cw.max);
