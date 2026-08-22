@@ -144,6 +144,30 @@ fn format_file_size(bytes: u64) -> String {
     }
 }
 
+/// Renders the "file too large to open" toast message for a [`FileLoadError::TooLarge`].
+///
+/// The comparative form (e.g. `8.6 GB > 100.0 MB limit`) is only used when the reported size
+/// is [`ReportedSize::Exact`] *and* still reads as larger than the limit after formatting.
+/// [`ReportedSize::AtLeast`] (a lower bound from a capped read, e.g. for a device, FIFO, or a
+/// file that changed size mid-read) isn't presented as if it were the file's true size, and an
+/// exact size that happens to round to the same displayed value as the limit isn't presented as
+/// a comparison that would otherwise read as false.
+fn format_too_large_message(size: warp_util::file::ReportedSize, limit_bytes: u64) -> String {
+    if let warp_util::file::ReportedSize::Exact(size_bytes) = size {
+        let formatted_size = format_file_size(size_bytes);
+        let formatted_limit = format_file_size(limit_bytes);
+        if formatted_size != formatted_limit {
+            return format!(
+                "File is too large to open ({formatted_size} > {formatted_limit} limit)."
+            );
+        }
+    }
+    format!(
+        "File is larger than the {} limit.",
+        format_file_size(limit_bytes)
+    )
+}
+
 pub use crate::util::openable_file_type::is_binary_file;
 /// Determines the `SavePosition` ID for a draggable tab based on its index.
 pub fn tab_position_id(index: usize) -> String {
@@ -966,14 +990,9 @@ impl CodeView {
         ctx: &mut ViewContext<Self>,
     ) {
         let message = match error {
-            warp_util::file::FileLoadError::TooLarge {
-                size_bytes,
-                limit_bytes,
-            } => format!(
-                "File is too large to open ({} > {} limit).",
-                format_file_size(*size_bytes),
-                format_file_size(*limit_bytes)
-            ),
+            warp_util::file::FileLoadError::TooLarge { size, limit_bytes } => {
+                format_too_large_message(*size, *limit_bytes)
+            }
             warp_util::file::FileLoadError::DoesNotExist
             | warp_util::file::FileLoadError::IOError(_) => "Failed to load file.".to_string(),
         };

@@ -1,7 +1,7 @@
 use tempfile::TempDir;
 use warpui_core::r#async::block_on;
 
-use super::{FileLoadError, read_capped, read_to_string_capped};
+use super::{FileLoadError, ReportedSize, read_capped, read_to_string_capped};
 
 fn write_file(dir: &TempDir, name: &str, contents: &[u8]) -> std::path::PathBuf {
     let path = dir.path().join(name);
@@ -25,9 +25,27 @@ fn read_to_string_capped_rejects_file_over_limit() {
 
     let error = block_on(read_to_string_capped(&path, 1024)).expect_err("should reject");
     assert!(
-        matches!(error, FileLoadError::TooLarge { limit_bytes, .. } if limit_bytes == 1024),
-        "expected TooLarge, got {error:?}"
+        matches!(
+            error,
+            FileLoadError::TooLarge {
+                size: ReportedSize::Exact(2048),
+                limit_bytes: 1024
+            }
+        ),
+        "expected an exact TooLarge(2048) over a 1024 limit, got {error:?}"
     );
+}
+
+#[test]
+fn read_to_string_capped_accepts_a_file_exactly_at_the_limit() {
+    // The cap rejects content *exceeding* `max_bytes`; a file of exactly `max_bytes` is the
+    // boundary and must be accepted, not off-by-one rejected.
+    let dir = TempDir::new().expect("create tempdir");
+    let path = write_file(&dir, "exact.txt", &vec![b'a'; 1024]);
+
+    let contents =
+        block_on(read_to_string_capped(&path, 1024)).expect("exact-limit file should be accepted");
+    assert_eq!(contents.len(), 1024);
 }
 
 #[test]
@@ -56,9 +74,17 @@ fn read_capped_rejects_unbounded_data_from_a_device_reporting_zero_length() {
 
     let error = block_on(read_capped(std::path::Path::new("/dev/zero"), 1024))
         .expect_err("should reject unbounded device data");
+    // The lying `stat` must not be surfaced as the file's exact size -- only the lower bound
+    // actually proven by the capped read is known here.
     assert!(
-        matches!(error, FileLoadError::TooLarge { .. }),
-        "expected TooLarge, got {error:?}"
+        matches!(
+            error,
+            FileLoadError::TooLarge {
+                size: ReportedSize::AtLeast(1025),
+                limit_bytes: 1024
+            }
+        ),
+        "expected an AtLeast(1025) lower bound over a 1024 limit, got {error:?}"
     );
 }
 
@@ -100,9 +126,16 @@ fn read_capped_rejects_content_that_grows_past_the_cap_while_being_read() {
     });
 
     let error = block_on(read_capped(&fifo_path, 1024)).expect_err("should reject");
+    // As above: a FIFO's lying `stat` must not be surfaced as an exact size.
     assert!(
-        matches!(error, FileLoadError::TooLarge { .. }),
-        "expected TooLarge, got {error:?}"
+        matches!(
+            error,
+            FileLoadError::TooLarge {
+                size: ReportedSize::AtLeast(1025),
+                limit_bytes: 1024
+            }
+        ),
+        "expected an AtLeast(1025) lower bound over a 1024 limit, got {error:?}"
     );
 
     writer.join().expect("writer thread should not panic");

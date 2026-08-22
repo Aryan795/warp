@@ -41,14 +41,29 @@ register_error!(FileSaveError);
 /// attempting the read.
 pub const MAX_LOADABLE_FILE_SIZE_BYTES: u64 = 100 * 1024 * 1024;
 
+/// A rejected oversized file's reported size: either the file's exact on-disk size, or (when
+/// that can't be trusted) only a lower bound.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ReportedSize {
+    /// The exact on-disk size, from `stat`-ing a regular file.
+    Exact(u64),
+    /// Not necessarily the file's true size: `stat` either failed or (for a FIFO, character
+    /// device, or other non-regular file) cannot be trusted, so this is only known to be a
+    /// lower bound on the actual size.
+    AtLeast(u64),
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum FileLoadError {
     #[error("File does not exist")]
     DoesNotExist,
     #[error("IO error when loading file.")]
     IOError(#[from] io::Error),
-    #[error("File is too large to open ({size_bytes} bytes, limit is {limit_bytes} bytes)")]
-    TooLarge { size_bytes: u64, limit_bytes: u64 },
+    #[error("File is too large to open (limit is {limit_bytes} bytes, reported size: {size:?})")]
+    TooLarge {
+        size: ReportedSize,
+        limit_bytes: u64,
+    },
 }
 
 /// Reads `path` into a `Vec<u8>`, rejecting content exceeding `max_bytes`.
@@ -60,20 +75,29 @@ pub enum FileLoadError {
 /// much data it actually yields, and a regular file's size can change (or the path can be
 /// atomically replaced) between the `stat` and a later, separate open. `metadata` is still
 /// queried here, but only as a best-effort allocation-size hint, capped so an inflated or
-/// unrelated `stat` length can never itself cause an over-cap reservation.
+/// unrelated `stat` length can never itself cause an over-cap reservation, and to report an
+/// exact size in [`FileLoadError::TooLarge`] when it can be trusted.
 pub async fn read_capped(path: &Path, max_bytes: u64) -> Result<Vec<u8>, FileLoadError> {
     let file = async_fs::File::open(path).await?;
     let read_limit = max_bytes.saturating_add(1);
-    let metadata_len = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+    let metadata = file.metadata().await.ok();
+    let metadata_len = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
     let mut buffer = Vec::with_capacity(metadata_len.min(read_limit) as usize);
     file.take(read_limit).read_to_end(&mut buffer).await?;
     if buffer.len() as u64 > max_bytes {
-        // `stat` isn't trusted for the accept/reject decision above, but when it reports a size
-        // at least as large as what was actually read, it's more informative to surface than the
-        // bare "read past the limit" lower bound.
-        let size_bytes = metadata_len.max(buffer.len() as u64);
+        // `stat` isn't trusted for the accept/reject decision above. It's only trusted to
+        // report the file's *size* when it succeeded, the path is a regular file (a FIFO or
+        // character device commonly reports a misleading length, often 0), and it itself
+        // reports something past the limit; otherwise all that's actually known is the lower
+        // bound proven by the capped read.
+        let size = match &metadata {
+            Some(metadata) if metadata.is_file() && metadata.len() > max_bytes => {
+                ReportedSize::Exact(metadata.len())
+            }
+            _ => ReportedSize::AtLeast(buffer.len() as u64),
+        };
         return Err(FileLoadError::TooLarge {
-            size_bytes,
+            size,
             limit_bytes: max_bytes,
         });
     }

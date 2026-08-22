@@ -16,6 +16,10 @@ enum TestFileModelEvent {
         content: String,
         _version: ContentVersion,
     },
+    FileUpdated {
+        id: FileId,
+        content: String,
+    },
     FileSaved,
     FailedToLoad(String),
     FailedToSave,
@@ -33,21 +37,16 @@ impl From<&FileModelEvent> for TestFileModelEvent {
                 content: content.clone(),
                 _version: *version,
             },
+            FileModelEvent::FileUpdated { id, content, .. } => TestFileModelEvent::FileUpdated {
+                id: *id,
+                content: content.clone(),
+            },
             FileModelEvent::FileSaved { .. } => TestFileModelEvent::FileSaved,
             FileModelEvent::FailedToLoad {
                 id: _id,
                 error: err,
             } => TestFileModelEvent::FailedToLoad(format!("{err:?}")),
             FileModelEvent::FailedToSave { .. } => TestFileModelEvent::FailedToSave,
-            FileModelEvent::FileUpdated { .. } => {
-                // For now, we don't handle file updated events in tests
-                // This could be extended to include a FileUpdated variant in TestFileModelEvent if needed
-                TestFileModelEvent::FileLoaded {
-                    id: event.file_id(),
-                    content: String::new(),
-                    _version: ContentVersion::new(),
-                }
-            }
         }
     }
 }
@@ -475,17 +474,27 @@ fn test_reload_file_paths_skips_oversized_replacement() {
             model.reload_file_paths(HashSet::from([tracked_small_path, tracked_big_path]), ctx);
         });
 
-        // The oversized replacement never reaches `FileUpdated`: the only event delivered for
-        // this reload is the small file's, identified by its FileId.
+        // The reload's spawned callback emits every `FileUpdated` for this call in one
+        // synchronous pass before yielding, and the event channel forwards each emit
+        // synchronously too, so by the time the first event is received here, any second
+        // event this reload produced is already sitting in the channel. Checking for one
+        // immediately after the other -- rather than only checking the first -- is what
+        // actually proves the oversized file's id never got an update, instead of merely
+        // being consistent with it having been emitted second.
         match receiver.recv().await.expect("Could not receive the result") {
-            TestFileModelEvent::FileLoaded { id, .. } => {
+            TestFileModelEvent::FileUpdated { id, content } => {
                 assert_eq!(
                     id, small_id,
                     "expected the small file's update, not the oversized one"
                 );
+                assert_eq!(content, "small, updated");
             }
             event => panic!("Expected an update event for the small file, got {event:?}"),
         }
+        assert!(
+            receiver.try_recv().is_err(),
+            "no update should have been emitted for the oversized file's id ({big_id:?})"
+        );
     });
 }
 
