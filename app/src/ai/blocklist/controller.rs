@@ -435,6 +435,11 @@ impl BlocklistAIController {
     /// conversation started: which credentials a member may use is a property of the team the
     /// user is acting as right now, so an admin's restriction binds on the next request rather
     /// than waiting for a new conversation, and follows a pane dragged to another window.
+    ///
+    /// Only the GUI registers its windows with `UserWorkspaces` (`RootView::new` is the sole
+    /// caller of `register_window`), so in the TUI this resolves to no team and the team
+    /// `team_byo` policy is inert. Registering TUI windows is what fixes that; substituting
+    /// workspace-level settings here would read one arbitrarily-chosen team's.
     fn apply_team_byo_policy(&self, request_params: &mut api::RequestParams, ctx: &AppContext) {
         request_params.apply_team_byo_policy(&self.team_context(ctx), ctx);
     }
