@@ -1530,11 +1530,11 @@ fn should_show_completions_in_ai_input(buffer_text: &str) -> bool {
 /// Always `false` for AI input mode: that's prose, not a shell command line, so there's no command
 /// spec to hand to the shell.
 fn should_use_native_shell_completions(
-    is_feature_enabled_or_forced: bool,
+    native_shell_completions_enabled: bool,
     buffer_text_is_multiline: bool,
     is_ai_input: bool,
 ) -> bool {
-    is_feature_enabled_or_forced
+    native_shell_completions_enabled
         // For now, don't use native shell completions for multi-line commands.
         && !buffer_text_is_multiline
         && !is_ai_input
