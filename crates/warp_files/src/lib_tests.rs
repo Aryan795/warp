@@ -416,4 +416,77 @@ fn test_read_content_for_file_reports_too_large() {
     });
 }
 
+/// [`read_reload_contents`] must skip an oversized file without failing the whole batch,
+/// matching the existing "skip files that fail to read" behavior for other read errors.
+#[test]
+fn test_read_reload_contents_skips_oversized_file() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let oversized_path = directory.path().join("big.txt");
+    let file = std::fs::File::create(&oversized_path).expect("create file");
+    file.set_len(MAX_LOADABLE_FILE_SIZE_BYTES + 1)
+        .expect("set sparse length");
+    drop(file);
+    let ok_path = directory.path().join("small.txt");
+    std::fs::write(&ok_path, "fine").expect("write small file");
+
+    let contents = block_on(read_reload_contents(vec![oversized_path, ok_path.clone()]));
+
+    assert_eq!(contents, vec![(ok_path, "fine".to_string())]);
+}
+
+/// Regression: the file-watcher autoreload path (`reload_file_paths`) must apply the same size
+/// guard as the initial `open`. A file that grows past the cap between opens is skipped instead
+/// of reloaded, rather than reading it unbounded and emitting `FileUpdated` with its content.
+#[test]
+fn test_reload_file_paths_skips_oversized_replacement() {
+    App::test((), |mut app| async move {
+        let app = &mut app;
+        app.add_singleton_model(|_| DetectedRepositories::default());
+        let files = app.add_singleton_model(FileModel::new);
+        let receiver = setup_event_channel(app, &files);
+
+        let directory = tempfile::tempdir().expect("temp dir");
+        let small_path = directory.path().join("small.txt");
+        let big_path = directory.path().join("big.txt");
+        std::fs::write(&small_path, "small").expect("write small file");
+        std::fs::write(&big_path, "placeholder").expect("write big file placeholder");
+
+        let small_id = files.update(app, |model, ctx| model.open(&small_path, true, ctx));
+        await_load(&receiver).await;
+        let big_id = files.update(app, |model, ctx| model.open(&big_path, true, ctx));
+        await_load(&receiver).await;
+
+        let (tracked_small_path, tracked_big_path) = files.read(app, |model, _| {
+            (
+                model.file_path(small_id).expect("small path tracked"),
+                model.file_path(big_id).expect("big path tracked"),
+            )
+        });
+
+        // Grow the big file past the cap, as an external process replacing it with something
+        // huge would, then drive the same reload path the watcher uses for both files at once.
+        std::fs::write(&tracked_small_path, "small, updated").expect("update small file");
+        let file = std::fs::File::create(&tracked_big_path).expect("recreate big file");
+        file.set_len(MAX_LOADABLE_FILE_SIZE_BYTES + 1)
+            .expect("set sparse length");
+        drop(file);
+
+        files.update(app, |model, ctx| {
+            model.reload_file_paths(HashSet::from([tracked_small_path, tracked_big_path]), ctx);
+        });
+
+        // The oversized replacement never reaches `FileUpdated`: the only event delivered for
+        // this reload is the small file's, identified by its FileId.
+        match receiver.recv().await.expect("Could not receive the result") {
+            TestFileModelEvent::FileLoaded { id, .. } => {
+                assert_eq!(
+                    id, small_id,
+                    "expected the small file's update, not the oversized one"
+                );
+            }
+            event => panic!("Expected an update event for the small file, got {event:?}"),
+        }
+    });
+}
+
 static TEST_FILE_CONTENT: &[u8] = include_bytes!("../test_data/test_file.rs");
