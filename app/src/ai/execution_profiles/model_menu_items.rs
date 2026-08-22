@@ -12,11 +12,13 @@ use warpui::{Action, AppContext, Element};
 use crate::ai::custom_model_routers::is_custom_router_id;
 use crate::ai::llms::{
     DisableReason, LLMId, LLMInfo, ModelIconFlags, model_leading_icon,
-    should_show_bedrock_icon_for_model,
-    should_show_gemini_enterprise_agent_platform_icon_for_model, should_show_key_icon_for_model,
+    effective_model_disable_reason_for_render_context,
+    should_show_bedrock_icon_for_model_for_render_context,
+    should_show_gemini_enterprise_agent_platform_icon_for_model_for_render_context,
+    should_show_key_icon_for_model_for_render_context,
 };
 use crate::menu::{MenuItem, MenuItemFields, MenuTooltipPosition};
-use crate::workspaces::user_workspaces::TeamContext;
+use crate::workspaces::user_workspaces::TeamRenderContext;
 
 pub fn is_auto(llm: &LLMInfo) -> bool {
     llm.display_name.to_lowercase().contains("auto")
@@ -77,7 +79,7 @@ fn make_item_fields<A: Action + Clone>(
     model_id_to_add_profile_default_label_to: Option<&LLMId>,
     collapse_auto: bool,
     collapse_reasoning_variants: bool,
-    team_context: Option<&TeamContext>,
+    team_context: Option<&TeamRenderContext<'_>>,
     app: &AppContext,
 ) -> MenuItem<A> {
     let is_auto_model = is_auto(llm);
@@ -88,10 +90,17 @@ fn make_item_fields<A: Action + Clone>(
     } else {
         llm.menu_display_name()
     };
-    let is_using_bedrock = should_show_bedrock_icon_for_model(llm, team_context, app);
+    let is_using_bedrock =
+        should_show_bedrock_icon_for_model_for_render_context(llm, team_context, app);
     let is_using_gemini_enterprise_agent_platform =
-        should_show_gemini_enterprise_agent_platform_icon_for_model(llm, team_context, app);
-    let is_using_api_key = should_show_key_icon_for_model(llm, team_context, app);
+        should_show_gemini_enterprise_agent_platform_icon_for_model_for_render_context(
+            llm,
+            team_context,
+            app,
+        );
+    let is_using_api_key =
+        should_show_key_icon_for_model_for_render_context(llm, team_context, app);
+    let disable_reason = effective_model_disable_reason_for_render_context(llm, team_context, app);
     let is_custom_router = is_custom_router_id(llm.id.as_str());
     let leading_icon = model_leading_icon(
         llm,
@@ -163,9 +172,9 @@ fn make_item_fields<A: Action + Clone>(
 
     item = item
         .with_on_select_action(action(llm))
-        .with_disabled(llm.disable_reason.is_some());
+        .with_disabled(disable_reason.is_some());
 
-    if let Some(reason) = &llm.disable_reason {
+    if let Some(reason) = &disable_reason {
         item = item
             .with_tooltip(reason.tooltip_text())
             .with_tooltip_position(MenuTooltipPosition::Above);
@@ -187,7 +196,7 @@ pub fn available_model_menu_items<A: Action + Clone>(
     position_id_fn: Option<&dyn Fn(&LLMId) -> String>,
     collapse_auto: bool,
     collapse_reasoning_variants: bool,
-    team_context: Option<&TeamContext>,
+    team_context: Option<&TeamRenderContext<'_>>,
     app: &AppContext,
 ) -> Vec<MenuItem<A>> {
     choices

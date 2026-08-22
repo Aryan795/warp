@@ -97,7 +97,10 @@ fn assert_context_window_limit_for_request(
             ..Default::default()
         };
         app.read(|ctx| {
-            assert_eq!(profile.context_window_limit_for_request(ctx), expected);
+            assert_eq!(
+                profile.context_window_limit_for_request(None, ctx),
+                expected
+            );
         });
     });
 }

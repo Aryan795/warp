@@ -138,7 +138,7 @@ fn spawn_config_honors_pane_model_override() {
 
         model.read(&app, |model, app| {
             assert_eq!(
-                model.build_default_spawn_config(app).model_id.as_deref(),
+                model.build_default_spawn_config(None, app).model_id.as_deref(),
                 Some("auto-genius")
             );
         });
@@ -466,6 +466,7 @@ fn viewed_task_config_preserves_environment_before_cloud_model_load() {
                     environment_id: Some(environment_id.to_string()),
                     ..Default::default()
                 }),
+                None,
                 ctx,
             );
             model.validate_environment_after_initial_load(ctx);
@@ -493,6 +494,7 @@ fn viewed_task_config_applies_oz_model_override() {
                     model_id: Some("model-from-run".to_string()),
                     ..Default::default()
                 }),
+                None,
                 ctx,
             );
         });

@@ -1046,7 +1046,7 @@ fn test_cloud_cloud_handoff_session_join_keeps_closed_details_panel_hidden() {
                 .expect("cloud mode terminal should have ambient model")
                 .clone();
             ambient_agent_view_model.update(ctx, |model, ctx| {
-                model.enter_viewing_existing_session(task_id, ctx);
+                model.enter_viewing_existing_session(task_id, None, ctx);
             });
 
             assert!(!view.is_conversation_details_panel_open);
@@ -1105,7 +1105,7 @@ fn test_cloud_cloud_handoff_session_join_respects_details_panel_closed_after_fol
                 .expect("cloud mode terminal should have ambient model")
                 .clone();
             ambient_agent_view_model.update(ctx, |model, ctx| {
-                model.enter_viewing_existing_session(task_id, ctx);
+                model.enter_viewing_existing_session(task_id, None, ctx);
             });
 
             view.is_conversation_details_panel_open = true;
@@ -1170,7 +1170,7 @@ fn test_restored_ambient_view_resolves_cta_from_view_model_task_id() {
                 .expect("cloud mode terminal should have ambient model")
                 .clone();
             ambient_agent_view_model.update(ctx, |model, ctx| {
-                model.enter_viewing_existing_session(task_id, ctx);
+                model.enter_viewing_existing_session(task_id, None, ctx);
             });
 
             {
@@ -1229,7 +1229,7 @@ fn test_continue_in_cloud_tombstone_routes_third_party_followup_to_new_cloud_vm(
                 .expect("cloud mode terminal should have ambient model")
                 .clone();
             ambient_agent_view_model.update(ctx, |model, ctx| {
-                model.enter_viewing_existing_session(task_id, ctx);
+                model.enter_viewing_existing_session(task_id, None, ctx);
             });
             // Simulate the live shared session ending: the pane is now a finished (read-only)
             // viewer of the ended ambient run.
@@ -1301,7 +1301,7 @@ fn test_restored_oz_edit_access_non_owner_finished_view_uses_followup_input_with
                 .expect("cloud mode terminal should have ambient model")
                 .clone();
             ambient_agent_view_model.update(ctx, |model, ctx| {
-                model.enter_viewing_existing_session(task_id, ctx);
+                model.enter_viewing_existing_session(task_id, None, ctx);
             });
             let initial_block_height_items = {
                 let mut model = view.model.lock();
@@ -1830,7 +1830,7 @@ fn test_restored_owned_tombstone_hides_input_until_continue() {
                 .expect("cloud mode terminal should have ambient model")
                 .clone();
             ambient_agent_view_model.update(ctx, |model, ctx| {
-                model.enter_viewing_existing_session(task_id, ctx);
+                model.enter_viewing_existing_session(task_id, None, ctx);
             });
             view.input().update(ctx, |input, ctx| {
                 input.editor().update(ctx, |editor, ctx| {
@@ -2010,7 +2010,7 @@ fn test_deep_linked_ambient_continuation_refreshes_when_task_data_arrives() {
                 .expect("cloud mode terminal should have ambient model")
                 .clone();
             ambient_agent_view_model.update(ctx, |model, ctx| {
-                model.enter_viewing_existing_session(task_id, ctx);
+                model.enter_viewing_existing_session(task_id, None, ctx);
             });
 
             view.insert_conversation_ended_tombstone_with_resolved_cta(ctx);
@@ -2121,7 +2121,7 @@ fn test_try_submit_pending_cloud_followup_allows_repeat_submission_for_owned_tas
                 .expect("cloud mode terminal should have ambient model")
                 .clone();
             ambient_agent_view_model.update(ctx, |model, ctx| {
-                model.enter_viewing_existing_session(task_id, ctx);
+                model.enter_viewing_existing_session(task_id, None, ctx);
             });
 
             view.enable_cloud_followup_input(task_id, ctx);
@@ -2166,7 +2166,7 @@ fn test_try_submit_pending_cloud_followup_rejects_task_source_that_blocks_follow
                 .expect("cloud mode terminal should have ambient model")
                 .clone();
             ambient_agent_view_model.update(ctx, |model, ctx| {
-                model.enter_viewing_existing_session(task_id, ctx);
+                model.enter_viewing_existing_session(task_id, None, ctx);
             });
 
             view.enable_cloud_followup_input(task_id, ctx);
@@ -2322,7 +2322,7 @@ fn test_non_owned_tombstone_is_removed_for_followup_and_reinserted_after_complet
                 .expect("cloud mode terminal should have ambient model")
                 .clone();
             ambient_agent_view_model.update(ctx, |model, ctx| {
-                model.enter_viewing_existing_session(task_id, ctx);
+                model.enter_viewing_existing_session(task_id, None, ctx);
             });
 
             let initial_block_height_items =
@@ -2424,7 +2424,7 @@ fn test_on_ambient_agent_execution_ended_refreshes_open_details_panel_to_termina
                 .expect("cloud mode terminal should have ambient model")
                 .clone();
             ambient_agent_view_model.update(ctx, |model, ctx| {
-                model.enter_viewing_existing_session(task_id, ctx);
+                model.enter_viewing_existing_session(task_id, None, ctx);
             });
 
             view.is_conversation_details_panel_open = true;

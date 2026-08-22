@@ -723,7 +723,7 @@ fn copy_model_and_profile_preserves_explicit_model_over_source_profile_default()
 
             // Source's explicit selection = M (differs from its profile default D).
             LLMPreferences::handle(ctx).update(ctx, |prefs, ctx| {
-                prefs.update_preferred_agent_mode_llm(&m, source_id, ctx);
+                prefs.update_preferred_agent_mode_llm(&m, source_id, None, ctx);
             });
         });
 
@@ -731,12 +731,12 @@ fn copy_model_and_profile_preserves_explicit_model_over_source_profile_default()
         app.update(|ctx| {
             let prefs = LLMPreferences::as_ref(ctx);
             assert_eq!(
-                prefs.get_active_base_model(ctx, Some(source_id)).id,
+                prefs.get_active_base_model(Some(source_id), None, ctx).id,
                 m,
                 "source pane should resolve to its explicit selection"
             );
             assert_eq!(
-                prefs.get_active_base_model(ctx, Some(new_id)).id,
+                prefs.get_active_base_model(Some(new_id), None, ctx).id,
                 m,
                 "destination pane's current profile default should be M"
             );
@@ -750,7 +750,7 @@ fn copy_model_and_profile_preserves_explicit_model_over_source_profile_default()
         app.update(|ctx| {
             assert_eq!(
                 LLMPreferences::as_ref(ctx)
-                    .get_active_base_model(ctx, Some(new_id))
+                    .get_active_base_model(Some(new_id), None, ctx)
                     .id,
                 m,
                 "destination pane must retain the source's explicit selection, not the source profile default"

@@ -843,9 +843,15 @@ fn test_llm_policy_uses_team_context_with_teamless_fallback_and_no_stale_fallbac
                 !user_workspaces
                     .is_gemini_enterprise_credentials_enabled_for_context(Some(&context_b), ctx)
             );
-            assert!(user_workspaces.is_aws_bedrock_credentials_enabled_for_context(None, ctx));
+            assert!(user_workspaces.is_aws_bedrock_credentials_enabled_for_context(
+                None::<&TeamContext>,
+                ctx
+            ));
             assert!(
-                user_workspaces.is_gemini_enterprise_credentials_enabled_for_context(None, ctx)
+                user_workspaces.is_gemini_enterprise_credentials_enabled_for_context(
+                    None::<&TeamContext>,
+                    ctx
+                )
             );
         });
 

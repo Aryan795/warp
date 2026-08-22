@@ -3366,7 +3366,7 @@ fn cloud_mode_followup_input_uses_explicit_submit_event_even_when_view_pending()
                 .expect("cloud mode terminal should have ambient model")
                 .clone();
             ambient_agent_view_model.update(ctx, |model, ctx| {
-                model.enter_viewing_existing_session(task_id, ctx);
+                model.enter_viewing_existing_session(task_id, None, ctx);
             });
 
             view.input().update(ctx, |input, ctx| {
@@ -3446,6 +3446,7 @@ fn cloud_mode_dispatched_agent_inserts_queued_user_query() {
                             snapshot_disabled: None,
                             orchestration_handoff: None,
                         },
+                        None,
                         ctx,
                     );
                 });
@@ -3796,7 +3797,7 @@ fn cloud_mode_followup_dispatched_inserts_queued_user_query() {
             view.ambient_agent_view_model()
                 .expect("cloud mode terminal should have ambient model")
                 .update(ctx, |model, ctx| {
-                    model.enter_viewing_existing_session(task_id, ctx);
+                    model.enter_viewing_existing_session(task_id, None, ctx);
                     model.submit_cloud_followup("follow up".to_string(), ctx);
                 });
             view.handle_ambient_agent_event(&AmbientAgentViewModelEvent::FollowupDispatched, ctx);
@@ -3827,7 +3828,7 @@ fn cloud_mode_setup_v2_suppresses_sharer_input_updates_while_followup_setup_comm
                 .expect("cloud mode terminal should have ambient model")
                 .clone();
             ambient_agent_view_model.update(ctx, |model, ctx| {
-                model.enter_viewing_existing_session(task_id, ctx);
+                model.enter_viewing_existing_session(task_id, None, ctx);
             });
             view.handle_ambient_agent_event(&AmbientAgentViewModelEvent::FollowupDispatched, ctx);
 

@@ -269,8 +269,13 @@ fn oz_model_menu_items<A: OrchestrationControlAction, V: View>(
     rows: &[OptionRow],
     ctx: &mut ViewContext<V>,
 ) -> Vec<MenuItem<DropdownAction>> {
+    let handle = ctx.handle();
+    let team_context =
+        UserWorkspaces::as_ref(ctx).team_render_context_for_view_handle(&handle, ctx);
     let llm_prefs = LLMPreferences::as_ref(ctx);
-    let all_choices: Vec<_> = llm_prefs.get_base_llm_choices_for_agent_mode(ctx).collect();
+    let all_choices: Vec<_> = llm_prefs
+        .get_base_llm_choices_for_agent_mode_for_render_context(team_context.as_ref(), ctx)
+        .collect();
     let ordered_choices: Vec<_> = rows
         .iter()
         .filter_map(|row| {
@@ -280,7 +285,6 @@ fn oz_model_menu_items<A: OrchestrationControlAction, V: View>(
                 .find(|llm| llm.id.to_string() == row.id)
         })
         .collect();
-    let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
     available_model_menu_items(
         ordered_choices,
         move |llm| DropdownAction::select_action_and_close(A::model_changed(llm.id.to_string())),

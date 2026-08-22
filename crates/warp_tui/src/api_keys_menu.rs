@@ -88,12 +88,14 @@ pub(crate) enum TuiApiKeysFooter {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct TuiApiKeysMenuEvent;
+pub(crate) enum TuiApiKeysMenuEvent {
+    Updated,
+    RequestGrokOAuth,
+}
 
 pub(crate) struct TuiApiKeysMenuModel {
     input_editor: ModelHandle<CodeEditorModel>,
     suggestions_mode: ModelHandle<TuiInputSuggestionsModeModel>,
-    team_context: Option<TeamContext>,
     state: TuiApiKeysMenuState,
 }
 
@@ -114,7 +116,7 @@ impl TuiApiKeysMenuModel {
                 }
                 TuiApiKeysMenuState::EditingProvider { error, .. } => {
                     if error.take().is_some() {
-                        ctx.emit(TuiApiKeysMenuEvent);
+                        ctx.emit(TuiApiKeysMenuEvent::Updated);
                     }
                 }
                 TuiApiKeysMenuState::ConnectingGrok { controller } => {
@@ -154,18 +156,21 @@ impl TuiApiKeysMenuModel {
         Self {
             input_editor,
             suggestions_mode,
-            team_context: None,
             state: TuiApiKeysMenuState::Closed,
         }
     }
 
-    fn start_grok_oauth(&mut self, ctx: &mut ModelContext<Self>) {
+    pub(crate) fn start_grok_oauth(
+        &mut self,
+        team_context: Option<TeamContext>,
+        ctx: &mut ModelContext<Self>,
+    ) {
         let workspaces = UserWorkspaces::as_ref(ctx);
         let policy_error = if !FeatureFlag::SuperGrok.is_enabled() {
             Some("Grok subscriptions aren't available in this build.")
         } else if !workspaces.is_byo_api_key_enabled(ctx) {
             Some("Grok subscriptions require BYOK access for this workspace.")
-        } else if !workspaces.are_member_byo_keys_allowed_for_context(self.team_context.as_ref()) {
+        } else if !workspaces.are_member_byo_keys_allowed_for_context(team_context.as_ref()) {
             Some("Your organization doesn't allow member-provided credentials.")
         } else {
             None
@@ -185,10 +190,10 @@ impl TuiApiKeysMenuModel {
         let controller = ctx.add_model(move |ctx| TuiGrokOAuthController::new(attempt, ctx));
         ctx.subscribe_to_model(&controller, |menu, _, event, ctx| match event {
             TuiGrokOAuthControllerEvent::Connected => menu.transition_to_browsing(ctx),
-            TuiGrokOAuthControllerEvent::Updated => ctx.emit(TuiApiKeysMenuEvent),
+            TuiGrokOAuthControllerEvent::Updated => ctx.emit(TuiApiKeysMenuEvent::Updated),
         });
         self.state = TuiApiKeysMenuState::ConnectingGrok { controller };
-        ctx.emit(TuiApiKeysMenuEvent);
+        ctx.emit(TuiApiKeysMenuEvent::Updated);
     }
 
     pub(crate) fn is_open(&self, ctx: &AppContext) -> bool {
@@ -196,7 +201,7 @@ impl TuiApiKeysMenuModel {
             && self.suggestions_mode.as_ref(ctx).mode() == TuiInputSuggestionsMode::ApiKeys
     }
 
-    pub(crate) fn open(&mut self, team_context: Option<TeamContext>, ctx: &mut ModelContext<Self>) {
+    pub(crate) fn open(&mut self, ctx: &mut ModelContext<Self>) {
         if self.is_open(ctx) {
             return;
         }
@@ -206,19 +211,14 @@ impl TuiApiKeysMenuModel {
         if !did_open {
             return;
         }
-        self.team_context = team_context;
         self.transition_to_browsing(ctx);
     }
 
     /// Opens the menu and jumps straight into the Grok connect path, equivalent to selecting the
     /// "X premium or SuperGrok subscription" row. Reuses `edit_provider` so the already-connected
     /// and policy-gated cases surface the same messaging as the provider list.
-    pub(crate) fn open_and_connect_grok(
-        &mut self,
-        team_context: Option<TeamContext>,
-        ctx: &mut ModelContext<Self>,
-    ) {
-        self.open(team_context, ctx);
+    pub(crate) fn open_and_connect_grok(&mut self, ctx: &mut ModelContext<Self>) {
+        self.open(ctx);
         if self.is_open(ctx) {
             self.edit_provider(LLMProvider::Xai, ctx);
         }
@@ -334,7 +334,7 @@ impl TuiApiKeysMenuModel {
             return;
         };
         list.select_previous(MAX_VISIBLE_ROWS, |_| true);
-        ctx.emit(TuiApiKeysMenuEvent);
+        ctx.emit(TuiApiKeysMenuEvent::Updated);
     }
 
     pub(crate) fn select_next(&mut self, ctx: &mut ModelContext<Self>) {
@@ -342,7 +342,7 @@ impl TuiApiKeysMenuModel {
             return;
         };
         list.select_next(MAX_VISIBLE_ROWS, |_| true);
-        ctx.emit(TuiApiKeysMenuEvent);
+        ctx.emit(TuiApiKeysMenuEvent::Updated);
     }
 
     pub(crate) fn select_at_snapshot_index(
@@ -354,7 +354,7 @@ impl TuiApiKeysMenuModel {
             return false;
         };
         let selected = list.select_absolute(index, MAX_VISIBLE_ROWS, |_| true);
-        ctx.emit(TuiApiKeysMenuEvent);
+        ctx.emit(TuiApiKeysMenuEvent::Updated);
         selected
     }
 
@@ -363,7 +363,7 @@ impl TuiApiKeysMenuModel {
             return;
         };
         list.scroll_by(delta, MAX_VISIBLE_ROWS);
-        ctx.emit(TuiApiKeysMenuEvent);
+        ctx.emit(TuiApiKeysMenuEvent::Updated);
     }
 
     pub(crate) fn accept_selected(&mut self, ctx: &mut ModelContext<Self>) {
@@ -513,7 +513,7 @@ impl TuiApiKeysMenuModel {
                     ctx,
                 );
             } else {
-                self.start_grok_oauth(ctx);
+                ctx.emit(TuiApiKeysMenuEvent::RequestGrokOAuth);
             }
             return;
         }
@@ -526,7 +526,7 @@ impl TuiApiKeysMenuModel {
             provider,
             error: None,
         };
-        ctx.emit(TuiApiKeysMenuEvent);
+        ctx.emit(TuiApiKeysMenuEvent::Updated);
     }
 
     fn save_provider(&mut self, provider: LLMProvider, ctx: &mut ModelContext<Self>) {
@@ -540,7 +540,7 @@ impl TuiApiKeysMenuModel {
                 if let TuiApiKeysMenuState::EditingProvider { error, .. } = &mut self.state {
                     *error = Some("Could not save this API key. Try again.".to_owned());
                 }
-                ctx.emit(TuiApiKeysMenuEvent);
+                ctx.emit(TuiApiKeysMenuEvent::Updated);
             }
         }
     }
@@ -593,19 +593,18 @@ impl TuiApiKeysMenuModel {
             | TuiApiKeysMenuState::EditingProvider { .. } => None,
         };
         self.state = TuiApiKeysMenuState::Closed;
-        self.team_context = None;
         if let Some(controller) = grok_controller
             && controller.as_ref(ctx).is_active()
         {
             controller.update(ctx, |controller, ctx| controller.cancel(ctx));
         }
         self.clear_input(ctx);
-        ctx.emit(TuiApiKeysMenuEvent);
+        ctx.emit(TuiApiKeysMenuEvent::Updated);
     }
 
     fn refresh_rows(&mut self, ctx: &mut ModelContext<Self>) {
         let TuiApiKeysMenuState::Browsing { list, .. } = &mut self.state else {
-            ctx.emit(TuiApiKeysMenuEvent);
+            ctx.emit(TuiApiKeysMenuEvent::Updated);
             return;
         };
         let query = input_text(&self.input_editor, ctx).to_ascii_lowercase();
@@ -622,13 +621,13 @@ impl TuiApiKeysMenuModel {
             })
             .or(Some(0));
         list.replace_rows(rows, false, preferred_index, MAX_VISIBLE_ROWS, |_| true);
-        ctx.emit(TuiApiKeysMenuEvent);
+        ctx.emit(TuiApiKeysMenuEvent::Updated);
     }
 
     fn set_browsing_error(&mut self, message: String, ctx: &mut ModelContext<Self>) {
         if let TuiApiKeysMenuState::Browsing { error, .. } = &mut self.state {
             *error = Some(message);
-            ctx.emit(TuiApiKeysMenuEvent);
+            ctx.emit(TuiApiKeysMenuEvent::Updated);
         }
     }
 

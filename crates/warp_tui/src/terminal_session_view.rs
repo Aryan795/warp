@@ -1673,8 +1673,9 @@ impl TuiTerminalSessionView {
         let api_keys_menu = ctx.add_model(|ctx| {
             TuiApiKeysMenuModel::new(input_editor_model.clone(), suggestions_mode.clone(), ctx)
         });
-        ctx.subscribe_to_model(&api_keys_menu, |_, _, _: &TuiApiKeysMenuEvent, ctx| {
-            ctx.notify();
+        ctx.subscribe_to_model(&api_keys_menu, |view, _, event, ctx| match event {
+            TuiApiKeysMenuEvent::Updated => ctx.notify(),
+            TuiApiKeysMenuEvent::RequestGrokOAuth => view.start_grok_oauth(ctx),
         });
         let conversation_menu = ctx.add_model(|ctx| {
             TuiConversationMenuModel::new(
@@ -3455,9 +3456,12 @@ impl TuiTerminalSessionView {
     }
 
     fn handle_pasted(&mut self, text: String, ctx: &mut ViewContext<Self>) {
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         let disposition = self
             .attachment_bar
-            .update(ctx, |bar, ctx| bar.try_attach_paste(text.clone(), ctx));
+            .update(ctx, |bar, ctx| {
+                bar.try_attach_paste(text.clone(), team_context, ctx)
+            });
         if disposition == TuiAttachmentPasteDisposition::NotHandled {
             self.input_view
                 .update(ctx, |input, ctx| input.insert_pasted_text(&text, ctx));
@@ -3862,6 +3866,13 @@ impl TuiTerminalSessionView {
             } else {
                 menu.open(ctx);
             }
+        });
+    }
+
+    fn start_grok_oauth(&mut self, ctx: &mut ViewContext<Self>) {
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        self.api_keys_menu.update(ctx, |menu, ctx| {
+            menu.start_grok_oauth(team_context, ctx)
         });
     }
 
@@ -4321,8 +4332,14 @@ impl TuiTerminalSessionView {
     }
 
     fn handle_accepted_model(&mut self, id: &LLMId, ctx: &mut ViewContext<Self>) {
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         LLMPreferences::handle(ctx).update(ctx, |preferences, ctx| {
-            preferences.update_preferred_agent_mode_llm(id, self.terminal_surface_id, ctx);
+            preferences.update_preferred_agent_mode_llm(
+                id,
+                self.terminal_surface_id,
+                team_context.as_ref(),
+                ctx,
+            );
         });
         self.model_menu.update(ctx, |menu, ctx| menu.dismiss(ctx));
     }
@@ -4601,15 +4618,12 @@ impl TuiTerminalSessionView {
                 self.reset_statusline(command.name, ctx);
             }
             SlashCommandKind::ApiKeys => {
-                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
-                self.api_keys_menu
-                    .update(ctx, |menu, ctx| menu.open(team_context, ctx));
+                self.api_keys_menu.update(ctx, |menu, ctx| menu.open(ctx));
                 record_static_slash_command_accepted(command.name, true, ctx);
             }
             SlashCommandKind::ConnectGrok => {
-                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
                 self.api_keys_menu.update(ctx, |menu, ctx| {
-                    menu.open_and_connect_grok(team_context, ctx)
+                    menu.open_and_connect_grok(ctx)
                 });
                 record_static_slash_command_accepted(command.name, true, ctx);
             }
@@ -5671,8 +5685,10 @@ impl TypedActionView for TuiTerminalSessionView {
                 }
             }
             TuiTerminalSessionAction::PasteFromClipboard => {
-                self.attachment_bar
-                    .update(ctx, |bar, ctx| bar.paste_from_clipboard(ctx));
+                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                self.attachment_bar.update(ctx, |bar, ctx| {
+                    bar.paste_from_clipboard(team_context, ctx)
+                });
             }
             #[cfg(feature = "voice_input")]
             TuiTerminalSessionAction::StartVoiceInput => {

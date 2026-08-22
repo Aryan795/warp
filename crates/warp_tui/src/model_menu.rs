@@ -100,7 +100,7 @@ impl TuiModelMenuModel {
         selected_index: usize,
     ) -> Self {
         let mut list = TuiInlineMenuListState::default();
-        let test_presentations = rows
+        let test_presentations: HashMap<LLMId, TuiModelPickerPresentation> = rows
             .iter()
             .map(|(id, is_selectable)| {
                 (
@@ -362,7 +362,18 @@ impl TuiModelMenuModel {
         });
         ctx.emit(TuiModelMenuEvent);
     }
-    .map(|presentation| presentation.id.clone())
+
+    pub(crate) fn active_model_title(&self, ctx: &AppContext) -> Option<String> {
+        let owner_view = self.owner_view.as_ref()?;
+        let id = tui_active_model_id_for_view(owner_view, self.terminal_view_id, ctx);
+        tui_model_picker_presentation_for_view(
+            owner_view,
+            self.terminal_view_id,
+            &id,
+            ctx,
+        )
+        .map(|presentation| presentation.title)
+    }
 }
 
 fn snapshot_row(presentation: &TuiModelPickerPresentation) -> TuiInlineMenuRow {
@@ -415,6 +426,7 @@ fn preferred_selection_id(
             .rev()
             .find(|presentation| presentation.is_selectable)
     }
+    .map(|presentation| presentation.id.clone())
 }
 
 fn input_text(editor: &ModelHandle<CodeEditorModel>, app: &AppContext) -> String {

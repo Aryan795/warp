@@ -6,6 +6,7 @@
 //! completed card into the transcript.
 
 use warp::tui_export::{HandoffRestoration, UserWorkspaces, record_static_slash_command_accepted};
+use warpui::SingletonEntity as _;
 use warpui_core::{AppContext, ViewContext, ViewHandle};
 
 use super::TuiTerminalSessionView;

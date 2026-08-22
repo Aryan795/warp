@@ -1071,31 +1071,43 @@ impl AgentProfilesPageView {
                 menu.set_enabled(ctx);
             }
 
-            let choices = LLMPreferences::as_ref(ctx)
-                .get_base_llm_choices_for_agent_mode(ctx)
-                .collect_vec();
-
-            let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
-            let items = available_model_menu_items(
-                choices,
-                |llm| {
-                    DropdownAction::select_action_and_close(AgentProfilesPageAction::SetBaseModel(
-                        llm.id.clone(),
-                    ))
-                },
-                None,
-                None,
-                false,
-                false,
-                team_context.as_ref(),
-                ctx,
-            );
+            let (items, active_id) = {
+                let handle = ctx.handle();
+                let team_context =
+                    UserWorkspaces::as_ref(ctx).team_render_context_for_view_handle(&handle, ctx);
+                let choices = LLMPreferences::as_ref(ctx)
+                    .get_base_llm_choices_for_agent_mode_for_render_context(
+                        team_context.as_ref(),
+                        ctx,
+                    )
+                    .collect_vec();
+                let items = available_model_menu_items(
+                    choices,
+                    |llm| {
+                        DropdownAction::select_action_and_close(
+                            AgentProfilesPageAction::SetBaseModel(llm.id.clone()),
+                        )
+                    },
+                    None,
+                    None,
+                    false,
+                    false,
+                    team_context.as_ref(),
+                    ctx,
+                );
+                let active_id = LLMPreferences::as_ref(ctx)
+                    .get_active_base_model_for_render_context(
+                        None,
+                        team_context.as_ref(),
+                        ctx,
+                    )
+                    .id
+                    .clone();
+                (items, active_id)
+            };
             menu.set_rich_items(items, ctx);
-
-            let active =
-                LLMPreferences::as_ref(ctx).get_active_base_model(None, team_context.as_ref(), ctx);
             menu.set_selected_by_action(
-                AgentProfilesPageAction::SetBaseModel(active.id.clone()),
+                AgentProfilesPageAction::SetBaseModel(active_id),
                 ctx,
             );
             ctx.notify();
@@ -1116,34 +1128,41 @@ impl AgentProfilesPageView {
                 menu.set_enabled(ctx);
             }
 
-            let choices = LLMPreferences::as_ref(ctx)
-                .get_coding_llm_choices(ctx)
-                .collect_vec();
-
-            let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
-            let items = available_model_menu_items(
-                choices,
-                |llm| {
-                    DropdownAction::select_action_and_close(
-                        AgentProfilesPageAction::SetCodingModel(llm.id.clone()),
+            let (items, active_id) = {
+                let handle = ctx.handle();
+                let team_context =
+                    UserWorkspaces::as_ref(ctx).team_render_context_for_view_handle(&handle, ctx);
+                let choices = LLMPreferences::as_ref(ctx)
+                    .get_coding_llm_choices_for_render_context(team_context.as_ref(), ctx)
+                    .collect_vec();
+                let items = available_model_menu_items(
+                    choices,
+                    |llm| {
+                        DropdownAction::select_action_and_close(
+                            AgentProfilesPageAction::SetCodingModel(llm.id.clone()),
+                        )
+                    },
+                    None,
+                    None,
+                    false,
+                    false,
+                    team_context.as_ref(),
+                    ctx,
+                );
+                let active_id = LLMPreferences::as_ref(ctx)
+                    .get_active_coding_model_for_render_context(
+                        None,
+                        team_context.as_ref(),
+                        ctx,
                     )
-                },
-                None,
-                None,
-                false,
-                false,
-                team_context.as_ref(),
-                ctx,
-            );
+                    .id
+                    .clone();
+                (items, active_id)
+            };
             menu.set_rich_items(items, ctx);
-            let active = LLMPreferences::as_ref(ctx).get_active_coding_model(
-                None,
-                team_context.as_ref(),
-                ctx,
-            );
 
             menu.set_selected_by_action(
-                AgentProfilesPageAction::SetCodingModel(active.id.clone()),
+                AgentProfilesPageAction::SetCodingModel(active_id),
                 ctx,
             );
             ctx.notify();

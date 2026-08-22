@@ -23,7 +23,7 @@ fn add_menu(
         let input = ctx.add_model(|ctx| CodeEditorModel::new_tui(80, ctx));
         let mode = ctx.add_model(|_| TuiInputSuggestionsModeModel::new());
         let menu = ctx.add_model(|ctx| TuiApiKeysMenuModel::new(input.clone(), mode.clone(), ctx));
-        menu.update(ctx, |menu, ctx| menu.open(None, ctx));
+        menu.update(ctx, |menu, ctx| menu.open(ctx));
         (input, mode, menu)
     })
 }
@@ -164,7 +164,7 @@ fn open_and_connect_grok_matches_selecting_the_grok_row() {
             let mode = ctx.add_model(|_| TuiInputSuggestionsModeModel::new());
             let menu = ctx.add_model(|ctx| TuiApiKeysMenuModel::new(input, mode, ctx));
             menu.update(ctx, |menu, ctx| {
-                menu.open(None, ctx);
+                menu.open(ctx);
                 assert!(menu.select_at_snapshot_index(3, ctx));
                 menu.accept_selected(ctx);
             });
@@ -176,7 +176,7 @@ fn open_and_connect_grok_matches_selecting_the_grok_row() {
             let input = ctx.add_model(|ctx| CodeEditorModel::new_tui(80, ctx));
             let mode = ctx.add_model(|_| TuiInputSuggestionsModeModel::new());
             let menu = ctx.add_model(|ctx| TuiApiKeysMenuModel::new(input, mode, ctx));
-            menu.update(ctx, |menu, ctx| menu.open_and_connect_grok(None, ctx));
+            menu.update(ctx, |menu, ctx| menu.open_and_connect_grok(ctx));
             menu
         });
 
