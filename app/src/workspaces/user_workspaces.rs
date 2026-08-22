@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -36,13 +37,15 @@ use crate::server::server_api::workspace::{PurchaseAddonCreditsOutcome, Workspac
 #[cfg(test)]
 use crate::server::server_api::{team::MockTeamClient, workspace::MockWorkspaceClient};
 use crate::settings::{
-    AISettings, AISettingsChangedEvent, CodeSettings, CodeSettingsChangedEvent, PrivacySettings,
+    AISettings, AISettingsChangedEvent, AgentModeCommandExecutionPredicate, CodeSettings,
+    CodeSettingsChangedEvent, PrivacySettings,
 };
 #[cfg(test)]
-use crate::workspaces::workspace::{AIAutonomyPolicy, WorkspaceMember, WorkspaceSettings};
 use crate::workspaces::workspace::{
-    AiAutonomySettings, AiOverages, PurchaseAddOnCreditsPolicy, SandboxedAgentSettings,
-    UsageBasedPricingSettings,
+    AIAutonomyPolicy, SplitListSetting, WorkspaceMember, WorkspaceSettings,
+};
+use crate::workspaces::workspace::{
+    AiAutonomySettings, AiOverages, PurchaseAddOnCreditsPolicy, UsageBasedPricingSettings,
 };
 
 const STRIPE_SUBSCRIPTION_INTERVAL_PAGE_PREFIX: &str = "/upgrade";
@@ -234,7 +237,7 @@ impl TeamContextForOperation {
 /// The team a view renders as, borrowed for the duration of a single read.
 ///
 /// It is resolved at the point of use so policy reads follow the view between windows.
-pub(crate) struct TeamContext<'a> {
+pub struct TeamContext<'a> {
     #[allow(dead_code)]
     team_uid: Option<&'a ServerId>,
 }
@@ -245,7 +248,41 @@ impl TeamScope for TeamContext<'_> {
     }
 }
 
-pub(crate) type TeamContextResolver = Box<dyn for<'a> Fn(&'a AppContext) -> TeamContext<'a>>;
+#[cfg(test)]
+impl TeamContext<'_> {
+    /// A scope on no team, for tests whose subject is not team policy and which would
+    /// otherwise have to stand up a window to say so. A test that asserts anything about which
+    /// team applies must resolve from a real surface instead, via
+    /// [`UserWorkspaces::team_context_resolver`] — this constructor cannot tell you that.
+    pub(crate) fn teamless_for_test() -> Self {
+        Self { team_uid: None }
+    }
+}
+
+pub type TeamContextResolver = Rc<dyn for<'a> Fn(&'a AppContext) -> TeamContext<'a>>;
+
+/// Compiles admin-configured command patterns into predicates, dropping any that fail to parse
+/// so a single malformed pattern cannot void the rest of a denylist.
+fn command_execution_predicates(patterns: &[String]) -> Vec<AgentModeCommandExecutionPredicate> {
+    patterns
+        .iter()
+        .filter_map(
+            |pattern| match AgentModeCommandExecutionPredicate::new_regex(pattern) {
+                Ok(predicate) => Some(predicate),
+                Err(error) => {
+                    report_error!(
+                        anyhow::Error::new(error)
+                            .context("Couldn't parse an admin-configured command pattern"),
+                        extra: { "pattern" => %pattern },
+                        warp_errors::ReportErrorLogMode::OncePerRun
+                    );
+                    None
+                }
+            },
+        )
+        .collect()
+}
+
 impl UserWorkspaces {
     #[cfg(any(test, all(feature = "tui", feature = "test-util")))]
     pub fn mock(
@@ -468,13 +505,19 @@ impl UserWorkspaces {
         }
     }
 
-    pub(crate) fn team_context_resolver<T: Entity>(view: WeakViewHandle<T>) -> TeamContextResolver {
-        Box::new(move |app| {
+    pub fn team_context_resolver<T: Entity>(view: WeakViewHandle<T>) -> TeamContextResolver {
+        Rc::new(move |app| {
             let team_uid = Self::as_ref(app)
                 .team_for_view_handle(&view, app)
                 .map(|team| &team.uid);
             TeamContext { team_uid }
         })
+    }
+
+    /// A resolver for tests that build a model without a window to resolve against.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn teamless_context_resolver_for_test() -> TeamContextResolver {
+        Rc::new(|_| TeamContext { team_uid: None })
     }
 
     /// Resolves `view`'s window team for one read. See [`TeamContext`].
@@ -1032,10 +1075,45 @@ impl UserWorkspaces {
             .unwrap_or_default()
     }
 
-    /// Returns the sandboxed agent settings enforced by the workspace, if any.
-    pub fn sandboxed_agent_settings(&self) -> Option<SandboxedAgentSettings> {
+    /// The organization-managed command denylist a sandboxed agent must obey, for `scope`'s
+    /// team: running in a team's context means running under that team's rules.
+    ///
+    /// A scope naming no team falls back to the current workspace's denylist rather than to an
+    /// empty one. This is a safety control, and the two cases a scope cannot tell apart -- a
+    /// user genuinely on no team, and a window that has not been given a team -- must both fail
+    /// closed. Returning nothing here would silently stop enforcing for the second case, which
+    /// is strictly worse than enforcing the workspace's rules, and worse than the behaviour this
+    /// replaced.
+    pub(crate) fn sandboxed_agent_execute_commands_denylist_for_scope(
+        &self,
+        scope: &dyn TeamScope,
+    ) -> Vec<AgentModeCommandExecutionPredicate> {
+        let Some(team_uid) = scope.team_uid() else {
+            return self.workspace_sandboxed_agent_execute_commands_denylist();
+        };
+
+        self.team_from_uid(team_uid)
+            .map(|team| {
+                command_execution_predicates(
+                    &team
+                        .settings
+                        .sandboxed_agent
+                        .execute_commands_denylist
+                        .values,
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    /// The current workspace's own sandboxed-agent denylist, used when no team is named; see
+    /// [`Self::sandboxed_agent_execute_commands_denylist_for_scope`].
+    fn workspace_sandboxed_agent_execute_commands_denylist(
+        &self,
+    ) -> Vec<AgentModeCommandExecutionPredicate> {
         self.current_workspace()
-            .and_then(|workspace| workspace.settings.sandboxed_agent_settings.clone())
+            .and_then(|workspace| workspace.settings.sandboxed_agent_settings.as_ref())
+            .and_then(|settings| settings.execute_commands_denylist.clone())
+            .unwrap_or_default()
     }
 
     /// Returns true iff AI autonomy features are allowed for this client.
@@ -2140,16 +2218,44 @@ impl UserWorkspaces {
         }
     }
 
-    pub fn update_sandboxed_agent_settings<F>(&mut self, f: F, ctx: &mut ModelContext<Self>)
-    where
-        F: FnOnce(&mut Option<SandboxedAgentSettings>),
-    {
+    /// Replaces the current workspace's teams with one team per entry in `denylists`, each
+    /// carrying that entry as its sandboxed-agent command denylist, and returns their uids in
+    /// the same order. Lets a test express per-team sandbox policy after
+    /// [`Self::setup_test_workspace`], then point a window at one of them.
+    pub fn update_team_sandboxed_agent_denylists(
+        &mut self,
+        denylists: &[Vec<&str>],
+        ctx: &mut ModelContext<Self>,
+    ) -> Vec<ServerId> {
+        let team_uids: Vec<ServerId> = (0..denylists.len())
+            .map(|index| ServerId::from(index as i64 + 2))
+            .collect();
+        let uids_for_update = team_uids.clone();
         self.update_current_workspace(
             |workspace| {
-                f(&mut workspace.settings.sandboxed_agent_settings);
+                let template = workspace
+                    .teams
+                    .first()
+                    .cloned()
+                    .expect("a test workspace should already have a team");
+                workspace.teams = denylists
+                    .iter()
+                    .zip(uids_for_update)
+                    .map(|(patterns, team_uid)| {
+                        let mut team = template.clone();
+                        team.uid = team_uid;
+                        team.settings.sandboxed_agent.execute_commands_denylist =
+                            SplitListSetting {
+                                values: patterns.iter().map(|p| (*p).to_owned()).collect(),
+                                ..Default::default()
+                            };
+                        team
+                    })
+                    .collect();
             },
             ctx,
         );
+        team_uids
     }
 
     pub fn update_ai_autonomy_settings<F>(&mut self, f: F, ctx: &mut ModelContext<Self>)

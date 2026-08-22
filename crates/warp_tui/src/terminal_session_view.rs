@@ -1561,6 +1561,7 @@ impl TuiTerminalSessionView {
                 &model_events,
                 get_relevant_files_controller,
                 terminal_surface_id,
+                UserWorkspaces::team_context_resolver(terminal_surface.clone()),
                 ctx,
             )
         });

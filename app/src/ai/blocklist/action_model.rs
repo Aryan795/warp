@@ -70,6 +70,7 @@ use crate::ai::get_relevant_files::controller::GetRelevantFilesController;
 use crate::terminal::TerminalModel;
 use crate::terminal::model::session::active_session::ActiveSession;
 use crate::terminal::model_events::ModelEventDispatcher;
+use crate::workspaces::user_workspaces::TeamContextResolver;
 use crate::{TelemetryEvent, send_telemetry_from_ctx};
 
 /// The status of an action from an AI output.
@@ -257,12 +258,16 @@ pub struct BlocklistAIActionModel {
 }
 
 impl BlocklistAIActionModel {
+    /// `team_context_resolver` resolves the team governing the surface this action model acts
+    /// on behalf of. It is a resolver rather than a team so the policy its executors enforce
+    /// follows the surface between windows.
     pub fn new(
         terminal_model: Arc<FairMutex<TerminalModel>>,
         active_session: ModelHandle<ActiveSession>,
         model_event_dispatcher: &ModelHandle<ModelEventDispatcher>,
         get_relevant_files_controller: ModelHandle<GetRelevantFilesController>,
         terminal_view_id: EntityId,
+        team_context_resolver: TeamContextResolver,
         ctx: &mut ModelContext<Self>,
     ) -> Self {
         let executor = ctx.add_model(|ctx| {
@@ -272,6 +277,7 @@ impl BlocklistAIActionModel {
                 model_event_dispatcher,
                 get_relevant_files_controller,
                 terminal_view_id,
+                team_context_resolver,
                 ctx,
             )
         });

@@ -2777,16 +2777,24 @@ impl AIBlock {
             })
         {
             if is_agent_mode_autonomy_allowed(ctx) {
-                let autoexecute_decision = escape_char.map(|escape_char| {
-                    BlocklistAIPermissions::as_ref(ctx).can_autoexecute_command(
+                // The speedbump reports the policy of the team this surface is in, resolved now
+                // rather than when the block was built, so it follows the tab between windows.
+                // A surface in no window has no team to report for, and the speedbump is skipped
+                // as it already is when the shell type is unknown; this only decides whether to
+                // show it, never whether a command may run.
+                let autoexecute_decision = escape_char.and_then(|escape_char| {
+                    let team_context = UserWorkspaces::as_ref(ctx)
+                        .team_context(&self.terminal_view_handle, ctx)?;
+                    Some(BlocklistAIPermissions::as_ref(ctx).can_autoexecute_command(
                         &self.client_ids.conversation_id,
                         command,
                         escape_char,
                         is_read_only,
                         is_risky,
                         Some(self.terminal_view_id),
+                        &team_context,
                         ctx,
-                    )
+                    ))
                 });
 
                 match autoexecute_decision {

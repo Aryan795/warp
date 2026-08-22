@@ -19,8 +19,9 @@ use warp::tui_export::{
     GetRelevantFilesController, LLMId, MessageId, ModelEventDispatcher, OutputStatusUpdateCallback,
     ReceivedMessageDisplay, RenderableAIError, RequestCommandOutputResult, ServerOutputId,
     Sessions, Shared, SummarizationType, TaskId, TerminalModel, TodoOperation, TodoStatus,
-    TuiOnboardingMarker, TuiOnboardingMarkers, UserQueryMode, queue_tui_permission_action,
-    register_tui_session_view_test_singletons, should_show_failed_output_usage_notice,
+    TuiOnboardingMarker, TuiOnboardingMarkers, UserQueryMode, UserWorkspaces,
+    queue_tui_permission_action, register_tui_session_view_test_singletons,
+    should_show_failed_output_usage_notice,
 };
 use warp_core::ui::color::blend::Blend;
 use warp_core::ui::theme::Fill as ThemeFill;
@@ -2402,6 +2403,19 @@ fn test_agent_block_with_registered_singletons(
     let active_session =
         app.add_model(|ctx| ActiveSession::new(sessions, model_events.clone(), ctx));
     let get_relevant_files = app.add_model(|_| GetRelevantFilesController::default());
+    // The action model resolves team-scoped policy through its surface, so the surface has to be
+    // a real view in a window. Deliberately left on no team, which is what a TUI surface is
+    // today; assigning one would change what these tests prove.
+    let terminal_surface = app.update(|ctx| {
+        let (_window_id, host) = ctx.add_tui_window(
+            AddWindowOptions {
+                window_style: WindowStyle::NotStealFocus,
+                ..Default::default()
+            },
+            |_| TestHostView,
+        );
+        host.downgrade()
+    });
     let action_model = app.add_model(|ctx| {
         BlocklistAIActionModel::new(
             action_terminal_model,
@@ -2409,6 +2423,7 @@ fn test_agent_block_with_registered_singletons(
             &model_events,
             get_relevant_files,
             EntityId::new(),
+            UserWorkspaces::team_context_resolver(terminal_surface),
             ctx,
         )
     });
