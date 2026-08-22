@@ -328,12 +328,15 @@ fn request_params_do_not_allow_member_credentials_until_the_policy_has_been_appl
     assert!(!RequestParams::new_for_test().member_byo_credentials_allowed);
 }
 
-/// A window `UserWorkspaces` has never been told about resolves to no team, and so reads the
-/// workspace's `team_byo`. Every TUI window is in that state -- `register_window` is only
-/// called from the GUI's `RootView::new` -- so this is what keeps a restriction reaching TUI
-/// requests at all, and it is the same value the ambient getters this slice replaces read.
+/// A scope with no team reads the workspace's `team_byo` at request time, which is the same
+/// value the ambient getter this slice replaces read -- so a restriction still binds rather
+/// than the request going out unrestricted.
+///
+/// Driven here through a window `UserWorkspaces` has not been told about, which is one way to
+/// reach a teamless scope; a registered window with no team selected is another. The behaviour
+/// under test is the fallback, not the particular route to it.
 #[test]
-fn apply_team_byo_policy_applies_the_workspace_policy_to_an_unregistered_window() {
+fn apply_team_byo_policy_applies_the_workspace_policy_to_a_scope_with_no_team() {
     let (_team_a, team_b) = two_teams_of_opposing_byo_policy();
     let mut workspace = workspace_with_teams(vec![team_b]);
     workspace.settings.team_byo = Some(TeamByoSettings {
