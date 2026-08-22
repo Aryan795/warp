@@ -10073,6 +10073,111 @@ mod completion_sources_tests {
 }
 
 #[cfg(test)]
+mod completion_sources_resolution_tests {
+    use super::super::{CompletionSources, CompletionsTrigger, resolve_completion_sources};
+
+    // With the `NativeShellCompletions` feature flag off, master behavior holds regardless of the
+    // toggles: Warp completions on, the shell never asked. This is the invariant a refactor that
+    // made the toggles co-equal with the flag would silently break.
+    #[test]
+    fn feature_flag_off_is_warp_only_regardless_of_toggles() {
+        for warp_completions_enabled in [true, false] {
+            for native_shell_completions_enabled in [true, false] {
+                assert_eq!(
+                    resolve_completion_sources(
+                        false,
+                        false,
+                        false,
+                        CompletionsTrigger::Keybinding,
+                        warp_completions_enabled,
+                        native_shell_completions_enabled,
+                    ),
+                    CompletionSources::WarpOnly,
+                    "flag off must resolve to WarpOnly (warp={warp_completions_enabled}, native={native_shell_completions_enabled})"
+                );
+            }
+        }
+    }
+
+    // AI input is prose, not a shell command line, so it always uses Warp's own specs regardless of
+    // the flag or the toggles. A refactor dropping the AI-input override would silently break this.
+    #[test]
+    fn ai_input_is_warp_only_regardless_of_flag_and_toggles() {
+        for feature_flag_enabled in [true, false] {
+            for warp_completions_enabled in [true, false] {
+                for native_shell_completions_enabled in [true, false] {
+                    assert_eq!(
+                        resolve_completion_sources(
+                            feature_flag_enabled,
+                            true,
+                            false,
+                            CompletionsTrigger::Keybinding,
+                            warp_completions_enabled,
+                            native_shell_completions_enabled,
+                        ),
+                        CompletionSources::WarpOnly,
+                        "AI input must resolve to WarpOnly (flag={feature_flag_enabled}, warp={warp_completions_enabled}, native={native_shell_completions_enabled})"
+                    );
+                }
+            }
+        }
+    }
+
+    // With the flag on, a non-AI single-line buffer, and an explicit Tab/keybinding trigger, the two
+    // toggles map to the four sources.
+    #[test]
+    fn feature_flag_on_maps_the_four_toggle_states() {
+        let resolve = |warp_completions_enabled, native_shell_completions_enabled| {
+            resolve_completion_sources(
+                true,
+                false,
+                false,
+                CompletionsTrigger::Keybinding,
+                warp_completions_enabled,
+                native_shell_completions_enabled,
+            )
+        };
+        assert_eq!(resolve(true, true), CompletionSources::WarpThenNative);
+        assert_eq!(resolve(true, false), CompletionSources::WarpOnly);
+        assert_eq!(resolve(false, true), CompletionSources::NativeOnly);
+        assert_eq!(resolve(false, false), CompletionSources::None);
+    }
+
+    // Native completions are Tab-only: an as-you-type trigger keeps Warp's bundled-spec behavior
+    // even with both toggles on, so the shell isn't fired on every keystroke.
+    #[test]
+    fn as_you_type_never_selects_native_even_with_both_toggles_on() {
+        assert_eq!(
+            resolve_completion_sources(
+                true,  // feature flag on
+                false, // not AI input
+                false, // single-line
+                CompletionsTrigger::AsYouType,
+                true, // warp completions on
+                true, // native shell completions on
+            ),
+            CompletionSources::WarpOnly
+        );
+    }
+
+    // A multi-line buffer disables native completions even on a Tab trigger with both toggles on.
+    #[test]
+    fn multiline_buffer_never_selects_native() {
+        assert_eq!(
+            resolve_completion_sources(
+                true,  // feature flag on
+                false, // not AI input
+                true,  // multi-line
+                CompletionsTrigger::Keybinding,
+                true, // warp completions on
+                true, // native shell completions on
+            ),
+            CompletionSources::WarpOnly
+        );
+    }
+}
+
+#[cfg(test)]
 mod strip_control_characters_tests {
     use super::super::strip_control_characters;
 

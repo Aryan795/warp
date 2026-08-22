@@ -1603,6 +1603,44 @@ impl CompletionSources {
     }
 }
 
+/// Resolves which [`CompletionSources`] a request draws on from the `NativeShellCompletions`
+/// feature flag, the input type, the trigger, and the two user toggles -- the outer policy that
+/// sits above [`CompletionSources::resolve`].
+///
+/// The feature flag is a strict outer gate: with it off, master behavior holds (Warp completions
+/// on, the shell never asked) whatever the toggles say. AI input is prose, not a shell command
+/// line, so it always uses Warp's own specs, again whatever the toggles say. Native completions
+/// run the shell's own engine through a foreground in-band generator command, too costly to fire on
+/// every keystroke, so they're reserved for an explicit Tab/keybinding trigger on a single-line
+/// buffer.
+fn resolve_completion_sources(
+    feature_flag_enabled: bool,
+    is_ai_input: bool,
+    buffer_text_is_multiline: bool,
+    completions_trigger: CompletionsTrigger,
+    warp_completions_enabled: bool,
+    native_shell_completions_enabled: bool,
+) -> CompletionSources {
+    let (warp_completions_enabled, native_shell_completions_enabled) = if feature_flag_enabled {
+        (warp_completions_enabled, native_shell_completions_enabled)
+    } else {
+        (true, false)
+    };
+
+    if is_ai_input {
+        return CompletionSources::WarpOnly;
+    }
+
+    let native_shell_completions_eligible = completions_trigger != CompletionsTrigger::AsYouType
+        && should_use_native_shell_completions(
+            native_shell_completions_enabled,
+            buffer_text_is_multiline,
+            is_ai_input,
+        );
+
+    CompletionSources::resolve(warp_completions_enabled, native_shell_completions_eligible)
+}
+
 /// Whether the bundled completion spec pass produced nothing usable -- i.e. the shell should now
 /// be asked, in the [`CompletionSources::WarpThenNative`] path. `None` (the completer returned no
 /// result) and an empty suggestion list both count as empty.
@@ -12418,37 +12456,20 @@ impl Input {
         let buffer_text = self.buffer_text(ctx);
         let input_type = self.ai_input_model.as_ref(ctx).input_type();
 
-        // The `NativeShellCompletions` feature flag is the outer gate that decides who has native
-        // shell completions at all. Only when it's on do the two user toggles apply; otherwise
-        // master behavior holds: Warp completions on, the shell never asked.
-        let (warp_completions_enabled, native_shell_completions_enabled) =
-            if FeatureFlag::NativeShellCompletions.is_enabled() {
-                let input_settings = InputSettings::as_ref(ctx);
-                (
-                    *input_settings.warp_completions_enabled,
-                    *input_settings.native_shell_completions_enabled,
-                )
-            } else {
-                (true, false)
-            };
-
-        // Native completions run the shell's own engine through a foreground in-band generator
-        // command, too costly to fire on every keystroke, so they're reserved for an explicit
-        // Tab/keybinding trigger; an as-you-type keystroke keeps Warp's bundled-spec behavior.
-        let native_shell_completions_eligible = completions_trigger
-            != CompletionsTrigger::AsYouType
-            && should_use_native_shell_completions(
-                native_shell_completions_enabled,
-                buffer_text.contains('\n'),
+        // Resolve which completion sources this request draws on. The impure reads -- the feature
+        // flag and the two settings toggles -- happen here; the policy itself is a pure function so
+        // the flag-as-outer-gate and AI-input invariants can be unit-tested. See
+        // `resolve_completion_sources`.
+        let sources = {
+            let input_settings = InputSettings::as_ref(ctx);
+            resolve_completion_sources(
+                FeatureFlag::NativeShellCompletions.is_enabled(),
                 input_type.is_ai(),
-            );
-
-        // AI input is prose, not a shell command line, so it's unaffected by the toggles: it always
-        // uses Warp's own spec pass (with file-path completions), exactly as before.
-        let sources = if input_type.is_ai() {
-            CompletionSources::WarpOnly
-        } else {
-            CompletionSources::resolve(warp_completions_enabled, native_shell_completions_eligible)
+                buffer_text.contains('\n'),
+                completions_trigger,
+                *input_settings.warp_completions_enabled,
+                *input_settings.native_shell_completions_enabled,
+            )
         };
 
         let fallback_strategy =
