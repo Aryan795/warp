@@ -6196,10 +6196,7 @@ impl TerminalView {
                     for owner_id in &owner_block_ids {
                         if let Some(ai_block_handle) = self.ai_block_handle_by_view_id(*owner_id) {
                             ai_block_handle.update(ctx, |block, ctx| {
-                                block.handle_action(
-                                    &AIBlockAction::ToggleIsTurnPanelExpanded,
-                                    ctx,
-                                );
+                                block.handle_action(&AIBlockAction::ToggleIsTurnPanelExpanded, ctx);
                             });
                         }
                     }
@@ -7149,8 +7146,8 @@ impl TerminalView {
                 .wall_to_wall_response_time_since_last_query(),
         };
 
-        let turn_usage_view =
-            ctx.add_typed_action_view(|_ctx| TurnUsageView::new(turn_usage_info, Some(timing_info)));
+        let turn_usage_view = ctx
+            .add_typed_action_view(|_ctx| TurnUsageView::new(turn_usage_info, Some(timing_info)));
 
         // Close the panel when the user clicks its "X" button, by toggling
         // the same flag/action the trigger icon uses.
@@ -21102,11 +21099,10 @@ impl TerminalView {
     fn active_ai_block(&self, ctx: &AppContext) -> Option<&ViewHandle<AIBlock>> {
         // Skip trailing non-AI items (usage footers, turn panels) as they don't impact the
         // conversation state.
-        let candidate = self
-            .rich_content_views
-            .iter()
-            .rev()
-            .find(|rc| !rc.is_usage_footer() && !rc.is_turn_panel() && !rc.is_pending_user_query());
+        let candidate =
+            self.rich_content_views.iter().rev().find(|rc| {
+                !rc.is_usage_footer() && !rc.is_turn_panel() && !rc.is_pending_user_query()
+            });
 
         candidate.and_then(|rich_content| {
             let ai_metadata = rich_content.ai_block_metadata()?;

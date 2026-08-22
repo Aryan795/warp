@@ -842,14 +842,20 @@ impl AIConversation {
     /// `tool_usage_metadata().total_tool_calls()`, which is always the
     /// conversation-cumulative total.
     pub fn tool_calls_for_last_block(&self) -> Option<i32> {
-        let baseline = self.conversation_usage_metadata.turn_usage_baseline.as_ref()?;
+        let baseline = self
+            .conversation_usage_metadata
+            .turn_usage_baseline
+            .as_ref()?;
         Some(self.conversation_usage_metadata.total_tool_calls() - baseline.tool_calls)
     }
 
     /// Files changed during the last block (turn). See
     /// [`Self::tool_calls_for_last_block`] for scoping semantics.
     pub fn files_changed_for_last_block(&self) -> Option<i32> {
-        let baseline = self.conversation_usage_metadata.turn_usage_baseline.as_ref()?;
+        let baseline = self
+            .conversation_usage_metadata
+            .turn_usage_baseline
+            .as_ref()?;
         Some(
             self.conversation_usage_metadata
                 .tool_usage_metadata
@@ -862,7 +868,10 @@ impl AIConversation {
     /// Lines added during the last block (turn). See
     /// [`Self::tool_calls_for_last_block`] for scoping semantics.
     pub fn lines_added_for_last_block(&self) -> Option<i32> {
-        let baseline = self.conversation_usage_metadata.turn_usage_baseline.as_ref()?;
+        let baseline = self
+            .conversation_usage_metadata
+            .turn_usage_baseline
+            .as_ref()?;
         Some(
             self.conversation_usage_metadata
                 .tool_usage_metadata
@@ -875,7 +884,10 @@ impl AIConversation {
     /// Lines removed during the last block (turn). See
     /// [`Self::tool_calls_for_last_block`] for scoping semantics.
     pub fn lines_removed_for_last_block(&self) -> Option<i32> {
-        let baseline = self.conversation_usage_metadata.turn_usage_baseline.as_ref()?;
+        let baseline = self
+            .conversation_usage_metadata
+            .turn_usage_baseline
+            .as_ref()?;
         Some(
             self.conversation_usage_metadata
                 .tool_usage_metadata
@@ -888,7 +900,10 @@ impl AIConversation {
     /// Commands executed during the last block (turn). See
     /// [`Self::tool_calls_for_last_block`] for scoping semantics.
     pub fn commands_executed_for_last_block(&self) -> Option<i32> {
-        let baseline = self.conversation_usage_metadata.turn_usage_baseline.as_ref()?;
+        let baseline = self
+            .conversation_usage_metadata
+            .turn_usage_baseline
+            .as_ref()?;
         Some(
             self.conversation_usage_metadata
                 .tool_usage_metadata
@@ -902,8 +917,12 @@ impl AIConversation {
     /// during the last block (turn). See [`Self::tool_calls_for_last_block`]
     /// for scoping semantics.
     pub fn tokens_for_last_block(&self) -> Option<u64> {
-        let baseline = self.conversation_usage_metadata.turn_usage_baseline.as_ref()?;
-        let current = Self::total_tokens_from_model_usage(&self.conversation_usage_metadata.token_usage);
+        let baseline = self
+            .conversation_usage_metadata
+            .turn_usage_baseline
+            .as_ref()?;
+        let current =
+            Self::total_tokens_from_model_usage(&self.conversation_usage_metadata.token_usage);
         Some(current.saturating_sub(baseline.total_tokens))
     }
 
@@ -914,7 +933,10 @@ impl AIConversation {
     /// numeric zero. See [`Self::tool_calls_for_last_block`] for scoping
     /// semantics.
     pub fn provider_cost_in_cents_for_last_block(&self) -> Option<f32> {
-        let baseline = self.conversation_usage_metadata.turn_usage_baseline.as_ref()?;
+        let baseline = self
+            .conversation_usage_metadata
+            .turn_usage_baseline
+            .as_ref()?;
         let baseline_cost = baseline.provider_cost_in_cents?;
         let current_cost = self.total_provider_cost_in_cents?;
         Some(current_cost - baseline_cost)

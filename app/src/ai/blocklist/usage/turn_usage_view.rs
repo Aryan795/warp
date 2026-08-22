@@ -106,13 +106,9 @@ impl TurnUsageView {
         let background = theme.surface_2();
         let font_size = appearance.ui_font_size() + 2.;
 
-        let title = Text::new(
-            "Turn".to_string(),
-            appearance.ui_font_family(),
-            font_size,
-        )
-        .with_color(blended_colors::text_main(theme, background))
-        .finish();
+        let title = Text::new("Turn".to_string(), appearance.ui_font_family(), font_size)
+            .with_color(blended_colors::text_main(theme, background))
+            .finish();
 
         let close_icon_size = font_size;
         let close_button = Hoverable::new(self.close_button_mouse_state.clone(), {
@@ -416,9 +412,10 @@ impl View for TurnUsageView {
             .with_border(Border::all(1.0).with_border_fill(theme.outline()))
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
             .with_uniform_margin(16.)
-            .with_drop_shadow(DropShadow::new_with_standard_offset_and_spread(
-                ColorU::new(0, 0, 0, 32),
-            ).with_offset(vec2f(0., 2.)))
+            .with_drop_shadow(
+                DropShadow::new_with_standard_offset_and_spread(ColorU::new(0, 0, 0, 32))
+                    .with_offset(vec2f(0., 2.)),
+            )
             .finish()
     }
 }
