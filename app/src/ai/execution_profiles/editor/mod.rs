@@ -1187,7 +1187,7 @@ impl ExecutionProfileEditorView {
                 .iter()
                 .any(|llm| matches!(llm.disable_reason, Some(DisableReason::RequiresUpgrade)));
 
-            let team_uid = UserWorkspaces::as_ref(ctx).team_uid_for_window(ctx.window_id());
+            let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
             let items = available_model_menu_items(
                 choices,
                 |llm| DropdownAction::select_action_and_close(create_action(llm.id.clone())),
@@ -1195,7 +1195,7 @@ impl ExecutionProfileEditorView {
                 None,
                 false,
                 false,
-                team_uid,
+                team_context.as_ref(),
                 ctx,
             );
             dropdown.set_rich_items(items, ctx);
@@ -1237,7 +1237,7 @@ impl ExecutionProfileEditorView {
                 .get_coding_llm_choices(ctx)
                 .collect_vec();
 
-            let team_uid = UserWorkspaces::as_ref(ctx).team_uid_for_window(ctx.window_id());
+            let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
             let items = available_model_menu_items(
                 choices,
                 |llm| {
@@ -1249,7 +1249,7 @@ impl ExecutionProfileEditorView {
                 None,
                 false,
                 false,
-                team_uid,
+                team_context.as_ref(),
                 ctx,
             );
             dropdown.set_rich_items(items, ctx);

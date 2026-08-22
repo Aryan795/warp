@@ -280,7 +280,7 @@ fn oz_model_menu_items<A: OrchestrationControlAction, V: View>(
                 .find(|llm| llm.id.to_string() == row.id)
         })
         .collect();
-    let team_uid = UserWorkspaces::as_ref(ctx).team_uid_for_window(ctx.window_id());
+    let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
     available_model_menu_items(
         ordered_choices,
         move |llm| DropdownAction::select_action_and_close(A::model_changed(llm.id.to_string())),
@@ -288,7 +288,7 @@ fn oz_model_menu_items<A: OrchestrationControlAction, V: View>(
         None,
         false,
         false,
-        team_uid,
+        team_context.as_ref(),
         ctx,
     )
 }

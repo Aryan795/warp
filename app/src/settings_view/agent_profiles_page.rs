@@ -1031,7 +1031,7 @@ impl AgentProfilesPageView {
                 .get_base_llm_choices_for_agent_mode(ctx)
                 .collect_vec();
 
-            let team_uid = UserWorkspaces::as_ref(ctx).team_uid_for_window(ctx.window_id());
+            let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
             let items = available_model_menu_items(
                 choices,
                 |llm| {
@@ -1043,7 +1043,7 @@ impl AgentProfilesPageView {
                 None,
                 false,
                 false,
-                team_uid,
+                team_context.as_ref(),
                 ctx,
             );
             menu.set_rich_items(items, ctx);
@@ -1075,7 +1075,7 @@ impl AgentProfilesPageView {
                 .get_coding_llm_choices(ctx)
                 .collect_vec();
 
-            let team_uid = UserWorkspaces::as_ref(ctx).team_uid_for_window(ctx.window_id());
+            let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
             let items = available_model_menu_items(
                 choices,
                 |llm| {
@@ -1087,7 +1087,7 @@ impl AgentProfilesPageView {
                 None,
                 false,
                 false,
-                team_uid,
+                team_context.as_ref(),
                 ctx,
             );
             menu.set_rich_items(items, ctx);

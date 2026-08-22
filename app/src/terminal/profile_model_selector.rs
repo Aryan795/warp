@@ -18,7 +18,7 @@ use warpui::text_layout::ClipConfig;
 use warpui::ui_components::components::UiComponent;
 use warpui::{
     AppContext, Element, Entity, EntityId, ModelHandle, SingletonEntity as _, TypedActionView,
-    View, ViewContext, ViewHandle, WindowId,
+    View, ViewContext, ViewHandle,
 };
 
 const SIDECAR_HORIZONTAL_GAP: f32 = 8.;
@@ -55,7 +55,6 @@ use crate::cloud_object::model::generic_string_model::StringModel;
 use crate::context_chips::display_chip::{udi_font_size, udi_icon_size};
 use crate::context_chips::spacing;
 use crate::menu::{Event as MenuEvent, Menu, MenuItem, MenuItemFields};
-use crate::server::ids::ServerId;
 use crate::settings_view::SettingsSection;
 use crate::terminal::TerminalModel;
 use crate::terminal::input::{MenuPositioning, MenuPositioningProvider};
@@ -66,7 +65,7 @@ use crate::view_components::action_button::{
 };
 use crate::view_components::{FeaturePopup, NewFeaturePopupEvent, NewFeaturePopupLabel};
 use crate::workspace::WorkspaceAction;
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces, UserWorkspacesEvent};
 
 const MENU_WIDTH: f32 = 280.;
 const NEW_MODEL_CHOICES_POPUP_DELAY: Duration = Duration::from_millis(500);
@@ -174,7 +173,7 @@ pub struct ProfileModelSelector {
     is_profile_menu_open: bool,
     is_model_menu_open: bool,
     terminal_view_id: EntityId,
-    window_id: WindowId,
+    team_context: Option<TeamContext>,
     profile_mouse_state: MouseStateHandle,
     model_mouse_state: MouseStateHandle,
     menu_positioning_provider: Arc<dyn MenuPositioningProvider>,
@@ -249,7 +248,7 @@ impl ProfileModelSelector {
         controller: Option<ModelHandle<BlocklistAIController>>,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
-        let window_id = ctx.window_id();
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         let profile_button = ctx.add_typed_action_view(|ctx| {
             let appearance = Appearance::as_ref(ctx);
             ActionButton::new(
@@ -499,6 +498,19 @@ impl ProfileModelSelector {
                 ctx.notify();
             },
         );
+        ctx.subscribe_to_model(
+            &UserWorkspaces::handle(ctx),
+            |me, _, event, ctx| match event {
+                UserWorkspacesEvent::WindowTeamChanged { window_id }
+                    if *window_id == ctx.window_id() =>
+                {
+                    me.team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                    me.refresh_state(ctx);
+                    ctx.notify();
+                }
+                _ => {}
+            },
+        );
 
         ctx.subscribe_to_model(
             &AIExecutionProfilesModel::handle(ctx),
@@ -556,7 +568,7 @@ impl ProfileModelSelector {
             is_profile_menu_open: false,
             is_model_menu_open: false,
             terminal_view_id,
-            window_id,
+            team_context,
             profile_mouse_state: Default::default(),
             model_mouse_state: Default::default(),
             menu_positioning_provider,
@@ -652,10 +664,6 @@ impl ProfileModelSelector {
         self.is_profile_menu_open || self.is_model_menu_open
     }
 
-    /// The team currently selected for this selector's window, resolved fresh from `ctx`.
-    fn team_uid(&self, ctx: &AppContext) -> Option<ServerId> {
-        UserWorkspaces::as_ref(ctx).team_uid_for_window(self.window_id)
-    }
 
     pub fn model_menu_item_position_id(&self, llm_id: &LLMId) -> String {
         format!("{PROFILE_SELECTOR_POSITION_ID}_{llm_id}")
@@ -1082,7 +1090,7 @@ impl ProfileModelSelector {
             Some(&|llm_id| self.model_menu_item_position_id(llm_id)),
             true,
             true,
-            self.team_uid(ctx),
+            self.team_context.as_ref(),
             ctx,
         );
 
@@ -1107,7 +1115,7 @@ impl ProfileModelSelector {
             for llm in &custom_choices {
                 let mut fields = MenuItemFields::new(llm.menu_display_name())
                     .with_on_select_action(ProfileModelSelectorAction::SelectModel(llm.id.clone()));
-                if should_show_key_icon_for_model(llm, self.team_uid(ctx), ctx) {
+                if should_show_key_icon_for_model(llm, self.team_context.as_ref(), ctx) {
                     fields = fields.with_right_side_icon(Icon::Key);
                 }
                 items.push(MenuItem::Item(fields));
@@ -1136,7 +1144,7 @@ impl ProfileModelSelector {
                 Some(&|llm_id| self.model_menu_item_position_id(llm_id)),
                 true,
                 true,
-                self.team_uid(ctx),
+                self.team_context.as_ref(),
                 ctx,
             ));
         }
@@ -2341,7 +2349,8 @@ impl View for ProfileModelSelector {
                         .cloned();
                     Some(self.render_sidecar_spec_panel(&kind, &sidecar_spec, app))
                 } else if let Some(spec) = info.spec.as_ref() {
-                    let byo_key_source = byo_key_source_for_model(info, self.team_uid(app), app);
+                    let byo_key_source =
+                        byo_key_source_for_model(info, self.team_context.as_ref(), app);
                     Some(self.render_model_spec(spec, byo_key_source, app))
                 } else {
                     None

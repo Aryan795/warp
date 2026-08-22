@@ -15,7 +15,9 @@ use warpui::presenter::ChildView;
 use warpui::ui_components::components::{UiComponent, UiComponentStyles};
 use warpui::{AppContext, EntityId, SingletonEntity, ViewHandle, WeakViewHandle};
 
-use crate::ai::llms::{LLMPreferences, should_show_key_icon_for_model};
+use crate::ai::llms::{
+    LLMPreferences, should_show_key_icon_for_model_for_render_context,
+};
 use crate::ai::{AIRequestUsageModel, BuyCreditsBannerDisplayState};
 use crate::appearance::Appearance;
 use crate::settings::{AISettings, InputSettings};
@@ -499,9 +501,11 @@ pub(super) fn maybe_add_buy_credits_banner(
         ai_request_usage.compute_buy_addon_credits_banner_display_state(app),
         BuyCreditsBannerDisplayState::Hidden
     );
-    let is_using_api_key_for_current_model = should_show_key_icon_for_model(
+    let team_render_context =
+        workspaces.team_render_context_for_view_handle(input_view_handle, app);
+    let is_using_api_key_for_current_model = should_show_key_icon_for_model_for_render_context(
         LLMPreferences::as_ref(app).get_active_base_model(app, Some(terminal_view_id)),
-        team.map(|team| team.uid),
+        team_render_context.as_ref(),
         app,
     );
     if can_purchase_addon_credits

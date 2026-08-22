@@ -341,6 +341,30 @@ impl UserWorkspaces {
             })
     }
 
+    pub(crate) fn agent_settings_has_team_byo_endpoint_for_model(
+        &self,
+        context: Option<&TeamRenderContext<'_>>,
+        model_config_key: &str,
+    ) -> bool {
+        self.is_managed_byok_byoe_enabled()
+            && context.is_some_and(|context| {
+                context
+                    .team
+                    .settings
+                    .team_byo
+                    .as_ref()
+                    .is_some_and(|team_byo| {
+                        team_byo.endpoints_enabled
+                            && team_byo.endpoints.iter().any(|endpoint| {
+                                endpoint.enabled
+                                    && endpoint.models.iter().any(|model| {
+                                        model.enabled && model.config_key == model_config_key
+                                    })
+                            })
+                    })
+            })
+    }
+
     pub fn set_team_for_window(
         &mut self,
         window_id: WindowId,
@@ -635,14 +659,6 @@ impl UserWorkspaces {
         self.llm_settings_for_team(context.map(|context| context.team))
     }
 
-    fn llm_settings_for_team_uid(&self, team_uid: Option<ServerId>) -> Option<&LlmSettings> {
-        match team_uid {
-            Some(team_uid) => self
-                .team_from_uid(team_uid)
-                .map(|team| &team.settings.llm_settings),
-            None => self.llm_settings_for_team(None),
-        }
-    }
 
     pub(crate) fn is_custom_llm_enabled(
         &self,
@@ -803,7 +819,7 @@ impl UserWorkspaces {
                         .is_some_and(|policy| policy.is_voice_enabled)
                 })
     }
-    pub(crate) fn are_member_byo_keys_allowed_for_context(
+    pub fn are_member_byo_keys_allowed_for_context(
         &self,
         context: Option<&TeamContext>,
     ) -> bool {
@@ -940,17 +956,14 @@ impl UserWorkspaces {
         self.are_member_byo_endpoints_allowed_for_team(context.map(|context| context.team.uid))
     }
 
-    /// Whether `team_uid`'s team has provided its own first-party key for `provider`.
-    /// `team_uid` is `None`, or names a team no longer in the current workspace, for a
-    /// no-team window, which has no team-provided key and returns `false`.
-    pub fn has_team_first_party_key_for_team(
+    pub(crate) fn has_team_first_party_key(
         &self,
-        team_uid: Option<ServerId>,
+        context: Option<&TeamContext>,
         provider: LLMProvider,
     ) -> bool {
         self.is_managed_byok_byoe_enabled()
-            && team_uid
-                .and_then(|team_uid| self.team_from_uid(team_uid))
+            && context
+                .and_then(|context| self.team_for_context(context))
                 .is_some_and(|team| {
                     team.settings.team_byo.as_ref().is_some_and(|team_byo| {
                         team_byo.first_party_enabled
@@ -962,18 +975,14 @@ impl UserWorkspaces {
                 })
     }
 
-    /// Whether `team_uid`'s team has configured and enabled a BYO endpoint model whose
-    /// `config_key` is `model_config_key`. `team_uid` is `None`, or names a team no longer in
-    /// the current workspace, for a no-team window, which has no team-provided endpoint and
-    /// returns `false`.
-    pub fn has_team_byo_endpoint_for_model_for_team(
+    pub(crate) fn has_team_byo_endpoint_for_model(
         &self,
-        team_uid: Option<ServerId>,
+        context: Option<&TeamContext>,
         model_config_key: &str,
     ) -> bool {
         self.is_managed_byok_byoe_enabled()
-            && team_uid
-                .and_then(|team_uid| self.team_from_uid(team_uid))
+            && context
+                .and_then(|context| self.team_for_context(context))
                 .is_some_and(|team| {
                     team.settings.team_byo.as_ref().is_some_and(|team_byo| {
                         team_byo.endpoints_enabled
@@ -987,13 +996,26 @@ impl UserWorkspaces {
                 })
     }
 
-    /// [`Self::has_team_first_party_key_for_team`], scoped to `context`'s team.
     pub(crate) fn agent_settings_has_team_first_party_key(
         &self,
         context: Option<&TeamRenderContext<'_>>,
         provider: LLMProvider,
     ) -> bool {
-        self.has_team_first_party_key_for_team(context.map(|context| context.team.uid), provider)
+        self.is_managed_byok_byoe_enabled()
+            && context.is_some_and(|context| {
+                context
+                    .team
+                    .settings
+                    .team_byo
+                    .as_ref()
+                    .is_some_and(|team_byo| {
+                        team_byo.first_party_enabled
+                            && team_byo
+                                .first_party_keys
+                                .iter()
+                                .any(|key| key.provider == provider)
+                    })
+            })
     }
 
     /// Whether `user_email` has admin permissions on `context`'s team.
@@ -1179,41 +1201,6 @@ impl UserWorkspaces {
         )
     }
 
-    pub(crate) fn is_aws_bedrock_credentials_enabled_for_team_uid(
-        &self,
-        team_uid: Option<ServerId>,
-        app: &AppContext,
-    ) -> bool {
-        Self::host_credentials_enabled(
-            self.llm_settings_for_team_uid(team_uid),
-            LLMModelHost::AwsBedrock,
-            *AISettings::as_ref(app)
-                .aws_bedrock_credentials_enabled
-                .value(),
-        )
-    }
-
-    pub(crate) fn is_gemini_enterprise_credentials_enabled_for_team_uid(
-        &self,
-        team_uid: Option<ServerId>,
-        app: &AppContext,
-    ) -> bool {
-        if !FeatureFlag::GeminiEnterprise.is_enabled()
-            || AuthStateProvider::as_ref(app)
-                .get()
-                .is_anonymous_or_logged_out()
-        {
-            return false;
-        }
-
-        Self::host_credentials_enabled(
-            self.llm_settings_for_team_uid(team_uid),
-            LLMModelHost::GeminiEnterprise,
-            *AISettings::as_ref(app)
-                .gemini_enterprise_credentials_enabled
-                .value(),
-        )
-    }
 
     pub(crate) fn is_aws_bedrock_credentials_enabled_for_any_scope(
         &self,

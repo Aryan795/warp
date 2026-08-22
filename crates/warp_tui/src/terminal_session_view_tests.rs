@@ -1716,7 +1716,9 @@ fn model_menu_labels_the_profile_default_model() {
         let fixture = focus_test_fixture(&mut app);
         let (view, _) = add_focus_test_session(&mut app, &fixture, true);
         view.update(&mut app, |view, ctx| {
-            view.model_menu.update(ctx, |menu, ctx| menu.open(ctx));
+            let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+            view.model_menu
+                .update(ctx, |menu, ctx| menu.open(team_context, ctx));
         });
 
         view.read(&app, |view, ctx| {

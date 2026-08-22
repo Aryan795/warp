@@ -8,6 +8,7 @@ pub use ::ai::agent::{
     AskUserQuestionAction, AskUserQuestionEffect, AskUserQuestionPhase, AskUserQuestionSession,
     QuestionDraft,
 };
+pub use crate::workspaces::user_workspaces::TeamContext;
 pub use ai::agent::action::{RunAgentsAgentRunConfig, RunAgentsExecutionMode, RunAgentsRequest};
 pub use ai::agent::orchestration_config::{OrchestrationConfig, OrchestrationConfigStatus};
 pub use repo_metadata::repositories::RepoDetectionSource;

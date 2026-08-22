@@ -4,13 +4,11 @@ use warp::editor::{CodeEditorModel, CodeEditorModelEvent};
 use warp::settings::AISettings;
 use warp::tui_export::{
     AISettingsChangedEvent, LLMId, LLMPreferences, LLMPreferencesEvent, ModelPickerChoice,
-    ServerId, UserWorkspaces, query_model_picker_choices, should_show_bedrock_icon_for_model,
+    TeamContext, query_model_picker_choices, should_show_bedrock_icon_for_model,
     should_show_gemini_enterprise_agent_platform_icon_for_model, should_show_key_icon_for_model,
 };
 use warp_editor::model::CoreEditorModel;
-use warpui_core::{
-    AppContext, Entity, EntityId, ModelContext, ModelHandle, SingletonEntity, WindowId,
-};
+use warpui_core::{AppContext, Entity, EntityId, ModelContext, ModelHandle, SingletonEntity};
 
 use crate::inline_menu::{
     MAX_INLINE_MENU_ROWS, TuiInlineMenuHeader, TuiInlineMenuListState, TuiInlineMenuRow,
@@ -46,7 +44,7 @@ pub(crate) struct TuiModelMenuModel {
     input_editor: ModelHandle<CodeEditorModel>,
     suggestions_mode: ModelHandle<TuiInputSuggestionsModeModel>,
     terminal_view_id: EntityId,
-    window_id: WindowId,
+    team_context: Option<TeamContext>,
     state: TuiModelMenuState,
 }
 
@@ -55,7 +53,6 @@ impl TuiModelMenuModel {
         input_editor: ModelHandle<CodeEditorModel>,
         suggestions_mode: ModelHandle<TuiInputSuggestionsModeModel>,
         terminal_view_id: EntityId,
-        window_id: WindowId,
         ctx: &mut ModelContext<Self>,
     ) -> Self {
         ctx.subscribe_to_model(&input_editor, |model, _, event, ctx| {
@@ -85,7 +82,7 @@ impl TuiModelMenuModel {
             input_editor,
             suggestions_mode,
             terminal_view_id,
-            window_id,
+            team_context: None,
             state: TuiModelMenuState::Closed,
         }
     }
@@ -118,7 +115,7 @@ impl TuiModelMenuModel {
             input_editor,
             suggestions_mode,
             terminal_view_id: EntityId::new(),
-            window_id: WindowId::new(),
+            team_context: None,
             state: TuiModelMenuState::Open { list },
         }
     }
@@ -132,7 +129,11 @@ impl TuiModelMenuModel {
             && self.suggestions_mode.as_ref(ctx).mode() == TuiInputSuggestionsMode::ModelSelector
     }
 
-    pub(crate) fn open(&mut self, ctx: &mut ModelContext<Self>) {
+    pub(crate) fn open(
+        &mut self,
+        team_context: Option<TeamContext>,
+        ctx: &mut ModelContext<Self>,
+    ) {
         if self.has_open_state() {
             return;
         }
@@ -147,6 +148,7 @@ impl TuiModelMenuModel {
         self.state = TuiModelMenuState::Open {
             list: TuiInlineMenuListState::default(),
         };
+        self.team_context = team_context;
         self.refresh_rows(ctx);
     }
 
@@ -155,6 +157,7 @@ impl TuiModelMenuModel {
             return;
         }
         self.state = TuiModelMenuState::Closed;
+        self.team_context = None;
         self.suggestions_mode.update(ctx, |mode, ctx| {
             mode.close_if_active(TuiInputSuggestionsMode::ModelSelector, ctx);
         });
@@ -253,16 +256,23 @@ impl TuiModelMenuModel {
             .get_active_profile_base_model(ctx, Some(self.terminal_view_id))
             .id
             .clone();
-        let team_uid = UserWorkspaces::as_ref(ctx).team_uid_for_window(self.window_id);
         let choices = query_model_picker_choices(
             preferences,
             preferences.get_base_llm_choices_for_agent_mode(ctx),
             &query,
+            self.team_context.as_ref(),
             ctx,
         );
         let rows = choices
             .into_iter()
-            .map(|choice| model_menu_row(choice, &profile_default_id, team_uid, ctx))
+            .map(|choice| {
+                model_menu_row(
+                    choice,
+                    &profile_default_id,
+                    self.team_context.as_ref(),
+                    ctx,
+                )
+            })
             .collect::<Vec<_>>();
         let preferred_index = preferred_selection_index(&rows, &active_id, query.trim().is_empty());
         let TuiModelMenuState::Open { list } = &mut self.state else {
@@ -278,15 +288,19 @@ impl TuiModelMenuModel {
 fn model_menu_row(
     choice: ModelPickerChoice,
     profile_default_id: &LLMId,
-    team_uid: Option<ServerId>,
+    team_context: Option<&TeamContext>,
     app: &AppContext,
 ) -> TuiModelMenuRow {
-    let uses_external_inference = should_show_key_icon_for_model(&choice.llm, team_uid, app)
-        || should_show_bedrock_icon_for_model(&choice.llm, team_uid, app)
-        || should_show_gemini_enterprise_agent_platform_icon_for_model(&choice.llm, team_uid, app);
+    let uses_external_inference = should_show_key_icon_for_model(&choice.llm, team_context, app)
+        || should_show_bedrock_icon_for_model(&choice.llm, team_context, app)
+        || should_show_gemini_enterprise_agent_platform_icon_for_model(
+            &choice.llm,
+            team_context,
+            app,
+        );
     TuiModelMenuRow {
         is_selectable: choice.is_selectable(),
-        is_key_connected: should_show_key_icon_for_model(&choice.llm, team_uid, app),
+        is_key_connected: should_show_key_icon_for_model(&choice.llm, team_context, app),
         discount_percentage: choice
             .llm
             .discount_percentage

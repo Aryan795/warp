@@ -97,7 +97,8 @@ fn provider_key_controls_key_connected_callout() {
             .unwrap();
         let connected_row = app.read(|ctx| {
             let choice =
-                query_model_picker_choices(LLMPreferences::as_ref(ctx), [&llm], "", ctx).remove(0);
+                query_model_picker_choices(LLMPreferences::as_ref(ctx), [&llm], "", None, ctx)
+                    .remove(0);
             model_menu_row(choice, &LLMId::from("profile-default"), None, ctx)
         });
         assert_eq!(

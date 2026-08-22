@@ -5,7 +5,7 @@ use ai::api_keys::{ApiKeyManager, ApiKeyManagerEvent};
 use ai::grok_subscription::oauth::OauthAttempt;
 use warp::editor::{CodeEditorModel, CodeEditorModelEvent};
 use warp::settings::{AISettings, AISettingsChangedEvent};
-use warp::tui_export::UserWorkspaces;
+use warp::tui_export::{TeamContext, UserWorkspaces};
 use warp_core::features::FeatureFlag;
 use warp_core::settings::ToggleableSetting as _;
 use warp_editor::model::CoreEditorModel;
@@ -93,6 +93,7 @@ pub(crate) struct TuiApiKeysMenuEvent;
 pub(crate) struct TuiApiKeysMenuModel {
     input_editor: ModelHandle<CodeEditorModel>,
     suggestions_mode: ModelHandle<TuiInputSuggestionsModeModel>,
+    team_context: Option<TeamContext>,
     state: TuiApiKeysMenuState,
 }
 
@@ -153,6 +154,7 @@ impl TuiApiKeysMenuModel {
         Self {
             input_editor,
             suggestions_mode,
+            team_context: None,
             state: TuiApiKeysMenuState::Closed,
         }
     }
@@ -163,7 +165,7 @@ impl TuiApiKeysMenuModel {
             Some("Grok subscriptions aren't available in this build.")
         } else if !workspaces.is_byo_api_key_enabled(ctx) {
             Some("Grok subscriptions require BYOK access for this workspace.")
-        } else if !workspaces.are_member_byo_keys_allowed() {
+        } else if !workspaces.are_member_byo_keys_allowed_for_context(self.team_context.as_ref()) {
             Some("Your organization doesn't allow member-provided credentials.")
         } else {
             None
@@ -194,7 +196,11 @@ impl TuiApiKeysMenuModel {
             && self.suggestions_mode.as_ref(ctx).mode() == TuiInputSuggestionsMode::ApiKeys
     }
 
-    pub(crate) fn open(&mut self, ctx: &mut ModelContext<Self>) {
+    pub(crate) fn open(
+        &mut self,
+        team_context: Option<TeamContext>,
+        ctx: &mut ModelContext<Self>,
+    ) {
         if self.is_open(ctx) {
             return;
         }
@@ -204,14 +210,19 @@ impl TuiApiKeysMenuModel {
         if !did_open {
             return;
         }
+        self.team_context = team_context;
         self.transition_to_browsing(ctx);
     }
 
     /// Opens the menu and jumps straight into the Grok connect path, equivalent to selecting the
     /// "X premium or SuperGrok subscription" row. Reuses `edit_provider` so the already-connected
     /// and policy-gated cases surface the same messaging as the provider list.
-    pub(crate) fn open_and_connect_grok(&mut self, ctx: &mut ModelContext<Self>) {
-        self.open(ctx);
+    pub(crate) fn open_and_connect_grok(
+        &mut self,
+        team_context: Option<TeamContext>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.open(team_context, ctx);
         if self.is_open(ctx) {
             self.edit_provider(LLMProvider::Xai, ctx);
         }
@@ -586,6 +597,7 @@ impl TuiApiKeysMenuModel {
             | TuiApiKeysMenuState::EditingProvider { .. } => None,
         };
         self.state = TuiApiKeysMenuState::Closed;
+        self.team_context = None;
         if let Some(controller) = grok_controller
             && controller.as_ref(ctx).is_active()
         {

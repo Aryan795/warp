@@ -1056,6 +1056,7 @@ fn shared_model_picker_query_orders_filters_and_marks_disabled_choices() {
             preferences,
             preferences.get_base_llm_choices_for_agent_mode(app),
             "",
+            None,
             app,
         );
         assert_eq!(
@@ -1072,6 +1073,7 @@ fn shared_model_picker_query_orders_filters_and_marks_disabled_choices() {
             preferences,
             preferences.get_base_llm_choices_for_agent_mode(app),
             "gpt 5",
+            None,
             app,
         );
         assert_eq!(filtered.len(), 1);
@@ -1400,8 +1402,8 @@ fn credential_source_for_model_differs_by_window_team_policy() {
         initialize_team_scope_test_app(&mut app, workspace);
         app.add_singleton_model(LLMPreferences::new);
 
-        let (window_a, _view_a) = create_team_scope_test_window(&mut app);
-        let (window_b, _view_b) = create_team_scope_test_window(&mut app);
+        let (window_a, view_a) = create_team_scope_test_window(&mut app);
+        let (window_b, view_b) = create_team_scope_test_window(&mut app);
         UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
             user_workspaces.set_team_for_window(window_a, team_a.uid, ctx);
             user_workspaces.set_team_for_window(window_b, team_b.uid, ctx);
@@ -1410,30 +1412,30 @@ fn credential_source_for_model_differs_by_window_team_policy() {
         let mut anthropic_llm = agent_llm("claude-opus", "Opus");
         anthropic_llm.provider = LLMProvider::Anthropic;
 
+        let team_context_a = view_a.update(&mut app, |_, ctx| {
+            UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+        });
+        let team_context_b = view_b.update(&mut app, |_, ctx| {
+            UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+        });
         app.read(|ctx| {
-            let user_workspaces = UserWorkspaces::as_ref(ctx);
-            // Each window resolves its own team fresh, exactly as the controller boundary
-            // and the model-picker call sites do (`team_uid_for_window`), so this exercises
-            // the same production path rather than constructing a context directly.
-            let team_uid_a = user_workspaces.team_uid_for_window(window_a);
-            let team_uid_b = user_workspaces.team_uid_for_window(window_b);
 
             assert_eq!(
-                byo_key_source_for_model(&anthropic_llm, team_uid_a, ctx),
+                byo_key_source_for_model(&anthropic_llm, team_context_a.as_ref(), ctx),
                 Some(ByoKeySource::TeamProvided),
                 "team A's first-party key should surface as the credential source"
             );
             assert_eq!(
-                byo_key_source_for_model(&anthropic_llm, team_uid_b, ctx),
+                byo_key_source_for_model(&anthropic_llm, team_context_b.as_ref(), ctx),
                 None,
                 "team B has no team-provided key and disallows member keys, so no credential source"
             );
             assert!(
-                should_show_key_icon_for_model(&anthropic_llm, team_uid_a, ctx),
+                should_show_key_icon_for_model(&anthropic_llm, team_context_a.as_ref(), ctx),
                 "window A should show the key icon"
             );
             assert!(
-                !should_show_key_icon_for_model(&anthropic_llm, team_uid_b, ctx),
+                !should_show_key_icon_for_model(&anthropic_llm, team_context_b.as_ref(), ctx),
                 "window B should not show the key icon"
             );
         });

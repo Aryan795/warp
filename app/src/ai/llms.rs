@@ -18,10 +18,11 @@ use super::execution_profiles::profiles::AIExecutionProfilesModel;
 use crate::auth::AuthStateProvider;
 use crate::auth::auth_manager::{AuthManager, AuthManagerEvent};
 use crate::network::{NetworkStatus, NetworkStatusEvent, NetworkStatusKind};
-use crate::server::ids::ServerId;
 use crate::server::server_api::ServerApiProvider;
 use crate::user_config::{WarpConfig, WarpConfigUpdateEvent};
-use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
+use crate::workspaces::user_workspaces::{
+    TeamContext, TeamRenderContext, UserWorkspaces, UserWorkspacesEvent,
+};
 
 /// Checks if a user's' API key is being used for the given provider.
 /// Returns `true` if BYO API key is enabled and a key exists for the provider.
@@ -106,18 +107,18 @@ fn is_using_team_first_party_key_for_provider(provider: &LLMProvider, app: &AppC
 /// [`is_using_first_party_key_for_provider`] (via [`is_usable_llm`]), decides whether a
 /// `RequiresUpgrade` model should stay selectable, and re-scoping that decision to a specific
 /// window's team is a larger, separate change tracked as deferred work.
-fn first_party_key_source_for_provider_for_team(
+pub(crate) fn first_party_key_source_for_provider_for_context(
     provider: &LLMProvider,
-    team_uid: Option<ServerId>,
+    team_context: Option<&TeamContext>,
     app: &AppContext,
 ) -> Option<ByoKeySource> {
     let workspaces = UserWorkspaces::as_ref(app);
-    if workspaces.are_member_byo_keys_allowed_for_team(team_uid)
+    if workspaces.are_member_byo_keys_allowed_for_context(team_context)
         && is_using_api_key_for_provider(provider, app)
     {
         return Some(ByoKeySource::UserProvided);
     }
-    if workspaces.has_team_first_party_key_for_team(team_uid, *provider) {
+    if workspaces.has_team_first_party_key(team_context, *provider) {
         return Some(ByoKeySource::TeamProvided);
     }
     None
@@ -128,30 +129,54 @@ fn first_party_key_source_for_provider_for_team(
 /// by the caller; `None` for a no-team window.
 pub fn byo_key_source_for_model(
     llm: &LLMInfo,
-    team_uid: Option<ServerId>,
+    team_context: Option<&TeamContext>,
     app: &AppContext,
 ) -> Option<ByoKeySource> {
     let workspaces = UserWorkspaces::as_ref(app);
     let is_custom_endpoint = LLMPreferences::as_ref(app)
         .custom_llm_info_for_id(&llm.id)
         .is_some();
-    if is_custom_endpoint && workspaces.are_member_byo_endpoints_allowed_for_team(team_uid) {
+    if is_custom_endpoint
+        && workspaces.are_member_byo_endpoints_allowed_for_context(team_context)
+    {
         return Some(ByoKeySource::UserProvided);
     }
-    if workspaces.has_team_byo_endpoint_for_model_for_team(team_uid, llm.id.as_str()) {
+    if workspaces.has_team_byo_endpoint_for_model(team_context, llm.id.as_str()) {
         return Some(ByoKeySource::TeamProvided);
     }
-    first_party_key_source_for_provider_for_team(&llm.provider, team_uid, app)
+    first_party_key_source_for_provider_for_context(&llm.provider, team_context, app)
 }
 
 /// Whether the credential (key) icon should be shown for `llm` in `team_uid`'s window. See
 /// [`byo_key_source_for_model`].
 pub fn should_show_key_icon_for_model(
     llm: &LLMInfo,
-    team_uid: Option<ServerId>,
+    team_context: Option<&TeamContext>,
     app: &AppContext,
 ) -> bool {
-    byo_key_source_for_model(llm, team_uid, app).is_some()
+    byo_key_source_for_model(llm, team_context, app).is_some()
+}
+
+pub(crate) fn should_show_key_icon_for_model_for_render_context(
+    llm: &LLMInfo,
+    team_context: Option<&TeamRenderContext<'_>>,
+    app: &AppContext,
+) -> bool {
+    let workspaces = UserWorkspaces::as_ref(app);
+    let is_custom_endpoint = LLMPreferences::as_ref(app)
+        .custom_llm_info_for_id(&llm.id)
+        .is_some();
+    if is_custom_endpoint
+        && workspaces.agent_settings_are_member_byo_endpoints_allowed(team_context)
+    {
+        return true;
+    }
+    if workspaces.agent_settings_has_team_byo_endpoint_for_model(team_context, llm.id.as_str()) {
+        return true;
+    }
+    (workspaces.agent_settings_are_member_byo_keys_allowed(team_context)
+        && is_using_api_key_for_provider(&llm.provider, app))
+        || workspaces.agent_settings_has_team_first_party_key(team_context, llm.provider)
 }
 
 fn should_show_host_icon_for_model(
@@ -168,26 +193,27 @@ fn should_show_host_icon_for_model(
 
 pub fn should_show_bedrock_icon_for_model(
     llm: &LLMInfo,
-    team_uid: Option<ServerId>,
+    team_context: Option<&TeamContext>,
     app: &AppContext,
 ) -> bool {
     should_show_host_icon_for_model(
         llm,
         &LLMModelHost::AwsBedrock,
-        UserWorkspaces::as_ref(app).is_aws_bedrock_credentials_enabled_for_team_uid(team_uid, app),
+        UserWorkspaces::as_ref(app)
+            .is_aws_bedrock_credentials_enabled_for_context(team_context, app),
     )
 }
 
 pub fn should_show_gemini_enterprise_agent_platform_icon_for_model(
     llm: &LLMInfo,
-    team_uid: Option<ServerId>,
+    team_context: Option<&TeamContext>,
     app: &AppContext,
 ) -> bool {
     should_show_host_icon_for_model(
         llm,
         &LLMModelHost::GeminiEnterprise,
         UserWorkspaces::as_ref(app)
-            .is_gemini_enterprise_credentials_enabled_for_team_uid(team_uid, app),
+            .is_gemini_enterprise_credentials_enabled_for_context(team_context, app),
     )
 }
 

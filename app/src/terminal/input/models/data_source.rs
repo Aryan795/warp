@@ -18,7 +18,6 @@ use warpui::ui_components::button::ButtonVariant;
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
 use warpui::{
     AppContext, Element, Entity, EntityId, ModelContext, ModelHandle, SingletonEntity as _,
-    WindowId,
 };
 
 use super::model_spec_scores::{
@@ -30,7 +29,7 @@ use crate::ai::custom_model_routers::is_custom_router_id;
 use crate::ai::execution_profiles::model_menu_items::is_auto;
 use crate::ai::llms::{
     ByoKeySource, DisableReason, LLMId, LLMInfo, LLMPreferences, LLMProvider, LLMSpec,
-    ModelIconFlags, byo_key_source_for_model, is_using_first_party_key_for_provider,
+    ModelIconFlags, byo_key_source_for_model, first_party_key_source_for_provider_for_context,
     model_leading_icon, should_show_bedrock_icon_for_model,
     should_show_gemini_enterprise_agent_platform_icon_for_model,
 };
@@ -40,7 +39,6 @@ use crate::search::data_source::{Query, QueryFilter, QueryResult};
 use crate::search::mixer::DataSourceRunErrorWrapper;
 use crate::search::result_renderer::ItemHighlightState;
 use crate::search::{SearchItem, SyncDataSource};
-use crate::server::ids::ServerId;
 use crate::settings_view::SettingsSection;
 use crate::terminal::input::inline_menu::{
     DetailsRenderConfig, InlineMenuAction, InlineMenuMessageArgs, InlineMenuType,
@@ -49,7 +47,7 @@ use crate::terminal::input::inline_menu::{
 use crate::terminal::input::message_bar::{Message, MessageItem};
 use crate::terminal::view::ambient_agent::AmbientAgentViewModel;
 use crate::workspace::WorkspaceAction;
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces};
 
 /// Auto models pick their concrete model server-side, so the cost line names the
 /// class of inference rather than a host the request may never reach.
@@ -163,6 +161,7 @@ pub fn query_model_picker_choices<'a>(
     llm_preferences: &LLMPreferences,
     choices: impl IntoIterator<Item = &'a LLMInfo>,
     query_text: &str,
+    team_context: Option<&TeamContext>,
     app: &AppContext,
 ) -> Vec<ModelPickerChoice> {
     let choices = ModelSelectorDataSource::order_model_choices(
@@ -185,14 +184,13 @@ pub fn query_model_picker_choices<'a>(
                 }
                 Some(result)
             };
-            // Deliberately ambient, not `team_uid`-scoped: this mirrors `is_usable_llm`'s
-            // selectability check elsewhere in `ai::llms`, which the same deferred-work note on
-            // `first_party_key_source_for_provider_for_team` applies to. Re-scoping which BYO
-            // credential unlocks a `RequiresUpgrade` model to a specific window's team is a
-            // larger, separate change; this picker's disabled state must keep agreeing with the
-            // (ambient) disabled state every other model menu renders for the same `LLMInfo`.
             let disable_reason = if llm.disable_reason == Some(DisableReason::RequiresUpgrade)
-                && is_using_first_party_key_for_provider(&llm.provider, app)
+                && first_party_key_source_for_provider_for_context(
+                    &llm.provider,
+                    team_context,
+                    app,
+                )
+                .is_some()
             {
                 None
             } else {
@@ -216,21 +214,30 @@ pub fn query_model_picker_choices<'a>(
 
 pub struct ModelSelectorDataSource {
     terminal_view_id: EntityId,
-    window_id: WindowId,
+    team_context: Option<TeamContext>,
     ambient_agent_view_model: Option<ModelHandle<AmbientAgentViewModel>>,
 }
 
 impl ModelSelectorDataSource {
     pub fn new(
         terminal_view_id: EntityId,
-        window_id: WindowId,
+        team_context: Option<TeamContext>,
         ambient_agent_view_model: Option<ModelHandle<AmbientAgentViewModel>>,
     ) -> Self {
         Self {
             terminal_view_id,
-            window_id,
+            team_context,
             ambient_agent_view_model,
         }
+    }
+
+    pub fn set_team_context(
+        &mut self,
+        team_context: Option<TeamContext>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.team_context = team_context;
+        ctx.notify();
     }
 
     /// Attaches an ambient agent view model after construction so the picker treats this pane as a
@@ -330,16 +337,20 @@ impl SyncDataSource for ModelSelectorDataSource {
                 })
                 .collect_vec()
         };
-        let team_uid = UserWorkspaces::as_ref(app).team_uid_for_window(self.window_id);
         Ok(
-            query_model_picker_choices(llm_preferences, choices, &query.text, app)
+            query_model_picker_choices(
+                llm_preferences,
+                choices,
+                &query.text,
+                self.team_context.as_ref(),
+                app,
+            )
                 .into_iter()
                 .map(|choice| {
                     QueryResult::from(ModelSearchItem::new(
                         choice,
                         &active_llm_id,
-                        self.window_id,
-                        team_uid,
+                        self.team_context.as_ref(),
                         app,
                     ))
                 })
@@ -355,7 +366,7 @@ impl Entity for ModelSelectorDataSource {
 #[derive(Clone)]
 struct ModelSearchItem {
     id: LLMId,
-    window_id: WindowId,
+    upgrade_url: String,
     provider: LLMProvider,
     spec: Option<LLMSpec>,
     leading_icon: Icon,
@@ -381,17 +392,27 @@ impl ModelSearchItem {
     fn new(
         choice: ModelPickerChoice,
         active_llm_id: &LLMId,
-        window_id: WindowId,
-        team_uid: Option<ServerId>,
+        team_context: Option<&TeamContext>,
         app: &AppContext,
     ) -> Self {
         let llm = &choice.llm;
         let is_custom_router = is_custom_router_id(llm.id.as_str());
         let is_auto = is_auto(llm);
-        let is_using_bedrock = should_show_bedrock_icon_for_model(llm, team_uid, app);
+        let is_using_bedrock = should_show_bedrock_icon_for_model(llm, team_context, app);
         let is_using_gemini_enterprise_agent_platform =
-            should_show_gemini_enterprise_agent_platform_icon_for_model(llm, team_uid, app);
-        let byo_key_source = byo_key_source_for_model(llm, team_uid, app);
+            should_show_gemini_enterprise_agent_platform_icon_for_model(llm, team_context, app);
+        let byo_key_source = byo_key_source_for_model(llm, team_context, app);
+        let workspaces = UserWorkspaces::as_ref(app);
+        let upgrade_url = team_context
+            .and_then(|context| workspaces.team_for_context(context))
+            .map(|team| UserWorkspaces::upgrade_link_for_team(team.uid))
+            .unwrap_or_else(|| {
+                let user_id = AuthStateProvider::as_ref(app)
+                    .get()
+                    .user_id()
+                    .unwrap_or_default();
+                UserWorkspaces::upgrade_link(user_id)
+            });
         let leading_icon = model_leading_icon(
             llm,
             ModelIconFlags {
@@ -406,7 +427,7 @@ impl ModelSearchItem {
             (!is_using_cloud_host && byo_key_source.is_some()).then_some(Icon::Key);
         Self {
             id: llm.id.clone(),
-            window_id,
+            upgrade_url,
             provider: llm.provider,
             spec: llm.spec.clone(),
             leading_icon,
@@ -694,16 +715,6 @@ impl SearchItem for ModelSearchItem {
             .with_child(scores);
 
         if self.disable_reason.as_ref() == Some(&DisableReason::RequiresUpgrade) {
-            let upgrade_url =
-                if let Some(team) = UserWorkspaces::as_ref(app).team_for_window(self.window_id) {
-                    UserWorkspaces::upgrade_link_for_team(team.uid)
-                } else {
-                    let user_id = AuthStateProvider::as_ref(app)
-                        .get()
-                        .user_id()
-                        .unwrap_or_default();
-                    UserWorkspaces::upgrade_link(user_id)
-                };
 
             let mut display_name = self.display_text.clone();
             if let Some(first) = display_name.get_mut(..1) {
@@ -722,7 +733,7 @@ impl SearchItem for ModelSearchItem {
                 FormattedTextFragment::plain_text(format!(
                     "{display_name} is not available for free users. "
                 )),
-                FormattedTextFragment::hyperlink("Upgrade", upgrade_url),
+                FormattedTextFragment::hyperlink("Upgrade", self.upgrade_url.clone()),
             ];
 
             if byok_available {

@@ -1049,7 +1049,7 @@ fn fill_filterable_dropdown<F>(
     // `set_filtered_items` keeps an empty selection blank rather than
     // auto-selecting the first model.
     dropdown.set_placeholder(MODEL_PLACEHOLDER, ctx);
-    let team_uid = UserWorkspaces::as_ref(ctx).team_uid_for_window(ctx.window_id());
+    let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
     let items = available_model_menu_items(
         LLMPreferences::as_ref(ctx)
             .get_base_llm_choices_for_agent_mode(ctx)
@@ -1060,7 +1060,7 @@ fn fill_filterable_dropdown<F>(
         None,
         false,
         false,
-        team_uid,
+        team_context.as_ref(),
         ctx,
     );
     dropdown.set_rich_items(items, ctx);

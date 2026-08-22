@@ -1700,7 +1700,6 @@ impl TuiTerminalSessionView {
                 input_editor_model.clone(),
                 suggestions_mode.clone(),
                 terminal_surface_id,
-                window_id,
                 ctx,
             )
         });
@@ -3856,11 +3855,12 @@ impl TuiTerminalSessionView {
     /// the same menu `/model` surfaces. The model's existing open/dismiss paths
     /// preserve active-menu arbitration, input cleanup, and selection handling.
     fn toggle_model_menu(&mut self, ctx: &mut ViewContext<Self>) {
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         self.model_menu.update(ctx, |menu, ctx| {
             if menu.is_open(ctx) {
                 menu.dismiss(ctx);
             } else {
-                menu.open(ctx);
+                menu.open(team_context, ctx);
             }
         });
     }
@@ -4601,12 +4601,16 @@ impl TuiTerminalSessionView {
                 self.reset_statusline(command.name, ctx);
             }
             SlashCommandKind::ApiKeys => {
-                self.api_keys_menu.update(ctx, |menu, ctx| menu.open(ctx));
+                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                self.api_keys_menu
+                    .update(ctx, |menu, ctx| menu.open(team_context, ctx));
                 record_static_slash_command_accepted(command.name, true, ctx);
             }
             SlashCommandKind::ConnectGrok => {
-                self.api_keys_menu
-                    .update(ctx, |menu, ctx| menu.open_and_connect_grok(ctx));
+                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                self.api_keys_menu.update(ctx, |menu, ctx| {
+                    menu.open_and_connect_grok(team_context, ctx)
+                });
                 record_static_slash_command_accepted(command.name, true, ctx);
             }
             SlashCommandKind::Upgrade => {
@@ -4638,7 +4642,9 @@ impl TuiTerminalSessionView {
                 record_static_slash_command_accepted(command.name, true, ctx);
             }
             SlashCommandKind::Model => {
-                self.model_menu.update(ctx, |menu, ctx| menu.open(ctx));
+                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                self.model_menu
+                    .update(ctx, |menu, ctx| menu.open(team_context, ctx));
                 record_static_slash_command_accepted(command.name, true, ctx);
             }
             SlashCommandKind::InvokeSkill => {

@@ -34,6 +34,7 @@ use crate::ui_components::icons::Icon;
 use crate::view_components::action_button::{ActionButton, ActionButtonTheme, ButtonSize};
 use crate::view_components::alert::{Alert, AlertConfig};
 use crate::workspace::WorkspaceAction;
+use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
 
 struct ManageDefaultsTheme;
 
@@ -129,11 +130,11 @@ impl InlineModelSelectorView {
         positioner: &ModelHandle<InlineMenuPositioner>,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
-        let window_id = ctx.window_id();
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         let data_source = ctx.add_model(move |_| {
             // Built without the ambient model; the setter (called below for construction and by
             // the lazy shared-session viewer path) is the single point that attaches it.
-            ModelSelectorDataSource::new(terminal_view_id, window_id, None)
+            ModelSelectorDataSource::new(terminal_view_id, team_context, None)
         });
 
         let tab_configs = TAB_CONFIGS.clone();
@@ -275,6 +276,17 @@ impl InlineModelSelectorView {
                 });
             }
         });
+        ctx.subscribe_to_model(
+            &UserWorkspaces::handle(ctx),
+            |me, _, event, ctx| match event {
+                UserWorkspacesEvent::WindowTeamChanged { window_id }
+                    if *window_id == ctx.window_id() =>
+                {
+                    me.rerun_query(ctx);
+                }
+                _ => {}
+            },
+        );
 
         ctx.subscribe_to_model(input_buffer_model, |me, _, _, ctx| {
             if !me
@@ -466,6 +478,11 @@ impl InlineModelSelectorView {
     }
 
     fn rerun_query(&self, ctx: &mut ViewContext<Self>) {
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        self.model_selector_data_source
+            .update(ctx, |data_source, ctx| {
+                data_source.set_team_context(team_context, ctx);
+            });
         let filters = self.menu_model(ctx).active_tab_filters();
         let text = if self.filter_results_by_input {
             self.input_buffer_model

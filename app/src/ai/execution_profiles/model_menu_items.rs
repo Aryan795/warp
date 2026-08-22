@@ -16,7 +16,7 @@ use crate::ai::llms::{
     should_show_gemini_enterprise_agent_platform_icon_for_model, should_show_key_icon_for_model,
 };
 use crate::menu::{MenuItem, MenuItemFields, MenuTooltipPosition};
-use crate::server::ids::ServerId;
+use crate::workspaces::user_workspaces::TeamContext;
 
 pub fn is_auto(llm: &LLMInfo) -> bool {
     llm.display_name.to_lowercase().contains("auto")
@@ -77,7 +77,7 @@ fn make_item_fields<A: Action + Clone>(
     model_id_to_add_profile_default_label_to: Option<&LLMId>,
     collapse_auto: bool,
     collapse_reasoning_variants: bool,
-    team_uid: Option<ServerId>,
+    team_context: Option<&TeamContext>,
     app: &AppContext,
 ) -> MenuItem<A> {
     let is_auto_model = is_auto(llm);
@@ -88,10 +88,10 @@ fn make_item_fields<A: Action + Clone>(
     } else {
         llm.menu_display_name()
     };
-    let is_using_bedrock = should_show_bedrock_icon_for_model(llm, team_uid, app);
+    let is_using_bedrock = should_show_bedrock_icon_for_model(llm, team_context, app);
     let is_using_gemini_enterprise_agent_platform =
-        should_show_gemini_enterprise_agent_platform_icon_for_model(llm, team_uid, app);
-    let is_using_api_key = should_show_key_icon_for_model(llm, team_uid, app);
+        should_show_gemini_enterprise_agent_platform_icon_for_model(llm, team_context, app);
+    let is_using_api_key = should_show_key_icon_for_model(llm, team_context, app);
     let is_custom_router = is_custom_router_id(llm.id.as_str());
     let leading_icon = model_leading_icon(
         llm,
@@ -187,7 +187,7 @@ pub fn available_model_menu_items<A: Action + Clone>(
     position_id_fn: Option<&dyn Fn(&LLMId) -> String>,
     collapse_auto: bool,
     collapse_reasoning_variants: bool,
-    team_uid: Option<ServerId>,
+    team_context: Option<&TeamContext>,
     app: &AppContext,
 ) -> Vec<MenuItem<A>> {
     choices
@@ -200,7 +200,7 @@ pub fn available_model_menu_items<A: Action + Clone>(
                 model_id_to_add_profile_default_label_to,
                 collapse_auto,
                 collapse_reasoning_variants,
-                team_uid,
+                team_context,
                 app,
             )
         })
