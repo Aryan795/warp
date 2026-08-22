@@ -40,7 +40,7 @@ use crate::terminal::model::session::active_session::ActiveSession;
 use crate::terminal::model::terminal_model::TerminalModel;
 use crate::terminal::model_events::{ModelEvent, ModelEventDispatcher};
 use crate::terminal::view::{AgentModePromptSuggestion, PromptSuggestion};
-use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces};
+use crate::workspaces::user_workspaces::{TeamContextForOperation, UserWorkspaces};
 
 const NUM_TOP_BLOCK_LINES: usize = 100;
 const NUM_BOTTOM_BLOCK_LINES: usize = 200;
@@ -212,7 +212,7 @@ impl PassiveSuggestionsModel {
     pub(crate) fn handle_user_block_completed(
         &mut self,
         block_completed: &UserBlockCompleted,
-        team_context: Option<TeamContext>,
+        team_context: TeamContextForOperation,
         ctx: &mut ModelContext<Self>,
     ) {
         if block_completed.was_part_of_agent_interaction {
@@ -244,7 +244,7 @@ impl PassiveSuggestionsModel {
     fn generate_prompt_suggestions(
         &mut self,
         block_completed: UserBlockCompleted,
-        team_context: Option<TeamContext>,
+        team_context: TeamContextForOperation,
         ctx: &mut ModelContext<Self>,
     ) {
         let block_id = block_completed
@@ -324,7 +324,7 @@ impl PassiveSuggestionsModel {
     fn generate_unit_test_suggestion(
         &mut self,
         block_completed: UserBlockCompleted,
-        team_context: Option<TeamContext>,
+        team_context: TeamContextForOperation,
         ctx: &mut ModelContext<Self>,
     ) {
         #[cfg(target_family = "wasm")]
@@ -381,7 +381,7 @@ impl PassiveSuggestionsModel {
         &mut self,
         prompt_suggestion: AgentModePromptSuggestion,
         block_id: BlockId,
-        team_context: Option<TeamContext>,
+        team_context: TeamContextForOperation,
         ctx: &mut ModelContext<Self>,
     ) {
         if !passive_code_diffs_enabled(ctx) {

@@ -1753,14 +1753,25 @@ impl PaneGroup {
                     && let Ok(llm_id) = serde_json::from_str::<LLMId>(llm_override)
                 {
                     log::info!("Selecting base agent model {llm_id} (from terminal snapshot)");
-                    let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                    let handle = ctx.handle();
+                    let profile_default_model_id = {
+                        let team_context = UserWorkspaces::as_ref(ctx).team_context(&handle, ctx);
+                        crate::ai::llms::LLMPreferences::as_ref(ctx)
+                            .get_active_profile_base_model_for_team_context(
+                                Some(terminal_view_id),
+                                team_context.as_ref(),
+                                ctx,
+                            )
+                            .id
+                            .clone()
+                    };
                     crate::ai::llms::LLMPreferences::handle(ctx).update(
                         ctx,
                         move |llm_prefs, ctx| {
-                            llm_prefs.update_preferred_agent_mode_llm(
+                            llm_prefs.update_preferred_agent_mode_llm_with_profile_default(
                                 &llm_id,
                                 terminal_view_id,
-                                team_context.as_ref(),
+                                &profile_default_model_id,
                                 ctx,
                             );
                         },
@@ -5521,7 +5532,7 @@ impl PaneGroup {
             model.get_or_async_fetch_task_data(&task_id, ctx);
         });
         let mut conversation_id = None;
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
         terminal_view.update(ctx, move |view, ctx| {
             // The cloud-mode terminal model starts with
             // `is_executing_oz_environment_startup_commands = true`. Clear it

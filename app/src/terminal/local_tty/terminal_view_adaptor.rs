@@ -312,17 +312,19 @@ fn wire_up_terminal_view_session_sharing(
         }
 
         if let Some(network) = session_sharer_for_models.borrow().as_ref() {
-            let Some(view) = weak_view_for_models.upgrade(ctx) else {
+            if weak_view_for_models.upgrade(ctx).is_none() {
                 return;
-            };
-            let selected_model_id: String = view.update(ctx, |_, ctx| {
-                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
-                LLMPreferences::as_ref(ctx)
-                    .get_active_base_model(Some(terminal_view_id), team_context.as_ref(), ctx)
-                    .id
-                    .clone()
-                    .into()
-            });
+            }
+            let team_context = UserWorkspaces::as_ref(ctx).team_context(&weak_view_for_models, ctx);
+            let selected_model_id: String = LLMPreferences::as_ref(ctx)
+                .get_active_base_model_for_team_context(
+                    Some(terminal_view_id),
+                    team_context.as_ref(),
+                    ctx,
+                )
+                .id
+                .clone()
+                .into();
 
             // The send method will check if it actually changed and skip if not
             network.update(ctx, |network, _| {
@@ -851,7 +853,7 @@ impl TerminalManager<TerminalView> {
                     cli_agent_session,
                 };
                 let team_context = terminal_view.update(ctx, |_, ctx| {
-                    UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+                    UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx)
                 });
                 let model_for_network = model.clone();
                 let source_for_network = source.clone();
@@ -1393,7 +1395,7 @@ impl TerminalManager<TerminalView> {
 
                 // Execute the agent prompt in the Oz-harness case
                 terminal_view.update(ctx, |view, ctx| {
-                    let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                    let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
                     // Restore the sharer's frozen visual state. The buffer is cleared by
                     // system_clear_buffer when SentRequest fires from execute_agent_prompt_for_shared_session.
                     view.input().update(ctx, |input, ctx| {

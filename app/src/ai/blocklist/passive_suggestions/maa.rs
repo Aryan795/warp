@@ -30,7 +30,7 @@ use crate::terminal::model::session::active_session::ActiveSession;
 use crate::terminal::model::terminal_model::TerminalModel;
 use crate::terminal::model_events::{ModelEvent, ModelEventDispatcher};
 use crate::terminal::view::ambient_agent::AmbientAgentViewModel;
-use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces};
+use crate::workspaces::user_workspaces::{TeamContextForOperation, UserWorkspaces};
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "local_fs")] {
@@ -175,7 +175,7 @@ impl PassiveSuggestionsModel {
         followup_conversation_id: Option<AIConversationId>,
         trigger: PassiveSuggestionTrigger,
         supported_tools: Vec<warp_multi_agent_api::ToolType>,
-        team_context: Option<TeamContext>,
+        team_context: TeamContextForOperation,
         ctx: &mut ModelContext<Self>,
     ) {
         // Capture before the call — `Some` means there's a real conversation
@@ -402,7 +402,7 @@ impl PassiveSuggestionsModel {
     pub(crate) fn handle_finished_stream(
         &mut self,
         conversation_id: AIConversationId,
-        team_context: Option<TeamContext>,
+        team_context: TeamContextForOperation,
         ctx: &mut ModelContext<Self>,
     ) {
         self.abort_pending_requests(ctx);
@@ -445,7 +445,7 @@ impl PassiveSuggestionsModel {
         block_context: Box<BlockContext>,
         relevant_files: Vec<FileContext>,
         supported_tools: Vec<warp_multi_agent_api::ToolType>,
-        team_context: Option<TeamContext>,
+        team_context: TeamContextForOperation,
         ctx: &mut ModelContext<Self>,
     ) {
         let trigger =
@@ -458,7 +458,7 @@ impl PassiveSuggestionsModel {
     pub(crate) fn handle_user_block_completed(
         &mut self,
         block_completed: &UserBlockCompleted,
-        team_context: Option<TeamContext>,
+        team_context: TeamContextForOperation,
         ctx: &mut ModelContext<Self>,
     ) {
         self.abort_pending_requests(ctx);

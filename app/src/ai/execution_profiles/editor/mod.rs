@@ -46,7 +46,7 @@ use crate::view_components::{
     Dropdown, DropdownItem, FilterableDropdown, SubmittableTextInput, SubmittableTextInputEvent,
 };
 use crate::workspace::WorkspaceAction;
-use crate::workspaces::user_workspaces::{TeamContext, TeamRenderContext, UserWorkspacesEvent};
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspacesEvent};
 use crate::{Appearance, TemplatableMCPServerManager, UserWorkspaces};
 
 const MODEL_MENU_WIDTH: f32 = 250.;
@@ -542,7 +542,8 @@ impl ExecutionProfileEditorView {
         // persisted limit (or the active model's max as a sensible default).
         // The slider's current position is derived from the profile on each
         // render, so no local Cell is needed.
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let handle = ctx.handle();
+        let team_context = UserWorkspaces::as_ref(ctx).team_context(&handle, ctx);
         let initial_context_window_value =
             initial_context_window_display_value(&profile_data, team_context.as_ref(), ctx);
         let context_window_slider_state = SliderStateHandle::default();
@@ -1256,11 +1257,11 @@ impl ExecutionProfileEditorView {
     ) where
         G: for<'a> FnOnce(
             &'a LLMPreferences,
-            Option<&TeamRenderContext<'_>>,
+            Option<&TeamContext<'_>>,
             &AppContext,
         ) -> Vec<&'a LLMInfo>,
         A: Fn(LLMId) -> ExecutionProfileEditorViewAction,
-        D: FnOnce(&LLMPreferences, Option<&TeamRenderContext<'_>>, &AppContext) -> LLMId,
+        D: FnOnce(&LLMPreferences, Option<&TeamContext<'_>>, &AppContext) -> LLMId,
     {
         menu.update(ctx, |dropdown, ctx| {
             let disabled_by_ai_toggle = !AISettings::as_ref(ctx).is_any_ai_enabled(ctx);
@@ -1274,8 +1275,7 @@ impl ExecutionProfileEditorView {
             let (items, has_upgrade_gated_models, model_to_select) = {
                 let llm_prefs = LLMPreferences::as_ref(ctx);
                 let handle = ctx.handle();
-                let team_context =
-                    UserWorkspaces::as_ref(ctx).team_render_context_for_view_handle(&handle, ctx);
+                let team_context = UserWorkspaces::as_ref(ctx).team_context(&handle, ctx);
                 let choices = get_choices(llm_prefs, team_context.as_ref(), ctx);
                 let has_upgrade_gated_models = choices
                     .iter()
@@ -1328,8 +1328,7 @@ impl ExecutionProfileEditorView {
 
             let (items, model_to_select) = {
                 let handle = ctx.handle();
-                let team_context =
-                    UserWorkspaces::as_ref(ctx).team_render_context_for_view_handle(&handle, ctx);
+                let team_context = UserWorkspaces::as_ref(ctx).team_context(&handle, ctx);
                 let choices = LLMPreferences::as_ref(ctx)
                     .get_coding_llm_choices_for_render_context(team_context.as_ref(), ctx)
                     .collect_vec();
@@ -1497,16 +1496,14 @@ impl ExecutionProfileEditorView {
     fn configurable_context_window_for_render(&self, app: &AppContext) -> Option<LLMContextWindow> {
         let profile =
             BlocklistAIPermissions::as_ref(app).permissions_profile_for_id(app, &self.profile_id);
-        let team_render_context =
-            UserWorkspaces::as_ref(app).team_render_context_for_view_handle(&self.weak_self, app);
+        let team_render_context = UserWorkspaces::as_ref(app).team_context(&self.weak_self, app);
         profile.configurable_context_window_for_render_context(team_render_context.as_ref(), app)
     }
 
     fn current_context_window_display_value_for_render(&self, app: &AppContext) -> Option<u32> {
         let profile =
             BlocklistAIPermissions::as_ref(app).permissions_profile_for_id(app, &self.profile_id);
-        let team_render_context =
-            UserWorkspaces::as_ref(app).team_render_context_for_view_handle(&self.weak_self, app);
+        let team_render_context = UserWorkspaces::as_ref(app).team_context(&self.weak_self, app);
         profile.context_window_display_value_for_render_context(team_render_context.as_ref(), app)
     }
 
@@ -1516,8 +1513,7 @@ impl ExecutionProfileEditorView {
     ) -> Option<LLMContextWindow> {
         let profile =
             BlocklistAIPermissions::as_ref(ctx).permissions_profile_for_id(ctx, &self.profile_id);
-        let team_render_context =
-            UserWorkspaces::as_ref(ctx).team_render_context_for_view_handle(&self.weak_self, ctx);
+        let team_render_context = UserWorkspaces::as_ref(ctx).team_context(&self.weak_self, ctx);
         profile.configurable_context_window_for_render_context(team_render_context.as_ref(), ctx)
     }
 
@@ -1527,8 +1523,7 @@ impl ExecutionProfileEditorView {
     ) -> Option<u32> {
         let profile =
             BlocklistAIPermissions::as_ref(ctx).permissions_profile_for_id(ctx, &self.profile_id);
-        let team_render_context =
-            UserWorkspaces::as_ref(ctx).team_render_context_for_view_handle(&self.weak_self, ctx);
+        let team_render_context = UserWorkspaces::as_ref(ctx).team_context(&self.weak_self, ctx);
         profile.context_window_display_value_for_render_context(team_render_context.as_ref(), ctx)
     }
 
@@ -1607,14 +1602,14 @@ impl ExecutionProfileEditorView {
 
 fn initial_context_window_display_value(
     profile_data: &AIExecutionProfile,
-    team_context: Option<&TeamContext>,
+    team_context: Option<&TeamContext<'_>>,
     app: &AppContext,
 ) -> u32 {
     profile_data
-        .context_window_display_value(team_context, app)
+        .context_window_display_value_for_render_context(team_context, app)
         .unwrap_or_else(|| {
             LLMPreferences::as_ref(app)
-                .get_default_base_model(team_context, app)
+                .get_default_base_model_for_render_context(team_context, app)
                 .context_window
                 .default_max
         })

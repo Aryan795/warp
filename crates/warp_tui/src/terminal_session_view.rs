@@ -1458,9 +1458,9 @@ impl TuiTerminalSessionView {
         self.input_view.update(ctx, |input, ctx| input.clear(ctx));
         ctx.notify();
 
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
         let request_prompt = prompt.clone();
-        let dispatched = self.ai_controller.update(ctx, move |controller, ctx| {
+        let dispatched = self.ai_controller.update(ctx, |controller, ctx| {
             controller.send_user_query_in_conversation(
                 request_prompt,
                 conversation_id,
@@ -1924,7 +1924,7 @@ impl TuiTerminalSessionView {
                 conversation_id,
                 text,
             } => {
-                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
                 view.ai_controller.update(ctx, move |controller, ctx| {
                     controller.send_user_query_in_conversation(
                         text.clone(),
@@ -2372,7 +2372,7 @@ impl TuiTerminalSessionView {
         conversation_id: AIConversationId,
         ctx: &mut ViewContext<Self>,
     ) {
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
         self.ai_controller.update(ctx, move |controller, ctx| {
             controller.set_ambient_agent_task_id(Some(task_id), ctx);
             controller.send_agent_query_in_conversation(prompt, conversation_id, team_context, ctx);
@@ -3456,7 +3456,7 @@ impl TuiTerminalSessionView {
     }
 
     fn handle_pasted(&mut self, text: String, ctx: &mut ViewContext<Self>) {
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
         let disposition = self.attachment_bar.update(ctx, |bar, ctx| {
             bar.try_attach_paste(text.clone(), team_context, ctx)
         });
@@ -3868,7 +3868,7 @@ impl TuiTerminalSessionView {
     }
 
     fn start_grok_oauth(&mut self, ctx: &mut ViewContext<Self>) {
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
         self.api_keys_menu
             .update(ctx, |menu, ctx| menu.start_grok_oauth(team_context, ctx));
     }
@@ -4027,7 +4027,7 @@ impl TuiTerminalSessionView {
             report_error!("TUI prompt submitted without an eagerly selected conversation");
             return;
         };
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
         let request_prompt = prompt.clone();
         let dispatched = self.ai_controller.update(ctx, move |controller, ctx| {
             controller.send_user_query_in_conversation(
@@ -4220,7 +4220,7 @@ impl TuiTerminalSessionView {
             self.show_transient_hint(LOCAL_SKILLS_REMOTE_EXECUTION_ERROR_MESSAGE.to_owned(), ctx);
             return;
         }
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
         let result = self.ai_controller.update(ctx, move |controller, ctx| {
             controller.send_invoke_skill_request(reference, user_query, team_context, ctx)
         });
@@ -4329,15 +4329,12 @@ impl TuiTerminalSessionView {
     }
 
     fn handle_accepted_model(&mut self, id: &LLMId, ctx: &mut ViewContext<Self>) {
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
-        LLMPreferences::handle(ctx).update(ctx, |preferences, ctx| {
-            preferences.update_preferred_agent_mode_llm(
-                id,
-                self.terminal_surface_id,
-                team_context.as_ref(),
-                ctx,
-            );
-        });
+        LLMPreferences::update_preferred_agent_mode_llm_for_view(
+            id,
+            self.terminal_surface_id,
+            &ctx.handle(),
+            ctx,
+        );
         self.model_menu.update(ctx, |menu, ctx| menu.dismiss(ctx));
     }
     fn handle_accepted_mcp_action(&mut self, action: TuiMcpAction, ctx: &mut ViewContext<Self>) {
@@ -4746,7 +4743,7 @@ impl TuiTerminalSessionView {
                     );
                     return;
                 };
-                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
                 self.ai_controller.update(ctx, move |controller, ctx| {
                     controller.send_create_new_project_request(query.to_owned(), team_context, ctx);
                 });
@@ -5681,7 +5678,7 @@ impl TypedActionView for TuiTerminalSessionView {
                 }
             }
             TuiTerminalSessionAction::PasteFromClipboard => {
-                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
                 self.attachment_bar
                     .update(ctx, |bar, ctx| bar.paste_from_clipboard(team_context, ctx));
             }

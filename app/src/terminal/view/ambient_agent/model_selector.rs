@@ -400,7 +400,8 @@ impl ModelSelector {
             button.set_disabled(!is_configuring, ctx);
         });
 
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let handle = ctx.handle();
+        let team_context = UserWorkspaces::as_ref(ctx).team_context(&handle, ctx);
         let active_label = match self.active_harness(ctx) {
             Some(harness) if !matches!(harness, Harness::Oz | Harness::Unknown) => self
                 .resolved_harness_selection(harness, ctx)
@@ -419,7 +420,11 @@ impl ModelSelector {
                 })
                 .unwrap_or_else(|| "default".to_string()),
             _ => LLMPreferences::as_ref(ctx)
-                .get_active_base_model(Some(self.terminal_view_id), team_context.as_ref(), ctx)
+                .get_active_base_model_for_render_context(
+                    Some(self.terminal_view_id),
+                    team_context.as_ref(),
+                    ctx,
+                )
                 .display_name
                 .clone(),
         };
@@ -481,9 +486,14 @@ impl ModelSelector {
         ctx: &ViewContext<Self>,
     ) -> (Vec<MenuItem<ModelSelectorAction>>, ModelSelectorAction) {
         let llm_preferences = LLMPreferences::as_ref(ctx);
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let handle = ctx.handle();
+        let team_context = UserWorkspaces::as_ref(ctx).team_context(&handle, ctx);
         let active_llm_id = llm_preferences
-            .get_active_base_model(Some(self.terminal_view_id), team_context.as_ref(), ctx)
+            .get_active_base_model_for_render_context(
+                Some(self.terminal_view_id),
+                team_context.as_ref(),
+                ctx,
+            )
             .id
             .clone();
 
@@ -658,12 +668,23 @@ impl TypedActionView for ModelSelector {
             ModelSelectorAction::SelectModel(llm_id) => {
                 let terminal_view_id = self.terminal_view_id;
                 let id_for_update = llm_id.clone();
-                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                let handle = ctx.handle();
+                let profile_default_model_id = {
+                    let team_context = UserWorkspaces::as_ref(ctx).team_context(&handle, ctx);
+                    LLMPreferences::as_ref(ctx)
+                        .get_active_profile_base_model_for_team_context(
+                            Some(terminal_view_id),
+                            team_context.as_ref(),
+                            ctx,
+                        )
+                        .id
+                        .clone()
+                };
                 LLMPreferences::handle(ctx).update(ctx, move |prefs, ctx| {
-                    prefs.update_preferred_agent_mode_llm(
+                    prefs.update_preferred_agent_mode_llm_with_profile_default(
                         &id_for_update,
                         terminal_view_id,
-                        team_context.as_ref(),
+                        &profile_default_model_id,
                         ctx,
                     );
                 });

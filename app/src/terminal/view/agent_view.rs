@@ -301,7 +301,7 @@ impl TerminalView {
                     }
                 });
 
-                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
                 self.ai_controller.update(ctx, move |controller, ctx| {
                     controller.send_user_query_in_conversation(
                         initial_prompt,

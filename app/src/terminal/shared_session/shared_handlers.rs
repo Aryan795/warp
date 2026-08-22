@@ -31,26 +31,45 @@ pub(crate) fn apply_selected_agent_model_update(
         return;
     };
     let terminal_view_id = view.id();
-    let team_context = view.update(ctx, |_, ctx| {
-        UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
-    });
     let model_id = LLMId::from(selected_model.model_id().to_owned());
+    let (current_model_id, profile_default_model_id, model_is_available) = {
+        let team_context = UserWorkspaces::as_ref(ctx).team_context(weak_view_handle, ctx);
+        let llm_prefs = LLMPreferences::as_ref(ctx);
+        let current_model_id = llm_prefs
+            .get_active_base_model_for_team_context(
+                Some(terminal_view_id),
+                team_context.as_ref(),
+                ctx,
+            )
+            .id
+            .clone();
+        let profile_default_model_id = llm_prefs
+            .get_active_profile_base_model_for_team_context(
+                Some(terminal_view_id),
+                team_context.as_ref(),
+                ctx,
+            )
+            .id
+            .clone();
+        let model_is_available = llm_prefs.is_agent_mode_model_selectable_for_team_context(
+            &model_id,
+            team_context.as_ref(),
+            ctx,
+        );
+        (
+            current_model_id,
+            profile_default_model_id,
+            model_is_available,
+        )
+    };
 
     // Check if this is already our current model - if so, skip the update to avoid loops
-    let llm_prefs = LLMPreferences::as_ref(ctx);
-    let current_model_id = llm_prefs
-        .get_active_base_model(Some(terminal_view_id), team_context.as_ref(), ctx)
-        .id
-        .clone();
     if current_model_id == model_id {
         return;
     }
 
     // Check if the model is available to the viewer. If not, skip the update.
     // This handles cases where the viewer and sharer have different model permissions.
-    let model_is_available = llm_prefs
-        .get_base_llm_choices_for_agent_mode(ctx)
-        .any(|info| info.id == model_id);
     if !model_is_available {
         log::warn!("Skipping shared-session model update - {model_id} is unknown");
         return;
@@ -60,10 +79,10 @@ pub(crate) fn apply_selected_agent_model_update(
 
     // Update the local LLMPreferences to match the selected model
     LLMPreferences::handle(ctx).update(ctx, move |prefs, ctx| {
-        prefs.update_preferred_agent_mode_llm(
+        prefs.update_preferred_agent_mode_llm_with_profile_default(
             &model_id,
             terminal_view_id,
-            team_context.as_ref(),
+            &profile_default_model_id,
             ctx,
         );
     });

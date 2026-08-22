@@ -169,23 +169,36 @@ pub struct CreateTeamResponse {
 /// share a lifetime, restructure so they share the single owner instead.
 ///
 /// This is scope, not authority: the server still authorizes every request made under it.
-pub struct TeamContext {
-    team_uid: ServerId,
+pub struct TeamContextForOperation {
+    team_uid: Option<ServerId>,
 }
 pub(crate) trait TeamScope {
-    fn team_uid(&self) -> ServerId;
+    fn team_uid(&self) -> Option<ServerId>;
 }
 
-impl TeamScope for TeamContext {
-    fn team_uid(&self) -> ServerId {
+impl TeamScope for TeamContextForOperation {
+    fn team_uid(&self) -> Option<ServerId> {
         self.team_uid
+    }
+}
+impl TeamContextForOperation {
+    pub(crate) fn teamless() -> Self {
+        Self { team_uid: None }
+    }
+}
+#[cfg(any(test, feature = "test-util"))]
+impl TeamContextForOperation {
+    pub fn teamless_for_test() -> Self {
+        Self::teamless()
     }
 }
 
 #[cfg(test)]
-impl TeamContext {
+impl TeamContextForOperation {
     pub(crate) fn new_for_test(team_uid: ServerId) -> Self {
-        Self { team_uid }
+        Self {
+            team_uid: Some(team_uid),
+        }
     }
 }
 
@@ -196,12 +209,12 @@ impl TeamContext {
 /// view state or moved into a `'static` future, and it deliberately offers no conversion to
 /// a [`TeamContext`]. A [`WeakViewHandle`] locates a window to read from; it is not evidence
 /// that the holder is running in that window, which is what minting operation scope requires.
-pub(crate) struct TeamRenderContext<'a> {
-    team_uid: &'a ServerId,
+pub(crate) struct TeamContext<'a> {
+    team_uid: Option<&'a ServerId>,
 }
-impl TeamScope for TeamRenderContext<'_> {
-    fn team_uid(&self) -> ServerId {
-        *self.team_uid
+impl TeamScope for TeamContext<'_> {
+    fn team_uid(&self) -> Option<ServerId> {
+        self.team_uid.copied()
     }
 }
 
@@ -297,13 +310,12 @@ impl UserWorkspaces {
     }
 
     pub(crate) fn upgrade_link_for_render_context(
-        context: Option<&TeamRenderContext<'_>>,
+        context: Option<&TeamContext<'_>>,
         user_id: UserUid,
     ) -> String {
-        context.map_or_else(
-            || Self::upgrade_link(user_id),
-            |context| Self::upgrade_link_for_team(context.team_uid()),
-        )
+        context
+            .and_then(TeamScope::team_uid)
+            .map_or_else(|| Self::upgrade_link(user_id), Self::upgrade_link_for_team)
     }
 
     pub fn warp_agent_cli_upgrade_link(user_id: Option<UserUid>) -> String {
@@ -410,30 +422,36 @@ impl UserWorkspaces {
 
     /// Captures the team selected in `ctx`'s window as an operation's [`TeamContext`]. This
     /// is the only way application code mints one.
-    pub fn team_context_for_view<T: Entity>(&self, ctx: &ViewContext<T>) -> Option<TeamContext> {
-        self.team_uid_for_window(ctx.window_id())
-            .map(|team_uid| TeamContext { team_uid })
+    pub fn team_context_for_operation<T: Entity>(
+        &self,
+        ctx: &ViewContext<T>,
+    ) -> TeamContextForOperation {
+        TeamContextForOperation {
+            team_uid: self.team_uid_for_window(ctx.window_id()),
+        }
     }
 
     /// Resolves `view`'s window team for one render. See [`TeamRenderContext`].
-    pub(crate) fn team_render_context_for_view_handle<'a, T: Entity>(
+    pub(crate) fn team_context<'a, T: Entity>(
         &'a self,
         view: &WeakViewHandle<T>,
         app: &AppContext,
-    ) -> Option<TeamRenderContext<'a>> {
+    ) -> Option<TeamContext<'a>> {
         let window_id = view.window_id(app)?;
-        let team_uid = self.team_uid_for_window(window_id)?;
-        let team = self.team_from_uid(team_uid)?;
-        Some(TeamRenderContext {
-            team_uid: &team.uid,
-        })
-        Some(TeamRenderContext { team })
+        let team_uid = self.window_team_uids.get(&window_id)?;
+        let team_uid = match team_uid {
+            Some(team_uid) => Some(&self.team_from_uid(*team_uid)?.uid),
+            None => None,
+        };
+        Some(TeamContext { team_uid })
     }
 
     /// Reads a captured team's metadata. Returns `None` once that team is gone from the
     /// current workspace, e.g. after the user leaves it.
     pub(crate) fn team_for_context<S: TeamScope + ?Sized>(&self, context: &S) -> Option<&Team> {
-        self.team_from_uid(context.team_uid())
+        context
+            .team_uid()
+            .and_then(|team_uid| self.team_from_uid(team_uid))
     }
 
     /// Returns the windows whose team assignment changed.
@@ -648,9 +666,9 @@ impl UserWorkspaces {
         &self,
         context: Option<&S>,
     ) -> Option<&LlmSettings> {
-        match context {
-            Some(context) => self
-                .team_for_context(context)
+        match context.and_then(TeamScope::team_uid) {
+            Some(team_uid) => self
+                .team_from_uid(team_uid)
                 .map(|team| &team.settings.llm_settings),
             None => self.llm_settings_for_team(None),
         }
@@ -658,7 +676,7 @@ impl UserWorkspaces {
 
     pub(crate) fn is_custom_llm_enabled(
         &self,
-        team_render_context: Option<TeamRenderContext<'_>>,
+        team_render_context: Option<TeamContext<'_>>,
     ) -> bool {
         self.llm_settings(team_render_context.as_ref())
             .is_some_and(|settings| settings.enabled)
@@ -815,15 +833,18 @@ impl UserWorkspaces {
                         .is_some_and(|policy| policy.is_voice_enabled)
                 })
     }
-    pub fn are_member_byo_keys_allowed_for_context(&self, context: Option<&TeamContext>) -> bool {
-        self.are_member_byo_keys_allowed_for_scope(context)
+    pub fn are_member_byo_keys_allowed_for_context(
+        &self,
+        context: &TeamContextForOperation,
+    ) -> bool {
+        self.are_member_byo_keys_allowed_for_scope(Some(context))
     }
 
     pub(crate) fn are_member_byo_endpoints_allowed_for_context(
         &self,
-        context: Option<&TeamContext>,
+        context: &TeamContextForOperation,
     ) -> bool {
-        self.are_member_byo_endpoints_allowed_for_scope(context)
+        self.are_member_byo_endpoints_allowed_for_scope(Some(context))
     }
 
     /// Whether BYO API key is enabled for the current user, based on the active policies.
@@ -902,14 +923,14 @@ impl UserWorkspaces {
         &self,
         context: Option<&S>,
     ) -> bool {
-        self.are_member_byo_keys_allowed_for_team(context.map(TeamScope::team_uid))
+        self.are_member_byo_keys_allowed_for_team(context.and_then(TeamScope::team_uid))
     }
 
     pub(crate) fn are_member_byo_endpoints_allowed_for_scope<S: TeamScope + ?Sized>(
         &self,
         context: Option<&S>,
     ) -> bool {
-        self.are_member_byo_endpoints_allowed_for_team(context.map(TeamScope::team_uid))
+        self.are_member_byo_endpoints_allowed_for_team(context.and_then(TeamScope::team_uid))
     }
 
     /// [`Self::are_member_byo_endpoints_allowed`], but reading `team_uid`'s team's effective
@@ -932,7 +953,7 @@ impl UserWorkspaces {
     /// [`Self::are_member_byo_keys_allowed_for_team`], scoped to `context`'s team.
     pub(crate) fn agent_settings_are_member_byo_keys_allowed(
         &self,
-        context: Option<&TeamRenderContext<'_>>,
+        context: Option<&TeamContext<'_>>,
     ) -> bool {
         self.are_member_byo_keys_allowed_for_scope(context)
     }
@@ -940,7 +961,7 @@ impl UserWorkspaces {
     /// [`Self::are_member_byo_endpoints_allowed_for_team`], scoped to `context`'s team.
     pub(crate) fn agent_settings_are_member_byo_endpoints_allowed(
         &self,
-        context: Option<&TeamRenderContext<'_>>,
+        context: Option<&TeamContext<'_>>,
     ) -> bool {
         self.are_member_byo_endpoints_allowed_for_scope(context)
     }
@@ -987,7 +1008,7 @@ impl UserWorkspaces {
 
     pub(crate) fn agent_settings_has_team_first_party_key(
         &self,
-        context: Option<&TeamRenderContext<'_>>,
+        context: Option<&TeamContext<'_>>,
         provider: LLMProvider,
     ) -> bool {
         self.has_team_first_party_key(context, provider)
@@ -996,7 +1017,7 @@ impl UserWorkspaces {
     /// Whether `user_email` has admin permissions on `context`'s team.
     pub(crate) fn agent_settings_team_has_admin_permissions(
         &self,
-        context: &TeamRenderContext<'_>,
+        context: &TeamContext<'_>,
         user_email: &str,
     ) -> bool {
         self.team_for_context(context)
@@ -1006,9 +1027,9 @@ impl UserWorkspaces {
     /// The Build-plan upgrade link for `context`'s team.
     pub(crate) fn agent_settings_upgrade_link_for_team(
         &self,
-        context: &TeamRenderContext<'_>,
-    ) -> String {
-        Self::upgrade_link_for_team(context.team_uid())
+        context: &TeamContext<'_>,
+    ) -> Option<String> {
+        context.team_uid().map(Self::upgrade_link_for_team)
     }
 
     fn host_settings(
@@ -1066,21 +1087,21 @@ impl UserWorkspaces {
 
     pub(crate) fn is_aws_bedrock_available_for_render_context(
         &self,
-        context: Option<&TeamRenderContext<'_>>,
+        context: Option<&TeamContext<'_>>,
     ) -> bool {
         Self::host_is_available(self.llm_settings(context), LLMModelHost::AwsBedrock)
     }
 
     pub(crate) fn aws_bedrock_host_enablement_setting_for_render_context(
         &self,
-        context: Option<&TeamRenderContext<'_>>,
+        context: Option<&TeamContext<'_>>,
     ) -> HostEnablementSetting {
         Self::host_enablement_setting(self.llm_settings(context), LLMModelHost::AwsBedrock)
     }
 
     pub(crate) fn is_aws_bedrock_credentials_toggleable_for_render_context(
         &self,
-        context: Option<&TeamRenderContext<'_>>,
+        context: Option<&TeamContext<'_>>,
     ) -> bool {
         matches!(
             self.aws_bedrock_host_enablement_setting_for_render_context(context),
@@ -1090,7 +1111,7 @@ impl UserWorkspaces {
 
     pub(crate) fn is_aws_bedrock_credentials_enabled_for_render_context(
         &self,
-        context: Option<&TeamRenderContext<'_>>,
+        context: Option<&TeamContext<'_>>,
         app: &AppContext,
     ) -> bool {
         self.is_aws_bedrock_credentials_enabled_for_context(context, app)
@@ -1127,21 +1148,21 @@ impl UserWorkspaces {
 
     pub(crate) fn is_gemini_enterprise_available_for_render_context(
         &self,
-        context: Option<&TeamRenderContext<'_>>,
+        context: Option<&TeamContext<'_>>,
     ) -> bool {
         Self::host_is_available(self.llm_settings(context), LLMModelHost::GeminiEnterprise)
     }
 
     pub(crate) fn gemini_enterprise_host_enablement_setting_for_render_context(
         &self,
-        context: Option<&TeamRenderContext<'_>>,
+        context: Option<&TeamContext<'_>>,
     ) -> HostEnablementSetting {
         Self::host_enablement_setting(self.llm_settings(context), LLMModelHost::GeminiEnterprise)
     }
 
     pub(crate) fn is_gemini_enterprise_credentials_toggleable_for_render_context(
         &self,
-        context: Option<&TeamRenderContext<'_>>,
+        context: Option<&TeamContext<'_>>,
     ) -> bool {
         matches!(
             self.gemini_enterprise_host_enablement_setting_for_render_context(context),
@@ -1177,7 +1198,7 @@ impl UserWorkspaces {
 
     pub(crate) fn is_gemini_enterprise_credentials_enabled_for_render_context(
         &self,
-        context: Option<&TeamRenderContext<'_>>,
+        context: Option<&TeamContext<'_>>,
         app: &AppContext,
     ) -> bool {
         self.is_gemini_enterprise_credentials_enabled_for_context(context, app)

@@ -1050,8 +1050,7 @@ fn fill_filterable_dropdown<F>(
     // auto-selecting the first model.
     dropdown.set_placeholder(MODEL_PLACEHOLDER, ctx);
     let handle = ctx.handle();
-    let team_context =
-        UserWorkspaces::as_ref(ctx).team_render_context_for_view_handle(&handle, ctx);
+    let team_context = UserWorkspaces::as_ref(ctx).team_context(&handle, ctx);
     let items = available_model_menu_items(
         LLMPreferences::as_ref(ctx)
             .get_base_llm_choices_for_agent_mode_for_render_context(team_context.as_ref(), ctx)

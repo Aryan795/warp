@@ -70,7 +70,7 @@ use crate::ai::get_relevant_files::controller::GetRelevantFilesController;
 use crate::terminal::TerminalModel;
 use crate::terminal::model::session::active_session::ActiveSession;
 use crate::terminal::model_events::ModelEventDispatcher;
-use crate::workspaces::user_workspaces::TeamContext;
+use crate::workspaces::user_workspaces::TeamContextForOperation;
 use crate::{TelemetryEvent, send_telemetry_from_ctx};
 
 /// The status of an action from an AI output.
@@ -234,7 +234,7 @@ pub struct BlocklistAIActionModel {
 
     /// Map from conversation ID to actions received in the most recent AI output that are finished.
     finished_action_results: HashMap<AIConversationId, Vec<Arc<AIAgentActionResult>>>,
-    request_team_contexts: HashMap<AIConversationId, Option<TeamContext>>,
+    request_team_contexts: HashMap<AIConversationId, TeamContextForOperation>,
 
     /// Original order for the current batch of actions.
     ///
@@ -625,7 +625,7 @@ impl BlocklistAIActionModel {
     pub(super) fn set_request_team_context(
         &mut self,
         conversation_id: AIConversationId,
-        team_context: Option<TeamContext>,
+        team_context: TeamContextForOperation,
     ) {
         self.request_team_contexts
             .insert(conversation_id, team_context);
@@ -634,17 +634,15 @@ impl BlocklistAIActionModel {
     pub(super) fn take_request_team_context(
         &mut self,
         conversation_id: AIConversationId,
-    ) -> Option<Option<TeamContext>> {
+    ) -> Option<TeamContextForOperation> {
         self.request_team_contexts.remove(&conversation_id)
     }
 
     pub(super) fn request_team_context(
         &self,
         conversation_id: AIConversationId,
-    ) -> Option<Option<&TeamContext>> {
-        self.request_team_contexts
-            .get(&conversation_id)
-            .map(Option::as_ref)
+    ) -> Option<&TeamContextForOperation> {
+        self.request_team_contexts.get(&conversation_id)
     }
 
     /// Returns the `AIActionStatus` for the action corresponding to the given `id`, if any.

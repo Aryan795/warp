@@ -17,7 +17,7 @@ use crate::server::server_api::team::MockTeamClient;
 use crate::server::server_api::workspace::MockWorkspaceClient;
 use crate::settings::AISettings;
 use crate::workspaces::team::Team;
-use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces};
+use crate::workspaces::user_workspaces::{TeamContextForOperation, UserWorkspaces};
 use crate::workspaces::workspace::{
     BillingMetadata, HostEnablementSetting, LlmHostSettings, ManagedByokByoePolicy,
     TeamByoSettings, TeamSettings, Tier, Workspace,
@@ -169,8 +169,8 @@ fn apply_team_byo_policy_gates_member_credentials_by_team_policy() {
                 ctx,
             )
         });
-        let team_context_a = TeamContext::new_for_test(team_a.uid);
-        let team_context_b = TeamContext::new_for_test(team_b.uid);
+        let team_context_a = TeamContextForOperation::new_for_test(team_a.uid);
+        let team_context_b = TeamContextForOperation::new_for_test(team_b.uid);
         let api_key_manager = app.add_singleton_model(ApiKeyManager::new);
         api_key_manager.update(&mut app, |manager, ctx| {
             manager
@@ -202,7 +202,7 @@ fn apply_team_byo_policy_gates_member_credentials_by_team_policy() {
                 },
                 ctx,
             );
-            let binding = match geap_policy_for_context(Some(&team_context_a), ctx) {
+            let binding = match geap_policy_for_context(&team_context_a, ctx) {
                 GeapPolicy::Mintable(binding) => binding,
                 other => panic!("expected a mintable GEAP policy, got {other:?}"),
             };
@@ -221,7 +221,7 @@ fn apply_team_byo_policy_gates_member_credentials_by_team_policy() {
             let api_key_manager = ApiKeyManager::as_ref(ctx);
             let is_aws_bedrock_enabled = UserWorkspaces::as_ref(ctx)
                 .is_aws_bedrock_credentials_enabled_for_context(Some(&team_context_a), ctx);
-            let geap_binding = geap_policy_for_context(Some(&team_context_a), ctx).mint_binding();
+            let geap_binding = geap_policy_for_context(&team_context_a, ctx).mint_binding();
             request_params.api_keys = api_key_manager.api_keys_for_request(
                 true,
                 is_aws_bedrock_enabled,
@@ -248,7 +248,7 @@ fn apply_team_byo_policy_gates_member_credentials_by_team_policy() {
 
         app.read(|ctx| {
             let mut allowed = request_params.clone();
-            allowed.apply_team_byo_policy(Some(&team_context_a), ctx);
+            allowed.apply_team_byo_policy(&team_context_a, ctx);
             let allowed_keys = allowed
                 .api_keys
                 .expect("team A's policy allows members to use their own keys");
@@ -270,7 +270,7 @@ fn apply_team_byo_policy_gates_member_credentials_by_team_policy() {
             );
 
             let mut disallowed = request_params.clone();
-            disallowed.apply_team_byo_policy(Some(&team_context_b), ctx);
+            disallowed.apply_team_byo_policy(&team_context_b, ctx);
             let disallowed_keys = disallowed.api_keys.expect(
                 "Bedrock/GEAP credentials must keep api_keys populated even once member keys are stripped",
             );

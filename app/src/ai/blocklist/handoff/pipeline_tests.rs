@@ -156,6 +156,7 @@ fn prepare_falls_back_to_auto_for_an_implicit_local_model() {
                         },
                         HandoffEntryPoint::Ampersand,
                         HandoffSurface::Gui,
+                        TeamContextForOperation::teamless(),
                     )
                     .with_launch(Some(PendingCloudLaunch {
                         prompt: "new task".to_owned(),
@@ -370,6 +371,7 @@ fn prepare_rejects_an_empty_source_without_a_prompt() {
                     },
                     HandoffEntryPoint::Ampersand,
                     HandoffSurface::Gui,
+                    TeamContextForOperation::teamless(),
                 ),
                 ctx,
             )
@@ -401,6 +403,7 @@ fn prepare_accepts_a_cwd_snapshot_without_a_source_or_prompt() {
                         },
                         HandoffEntryPoint::Ampersand,
                         HandoffSurface::Gui,
+                        TeamContextForOperation::teamless(),
                     )
                     .with_current_working_directory(Some("/repo".to_owned())),
                     ctx,
@@ -449,6 +452,7 @@ fn prepare_preserves_untransferred_source_attachments() {
                         },
                         HandoffEntryPoint::Ampersand,
                         HandoffSurface::Gui,
+                        TeamContextForOperation::teamless(),
                     )
                     .with_source_conversation_id(None)
                     .with_launch(Some(PendingCloudLaunch {
@@ -547,6 +551,7 @@ fn prepare_collects_completed_descendant_paths() {
                         },
                         HandoffEntryPoint::Ampersand,
                         HandoffSurface::Gui,
+                        TeamContextForOperation::teamless(),
                     )
                     .with_expected_conversation_id(Some(parent_id))
                     .with_launch(Some(PendingCloudLaunch {
@@ -643,6 +648,7 @@ fn prepare_orders_guards_cancellation_token_check_and_attachment_transfer() {
                     },
                     HandoffEntryPoint::Ampersand,
                     HandoffSurface::Gui,
+                    TeamContextForOperation::teamless(),
                 )
                 .with_expected_conversation_id(Some(conversation_id))
                 .with_long_running_command(true)
@@ -685,6 +691,7 @@ fn prepare_orders_guards_cancellation_token_check_and_attachment_transfer() {
                     },
                     HandoffEntryPoint::Ampersand,
                     HandoffSurface::Gui,
+                    TeamContextForOperation::teamless(),
                 )
                 .with_expected_conversation_id(Some(conversation_id))
                 .with_launch(Some(launch.clone()))
@@ -732,6 +739,7 @@ fn prepare_orders_guards_cancellation_token_check_and_attachment_transfer() {
                     },
                     HandoffEntryPoint::Ampersand,
                     HandoffSurface::Gui,
+                    TeamContextForOperation::teamless(),
                 )
                 .with_expected_conversation_id(Some(conversation_id))
                 .with_launch(Some(launch)),

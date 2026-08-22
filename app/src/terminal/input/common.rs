@@ -498,8 +498,7 @@ pub(super) fn maybe_add_buy_credits_banner(
         ai_request_usage.compute_buy_addon_credits_banner_display_state(app),
         BuyCreditsBannerDisplayState::Hidden
     );
-    let team_render_context =
-        workspaces.team_render_context_for_view_handle(input_view_handle, app);
+    let team_render_context = workspaces.team_context(input_view_handle, app);
     let Some(input) = input_view_handle.upgrade(app) else {
         return;
     };

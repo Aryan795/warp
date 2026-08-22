@@ -34,7 +34,7 @@ use crate::ai::mcp::TemplatableMCPServerManager;
 use crate::server::server_api::AIApiError;
 use crate::settings::AISettings;
 use crate::terminal::safe_mode_settings::get_secret_obfuscation_mode;
-use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces};
+use crate::workspaces::user_workspaces::{TeamContextForOperation, UserWorkspaces};
 
 /// Unique, server-generated conversation-scoped token to be roundtripped to the API when sending
 /// requests that follow-up within a given conversation.
@@ -228,7 +228,7 @@ impl RequestParams {
 
     pub(crate) fn new(
         terminal_view_id: Option<EntityId>,
-        team_context: Option<&TeamContext>,
+        team_context: &TeamContextForOperation,
         session_context: SessionContext,
         request_input: &RequestInput,
         conversation: ConversationData,
@@ -323,7 +323,7 @@ impl RequestParams {
         let geap_binding: Option<::ai::api_keys::GeapMintBinding> = None;
         let api_keys = api_key_manager.api_keys_for_request(
             is_byo_enabled,
-            user_workspaces.is_aws_bedrock_credentials_enabled_for_context(team_context, app),
+            user_workspaces.is_aws_bedrock_credentials_enabled_for_context(Some(team_context), app),
             geap_binding.clone(),
         );
         let is_custom_inference_enabled = user_workspaces.is_custom_inference_enabled(app);
@@ -432,7 +432,7 @@ impl RequestParams {
     /// disallows. The caller supplies the same operation scope used to construct `self`.
     pub(crate) fn apply_team_byo_policy(
         &mut self,
-        context: Option<&TeamContext>,
+        context: &TeamContextForOperation,
         app: &AppContext,
     ) {
         let user_workspaces = UserWorkspaces::as_ref(app);
@@ -447,7 +447,7 @@ impl RequestParams {
             let geap_binding: Option<::ai::api_keys::GeapMintBinding> = None;
             self.api_keys = api_key_manager.api_keys_for_request(
                 false,
-                user_workspaces.is_aws_bedrock_credentials_enabled_for_context(context, app),
+                user_workspaces.is_aws_bedrock_credentials_enabled_for_context(Some(context), app),
                 geap_binding.clone(),
             );
             self.geap_mint_binding = geap_binding;

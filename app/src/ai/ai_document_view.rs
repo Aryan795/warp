@@ -1257,7 +1257,7 @@ impl TypedActionView for AIDocumentView {
                     // The document is already marked as Dirty and pending_document_id
                     // is already set in the context model, so the updated plan will be attached.
                     // TODO(roland): don't directly use user query, but send a new input type that can be formatted on the server.
-                    let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                    let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
                     terminal_view
                         .ai_controller()
                         .update(ctx, move |controller, ctx| {

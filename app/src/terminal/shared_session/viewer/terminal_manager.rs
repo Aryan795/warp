@@ -597,17 +597,20 @@ impl TerminalManager {
                     return;
                 }
 
-                let Some(view) = weak_view_for_models.upgrade(ctx) else {
+                if weak_view_for_models.upgrade(ctx).is_none() {
                     return;
-                };
-                let selected_model_id: String = view.update(ctx, |_, ctx| {
-                    let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
-                    LLMPreferences::as_ref(ctx)
-                        .get_active_base_model(Some(terminal_view_id), team_context.as_ref(), ctx)
-                        .id
-                        .clone()
-                        .into()
-                });
+                }
+                let team_context =
+                    UserWorkspaces::as_ref(ctx).team_context(&weak_view_for_models, ctx);
+                let selected_model_id: String = LLMPreferences::as_ref(ctx)
+                    .get_active_base_model_for_team_context(
+                        Some(terminal_view_id),
+                        team_context.as_ref(),
+                        ctx,
+                    )
+                    .id
+                    .clone()
+                    .into();
 
                 Self::send_input_context_update_to_current_network(
                     &model_remote_update_guard,

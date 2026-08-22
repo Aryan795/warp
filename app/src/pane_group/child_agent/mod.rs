@@ -16,7 +16,8 @@ use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::attachment_utils::attachments_download_dir;
 use crate::ai::blocklist::agent_view::AgentViewEntryOrigin;
 use crate::ai::blocklist::{
-    BlocklistAIHistoryModel, StartAgentRequestId, inherit_child_agent_settings,
+    BlocklistAIHistoryModel, StartAgentRequestId, apply_inherited_child_agent_settings,
+    inherited_child_agent_settings_for_team_context,
 };
 use crate::pane_group::{PaneGroup, PaneId};
 use crate::terminal::TerminalView;
@@ -125,13 +126,18 @@ pub(crate) fn create_hidden_child_agent_conversation(
     let terminal_view_id = new_terminal_view.id();
     match group.terminal_view_from_pane_id(parent_pane_id, ctx) {
         Some(parent_terminal_view) => {
-            let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
-            inherit_child_agent_settings(
-                parent_terminal_view.id(),
-                terminal_view_id,
-                team_context.as_ref(),
-                ctx,
-            );
+            let parent_terminal_view_id = parent_terminal_view.id();
+            let parent_terminal_view = parent_terminal_view.downgrade();
+            let settings = {
+                let team_context =
+                    UserWorkspaces::as_ref(ctx).team_context(&parent_terminal_view, ctx);
+                inherited_child_agent_settings_for_team_context(
+                    parent_terminal_view_id,
+                    team_context.as_ref(),
+                    ctx,
+                )
+            };
+            apply_inherited_child_agent_settings(terminal_view_id, settings, ctx);
         }
         _ => {
             log::warn!(

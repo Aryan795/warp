@@ -27,12 +27,12 @@ use warp::tui_export::{
     InputTypeAutoDetectionSource, LLMId, LLMPreferences, LinkedWorkflowData,
     LongRunningCommandControlState, MessageId, OutputStatusUpdateCallback, ParsedSlashCommandInput,
     PtyIntent, PtyIntentEvent, ServerOutputId, Session, Shared, SizeInfo, SizeUpdate,
-    SlashCommandDataSource as _, SlashCommandKind, TaskId, TranscriptScope, TuiMcpAction,
-    TuiMcpServerId, TuiOnboardingMarker, TuiOnboardingMarkers, TuiUpArrowHistoryItemKind,
-    UserTakeOverReason, UserWorkspaces, WarpConfig, WarpConfigUpdateEvent,
-    export_conversation_markdown, forkable_tui_conversation_for_test, queue_tui_permission_action,
-    register_tui_session_view_test_singletons, set_tui_default_team_admin_for_test,
-    set_tui_managed_byok_team_for_test, slash_commands,
+    SlashCommandDataSource as _, SlashCommandKind, TaskId, TeamContextForOperation,
+    TranscriptScope, TuiMcpAction, TuiMcpServerId, TuiOnboardingMarker, TuiOnboardingMarkers,
+    TuiUpArrowHistoryItemKind, UserTakeOverReason, UserWorkspaces, WarpConfig,
+    WarpConfigUpdateEvent, export_conversation_markdown, forkable_tui_conversation_for_test,
+    queue_tui_permission_action, register_tui_session_view_test_singletons,
+    set_tui_default_team_admin_for_test, set_tui_managed_byok_team_for_test, slash_commands,
 };
 use warp_core::channel::{Channel, ChannelState};
 use warp_core::features::FeatureFlag;
@@ -1660,7 +1660,9 @@ fn accepted_model_only_changes_the_current_session() {
     App::test((), |mut app| async move {
         let fixture = focus_test_fixture(&mut app);
         LLMPreferences::handle(&app).update(&mut app, |preferences, ctx| {
-            let mut alternate = preferences.get_default_base_model(None, ctx).clone();
+            let mut alternate = preferences
+                .get_default_base_model(&TeamContextForOperation::teamless_for_test(), ctx)
+                .clone();
             alternate.id = "tui-session-override".into();
             alternate.display_name = "TUI session override".to_owned();
             preferences.add_agent_mode_model_for_test(alternate);
@@ -1670,7 +1672,11 @@ fn accepted_model_only_changes_the_current_session() {
         let (profile_default_id, alternate_id) = app.read(|ctx| {
             let preferences = LLMPreferences::as_ref(ctx);
             let profile_default_id = preferences
-                .get_active_profile_base_model(None, None, ctx)
+                .get_active_profile_base_model(
+                    None,
+                    &TeamContextForOperation::teamless_for_test(),
+                    ctx,
+                )
                 .id
                 .clone();
             let alternate_id = preferences
@@ -1692,19 +1698,31 @@ fn accepted_model_only_changes_the_current_session() {
             let second_surface_id = second_view.as_ref(ctx).terminal_surface_id;
             assert_eq!(
                 preferences
-                    .get_active_base_model(Some(first_surface_id), None, ctx)
+                    .get_active_base_model(
+                        Some(first_surface_id),
+                        &TeamContextForOperation::teamless_for_test(),
+                        ctx,
+                    )
                     .id,
                 alternate_id
             );
             assert_eq!(
                 preferences
-                    .get_active_base_model(Some(second_surface_id), None, ctx)
+                    .get_active_base_model(
+                        Some(second_surface_id),
+                        &TeamContextForOperation::teamless_for_test(),
+                        ctx,
+                    )
                     .id,
                 profile_default_id
             );
             assert_eq!(
                 preferences
-                    .get_active_profile_base_model(Some(first_surface_id), None, ctx)
+                    .get_active_profile_base_model(
+                        Some(first_surface_id),
+                        &TeamContextForOperation::teamless_for_test(),
+                        ctx,
+                    )
                     .id,
                 profile_default_id
             );
@@ -1723,7 +1741,11 @@ fn model_menu_labels_the_profile_default_model() {
 
         view.read(&app, |view, ctx| {
             let default_name = LLMPreferences::as_ref(ctx)
-                .get_active_profile_base_model(Some(view.terminal_surface_id), None, ctx)
+                .get_active_profile_base_model(
+                    Some(view.terminal_surface_id),
+                    &TeamContextForOperation::teamless_for_test(),
+                    ctx,
+                )
                 .display_name
                 .clone();
             let snapshot = view
@@ -1770,7 +1792,9 @@ fn model_menu_revalidates_presentation_and_acceptance_after_team_change() {
         });
         let model_id = LLMId::from("team-scoped-tui-model");
         LLMPreferences::handle(&app).update(&mut app, |preferences, ctx| {
-            let mut model = preferences.get_default_base_model(None, ctx).clone();
+            let mut model = preferences
+                .get_default_base_model(&TeamContextForOperation::teamless_for_test(), ctx)
+                .clone();
             model.id = model_id.clone();
             model.display_name = "Team-scoped TUI model".to_owned();
             model.provider = LLMProvider::Anthropic;
@@ -2740,7 +2764,11 @@ fn footer_model_label_is_a_bounded_click_target() {
 
         let model_name = view.read(&app, |view, ctx| {
             LLMPreferences::as_ref(ctx)
-                .get_active_base_model(Some(view.terminal_surface_id), None, ctx)
+                .get_active_base_model(
+                    Some(view.terminal_surface_id),
+                    &TeamContextForOperation::teamless_for_test(),
+                    ctx,
+                )
                 .display_name
                 .clone()
         });

@@ -426,8 +426,7 @@ fn render_context_window_row(
     let mut column = Flex::column()
         .with_child(Container::new(label_desc).with_margin_bottom(4.).finish())
         .with_child(slider_row);
-    let team_render_context = crate::UserWorkspaces::as_ref(app)
-        .team_render_context_for_view_handle(&view.weak_self, app);
+    let team_render_context = crate::UserWorkspaces::as_ref(app).team_context(&view.weak_self, app);
     if BlocklistAIPermissions::as_ref(app)
         .permissions_profile_for_id(app, view.profile_id())
         .should_show_long_context_pricing_warning_for_render_context(

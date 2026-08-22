@@ -4,7 +4,7 @@ use warp::editor::CodeEditorModel;
 use warp::tui_export::{
     ActiveSession, BlocklistAIContextEvent, BlocklistAIContextModel, BlocklistAIInputModel,
     InputType, InputTypeAutoDetectionSource, LLMPreferences, MAX_IMAGE_COUNT_FOR_QUERY,
-    PendingAttachmentSummary, TeamContext,
+    PendingAttachmentSummary, TeamContextForOperation,
 };
 use warp_core::features::FeatureFlag;
 use warp_editor::model::CoreEditorModel;
@@ -185,7 +185,7 @@ impl TuiAttachmentModel {
     pub(crate) fn try_attach_paste(
         &mut self,
         text: String,
-        team_context: Option<TeamContext>,
+        team_context: TeamContextForOperation,
         ctx: &mut ModelContext<Self>,
     ) -> TuiAttachmentPasteDisposition {
         if !FeatureFlag::ImageAsContext.is_enabled() {
@@ -201,13 +201,13 @@ impl TuiAttachmentModel {
         &mut self,
         paths: Vec<PathBuf>,
         original_text: String,
-        team_context: Option<TeamContext>,
+        team_context: TeamContextForOperation,
         ctx: &mut ModelContext<Self>,
     ) -> TuiAttachmentPasteDisposition {
         if !FeatureFlag::ImageAsContext.is_enabled() {
             return TuiAttachmentPasteDisposition::NotHandled;
         }
-        if let Err(error) = self.validate_new_images(paths.len(), team_context.as_ref(), ctx) {
+        if let Err(error) = self.validate_new_images(paths.len(), &team_context, ctx) {
             ctx.emit(TuiAttachmentModelEvent::RestorePastedText(original_text));
             ctx.emit(TuiAttachmentModelEvent::ShowHint(error));
             return TuiAttachmentPasteDisposition::Handled;
@@ -246,7 +246,7 @@ impl TuiAttachmentModel {
 
     pub(crate) fn paste_from_clipboard(
         &mut self,
-        team_context: Option<TeamContext>,
+        team_context: TeamContextForOperation,
         ctx: &mut ModelContext<Self>,
     ) {
         ctx.spawn(
@@ -286,10 +286,10 @@ impl TuiAttachmentModel {
     fn attach_clipboard_image(
         &mut self,
         content: ClipboardContent,
-        team_context: Option<TeamContext>,
+        team_context: TeamContextForOperation,
         ctx: &mut ModelContext<Self>,
     ) -> bool {
-        if let Err(error) = self.validate_new_images(1, team_context.as_ref(), ctx) {
+        if let Err(error) = self.validate_new_images(1, &team_context, ctx) {
             ctx.emit(TuiAttachmentModelEvent::ShowHint(error));
             return false;
         }
@@ -332,7 +332,7 @@ impl TuiAttachmentModel {
     fn validate_new_images(
         &self,
         count: usize,
-        team_context: Option<&TeamContext>,
+        team_context: &TeamContextForOperation,
         ctx: &AppContext,
     ) -> Result<(), String> {
         if !FeatureFlag::ImageAsContext.is_enabled() {

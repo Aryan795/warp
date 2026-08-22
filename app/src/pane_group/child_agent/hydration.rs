@@ -302,7 +302,7 @@ impl PaneGroup {
             return;
         }
 
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
         new_terminal_view.update(ctx, move |terminal_view, ctx| {
             terminal_view.suppress_initial_conversation_details_panel_auto_open();
             terminal_view.restore_conversation_after_view_creation(
@@ -346,7 +346,7 @@ impl PaneGroup {
         let Some(terminal_view) = self.terminal_view_from_pane_id(pane_id, ctx) else {
             return;
         };
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
         terminal_view.update(ctx, move |terminal_view, ctx| {
             let Some(ambient_agent_view_model) = terminal_view
                 .ambient_agent_view_model()

@@ -14019,7 +14019,7 @@ impl Workspace {
         terminal_view.update(ctx, |terminal_view, terminal_view_ctx| {
             if summarize_after_fork {
                 let team_context = UserWorkspaces::as_ref(terminal_view_ctx)
-                    .team_context_for_view(terminal_view_ctx);
+                    .team_context_for_operation(terminal_view_ctx);
                 terminal_view
                     .ai_controller()
                     .update(terminal_view_ctx, move |controller, ctx| {
@@ -14052,7 +14052,7 @@ impl Workspace {
                     );
                 }
                 let team_context = UserWorkspaces::as_ref(terminal_view_ctx)
-                    .team_context_for_view(terminal_view_ctx);
+                    .team_context_for_operation(terminal_view_ctx);
                 terminal_view
                     .ai_controller()
                     .update(terminal_view_ctx, move |controller, ctx| {
@@ -14133,7 +14133,7 @@ impl Workspace {
         };
 
         terminal_view.update(ctx, |terminal, ctx| {
-            let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+            let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
             terminal
                 .ai_controller()
                 .update(ctx, move |controller, ctx| {
@@ -15479,7 +15479,7 @@ impl Workspace {
                         Some((prompt, attachments))
                     })
                 });
-                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
                 model_handle.update(ctx, move |model, ctx| {
                     model.set_environment_id(Some(env_id), ctx);
                     if let Some((prompt, attachments)) = pending {
@@ -15705,7 +15705,7 @@ impl Workspace {
         } else {
             CancellationReason::ManuallyCancelled
         };
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
         let prepare_input = HandoffPrepareInput::new(
             terminal_surface_id,
             history,
@@ -15714,6 +15714,7 @@ impl Workspace {
             snapshot_target,
             intent.entry_point(),
             HandoffSurface::Gui,
+            team_context,
         )
         .with_expected_conversation_id(intent.expected_conversation_id())
         .with_source_conversation_id(source_conversation_id)
@@ -15723,8 +15724,7 @@ impl Workspace {
         .with_transfer_pending_attachments(intent.shows_user_feedback())
         .with_environment_id(environment_id)
         .with_cancellation_reason(cancellation_reason)
-        .with_require_in_progress_source(intent.expected_conversation_id().is_some())
-        .with_team_context(team_context);
+        .with_require_in_progress_source(intent.expected_conversation_id().is_some());
         let pending = match prepare_handoff(prepare_input, ctx) {
             Ok(pending) => pending,
             Err(error) => {
@@ -15858,12 +15858,12 @@ impl Workspace {
             ctx,
         );
         let handoff_terminal_view_id = model_handle.as_ref(ctx).terminal_view_id();
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
         LLMPreferences::handle(ctx).update(ctx, move |preferences, ctx| {
             preferences.update_preferred_agent_mode_llm(
                 &HandoffLLMId::from(presentation.model_id.as_str()),
                 handoff_terminal_view_id,
-                team_context.as_ref(),
+                &team_context,
                 ctx,
             );
         });
@@ -24353,7 +24353,7 @@ impl TypedActionView for Workspace {
                             // production builds.
                             if let Some(skill) = modify_settings_skill {
                                 let team_context = UserWorkspaces::as_ref(terminal_view_ctx)
-                                    .team_context_for_view(terminal_view_ctx);
+                                    .team_context_for_operation(terminal_view_ctx);
                                 terminal_view.ai_controller().update(
                                     terminal_view_ctx,
                                     move |controller, ctx| {
@@ -24371,7 +24371,7 @@ impl TypedActionView for Workspace {
                                 terminal_view.active_conversation_id(terminal_view_ctx)
                             {
                                 let team_context = UserWorkspaces::as_ref(terminal_view_ctx)
-                                    .team_context_for_view(terminal_view_ctx);
+                                    .team_context_for_operation(terminal_view_ctx);
                                 terminal_view.ai_controller().update(
                                     terminal_view_ctx,
                                     move |controller, ctx| {
@@ -25383,7 +25383,7 @@ impl TypedActionView for Workspace {
                     if let Some(terminal_view) = pane_group.focused_session_view(ctx) {
                         terminal_view.update(ctx, |terminal_view, terminal_view_ctx| {
                             let team_context = UserWorkspaces::as_ref(terminal_view_ctx)
-                                .team_context_for_view(terminal_view_ctx);
+                                .team_context_for_operation(terminal_view_ctx);
                             terminal_view.ai_controller().update(
                                 terminal_view_ctx,
                                 move |controller, ctx| {

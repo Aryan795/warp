@@ -17,7 +17,7 @@ use warpui::{AppContext, ModelContext, SingletonEntity};
 use crate::auth::AuthStateProvider;
 use crate::settings::{AISettings, AISettingsChangedEvent};
 use crate::workspaces::user_workspaces::{
-    TeamContext, TeamRenderContext, TeamScope, UserWorkspaces, UserWorkspacesEvent,
+    TeamContext, TeamContextForOperation, TeamScope, UserWorkspaces, UserWorkspacesEvent,
 };
 use crate::workspaces::workspace::LlmHostSettings;
 
@@ -79,14 +79,15 @@ fn geap_mint_binding_from_parts(
 }
 
 pub(crate) fn current_geap_policy(app: &AppContext) -> GeapPolicy {
-    geap_policy_for_context(None, app)
+    let context = TeamContextForOperation::teamless();
+    geap_policy_for_context(&context, app)
 }
 
 pub(crate) fn geap_policy_for_context(
-    context: Option<&TeamContext>,
+    context: &TeamContextForOperation,
     app: &AppContext,
 ) -> GeapPolicy {
-    geap_policy_for_scope(context, app)
+    geap_policy_for_scope(Some(context), app)
 }
 
 fn geap_policy_for_scope<S: TeamScope + ?Sized>(
@@ -102,7 +103,7 @@ fn geap_policy_for_scope<S: TeamScope + ?Sized>(
 }
 
 pub(crate) fn geap_policy_for_render_context(
-    context: Option<&TeamRenderContext<'_>>,
+    context: Option<&TeamContext<'_>>,
     app: &AppContext,
 ) -> GeapPolicy {
     geap_policy_for_scope(context, app)
@@ -189,14 +190,6 @@ pub(crate) fn force_refresh_geap_credentials(
     ctx: &mut ModelContext<ApiKeyManager>,
 ) {
     refresh_geap_credentials_with_options(manager, true, None, ctx);
-}
-
-pub(crate) fn force_refresh_geap_credentials_for_context(
-    manager: &mut ApiKeyManager,
-    context: Option<&TeamContext>,
-    ctx: &mut ModelContext<ApiKeyManager>,
-) {
-    force_refresh_geap_credentials_for_policy(manager, geap_policy_for_context(context, ctx), ctx);
 }
 
 pub(crate) fn force_refresh_geap_credentials_for_policy(

@@ -28,7 +28,7 @@ impl TuiTerminalSessionView {
             return;
         }
         let current_working_directory = self.current_working_directory(ctx);
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
         let model = match TuiHandoffModel::new(
             self.terminal_surface_id,
             self.terminal_model.clone(),

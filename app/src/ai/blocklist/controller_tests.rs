@@ -27,7 +27,7 @@ use crate::ai::llms::{LLMId, LLMModelHost};
 use crate::terminal::TerminalView;
 use crate::test_util::terminal::{add_window_with_terminal, initialize_app_for_terminal_view};
 use crate::workspaces::team::Team;
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{TeamContextForOperation, UserWorkspaces};
 use crate::workspaces::workspace::{HostEnablementSetting, LlmHostSettings, Workspace};
 
 fn new_ambient_agent_task_id() -> AmbientAgentTaskId {
@@ -64,8 +64,9 @@ fn passive_suggestions_request_params_omit_ambient_agent_task_id() {
                     history_model.start_new_conversation(terminal.id(), false, false, false, ctx)
                 });
             let existing_conversation_context =
-                UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
-            let new_conversation_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
+            let new_conversation_context =
+                UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
 
             terminal
                 .ai_controller()
@@ -170,14 +171,10 @@ fn request_and_continuation_scopes_do_not_follow_window_reassignment() {
             terminal.update(&mut app, |_terminal, ctx| {
                 let user_workspaces = UserWorkspaces::as_ref(ctx);
                 (
-                    user_workspaces.team_context_for_view(ctx),
-                    user_workspaces.team_context_for_view(ctx),
+                    user_workspaces.team_context_for_operation(ctx),
+                    user_workspaces.team_context_for_operation(ctx),
                 )
             });
-        let team_a_action_context =
-            team_a_action_context.expect("the initial action request should capture team A");
-        let team_a_resume_context =
-            team_a_resume_context.expect("the initial resumed request should capture team A");
 
         let mut reassigned_workspace = workspace;
         reassigned_workspace.teams = vec![team_b.clone()];
@@ -185,16 +182,14 @@ fn request_and_continuation_scopes_do_not_follow_window_reassignment() {
             user_workspaces.update_workspaces(vec![reassigned_workspace], ctx);
         });
 
-        let replacement_context = terminal
-            .update(&mut app, |_terminal, ctx| {
-                let user_workspaces = UserWorkspaces::as_ref(ctx);
-                assert_eq!(
-                    user_workspaces.team_uid_for_window(window_id),
-                    Some(team_b.uid)
-                );
-                user_workspaces.team_context_for_view(ctx)
-            })
-            .expect("the reassigned window should capture team B for new operations");
+        let replacement_context = terminal.update(&mut app, |_terminal, ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert_eq!(
+                user_workspaces.team_uid_for_window(window_id),
+                Some(team_b.uid)
+            );
+            user_workspaces.team_context_for_operation(ctx)
+        });
         app.read(|ctx| {
             let user_workspaces = UserWorkspaces::as_ref(ctx);
             assert!(
@@ -204,7 +199,7 @@ fn request_and_continuation_scopes_do_not_follow_window_reassignment() {
                 )
             );
             assert!(matches!(
-                geap_policy_for_context(Some(&replacement_context), ctx),
+                geap_policy_for_context(&replacement_context, ctx),
                 GeapPolicy::Mintable(_)
             ));
         });
@@ -213,8 +208,7 @@ fn request_and_continuation_scopes_do_not_follow_window_reassignment() {
         let team_a_request_params = terminal.update(&mut app, |terminal, ctx| {
             terminal.ai_controller().update(ctx, |controller, ctx| {
                 controller.action_model.update(ctx, |action_model, _| {
-                    action_model
-                        .set_request_team_context(conversation_id, Some(team_a_action_context));
+                    action_model.set_request_team_context(conversation_id, team_a_action_context);
                 });
                 let inherited_context =
                     controller.take_team_context_for_continuation(conversation_id, ctx);
@@ -223,7 +217,7 @@ fn request_and_continuation_scopes_do_not_follow_window_reassignment() {
                         None,
                         PassiveSuggestionTrigger::FilesChanged,
                         vec![],
-                        inherited_context,
+                        inherited_context.expect("the conversation should retain team A"),
                         ctx,
                     )
                     .expect("the captured request should keep team A")
@@ -234,7 +228,7 @@ fn request_and_continuation_scopes_do_not_follow_window_reassignment() {
             let resume = PendingResume::new_for_test(
                 RecoveryBudget::fresh().next_attempt(),
                 std::time::Duration::ZERO,
-                Some(team_a_resume_context),
+                team_a_resume_context,
             );
             terminal.ai_controller().update(ctx, |controller, ctx| {
                 controller
@@ -250,7 +244,7 @@ fn request_and_continuation_scopes_do_not_follow_window_reassignment() {
             })
         });
         let team_b_request_params = terminal.update(&mut app, |terminal, ctx| {
-            let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+            let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
             terminal.ai_controller().update(ctx, |controller, ctx| {
                 controller
                     .build_passive_suggestions_request_params(
@@ -397,7 +391,7 @@ fn cancelling_conversation_aborts_pending_auto_resume() {
                 let resume = PendingResume::new_for_test(
                     RecoveryBudget::fresh().next_attempt(),
                     std::time::Duration::from_millis(1),
-                    None,
+                    TeamContextForOperation::teamless(),
                 );
                 controller.schedule_auto_resume_after_error(conversation_id, resume, ctx);
                 assert!(

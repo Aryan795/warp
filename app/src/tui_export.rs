@@ -138,11 +138,7 @@ pub use crate::ai::harness_availability::{
     AuthSecretEntry, AuthSecretFetchState, HarnessAvailability, HarnessAvailabilityEvent,
     HarnessAvailabilityModel, HarnessModelInfo,
 };
-pub use crate::ai::llms::{
-    DisableReason, LLMId, LLMInfo, LLMPreferences, LLMPreferencesEvent,
-    should_show_bedrock_icon_for_model,
-    should_show_gemini_enterprise_agent_platform_icon_for_model, should_show_key_icon_for_model,
-};
+pub use crate::ai::llms::{DisableReason, LLMId, LLMInfo, LLMPreferences, LLMPreferencesEvent};
 pub use crate::ai::orchestration::{
     AuthSecretSelection, CloudAgentStartupAuthFlow, CloudAgentStartupBlocker,
     CloudAgentStartupFailure, CloudAgentStartupIssue, CloudAgentStartupPresentation,
@@ -277,7 +273,9 @@ pub use crate::util::repo_detection::{RepoDetectionSessionType, detect_possible_
 pub use crate::util::time_format::format_elapsed_seconds;
 #[cfg(feature = "voice_input")]
 pub use crate::voice::transcriber::{Transcriber, VoiceTranscriber};
-pub use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces, UserWorkspacesEvent};
+pub use crate::workspaces::user_workspaces::{
+    TeamContextForOperation, UserWorkspaces, UserWorkspacesEvent,
+};
 pub use crate::workspaces::workspace::{AiCreditsUsageAndCostType, UsageVisibilityGranularity};
 
 #[derive(Debug, Clone)]
@@ -309,7 +307,7 @@ pub fn tui_model_picker_presentation_for_view<T: warpui::Entity>(
     app: &warpui::AppContext,
 ) -> Option<TuiModelPickerPresentation> {
     let workspaces = crate::workspaces::user_workspaces::UserWorkspaces::as_ref(app);
-    let team_context = workspaces.team_render_context_for_view_handle(owner_view, app);
+    let team_context = workspaces.team_context(owner_view, app);
     let preferences = crate::ai::llms::LLMPreferences::as_ref(app);
     let llm = preferences.get_llm_info(id)?;
     if !preferences
@@ -366,7 +364,7 @@ pub fn tui_active_model_id_for_view<T: warpui::Entity>(
     app: &warpui::AppContext,
 ) -> LLMId {
     let workspaces = crate::workspaces::user_workspaces::UserWorkspaces::as_ref(app);
-    let team_context = workspaces.team_render_context_for_view_handle(owner_view, app);
+    let team_context = workspaces.team_context(owner_view, app);
     crate::ai::llms::LLMPreferences::as_ref(app)
         .get_active_base_model_for_render_context(
             Some(terminal_view_id),

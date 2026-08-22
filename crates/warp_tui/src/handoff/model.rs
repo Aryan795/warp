@@ -19,9 +19,9 @@ use warp::tui_export::{
     CloudEnvironmentCatalog, HandoffCommitOutcome, HandoffEntryPoint, HandoffLaunchAttachments,
     HandoffPrepareError, HandoffPrepareInput, HandoffRestoration, HandoffSurface, LLMId,
     LLMPreferences, LLMPreferencesEvent, OptionRow, OptionSnapshot, OptionSourceStatus,
-    PendingCloudLaunch, PendingHandoff, ServerApiProvider, SnapshotUploadTarget, TeamContext,
-    TerminalModel, UserWorkspaces, UserWorkspacesEvent, execute_handoff, handoff_dispatch_error,
-    oz_model_snapshot, prepare_handoff, suggest_handoff_environment,
+    PendingCloudLaunch, PendingHandoff, ServerApiProvider, SnapshotUploadTarget,
+    TeamContextForOperation, TerminalModel, UserWorkspaces, UserWorkspacesEvent, execute_handoff,
+    handoff_dispatch_error, oz_model_snapshot, prepare_handoff, suggest_handoff_environment,
 };
 use warpui::{AppContext, Entity, EntityId, ModelContext, ModelHandle, SingletonEntity as _};
 
@@ -117,7 +117,7 @@ impl TuiHandoffModel {
         context: ModelHandle<BlocklistAIContextModel>,
         current_working_directory: Option<String>,
         argument: Option<String>,
-        team_context: Option<TeamContext>,
+        team_context: TeamContextForOperation,
         ctx: &mut AppContext,
     ) -> Result<ModelHandle<Self>, TuiHandoffPreparationFailure> {
         if !AISettings::as_ref(ctx).is_cloud_handoff_enabled(ctx) {
@@ -166,13 +166,13 @@ impl TuiHandoffModel {
                 },
                 HandoffEntryPoint::SlashCommand,
                 HandoffSurface::Tui,
+                team_context,
             )
             .with_expected_conversation_id(source_conversation_id)
             .with_current_working_directory(current_working_directory.clone())
             .with_long_running_command(has_long_running_command)
             .with_launch(Some(launch))
-            .with_environment_required(true)
-            .with_team_context(team_context),
+            .with_environment_required(true),
             ctx,
         )
         .map_err(|error| Self::preparation_failure(error, source_was_active, argument.as_ref()))?;

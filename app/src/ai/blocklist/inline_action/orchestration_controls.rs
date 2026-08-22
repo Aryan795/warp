@@ -270,8 +270,7 @@ fn oz_model_menu_items<A: OrchestrationControlAction, V: View>(
     ctx: &mut ViewContext<V>,
 ) -> Vec<MenuItem<DropdownAction>> {
     let handle = ctx.handle();
-    let team_context =
-        UserWorkspaces::as_ref(ctx).team_render_context_for_view_handle(&handle, ctx);
+    let team_context = UserWorkspaces::as_ref(ctx).team_context(&handle, ctx);
     let llm_prefs = LLMPreferences::as_ref(ctx);
     let all_choices: Vec<_> = llm_prefs
         .get_base_llm_choices_for_agent_mode_for_render_context(team_context.as_ref(), ctx)

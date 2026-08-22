@@ -114,8 +114,7 @@ impl View for ExecutionProfileView {
         let profile = permissions.permissions_profile_for_id(app, &self.profile_id);
 
         let llm_preferences = LLMPreferences::as_ref(app);
-        let team_render_context =
-            UserWorkspaces::as_ref(app).team_render_context_for_view_handle(&self.weak_self, app);
+        let team_render_context = UserWorkspaces::as_ref(app).team_context(&self.weak_self, app);
         let base_model = llm_preferences
             .effective_base_model_for_profile_for_render_context(
                 &profile,

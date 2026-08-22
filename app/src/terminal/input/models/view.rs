@@ -462,14 +462,23 @@ impl InlineModelSelectorView {
 
     fn active_model_id_for_current_tab(&self, ctx: &ViewContext<Self>) -> LLMId {
         let llm_preferences = LLMPreferences::as_ref(ctx);
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let handle = ctx.handle();
+        let team_context = UserWorkspaces::as_ref(ctx).team_context(&handle, ctx);
         match self.active_tab(ctx) {
             InlineModelSelectorTab::BaseAgent => llm_preferences
-                .get_active_base_model(Some(self.terminal_view_id), team_context.as_ref(), ctx)
+                .get_active_base_model_for_render_context(
+                    Some(self.terminal_view_id),
+                    team_context.as_ref(),
+                    ctx,
+                )
                 .id
                 .clone(),
             InlineModelSelectorTab::FullTerminalUse => llm_preferences
-                .get_active_cli_agent_model(Some(self.terminal_view_id), team_context.as_ref(), ctx)
+                .get_active_cli_agent_model_for_render_context(
+                    Some(self.terminal_view_id),
+                    team_context.as_ref(),
+                    ctx,
+                )
                 .id
                 .clone(),
         }

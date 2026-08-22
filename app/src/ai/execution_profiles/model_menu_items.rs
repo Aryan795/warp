@@ -18,7 +18,7 @@ use crate::ai::llms::{
     should_show_key_icon_for_model_for_render_context,
 };
 use crate::menu::{MenuItem, MenuItemFields, MenuTooltipPosition};
-use crate::workspaces::user_workspaces::TeamRenderContext;
+use crate::workspaces::user_workspaces::TeamContext;
 
 pub fn is_auto(llm: &LLMInfo) -> bool {
     llm.display_name.to_lowercase().contains("auto")
@@ -79,7 +79,7 @@ fn make_item_fields<A: Action + Clone>(
     model_id_to_add_profile_default_label_to: Option<&LLMId>,
     collapse_auto: bool,
     collapse_reasoning_variants: bool,
-    team_context: Option<&TeamRenderContext<'_>>,
+    team_context: Option<&TeamContext<'_>>,
     app: &AppContext,
 ) -> MenuItem<A> {
     let is_auto_model = is_auto(llm);
@@ -196,7 +196,7 @@ pub fn available_model_menu_items<A: Action + Clone>(
     position_id_fn: Option<&dyn Fn(&LLMId) -> String>,
     collapse_auto: bool,
     collapse_reasoning_variants: bool,
-    team_context: Option<&TeamRenderContext<'_>>,
+    team_context: Option<&TeamContext<'_>>,
     app: &AppContext,
 ) -> Vec<MenuItem<A>> {
     choices

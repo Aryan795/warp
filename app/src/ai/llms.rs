@@ -11,7 +11,7 @@ use warp_core::ui::Icon;
 use warp_core::user_preferences::GetUserPreferences;
 use warp_errors::report_error;
 use warp_multi_agent_api as api;
-use warpui::{AppContext, Entity, EntityId, ModelContext, SingletonEntity};
+use warpui::{AppContext, Entity, EntityId, ModelContext, SingletonEntity, WeakViewHandle};
 
 use super::custom_model_routers::{self, CustomModelRouter, ModelConfigError};
 use super::execution_profiles::AIExecutionProfile;
@@ -22,7 +22,7 @@ use crate::network::{NetworkStatus, NetworkStatusEvent, NetworkStatusKind};
 use crate::server::server_api::ServerApiProvider;
 use crate::user_config::{WarpConfig, WarpConfigUpdateEvent};
 use crate::workspaces::user_workspaces::{
-    TeamContext, TeamRenderContext, TeamScope, UserWorkspaces, UserWorkspacesEvent,
+    TeamContext, TeamContextForOperation, TeamScope, UserWorkspaces, UserWorkspacesEvent,
 };
 
 /// Checks if a user's' API key is being used for the given provider.
@@ -42,6 +42,14 @@ pub fn is_using_api_key_for_provider(provider: &LLMProvider, app: &AppContext) -
         LLMProvider::Xai => manager.grok_tokens().is_some(),
         LLMProvider::Unknown => false,
     }
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub(crate) struct AgentModeLLMOverrideUpdate {
+    terminal_view_id: EntityId,
+    model_id: LLMId,
+    previous_effective_model_id: LLMId,
+    next_effective_model_id: LLMId,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,12 +84,13 @@ pub(crate) fn first_party_key_source_for_provider_for_context<S: TeamScope + ?Si
     None
 }
 
+#[cfg(test)]
 pub fn byo_key_source_for_model(
     llm: &LLMInfo,
-    team_context: Option<&TeamContext>,
+    team_context: &TeamContextForOperation,
     app: &AppContext,
 ) -> Option<ByoKeySource> {
-    byo_key_source_for_scope(llm, team_context, app)
+    byo_key_source_for_scope(llm, Some(team_context), app)
 }
 
 fn byo_key_source_for_scope<S: TeamScope + ?Sized>(
@@ -111,17 +120,18 @@ fn byo_key_source_for_scope_with_custom_endpoint<S: TeamScope + ?Sized>(
     first_party_key_source_for_provider_for_context(&llm.provider, team_context, app)
 }
 
+#[cfg(test)]
 pub fn should_show_key_icon_for_model(
     llm: &LLMInfo,
-    team_context: Option<&TeamContext>,
+    team_context: &TeamContextForOperation,
     app: &AppContext,
 ) -> bool {
-    byo_key_source_for_scope(llm, team_context, app).is_some()
+    byo_key_source_for_scope(llm, Some(team_context), app).is_some()
 }
 
 pub(crate) fn byo_key_source_for_model_for_render_context(
     llm: &LLMInfo,
-    team_context: Option<&TeamRenderContext<'_>>,
+    team_context: Option<&TeamContext<'_>>,
     app: &AppContext,
 ) -> Option<ByoKeySource> {
     byo_key_source_for_scope(llm, team_context, app)
@@ -129,7 +139,7 @@ pub(crate) fn byo_key_source_for_model_for_render_context(
 
 pub(crate) fn should_show_key_icon_for_model_for_render_context(
     llm: &LLMInfo,
-    team_context: Option<&TeamRenderContext<'_>>,
+    team_context: Option<&TeamContext<'_>>,
     app: &AppContext,
 ) -> bool {
     byo_key_source_for_scope(llm, team_context, app).is_some()
@@ -137,17 +147,17 @@ pub(crate) fn should_show_key_icon_for_model_for_render_context(
 
 pub(crate) fn effective_model_disable_reason_for_render_context(
     llm: &LLMInfo,
-    team_context: Option<&TeamRenderContext<'_>>,
+    team_context: Option<&TeamContext<'_>>,
     app: &AppContext,
 ) -> Option<DisableReason> {
     effective_model_disable_reason_for_scope(llm, team_context, app)
 }
 pub(crate) fn effective_model_disable_reason(
     llm: &LLMInfo,
-    team_context: Option<&TeamContext>,
+    team_context: &TeamContextForOperation,
     app: &AppContext,
 ) -> Option<DisableReason> {
-    effective_model_disable_reason_for_scope(llm, team_context, app)
+    effective_model_disable_reason_for_scope(llm, Some(team_context), app)
 }
 
 fn effective_model_disable_reason_for_scope<S: TeamScope + ?Sized>(
@@ -187,17 +197,10 @@ fn should_show_bedrock_icon_for_scope<S: TeamScope + ?Sized>(
             .is_aws_bedrock_credentials_enabled_for_context(team_context, app),
     )
 }
-pub fn should_show_bedrock_icon_for_model(
-    llm: &LLMInfo,
-    team_context: Option<&TeamContext>,
-    app: &AppContext,
-) -> bool {
-    should_show_bedrock_icon_for_scope(llm, team_context, app)
-}
 
 pub(crate) fn should_show_bedrock_icon_for_model_for_render_context(
     llm: &LLMInfo,
-    team_context: Option<&TeamRenderContext<'_>>,
+    team_context: Option<&TeamContext<'_>>,
     app: &AppContext,
 ) -> bool {
     should_show_bedrock_icon_for_scope(llm, team_context, app)
@@ -215,17 +218,10 @@ fn should_show_gemini_enterprise_agent_platform_icon_for_scope<S: TeamScope + ?S
             .is_gemini_enterprise_credentials_enabled_for_context(team_context, app),
     )
 }
-pub fn should_show_gemini_enterprise_agent_platform_icon_for_model(
-    llm: &LLMInfo,
-    team_context: Option<&TeamContext>,
-    app: &AppContext,
-) -> bool {
-    should_show_gemini_enterprise_agent_platform_icon_for_scope(llm, team_context, app)
-}
 
 pub(crate) fn should_show_gemini_enterprise_agent_platform_icon_for_model_for_render_context(
     llm: &LLMInfo,
-    team_context: Option<&TeamRenderContext<'_>>,
+    team_context: Option<&TeamContext<'_>>,
     app: &AppContext,
 ) -> bool {
     should_show_gemini_enterprise_agent_platform_icon_for_scope(llm, team_context, app)
@@ -314,7 +310,11 @@ impl DisableReason {
 /// Returns `true` when the model is usable for the current user: not disabled,
 /// or disabled for a reason that doesn't block requests (see
 /// [`DisableReason::should_clear_preference`]).
-fn is_usable_llm(info: &LLMInfo, team_context: Option<&TeamContext>, app: &AppContext) -> bool {
+fn is_usable_llm_for_scope<S: TeamScope + ?Sized>(
+    info: &LLMInfo,
+    team_context: Option<&S>,
+    app: &AppContext,
+) -> bool {
     let has_byok_key =
         first_party_key_source_for_provider_for_context(&info.provider, team_context, app)
             .is_some();
@@ -322,9 +322,13 @@ fn is_usable_llm(info: &LLMInfo, team_context: Option<&TeamContext>, app: &AppCo
         .as_ref()
         .is_none_or(|reason| !reason.should_clear_preference(has_byok_key))
 }
+
+fn is_usable_llm(info: &LLMInfo, team_context: &TeamContextForOperation, app: &AppContext) -> bool {
+    is_usable_llm_for_scope(info, Some(team_context), app)
+}
 fn is_usable_llm_for_render_context(
     info: &LLMInfo,
-    team_context: Option<&TeamRenderContext<'_>>,
+    team_context: Option<&TeamContext<'_>>,
     app: &AppContext,
 ) -> bool {
     let has_byok_key = byo_key_source_for_scope(info, team_context, app).is_some();
@@ -610,7 +614,7 @@ impl AvailableLLMs {
     fn usable_info_for_id(
         &self,
         id: &LLMId,
-        team_context: Option<&TeamContext>,
+        team_context: &TeamContextForOperation,
         app: &AppContext,
     ) -> Option<&LLMInfo> {
         self.usable_info_for_id_with(id, &|info| is_usable_llm(info, team_context, app))
@@ -629,7 +633,7 @@ impl AvailableLLMs {
     /// (e.g. an admin disabled every hosted model).
     fn usable_default_llm_info(
         &self,
-        team_context: Option<&TeamContext>,
+        team_context: &TeamContextForOperation,
         app: &AppContext,
     ) -> Option<&LLMInfo> {
         self.usable_default_llm_info_with(&|info| is_usable_llm(info, team_context, app))
@@ -943,10 +947,28 @@ impl LLMPreferences {
     pub fn get_active_base_model<'a>(
         &'a self,
         terminal_view_id: Option<EntityId>,
-        team_context: Option<&TeamContext>,
+        team_context: &TeamContextForOperation,
         app: &'a AppContext,
     ) -> &'a LLMInfo {
-        let is_usable = |info: &LLMInfo| is_usable_llm(info, team_context, app);
+        self.get_active_base_model_for_scope(terminal_view_id, Some(team_context), app)
+    }
+
+    pub(crate) fn get_active_base_model_for_team_context<'a>(
+        &'a self,
+        terminal_view_id: Option<EntityId>,
+        team_context: Option<&TeamContext<'_>>,
+        app: &'a AppContext,
+    ) -> &'a LLMInfo {
+        self.get_active_base_model_for_scope(terminal_view_id, team_context, app)
+    }
+
+    fn get_active_base_model_for_scope<'a, S: TeamScope + ?Sized>(
+        &'a self,
+        terminal_view_id: Option<EntityId>,
+        team_context: Option<&S>,
+        app: &'a AppContext,
+    ) -> &'a LLMInfo {
+        let is_usable = |info: &LLMInfo| is_usable_llm_for_scope(info, team_context, app);
         self.get_preferred_base_model_with(
             terminal_view_id,
             &is_usable,
@@ -958,7 +980,7 @@ impl LLMPreferences {
     pub(crate) fn get_active_base_model_for_render_context<'a>(
         &'a self,
         terminal_view_id: Option<EntityId>,
-        team_context: Option<&TeamRenderContext<'_>>,
+        team_context: Option<&TeamContext<'_>>,
         app: &'a AppContext,
     ) -> &'a LLMInfo {
         let is_usable = |info: &LLMInfo| is_usable_llm_for_render_context(info, team_context, app);
@@ -1005,10 +1027,27 @@ impl LLMPreferences {
     pub fn get_active_profile_base_model<'a>(
         &'a self,
         terminal_view_id: Option<EntityId>,
-        team_context: Option<&TeamContext>,
+        team_context: &TeamContextForOperation,
         app: &'a AppContext,
     ) -> &'a LLMInfo {
-        let is_usable = |info: &LLMInfo| is_usable_llm(info, team_context, app);
+        self.get_active_profile_base_model_for_scope(terminal_view_id, Some(team_context), app)
+    }
+    pub(crate) fn get_active_profile_base_model_for_team_context<'a>(
+        &'a self,
+        terminal_view_id: Option<EntityId>,
+        team_context: Option<&TeamContext<'_>>,
+        app: &'a AppContext,
+    ) -> &'a LLMInfo {
+        self.get_active_profile_base_model_for_scope(terminal_view_id, team_context, app)
+    }
+
+    fn get_active_profile_base_model_for_scope<'a, S: TeamScope + ?Sized>(
+        &'a self,
+        terminal_view_id: Option<EntityId>,
+        team_context: Option<&S>,
+        app: &'a AppContext,
+    ) -> &'a LLMInfo {
+        let is_usable = |info: &LLMInfo| is_usable_llm_for_scope(info, team_context, app);
         self.get_active_profile_base_model_with(
             terminal_view_id,
             &is_usable,
@@ -1017,10 +1056,11 @@ impl LLMPreferences {
         )
     }
 
+    #[cfg(feature = "tui")]
     pub(crate) fn get_active_profile_base_model_for_render_context<'a>(
         &'a self,
         terminal_view_id: Option<EntityId>,
-        team_context: Option<&TeamRenderContext<'_>>,
+        team_context: Option<&TeamContext<'_>>,
         app: &'a AppContext,
     ) -> &'a LLMInfo {
         let is_usable = |info: &LLMInfo| is_usable_llm_for_render_context(info, team_context, app);
@@ -1070,14 +1110,14 @@ impl LLMPreferences {
     fn fallback_llm_info<'a>(
         &'a self,
         available: &'a AvailableLLMs,
-        team_context: Option<&TeamContext>,
+        team_context: &TeamContextForOperation,
         app: &AppContext,
     ) -> &'a LLMInfo {
         let is_usable = |info: &LLMInfo| is_usable_llm(info, team_context, app);
         self.fallback_llm_info_with(
             available,
             &is_usable,
-            self.custom_inference_enabled_for_context(team_context, app),
+            self.custom_inference_enabled_for_context(Some(team_context), app),
             app,
         )
     }
@@ -1101,7 +1141,7 @@ impl LLMPreferences {
 
     pub(crate) fn get_default_computer_use_model_for_render_context(
         &self,
-        team_context: Option<&TeamRenderContext<'_>>,
+        team_context: Option<&TeamContext<'_>>,
         app: &AppContext,
     ) -> &LLMInfo {
         let available = self.get_computer_use_available();
@@ -1114,7 +1154,7 @@ impl LLMPreferences {
     pub(crate) fn effective_computer_use_model_for_profile_for_render_context<'a>(
         &'a self,
         profile: &AIExecutionProfile,
-        team_context: Option<&TeamRenderContext<'_>>,
+        team_context: Option<&TeamContext<'_>>,
         app: &'a AppContext,
     ) -> &'a LLMInfo {
         let available = self.get_computer_use_available();
@@ -1144,7 +1184,7 @@ impl LLMPreferences {
         &'a self,
         available: &'a AvailableLLMs,
         id: &LLMId,
-        team_context: Option<&TeamContext>,
+        team_context: &TeamContextForOperation,
         app: &AppContext,
     ) -> Option<&'a LLMInfo> {
         let is_usable = |info: &LLMInfo| is_usable_llm(info, team_context, app);
@@ -1152,7 +1192,7 @@ impl LLMPreferences {
             available,
             id,
             &is_usable,
-            self.custom_inference_enabled_for_context(team_context, app),
+            self.custom_inference_enabled_for_context(Some(team_context), app),
             app,
         )
     }
@@ -1178,7 +1218,7 @@ impl LLMPreferences {
     pub(crate) fn effective_base_model_for_profile<'a>(
         &'a self,
         profile: &AIExecutionProfile,
-        team_context: Option<&TeamContext>,
+        team_context: &TeamContextForOperation,
         app: &'a AppContext,
     ) -> &'a LLMInfo {
         profile
@@ -1193,7 +1233,7 @@ impl LLMPreferences {
     pub(crate) fn effective_base_model_for_profile_for_render_context<'a>(
         &'a self,
         profile: &AIExecutionProfile,
-        team_context: Option<&TeamRenderContext<'_>>,
+        team_context: Option<&TeamContext<'_>>,
         app: &'a AppContext,
     ) -> &'a LLMInfo {
         let is_usable = |info: &LLMInfo| is_usable_llm_for_render_context(info, team_context, app);
@@ -1223,7 +1263,7 @@ impl LLMPreferences {
     pub fn get_active_coding_model<'a>(
         &'a self,
         terminal_view_id: Option<EntityId>,
-        team_context: Option<&TeamContext>,
+        team_context: &TeamContextForOperation,
         app: &'a AppContext,
     ) -> &'a LLMInfo {
         self.get_preferred_coding_model(terminal_view_id, team_context, app)
@@ -1231,7 +1271,7 @@ impl LLMPreferences {
     pub(crate) fn get_active_coding_model_for_render_context<'a>(
         &'a self,
         terminal_view_id: Option<EntityId>,
-        team_context: Option<&TeamRenderContext<'_>>,
+        team_context: Option<&TeamContext<'_>>,
         app: &'a AppContext,
     ) -> &'a LLMInfo {
         let profile = AIExecutionProfilesModel::as_ref(app).active_profile(terminal_view_id, app);
@@ -1265,7 +1305,7 @@ impl LLMPreferences {
     fn get_preferred_coding_model(
         &self,
         terminal_view_id: Option<EntityId>,
-        team_context: Option<&TeamContext>,
+        team_context: &TeamContextForOperation,
         app: &AppContext,
     ) -> &LLMInfo {
         let profile = AIExecutionProfilesModel::as_ref(app).active_profile(terminal_view_id, app);
@@ -1313,7 +1353,7 @@ impl LLMPreferences {
     }
     pub(crate) fn get_base_llm_choices_for_agent_mode_for_render_context(
         &self,
-        team_context: Option<&TeamRenderContext<'_>>,
+        team_context: Option<&TeamContext<'_>>,
         app: &AppContext,
     ) -> impl Iterator<Item = &LLMInfo> + use<'_> {
         let custom_inference_enabled = self.custom_inference_enabled_for_context(team_context, app);
@@ -1341,7 +1381,7 @@ impl LLMPreferences {
 
     pub(crate) fn get_coding_llm_choices_for_render_context(
         &self,
-        team_context: Option<&TeamRenderContext<'_>>,
+        team_context: Option<&TeamContext<'_>>,
         app: &AppContext,
     ) -> impl Iterator<Item = &LLMInfo> + use<'_> {
         let custom_inference_enabled = self.custom_inference_enabled_for_context(team_context, app);
@@ -1401,7 +1441,7 @@ impl LLMPreferences {
 
     pub(crate) fn get_cli_agent_llm_choices_for_render_context(
         &self,
-        team_context: Option<&TeamRenderContext<'_>>,
+        team_context: Option<&TeamContext<'_>>,
         app: &AppContext,
     ) -> impl Iterator<Item = &LLMInfo> + use<'_> {
         let custom_inference_enabled = self.custom_inference_enabled_for_context(team_context, app);
@@ -1424,7 +1464,7 @@ impl LLMPreferences {
     pub fn get_active_cli_agent_model<'a>(
         &'a self,
         terminal_view_id: Option<EntityId>,
-        team_context: Option<&TeamContext>,
+        team_context: &TeamContextForOperation,
         app: &'a AppContext,
     ) -> &'a LLMInfo {
         let profile = AIExecutionProfilesModel::as_ref(app).active_profile(terminal_view_id, app);
@@ -1444,7 +1484,7 @@ impl LLMPreferences {
     pub(crate) fn get_active_cli_agent_model_for_render_context<'a>(
         &'a self,
         terminal_view_id: Option<EntityId>,
-        team_context: Option<&TeamRenderContext<'_>>,
+        team_context: Option<&TeamContext<'_>>,
         app: &'a AppContext,
     ) -> &'a LLMInfo {
         let profile = AIExecutionProfilesModel::as_ref(app).active_profile(terminal_view_id, app);
@@ -1474,7 +1514,7 @@ impl LLMPreferences {
     /// (disable-aware, see [`Self::fallback_llm_info`]).
     pub fn get_default_cli_agent_model(
         &self,
-        team_context: Option<&TeamContext>,
+        team_context: &TeamContextForOperation,
         app: &AppContext,
     ) -> &LLMInfo {
         self.fallback_llm_info(self.get_cli_agent_available(), team_context, app)
@@ -1482,7 +1522,7 @@ impl LLMPreferences {
 
     pub(crate) fn get_default_cli_agent_model_for_render_context(
         &self,
-        team_context: Option<&TeamRenderContext<'_>>,
+        team_context: Option<&TeamContext<'_>>,
         app: &AppContext,
     ) -> &LLMInfo {
         let is_usable = |info: &LLMInfo| is_usable_llm_for_render_context(info, team_context, app);
@@ -1511,7 +1551,7 @@ impl LLMPreferences {
     pub fn get_active_computer_use_model<'a>(
         &'a self,
         terminal_view_id: Option<EntityId>,
-        team_context: Option<&TeamContext>,
+        team_context: &TeamContextForOperation,
         app: &'a AppContext,
     ) -> &'a LLMInfo {
         let profile = AIExecutionProfilesModel::as_ref(app).active_profile(terminal_view_id, app);
@@ -1531,7 +1571,7 @@ impl LLMPreferences {
     /// custom models aren't offered for computer use.
     pub fn get_default_computer_use_model(
         &self,
-        team_context: Option<&TeamContext>,
+        team_context: &TeamContextForOperation,
         app: &AppContext,
     ) -> &LLMInfo {
         let available = self.get_computer_use_available();
@@ -1543,7 +1583,7 @@ impl LLMPreferences {
     pub(crate) fn effective_cli_agent_model_for_profile_for_render_context<'a>(
         &'a self,
         profile: &AIExecutionProfile,
-        team_context: Option<&TeamRenderContext<'_>>,
+        team_context: Option<&TeamContext<'_>>,
         app: &'a AppContext,
     ) -> &'a LLMInfo {
         let available = self.get_cli_agent_available();
@@ -1628,12 +1668,34 @@ impl LLMPreferences {
     pub(crate) fn is_active_base_model_cloud_runnable(
         &self,
         terminal_view_id: EntityId,
-        team_context: Option<&TeamContext>,
+        team_context: &TeamContextForOperation,
+        app: &AppContext,
+    ) -> bool {
+        self.is_active_base_model_cloud_runnable_for_scope(
+            terminal_view_id,
+            Some(team_context),
+            app,
+        )
+    }
+
+    pub(crate) fn is_active_base_model_cloud_runnable_for_team_context(
+        &self,
+        terminal_view_id: EntityId,
+        team_context: Option<&TeamContext<'_>>,
+        app: &AppContext,
+    ) -> bool {
+        self.is_active_base_model_cloud_runnable_for_scope(terminal_view_id, team_context, app)
+    }
+
+    fn is_active_base_model_cloud_runnable_for_scope<S: TeamScope + ?Sized>(
+        &self,
+        terminal_view_id: EntityId,
+        team_context: Option<&S>,
         app: &AppContext,
     ) -> bool {
         self.is_cloud_runnable_oz_model_id(
             &self
-                .get_active_base_model(Some(terminal_view_id), team_context, app)
+                .get_active_base_model_for_scope(Some(terminal_view_id), team_context, app)
                 .id,
         )
     }
@@ -1922,7 +1984,7 @@ impl LLMPreferences {
     /// (disable-aware, see [`Self::fallback_llm_info`]).
     pub fn get_default_base_model(
         &self,
-        team_context: Option<&TeamContext>,
+        team_context: &TeamContextForOperation,
         app: &AppContext,
     ) -> &LLMInfo {
         self.fallback_llm_info(&self.models_by_feature.agent_mode, team_context, app)
@@ -1930,7 +1992,7 @@ impl LLMPreferences {
 
     pub(crate) fn get_default_base_model_for_render_context(
         &self,
-        team_context: Option<&TeamRenderContext<'_>>,
+        team_context: Option<&TeamContext<'_>>,
         app: &AppContext,
     ) -> &LLMInfo {
         let is_usable = |info: &LLMInfo| is_usable_llm_for_render_context(info, team_context, app);
@@ -1950,7 +2012,7 @@ impl LLMPreferences {
     /// (disable-aware, see [`Self::fallback_llm_info`]).
     pub fn get_default_coding_model(
         &self,
-        team_context: Option<&TeamContext>,
+        team_context: &TeamContextForOperation,
         app: &AppContext,
     ) -> &LLMInfo {
         self.fallback_llm_info(&self.models_by_feature.coding, team_context, app)
@@ -1958,7 +2020,7 @@ impl LLMPreferences {
 
     pub(crate) fn get_default_coding_model_for_render_context(
         &self,
-        team_context: Option<&TeamRenderContext<'_>>,
+        team_context: Option<&TeamContext<'_>>,
         app: &AppContext,
     ) -> &LLMInfo {
         let is_usable = |info: &LLMInfo| is_usable_llm_for_render_context(info, team_context, app);
@@ -1997,10 +2059,20 @@ impl LLMPreferences {
     pub fn is_available_agent_mode_llm(&self, id: &LLMId) -> bool {
         self.models_by_feature.agent_mode.info_for_id(id).is_some()
     }
-    pub(crate) fn is_agent_mode_model_selectable(
+
+    pub(crate) fn is_agent_mode_model_selectable_for_team_context(
         &self,
         id: &LLMId,
-        team_context: Option<&TeamContext>,
+        team_context: Option<&TeamContext<'_>>,
+        app: &AppContext,
+    ) -> bool {
+        self.is_agent_mode_model_selectable_for_scope(id, team_context, app)
+    }
+
+    fn is_agent_mode_model_selectable_for_scope<S: TeamScope + ?Sized>(
+        &self,
+        id: &LLMId,
+        team_context: Option<&S>,
         app: &AppContext,
     ) -> bool {
         let info = Self::server_info_for_id_router_gated(&self.models_by_feature.agent_mode, id)
@@ -2028,17 +2100,73 @@ impl LLMPreferences {
         &mut self,
         preferred_llm_id: &LLMId,
         terminal_view_id: EntityId,
-        team_context: Option<&TeamContext>,
+        team_context: &TeamContextForOperation,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.update_preferred_agent_mode_llm_for_scope(
+            preferred_llm_id,
+            terminal_view_id,
+            Some(team_context),
+            ctx,
+        );
+    }
+
+    pub fn update_preferred_agent_mode_llm_for_view<T: Entity>(
+        preferred_llm_id: &LLMId,
+        terminal_view_id: EntityId,
+        view: &WeakViewHandle<T>,
+        ctx: &mut AppContext,
+    ) {
+        let profile_default_model_id = {
+            let team_context = UserWorkspaces::as_ref(ctx).team_context(view, ctx);
+            Self::as_ref(ctx)
+                .get_active_profile_base_model_for_team_context(
+                    Some(terminal_view_id),
+                    team_context.as_ref(),
+                    ctx,
+                )
+                .id
+                .clone()
+        };
+        Self::handle(ctx).update(ctx, |preferences, ctx| {
+            preferences.update_preferred_agent_mode_llm_with_profile_default(
+                preferred_llm_id,
+                terminal_view_id,
+                &profile_default_model_id,
+                ctx,
+            );
+        });
+    }
+
+    fn update_preferred_agent_mode_llm_for_scope<S: TeamScope + ?Sized>(
+        &mut self,
+        preferred_llm_id: &LLMId,
+        terminal_view_id: EntityId,
+        team_context: Option<&S>,
         ctx: &mut ModelContext<Self>,
     ) {
         let profile_default_model_id = self
-            .get_active_profile_base_model(Some(terminal_view_id), team_context, ctx)
+            .get_active_profile_base_model_for_scope(Some(terminal_view_id), team_context, ctx)
             .id
             .clone();
+        self.update_preferred_agent_mode_llm_with_profile_default(
+            preferred_llm_id,
+            terminal_view_id,
+            &profile_default_model_id,
+            ctx,
+        );
+    }
 
+    pub(crate) fn update_preferred_agent_mode_llm_with_profile_default(
+        &mut self,
+        preferred_llm_id: &LLMId,
+        terminal_view_id: EntityId,
+        profile_default_model_id: &LLMId,
+        ctx: &mut ModelContext<Self>,
+    ) {
         // Only remove override if we're setting to the profile's default.
         // Otherwise, always set the override explicitly.
-        let changed = if preferred_llm_id == &profile_default_model_id {
+        let changed = if preferred_llm_id == profile_default_model_id {
             self.base_llm_for_terminal_view
                 .remove(&terminal_view_id)
                 .is_some()
@@ -2093,29 +2221,96 @@ impl LLMPreferences {
     /// Pins an explicit child-run model independently of profile or TUI
     /// defaults. Persist the pin whenever it changes, but notify active-model
     /// subscribers only when the surface's effective selection changes.
-    #[cfg(not(target_family = "wasm"))]
+    #[cfg(all(not(target_family = "wasm"), any(test, feature = "tui")))]
     pub(crate) fn set_agent_mode_llm_override(
         &mut self,
         terminal_view_id: EntityId,
         model_id: LLMId,
-        team_context: Option<&TeamContext>,
+        team_context: &TeamContextForOperation,
         ctx: &mut ModelContext<Self>,
     ) {
+        let update = self.prepare_agent_mode_llm_override_for_scope(
+            terminal_view_id,
+            model_id,
+            Some(team_context),
+            ctx,
+        );
+        self.apply_agent_mode_llm_override(update, ctx);
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn prepare_agent_mode_llm_override_for_team_context(
+        &self,
+        terminal_view_id: EntityId,
+        model_id: LLMId,
+        team_context: Option<&TeamContext<'_>>,
+        app: &AppContext,
+    ) -> AgentModeLLMOverrideUpdate {
+        self.prepare_agent_mode_llm_override_for_scope(
+            terminal_view_id,
+            model_id,
+            team_context,
+            app,
+        )
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn prepare_agent_mode_llm_override_for_scope<S: TeamScope + ?Sized>(
+        &self,
+        terminal_view_id: EntityId,
+        model_id: LLMId,
+        team_context: Option<&S>,
+        app: &AppContext,
+    ) -> AgentModeLLMOverrideUpdate {
         let previous_effective_model_id = self
-            .get_active_base_model(Some(terminal_view_id), team_context, ctx)
+            .get_active_base_model_for_scope(Some(terminal_view_id), team_context, app)
             .id
             .clone();
+        let is_usable = |info: &LLMInfo| is_usable_llm_for_scope(info, team_context, app);
+        let next_effective_model_id = self
+            .model_info_for_id_with(
+                &self.models_by_feature.agent_mode,
+                &model_id,
+                &is_usable,
+                self.custom_inference_enabled_for_context(team_context, app),
+                app,
+            )
+            .unwrap_or_else(|| {
+                self.get_active_profile_base_model_for_scope(
+                    Some(terminal_view_id),
+                    team_context,
+                    app,
+                )
+            })
+            .id
+            .clone();
+        AgentModeLLMOverrideUpdate {
+            terminal_view_id,
+            model_id,
+            previous_effective_model_id,
+            next_effective_model_id,
+        }
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn apply_agent_mode_llm_override(
+        &mut self,
+        update: AgentModeLLMOverrideUpdate,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let AgentModeLLMOverrideUpdate {
+            terminal_view_id,
+            model_id,
+            previous_effective_model_id,
+            next_effective_model_id,
+        } = update;
         let stored_selection_changed = self
             .base_llm_for_terminal_view
             .insert(terminal_view_id, model_id.clone())
             != Some(model_id);
         if stored_selection_changed {
             self.trigger_snapshot_save(ctx);
-            if self
-                .get_active_base_model(Some(terminal_view_id), team_context, ctx)
-                .id
-                != previous_effective_model_id
-            {
+            if next_effective_model_id != previous_effective_model_id {
                 ctx.emit(LLMPreferencesEvent::UpdatedActiveAgentModeLLM);
             }
         }
@@ -2474,7 +2669,7 @@ impl LLMPreferences {
     pub fn vision_supported(
         &self,
         terminal_view_id: Option<EntityId>,
-        team_context: Option<&TeamContext>,
+        team_context: &TeamContextForOperation,
         app: &AppContext,
     ) -> bool {
         self.get_active_base_model(terminal_view_id, team_context, app)

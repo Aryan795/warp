@@ -320,19 +320,22 @@ fn team_for_test() -> Team {
     }
 }
 
-fn sole_team_context(user_workspaces: &UserWorkspaces) -> TeamContext {
-    TeamContext {
-        team_uid: user_workspaces
-            .sole_team_uid()
-            .expect("the test workspace should have one team"),
+fn sole_team_context(user_workspaces: &UserWorkspaces) -> TeamContextForOperation {
+    TeamContextForOperation {
+        team_uid: Some(
+            user_workspaces
+                .sole_team_uid()
+                .expect("the test workspace should have one team"),
+        ),
     }
 }
 
-fn sole_team_render_context(user_workspaces: &UserWorkspaces) -> TeamRenderContext<'_> {
-    TeamRenderContext {
-        team: user_workspaces
-            .sole_team()
-            .expect("the test workspace should have one team"),
+fn sole_team_render_context(user_workspaces: &UserWorkspaces) -> TeamContext<'_> {
+    let team = user_workspaces
+        .sole_team()
+        .expect("the test workspace should have one team");
+    TeamContext {
+        team_uid: Some(&team.uid),
     }
 }
 
@@ -822,8 +825,8 @@ fn test_llm_policy_uses_team_context_with_teamless_fallback_and_no_stale_fallbac
             Arc::new(MockWorkspaceClient::new()),
         );
 
-        let context_a = TeamContext::new_for_test(team_a.uid);
-        let context_b = TeamContext::new_for_test(team_b.uid);
+        let context_a = TeamContextForOperation::new_for_test(team_a.uid);
+        let context_b = TeamContextForOperation::new_for_test(team_b.uid);
 
         app.read(|ctx| {
             let user_workspaces = UserWorkspaces::as_ref(ctx);
@@ -844,12 +847,14 @@ fn test_llm_policy_uses_team_context_with_teamless_fallback_and_no_stale_fallbac
                     .is_gemini_enterprise_credentials_enabled_for_context(Some(&context_b), ctx)
             );
             assert!(
-                user_workspaces
-                    .is_aws_bedrock_credentials_enabled_for_context(None::<&TeamContext>, ctx)
+                user_workspaces.is_aws_bedrock_credentials_enabled_for_context(
+                    None::<&TeamContextForOperation>,
+                    ctx
+                )
             );
             assert!(
                 user_workspaces.is_gemini_enterprise_credentials_enabled_for_context(
-                    None::<&TeamContext>,
+                    None::<&TeamContextForOperation>,
                     ctx
                 )
             );
@@ -1232,26 +1237,24 @@ fn test_team_context_for_view_resolves_each_windows_own_team() {
         });
 
         let context_a = view_a.update(&mut app, |_, ctx| {
-            UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+            UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx)
         });
         let context_b = view_b.update(&mut app, |_, ctx| {
-            UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+            UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx)
         });
 
         app.read(|ctx| {
             let user_workspaces = UserWorkspaces::as_ref(ctx);
             assert_eq!(
-                context_a
-                    .as_ref()
-                    .and_then(|context| user_workspaces.team_for_context(context))
+                user_workspaces
+                    .team_for_context(&context_a)
                     .map(|team| team.uid),
                 Some(team_a.uid),
                 "the view in window A should mint a context resolving to team A"
             );
             assert_eq!(
-                context_b
-                    .as_ref()
-                    .and_then(|context| user_workspaces.team_for_context(context))
+                user_workspaces
+                    .team_for_context(&context_b)
                     .map(|team| team.uid),
                 Some(team_b.uid),
                 "the view in window B should mint a context resolving to team B"
@@ -1277,18 +1280,16 @@ fn test_window_team_reconciliation_moves_rendering_but_not_a_captured_context() 
             user_workspaces.set_team_for_window(window_id, team_a.uid, ctx);
         });
 
-        let context_a = view
-            .update(&mut app, |_, ctx| {
-                UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
-            })
-            .expect("a window assigned to team A should mint a context");
+        let context_a = view.update(&mut app, |_, ctx| {
+            UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx)
+        });
 
         app.read(|ctx| {
             assert_eq!(
                 UserWorkspaces::as_ref(ctx)
-                    .team_render_context_for_view_handle(&weak_view, ctx)
-                    .map(|render| render.team_uid()),
-                Some(team_a.uid)
+                    .team_context(&weak_view, ctx)
+                    .and_then(|context| context.team_uid()),
+                Some(team_a.uid),
             );
         });
 
@@ -1300,8 +1301,8 @@ fn test_window_team_reconciliation_moves_rendering_but_not_a_captured_context() 
             let user_workspaces = UserWorkspaces::as_ref(ctx);
             assert_eq!(
                 user_workspaces
-                    .team_render_context_for_view_handle(&weak_view, ctx)
-                    .map(|render| render.team_uid()),
+                    .team_context(&weak_view, ctx)
+                    .and_then(|context| context.team_uid()),
                 Some(team_b.uid),
                 "a freshly resolved render context should follow the window to team B"
             );
@@ -1315,7 +1316,7 @@ fn test_window_team_reconciliation_moves_rendering_but_not_a_captured_context() 
 }
 
 #[test]
-fn test_team_context_and_render_context_return_none_without_a_team() {
+fn test_team_contexts_represent_a_registered_teamless_window() {
     App::test((), |mut app| async move {
         initialize_window_team_test_app(&mut app, vec![]);
 
@@ -1325,21 +1326,16 @@ fn test_team_context_and_render_context_return_none_without_a_team() {
         });
 
         let context = view.update(&mut app, |_, ctx| {
-            UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+            UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx)
         });
-        assert!(
-            context.is_none(),
-            "a window with no team should not mint a TeamContext"
-        );
+        assert_eq!(context.team_uid(), None);
 
         let weak_view = view.downgrade();
         app.read(|ctx| {
-            assert!(
-                UserWorkspaces::as_ref(ctx)
-                    .team_render_context_for_view_handle(&weak_view, ctx)
-                    .is_none(),
-                "a window with no team should not resolve a TeamRenderContext"
-            );
+            let context = UserWorkspaces::as_ref(ctx)
+                .team_context(&weak_view, ctx)
+                .expect("a registered teamless window should resolve");
+            assert_eq!(context.team_uid(), None);
         });
     })
 }
@@ -1385,8 +1381,8 @@ fn test_agent_settings_are_member_byo_keys_allowed_reads_selected_team_per_windo
                 user_workspaces.is_managed_byok_byoe_enabled(),
                 "the workspace plan manages BYOK/BYOE centrally, regardless of window team"
             );
-            let context_a = user_workspaces.team_render_context_for_view_handle(&weak_a, ctx);
-            let context_b = user_workspaces.team_render_context_for_view_handle(&weak_b, ctx);
+            let context_a = user_workspaces.team_context(&weak_a, ctx);
+            let context_b = user_workspaces.team_context(&weak_b, ctx);
             assert!(
                 user_workspaces.agent_settings_are_member_byo_keys_allowed(context_a.as_ref()),
                 "team A's policy should allow members to use their own keys"
@@ -1423,8 +1419,8 @@ fn test_agent_settings_are_member_byo_endpoints_allowed_reads_selected_team_per_
 
         app.read(|ctx| {
             let user_workspaces = UserWorkspaces::as_ref(ctx);
-            let context_a = user_workspaces.team_render_context_for_view_handle(&weak_a, ctx);
-            let context_b = user_workspaces.team_render_context_for_view_handle(&weak_b, ctx);
+            let context_a = user_workspaces.team_context(&weak_a, ctx);
+            let context_b = user_workspaces.team_context(&weak_b, ctx);
             assert!(
                 user_workspaces.agent_settings_are_member_byo_endpoints_allowed(context_a.as_ref()),
                 "team A's policy should allow members to use their own custom endpoints"
@@ -1461,15 +1457,13 @@ fn test_agent_settings_are_member_byo_keys_allowed_follows_window_team_change() 
         UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
             user_workspaces.set_team_for_window(window_id, team_a.uid, ctx);
         });
-        let operation_context = view
-            .update(&mut app, |_, ctx| {
-                UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
-            })
-            .expect("the operation should capture team A");
+        let operation_context = view.update(&mut app, |_, ctx| {
+            UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx)
+        });
 
         app.read(|ctx| {
             let user_workspaces = UserWorkspaces::as_ref(ctx);
-            let context = user_workspaces.team_render_context_for_view_handle(&weak_view, ctx);
+            let context = user_workspaces.team_context(&weak_view, ctx);
             assert!(
                 user_workspaces.agent_settings_are_member_byo_keys_allowed(context.as_ref()),
                 "team A's policy allows members to use their own keys"
@@ -1483,18 +1477,17 @@ fn test_agent_settings_are_member_byo_keys_allowed_follows_window_team_change() 
 
         app.read(|ctx| {
             let user_workspaces = UserWorkspaces::as_ref(ctx);
-            let context = user_workspaces.team_render_context_for_view_handle(&weak_view, ctx);
+            let context = user_workspaces.team_context(&weak_view, ctx);
             assert!(
                 !user_workspaces.agent_settings_are_member_byo_keys_allowed(context.as_ref()),
                 "after the window reconciles onto team B, its restrictive policy should apply"
             );
             assert!(
-                !user_workspaces.are_member_byo_keys_allowed_for_context(Some(&operation_context)),
+                !user_workspaces.are_member_byo_keys_allowed_for_context(&operation_context),
                 "a captured scope must not allow member keys after its team disappears"
             );
             assert!(
-                !user_workspaces
-                    .are_member_byo_endpoints_allowed_for_context(Some(&operation_context)),
+                !user_workspaces.are_member_byo_endpoints_allowed_for_context(&operation_context),
                 "a captured scope must not allow member endpoints after its team disappears"
             );
         });
@@ -2764,8 +2757,8 @@ fn test_member_team_settings_win_over_workspace_settings() {
             let user_workspaces = UserWorkspaces::as_ref(ctx);
             let team = user_workspaces.sole_team();
             assert!(team.is_some(), "the member team should survive filtering");
-            let team_render_context = team.map(|team| TeamRenderContext {
-                team_uid: &team.uid,
+            let team_render_context = team.map(|team| TeamContext {
+                team_uid: Some(&team.uid),
             });
             assert!(
                 !user_workspaces.is_custom_llm_enabled(team_render_context),

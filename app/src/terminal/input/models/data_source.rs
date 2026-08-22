@@ -50,7 +50,7 @@ use crate::terminal::input::inline_menu::{
 use crate::terminal::input::message_bar::{Message, MessageItem};
 use crate::terminal::view::ambient_agent::AmbientAgentViewModel;
 use crate::workspace::WorkspaceAction;
-use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces};
+use crate::workspaces::user_workspaces::{TeamContextForOperation, UserWorkspaces};
 
 /// Auto models pick their concrete model server-side, so the cost line names the
 /// class of inference rather than a host the request may never reach.
@@ -164,7 +164,7 @@ pub fn query_model_picker_choices<'a>(
     llm_preferences: &LLMPreferences,
     choices: impl IntoIterator<Item = &'a LLMInfo>,
     query_text: &str,
-    team_context: Option<&TeamContext>,
+    team_context: &TeamContextForOperation,
     app: &AppContext,
 ) -> Vec<ModelPickerChoice> {
     let choices = ModelSelectorDataSource::order_model_choices(
@@ -407,8 +407,7 @@ impl ModelSearchItem {
     fn presentation(&self, app: &AppContext) -> Option<ModelSearchPresentation> {
         self.owner_view.upgrade(app)?;
         let workspaces = UserWorkspaces::as_ref(app);
-        let team_render_context =
-            workspaces.team_render_context_for_view_handle(&self.owner_view, app);
+        let team_render_context = workspaces.team_context(&self.owner_view, app);
         let preferences = LLMPreferences::as_ref(app);
         let llm = preferences.get_llm_info(&self.id)?.clone();
         let is_custom_endpoint = preferences.custom_llm_info_for_id(&llm.id).is_some();

@@ -5,7 +5,7 @@ use ai::api_keys::{ApiKeyManager, ApiKeyManagerEvent};
 use ai::grok_subscription::oauth::OauthAttempt;
 use warp::editor::{CodeEditorModel, CodeEditorModelEvent};
 use warp::settings::{AISettings, AISettingsChangedEvent};
-use warp::tui_export::{TeamContext, UserWorkspaces};
+use warp::tui_export::{TeamContextForOperation, UserWorkspaces};
 use warp_core::features::FeatureFlag;
 use warp_core::settings::ToggleableSetting as _;
 use warp_editor::model::CoreEditorModel;
@@ -162,7 +162,7 @@ impl TuiApiKeysMenuModel {
 
     pub(crate) fn start_grok_oauth(
         &mut self,
-        team_context: Option<TeamContext>,
+        team_context: TeamContextForOperation,
         ctx: &mut ModelContext<Self>,
     ) {
         let workspaces = UserWorkspaces::as_ref(ctx);
@@ -170,7 +170,7 @@ impl TuiApiKeysMenuModel {
             Some("Grok subscriptions aren't available in this build.")
         } else if !workspaces.is_byo_api_key_enabled(ctx) {
             Some("Grok subscriptions require BYOK access for this workspace.")
-        } else if !workspaces.are_member_byo_keys_allowed_for_context(team_context.as_ref()) {
+        } else if !workspaces.are_member_byo_keys_allowed_for_context(&team_context) {
             Some("Your organization doesn't allow member-provided credentials.")
         } else {
             None

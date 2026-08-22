@@ -59,7 +59,7 @@ use crate::terminal::shared_session::{
 };
 use crate::throttle::throttle;
 #[cfg(not(any(test, feature = "integration_tests")))]
-use crate::workspaces::user_workspaces::TeamContext;
+use crate::workspaces::user_workspaces::TeamContextForOperation;
 
 /// The amount of time we will wait to batch consecutive PTY read events before sending an event to the server.
 #[cfg(not(any(test, feature = "integration_tests")))]
@@ -386,7 +386,7 @@ impl Network {
         selection: Selection,
         input_replica_id: ReplicaId,
         terminal_view_id: warpui::EntityId,
-        team_context: Option<TeamContext>,
+        team_context: TeamContextForOperation,
         universal_developer_input_context: UniversalDeveloperInputContext,
         lifetime: Lifetime,
         source: SharedSessionSource,
@@ -407,7 +407,7 @@ impl Network {
             }
         };
         let selected_model_id: String = crate::ai::llms::LLMPreferences::as_ref(ctx)
-            .get_active_base_model(Some(terminal_view_id), team_context.as_ref(), ctx)
+            .get_active_base_model(Some(terminal_view_id), &team_context, ctx)
             .id
             .clone()
             .into();

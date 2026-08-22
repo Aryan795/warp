@@ -4241,8 +4241,7 @@ impl TerminalView {
             if let AISettingsChangedEvent::AwsBedrockCredentialsEnabled { .. } = ai_settings_event
                 && {
                     let workspaces = UserWorkspaces::as_ref(ctx);
-                    let context =
-                        workspaces.team_render_context_for_view_handle(&ctx.handle(), ctx);
+                    let context = workspaces.team_context(&ctx.handle(), ctx);
                     !workspaces.is_aws_bedrock_credentials_enabled_for_render_context(
                         context.as_ref(),
                         ctx,
@@ -5361,7 +5360,7 @@ impl TerminalView {
         } = event
         {
             if FeatureFlag::PromptSuggestionsViaMAA.is_enabled() {
-                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
                 self.passive_suggestions_models
                     .maa
                     .update(ctx, move |model, ctx| {
@@ -6930,7 +6929,7 @@ impl TerminalView {
             });
         }
 
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
         self.ai_controller.update(ctx, move |controller, ctx| {
             controller.resume_conversation(*conversation_id, vec![], team_context, ctx);
         });
@@ -8097,7 +8096,7 @@ impl TerminalView {
         ctx: &mut ViewContext<Self>,
     ) {
         let model = self.ensure_ambient_agent_view_model(ctx);
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
         model.update(ctx, |model, ctx| {
             model.enter_viewing_existing_session(task_id, team_context, ctx);
             model.set_live_execution_session(session_id);
@@ -10305,7 +10304,7 @@ impl TerminalView {
                 }
             };
 
-            let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+            let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
             self.ai_controller.update(ctx, move |controller, ctx| {
                 controller.send_passive_suggestion_result(
                     Some(conversation_id),
@@ -10876,7 +10875,7 @@ impl TerminalView {
         }
 
         let workspaces = UserWorkspaces::as_ref(ctx);
-        let context = workspaces.team_render_context_for_view_handle(&ctx.handle(), ctx);
+        let context = workspaces.team_context(&ctx.handle(), ctx);
         if !workspaces.is_aws_bedrock_credentials_enabled_for_render_context(context.as_ref(), ctx)
         {
             return;
@@ -12294,7 +12293,7 @@ impl TerminalView {
                 if let BlockType::User(block_completed) = block_type
                     && !block_completed.was_part_of_agent_interaction
                 {
-                    let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                    let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
                     if FeatureFlag::PromptSuggestionsViaMAA.is_enabled() {
                         self.passive_suggestions_models
                             .maa
@@ -14202,7 +14201,7 @@ impl TerminalView {
     }
 
     fn summarize_conversation(&mut self, ctx: &mut ViewContext<Self>) {
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
         self.ai_controller.update(ctx, move |controller, ctx| {
             controller.send_slash_command_request(
                 SlashCommandRequest::Summarize { prompt: None },
@@ -14307,7 +14306,7 @@ impl TerminalView {
                     ctx.emit(Event::OnboardingInitCompleted);
                 }
                 InitProjectModelEvent::GenerateProjectRules => {
-                    let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                    let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
                     me.ai_controller.update(ctx, move |controller, ctx| {
                         controller.send_ai_input_with_context(
                             |context| AIAgentInput::InitProjectRules {
@@ -14347,7 +14346,7 @@ impl TerminalView {
                     });
                 }
                 InitProjectModelEvent::RegenerateProjectRules => {
-                    let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                    let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
                     me.ai_controller.update(ctx, move |controller, ctx| {
                         controller.send_ai_input_with_context(
                             |context| AIAgentInput::InitProjectRules {
@@ -14369,7 +14368,7 @@ impl TerminalView {
                     me.start_lsp_server_in_active_pwd(ctx);
                 }
                 InitProjectModelEvent::CreateEnvironment => {
-                    let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                    let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
                     me.ai_controller.update(ctx, move |controller, ctx| {
                         controller.send_ai_input_with_context(
                             |context| AIAgentInput::CreateEnvironment {
@@ -14669,7 +14668,7 @@ impl TerminalView {
         });
 
         // Send the CreateEnvironment request (shows "/create-environment" instead of full prompt)
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
         self.ai_controller.update(ctx, move |controller, ctx| {
             controller.send_slash_command_request(
                 SlashCommandRequest::CreateEnvironment {
@@ -15727,7 +15726,8 @@ impl TerminalView {
                     let diffs = original_edits.clone();
                     if *accepted {
                         let trigger = trigger.clone();
-                        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                        let team_context =
+                            UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
                         me.ai_controller.update(ctx, move |controller, ctx| {
                             controller.send_passive_suggestion_result(
                                 Some(conversation_id),
@@ -23580,7 +23580,7 @@ impl TerminalView {
             });
         }
 
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
         self.ai_controller.update(ctx, move |controller, ctx| {
             // Send the code review request to the AI controller and return the result
             controller.send_custom_ai_input_query(code_review_input, team_context, ctx);

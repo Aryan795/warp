@@ -866,8 +866,7 @@ impl View for UniversalDeveloperInputButtonBar {
         };
 
         let workspaces = UserWorkspaces::as_ref(app);
-        let team_render_context =
-            workspaces.team_render_context_for_view_handle(&self.weak_self, app);
+        let team_render_context = workspaces.team_context(&self.weak_self, app);
         let active_model_display_name = LLMPreferences::as_ref(app)
             .get_active_base_model_for_render_context(
                 Some(self.terminal_view_id),

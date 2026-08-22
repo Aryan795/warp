@@ -46,7 +46,7 @@ use crate::server::server_api::ai::{
 };
 use crate::terminal::CLIAgent;
 use crate::terminal::view::ambient_agent::{SetupCommandGroupId, SetupCommandState};
-use crate::workspaces::user_workspaces::TeamContext;
+use crate::workspaces::user_workspaces::TeamContextForOperation;
 
 /// Tracks progress timestamps for each step during ambient agent spawning.
 #[derive(Debug, Clone)]
@@ -793,7 +793,7 @@ impl AmbientAgentViewModel {
     pub fn enter_viewing_existing_session(
         &mut self,
         task_id: AmbientAgentTaskId,
-        team_context: Option<TeamContext>,
+        team_context: TeamContextForOperation,
         ctx: &mut ModelContext<Self>,
     ) {
         let ai_client = ServerApiProvider::as_ref(ctx).get_ai_client();
@@ -815,7 +815,7 @@ impl AmbientAgentViewModel {
                     me.source = task.source.clone();
                     me.apply_viewed_task_config_snapshot(
                         task.agent_config_snapshot.as_ref(),
-                        team_context.as_ref(),
+                        &team_context,
                         ctx,
                     );
                     ctx.emit(AmbientAgentViewModelEvent::ViewerHarnessResolved);
@@ -846,7 +846,7 @@ impl AmbientAgentViewModel {
     fn apply_viewed_task_config_snapshot(
         &mut self,
         snapshot: Option<&AgentConfigSnapshot>,
-        team_context: Option<&TeamContext>,
+        team_context: &TeamContextForOperation,
         ctx: &mut ModelContext<Self>,
     ) {
         let environment_id = snapshot
@@ -1013,7 +1013,7 @@ impl AmbientAgentViewModel {
     /// both flows route to the same worker host and inherit the same defaults.
     pub(crate) fn build_default_spawn_config(
         &self,
-        team_context: Option<&TeamContext>,
+        team_context: &TeamContextForOperation,
         ctx: &AppContext,
     ) -> AgentConfigSnapshot {
         let selected_harness = self.selected_harness();
@@ -1070,10 +1070,10 @@ impl AmbientAgentViewModel {
         &mut self,
         prompt: String,
         attachments: Vec<AttachmentInput>,
-        team_context: Option<TeamContext>,
+        team_context: TeamContextForOperation,
         ctx: &mut ModelContext<Self>,
     ) {
-        let config = Some(self.build_default_spawn_config(team_context.as_ref(), ctx));
+        let config = Some(self.build_default_spawn_config(&team_context, ctx));
 
         let (prompt, mode) = extract_user_query_mode(prompt);
         let request = SpawnAgentRequest {
@@ -1102,7 +1102,7 @@ impl AmbientAgentViewModel {
     pub fn spawn_agent_with_request(
         &mut self,
         request: SpawnAgentRequest,
-        team_context: Option<TeamContext>,
+        team_context: TeamContextForOperation,
         ctx: &mut ModelContext<Self>,
     ) {
         // Apply pane settings from the request.
@@ -1119,7 +1119,7 @@ impl AmbientAgentViewModel {
                     prefs.update_preferred_agent_mode_llm(
                         &LLMId::from(model_id),
                         self.terminal_view_id,
-                        team_context.as_ref(),
+                        &team_context,
                         ctx,
                     )
                 });

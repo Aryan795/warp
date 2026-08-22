@@ -1532,7 +1532,7 @@ impl Input {
         let followup_attachments = QueuedQueryModel::as_ref(ctx)
             .attachments_for(conversation_id, queued_query_id)
             .to_vec();
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
         self.ai_controller.update(ctx, move |controller, ctx| {
             controller.send_queued_slash_command_request(
                 SlashCommandRequest::Summarize { prompt: None },

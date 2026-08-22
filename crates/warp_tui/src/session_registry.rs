@@ -329,7 +329,7 @@ impl TuiSessions {
                     working_directory,
                 } => {
                     let team_context = view_for_team_context.update(ctx, |_, ctx| {
-                        UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+                        UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx)
                     });
                     orchestration.update(ctx, |orchestration, ctx| {
                         orchestration.dispatch_create_agent(

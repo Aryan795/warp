@@ -22,7 +22,7 @@ use crate::terminal::input::models::query_model_picker_choices;
 use crate::test_util::settings::initialize_settings_for_tests;
 use crate::workspaces::team::{Team, TeamVisibility};
 use crate::workspaces::team_tester::TeamTesterStatus;
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{TeamContextForOperation, UserWorkspaces};
 use crate::workspaces::workspace::{
     ByoFirstPartyKey, ManagedByokByoePolicy, TeamByoSettings, Workspace,
 };
@@ -681,21 +681,23 @@ fn active_models_fall_back_to_usable_choice_or_custom_endpoint_when_default_disa
             // Falls back to the first usable hosted choice.
             assert_eq!(
                 preferences
-                    .get_active_base_model(None, None, app)
+                    .get_active_base_model(None, &TeamContextForOperation::teamless(), app)
                     .id
                     .as_str(),
                 "gpt-x"
             );
             assert_eq!(
                 preferences
-                    .get_active_coding_model(None, None, app)
+                    .get_active_coding_model(None, &TeamContextForOperation::teamless(), app)
                     .id
                     .as_str(),
                 "gpt-x"
             );
             // No usable hosted CLI choice → falls back to the custom endpoint.
             assert_eq!(
-                preferences.get_active_cli_agent_model(None, None, app).id,
+                preferences
+                    .get_active_cli_agent_model(None, &TeamContextForOperation::teamless(), app,)
+                    .id,
                 custom_model_id
             );
         });
@@ -770,14 +772,14 @@ fn active_models_use_default_when_usable() {
         llm_preferences.read(&app, |preferences, app| {
             assert_eq!(
                 preferences
-                    .get_active_base_model(None, None, app)
+                    .get_active_base_model(None, &TeamContextForOperation::teamless(), app)
                     .id
                     .as_str(),
                 "auto"
             );
             assert_eq!(
                 preferences
-                    .get_active_cli_agent_model(None, None, app)
+                    .get_active_cli_agent_model(None, &TeamContextForOperation::teamless(), app,)
                     .id
                     .as_str(),
                 "cli-agent-auto"
@@ -1065,7 +1067,7 @@ fn shared_model_picker_query_orders_filters_and_marks_disabled_choices() {
             preferences,
             preferences.get_base_llm_choices_for_agent_mode(app),
             "",
-            None,
+            &TeamContextForOperation::teamless(),
             app,
         );
         assert_eq!(
@@ -1082,7 +1084,7 @@ fn shared_model_picker_query_orders_filters_and_marks_disabled_choices() {
             preferences,
             preferences.get_base_llm_choices_for_agent_mode(app),
             "gpt 5",
-            None,
+            &TeamContextForOperation::teamless(),
             app,
         );
         assert_eq!(filtered.len(), 1);
@@ -1148,7 +1150,11 @@ fn updating_active_profile_base_model_persists_and_updates_resolution() {
         preferences.read(&app, |preferences, ctx| {
             assert_eq!(
                 preferences
-                    .get_active_base_model(Some(surface_id), None, ctx)
+                    .get_active_base_model(
+                        Some(surface_id),
+                        &TeamContextForOperation::teamless(),
+                        ctx,
+                    )
                     .id
                     .as_str(),
                 "claude-opus"
@@ -1193,10 +1199,15 @@ fn selecting_a_custom_profile_default_clears_the_session_override() {
             preferences.set_agent_mode_llm_override(
                 surface_id,
                 LLMId::from("claude-opus"),
-                None,
+                &TeamContextForOperation::teamless(),
                 ctx,
             );
-            preferences.update_preferred_agent_mode_llm(&custom_model_id, surface_id, None, ctx);
+            preferences.update_preferred_agent_mode_llm(
+                &custom_model_id,
+                surface_id,
+                &TeamContextForOperation::teamless(),
+                ctx,
+            );
         });
 
         preferences.read(&app, |preferences, _| {
@@ -1211,7 +1222,11 @@ fn selecting_a_custom_profile_default_clears_the_session_override() {
         preferences.read(&app, |preferences, ctx| {
             assert_eq!(
                 preferences
-                    .get_active_base_model(Some(surface_id), None, ctx)
+                    .get_active_base_model(
+                        Some(surface_id),
+                        &TeamContextForOperation::teamless(),
+                        ctx,
+                    )
                     .id
                     .as_str(),
                 "auto"
@@ -1250,13 +1265,22 @@ fn explicit_child_model_pin_preserves_gui_behavior_and_only_emits_for_effective_
 
         let surface_id = EntityId::new();
         preferences.update(&mut app, |preferences, ctx| {
-            preferences.set_agent_mode_llm_override(surface_id, LLMId::from("auto"), None, ctx);
+            preferences.set_agent_mode_llm_override(
+                surface_id,
+                LLMId::from("auto"),
+                &TeamContextForOperation::teamless(),
+                ctx,
+            );
         });
         assert_eq!(active_model_events.get(), 0);
         preferences.read(&app, |preferences, ctx| {
             assert_eq!(
                 preferences
-                    .get_active_base_model(Some(surface_id), None, ctx)
+                    .get_active_base_model(
+                        Some(surface_id),
+                        &TeamContextForOperation::teamless(),
+                        ctx,
+                    )
                     .id
                     .as_str(),
                 "auto"
@@ -1277,7 +1301,11 @@ fn explicit_child_model_pin_preserves_gui_behavior_and_only_emits_for_effective_
         preferences.read(&app, |preferences, ctx| {
             assert_eq!(
                 preferences
-                    .get_active_base_model(Some(surface_id), None, ctx)
+                    .get_active_base_model(
+                        Some(surface_id),
+                        &TeamContextForOperation::teamless(),
+                        ctx,
+                    )
                     .id
                     .as_str(),
                 "auto"
@@ -1288,7 +1316,7 @@ fn explicit_child_model_pin_preserves_gui_behavior_and_only_emits_for_effective_
             preferences.set_agent_mode_llm_override(
                 surface_id,
                 LLMId::from("claude-opus"),
-                None,
+                &TeamContextForOperation::teamless(),
                 ctx,
             );
         });
@@ -1297,7 +1325,7 @@ fn explicit_child_model_pin_preserves_gui_behavior_and_only_emits_for_effective_
             preferences.set_agent_mode_llm_override(
                 surface_id,
                 LLMId::from("claude-opus"),
-                None,
+                &TeamContextForOperation::teamless(),
                 ctx,
             );
         });
@@ -1437,28 +1465,28 @@ fn credential_source_for_model_differs_by_window_team_policy() {
         anthropic_llm.provider = LLMProvider::Anthropic;
 
         let team_context_a = view_a.update(&mut app, |_, ctx| {
-            UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+            UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx)
         });
         let team_context_b = view_b.update(&mut app, |_, ctx| {
-            UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+            UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx)
         });
         app.read(|ctx| {
             assert_eq!(
-                byo_key_source_for_model(&anthropic_llm, team_context_a.as_ref(), ctx),
+                byo_key_source_for_model(&anthropic_llm, &team_context_a, ctx),
                 Some(ByoKeySource::TeamProvided),
                 "team A's first-party key should surface as the credential source"
             );
             assert_eq!(
-                byo_key_source_for_model(&anthropic_llm, team_context_b.as_ref(), ctx),
+                byo_key_source_for_model(&anthropic_llm, &team_context_b, ctx),
                 None,
                 "team B has no team-provided key and disallows member keys, so no credential source"
             );
             assert!(
-                should_show_key_icon_for_model(&anthropic_llm, team_context_a.as_ref(), ctx),
+                should_show_key_icon_for_model(&anthropic_llm, &team_context_a, ctx),
                 "window A should show the key icon"
             );
             assert!(
-                !should_show_key_icon_for_model(&anthropic_llm, team_context_b.as_ref(), ctx),
+                !should_show_key_icon_for_model(&anthropic_llm, &team_context_b, ctx),
                 "window B should not show the key icon"
             );
         });

@@ -144,7 +144,16 @@ impl AgentProfilesPageView {
         let is_any_ai_enabled = AISettings::as_ref(ctx).is_any_ai_enabled(ctx);
 
         let workspace = UserWorkspaces::handle(ctx);
-        let team_context = workspace.as_ref(ctx).team_context_for_view(ctx);
+        let clamped_initial = {
+            let handle = ctx.handle();
+            let team_context = workspace.as_ref(ctx).team_context(&handle, ctx);
+            let initial_context_window_value =
+                Self::initial_context_window_value(team_context.as_ref(), ctx);
+            Self::active_profile_data(ctx)
+                .configurable_context_window_for_render_context(team_context.as_ref(), ctx)
+                .map(|cw| initial_context_window_value.clamp(cw.min, cw.max))
+                .unwrap_or(initial_context_window_value)
+        };
         let ai_autonomy_settings = workspace.as_ref(ctx).ai_autonomy_settings();
         ctx.subscribe_to_model(&workspace, |me, workspace, event, ctx| {
             if matches!(
@@ -206,12 +215,6 @@ impl AgentProfilesPageView {
         });
         Self::refresh_base_model_menu(&base_model_dropdown, ctx);
 
-        let initial_context_window_value =
-            Self::initial_context_window_value(team_context.as_ref(), ctx);
-        let clamped_initial = Self::active_profile_data(ctx)
-            .configurable_context_window(team_context.as_ref(), ctx)
-            .map(|cw| initial_context_window_value.clamp(cw.min, cw.max))
-            .unwrap_or(initial_context_window_value);
         let context_window_slider_state = SliderStateHandle::default();
 
         let context_window_editor = ctx.add_typed_action_view(|ctx| {
@@ -980,15 +983,13 @@ impl AgentProfilesPageView {
     }
 
     fn configurable_context_window_for_render(&self, app: &AppContext) -> Option<LLMContextWindow> {
-        let team_render_context =
-            UserWorkspaces::as_ref(app).team_render_context_for_view_handle(&self.weak_self, app);
+        let team_render_context = UserWorkspaces::as_ref(app).team_context(&self.weak_self, app);
         Self::active_profile_data(app)
             .configurable_context_window_for_render_context(team_render_context.as_ref(), app)
     }
 
     fn current_context_window_display_value_for_render(&self, app: &AppContext) -> Option<u32> {
-        let team_render_context =
-            UserWorkspaces::as_ref(app).team_render_context_for_view_handle(&self.weak_self, app);
+        let team_render_context = UserWorkspaces::as_ref(app).team_context(&self.weak_self, app);
         Self::active_profile_data(app)
             .context_window_display_value_for_render_context(team_render_context.as_ref(), app)
     }
@@ -997,8 +998,7 @@ impl AgentProfilesPageView {
         &self,
         ctx: &ViewContext<Self>,
     ) -> Option<LLMContextWindow> {
-        let team_render_context =
-            UserWorkspaces::as_ref(ctx).team_render_context_for_view_handle(&self.weak_self, ctx);
+        let team_render_context = UserWorkspaces::as_ref(ctx).team_context(&self.weak_self, ctx);
         Self::active_profile_data(ctx)
             .configurable_context_window_for_render_context(team_render_context.as_ref(), ctx)
     }
@@ -1007,18 +1007,20 @@ impl AgentProfilesPageView {
         &self,
         ctx: &ViewContext<Self>,
     ) -> Option<u32> {
-        let team_render_context =
-            UserWorkspaces::as_ref(ctx).team_render_context_for_view_handle(&self.weak_self, ctx);
+        let team_render_context = UserWorkspaces::as_ref(ctx).team_context(&self.weak_self, ctx);
         Self::active_profile_data(ctx)
             .context_window_display_value_for_render_context(team_render_context.as_ref(), ctx)
     }
 
-    fn initial_context_window_value(team_context: Option<&TeamContext>, app: &AppContext) -> u32 {
+    fn initial_context_window_value(
+        team_context: Option<&TeamContext<'_>>,
+        app: &AppContext,
+    ) -> u32 {
         Self::active_profile_data(app)
-            .context_window_display_value(team_context, app)
+            .context_window_display_value_for_render_context(team_context, app)
             .unwrap_or_else(|| {
                 LLMPreferences::as_ref(app)
-                    .get_active_base_model(None, team_context, app)
+                    .get_active_base_model_for_render_context(None, team_context, app)
                     .context_window
                     .default_max
             })
@@ -1073,8 +1075,7 @@ impl AgentProfilesPageView {
 
             let (items, active_id) = {
                 let handle = ctx.handle();
-                let team_context =
-                    UserWorkspaces::as_ref(ctx).team_render_context_for_view_handle(&handle, ctx);
+                let team_context = UserWorkspaces::as_ref(ctx).team_context(&handle, ctx);
                 let choices = LLMPreferences::as_ref(ctx)
                     .get_base_llm_choices_for_agent_mode_for_render_context(
                         team_context.as_ref(),
@@ -1123,8 +1124,7 @@ impl AgentProfilesPageView {
 
             let (items, active_id) = {
                 let handle = ctx.handle();
-                let team_context =
-                    UserWorkspaces::as_ref(ctx).team_render_context_for_view_handle(&handle, ctx);
+                let team_context = UserWorkspaces::as_ref(ctx).team_context(&handle, ctx);
                 let choices = LLMPreferences::as_ref(ctx)
                     .get_coding_llm_choices_for_render_context(team_context.as_ref(), ctx)
                     .collect_vec();
@@ -2482,8 +2482,7 @@ impl AgentsWidget {
             .finish();
 
         let mut column = Flex::column().with_child(label).with_child(row);
-        let team_render_context =
-            UserWorkspaces::as_ref(app).team_render_context_for_view_handle(&view.weak_self, app);
+        let team_render_context = UserWorkspaces::as_ref(app).team_context(&view.weak_self, app);
         if AgentProfilesPageView::active_profile_data(app)
             .should_show_long_context_pricing_warning_for_render_context(
                 view.dragged_context_window_value,

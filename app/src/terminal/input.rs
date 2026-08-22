@@ -3545,7 +3545,7 @@ impl Input {
 
         ctx.subscribe_to_model(&LLMPreferences::handle(ctx), |me, _, event, ctx| {
             if let LLMPreferencesEvent::UpdatedActiveAgentModeLLM = event {
-                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
                 // If the new model doesn't support vision and we had image chips,
                 // clear them and show a toast.
                 let has_image_chips = me
@@ -3554,7 +3554,7 @@ impl Input {
                     .any(|c| matches!(c.attachment_type, AttachmentType::Image));
                 let vision_supported = LLMPreferences::as_ref(ctx).vision_supported(
                     Some(me.terminal_view_id),
-                    team_context.as_ref(),
+                    &team_context,
                     ctx,
                 );
                 if !vision_supported {
@@ -4678,10 +4678,10 @@ impl Input {
     /// front instead of failing at spawn time.
     #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
     fn block_cloud_handoff_if_model_unsupported(&self, ctx: &mut ViewContext<Self>) -> bool {
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
         if LLMPreferences::as_ref(ctx).is_active_base_model_cloud_runnable(
             self.terminal_view_id,
-            team_context.as_ref(),
+            &team_context,
             ctx,
         ) {
             return false;
@@ -5164,12 +5164,13 @@ impl Input {
 
                 match selected_tab {
                     InlineModelSelectorTab::BaseAgent => {
-                        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                        let team_context =
+                            UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
                         LLMPreferences::handle(ctx).update(ctx, |preferences, ctx| {
                             preferences.update_preferred_agent_mode_llm(
                                 id,
                                 self.terminal_view_id,
-                                team_context.as_ref(),
+                                &team_context,
                                 ctx,
                             );
                         });
@@ -6036,7 +6037,7 @@ impl Input {
             });
         }
 
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
         self.ai_controller.update(ctx, move |controller, ctx| {
             controller.send_resolved_skill_invocation(
                 skill,
@@ -6165,9 +6166,15 @@ impl Input {
         let ai_input_model = self.ai_input_model.as_ref(ctx);
 
         let llm_prefs = LLMPreferences::as_ref(ctx);
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
-        let vision_supported =
-            llm_prefs.vision_supported(Some(self.terminal_view_id), team_context.as_ref(), ctx);
+        let handle = ctx.handle();
+        let team_context = UserWorkspaces::as_ref(ctx).team_context(&handle, ctx);
+        let vision_supported = llm_prefs
+            .get_active_base_model_for_render_context(
+                Some(self.terminal_view_id),
+                team_context.as_ref(),
+                ctx,
+            )
+            .vision_supported;
 
         let num_images_attached = self.ai_context_model.as_ref(ctx).pending_images().len();
 
@@ -6357,7 +6364,7 @@ impl Input {
             PromptDisplayEvent::RunAgentQuery(query) => {
                 self.cancel_active_conversation(ctx, CancellationReason::UserCommandExecuted);
                 let query = query.clone();
-                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
                 self.ai_controller.update(ctx, |controller, ctx| {
                     controller.send_user_query_in_new_conversation(
                         query,
@@ -13322,7 +13329,7 @@ impl Input {
                     controller.try_enter_agent_view(None, AgentViewEntryOrigin::ProjectEntry, ctx);
             });
         }
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
         self.ai_controller.update(ctx, move |controller, ctx| {
             controller.send_create_new_project_request(ai_query, team_context, ctx)
         });
@@ -13337,7 +13344,7 @@ impl Input {
                     controller.try_enter_agent_view(None, AgentViewEntryOrigin::ProjectEntry, ctx);
             });
         }
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
         self.ai_controller.update(ctx, move |controller, ctx| {
             controller.send_slash_command_request(
                 SlashCommandRequest::CloneRepository { url },
@@ -13661,7 +13668,7 @@ impl Input {
                 });
 
                 if let Some(ambient_agent_view_model) = self.ambient_agent_view_model() {
-                    let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                    let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
                     ambient_agent_view_model.update(ctx, move |state, ctx| {
                         state.spawn_agent(prompt, attachments, team_context, ctx);
                     });
@@ -14048,7 +14055,7 @@ impl Input {
         // A fired queued row always belongs to the existing conversation that finished, so we
         // submit into that conversation directly rather than re-deriving from the current UI
         // selection (which may point at a different conversation the user navigated to).
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
         self.ai_controller.update(ctx, move |controller, ctx| {
             controller.send_queued_user_query_in_conversation(
                 prompt,
@@ -14068,7 +14075,7 @@ impl Input {
     /// not-in-progress fallback and the legacy pending-user-query submission paths, which are
     /// immediate sends (not queued-row fires) and therefore reset their live staging.
     pub(crate) fn submit_user_query_now(&mut self, prompt: String, ctx: &mut ViewContext<Self>) {
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
         if let Some(conversation_id) = self
             .ai_context_model
             .as_ref(ctx)
@@ -14489,7 +14496,7 @@ impl Input {
             return;
         }
 
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
         if let Some(zero_state_prompt_suggestion_type) = zero_state_prompt_suggestion_type {
             return self.ai_controller.update(ctx, move |controller, ctx| {
                 controller.send_zero_state_prompt_suggestion(

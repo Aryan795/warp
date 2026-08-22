@@ -65,7 +65,7 @@ use crate::view_components::action_button::{
 };
 use crate::view_components::{FeaturePopup, NewFeaturePopupEvent, NewFeaturePopupLabel};
 use crate::workspace::WorkspaceAction;
-use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces, UserWorkspacesEvent};
+use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
 
 const MENU_WIDTH: f32 = 280.;
 const NEW_MODEL_CHOICES_POPUP_DELAY: Duration = Duration::from_millis(500);
@@ -237,9 +237,6 @@ impl ProfileModelSelectorAction {
 }
 
 impl ProfileModelSelector {
-    fn team_context(ctx: &ViewContext<Self>) -> Option<TeamContext> {
-        UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
-    }
     pub fn new(
         menu_positioning_provider: Arc<dyn crate::terminal::input::MenuPositioningProvider>,
         terminal_view_id: EntityId,
@@ -923,8 +920,7 @@ impl ProfileModelSelector {
             self.refresh_harness_model_menu(ctx);
             return;
         }
-        let team_render_context =
-            UserWorkspaces::as_ref(ctx).team_render_context_for_view_handle(&self.weak_self, ctx);
+        let team_render_context = UserWorkspaces::as_ref(ctx).team_context(&self.weak_self, ctx);
 
         let llm_preferences = LLMPreferences::as_ref(ctx);
 
@@ -1103,8 +1099,7 @@ impl ProfileModelSelector {
         kind: &ModelSpecSidecarKind,
         ctx: &mut ViewContext<Self>,
     ) {
-        let team_render_context =
-            UserWorkspaces::as_ref(ctx).team_render_context_for_view_handle(&self.weak_self, ctx);
+        let team_render_context = UserWorkspaces::as_ref(ctx).team_context(&self.weak_self, ctx);
         let llm_preferences = LLMPreferences::as_ref(ctx);
         let active_llm = llm_preferences.get_active_base_model_for_render_context(
             Some(self.terminal_view_id),
@@ -1165,8 +1160,7 @@ impl ProfileModelSelector {
         base_name: &str,
         ctx: &mut ViewContext<Self>,
     ) {
-        let team_render_context =
-            UserWorkspaces::as_ref(ctx).team_render_context_for_view_handle(&self.weak_self, ctx);
+        let team_render_context = UserWorkspaces::as_ref(ctx).team_context(&self.weak_self, ctx);
         let llm_preferences = LLMPreferences::as_ref(ctx);
         let active_llm = llm_preferences.get_active_base_model_for_render_context(
             Some(self.terminal_view_id),
@@ -1244,18 +1238,35 @@ impl ProfileModelSelector {
             .read(ctx, |menu, _| menu.selected_index())
             .unwrap_or(0);
         if let Some(llm_id) = self.get_selected_llm_id(MenuType::Sidecar, index, ctx) {
-            let team_context = Self::team_context(ctx);
-            LLMPreferences::handle(ctx).update(ctx, |preferences, ctx| {
-                if preferences.is_agent_mode_model_selectable(&llm_id, team_context.as_ref(), ctx) {
-                    log::info!("Selecting base agent model {llm_id} (from model selector)");
-                    preferences.update_preferred_agent_mode_llm(
-                        &llm_id,
-                        self.terminal_view_id,
+            let (is_selectable, profile_default_model_id) = {
+                let team_context = UserWorkspaces::as_ref(ctx).team_context(&self.weak_self, ctx);
+                let preferences = LLMPreferences::as_ref(ctx);
+                let is_selectable = preferences.is_agent_mode_model_selectable_for_team_context(
+                    &llm_id,
+                    team_context.as_ref(),
+                    ctx,
+                );
+                let profile_default_model_id = preferences
+                    .get_active_profile_base_model_for_team_context(
+                        Some(self.terminal_view_id),
                         team_context.as_ref(),
                         ctx,
+                    )
+                    .id
+                    .clone();
+                (is_selectable, profile_default_model_id)
+            };
+            if is_selectable {
+                log::info!("Selecting base agent model {llm_id} (from model selector)");
+                LLMPreferences::handle(ctx).update(ctx, |preferences, ctx| {
+                    preferences.update_preferred_agent_mode_llm_with_profile_default(
+                        &llm_id,
+                        self.terminal_view_id,
+                        &profile_default_model_id,
+                        ctx,
                     );
-                }
-            });
+                });
+            }
         }
         self.set_model_menu_visibility(false, ctx);
     }
@@ -1320,8 +1331,7 @@ impl ProfileModelSelector {
                 .and_then(|item| item.item_on_select_action())
                 .cloned()
         })?;
-        let team_render_context =
-            UserWorkspaces::as_ref(ctx).team_render_context_for_view_handle(&self.weak_self, ctx);
+        let team_render_context = UserWorkspaces::as_ref(ctx).team_context(&self.weak_self, ctx);
         let llm_preferences = LLMPreferences::as_ref(ctx);
         let mut choices = llm_preferences.get_base_llm_choices_for_agent_mode_for_render_context(
             team_render_context.as_ref(),
@@ -1410,8 +1420,7 @@ impl ProfileModelSelector {
         id: &LLMId,
         app: &'a AppContext,
     ) -> Option<&'a LLMInfo> {
-        let team_render_context =
-            UserWorkspaces::as_ref(app).team_render_context_for_view_handle(&self.weak_self, app);
+        let team_render_context = UserWorkspaces::as_ref(app).team_context(&self.weak_self, app);
         LLMPreferences::as_ref(app)
             .get_base_llm_choices_for_agent_mode_for_render_context(
                 team_render_context.as_ref(),
@@ -1421,8 +1430,7 @@ impl ProfileModelSelector {
     }
 
     fn has_multiple_reasoning_variants(&self, llm: &LLMInfo, app: &AppContext) -> bool {
-        let team_render_context =
-            UserWorkspaces::as_ref(app).team_render_context_for_view_handle(&self.weak_self, app);
+        let team_render_context = UserWorkspaces::as_ref(app).team_context(&self.weak_self, app);
         let all_model_choices = LLMPreferences::as_ref(app)
             .get_base_llm_choices_for_agent_mode_for_render_context(
                 team_render_context.as_ref(),
@@ -1664,8 +1672,7 @@ impl ProfileModelSelector {
         let appearance = Appearance::as_ref(app);
         let theme = appearance.theme();
         let workspaces = UserWorkspaces::as_ref(app);
-        let team_render_context =
-            workspaces.team_render_context_for_view_handle(&self.weak_self, app);
+        let team_render_context = workspaces.team_context(&self.weak_self, app);
         let llm_preferences = LLMPreferences::as_ref(app);
 
         // Allow editing if composing an ambient agent query, or if the user has edit access
@@ -2171,22 +2178,37 @@ impl TypedActionView for ProfileModelSelector {
                 self.set_profile_menu_visibility(false, ctx);
             }
             ProfileModelSelectorAction::SelectModel(llm_id) => {
-                let team_context = Self::team_context(ctx);
-                LLMPreferences::handle(ctx).update(ctx, |preferences, ctx| {
-                    if preferences.is_agent_mode_model_selectable(
-                        llm_id,
-                        team_context.as_ref(),
-                        ctx,
-                    ) {
-                        log::info!("Selecting base agent model {llm_id} (from model selector)");
-                        preferences.update_preferred_agent_mode_llm(
+                let (is_selectable, profile_default_model_id) = {
+                    let team_context =
+                        UserWorkspaces::as_ref(ctx).team_context(&self.weak_self, ctx);
+                    let preferences = LLMPreferences::as_ref(ctx);
+                    let is_selectable = preferences
+                        .is_agent_mode_model_selectable_for_team_context(
                             llm_id,
-                            self.terminal_view_id,
                             team_context.as_ref(),
                             ctx,
                         );
-                    }
-                });
+                    let profile_default_model_id = preferences
+                        .get_active_profile_base_model_for_team_context(
+                            Some(self.terminal_view_id),
+                            team_context.as_ref(),
+                            ctx,
+                        )
+                        .id
+                        .clone();
+                    (is_selectable, profile_default_model_id)
+                };
+                if is_selectable {
+                    log::info!("Selecting base agent model {llm_id} (from model selector)");
+                    LLMPreferences::handle(ctx).update(ctx, |preferences, ctx| {
+                        preferences.update_preferred_agent_mode_llm_with_profile_default(
+                            llm_id,
+                            self.terminal_view_id,
+                            &profile_default_model_id,
+                            ctx,
+                        );
+                    });
+                }
                 self.set_model_menu_visibility(false, ctx);
             }
             ProfileModelSelectorAction::SelectAutoModel
@@ -2362,8 +2384,7 @@ impl View for ProfileModelSelector {
                     Some(self.render_sidecar_spec_panel(&kind, &sidecar_spec, app))
                 } else if let Some(spec) = info.spec.as_ref() {
                     let workspaces = UserWorkspaces::as_ref(app);
-                    let team_render_context =
-                        workspaces.team_render_context_for_view_handle(&self.weak_self, app);
+                    let team_render_context = workspaces.team_context(&self.weak_self, app);
                     let byo_key_source = byo_key_source_for_model_for_render_context(
                         info,
                         team_render_context.as_ref(),
