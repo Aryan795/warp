@@ -1588,7 +1588,7 @@ impl TuiTerminalSessionView {
                 active_session.clone(),
                 model.clone(),
                 terminal_surface_id,
-                terminal_surface,
+                terminal_surface.clone(),
                 ctx,
             )
         });
@@ -1698,6 +1698,7 @@ impl TuiTerminalSessionView {
                 input_editor_model.clone(),
                 suggestions_mode.clone(),
                 terminal_surface_id,
+                terminal_surface,
                 ctx,
             )
         });

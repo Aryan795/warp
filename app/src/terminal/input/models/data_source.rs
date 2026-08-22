@@ -18,7 +18,7 @@ use warpui::ui_components::button::ButtonVariant;
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
 use warpui::{
     AppContext, Element, Entity, EntityId, ModelContext, ModelHandle, SingletonEntity as _,
-    WindowId,
+    WeakViewHandle, WindowId,
 };
 
 use super::model_spec_scores::{
@@ -26,6 +26,7 @@ use super::model_spec_scores::{
     MODEL_SPECS_TITLE, ModelSpecScoresLayout, REASONING_LEVEL_DESCRIPTION, REASONING_LEVEL_TITLE,
     render_model_spec_header, render_model_spec_scores,
 };
+use super::view::InlineModelSelectorView;
 use crate::ai::custom_model_routers::is_custom_router_id;
 use crate::ai::execution_profiles::model_menu_items::is_auto;
 use crate::ai::llms::{
@@ -158,10 +159,17 @@ impl ModelPickerChoice {
 }
 
 /// Applies the GUI model picker's ordering, fuzzy filtering, and effective disabled state.
+///
+/// `is_key_icon_shown` decides the BYOK-aware `RequiresUpgrade` clearing below, and is a
+/// closure rather than a view or scope directly so this can be shared by callers that resolve
+/// it differently: a GUI caller can pass [`should_show_key_icon_for_model`] bound to its
+/// [`WeakViewHandle`], while a caller on the other side of a crate boundary that cannot name a
+/// scope type can pass a closure it built some other way.
 pub fn query_model_picker_choices<'a>(
     llm_preferences: &LLMPreferences,
     choices: impl IntoIterator<Item = &'a LLMInfo>,
     query_text: &str,
+    is_key_icon_shown: impl Fn(&LLMInfo, &AppContext) -> bool,
     app: &AppContext,
 ) -> Vec<ModelPickerChoice> {
     let choices = ModelSelectorDataSource::order_model_choices(
@@ -185,7 +193,7 @@ pub fn query_model_picker_choices<'a>(
                 Some(result)
             };
             let disable_reason = if llm.disable_reason == Some(DisableReason::RequiresUpgrade)
-                && should_show_key_icon_for_model(llm, app)
+                && is_key_icon_shown(llm, app)
             {
                 None
             } else {
@@ -210,6 +218,12 @@ pub fn query_model_picker_choices<'a>(
 pub struct ModelSelectorDataSource {
     terminal_view_id: EntityId,
     window_id: WindowId,
+    /// Resolves the team-scoped credential getters below. A handle to the owning
+    /// [`InlineModelSelectorView`] rather than the terminal surface: this model is a child of
+    /// that view, so its window is always the terminal surface's window, and a handle this
+    /// model's own constructor can mint (`ctx.handle()`) is simpler to wire through than
+    /// threading the terminal surface's handle down separately.
+    view_handle: WeakViewHandle<InlineModelSelectorView>,
     ambient_agent_view_model: Option<ModelHandle<AmbientAgentViewModel>>,
 }
 
@@ -217,11 +231,13 @@ impl ModelSelectorDataSource {
     pub fn new(
         terminal_view_id: EntityId,
         window_id: WindowId,
+        view_handle: WeakViewHandle<InlineModelSelectorView>,
         ambient_agent_view_model: Option<ModelHandle<AmbientAgentViewModel>>,
     ) -> Self {
         Self {
             terminal_view_id,
             window_id,
+            view_handle,
             ambient_agent_view_model,
         }
     }
@@ -324,17 +340,24 @@ impl SyncDataSource for ModelSelectorDataSource {
                 .collect_vec()
         };
         Ok(
-            query_model_picker_choices(llm_preferences, choices, &query.text, app)
-                .into_iter()
-                .map(|choice| {
-                    QueryResult::from(ModelSearchItem::new(
-                        choice,
-                        &active_llm_id,
-                        self.window_id,
-                        app,
-                    ))
-                })
-                .collect(),
+            query_model_picker_choices(
+                llm_preferences,
+                choices,
+                &query.text,
+                |llm, app| should_show_key_icon_for_model(llm, &self.view_handle, app),
+                app,
+            )
+            .into_iter()
+            .map(|choice| {
+                QueryResult::from(ModelSearchItem::new(
+                    choice,
+                    &active_llm_id,
+                    self.window_id,
+                    &self.view_handle,
+                    app,
+                ))
+            })
+            .collect(),
         )
     }
 }
@@ -369,19 +392,24 @@ struct ModelSearchItem {
 }
 
 impl ModelSearchItem {
-    fn new(
+    fn new<T: Entity>(
         choice: ModelPickerChoice,
         active_llm_id: &LLMId,
         window_id: WindowId,
+        view: &WeakViewHandle<T>,
         app: &AppContext,
     ) -> Self {
         let llm = &choice.llm;
         let is_custom_router = is_custom_router_id(llm.id.as_str());
         let is_auto = is_auto(llm);
-        let is_using_bedrock = should_show_bedrock_icon_for_model(llm, app);
+        let is_using_bedrock = should_show_bedrock_icon_for_model(llm, view, app);
         let is_using_gemini_enterprise_agent_platform =
-            should_show_gemini_enterprise_agent_platform_icon_for_model(llm, app);
-        let byo_key_source = byo_key_source_for_model(llm, app);
+            should_show_gemini_enterprise_agent_platform_icon_for_model(llm, view, app);
+        let workspaces = UserWorkspaces::as_ref(app);
+        let scope = workspaces
+            .team_context(view, app)
+            .unwrap_or_else(|| workspaces.teamless_scope());
+        let byo_key_source = byo_key_source_for_model(llm, &scope, app);
         let leading_icon = model_leading_icon(
             llm,
             ModelIconFlags {

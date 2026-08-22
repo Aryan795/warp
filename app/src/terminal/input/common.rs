@@ -500,6 +500,7 @@ pub(super) fn maybe_add_buy_credits_banner(
     );
     let is_using_api_key_for_current_model = should_show_key_icon_for_model(
         LLMPreferences::as_ref(app).get_active_base_model(app, Some(terminal_view_id)),
+        input_view_handle,
         app,
     );
     if can_purchase_addon_credits

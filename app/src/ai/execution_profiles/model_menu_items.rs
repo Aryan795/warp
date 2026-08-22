@@ -7,7 +7,7 @@ use warpui::elements::{
     Text,
 };
 use warpui::fonts::{Properties, Style};
-use warpui::{Action, AppContext, Element};
+use warpui::{Action, Element, Entity, ViewContext};
 
 use crate::ai::custom_model_routers::is_custom_router_id;
 use crate::ai::llms::{
@@ -68,14 +68,14 @@ fn with_cost_and_profile_info<A: Action + Clone>(
     }
 }
 
-fn make_item_fields<A: Action + Clone>(
+fn make_item_fields<A: Action + Clone, V: Entity>(
     llm: &LLMInfo,
     action: impl Fn(&LLMInfo) -> A,
     position_id_fn: Option<&dyn Fn(&LLMId) -> String>,
     model_id_to_add_profile_default_label_to: Option<&LLMId>,
     collapse_auto: bool,
     collapse_reasoning_variants: bool,
-    app: &AppContext,
+    ctx: &ViewContext<V>,
 ) -> MenuItem<A> {
     let is_auto_model = is_auto(llm);
     let label = if collapse_auto && is_auto_model {
@@ -85,10 +85,13 @@ fn make_item_fields<A: Action + Clone>(
     } else {
         llm.menu_display_name()
     };
-    let is_using_bedrock = should_show_bedrock_icon_for_model(llm, app);
+    // Every call site already holds a `ViewContext`, so the window (and its team) is
+    // resolved from the view rendering this menu rather than left ambient.
+    let view = ctx.handle();
+    let is_using_bedrock = should_show_bedrock_icon_for_model(llm, &view, ctx);
     let is_using_gemini_enterprise_agent_platform =
-        should_show_gemini_enterprise_agent_platform_icon_for_model(llm, app);
-    let is_using_api_key = should_show_key_icon_for_model(llm, app);
+        should_show_gemini_enterprise_agent_platform_icon_for_model(llm, &view, ctx);
+    let is_using_api_key = should_show_key_icon_for_model(llm, &view, ctx);
     let is_custom_router = is_custom_router_id(llm.id.as_str());
     let leading_icon = model_leading_icon(
         llm,
@@ -176,14 +179,14 @@ fn make_item_fields<A: Action + Clone>(
     with_cost_and_profile_info(item, llm, model_id_to_add_profile_default_label_to).into_item()
 }
 
-pub fn available_model_menu_items<A: Action + Clone>(
+pub fn available_model_menu_items<A: Action + Clone, V: Entity>(
     choices: Vec<&LLMInfo>,
     action: impl Fn(&LLMInfo) -> A,
     model_id_to_add_profile_default_label_to: Option<&LLMId>,
     position_id_fn: Option<&dyn Fn(&LLMId) -> String>,
     collapse_auto: bool,
     collapse_reasoning_variants: bool,
-    app: &AppContext,
+    ctx: &ViewContext<V>,
 ) -> Vec<MenuItem<A>> {
     choices
         .into_iter()
@@ -195,7 +198,7 @@ pub fn available_model_menu_items<A: Action + Clone>(
                 model_id_to_add_profile_default_label_to,
                 collapse_auto,
                 collapse_reasoning_variants,
-                app,
+                ctx,
             )
         })
         .collect_vec()

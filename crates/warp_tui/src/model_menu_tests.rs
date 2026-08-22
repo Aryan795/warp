@@ -3,9 +3,34 @@ use ai::api_keys::ApiKeyManager;
 use warp::tui_export::register_tui_session_view_test_singletons;
 use warp_core::features::FeatureFlag;
 use warpui::SingletonEntity as _;
-use warpui_core::App;
+use warpui_core::elements::tui::{TuiElement, TuiText};
+use warpui_core::{AddWindowOptions, App, AppContext, Entity, TuiView, TypedActionView};
 
 use super::*;
+
+/// Stands in for the terminal surface so [`model_credential_icon_resolver`] has a real window
+/// to resolve, without pulling in `TuiTerminalSessionView`'s full construction. No team is
+/// registered for its window, so the resolver reads as teamless -- exactly the entitlement-only
+/// answer these tests exercise.
+struct ModelMenuTestSurface;
+
+impl Entity for ModelMenuTestSurface {
+    type Event = ();
+}
+
+impl TypedActionView for ModelMenuTestSurface {
+    type Action = ();
+}
+
+impl TuiView for ModelMenuTestSurface {
+    fn ui_name() -> &'static str {
+        "ModelMenuTestSurface"
+    }
+
+    fn render(&self, _ctx: &AppContext) -> Box<dyn TuiElement> {
+        TuiText::from_spans(Vec::new()).finish()
+    }
+}
 
 fn row(
     id: &str,
@@ -83,6 +108,9 @@ fn provider_key_controls_key_connected_callout() {
     App::test((), |mut app| async move {
         let _byok = FeatureFlag::SoloUserByok.override_enabled(true);
         register_tui_session_view_test_singletons(&mut app);
+        let (_window_id, surface) =
+            app.update(|ctx| ctx.add_tui_window(AddWindowOptions::default(), |_| ModelMenuTestSurface));
+        let credential_icons = model_credential_icon_resolver(surface.downgrade());
         let mut llm = app.read(|ctx| {
             LLMPreferences::as_ref(ctx)
                 .get_active_base_model(ctx, None)
@@ -96,9 +124,15 @@ fn provider_key_controls_key_connected_callout() {
             })
             .unwrap();
         let connected_row = app.read(|ctx| {
-            let choice =
-                query_model_picker_choices(LLMPreferences::as_ref(ctx), [&llm], "", ctx).remove(0);
-            model_menu_row(choice, &LLMId::from("profile-default"), ctx)
+            let choice = query_model_picker_choices(
+                LLMPreferences::as_ref(ctx),
+                [&llm],
+                "",
+                |llm, app| credential_icons(llm, app).is_key_connected,
+                ctx,
+            )
+            .remove(0);
+            model_menu_row(choice, &LLMId::from("profile-default"), &credential_icons, ctx)
         });
         assert_eq!(
             snapshot_row(&connected_row).state_suffix.as_deref(),
@@ -111,9 +145,15 @@ fn provider_key_controls_key_connected_callout() {
             })
             .unwrap();
         let disconnected_row = app.read(|ctx| {
-            let choice =
-                query_model_picker_choices(LLMPreferences::as_ref(ctx), [&llm], "", ctx).remove(0);
-            model_menu_row(choice, &LLMId::from("profile-default"), ctx)
+            let choice = query_model_picker_choices(
+                LLMPreferences::as_ref(ctx),
+                [&llm],
+                "",
+                |llm, app| credential_icons(llm, app).is_key_connected,
+                ctx,
+            )
+            .remove(0);
+            model_menu_row(choice, &LLMId::from("profile-default"), &credential_icons, ctx)
         });
         assert_eq!(snapshot_row(&disconnected_row).state_suffix, None);
     });

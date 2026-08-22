@@ -19,10 +19,11 @@ use super::team::{DiscoverableTeam, MembershipRole, Team};
 use super::workspace::WorkspaceMemberUsageInfo;
 use super::workspace::{
     AdminEnablementSetting, BillingMetadata, CustomerType, EnterpriseSecretRegex,
-    HostEnablementSetting, UgcCollectionEnablementSetting, Workspace, WorkspaceUid,
+    HostEnablementSetting, LlmHostSettings, LlmSettings, UgcCollectionEnablementSetting,
+    Workspace, WorkspaceUid,
 };
 use crate::ai::credit_availability::AICreditAvailability;
-use crate::ai::llms::{LLMModelHost, LLMProvider};
+use crate::ai::llms::{LLMId, LLMModelHost, LLMProvider};
 use crate::ai::request_usage_model::AIRequestUsageModel;
 use crate::auth::{AuthStateProvider, UserUid};
 use crate::channel::ChannelState;
@@ -521,6 +522,23 @@ impl UserWorkspaces {
         self.team_context_for_window_id(window_id)
     }
 
+    /// A scope naming no team, for a caller that could not resolve a window at all -- a view
+    /// that is not currently attached to one, e.g. because it was dropped, or (for a
+    /// cross-crate caller resolving through [`Self::team_context`]) because it was never
+    /// registered in the first place, such as an offline or pre-login TUI session.
+    ///
+    /// This is the same scope a resolved window with no team selected produces, not a
+    /// different fallback: both mean "no team policy restricts this", and a getter built on
+    /// [`TeamScope`] cannot tell them apart. It exists only because there is deliberately no
+    /// way to construct [`TeamContext`] from anything but a live window -- see its docs -- so
+    /// a caller with no window has nothing else to hand a `TeamScope`-based getter. Reach for
+    /// it only where the caller has already confronted the missing window and decided that
+    /// reading as teamless is the right call for that read; it must not be used to route
+    /// around a resolvable window.
+    pub(crate) fn teamless_scope(&self) -> TeamContext<'static> {
+        TeamContext { team_uid: None }
+    }
+
     /// The team a scope names, when it names one that is still in the current workspace.
     ///
     /// Deliberately private. Callers get a resolved *setting* from a getter that takes their
@@ -1015,6 +1033,26 @@ impl UserWorkspaces {
             })
     }
 
+    /// [`Self::has_team_first_party_key_for_scope`] for a member-configured custom endpoint
+    /// routing to `llm_id`.
+    pub(crate) fn has_team_byo_endpoint_for_scope<S: TeamScope + ?Sized>(
+        &self,
+        scope: &S,
+        llm_id: &LLMId,
+    ) -> bool {
+        self.is_managed_byok_byoe_enabled()
+            && self.team_byo_for_scope(scope).is_some_and(|team_byo| {
+                team_byo.endpoints_enabled
+                    && team_byo.endpoints.iter().any(|endpoint| {
+                        endpoint.enabled
+                            && endpoint
+                                .models
+                                .iter()
+                                .any(|model| model.enabled && model.config_key == llm_id.as_str())
+                    })
+            })
+    }
+
     /// The `team_byo` policy that governs `scope`.
     ///
     /// A scope that names a team reads that team's policy and only that team's: an unresolvable
@@ -1031,6 +1069,42 @@ impl UserWorkspaces {
                 .current_workspace()
                 .and_then(|workspace| workspace.settings.team_byo.as_ref()),
         }
+    }
+
+    /// The `llm_settings` that govern `scope`, with the same no-team fallback to workspace
+    /// settings as [`Self::team_byo_for_scope`]. Backs the scoped Bedrock/Gemini Enterprise
+    /// host getters below, which were reading a cross-team union only because the TUI (their
+    /// one cross-crate caller, via `should_show_*_icon_for_model`) had no window to scope to;
+    /// it now does, so there is no live reason left for the ambient reads to survive here.
+    fn llm_settings_for_scope<S: TeamScope + ?Sized>(&self, scope: &S) -> Option<&LlmSettings> {
+        match scope.team_uid() {
+            Some(_) => self
+                .team_from_scope(scope)
+                .map(|team| &team.settings.llm_settings),
+            None => self
+                .current_workspace()
+                .map(|workspace| &workspace.settings.llm_settings),
+        }
+    }
+
+    fn host_settings_for_scope<S: TeamScope + ?Sized>(
+        &self,
+        scope: &S,
+        host: &LLMModelHost,
+    ) -> Option<&LlmHostSettings> {
+        self.llm_settings_for_scope(scope)?.host_configs.get(host)
+    }
+
+    fn is_host_available_for_scope<S: TeamScope + ?Sized>(
+        &self,
+        scope: &S,
+        host: &LLMModelHost,
+    ) -> bool {
+        self.llm_settings_for_scope(scope)
+            .is_some_and(|settings| settings.enabled)
+            && self
+                .host_settings_for_scope(scope, host)
+                .is_some_and(|settings| settings.enabled)
     }
 
     pub fn aws_bedrock_host_settings(&self) -> Option<&super::workspace::LlmHostSettings> {
@@ -1072,6 +1146,28 @@ impl UserWorkspaces {
         }
 
         match self.aws_bedrock_host_enablement_setting() {
+            HostEnablementSetting::Enforce => true,
+            HostEnablementSetting::RespectUserSetting => *AISettings::as_ref(app)
+                .aws_bedrock_credentials_enabled
+                .value(),
+        }
+    }
+
+    /// [`Self::is_aws_bedrock_credentials_enabled`] for `scope`'s team rather than one
+    /// arbitrarily-chosen team's workspace-level settings.
+    pub(crate) fn is_aws_bedrock_credentials_enabled_for_scope<S: TeamScope + ?Sized>(
+        &self,
+        scope: &S,
+        app: &AppContext,
+    ) -> bool {
+        if !self.is_host_available_for_scope(scope, &LLMModelHost::AwsBedrock) {
+            return false;
+        }
+        let enablement_setting = self
+            .host_settings_for_scope(scope, &LLMModelHost::AwsBedrock)
+            .map(|settings| settings.enablement_setting.clone())
+            .unwrap_or_default();
+        match enablement_setting {
             HostEnablementSetting::Enforce => true,
             HostEnablementSetting::RespectUserSetting => *AISettings::as_ref(app)
                 .aws_bedrock_credentials_enabled
@@ -1132,6 +1228,37 @@ impl UserWorkspaces {
         }
 
         match self.gemini_enterprise_host_enablement_setting() {
+            HostEnablementSetting::Enforce => true,
+            HostEnablementSetting::RespectUserSetting => *AISettings::as_ref(app)
+                .gemini_enterprise_credentials_enabled
+                .value(),
+        }
+    }
+
+    /// [`Self::is_gemini_enterprise_credentials_enabled`] for `scope`'s team rather than one
+    /// arbitrarily-chosen team's workspace-level settings.
+    pub(crate) fn is_gemini_enterprise_credentials_enabled_for_scope<S: TeamScope + ?Sized>(
+        &self,
+        scope: &S,
+        app: &AppContext,
+    ) -> bool {
+        if !FeatureFlag::GeminiEnterprise.is_enabled() {
+            return false;
+        }
+        if AuthStateProvider::as_ref(app)
+            .get()
+            .is_anonymous_or_logged_out()
+        {
+            return false;
+        }
+        if !self.is_host_available_for_scope(scope, &LLMModelHost::GeminiEnterprise) {
+            return false;
+        }
+        let enablement_setting = self
+            .host_settings_for_scope(scope, &LLMModelHost::GeminiEnterprise)
+            .map(|settings| settings.enablement_setting.clone())
+            .unwrap_or_default();
+        match enablement_setting {
             HostEnablementSetting::Enforce => true,
             HostEnablementSetting::RespectUserSetting => *AISettings::as_ref(app)
                 .gemini_enterprise_credentials_enabled

@@ -18,7 +18,7 @@ use warpui::text_layout::ClipConfig;
 use warpui::ui_components::components::UiComponent;
 use warpui::{
     AppContext, Element, Entity, EntityId, ModelHandle, SingletonEntity as _, TypedActionView,
-    View, ViewContext, ViewHandle,
+    View, ViewContext, ViewHandle, WeakViewHandle,
 };
 
 const SIDECAR_HORIZONTAL_GAP: f32 = 8.;
@@ -65,6 +65,7 @@ use crate::view_components::action_button::{
 };
 use crate::view_components::{FeaturePopup, NewFeaturePopupEvent, NewFeaturePopupLabel};
 use crate::workspace::WorkspaceAction;
+use crate::workspaces::user_workspaces::UserWorkspaces;
 
 const MENU_WIDTH: f32 = 280.;
 const NEW_MODEL_CHOICES_POPUP_DELAY: Duration = Duration::from_millis(500);
@@ -172,6 +173,11 @@ pub struct ProfileModelSelector {
     is_profile_menu_open: bool,
     is_model_menu_open: bool,
     terminal_view_id: EntityId,
+    /// Resolves this window's team for the credential-source getters in [`Self::render`],
+    /// which only has an [`AppContext`] to work with. Methods that already hold a
+    /// `ViewContext<Self>` (e.g. [`Self::refresh_model_menu`]) resolve the scope directly from
+    /// it instead.
+    view_handle: WeakViewHandle<Self>,
     profile_mouse_state: MouseStateHandle,
     model_mouse_state: MouseStateHandle,
     menu_positioning_provider: Arc<dyn MenuPositioningProvider>,
@@ -552,6 +558,7 @@ impl ProfileModelSelector {
             is_profile_menu_open: false,
             is_model_menu_open: false,
             terminal_view_id,
+            view_handle: ctx.handle(),
             profile_mouse_state: Default::default(),
             model_mouse_state: Default::default(),
             menu_positioning_provider,
@@ -1096,7 +1103,7 @@ impl ProfileModelSelector {
             for llm in &custom_choices {
                 let mut fields = MenuItemFields::new(llm.menu_display_name())
                     .with_on_select_action(ProfileModelSelectorAction::SelectModel(llm.id.clone()));
-                if should_show_key_icon_for_model(llm, ctx) {
+                if should_show_key_icon_for_model(llm, &self.view_handle, ctx) {
                     fields = fields.with_right_side_icon(Icon::Key);
                 }
                 items.push(MenuItem::Item(fields));
@@ -2329,7 +2336,11 @@ impl View for ProfileModelSelector {
                         .cloned();
                     Some(self.render_sidecar_spec_panel(&kind, &sidecar_spec, app))
                 } else if let Some(spec) = info.spec.as_ref() {
-                    let byo_key_source = byo_key_source_for_model(info, app);
+                    let workspaces = UserWorkspaces::as_ref(app);
+                    let scope = workspaces
+                        .team_context(&self.view_handle, app)
+                        .unwrap_or_else(|| workspaces.teamless_scope());
+                    let byo_key_source = byo_key_source_for_model(info, &scope, app);
                     Some(self.render_model_spec(spec, byo_key_source, app))
                 } else {
                     None

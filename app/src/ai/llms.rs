@@ -11,7 +11,7 @@ use warp_core::ui::Icon;
 use warp_core::user_preferences::GetUserPreferences;
 use warp_errors::report_error;
 use warp_multi_agent_api as api;
-use warpui::{AppContext, Entity, EntityId, ModelContext, SingletonEntity};
+use warpui::{AppContext, Entity, EntityId, ModelContext, SingletonEntity, WeakViewHandle};
 
 use super::custom_model_routers::{self, CustomModelRouter, ModelConfigError};
 use super::execution_profiles::profiles::AIExecutionProfilesModel;
@@ -20,7 +20,9 @@ use crate::auth::auth_manager::{AuthManager, AuthManagerEvent};
 use crate::network::{NetworkStatus, NetworkStatusEvent, NetworkStatusKind};
 use crate::server::server_api::ServerApiProvider;
 use crate::user_config::{WarpConfig, WarpConfigUpdateEvent};
-use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
+use crate::workspaces::user_workspaces::{
+    TeamContext, TeamScope, UserWorkspaces, UserWorkspacesEvent,
+};
 
 /// Checks if a user's' API key is being used for the given provider.
 /// Returns `true` if BYO API key is enabled and a key exists for the provider.
@@ -59,6 +61,15 @@ impl ByoKeySource {
 /// Returns the first-party key source that will be used for this provider.
 /// Member-provided keys win when team policy allows them; otherwise a
 /// configured team-managed key is used when available.
+///
+/// Ambient: for a user on more than one team this reads one arbitrarily-chosen team's
+/// `team_byo` (`GetEffectiveWorkspaceSettingsForWorkspace` server-side). Kept only for
+/// [`is_using_first_party_key_for_provider`]'s use inside [`is_usable_llm`], which feeds the
+/// model-catalog resolution core (`AvailableLLMs::usable_info_for_id` and everything built on
+/// it, e.g. [`LLMPreferences::get_active_base_model`]): that core resolves once per app, not
+/// once per window, so it has no window to scope this read against. Every other caller --
+/// the credential-source icon and label, and the model picker -- uses
+/// [`first_party_key_source_for_provider_for_scope`], which does not have this defect.
 pub fn first_party_key_source_for_provider(
     provider: &LLMProvider,
     app: &AppContext,
@@ -73,6 +84,7 @@ pub fn first_party_key_source_for_provider(
     None
 }
 
+/// See [`first_party_key_source_for_provider`] for why this stays ambient.
 pub fn is_using_first_party_key_for_provider(provider: &LLMProvider, app: &AppContext) -> bool {
     first_party_key_source_for_provider(provider, app).is_some()
 }
@@ -96,42 +108,84 @@ fn is_using_team_first_party_key_for_provider(provider: &LLMProvider, app: &AppC
         })
 }
 
-pub fn byo_key_source_for_model(llm: &LLMInfo, app: &AppContext) -> Option<ByoKeySource> {
+/// [`first_party_key_source_for_provider`], scoped to `scope`'s team rather than one
+/// arbitrarily-chosen team's workspace-level settings. This is the getter every UI surface
+/// that decides *which credential a specific window uses* should call.
+pub fn first_party_key_source_for_provider_for_scope(
+    provider: &LLMProvider,
+    scope: &impl TeamScope,
+    app: &AppContext,
+) -> Option<ByoKeySource> {
+    let workspaces = UserWorkspaces::as_ref(app);
+    if workspaces.are_member_byo_keys_allowed_for_scope(scope)
+        && is_using_api_key_for_provider(provider, app)
+    {
+        return Some(ByoKeySource::UserProvided);
+    }
+    if workspaces.has_team_first_party_key_for_scope(scope, *provider) {
+        return Some(ByoKeySource::TeamProvided);
+    }
+    None
+}
+
+/// Returns the BYO key source that will be used for `llm`, scoped to `scope`'s team.
+///
+/// Unlike [`first_party_key_source_for_provider`], this has no ambient counterpart to
+/// preserve: none of its callers feed the model-catalog resolution core, so it was migrated
+/// in place rather than split into a coexisting pair.
+pub fn byo_key_source_for_model(
+    llm: &LLMInfo,
+    scope: &impl TeamScope,
+    app: &AppContext,
+) -> Option<ByoKeySource> {
+    let workspaces = UserWorkspaces::as_ref(app);
     let is_custom_endpoint = LLMPreferences::as_ref(app)
         .custom_llm_info_for_id(&llm.id)
         .is_some();
-    if is_custom_endpoint && UserWorkspaces::as_ref(app).are_member_byo_endpoints_allowed() {
+    if is_custom_endpoint && workspaces.are_member_byo_endpoints_allowed_for_scope(scope) {
         return Some(ByoKeySource::UserProvided);
     }
-    if is_using_team_byo_endpoint_for_model(llm, app) {
+    if workspaces.has_team_byo_endpoint_for_scope(scope, &llm.id) {
         return Some(ByoKeySource::TeamProvided);
     }
-    first_party_key_source_for_provider(&llm.provider, app)
+    first_party_key_source_for_provider_for_scope(&llm.provider, scope, app)
 }
 
-fn is_using_team_byo_endpoint_for_model(llm: &LLMInfo, app: &AppContext) -> bool {
-    UserWorkspaces::as_ref(app)
-        .current_workspace()
-        .is_some_and(|workspace| {
-            workspace.billing_metadata.is_managed_byok_byoe_enabled()
-                && workspace
-                    .settings
-                    .team_byo
-                    .as_ref()
-                    .is_some_and(|team_byo| {
-                        team_byo.endpoints_enabled
-                            && team_byo.endpoints.iter().any(|endpoint| {
-                                endpoint.enabled
-                                    && endpoint.models.iter().any(|model| {
-                                        model.enabled && model.config_key == llm.id.as_str()
-                                    })
-                            })
-                    })
-        })
+/// Resolves `view`'s window team, falling back to a scope naming no team when `view` cannot
+/// resolve one at all -- not yet attached to a window, or (crossing into `warp_tui`, whose
+/// window registration follows its own successful workspaces-metadata response) an offline or
+/// pre-login session that was never registered.
+///
+/// That fallback is the same reading a genuinely teamless user already gets from the getters
+/// below, and every caller here is a display affordance -- which icon shows next to a model,
+/// not a safety control -- so approximating "not yet known" as "no team" is an acceptable
+/// cost rather than a defect.
+fn team_scope_for_view<'a, T: Entity>(
+    workspaces: &'a UserWorkspaces,
+    view: &WeakViewHandle<T>,
+    app: &AppContext,
+) -> TeamContext<'a> {
+    workspaces
+        .team_context(view, app)
+        .unwrap_or_else(|| workspaces.teamless_scope())
 }
 
-pub fn should_show_key_icon_for_model(llm: &LLMInfo, app: &AppContext) -> bool {
-    byo_key_source_for_model(llm, app).is_some()
+/// Whether the key icon should render next to `llm`: a BYO (member- or team-provided)
+/// credential is in use for it.
+///
+/// Takes `view` -- a [`WeakViewHandle`] to any view in the window this decision is being
+/// rendered for -- rather than an already-resolved scope, because this is re-exported to
+/// `warp_tui` (see `tui_export.rs`), which cannot name [`TeamScope`] or [`TeamContext`] (both
+/// `pub(crate)` to this crate) across the crate boundary but can mint its own
+/// [`WeakViewHandle`].
+pub fn should_show_key_icon_for_model<T: Entity>(
+    llm: &LLMInfo,
+    view: &WeakViewHandle<T>,
+    app: &AppContext,
+) -> bool {
+    let workspaces = UserWorkspaces::as_ref(app);
+    let scope = team_scope_for_view(workspaces, view, app);
+    byo_key_source_for_model(llm, &scope, app).is_some()
 }
 
 fn should_show_host_icon_for_model(
@@ -146,22 +200,35 @@ fn should_show_host_icon_for_model(
             .is_some_and(|config| config.enabled)
 }
 
-pub fn should_show_bedrock_icon_for_model(llm: &LLMInfo, app: &AppContext) -> bool {
+/// Whether to badge `llm` with the AWS Bedrock host icon. See [`should_show_key_icon_for_model`]
+/// for why this takes a view rather than a resolved scope.
+pub fn should_show_bedrock_icon_for_model<T: Entity>(
+    llm: &LLMInfo,
+    view: &WeakViewHandle<T>,
+    app: &AppContext,
+) -> bool {
+    let workspaces = UserWorkspaces::as_ref(app);
+    let scope = team_scope_for_view(workspaces, view, app);
     should_show_host_icon_for_model(
         llm,
         &LLMModelHost::AwsBedrock,
-        UserWorkspaces::as_ref(app).is_aws_bedrock_credentials_enabled(app),
+        workspaces.is_aws_bedrock_credentials_enabled_for_scope(&scope, app),
     )
 }
 
-pub fn should_show_gemini_enterprise_agent_platform_icon_for_model(
+/// See [`should_show_bedrock_icon_for_model`] for why this takes a view rather than a resolved
+/// scope.
+pub fn should_show_gemini_enterprise_agent_platform_icon_for_model<T: Entity>(
     llm: &LLMInfo,
+    view: &WeakViewHandle<T>,
     app: &AppContext,
 ) -> bool {
+    let workspaces = UserWorkspaces::as_ref(app);
+    let scope = team_scope_for_view(workspaces, view, app);
     should_show_host_icon_for_model(
         llm,
         &LLMModelHost::GeminiEnterprise,
-        UserWorkspaces::as_ref(app).is_gemini_enterprise_credentials_enabled(app),
+        workspaces.is_gemini_enterprise_credentials_enabled_for_scope(&scope, app),
     )
 }
 
@@ -249,6 +316,15 @@ impl DisableReason {
 /// Returns `true` when the model is usable for the current user: not disabled,
 /// or disabled for a reason that doesn't block requests (see
 /// [`DisableReason::should_clear_preference`]).
+///
+/// **Not window-scoped.** `has_byok_key` comes from [`is_using_first_party_key_for_provider`],
+/// which reads one arbitrarily-chosen team's `team_byo` for a user on more than one team. So a
+/// `RequiresUpgrade` model can be kept selected (or cleared) based on a team the window is not
+/// even on. That is the same bug class this file's other getters were migrated to fix; it
+/// survives here because this function feeds `AvailableLLMs::usable_info_for_id` /
+/// `usable_default_llm_info`, which underlie the model-catalog resolution methods below
+/// (`fallback_llm_info`, `model_info_for_id`, and everything built on them, e.g.
+/// `get_active_base_model`) -- a per-app cache with no window-scoped resolution path today.
 fn is_usable_llm(info: &LLMInfo, app: &AppContext) -> bool {
     let has_byok_key = is_using_first_party_key_for_provider(&info.provider, app);
     info.disable_reason
@@ -1162,6 +1238,13 @@ impl LLMPreferences {
         }
     }
 
+    /// **Not window-scoped**, for the same reason as [`is_usable_llm`]: this gates
+    /// [`Self::custom_llm_choices`] and [`Self::custom_llm_info_for_id_if_enabled`], both of
+    /// which feed the model-catalog resolution methods above (`fallback_llm_info`,
+    /// `model_info_for_id`, and the `get_*_llm_choices` / `get_active_*_model` family), a
+    /// per-app cache with no per-window resolution today. So which custom-endpoint models are
+    /// even considered usable can still be decided by one arbitrarily-chosen team's policy
+    /// for a user on more than one team.
     fn custom_inference_enabled(app: &AppContext) -> bool {
         let workspaces = UserWorkspaces::as_ref(app);
         workspaces.is_custom_inference_enabled(app) && workspaces.are_member_byo_endpoints_allowed()

@@ -3,12 +3,14 @@
 use warp::editor::{CodeEditorModel, CodeEditorModelEvent};
 use warp::settings::AISettings;
 use warp::tui_export::{
-    AISettingsChangedEvent, LLMId, LLMPreferences, LLMPreferencesEvent, ModelPickerChoice,
+    AISettingsChangedEvent, LLMId, LLMInfo, LLMPreferences, LLMPreferencesEvent, ModelPickerChoice,
     query_model_picker_choices, should_show_bedrock_icon_for_model,
     should_show_gemini_enterprise_agent_platform_icon_for_model, should_show_key_icon_for_model,
 };
 use warp_editor::model::CoreEditorModel;
-use warpui_core::{AppContext, Entity, EntityId, ModelContext, ModelHandle, SingletonEntity};
+use warpui_core::{
+    AppContext, Entity, EntityId, ModelContext, ModelHandle, SingletonEntity, WeakViewHandle,
+};
 
 use crate::inline_menu::{
     MAX_INLINE_MENU_ROWS, TuiInlineMenuHeader, TuiInlineMenuListState, TuiInlineMenuRow,
@@ -17,6 +19,32 @@ use crate::inline_menu::{
 use crate::input_suggestions_mode::{TuiInputSuggestionsMode, TuiInputSuggestionsModeModel};
 
 const MAX_VISIBLE_ROWS: usize = result_row_capacity(MAX_INLINE_MENU_ROWS, true, false);
+
+/// The three credential/host icon flags for a model, scoped to the window hosting the menu.
+struct ModelCredentialIcons {
+    is_using_bedrock: bool,
+    is_using_gemini_enterprise: bool,
+    is_key_connected: bool,
+}
+
+/// Resolves [`ModelCredentialIcons`] for a model, scoped to the window behind the
+/// `WeakViewHandle` captured when the resolver was built (see
+/// [`model_credential_icon_resolver`]). Boxed to type-erase that view's concrete type, so
+/// [`TuiModelMenuModel`] does not need a generic parameter purely to remember which view its
+/// window came from.
+type ModelCredentialIconResolver = Box<dyn Fn(&LLMInfo, &AppContext) -> ModelCredentialIcons>;
+
+fn model_credential_icon_resolver<T: Entity>(
+    view: WeakViewHandle<T>,
+) -> ModelCredentialIconResolver {
+    Box::new(move |llm, app| ModelCredentialIcons {
+        is_using_bedrock: should_show_bedrock_icon_for_model(llm, &view, app),
+        is_using_gemini_enterprise: should_show_gemini_enterprise_agent_platform_icon_for_model(
+            llm, &view, app,
+        ),
+        is_key_connected: should_show_key_icon_for_model(llm, &view, app),
+    })
+}
 
 #[derive(Debug, Clone)]
 struct TuiModelMenuRow {
@@ -44,14 +72,18 @@ pub(crate) struct TuiModelMenuModel {
     input_editor: ModelHandle<CodeEditorModel>,
     suggestions_mode: ModelHandle<TuiInputSuggestionsModeModel>,
     terminal_view_id: EntityId,
+    /// Scopes the credential/host icon reads in [`model_menu_row`] to the terminal surface's
+    /// window, per [`model_credential_icon_resolver`].
+    credential_icons: ModelCredentialIconResolver,
     state: TuiModelMenuState,
 }
 
 impl TuiModelMenuModel {
-    pub(crate) fn new(
+    pub(crate) fn new<T: Entity>(
         input_editor: ModelHandle<CodeEditorModel>,
         suggestions_mode: ModelHandle<TuiInputSuggestionsModeModel>,
         terminal_view_id: EntityId,
+        terminal_surface: WeakViewHandle<T>,
         ctx: &mut ModelContext<Self>,
     ) -> Self {
         ctx.subscribe_to_model(&input_editor, |model, _, event, ctx| {
@@ -81,6 +113,7 @@ impl TuiModelMenuModel {
             input_editor,
             suggestions_mode,
             terminal_view_id,
+            credential_icons: model_credential_icon_resolver(terminal_surface),
             state: TuiModelMenuState::Closed,
         }
     }
@@ -113,6 +146,12 @@ impl TuiModelMenuModel {
             input_editor,
             suggestions_mode,
             terminal_view_id: EntityId::new(),
+            // Nothing here exercises `model_menu_row`, which is the resolver's only caller.
+            credential_icons: Box::new(|_, _| ModelCredentialIcons {
+                is_using_bedrock: false,
+                is_using_gemini_enterprise: false,
+                is_key_connected: false,
+            }),
             state: TuiModelMenuState::Open { list },
         }
     }
@@ -247,15 +286,17 @@ impl TuiModelMenuModel {
             .get_active_profile_base_model(ctx, Some(self.terminal_view_id))
             .id
             .clone();
+        let credential_icons = &self.credential_icons;
         let choices = query_model_picker_choices(
             preferences,
             preferences.get_base_llm_choices_for_agent_mode(ctx),
             &query,
+            |llm, app| credential_icons(llm, app).is_key_connected,
             ctx,
         );
         let rows = choices
             .into_iter()
-            .map(|choice| model_menu_row(choice, &profile_default_id, ctx))
+            .map(|choice| model_menu_row(choice, &profile_default_id, credential_icons, ctx))
             .collect::<Vec<_>>();
         let preferred_index = preferred_selection_index(&rows, &active_id, query.trim().is_empty());
         let TuiModelMenuState::Open { list } = &mut self.state else {
@@ -271,14 +312,15 @@ impl TuiModelMenuModel {
 fn model_menu_row(
     choice: ModelPickerChoice,
     profile_default_id: &LLMId,
+    credential_icons: &ModelCredentialIconResolver,
     app: &AppContext,
 ) -> TuiModelMenuRow {
-    let uses_external_inference = should_show_key_icon_for_model(&choice.llm, app)
-        || should_show_bedrock_icon_for_model(&choice.llm, app)
-        || should_show_gemini_enterprise_agent_platform_icon_for_model(&choice.llm, app);
+    let icons = credential_icons(&choice.llm, app);
+    let uses_external_inference =
+        icons.is_key_connected || icons.is_using_bedrock || icons.is_using_gemini_enterprise;
     TuiModelMenuRow {
         is_selectable: choice.is_selectable(),
-        is_key_connected: should_show_key_icon_for_model(&choice.llm, app),
+        is_key_connected: icons.is_key_connected,
         discount_percentage: choice
             .llm
             .discount_percentage
