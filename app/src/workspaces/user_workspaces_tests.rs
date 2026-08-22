@@ -1401,15 +1401,26 @@ fn team_first_party_key_follows_each_windows_own_team() {
     })
 }
 
-/// A restrictive team's policy must not leak onto a window that is not on a team: no team
-/// means no team policy, and the plan's own BYO entitlement decides on its own.
-#[test]
-fn member_byo_policy_is_unrestricted_for_a_window_with_no_team() {
+/// A scope with no team reads the workspace's `team_byo`, which is the intended answer for a
+/// teamless user and for a window with no team selected. It must be a real read, not a
+/// permissive constant: a workspace policy that restricts members has to bind.
+fn assert_teamless_window_reads_workspace_policy(allow_member_credentials: bool) {
     let (_team_a, team_b) = two_teams_with_opposing_byo_policy();
     let mut workspace = workspace_for_test(&team_b);
     // Reconciliation assigns a teamless window to the workspace's first team, so the window
     // can only stay teamless while the workspace itself has no teams to fall back to.
     workspace.teams.clear();
+    workspace.settings.team_byo = Some(TeamByoSettings {
+        first_party_enabled: true,
+        endpoints_enabled: true,
+        allow_user_keys: allow_member_credentials,
+        allow_user_endpoints: allow_member_credentials,
+        first_party_keys: vec![ByoFirstPartyKey {
+            provider: LLMProvider::Anthropic,
+            credential_uid: "workspace-anthropic".to_string(),
+        }],
+        endpoints: vec![],
+    });
 
     App::test((), |mut app| async move {
         initialize_window_team_test_app(&mut app, vec![workspace]);
@@ -1427,13 +1438,33 @@ fn member_byo_policy_is_unrestricted_for_a_window_with_no_team() {
                 user_workspaces.is_managed_byok_byoe_enabled(),
                 "the plan still manages BYOK/BYOE centrally; only the team is missing"
             );
-            assert!(user_workspaces.are_member_byo_keys_allowed_for_scope(&scope));
-            assert!(user_workspaces.are_member_byo_endpoints_allowed_for_scope(&scope));
+            assert_eq!(
+                user_workspaces.are_member_byo_keys_allowed_for_scope(&scope),
+                allow_member_credentials,
+                "a teamless window must read the workspace's key policy"
+            );
+            assert_eq!(
+                user_workspaces.are_member_byo_endpoints_allowed_for_scope(&scope),
+                allow_member_credentials,
+                "a teamless window must read the workspace's endpoint policy"
+            );
             assert!(
-                !user_workspaces.has_team_first_party_key_for_scope(&scope, LLMProvider::Anthropic)
+                user_workspaces.has_team_first_party_key_for_scope(&scope, LLMProvider::Anthropic),
+                "a teamless window must see the workspace's first-party key"
             );
         });
     })
+}
+
+#[test]
+fn member_byo_policy_for_a_window_with_no_team_follows_a_permissive_workspace() {
+    assert_teamless_window_reads_workspace_policy(true);
+}
+
+/// The half that a hardcoded permissive answer would have got wrong.
+#[test]
+fn member_byo_policy_for_a_window_with_no_team_follows_a_restrictive_workspace() {
+    assert_teamless_window_reads_workspace_policy(false);
 }
 
 /// `team_byo` is only administered by plans that manage credentials centrally, so without

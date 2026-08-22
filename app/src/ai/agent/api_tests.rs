@@ -17,7 +17,7 @@ use crate::server::server_api::team::MockTeamClient;
 use crate::server::server_api::workspace::MockWorkspaceClient;
 use crate::settings::PrivacySettings;
 use crate::workspaces::team::Team;
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{TeamScope, UserWorkspaces};
 use crate::workspaces::workspace::{
     BillingMetadata, HostEnablementSetting, LlmHostSettings, ManagedByokByoePolicy,
     TeamByoSettings, TeamSettings, Tier, Workspace,
@@ -328,15 +328,22 @@ fn request_params_do_not_allow_member_credentials_until_the_policy_has_been_appl
     assert!(!RequestParams::new_for_test().member_byo_credentials_allowed);
 }
 
-/// A window `UserWorkspaces` has never been told about is on no team, so no team policy
-/// restricts it. Every TUI window is in this state today: `register_window` is only called
-/// from the GUI's `RootView::new`, so the TUI cannot resolve a team and an admin's `team_byo`
-/// restriction does not reach its requests. This pins that gap rather than endorsing it --
-/// registering TUI windows is what closes it, and this assertion should flip when it does.
+/// A window `UserWorkspaces` has never been told about resolves to no team, and so reads the
+/// workspace's `team_byo`. Every TUI window is in that state -- `register_window` is only
+/// called from the GUI's `RootView::new` -- so this is what keeps a restriction reaching TUI
+/// requests at all, and it is the same value the ambient getters this slice replaces read.
 #[test]
-fn apply_team_byo_policy_is_inert_for_an_unregistered_window() {
+fn apply_team_byo_policy_applies_the_workspace_policy_to_an_unregistered_window() {
     let (_team_a, team_b) = two_teams_of_opposing_byo_policy();
-    let workspace = workspace_with_teams(vec![team_b]);
+    let mut workspace = workspace_with_teams(vec![team_b]);
+    workspace.settings.team_byo = Some(TeamByoSettings {
+        first_party_enabled: true,
+        endpoints_enabled: true,
+        allow_user_keys: false,
+        allow_user_endpoints: false,
+        first_party_keys: vec![],
+        endpoints: vec![],
+    });
 
     App::test((), |mut app| async move {
         register_workspace_and_api_key_manager(&mut app, workspace);
@@ -351,25 +358,30 @@ fn apply_team_byo_policy_is_inert_for_an_unregistered_window() {
             request_params.api_keys =
                 ApiKeyManager::as_ref(ctx).api_keys_for_request(true, false, None);
         });
+        assert!(
+            request_params
+                .api_keys
+                .as_ref()
+                .is_some_and(|keys| !keys.anthropic.is_empty()),
+            "test setup should attach a member key for the policy check to strip"
+        );
 
         app.read(|ctx| {
             let user_workspaces = UserWorkspaces::as_ref(ctx);
-            assert!(
-                user_workspaces.is_managed_byok_byoe_enabled(),
-                "the plan manages BYOK/BYOE centrally, so only the missing window explains the \
-                 restriction not applying"
-            );
+            assert!(user_workspaces.is_managed_byok_byoe_enabled());
             let unregistered_window = WindowId::new();
             let team_scope = user_workspaces.team_context_for_window_for_test(unregistered_window);
+            assert_eq!(team_scope.team_uid(), None);
             request_params.apply_team_byo_policy(&team_scope, ctx);
             assert!(
                 request_params
                     .api_keys
                     .as_ref()
-                    .is_some_and(|keys| !keys.anthropic.is_empty()),
-                "an unregistered window resolves to no team, so the restrictive team_byo policy \
-                 does not apply to it"
+                    .is_none_or(|keys| keys.anthropic.is_empty()),
+                "the workspace restricts member credentials, so a window with no team must not \
+                 send one"
             );
+            assert!(!request_params.member_byo_credentials_allowed);
         });
     });
 }

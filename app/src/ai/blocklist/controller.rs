@@ -437,9 +437,10 @@ impl BlocklistAIController {
     /// than waiting for a new conversation, and follows a pane dragged to another window.
     ///
     /// Only the GUI registers its windows with `UserWorkspaces` (`RootView::new` is the sole
-    /// caller of `register_window`), so in the TUI this resolves to no team and the team
-    /// `team_byo` policy is inert. Registering TUI windows is what fixes that; substituting
-    /// workspace-level settings here would read one arbitrarily-chosen team's.
+    /// caller of `register_window`), so a TUI window resolves to no team and reads the
+    /// workspace's `team_byo` -- the same value the ambient getters read today, so an admin
+    /// restriction still binds there. Registering TUI windows is what would let it resolve a
+    /// team's own policy instead.
     fn apply_team_byo_policy(&self, request_params: &mut api::RequestParams, ctx: &AppContext) {
         request_params.apply_team_byo_policy(&self.team_context(ctx), ctx);
     }

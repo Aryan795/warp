@@ -964,7 +964,7 @@ impl UserWorkspaces {
     /// team-scoped `team_byo` policy on: a plan that does not manage credentials centrally has
     /// no `team_byo` policy to enforce, and members fall back to the plan's own BYO
     /// entitlement ([`Self::is_byo_api_key_enabled`] / [`Self::is_custom_inference_enabled`]).
-    pub fn is_managed_byok_byoe_enabled(&self) -> bool {
+    pub(crate) fn is_managed_byok_byoe_enabled(&self) -> bool {
         self.current_workspace_billing_metadata()
             .is_some_and(|billing| billing.is_managed_byok_byoe_enabled())
     }
@@ -976,20 +976,15 @@ impl UserWorkspaces {
     /// is [`Self::is_byo_api_key_enabled`], and stays workspace-level. Both must hold before a
     /// member key is used.
     ///
-    /// A scope with no team is not on a team, so no team policy restricts it and the plan's
-    /// entitlement alone decides. A scope that names a team resolves that team's policy or
-    /// nothing; it never falls back to another team's.
+    /// See [`Self::team_byo_for_scope`] for what a scope with no team reads.
     pub(crate) fn are_member_byo_keys_allowed_for_scope<S: TeamScope + ?Sized>(
         &self,
         scope: &S,
     ) -> bool {
         !self.is_managed_byok_byoe_enabled()
-            || match scope.team_uid() {
-                Some(_) => self.team_byo_for_scope(scope).is_some_and(|team_byo| {
-                    team_byo.first_party_enabled && team_byo.allow_user_keys
-                }),
-                None => true,
-            }
+            || self
+                .team_byo_for_scope(scope)
+                .is_some_and(|team_byo| team_byo.first_party_enabled && team_byo.allow_user_keys)
     }
 
     /// [`Self::are_member_byo_keys_allowed_for_scope`] for member-configured custom endpoints.
@@ -999,16 +994,12 @@ impl UserWorkspaces {
         scope: &S,
     ) -> bool {
         !self.is_managed_byok_byoe_enabled()
-            || match scope.team_uid() {
-                Some(_) => self.team_byo_for_scope(scope).is_some_and(|team_byo| {
-                    team_byo.endpoints_enabled && team_byo.allow_user_endpoints
-                }),
-                None => true,
-            }
+            || self
+                .team_byo_for_scope(scope)
+                .is_some_and(|team_byo| team_byo.endpoints_enabled && team_byo.allow_user_endpoints)
     }
 
-    /// Whether `scope`'s team has configured its own first-party key for `provider`. A scope
-    /// with no team has no team-provided key.
+    /// Whether a first-party key for `provider` has been configured for `scope`.
     pub(crate) fn has_team_first_party_key_for_scope<S: TeamScope + ?Sized>(
         &self,
         scope: &S,
@@ -1024,9 +1015,22 @@ impl UserWorkspaces {
             })
     }
 
+    /// The `team_byo` policy that governs `scope`.
+    ///
+    /// A scope that names a team reads that team's policy and only that team's: an unresolvable
+    /// team yields `None`, never another team's policy. A scope with **no** team reads the
+    /// workspace's, which is the intended answer both for a user who belongs to no team and
+    /// for a window with no team selected, and which keeps a teamless read identical to the
+    /// ambient getters it replaces.
     fn team_byo_for_scope<S: TeamScope + ?Sized>(&self, scope: &S) -> Option<&TeamByoSettings> {
-        self.team_from_scope(scope)
-            .and_then(|team| team.settings.team_byo.as_ref())
+        match scope.team_uid() {
+            Some(_) => self
+                .team_from_scope(scope)
+                .and_then(|team| team.settings.team_byo.as_ref()),
+            None => self
+                .current_workspace()
+                .and_then(|workspace| workspace.settings.team_byo.as_ref()),
+        }
     }
 
     pub fn aws_bedrock_host_settings(&self) -> Option<&super::workspace::LlmHostSettings> {
