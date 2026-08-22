@@ -849,22 +849,6 @@ impl UserWorkspaces {
             .unwrap_or(FeatureFlag::SoloUserByok.is_enabled())
     }
 
-    /// Whether the current workspace's managed BYOK/BYOE policy allows members
-    /// to use their own provider API keys. Users with no workspace, or
-    /// workspaces without the managed BYOK/BYOE policy, have no team-level
-    /// restriction, so this returns true and the normal BYO entitlement applies.
-    pub fn are_member_byo_keys_allowed(&self) -> bool {
-        self.current_workspace().is_none_or(|workspace| {
-            !workspace.billing_metadata.is_managed_byok_byoe_enabled()
-                || workspace
-                    .settings
-                    .team_byo
-                    .as_ref()
-                    .is_some_and(|team_byo| {
-                        team_byo.first_party_enabled && team_byo.allow_user_keys
-                    })
-        })
-    }
     /// Whether custom inference endpoints are enabled for the current user.
     /// Anonymous or logged-out users are not allowed to use custom inference.
     /// Controlled by the BYO_ENDPOINT billing policy.
@@ -909,8 +893,6 @@ impl UserWorkspaces {
             .is_some_and(|billing| billing.is_managed_byok_byoe_enabled())
     }
 
-    /// [`Self::are_member_byo_keys_allowed`], but reading `team_uid`'s team's effective
-    /// `TeamSettings.team_byo` policy instead of the workspace-level settings.
     pub(crate) fn are_member_byo_keys_allowed_for_team(&self, team_uid: Option<ServerId>) -> bool {
         !self.is_managed_byok_byoe_enabled()
             || match team_uid {

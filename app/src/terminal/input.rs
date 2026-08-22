@@ -3545,14 +3545,23 @@ impl Input {
 
         ctx.subscribe_to_model(&LLMPreferences::handle(ctx), |me, _, event, ctx| {
             if let LLMPreferencesEvent::UpdatedActiveAgentModeLLM = event {
+                let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
                 // If the new model doesn't support vision and we had image chips,
-                // the context model already cleared them — show a toast.
+                // clear them and show a toast.
                 let has_image_chips = me
                     .attachment_chips
                     .iter()
                     .any(|c| matches!(c.attachment_type, AttachmentType::Image));
-                let vision_supported =
-                    LLMPreferences::as_ref(ctx).vision_supported(ctx, Some(me.terminal_view_id));
+                let vision_supported = LLMPreferences::as_ref(ctx).vision_supported(
+                    Some(me.terminal_view_id),
+                    team_context.as_ref(),
+                    ctx,
+                );
+                if !vision_supported {
+                    me.ai_context_model.update(ctx, |context_model, ctx| {
+                        context_model.clear_pending_images(ctx);
+                    });
+                }
                 if has_image_chips && !vision_supported {
                     let window_id = ctx.window_id();
                     ToastStack::handle(ctx).update(ctx, |ts, ctx| {
@@ -4669,8 +4678,13 @@ impl Input {
     /// front instead of failing at spawn time.
     #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
     fn block_cloud_handoff_if_model_unsupported(&self, ctx: &mut ViewContext<Self>) -> bool {
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         if LLMPreferences::as_ref(ctx)
-            .is_active_base_model_cloud_runnable(self.terminal_view_id, ctx)
+            .is_active_base_model_cloud_runnable(
+                self.terminal_view_id,
+                team_context.as_ref(),
+                ctx,
+            )
         {
             return false;
         }
@@ -5152,10 +5166,13 @@ impl Input {
 
                 match selected_tab {
                     InlineModelSelectorTab::BaseAgent => {
+                        let team_context =
+                            UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
                         LLMPreferences::handle(ctx).update(ctx, |preferences, ctx| {
                             preferences.update_preferred_agent_mode_llm(
                                 id,
                                 self.terminal_view_id,
+                                team_context.as_ref(),
                                 ctx,
                             );
                         });
@@ -6151,8 +6168,12 @@ impl Input {
         let ai_input_model = self.ai_input_model.as_ref(ctx);
 
         let llm_prefs = LLMPreferences::as_ref(ctx);
-
-        let vision_supported = llm_prefs.vision_supported(ctx, Some(self.terminal_view_id));
+        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+        let vision_supported = llm_prefs.vision_supported(
+            Some(self.terminal_view_id),
+            team_context.as_ref(),
+            ctx,
+        );
 
         let num_images_attached = self.ai_context_model.as_ref(ctx).pending_images().len();
 

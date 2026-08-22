@@ -209,6 +209,7 @@ impl BlocklistAIController {
                     self.get_current_response_initiator(),
                     conversation_id,
                     self.terminal_surface_id,
+                    None,
                     ctx,
                 ),
                 stream_id.clone(),

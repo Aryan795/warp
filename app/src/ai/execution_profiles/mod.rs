@@ -15,7 +15,7 @@ use crate::cloud_object::{
 };
 use crate::server::sync_queue::QueueItem;
 use crate::settings::AISettings;
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces};
 /// This threshold currently only applies to GPT 5.4 and GPT 5.5 models
 pub const LONG_CONTEXT_WARNING_THRESHOLD: u32 = 272_000;
 pub(crate) const LONG_CONTEXT_PRICING_WARNING_URL: &str =
@@ -43,13 +43,12 @@ pub struct CloudAgentComputerUseState {
     /// Whether this value is forced by organization settings (true = user cannot change it).
     pub is_forced_by_org: bool,
 }
-fn effective_base_model<'a>(profile: &AIExecutionProfile, app: &'a AppContext) -> &'a LLMInfo {
-    let prefs = LLMPreferences::as_ref(app);
-    profile
-        .base_model
-        .as_ref()
-        .and_then(|id| prefs.get_llm_info(id))
-        .unwrap_or_else(|| prefs.get_default_base_model(app))
+fn effective_base_model<'a>(
+    profile: &AIExecutionProfile,
+    team_context: Option<&TeamContext>,
+    app: &'a AppContext,
+) -> &'a LLMInfo {
+    LLMPreferences::as_ref(app).effective_base_model_for_profile(profile, team_context, app)
 }
 
 /// Resolves the effective cloud agent computer use state by reading the workspace
@@ -134,20 +133,37 @@ fn create_default_from_legacy_settings_with_profile(
 }
 
 pub trait AIExecutionProfileAppExt {
-    fn configurable_context_window(&self, app: &AppContext) -> Option<LLMContextWindow>;
+    fn configurable_context_window(
+        &self,
+        team_context: Option<&TeamContext>,
+        app: &AppContext,
+    ) -> Option<LLMContextWindow>;
 
-    fn context_window_display_value(&self, app: &AppContext) -> Option<u32>;
-    fn context_window_limit_for_request(&self, app: &AppContext) -> Option<u32>;
+    fn context_window_display_value(
+        &self,
+        team_context: Option<&TeamContext>,
+        app: &AppContext,
+    ) -> Option<u32>;
+    fn context_window_limit_for_request(
+        &self,
+        team_context: Option<&TeamContext>,
+        app: &AppContext,
+    ) -> Option<u32>;
     fn should_show_long_context_pricing_warning(
         &self,
         context_window_limit: Option<u32>,
+        team_context: Option<&TeamContext>,
         app: &AppContext,
     ) -> bool;
 }
 
 impl AIExecutionProfileAppExt for AIExecutionProfile {
-    fn configurable_context_window(&self, app: &AppContext) -> Option<LLMContextWindow> {
-        let llm = effective_base_model(self, app);
+    fn configurable_context_window(
+        &self,
+        team_context: Option<&TeamContext>,
+        app: &AppContext,
+    ) -> Option<LLMContextWindow> {
+        let llm = effective_base_model(self, team_context, app);
         if has_configurable_context_window(
             llm,
             FeatureFlag::GPTConfigurableContextWindow.is_enabled(),
@@ -158,12 +174,20 @@ impl AIExecutionProfileAppExt for AIExecutionProfile {
         }
     }
 
-    fn context_window_display_value(&self, app: &AppContext) -> Option<u32> {
-        let cw = self.configurable_context_window(app)?;
+    fn context_window_display_value(
+        &self,
+        team_context: Option<&TeamContext>,
+        app: &AppContext,
+    ) -> Option<u32> {
+        let cw = self.configurable_context_window(team_context, app)?;
         Some(self.context_window_limit.unwrap_or(cw.default_max))
     }
-    fn context_window_limit_for_request(&self, app: &AppContext) -> Option<u32> {
-        let llm = effective_base_model(self, app);
+    fn context_window_limit_for_request(
+        &self,
+        team_context: Option<&TeamContext>,
+        app: &AppContext,
+    ) -> Option<u32> {
+        let llm = effective_base_model(self, team_context, app);
         if !has_configurable_context_window(
             llm,
             FeatureFlag::GPTConfigurableContextWindow.is_enabled(),
@@ -178,9 +202,10 @@ impl AIExecutionProfileAppExt for AIExecutionProfile {
     fn should_show_long_context_pricing_warning(
         &self,
         context_window_limit: Option<u32>,
+        team_context: Option<&TeamContext>,
         app: &AppContext,
     ) -> bool {
-        let llm = effective_base_model(self, app);
+        let llm = effective_base_model(self, team_context, app);
         should_show_long_context_pricing_warning(
             llm,
             Some(

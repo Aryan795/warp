@@ -195,16 +195,6 @@ impl BlocklistAIContextModel {
             },
         );
 
-        ctx.subscribe_to_model(&LLMPreferences::handle(ctx), |me, _, event, ctx| {
-            if let LLMPreferencesEvent::UpdatedActiveAgentModeLLM = event {
-                let llm_prefs = LLMPreferences::as_ref(ctx);
-                let vision_supported =
-                    llm_prefs.vision_supported(ctx, Some(me.terminal_surface_id));
-                if !vision_supported {
-                    me.clear_pending_images(ctx);
-                }
-            }
-        });
 
         ctx.subscribe_to_model(&conversation_selection, |me, _, event, ctx| match event {
             ConversationSelectionEvent::Changed => {

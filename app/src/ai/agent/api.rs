@@ -388,7 +388,7 @@ impl RequestParams {
         let context_window_limit = AIExecutionProfilesModel::as_ref(app)
             .active_profile(terminal_view_id, app)
             .data()
-            .context_window_limit_for_request(app);
+            .context_window_limit_for_request(team_context, app);
 
         Self {
             input: request_input.all_inputs().cloned().collect(),

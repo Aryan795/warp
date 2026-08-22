@@ -179,6 +179,7 @@ impl SlashCommandRequest {
             controller.get_current_response_initiator(),
             conversation_id,
             controller.terminal_surface_id,
+            team_context.as_ref(),
             ctx,
         );
         let model_id = request_input.model_id.clone();

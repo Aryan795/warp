@@ -18,7 +18,7 @@ use warpui::text_layout::ClipConfig;
 use warpui::ui_components::components::UiComponent;
 use warpui::{
     AppContext, Element, Entity, EntityId, ModelHandle, SingletonEntity as _, TypedActionView,
-    View, ViewContext, ViewHandle,
+    View, ViewContext, ViewHandle, WeakViewHandle,
 };
 
 const SIDECAR_HORIZONTAL_GAP: f32 = 8.;
@@ -48,7 +48,8 @@ use crate::ai::harness_availability::{
 };
 use crate::ai::llms::{
     ByoKeySource, LLMId, LLMInfo, LLMPreferences, LLMPreferencesEvent, LLMSpec,
-    byo_key_source_for_model, dedupe_model_display_names, should_show_key_icon_for_model,
+    byo_key_source_for_model_for_render_context, dedupe_model_display_names,
+    should_show_key_icon_for_model,
 };
 use crate::appearance::Appearance;
 use crate::cloud_object::model::generic_string_model::StringModel;
@@ -173,7 +174,9 @@ pub struct ProfileModelSelector {
     is_profile_menu_open: bool,
     is_model_menu_open: bool,
     terminal_view_id: EntityId,
-    team_context: Option<TeamContext>,
+    weak_self: WeakViewHandle<Self>,
+    base_model_display_name: String,
+    cli_agent_model_display_name: String,
     profile_mouse_state: MouseStateHandle,
     model_mouse_state: MouseStateHandle,
     menu_positioning_provider: Arc<dyn MenuPositioningProvider>,
@@ -239,6 +242,9 @@ impl ProfileModelSelectorAction {
 }
 
 impl ProfileModelSelector {
+    fn team_context(ctx: &ViewContext<Self>) -> Option<TeamContext> {
+        UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+    }
     pub fn new(
         menu_positioning_provider: Arc<dyn crate::terminal::input::MenuPositioningProvider>,
         terminal_view_id: EntityId,
@@ -248,7 +254,6 @@ impl ProfileModelSelector {
         controller: Option<ModelHandle<BlocklistAIController>>,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
-        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
         let profile_button = ctx.add_typed_action_view(|ctx| {
             let appearance = Appearance::as_ref(ctx);
             ActionButton::new(
@@ -504,7 +509,6 @@ impl ProfileModelSelector {
                 UserWorkspacesEvent::WindowTeamChanged { window_id }
                     if *window_id == ctx.window_id() =>
                 {
-                    me.team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
                     me.refresh_state(ctx);
                     ctx.notify();
                 }
@@ -568,7 +572,9 @@ impl ProfileModelSelector {
             is_profile_menu_open: false,
             is_model_menu_open: false,
             terminal_view_id,
-            team_context,
+            weak_self: ctx.handle(),
+            base_model_display_name: String::new(),
+            cli_agent_model_display_name: String::new(),
             profile_mouse_state: Default::default(),
             model_mouse_state: Default::default(),
             menu_positioning_provider,
@@ -720,10 +726,24 @@ impl ProfileModelSelector {
             });
         }
 
+        let team_context = Self::team_context(ctx);
+        let llm_preferences = LLMPreferences::as_ref(ctx);
+        let base_llm = llm_preferences.get_active_base_model(
+            Some(self.terminal_view_id),
+            team_context.as_ref(),
+            ctx,
+        );
+        let cli_agent_llm = llm_preferences.get_active_cli_agent_model(
+            Some(self.terminal_view_id),
+            team_context.as_ref(),
+            ctx,
+        );
+        self.base_model_display_name = base_llm.menu_display_name();
+        self.cli_agent_model_display_name = cli_agent_llm.menu_display_name();
+
         let model_name = if self.is_third_party_harness(ctx) {
             self.harness_model_display_name(ctx)
         } else {
-            let llm_preferences = LLMPreferences::as_ref(ctx);
             let active_llm = if FeatureFlag::InlineMenuHeaders.is_enabled()
                 && self
                     .terminal_model
@@ -732,9 +752,9 @@ impl ProfileModelSelector {
                     .active_block()
                     .is_agent_in_control_or_tagged_in()
             {
-                llm_preferences.get_active_cli_agent_model(ctx, Some(self.terminal_view_id))
+                cli_agent_llm
             } else {
-                llm_preferences.get_active_base_model(ctx, Some(self.terminal_view_id))
+                base_llm
             };
 
             // Don't append description for custom model routers — it would add a
@@ -999,10 +1019,15 @@ impl ProfileModelSelector {
             self.refresh_harness_model_menu(ctx);
             return;
         }
+        let team_context = Self::team_context(ctx);
 
         let llm_preferences = LLMPreferences::as_ref(ctx);
 
-        let active_llm = llm_preferences.get_active_base_model(ctx, Some(self.terminal_view_id));
+        let active_llm = llm_preferences.get_active_base_model(
+            Some(self.terminal_view_id),
+            team_context.as_ref(),
+            ctx,
+        );
 
         let active_profile =
             AIExecutionProfilesModel::as_ref(ctx).active_profile(Some(self.terminal_view_id), ctx);
@@ -1016,7 +1041,12 @@ impl ProfileModelSelector {
                     .get_llm_info(&id)
                     .map(|info| info.id.clone())
             })
-            .unwrap_or_else(|| llm_preferences.get_default_base_model(ctx).id.clone());
+            .unwrap_or_else(|| {
+                llm_preferences
+                    .get_default_base_model(team_context.as_ref(), ctx)
+                    .id
+                    .clone()
+            });
 
         let model_id_to_add_profile_default_label_to = Some(&profile_base_model_id);
 
@@ -1090,7 +1120,7 @@ impl ProfileModelSelector {
             Some(&|llm_id| self.model_menu_item_position_id(llm_id)),
             true,
             true,
-            self.team_context.as_ref(),
+            team_context.as_ref(),
             ctx,
         );
 
@@ -1115,7 +1145,7 @@ impl ProfileModelSelector {
             for llm in &custom_choices {
                 let mut fields = MenuItemFields::new(llm.menu_display_name())
                     .with_on_select_action(ProfileModelSelectorAction::SelectModel(llm.id.clone()));
-                if should_show_key_icon_for_model(llm, self.team_context.as_ref(), ctx) {
+                if should_show_key_icon_for_model(llm, team_context.as_ref(), ctx) {
                     fields = fields.with_right_side_icon(Icon::Key);
                 }
                 items.push(MenuItem::Item(fields));
@@ -1144,7 +1174,7 @@ impl ProfileModelSelector {
                 Some(&|llm_id| self.model_menu_item_position_id(llm_id)),
                 true,
                 true,
-                self.team_context.as_ref(),
+                team_context.as_ref(),
                 ctx,
             ));
         }
@@ -1164,8 +1194,13 @@ impl ProfileModelSelector {
         kind: &ModelSpecSidecarKind,
         ctx: &mut ViewContext<Self>,
     ) {
+        let team_context = Self::team_context(ctx);
         let llm_preferences = LLMPreferences::as_ref(ctx);
-        let active_llm = llm_preferences.get_active_base_model(ctx, Some(self.terminal_view_id));
+        let active_llm = llm_preferences.get_active_base_model(
+            Some(self.terminal_view_id),
+            team_context.as_ref(),
+            ctx,
+        );
         let active_llm_id = active_llm.id.clone();
 
         let items: Vec<MenuItem<ProfileModelSelectorAction>> = match kind {
@@ -1217,8 +1252,13 @@ impl ProfileModelSelector {
         base_name: &str,
         ctx: &mut ViewContext<Self>,
     ) {
+        let team_context = Self::team_context(ctx);
         let llm_preferences = LLMPreferences::as_ref(ctx);
-        let active_llm = llm_preferences.get_active_base_model(ctx, Some(self.terminal_view_id));
+        let active_llm = llm_preferences.get_active_base_model(
+            Some(self.terminal_view_id),
+            team_context.as_ref(),
+            ctx,
+        );
         let active_llm_id = active_llm.id.clone();
 
         let items: Vec<MenuItem<ProfileModelSelectorAction>> = self
@@ -1292,8 +1332,14 @@ impl ProfileModelSelector {
                 "Selecting base agent model {} (from model selector)",
                 &llm.id
             );
+            let team_context = Self::team_context(ctx);
             LLMPreferences::handle(ctx).update(ctx, |preferences, ctx| {
-                preferences.update_preferred_agent_mode_llm(&llm.id, self.terminal_view_id, ctx);
+                preferences.update_preferred_agent_mode_llm(
+                    &llm.id,
+                    self.terminal_view_id,
+                    team_context.as_ref(),
+                    ctx,
+                );
             });
         }
         self.set_model_menu_visibility(false, ctx);
@@ -1679,7 +1725,6 @@ impl ProfileModelSelector {
     fn render_model_section(&self, app: &AppContext) -> Box<dyn Element> {
         let appearance = Appearance::as_ref(app);
         let theme = appearance.theme();
-        let llm_preferences = LLMPreferences::as_ref(app);
 
         // Allow editing if composing an ambient agent query, or if the user has edit access
         // in a shared session (i.e., not a viewer, or is an executor).
@@ -1705,13 +1750,9 @@ impl ProfileModelSelector {
         let model_display_name = if self.is_third_party_harness(app) {
             self.harness_model_display_name(app)
         } else if is_lrc {
-            llm_preferences
-                .get_active_cli_agent_model(app, Some(self.terminal_view_id))
-                .menu_display_name()
+            self.cli_agent_model_display_name.clone()
         } else {
-            llm_preferences
-                .get_active_base_model(app, Some(self.terminal_view_id))
-                .menu_display_name()
+            self.base_model_display_name.clone()
         };
 
         let text_color = if self.is_blurred {
@@ -2176,9 +2217,15 @@ impl TypedActionView for ProfileModelSelector {
                 self.set_profile_menu_visibility(false, ctx);
             }
             ProfileModelSelectorAction::SelectModel(llm_id) => {
+                let team_context = Self::team_context(ctx);
                 LLMPreferences::handle(ctx).update(ctx, |preferences, ctx| {
                     log::info!("Selecting base agent model {llm_id} (from model selector)");
-                    preferences.update_preferred_agent_mode_llm(llm_id, self.terminal_view_id, ctx);
+                    preferences.update_preferred_agent_mode_llm(
+                        llm_id,
+                        self.terminal_view_id,
+                        team_context.as_ref(),
+                        ctx,
+                    );
                 });
                 self.set_model_menu_visibility(false, ctx);
             }
@@ -2349,8 +2396,14 @@ impl View for ProfileModelSelector {
                         .cloned();
                     Some(self.render_sidecar_spec_panel(&kind, &sidecar_spec, app))
                 } else if let Some(spec) = info.spec.as_ref() {
-                    let byo_key_source =
-                        byo_key_source_for_model(info, self.team_context.as_ref(), app);
+                    let workspaces = UserWorkspaces::as_ref(app);
+                    let team_render_context =
+                        workspaces.team_render_context_for_view_handle(&self.weak_self, app);
+                    let byo_key_source = byo_key_source_for_model_for_render_context(
+                        info,
+                        team_render_context.as_ref(),
+                        app,
+                    );
                     Some(self.render_model_spec(spec, byo_key_source, app))
                 } else {
                     None

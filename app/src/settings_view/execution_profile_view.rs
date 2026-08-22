@@ -26,6 +26,7 @@ use crate::cloud_object::model::generic_string_model::StringModel;
 use crate::settings::AISettings;
 use crate::ui_components::icons::Icon;
 use crate::view_components::action_button::{ActionButton, ButtonSize, SecondaryTheme};
+use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces, UserWorkspacesEvent};
 
 #[derive(Debug, Clone)]
 pub enum ExecutionProfileViewAction {
@@ -38,11 +39,24 @@ pub enum ExecutionProfileViewEvent {
 
 pub struct ExecutionProfileView {
     profile_id: ExecutionProfileId,
+    team_context: Option<TeamContext>,
     edit_button: ViewHandle<ActionButton>,
 }
 
 impl ExecutionProfileView {
     pub fn new(profile_id: ExecutionProfileId, ctx: &mut ViewContext<Self>) -> Self {
+        let workspaces = UserWorkspaces::handle(ctx);
+        let team_context = workspaces.as_ref(ctx).team_context_for_view(ctx);
+        ctx.subscribe_to_model(&workspaces, |me, workspaces, event, ctx| {
+            if matches!(
+                event,
+                UserWorkspacesEvent::WindowTeamChanged { window_id }
+                    if *window_id == ctx.window_id()
+            ) {
+                me.team_context = workspaces.as_ref(ctx).team_context_for_view(ctx);
+                ctx.notify();
+            }
+        });
         ctx.subscribe_to_model(&AIExecutionProfilesModel::handle(ctx), |me, _, event, ctx| {
             if matches!(event, AIExecutionProfilesModelEvent::ProfileUpdated(profile_id) if profile_id == &me.profile_id) {
                 ctx.notify();
@@ -78,6 +92,7 @@ impl ExecutionProfileView {
 
         Self {
             profile_id,
+            team_context,
             edit_button,
         }
     }
@@ -108,7 +123,7 @@ impl View for ExecutionProfileView {
             .map(|info| info.display_name.clone())
             .unwrap_or_else(|| {
                 llm_preferences
-                    .get_default_base_model(app)
+                    .get_default_base_model(self.team_context.as_ref(), app)
                     .display_name
                     .clone()
             });
@@ -120,7 +135,7 @@ impl View for ExecutionProfileView {
             .map(|info| info.display_name.clone())
             .unwrap_or_else(|| {
                 llm_preferences
-                    .get_default_cli_agent_model(app)
+                    .get_default_cli_agent_model(self.team_context.as_ref(), app)
                     .display_name
                     .clone()
             });
@@ -132,7 +147,7 @@ impl View for ExecutionProfileView {
             .map(|info| info.display_name.clone())
             .unwrap_or_else(|| {
                 llm_preferences
-                    .get_default_computer_use_model(app)
+                    .get_default_computer_use_model(self.team_context.as_ref(), app)
                     .display_name
                     .clone()
             });

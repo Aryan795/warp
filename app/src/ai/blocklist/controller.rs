@@ -214,6 +214,7 @@ impl RequestInput {
         shared_session_response_initiator: Option<ParticipantId>,
         conversation_id: AIConversationId,
         terminal_surface_id: EntityId,
+        team_context: Option<&TeamContext>,
         app: &AppContext,
     ) -> Self {
         let mut me = Self::new_with_common_fields(
@@ -221,6 +222,7 @@ impl RequestInput {
             active_session,
             shared_session_response_initiator,
             terminal_surface_id,
+            team_context,
             app,
         );
         me.input_messages.insert(task_id, inputs);
@@ -234,6 +236,7 @@ impl RequestInput {
         shared_session_response_initiator: Option<ParticipantId>,
         conversation_id: AIConversationId,
         terminal_surface_id: EntityId,
+        team_context: Option<&TeamContext>,
         app: &AppContext,
     ) -> Self {
         let mut me = Self::new_with_common_fields(
@@ -241,6 +244,7 @@ impl RequestInput {
             active_session,
             shared_session_response_initiator,
             terminal_surface_id,
+            team_context,
             app,
         );
         for result in action_results.into_iter() {
@@ -269,23 +273,24 @@ impl RequestInput {
         active_session: &ModelHandle<ActiveSession>,
         shared_session_response_initiator: Option<ParticipantId>,
         terminal_surface_id: EntityId,
+        team_context: Option<&TeamContext>,
         app: &AppContext,
     ) -> Self {
         let llm_prefs = LLMPreferences::as_ref(app);
         let model_id = llm_prefs
-            .get_active_base_model(app, Some(terminal_surface_id))
+            .get_active_base_model(Some(terminal_surface_id), team_context, app)
             .id
             .clone();
         let coding_model_id = llm_prefs
-            .get_active_coding_model(app, Some(terminal_surface_id))
+            .get_active_coding_model(Some(terminal_surface_id), team_context, app)
             .id
             .clone();
         let cli_agent_model_id = llm_prefs
-            .get_active_cli_agent_model(app, Some(terminal_surface_id))
+            .get_active_cli_agent_model(Some(terminal_surface_id), team_context, app)
             .id
             .clone();
         let computer_use_model_id = llm_prefs
-            .get_active_computer_use_model(app, Some(terminal_surface_id))
+            .get_active_computer_use_model(Some(terminal_surface_id), team_context, app)
             .id
             .clone();
         let working_directory = active_session
@@ -879,6 +884,7 @@ impl BlocklistAIController {
                 self.get_current_response_initiator(),
                 conversation_id,
                 self.terminal_surface_id,
+                team_context.as_ref(),
                 ctx,
             ),
             team_context,
@@ -1718,6 +1724,7 @@ impl BlocklistAIController {
             self.get_current_response_initiator(),
             conversation_id,
             self.terminal_surface_id,
+            team_context.as_ref(),
             ctx,
         );
 
@@ -2021,6 +2028,7 @@ impl BlocklistAIController {
                     self.get_current_response_initiator(),
                     conversation_id,
                     self.terminal_surface_id,
+                    team_context.as_ref(),
                     ctx,
                 ),
                 team_context,
@@ -2182,6 +2190,7 @@ impl BlocklistAIController {
                 self.get_current_response_initiator(),
                 conversation_id,
                 self.terminal_surface_id,
+                team_context.as_ref(),
                 ctx,
             ),
             team_context,
@@ -2270,6 +2279,7 @@ impl BlocklistAIController {
                 self.get_current_response_initiator(),
                 new_conversation.id(),
                 self.terminal_surface_id,
+                team_context.as_ref(),
                 ctx,
             ),
             team_context,
@@ -2384,6 +2394,7 @@ impl BlocklistAIController {
             self.get_current_response_initiator(),
             conversation_id,
             self.terminal_surface_id,
+            team_context.as_ref(),
             ctx,
         )
         .with_supported_tools(supported_tools);
@@ -2441,6 +2452,7 @@ impl BlocklistAIController {
                 self.get_current_response_initiator(),
                 new_conversation.id(),
                 self.terminal_surface_id,
+                team_context.as_ref(),
                 ctx,
             ),
             team_context,

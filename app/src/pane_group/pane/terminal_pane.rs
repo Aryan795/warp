@@ -1670,7 +1670,13 @@ fn launch_local_no_harness_child(
                     conversation_id,
                     ..
                 }) => {
-                    apply_child_agent_model_override(terminal_view_id, model_id.as_deref(), ctx);
+                    let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+                    apply_child_agent_model_override(
+                        terminal_view_id,
+                        model_id.as_deref(),
+                        team_context.as_ref(),
+                        ctx,
+                    );
 
                     // Stamp the task id on the child conversation directly
                     // so the share-reporter in
@@ -1823,9 +1829,11 @@ fn launch_local_harness_child(
                         conversation_id,
                         ..
                     }) => {
+                        let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
                         apply_child_agent_model_override(
                             terminal_view_id,
                             model_id.as_deref(),
+                            team_context.as_ref(),
                             ctx,
                         );
 

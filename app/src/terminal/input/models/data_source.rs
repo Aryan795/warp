@@ -309,12 +309,20 @@ impl SyncDataSource for ModelSelectorDataSource {
 
         let active_llm_id = if is_full_terminal {
             llm_preferences
-                .get_active_cli_agent_model(app, Some(self.terminal_view_id))
+                .get_active_cli_agent_model(
+                    Some(self.terminal_view_id),
+                    self.team_context.as_ref(),
+                    app,
+                )
                 .id
                 .clone()
         } else {
             llm_preferences
-                .get_active_base_model(app, Some(self.terminal_view_id))
+                .get_active_base_model(
+                    Some(self.terminal_view_id),
+                    self.team_context.as_ref(),
+                    app,
+                )
                 .id
                 .clone()
         };

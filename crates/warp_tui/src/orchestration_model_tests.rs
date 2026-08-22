@@ -183,6 +183,7 @@ fn add_relayed_executor(
                         parent_session_id,
                         (**request).clone(),
                         None,
+                        None,
                         ctx,
                     );
                 }

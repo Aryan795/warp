@@ -8,7 +8,6 @@ pub use ::ai::agent::{
     AskUserQuestionAction, AskUserQuestionEffect, AskUserQuestionPhase, AskUserQuestionSession,
     QuestionDraft,
 };
-pub use crate::workspaces::user_workspaces::TeamContext;
 pub use ai::agent::action::{RunAgentsAgentRunConfig, RunAgentsExecutionMode, RunAgentsRequest};
 pub use ai::agent::orchestration_config::{OrchestrationConfig, OrchestrationConfigStatus};
 pub use repo_metadata::repositories::RepoDetectionSource;
@@ -276,7 +275,7 @@ pub use crate::util::repo_detection::{RepoDetectionSessionType, detect_possible_
 pub use crate::util::time_format::format_elapsed_seconds;
 #[cfg(feature = "voice_input")]
 pub use crate::voice::transcriber::{Transcriber, VoiceTranscriber};
-pub use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
+pub use crate::workspaces::user_workspaces::{TeamContext, UserWorkspaces, UserWorkspacesEvent};
 pub use crate::workspaces::workspace::{AiCreditsUsageAndCostType, UsageVisibilityGranularity};
 
 pub fn format_usage_cost_cents(cents: i64) -> String {
