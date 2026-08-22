@@ -683,7 +683,11 @@ fn promptless_setup_complete_with_initial_prompt_does_not_drain_queue() {
             view.ambient_agent_view_model()
                 .expect("cloud terminal should have an ambient model")
                 .update(ctx, |model, ctx| {
-                    model.spawn_agent_with_request(cloud_spawn_request("initial prompt"), None, ctx);
+                    model.spawn_agent_with_request(
+                        cloud_spawn_request("initial prompt"),
+                        None,
+                        ctx,
+                    );
                 });
             QueuedQueryModel::handle(ctx).update(ctx, |model, ctx| {
                 model.append(

@@ -843,10 +843,10 @@ fn test_llm_policy_uses_team_context_with_teamless_fallback_and_no_stale_fallbac
                 !user_workspaces
                     .is_gemini_enterprise_credentials_enabled_for_context(Some(&context_b), ctx)
             );
-            assert!(user_workspaces.is_aws_bedrock_credentials_enabled_for_context(
-                None::<&TeamContext>,
-                ctx
-            ));
+            assert!(
+                user_workspaces
+                    .is_aws_bedrock_credentials_enabled_for_context(None::<&TeamContext>, ctx)
+            );
             assert!(
                 user_workspaces.is_gemini_enterprise_credentials_enabled_for_context(
                     None::<&TeamContext>,
@@ -1287,7 +1287,7 @@ fn test_window_team_reconciliation_moves_rendering_but_not_a_captured_context() 
             assert_eq!(
                 UserWorkspaces::as_ref(ctx)
                     .team_render_context_for_view_handle(&weak_view, ctx)
-                    .map(|render| render.team.uid),
+                    .map(|render| render.team_uid()),
                 Some(team_a.uid)
             );
         });
@@ -1301,7 +1301,7 @@ fn test_window_team_reconciliation_moves_rendering_but_not_a_captured_context() 
             assert_eq!(
                 user_workspaces
                     .team_render_context_for_view_handle(&weak_view, ctx)
-                    .map(|render| render.team.uid),
+                    .map(|render| render.team_uid()),
                 Some(team_b.uid),
                 "a freshly resolved render context should follow the window to team B"
             );
@@ -2764,7 +2764,9 @@ fn test_member_team_settings_win_over_workspace_settings() {
             let user_workspaces = UserWorkspaces::as_ref(ctx);
             let team = user_workspaces.sole_team();
             assert!(team.is_some(), "the member team should survive filtering");
-            let team_render_context = team.map(|team| TeamRenderContext { team });
+            let team_render_context = team.map(|team| TeamRenderContext {
+                team_uid: &team.uid,
+            });
             assert!(
                 !user_workspaces.is_custom_llm_enabled(team_render_context),
                 "the team's own settings should win when the user has a team"

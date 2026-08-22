@@ -25,15 +25,14 @@ use warp::tui_export::{
     AskUserQuestionType, BlockPadding, BlocklistAIHistoryEvent, BlocklistAIHistoryModel,
     ConversationStatus, ConversationUsageTotals, DisableReason, Harness,
     InputTypeAutoDetectionSource, LLMId, LLMPreferences, LinkedWorkflowData,
-    LongRunningCommandControlState, MessageId,
-    OutputStatusUpdateCallback, ParsedSlashCommandInput, PtyIntent, PtyIntentEvent, ServerOutputId,
-    Session, Shared, SizeInfo, SizeUpdate, SlashCommandDataSource as _, SlashCommandKind, TaskId,
-    TranscriptScope, TuiMcpAction, TuiMcpServerId, TuiOnboardingMarker, TuiOnboardingMarkers,
-    TuiUpArrowHistoryItemKind, UserTakeOverReason, WarpConfig, WarpConfigUpdateEvent,
+    LongRunningCommandControlState, MessageId, OutputStatusUpdateCallback, ParsedSlashCommandInput,
+    PtyIntent, PtyIntentEvent, ServerOutputId, Session, Shared, SizeInfo, SizeUpdate,
+    SlashCommandDataSource as _, SlashCommandKind, TaskId, TranscriptScope, TuiMcpAction,
+    TuiMcpServerId, TuiOnboardingMarker, TuiOnboardingMarkers, TuiUpArrowHistoryItemKind,
+    UserTakeOverReason, UserWorkspaces, WarpConfig, WarpConfigUpdateEvent,
     export_conversation_markdown, forkable_tui_conversation_for_test, queue_tui_permission_action,
     register_tui_session_view_test_singletons, set_tui_default_team_admin_for_test,
     set_tui_managed_byok_team_for_test, slash_commands,
-    UserWorkspaces,
 };
 use warp_core::channel::{Channel, ChannelState};
 use warp_core::features::FeatureFlag;
@@ -1764,12 +1763,7 @@ fn model_menu_revalidates_presentation_and_acceptance_after_team_change() {
     App::test((), |mut app| async move {
         let fixture = focus_test_fixture(&mut app);
         app.update(|ctx| {
-            set_tui_managed_byok_team_for_test(
-                111,
-                Some(LLMProvider::Anthropic),
-                false,
-                ctx,
-            );
+            set_tui_managed_byok_team_for_test(111, Some(LLMProvider::Anthropic), false, ctx);
             UserWorkspaces::handle(ctx).update(ctx, |workspaces, ctx| {
                 workspaces.set_team_for_window(fixture.window_id, 111.into(), ctx);
             });

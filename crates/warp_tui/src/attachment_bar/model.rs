@@ -267,8 +267,7 @@ impl TuiAttachmentModel {
                                 original_text.clone(),
                                 team_context,
                                 ctx,
-                            )
-                                == TuiAttachmentPasteDisposition::NotHandled
+                            ) == TuiAttachmentPasteDisposition::NotHandled
                             {
                                 ctx.emit(TuiAttachmentModelEvent::RestorePastedText(original_text));
                             }

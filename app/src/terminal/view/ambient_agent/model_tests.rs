@@ -138,7 +138,10 @@ fn spawn_config_honors_pane_model_override() {
 
         model.read(&app, |model, app| {
             assert_eq!(
-                model.build_default_spawn_config(None, app).model_id.as_deref(),
+                model
+                    .build_default_spawn_config(None, app)
+                    .model_id
+                    .as_deref(),
                 Some("auto-genius")
             );
         });

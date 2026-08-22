@@ -140,8 +140,8 @@ pub use crate::ai::harness_availability::{
 };
 pub use crate::ai::llms::{
     DisableReason, LLMId, LLMInfo, LLMPreferences, LLMPreferencesEvent,
-    should_show_bedrock_icon_for_model, should_show_gemini_enterprise_agent_platform_icon_for_model,
-    should_show_key_icon_for_model,
+    should_show_bedrock_icon_for_model,
+    should_show_gemini_enterprise_agent_platform_icon_for_model, should_show_key_icon_for_model,
 };
 pub use crate::ai::orchestration::{
     AuthSecretSelection, CloudAgentStartupAuthFlow, CloudAgentStartupBlocker,
@@ -356,9 +356,7 @@ pub fn tui_model_picker_presentation_for_view<T: warpui::Entity>(
         .is_none(),
         is_key_connected,
         is_profile_default,
-        discount_percentage: llm
-            .discount_percentage
-            .filter(|_| !uses_external_inference),
+        discount_percentage: llm.discount_percentage.filter(|_| !uses_external_inference),
     })
 }
 

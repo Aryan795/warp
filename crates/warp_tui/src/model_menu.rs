@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use warp::editor::{CodeEditorModel, CodeEditorModelEvent};
 use warp::settings::AISettings;
 use warp::tui_export::{
-    AISettingsChangedEvent, LLMId, LLMPreferences, LLMPreferencesEvent,
-    TuiModelPickerPresentation, tui_active_model_id_for_view, tui_model_picker_catalog_ids,
+    AISettingsChangedEvent, LLMId, LLMPreferences, LLMPreferencesEvent, TuiModelPickerPresentation,
+    tui_active_model_id_for_view, tui_model_picker_catalog_ids,
     tui_model_picker_presentation_for_view,
 };
 use warp_editor::model::CoreEditorModel;
@@ -265,9 +265,9 @@ impl TuiModelMenuModel {
             .into_iter()
             .map(|(_, presentation)| snapshot_row(&presentation))
             .collect::<Vec<_>>();
-        let status =
-            rows.is_empty()
-                .then(|| TuiInlineMenuStatus::Empty("No models found".to_owned()));
+        let status = rows
+            .is_empty()
+            .then(|| TuiInlineMenuStatus::Empty("No models found".to_owned()));
         Some(TuiInlineMenuSnapshot {
             header: Some(TuiInlineMenuHeader {
                 title: Some("Models".to_owned()),
@@ -318,9 +318,7 @@ impl TuiModelMenuModel {
     fn selectable_ids(&self, ctx: &AppContext) -> Vec<LLMId> {
         self.presentations(ctx)
             .into_iter()
-            .filter_map(|(_, presentation)| {
-                presentation.is_selectable.then_some(presentation.id)
-            })
+            .filter_map(|(_, presentation)| presentation.is_selectable.then_some(presentation.id))
             .collect()
     }
 
@@ -340,19 +338,14 @@ impl TuiModelMenuModel {
         let active_id = self
             .owner_view
             .as_ref()
-            .map(|owner_view| {
-                tui_active_model_id_for_view(owner_view, self.terminal_view_id, ctx)
-            })
+            .map(|owner_view| tui_active_model_id_for_view(owner_view, self.terminal_view_id, ctx))
             .unwrap_or_else(|| LLMId::from(""));
         let preferred_id =
             preferred_selection_id(&presentations, &active_id, query.trim().is_empty());
-        let preferred_index =
-            preferred_id.and_then(|id| rows.iter().position(|row| row.id == id));
+        let preferred_index = preferred_id.and_then(|id| rows.iter().position(|row| row.id == id));
         let selectable_ids = presentations
             .into_iter()
-            .filter_map(|presentation| {
-                presentation.is_selectable.then_some(presentation.id)
-            })
+            .filter_map(|presentation| presentation.is_selectable.then_some(presentation.id))
             .collect::<Vec<_>>();
         let TuiModelMenuState::Open { list } = &mut self.state else {
             return;
@@ -366,13 +359,8 @@ impl TuiModelMenuModel {
     pub(crate) fn active_model_title(&self, ctx: &AppContext) -> Option<String> {
         let owner_view = self.owner_view.as_ref()?;
         let id = tui_active_model_id_for_view(owner_view, self.terminal_view_id, ctx);
-        tui_model_picker_presentation_for_view(
-            owner_view,
-            self.terminal_view_id,
-            &id,
-            ctx,
-        )
-        .map(|presentation| presentation.title)
+        tui_model_picker_presentation_for_view(owner_view, self.terminal_view_id, &id, ctx)
+            .map(|presentation| presentation.title)
     }
 }
 
@@ -411,9 +399,7 @@ fn preferred_selection_id(
     if query_is_empty {
         presentations
             .iter()
-            .find(|presentation| {
-                presentation.id == *active_id && presentation.is_selectable
-            })
+            .find(|presentation| presentation.id == *active_id && presentation.is_selectable)
             .or_else(|| {
                 presentations
                     .iter()

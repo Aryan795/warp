@@ -169,10 +169,9 @@ impl TuiAttachmentBar {
         team_context: Option<TeamContext>,
         ctx: &mut ViewContext<Self>,
     ) -> TuiAttachmentPasteDisposition {
-        self.model
-            .update(ctx, |model, ctx| {
-                model.try_attach_paste(text, team_context, ctx)
-            })
+        self.model.update(ctx, |model, ctx| {
+            model.try_attach_paste(text, team_context, ctx)
+        })
     }
 
     pub(crate) fn paste_from_clipboard(
@@ -180,10 +179,9 @@ impl TuiAttachmentBar {
         team_context: Option<TeamContext>,
         ctx: &mut ViewContext<Self>,
     ) {
-        self.model
-            .update(ctx, |model, ctx| {
-                model.paste_from_clipboard(team_context, ctx)
-            });
+        self.model.update(ctx, |model, ctx| {
+            model.paste_from_clipboard(team_context, ctx)
+        });
     }
 
     #[cfg(test)]

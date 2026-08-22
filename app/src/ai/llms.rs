@@ -89,11 +89,20 @@ fn byo_key_source_for_scope<S: TeamScope + ?Sized>(
     team_context: Option<&S>,
     app: &AppContext,
 ) -> Option<ByoKeySource> {
-    let workspaces = UserWorkspaces::as_ref(app);
     let is_custom_endpoint = LLMPreferences::as_ref(app)
         .custom_llm_info_for_id(&llm.id)
         .is_some();
-    if is_custom_endpoint && workspaces.are_member_byo_endpoints_allowed_for_context(team_context) {
+    byo_key_source_for_scope_with_custom_endpoint(llm, team_context, is_custom_endpoint, app)
+}
+
+fn byo_key_source_for_scope_with_custom_endpoint<S: TeamScope + ?Sized>(
+    llm: &LLMInfo,
+    team_context: Option<&S>,
+    is_custom_endpoint: bool,
+    app: &AppContext,
+) -> Option<ByoKeySource> {
+    let workspaces = UserWorkspaces::as_ref(app);
+    if is_custom_endpoint && workspaces.are_member_byo_endpoints_allowed_for_scope(team_context) {
         return Some(ByoKeySource::UserProvided);
     }
     if workspaces.has_team_byo_endpoint_for_model(team_context, llm.id.as_str()) {
@@ -133,16 +142,21 @@ pub(crate) fn effective_model_disable_reason_for_render_context(
 ) -> Option<DisableReason> {
     effective_model_disable_reason_for_scope(llm, team_context, app)
 }
+pub(crate) fn effective_model_disable_reason(
+    llm: &LLMInfo,
+    team_context: Option<&TeamContext>,
+    app: &AppContext,
+) -> Option<DisableReason> {
+    effective_model_disable_reason_for_scope(llm, team_context, app)
+}
 
 fn effective_model_disable_reason_for_scope<S: TeamScope + ?Sized>(
     llm: &LLMInfo,
     team_context: Option<&S>,
     app: &AppContext,
 ) -> Option<DisableReason> {
-    let workspaces = UserWorkspaces::as_ref(app);
-    let has_first_party_key = (workspaces.are_member_byo_keys_allowed_for_scope(team_context)
-        && is_using_api_key_for_provider(&llm.provider, app))
-        || workspaces.has_team_first_party_key(team_context, llm.provider);
+    let has_first_party_key =
+        first_party_key_source_for_provider_for_context(&llm.provider, team_context, app).is_some();
     if llm.disable_reason == Some(DisableReason::RequiresUpgrade) && has_first_party_key {
         None
     } else {
@@ -161,8 +175,6 @@ fn should_show_host_icon_for_model(
             .get(host)
             .is_some_and(|config| config.enabled)
 }
-
-
 fn should_show_bedrock_icon_for_scope<S: TeamScope + ?Sized>(
     llm: &LLMInfo,
     team_context: Option<&S>,
@@ -302,14 +314,20 @@ impl DisableReason {
 /// Returns `true` when the model is usable for the current user: not disabled,
 /// or disabled for a reason that doesn't block requests (see
 /// [`DisableReason::should_clear_preference`]).
-fn is_usable_llm<S: TeamScope + ?Sized>(
-    info: &LLMInfo,
-    team_context: Option<&S>,
-    app: &AppContext,
-) -> bool {
+fn is_usable_llm(info: &LLMInfo, team_context: Option<&TeamContext>, app: &AppContext) -> bool {
     let has_byok_key =
         first_party_key_source_for_provider_for_context(&info.provider, team_context, app)
             .is_some();
+    info.disable_reason
+        .as_ref()
+        .is_none_or(|reason| !reason.should_clear_preference(has_byok_key))
+}
+fn is_usable_llm_for_render_context(
+    info: &LLMInfo,
+    team_context: Option<&TeamRenderContext<'_>>,
+    app: &AppContext,
+) -> bool {
+    let has_byok_key = byo_key_source_for_scope(info, team_context, app).is_some();
     info.disable_reason
         .as_ref()
         .is_none_or(|reason| !reason.should_clear_preference(has_byok_key))
@@ -609,9 +627,9 @@ impl AvailableLLMs {
     /// Disable-aware default: the server default when usable, otherwise the
     /// first usable choice. `None` when no server-provided choice is usable
     /// (e.g. an admin disabled every hosted model).
-    fn usable_default_llm_info<S: TeamScope + ?Sized>(
+    fn usable_default_llm_info(
         &self,
-        team_context: Option<&S>,
+        team_context: Option<&TeamContext>,
         app: &AppContext,
     ) -> Option<&LLMInfo> {
         self.usable_default_llm_info_with(&|info| is_usable_llm(info, team_context, app))
@@ -943,7 +961,7 @@ impl LLMPreferences {
         team_context: Option<&TeamRenderContext<'_>>,
         app: &'a AppContext,
     ) -> &'a LLMInfo {
-        let is_usable = |info: &LLMInfo| is_usable_llm(info, team_context, app);
+        let is_usable = |info: &LLMInfo| is_usable_llm_for_render_context(info, team_context, app);
         self.get_preferred_base_model_with(
             terminal_view_id,
             &is_usable,
@@ -1005,7 +1023,7 @@ impl LLMPreferences {
         team_context: Option<&TeamRenderContext<'_>>,
         app: &'a AppContext,
     ) -> &'a LLMInfo {
-        let is_usable = |info: &LLMInfo| is_usable_llm(info, team_context, app);
+        let is_usable = |info: &LLMInfo| is_usable_llm_for_render_context(info, team_context, app);
         self.get_active_profile_base_model_with(
             terminal_view_id,
             &is_usable,
@@ -1087,7 +1105,7 @@ impl LLMPreferences {
         app: &AppContext,
     ) -> &LLMInfo {
         let available = self.get_computer_use_available();
-        let is_usable = |info: &LLMInfo| is_usable_llm(info, team_context, app);
+        let is_usable = |info: &LLMInfo| is_usable_llm_for_render_context(info, team_context, app);
         available
             .usable_default_llm_info_with(&is_usable)
             .unwrap_or_else(|| available.default_llm_info())
@@ -1100,7 +1118,7 @@ impl LLMPreferences {
         app: &'a AppContext,
     ) -> &'a LLMInfo {
         let available = self.get_computer_use_available();
-        let is_usable = |info: &LLMInfo| is_usable_llm(info, team_context, app);
+        let is_usable = |info: &LLMInfo| is_usable_llm_for_render_context(info, team_context, app);
 
         profile
             .computer_use_model
@@ -1178,9 +1196,8 @@ impl LLMPreferences {
         team_context: Option<&TeamRenderContext<'_>>,
         app: &'a AppContext,
     ) -> &'a LLMInfo {
-        let is_usable = |info: &LLMInfo| is_usable_llm(info, team_context, app);
-        let custom_inference_enabled =
-            self.custom_inference_enabled_for_context(team_context, app);
+        let is_usable = |info: &LLMInfo| is_usable_llm_for_render_context(info, team_context, app);
+        let custom_inference_enabled = self.custom_inference_enabled_for_context(team_context, app);
         profile
             .base_model
             .as_ref()
@@ -1218,9 +1235,8 @@ impl LLMPreferences {
         app: &'a AppContext,
     ) -> &'a LLMInfo {
         let profile = AIExecutionProfilesModel::as_ref(app).active_profile(terminal_view_id, app);
-        let is_usable = |info: &LLMInfo| is_usable_llm(info, team_context, app);
-        let custom_inference_enabled =
-            self.custom_inference_enabled_for_context(team_context, app);
+        let is_usable = |info: &LLMInfo| is_usable_llm_for_render_context(info, team_context, app);
+        let custom_inference_enabled = self.custom_inference_enabled_for_context(team_context, app);
 
         profile
             .data()
@@ -1300,8 +1316,7 @@ impl LLMPreferences {
         team_context: Option<&TeamRenderContext<'_>>,
         app: &AppContext,
     ) -> impl Iterator<Item = &LLMInfo> + use<'_> {
-        let custom_inference_enabled =
-            self.custom_inference_enabled_for_context(team_context, app);
+        let custom_inference_enabled = self.custom_inference_enabled_for_context(team_context, app);
         self.get_base_llm_choices_for_agent_mode_catalog()
             .filter(move |llm| {
                 custom_inference_enabled || self.custom_llm_info_for_id(&llm.id).is_none()
@@ -1329,8 +1344,7 @@ impl LLMPreferences {
         team_context: Option<&TeamRenderContext<'_>>,
         app: &AppContext,
     ) -> impl Iterator<Item = &LLMInfo> + use<'_> {
-        let custom_inference_enabled =
-            self.custom_inference_enabled_for_context(team_context, app);
+        let custom_inference_enabled = self.custom_inference_enabled_for_context(team_context, app);
         let routers_enabled = FeatureFlag::CustomModelRouters.is_enabled();
         self.models_by_feature
             .coding
@@ -1340,7 +1354,12 @@ impl LLMPreferences {
             .filter(move |llm| {
                 routers_enabled || !custom_model_routers::is_cloud_custom_router_id(llm.id.as_str())
             })
-            .chain(custom_inference_enabled.then_some(self.custom_llms.iter()).into_iter().flatten())
+            .chain(
+                custom_inference_enabled
+                    .then_some(self.custom_llms.iter())
+                    .into_iter()
+                    .flatten(),
+            )
             .chain(self.custom_router_choices())
     }
 
@@ -1385,8 +1404,7 @@ impl LLMPreferences {
         team_context: Option<&TeamRenderContext<'_>>,
         app: &AppContext,
     ) -> impl Iterator<Item = &LLMInfo> + use<'_> {
-        let custom_inference_enabled =
-            self.custom_inference_enabled_for_context(team_context, app);
+        let custom_inference_enabled = self.custom_inference_enabled_for_context(team_context, app);
         self.get_cli_agent_llm_choices_catalog().filter(move |llm| {
             custom_inference_enabled || self.custom_llm_info_for_id(&llm.id).is_none()
         })
@@ -1431,9 +1449,8 @@ impl LLMPreferences {
     ) -> &'a LLMInfo {
         let profile = AIExecutionProfilesModel::as_ref(app).active_profile(terminal_view_id, app);
         let available = self.get_cli_agent_available();
-        let is_usable = |info: &LLMInfo| is_usable_llm(info, team_context, app);
-        let custom_inference_enabled =
-            self.custom_inference_enabled_for_context(team_context, app);
+        let is_usable = |info: &LLMInfo| is_usable_llm_for_render_context(info, team_context, app);
+        let custom_inference_enabled = self.custom_inference_enabled_for_context(team_context, app);
 
         profile
             .data()
@@ -1468,7 +1485,7 @@ impl LLMPreferences {
         team_context: Option<&TeamRenderContext<'_>>,
         app: &AppContext,
     ) -> &LLMInfo {
-        let is_usable = |info: &LLMInfo| is_usable_llm(info, team_context, app);
+        let is_usable = |info: &LLMInfo| is_usable_llm_for_render_context(info, team_context, app);
         self.fallback_llm_info_with(
             self.get_cli_agent_available(),
             &is_usable,
@@ -1530,9 +1547,8 @@ impl LLMPreferences {
         app: &'a AppContext,
     ) -> &'a LLMInfo {
         let available = self.get_cli_agent_available();
-        let is_usable = |info: &LLMInfo| is_usable_llm(info, team_context, app);
-        let custom_inference_enabled =
-            self.custom_inference_enabled_for_context(team_context, app);
+        let is_usable = |info: &LLMInfo| is_usable_llm_for_render_context(info, team_context, app);
+        let custom_inference_enabled = self.custom_inference_enabled_for_context(team_context, app);
 
         profile
             .cli_agent_model
@@ -1661,9 +1677,8 @@ impl LLMPreferences {
     ) -> bool {
         let workspaces = UserWorkspaces::as_ref(app);
         workspaces.is_custom_inference_enabled(app)
-            && workspaces.are_member_byo_endpoints_allowed_for_context(team_context)
+            && workspaces.are_member_byo_endpoints_allowed_for_scope(team_context)
     }
-
 
     /// Resolves a custom model router by its `config_key`/`LLMId`.
     pub fn custom_model_router_for_id(&self, id: &LLMId) -> Option<&CustomModelRouter> {
@@ -1918,7 +1933,7 @@ impl LLMPreferences {
         team_context: Option<&TeamRenderContext<'_>>,
         app: &AppContext,
     ) -> &LLMInfo {
-        let is_usable = |info: &LLMInfo| is_usable_llm(info, team_context, app);
+        let is_usable = |info: &LLMInfo| is_usable_llm_for_render_context(info, team_context, app);
         self.fallback_llm_info_with(
             &self.models_by_feature.agent_mode,
             &is_usable,
@@ -1946,7 +1961,7 @@ impl LLMPreferences {
         team_context: Option<&TeamRenderContext<'_>>,
         app: &AppContext,
     ) -> &LLMInfo {
-        let is_usable = |info: &LLMInfo| is_usable_llm(info, team_context, app);
+        let is_usable = |info: &LLMInfo| is_usable_llm_for_render_context(info, team_context, app);
         self.fallback_llm_info_with(
             &self.models_by_feature.coding,
             &is_usable,
@@ -1998,7 +2013,13 @@ impl LLMPreferences {
         info.is_some_and(|info| {
             info.disable_reason.is_none()
                 || info.disable_reason == Some(DisableReason::RequiresUpgrade)
-                    && byo_key_source_for_model(info, team_context, app).is_some()
+                    && byo_key_source_for_scope_with_custom_endpoint(
+                        info,
+                        team_context,
+                        self.custom_llm_info_for_id(&info.id).is_some(),
+                        app,
+                    )
+                    .is_some()
         })
     }
 

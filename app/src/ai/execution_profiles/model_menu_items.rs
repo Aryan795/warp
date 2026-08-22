@@ -11,8 +11,8 @@ use warpui::{Action, AppContext, Element};
 
 use crate::ai::custom_model_routers::is_custom_router_id;
 use crate::ai::llms::{
-    DisableReason, LLMId, LLMInfo, ModelIconFlags, model_leading_icon,
-    effective_model_disable_reason_for_render_context,
+    DisableReason, LLMId, LLMInfo, ModelIconFlags,
+    effective_model_disable_reason_for_render_context, model_leading_icon,
     should_show_bedrock_icon_for_model_for_render_context,
     should_show_gemini_enterprise_agent_platform_icon_for_model_for_render_context,
     should_show_key_icon_for_model_for_render_context,

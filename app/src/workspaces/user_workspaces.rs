@@ -194,15 +194,14 @@ impl TeamContext {
 /// Current-team UI must reflect the window's team as of this frame, so this is resolved
 /// per render rather than cached. The borrow is what enforces that: it cannot be stored in
 /// view state or moved into a `'static` future, and it deliberately offers no conversion to
-/// a team UID or to a [`TeamContext`]. A [`WeakViewHandle`] locates a window to read from;
-/// it is not evidence that the holder is running in that window, which is what minting
-/// operation scope requires.
+/// a [`TeamContext`]. A [`WeakViewHandle`] locates a window to read from; it is not evidence
+/// that the holder is running in that window, which is what minting operation scope requires.
 pub(crate) struct TeamRenderContext<'a> {
-    team: &'a Team,
+    team_uid: &'a ServerId,
 }
 impl TeamScope for TeamRenderContext<'_> {
     fn team_uid(&self) -> ServerId {
-        self.team.uid
+        *self.team_uid
     }
 }
 
@@ -365,14 +364,6 @@ impl UserWorkspaces {
             })
     }
 
-    pub(crate) fn agent_settings_has_team_byo_endpoint_for_model(
-        &self,
-        context: Option<&TeamRenderContext<'_>>,
-        model_config_key: &str,
-    ) -> bool {
-        self.has_team_byo_endpoint_for_model(context, model_config_key)
-    }
-
     pub fn set_team_for_window(
         &mut self,
         window_id: WindowId,
@@ -433,16 +424,15 @@ impl UserWorkspaces {
         let window_id = view.window_id(app)?;
         let team_uid = self.team_uid_for_window(window_id)?;
         let team = self.team_from_uid(team_uid)?;
-
+        Some(TeamRenderContext {
+            team_uid: &team.uid,
+        })
         Some(TeamRenderContext { team })
     }
 
     /// Reads a captured team's metadata. Returns `None` once that team is gone from the
     /// current workspace, e.g. after the user leaves it.
-    pub(crate) fn team_for_context<S: TeamScope + ?Sized>(
-        &self,
-        context: &S,
-    ) -> Option<&Team> {
+    pub(crate) fn team_for_context<S: TeamScope + ?Sized>(&self, context: &S) -> Option<&Team> {
         self.team_from_uid(context.team_uid())
     }
 
@@ -666,13 +656,6 @@ impl UserWorkspaces {
         }
     }
 
-    pub(crate) fn llm_settings_for_render_context<'a>(
-        &'a self,
-        context: Option<&TeamRenderContext<'a>>,
-    ) -> Option<&'a LlmSettings> {
-        self.llm_settings(context)
-    }
-
     pub(crate) fn is_custom_llm_enabled(
         &self,
         team_render_context: Option<TeamRenderContext<'_>>,
@@ -836,9 +819,9 @@ impl UserWorkspaces {
         self.are_member_byo_keys_allowed_for_scope(context)
     }
 
-    pub(crate) fn are_member_byo_endpoints_allowed_for_context<S: TeamScope + ?Sized>(
+    pub(crate) fn are_member_byo_endpoints_allowed_for_context(
         &self,
-        context: Option<&S>,
+        context: Option<&TeamContext>,
     ) -> bool {
         self.are_member_byo_endpoints_allowed_for_scope(context)
     }
@@ -1120,16 +1103,7 @@ impl UserWorkspaces {
         Self::host_settings(self.llm_settings(context), LLMModelHost::GeminiEnterprise)
     }
 
-    pub(crate) fn gemini_enterprise_host_settings_for_render_context<'a>(
-        &'a self,
-        context: Option<&TeamRenderContext<'a>>,
-    ) -> Option<&'a LlmHostSettings> {
-        Self::host_settings(self.llm_settings(context), LLMModelHost::GeminiEnterprise)
-    }
-
-    pub(crate) fn is_gemini_enterprise_credentials_enabled_for_context<
-        S: TeamScope + ?Sized,
-    >(
+    pub(crate) fn is_gemini_enterprise_credentials_enabled_for_context<S: TeamScope + ?Sized>(
         &self,
         context: Option<&S>,
         app: &AppContext,

@@ -3457,11 +3457,9 @@ impl TuiTerminalSessionView {
 
     fn handle_pasted(&mut self, text: String, ctx: &mut ViewContext<Self>) {
         let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
-        let disposition = self
-            .attachment_bar
-            .update(ctx, |bar, ctx| {
-                bar.try_attach_paste(text.clone(), team_context, ctx)
-            });
+        let disposition = self.attachment_bar.update(ctx, |bar, ctx| {
+            bar.try_attach_paste(text.clone(), team_context, ctx)
+        });
         if disposition == TuiAttachmentPasteDisposition::NotHandled {
             self.input_view
                 .update(ctx, |input, ctx| input.insert_pasted_text(&text, ctx));
@@ -3871,9 +3869,8 @@ impl TuiTerminalSessionView {
 
     fn start_grok_oauth(&mut self, ctx: &mut ViewContext<Self>) {
         let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
-        self.api_keys_menu.update(ctx, |menu, ctx| {
-            menu.start_grok_oauth(team_context, ctx)
-        });
+        self.api_keys_menu
+            .update(ctx, |menu, ctx| menu.start_grok_oauth(team_context, ctx));
     }
 
     /// The session's working directory. The cwd only arrives once shell
@@ -4622,9 +4619,8 @@ impl TuiTerminalSessionView {
                 record_static_slash_command_accepted(command.name, true, ctx);
             }
             SlashCommandKind::ConnectGrok => {
-                self.api_keys_menu.update(ctx, |menu, ctx| {
-                    menu.open_and_connect_grok(ctx)
-                });
+                self.api_keys_menu
+                    .update(ctx, |menu, ctx| menu.open_and_connect_grok(ctx));
                 record_static_slash_command_accepted(command.name, true, ctx);
             }
             SlashCommandKind::Upgrade => {
@@ -5686,9 +5682,8 @@ impl TypedActionView for TuiTerminalSessionView {
             }
             TuiTerminalSessionAction::PasteFromClipboard => {
                 let team_context = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
-                self.attachment_bar.update(ctx, |bar, ctx| {
-                    bar.paste_from_clipboard(team_context, ctx)
-                });
+                self.attachment_bar
+                    .update(ctx, |bar, ctx| bar.paste_from_clipboard(team_context, ctx));
             }
             #[cfg(feature = "voice_input")]
             TuiTerminalSessionAction::StartVoiceInput => {

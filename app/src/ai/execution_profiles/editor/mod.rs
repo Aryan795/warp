@@ -1337,9 +1337,7 @@ impl ExecutionProfileEditorView {
                     choices,
                     |llm| {
                         DropdownAction::select_action_and_close(
-                            ExecutionProfileEditorViewAction::SetCodingModel {
-                                id: llm.id.clone(),
-                            },
+                            ExecutionProfileEditorViewAction::SetCodingModel { id: llm.id.clone() },
                         )
                     },
                     None,

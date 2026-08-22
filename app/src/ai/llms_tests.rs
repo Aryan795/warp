@@ -680,11 +680,17 @@ fn active_models_fall_back_to_usable_choice_or_custom_endpoint_when_default_disa
         llm_preferences.read(&app, |preferences, app| {
             // Falls back to the first usable hosted choice.
             assert_eq!(
-                preferences.get_active_base_model(None, None, app).id.as_str(),
+                preferences
+                    .get_active_base_model(None, None, app)
+                    .id
+                    .as_str(),
                 "gpt-x"
             );
             assert_eq!(
-                preferences.get_active_coding_model(None, None, app).id.as_str(),
+                preferences
+                    .get_active_coding_model(None, None, app)
+                    .id
+                    .as_str(),
                 "gpt-x"
             );
             // No usable hosted CLI choice → falls back to the custom endpoint.
@@ -763,7 +769,10 @@ fn active_models_use_default_when_usable() {
 
         llm_preferences.read(&app, |preferences, app| {
             assert_eq!(
-                preferences.get_active_base_model(None, None, app).id.as_str(),
+                preferences
+                    .get_active_base_model(None, None, app)
+                    .id
+                    .as_str(),
                 "auto"
             );
             assert_eq!(
@@ -1187,12 +1196,7 @@ fn selecting_a_custom_profile_default_clears_the_session_override() {
                 None,
                 ctx,
             );
-            preferences.update_preferred_agent_mode_llm(
-                &custom_model_id,
-                surface_id,
-                None,
-                ctx,
-            );
+            preferences.update_preferred_agent_mode_llm(&custom_model_id, surface_id, None, ctx);
         });
 
         preferences.read(&app, |preferences, _| {
@@ -1246,12 +1250,7 @@ fn explicit_child_model_pin_preserves_gui_behavior_and_only_emits_for_effective_
 
         let surface_id = EntityId::new();
         preferences.update(&mut app, |preferences, ctx| {
-            preferences.set_agent_mode_llm_override(
-                surface_id,
-                LLMId::from("auto"),
-                None,
-                ctx,
-            );
+            preferences.set_agent_mode_llm_override(surface_id, LLMId::from("auto"), None, ctx);
         });
         assert_eq!(active_model_events.get(), 0);
         preferences.read(&app, |preferences, ctx| {

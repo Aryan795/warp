@@ -17,7 +17,7 @@ use warpui::{AppContext, ModelContext, SingletonEntity};
 use crate::auth::AuthStateProvider;
 use crate::settings::{AISettings, AISettingsChangedEvent};
 use crate::workspaces::user_workspaces::{
-    TeamContext, TeamRenderContext, UserWorkspaces, UserWorkspacesEvent,
+    TeamContext, TeamRenderContext, TeamScope, UserWorkspaces, UserWorkspacesEvent,
 };
 use crate::workspaces::workspace::LlmHostSettings;
 
@@ -86,6 +86,13 @@ pub(crate) fn geap_policy_for_context(
     context: Option<&TeamContext>,
     app: &AppContext,
 ) -> GeapPolicy {
+    geap_policy_for_scope(context, app)
+}
+
+fn geap_policy_for_scope<S: TeamScope + ?Sized>(
+    context: Option<&S>,
+    app: &AppContext,
+) -> GeapPolicy {
     let user_workspaces = UserWorkspaces::as_ref(app);
     geap_policy_from_host_settings(
         user_workspaces.is_gemini_enterprise_credentials_enabled_for_context(context, app),
@@ -98,12 +105,7 @@ pub(crate) fn geap_policy_for_render_context(
     context: Option<&TeamRenderContext<'_>>,
     app: &AppContext,
 ) -> GeapPolicy {
-    let user_workspaces = UserWorkspaces::as_ref(app);
-    geap_policy_from_host_settings(
-        user_workspaces.is_gemini_enterprise_credentials_enabled_for_render_context(context, app),
-        user_workspaces.gemini_enterprise_host_settings_for_render_context(context),
-        app,
-    )
+    geap_policy_for_scope(context, app)
 }
 
 fn geap_policy_from_host_settings(

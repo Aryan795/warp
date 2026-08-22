@@ -967,11 +967,7 @@ impl ProfileModelSelector {
         // the server-curated list stays visually distinct).
         let custom_ids: std::collections::HashSet<&LLMId> = all_model_choices
             .iter()
-            .filter(|info| {
-                llm_preferences
-                    .custom_llm_info_for_id(&info.id)
-                    .is_some()
-            })
+            .filter(|info| llm_preferences.custom_llm_info_for_id(&info.id).is_some())
             .map(|info| &info.id)
             .collect();
         let server_choices: Vec<&LLMInfo> = all_model_choices
@@ -1250,11 +1246,7 @@ impl ProfileModelSelector {
         if let Some(llm_id) = self.get_selected_llm_id(MenuType::Sidecar, index, ctx) {
             let team_context = Self::team_context(ctx);
             LLMPreferences::handle(ctx).update(ctx, |preferences, ctx| {
-                if preferences.is_agent_mode_model_selectable(
-                    &llm_id,
-                    team_context.as_ref(),
-                    ctx,
-                ) {
+                if preferences.is_agent_mode_model_selectable(&llm_id, team_context.as_ref(), ctx) {
                     log::info!("Selecting base agent model {llm_id} (from model selector)");
                     preferences.update_preferred_agent_mode_llm(
                         &llm_id,
@@ -1336,16 +1328,14 @@ impl ProfileModelSelector {
             ctx,
         );
         match action {
-            ProfileModelSelectorAction::SelectModel(llm_id) => {
-                choices.find(|llm| llm.id == llm_id).map(|llm| llm.id.clone())
-            }
-            ProfileModelSelectorAction::SelectAutoModel => choices
-                .find(|llm| is_auto(llm))
+            ProfileModelSelectorAction::SelectModel(llm_id) => choices
+                .find(|llm| llm.id == llm_id)
                 .map(|llm| llm.id.clone()),
+            ProfileModelSelectorAction::SelectAutoModel => {
+                choices.find(|llm| is_auto(llm)).map(|llm| llm.id.clone())
+            }
             ProfileModelSelectorAction::SelectReasoningModel(base_name) => choices
-                .find(|llm| {
-                    llm.base_model_name() == base_name && llm.has_reasoning_level()
-                })
+                .find(|llm| llm.base_model_name() == base_name && llm.has_reasoning_level())
                 .map(|llm| llm.id.clone()),
             _ => None,
         }
@@ -2455,3 +2445,7 @@ impl View for ProfileModelSelector {
 impl Entity for ProfileModelSelector {
     type Event = ProfileModelSelectorEvent;
 }
+
+#[cfg(test)]
+#[path = "profile_model_selector_tests.rs"]
+mod tests;
