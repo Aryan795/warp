@@ -425,9 +425,18 @@ impl BlocklistAIController {
         SessionContext::from_session(self.active_session.as_ref(ctx), ctx).skill_path_origin()
     }
 
-    #[allow(dead_code)]
     pub(crate) fn team_context<'a>(&self, app: &'a AppContext) -> TeamContext<'a> {
         (self.team_context_resolver)(app)
+    }
+
+    /// Applies the team policy governing member-provided credentials to `request_params`.
+    ///
+    /// Resolved through [`Self::team_context`] on every request rather than captured when the
+    /// conversation started: which credentials a member may use is a property of the team the
+    /// user is acting as right now, so an admin's restriction binds on the next request rather
+    /// than waiting for a new conversation, and follows a pane dragged to another window.
+    fn apply_team_byo_policy(&self, request_params: &mut api::RequestParams, ctx: &AppContext) {
+        request_params.apply_team_byo_policy(&self.team_context(ctx), ctx);
     }
 
     /// Creates a controller for a terminal surface.
@@ -2285,7 +2294,7 @@ impl BlocklistAIController {
             is_auto_resume_after_error: false,
         });
 
-        let request_params = api::RequestParams::new(
+        let mut request_params = api::RequestParams::new(
             Some(self.terminal_surface_id),
             SessionContext::from_session(self.active_session.as_ref(ctx), ctx),
             &request_input,
@@ -2293,6 +2302,7 @@ impl BlocklistAIController {
             metadata,
             ctx,
         );
+        self.apply_team_byo_policy(&mut request_params, ctx);
 
         Ok((conversation_id, request_params))
     }
@@ -2528,6 +2538,7 @@ impl BlocklistAIController {
             query_metadata,
             ctx,
         );
+        self.apply_team_byo_policy(&mut request_params, ctx);
         request_params.parent_agent_id = parent_agent_id;
         request_params.agent_name = agent_name;
 
