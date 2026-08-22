@@ -73,7 +73,6 @@ use warp_core::r#async::debounce;
 use warp_core::context_flag::ContextFlag;
 use warp_core::ui::theme::AnsiColorIdentifier;
 use warp_core::ui::theme::color::internal_colors;
-use warp_core::user_preferences::GetUserPreferences as _;
 use warp_editor::editor::NavigationKey;
 use warp_errors::{report_error, report_if_error};
 use warp_util::path::ShellFamily;
@@ -1573,36 +1572,40 @@ fn completions_fallback_strategy_for_trigger(
     }
 }
 
-/// When, if ever, a completions request asks the user's shell to compute native completions,
-/// relative to consulting Warp's own bundled completion specs.
+/// Which completion sources a request draws on, once the two user toggles and native-completions
+/// eligibility have been resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NativeCompletionsDispatch {
-    /// Native shell completions aren't in use; only the bundled spec results are shown.
-    Skip,
-    /// Ask the shell up front and use its answer unconditionally (the `ForceNativeShellCompletions`
-    /// pref). Dispatching up front lets it compute concurrently with the spec pass, for latency.
-    UpFront,
-    /// Consult the bundled specs first and ask the shell only if they come back empty. The shipping
-    /// flag-only configuration, so the shell isn't asked on a keystroke a bundled spec answers.
-    OnlyIfSpecsEmpty,
+enum CompletionSources {
+    /// No completions are offered; the menu is not opened.
+    None,
+    /// Only Warp's bundled completion specs.
+    WarpOnly,
+    /// Only the shell's native completions; bundled specs are not consulted and there is no Warp
+    /// file-path fallback ("native or nothing").
+    NativeOnly,
+    /// Bundled specs first, asking the shell only if they come back empty.
+    WarpThenNative,
 }
 
-/// Decides the [`NativeCompletionsDispatch`] strategy for a completions request. See that enum's
-/// variants for the rationale behind each case.
-fn native_completions_dispatch(
-    use_native_shell_completions: bool,
-    force_native_shell_completions: bool,
-) -> NativeCompletionsDispatch {
-    match (use_native_shell_completions, force_native_shell_completions) {
-        (false, _) => NativeCompletionsDispatch::Skip,
-        (true, true) => NativeCompletionsDispatch::UpFront,
-        (true, false) => NativeCompletionsDispatch::OnlyIfSpecsEmpty,
+impl CompletionSources {
+    fn resolve(warp_completions_enabled: bool, native_shell_completions_eligible: bool) -> Self {
+        match (warp_completions_enabled, native_shell_completions_eligible) {
+            (true, true) => Self::WarpThenNative,
+            (true, false) => Self::WarpOnly,
+            (false, true) => Self::NativeOnly,
+            (false, false) => Self::None,
+        }
+    }
+
+    /// Whether the shell's native completions are consulted for this request.
+    fn uses_native(self) -> bool {
+        matches!(self, Self::NativeOnly | Self::WarpThenNative)
     }
 }
 
 /// Whether the bundled completion spec pass produced nothing usable -- i.e. the shell should now
-/// be asked, in the [`NativeCompletionsDispatch::OnlyIfSpecsEmpty`] path. `None` (the completer
-/// returned no result) and an empty suggestion list both count as empty.
+/// be asked, in the [`CompletionSources::WarpThenNative`] path. `None` (the completer returned no
+/// result) and an empty suggestion list both count as empty.
 fn bundled_specs_are_empty(spec_suggestions: Option<&SuggestionResults>) -> bool {
     match spec_suggestions {
         Some(spec_suggestions) => spec_suggestions.suggestions.is_empty(),
@@ -12415,33 +12418,41 @@ impl Input {
         let buffer_text = self.buffer_text(ctx);
         let input_type = self.ai_input_model.as_ref(ctx).input_type();
 
-        // The 'ForceNativeShellCompletions' user pref can be used to unconditionally
-        // generate and show native shell completion results (i.e. regardless of whether or
-        // not we have completion results via completion specs).
-        let force_native_shell_completions = ctx
-            .private_user_preferences()
-            .read_value("ForceNativeShellCompletions")
-            .ok()
-            .flatten()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(false);
+        // The `NativeShellCompletions` feature flag is the outer gate that decides who has native
+        // shell completions at all. Only when it's on do the two user toggles apply; otherwise
+        // master behavior holds: Warp completions on, the shell never asked.
+        let (warp_completions_enabled, native_shell_completions_enabled) =
+            if FeatureFlag::NativeShellCompletions.is_enabled() {
+                let input_settings = InputSettings::as_ref(ctx);
+                (
+                    *input_settings.warp_completions_enabled,
+                    *input_settings.native_shell_completions_enabled,
+                )
+            } else {
+                (true, false)
+            };
 
-        let native_shell_completions_feature_enabled =
-            FeatureFlag::NativeShellCompletions.is_enabled() || force_native_shell_completions;
         // Native completions run the shell's own engine through a foreground in-band generator
         // command, too costly to fire on every keystroke, so they're reserved for an explicit
         // Tab/keybinding trigger; an as-you-type keystroke keeps Warp's bundled-spec behavior.
-        let use_native_shell_completions = completions_trigger != CompletionsTrigger::AsYouType
+        let native_shell_completions_eligible = completions_trigger
+            != CompletionsTrigger::AsYouType
             && should_use_native_shell_completions(
-                native_shell_completions_feature_enabled,
+                native_shell_completions_enabled,
                 buffer_text.contains('\n'),
                 input_type.is_ai(),
             );
 
-        let fallback_strategy = completions_fallback_strategy_for_trigger(
-            completions_trigger,
-            use_native_shell_completions,
-        );
+        // AI input is prose, not a shell command line, so it's unaffected by the toggles: it always
+        // uses Warp's own spec pass (with file-path completions), exactly as before.
+        let sources = if input_type.is_ai() {
+            CompletionSources::WarpOnly
+        } else {
+            CompletionSources::resolve(warp_completions_enabled, native_shell_completions_eligible)
+        };
+
+        let fallback_strategy =
+            completions_fallback_strategy_for_trigger(completions_trigger, sources.uses_native());
 
         if self.is_completions_while_typing_turned_on(ctx)
             && let Some(last_abort_handle) = self.completions_abort_handle.take()
@@ -12467,18 +12478,20 @@ impl Input {
 
         let cursor_position = cursor_position.as_usize();
 
-        // How this request factors in the shell's native completions
-        // (see `NativeCompletionsDispatch`).
-        let dispatch = native_completions_dispatch(
-            use_native_shell_completions,
-            force_native_shell_completions,
-        );
+        // With no source selected there's nothing to show, so abort any in-flight request and
+        // return without opening a menu.
+        if sources == CompletionSources::None {
+            if let Some(last_abort_handle) = self.completions_abort_handle.take() {
+                last_abort_handle.abort();
+            }
+            return;
+        }
 
-        // Shipping flag-only configuration: run the bundled specs first and ask the shell only if
-        // they come back empty, so the shell isn't asked on a keystroke a bundled spec answers.
-        // This needs a two-phase spawn -- the generator dispatch needs the `ViewContext` the
-        // background spec-pass future lacks -- so it's separate from the cases below.
-        if dispatch == NativeCompletionsDispatch::OnlyIfSpecsEmpty {
+        // `WarpThenNative`: run the bundled specs first and ask the shell only if they come back
+        // empty, so the shell isn't asked on a keystroke a bundled spec answers. This needs a
+        // two-phase spawn -- the generator dispatch needs the `ViewContext` the background spec-pass
+        // future lacks -- so it's separate from the cases below.
+        if sources == CompletionSources::WarpThenNative {
             let completion_session = completion_context.session.clone();
             let abort_handle = ctx
                 .spawn_abortable(
@@ -12527,11 +12540,11 @@ impl Input {
             return;
         }
 
-        // `Skip` and `UpFront` share this single up-front-or-none spawn. Under force, dispatch the
-        // generator up front so the shell computes concurrently with the spec pass (whose result is
-        // discarded); the `!force_native_shell_completions` guard when selecting results below is
-        // what preserves the pref's "native or nothing" semantics.
-        let dispatch_native_up_front = dispatch == NativeCompletionsDispatch::UpFront;
+        // `WarpOnly` and `NativeOnly` share this single up-front-or-none spawn. For `NativeOnly`,
+        // dispatch the generator up front so the shell computes concurrently with the spec pass
+        // (whose result is discarded); the `sources != NativeOnly` guard when selecting results
+        // below is what preserves the "native or nothing" semantics.
+        let dispatch_native_up_front = sources == CompletionSources::NativeOnly;
         let native_results_fut = if dispatch_native_up_front {
             // If we're using native shell completions, construct a future that
             // will be resolved with any completions data provided by the shell.
@@ -12567,7 +12580,10 @@ impl Input {
                     .await;
 
                     let suggestions = match suggestions {
-                        Some(s) if !s.suggestions.is_empty() && !force_native_shell_completions => {
+                        Some(s)
+                            if !s.suggestions.is_empty()
+                                && sources != CompletionSources::NativeOnly =>
+                        {
                             Some(s)
                         }
                         _ => native_results_fut
@@ -12602,7 +12618,7 @@ impl Input {
     }
 
     /// Dispatches the native-shell-completions generator after the bundled spec pass came back
-    /// empty (the second phase of the `OnlyIfSpecsEmpty` path), from the spec pass's foreground
+    /// empty (the second phase of the `WarpThenNative` path), from the spec pass's foreground
     /// `on_resolve` because dispatching needs the `ViewContext`.
     fn dispatch_native_shell_completions_after_empty_specs(
         &mut self,

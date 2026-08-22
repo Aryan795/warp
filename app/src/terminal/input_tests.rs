@@ -9994,53 +9994,62 @@ mod native_shell_completions_eligibility_tests {
 }
 
 #[cfg(test)]
-mod native_completions_dispatch_tests {
+mod completion_sources_tests {
     use warp_completer::completer::{MatchStrategy, SuggestionResults};
 
-    use super::super::{
-        NativeCompletionsDispatch, ShellCompletion, bundled_specs_are_empty,
-        native_completions_dispatch,
-    };
+    use super::super::{CompletionSources, ShellCompletion, bundled_specs_are_empty};
 
     #[test]
-    fn skips_the_shell_when_native_completions_are_not_in_use() {
-        // Native shell completions off entirely -- the shell is never asked, regardless of the
-        // force pref.
+    fn resolve_no_sources_when_both_off() {
+        // Warp completions off and native shell completions not eligible: nothing to show, so no
+        // menu is opened.
         assert_eq!(
-            native_completions_dispatch(false, false),
-            NativeCompletionsDispatch::Skip
-        );
-        assert_eq!(
-            native_completions_dispatch(false, true),
-            NativeCompletionsDispatch::Skip
+            CompletionSources::resolve(false, false),
+            CompletionSources::None
         );
     }
 
     #[test]
-    fn dispatches_up_front_under_the_force_pref() {
-        // The `ForceNativeShellCompletions` pref makes the shell's answer win unconditionally, so
-        // it's dispatched up front (before/without the bundled spec pass) for latency.
+    fn resolve_warp_only_when_native_is_ineligible() {
+        // Warp completions on but native shell completions not eligible (master behavior): bundled
+        // specs only, the shell is never asked.
         assert_eq!(
-            native_completions_dispatch(true, true),
-            NativeCompletionsDispatch::UpFront
+            CompletionSources::resolve(true, false),
+            CompletionSources::WarpOnly
         );
     }
 
     #[test]
-    fn defers_to_the_shell_only_after_empty_specs_in_the_flag_only_configuration() {
-        // The shipping behavior: the shell is consulted conditionally (after the bundled specs
-        // come back empty), not up front on every keystroke.
+    fn resolve_native_only_when_warp_is_off() {
+        // Warp completions off but native shell completions eligible: the shell answers and the
+        // bundled specs are not consulted ("native or nothing").
         assert_eq!(
-            native_completions_dispatch(true, false),
-            NativeCompletionsDispatch::OnlyIfSpecsEmpty
+            CompletionSources::resolve(false, true),
+            CompletionSources::NativeOnly
         );
+    }
+
+    #[test]
+    fn resolve_warp_then_native_when_both_on() {
+        // Both on: consult the bundled specs first and ask the shell only if they come back empty.
+        assert_eq!(
+            CompletionSources::resolve(true, true),
+            CompletionSources::WarpThenNative
+        );
+    }
+
+    #[test]
+    fn uses_native_only_for_native_backed_sources() {
+        assert!(!CompletionSources::None.uses_native());
+        assert!(!CompletionSources::WarpOnly.uses_native());
+        assert!(CompletionSources::NativeOnly.uses_native());
+        assert!(CompletionSources::WarpThenNative.uses_native());
     }
 
     #[test]
     fn a_bundled_spec_result_means_the_shell_is_not_asked() {
-        // The core of the fix: when a bundled spec produced suggestions, the flag-only path does
-        // not ask the shell at all (contrast with the old behavior, which dispatched the generator
-        // on every keystroke regardless of the specs).
+        // When a bundled spec produced suggestions, the `WarpThenNative` path does not ask the
+        // shell at all.
         let with_a_result = SuggestionResults {
             replacement_span: (0usize, 0usize).into(),
             suggestions: vec![ShellCompletion::new("checkout".to_string()).into()],
@@ -10052,7 +10061,7 @@ mod native_completions_dispatch_tests {
     #[test]
     fn no_bundled_spec_results_means_the_shell_is_asked() {
         // Both an empty suggestion list and no result at all count as empty, so the shell is
-        // asked in the flag-only path.
+        // asked in the `WarpThenNative` path.
         let empty = SuggestionResults {
             replacement_span: (0usize, 0usize).into(),
             suggestions: vec![],

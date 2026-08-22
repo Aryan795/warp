@@ -69,6 +69,15 @@ impl MatchStrategy {
                     return case_insensitive_match;
                 }
 
+                // Only fall back to a subsequence match for a query with at least one alphanumeric
+                // character. A query that is all punctuation (e.g. ".", "$(date).") would otherwise
+                // subsequence-match any candidate that merely contains those characters -- a lone
+                // "." matches every `$PATH` entry with a dot in it, like "vim.basic" -- producing
+                // spurious command completions. Prefix/exact matches above are unaffected.
+                if !partial.chars().any(|c| c.is_alphanumeric()) {
+                    return None;
+                }
+
                 match_indices_case_insensitive(from, partial)
                     .map(|match_result| Fuzzy { match_result })
             }

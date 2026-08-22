@@ -371,7 +371,11 @@ pub fn test_path_completions_with_special_character_case_insensitive() {
     );
 }
 
-/// Check that we can match on special characters regardless of their position in the file name.
+/// A fuzzy query made up entirely of special (non-alphanumeric) characters only matches via
+/// prefix/exact, not a mid-name subsequence: `~` matches `~` and `~foo` but not `!nice ~`. The
+/// subsequence fallback is gated on the query having at least one alphanumeric character, since an
+/// all-punctuation query otherwise matches any candidate merely containing those characters (see
+/// `MatchStrategy::get_match_type`).
 #[test]
 pub fn test_path_completions_with_special_characters_fuzzy() {
     let ctx = mock_path_completion_ctx_special_characters();
@@ -386,15 +390,6 @@ pub fn test_path_completions_with_special_characters_fuzzy() {
         .map(|matched_suggestion| matched_suggestion.suggestion)
         .collect_vec(),
         vec![
-            Suggestion::new(
-                "!nice ~/",
-                r"\!nice\ \~/",
-                Some("Directory".into()),
-                SuggestionType::Argument,
-                Priority::default(),
-            )
-            .with_icon_override(IconType::Folder)
-            .with_file_type(EngineFileType::Directory),
             Suggestion::new(
                 "~/",
                 r"\~/",

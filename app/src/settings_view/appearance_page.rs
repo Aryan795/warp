@@ -62,8 +62,9 @@ use crate::settings::{
     AIFontName, AISettings, AppEditorSettings, CodeSettings, CursorBlink, CursorBlinkEnabled,
     CursorDisplayType, DEFAULT_MONOSPACE_FONT_NAME, EnforceMinimumContrast, FocusPaneOnHover,
     FontSettings, FontSettingsChangedEvent, GPUSettings, InputBoxType, InputModeSettings,
-    InputModeState, InputSettings, InputSettingsChangedEvent, MonospaceFontName, PaneSettings,
-    ShouldDimInactivePanes, ThemeSettings, UseSystemTheme, UseThinStrokes, active_theme_kind,
+    InputModeState, InputSettings, InputSettingsChangedEvent, MonospaceFontName,
+    NativeShellCompletionsEnabled, PaneSettings, ShouldDimInactivePanes, ThemeSettings,
+    UseSystemTheme, UseThinStrokes, WarpCompletionsEnabled, active_theme_kind,
     respect_system_theme,
 };
 use crate::terminal::block_list_viewport::InputMode;
@@ -520,6 +521,8 @@ pub enum AppearancePageAction {
     ToggleRespectSystemTheme,
     ToggleOpenWindowsAtCustomSize,
     ToggleDimInactivePanes,
+    ToggleWarpCompletions,
+    ToggleNativeShellCompletions,
     ToggleAllAvailableFonts,
     ToggleMatchNotebookToMonospaceFontSize,
     ToggleMatchAIToTerminalFontFamily,
@@ -660,6 +663,24 @@ impl TypedActionView for AppearanceSettingsPageView {
             ToggleRespectSystemTheme => self.toggle_respect_system_theme(ctx),
             ToggleAllAvailableFonts => self.toggle_all_available_fonts(ctx),
             ToggleDimInactivePanes => self.toggle_dim_inactive_panes(ctx),
+            ToggleWarpCompletions => {
+                InputSettings::handle(ctx).update(ctx, |settings, ctx| {
+                    report_if_error!(settings.warp_completions_enabled.toggle_and_save_value(ctx));
+                });
+                // The Appearance page does not subscribe to Input settings, so notify explicitly
+                // to refresh the switch state.
+                ctx.notify();
+            }
+            ToggleNativeShellCompletions => {
+                InputSettings::handle(ctx).update(ctx, |settings, ctx| {
+                    report_if_error!(
+                        settings
+                            .native_shell_completions_enabled
+                            .toggle_and_save_value(ctx)
+                    );
+                });
+                ctx.notify();
+            }
             ToggleBlurTexture => self.toggle_blur_texture(ctx),
             ToggleLeftPanelVisibility => self.toggle_left_panel_visibility(ctx),
             ToggleToolsPanelProjectExplorer => {
@@ -1461,11 +1482,16 @@ impl AppearanceSettingsPageView {
         // Create the Input category with all widgets
         // The PromptWidget and InputModeWidget will handle their own visibility
 
-        let category_widgets: Vec<Box<dyn SettingsWidget<View = Self>>> = vec![
+        let mut category_widgets: Vec<Box<dyn SettingsWidget<View = Self>>> = vec![
             Box::new(InputTypeWidget::default()),
             Box::new(PromptWidget::default()),
             Box::new(InputModeWidget::default()),
         ];
+        // Gated at build time on the feature flag (fixed for the process), not `should_render`.
+        if FeatureFlag::NativeShellCompletions.is_enabled() {
+            category_widgets.push(Box::new(WarpCompletionsWidget::default()));
+            category_widgets.push(Box::new(NativeShellCompletionsWidget::default()));
+        }
 
         categories.push(Category::new("Input", category_widgets));
 
@@ -4003,6 +4029,98 @@ impl SettingsWidget for FocusFollowsMouseWidget {
                 })
                 .finish(),
             None,
+        )
+    }
+}
+
+#[derive(Default)]
+struct WarpCompletionsWidget {
+    switch_state: SwitchStateHandle,
+}
+
+impl SettingsWidget for WarpCompletionsWidget {
+    type View = AppearanceSettingsPageView;
+
+    fn search_terms(&self) -> &str {
+        "warp completions built-in shell command suggestions"
+    }
+
+    fn render(
+        &self,
+        view: &Self::View,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        render_body_item::<AppearancePageAction>(
+            "Warp completions".into(),
+            None,
+            LocalOnlyIconState::for_setting(
+                WarpCompletionsEnabled::storage_key(),
+                WarpCompletionsEnabled::sync_to_cloud(),
+                &mut view.local_only_icon_tooltip_states.borrow_mut(),
+                app,
+            ),
+            ToggleState::Enabled,
+            appearance,
+            appearance
+                .ui_builder()
+                .switch(self.switch_state.clone())
+                .check(*InputSettings::as_ref(app).warp_completions_enabled)
+                .build()
+                .on_click(move |ctx, _, _| {
+                    ctx.dispatch_typed_action(AppearancePageAction::ToggleWarpCompletions);
+                })
+                .finish(),
+            Some(
+                "Show Warp's built-in completions for shell commands. Turn this and native shell completions both off to disable command completions."
+                    .to_string(),
+            ),
+        )
+    }
+}
+
+#[derive(Default)]
+struct NativeShellCompletionsWidget {
+    switch_state: SwitchStateHandle,
+}
+
+impl SettingsWidget for NativeShellCompletionsWidget {
+    type View = AppearanceSettingsPageView;
+
+    fn search_terms(&self) -> &str {
+        "native shell completions your shell command suggestions"
+    }
+
+    fn render(
+        &self,
+        view: &Self::View,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        render_body_item::<AppearancePageAction>(
+            "Native shell completions".into(),
+            None,
+            LocalOnlyIconState::for_setting(
+                NativeShellCompletionsEnabled::storage_key(),
+                NativeShellCompletionsEnabled::sync_to_cloud(),
+                &mut view.local_only_icon_tooltip_states.borrow_mut(),
+                app,
+            ),
+            ToggleState::Enabled,
+            appearance,
+            appearance
+                .ui_builder()
+                .switch(self.switch_state.clone())
+                .check(*InputSettings::as_ref(app).native_shell_completions_enabled)
+                .build()
+                .on_click(move |ctx, _, _| {
+                    ctx.dispatch_typed_action(AppearancePageAction::ToggleNativeShellCompletions);
+                })
+                .finish(),
+            Some(
+                "Ask your shell for its own completions for shell commands. Turn this and Warp completions both off to disable command completions."
+                    .to_string(),
+            ),
         )
     }
 }
