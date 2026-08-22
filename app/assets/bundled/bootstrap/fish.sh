@@ -248,13 +248,6 @@ function warp_preexec --on-event fish_preexec
     warp_maybe_send_reset_grid_osc
 
     # If this preexec is called for user command, kill ongoing generator command jobs.
-    # Trim before matching because generator commands carry a leading space for fish's history
-    # exclusion, which would otherwise defeat this match and leave stale generator jobs running
-    # (and un-killed) during a real user command.
-    # Also: `test (! cmd)` always evaluates false regardless of cmd's exit status here, since
-    # `string match -q` prints nothing for `!`'s command substitution to capture and `test`
-    # with no arguments is false -- this branch never ran for any command before this fix.
-    # Use fish's own `not`, which negates a command's exit status directly.
     if not string match -q "warp_run_generator_command*" -- (string trim -- $argv[1])
         for pid in $_warp_generator_pids
             # Suppress stderr output; kill writes to stderr if the given PID is not running
