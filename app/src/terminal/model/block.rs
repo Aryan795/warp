@@ -10,6 +10,7 @@ use std::ops::{Range, RangeInclusive};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use ai_types::AIConversationId;
 use chrono::{DateTime, Duration, FixedOffset, Local};
 use enum_iterator::all;
 use hex;
@@ -41,7 +42,6 @@ use super::kitty::{KittyAction, KittyResponse};
 use super::secrets::RespectObfuscatedSecrets;
 use super::selection::ScrollDelta;
 use super::session::{Sessions, command_executor};
-use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::agent::redaction::redact_secrets;
 use crate::context_chips::prompt_snapshot::PromptSnapshot;
 use crate::server::ids::SyncId;
