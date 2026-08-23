@@ -193,8 +193,7 @@ impl SettingsPageMeta for EditorAndCodeReviewPageView {
     }
 
     fn should_render(&self, _ctx: &AppContext) -> bool {
-        FeatureFlag::FullSourceCodeEmbedding.is_enabled()
-            || FeatureFlag::OpenWarpNewSettingsModes.is_enabled()
+        FeatureFlag::OpenWarpNewSettingsModes.is_enabled()
     }
 
     fn scroll_to_widget(&mut self, widget_id: &'static str) {

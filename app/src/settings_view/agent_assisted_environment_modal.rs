@@ -15,7 +15,6 @@ use ai::index::full_source_code_embedding::manager::CodebaseIndexManagerEvent;
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
 use git2::Repository as GitRepository;
 use pathfinder_color::ColorU;
-use warp_core::features::FeatureFlag;
 use warp_core::paths::home_relative_path;
 use warp_core::ui::theme::color::internal_colors;
 use warpui::r#async::{SpawnedFutureHandle, Timer};
@@ -605,12 +604,9 @@ impl AgentAssistedEnvironmentModal {
     }
 
     fn render_dialog(&self, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
-        let description = if FeatureFlag::FullSourceCodeEmbedding.is_enabled() {
+        let description =
             "Select locally indexed repos to provide context for the environment creation agent."
-        } else {
-            "Select repos to provide context for the environment creation agent."
-        }
-        .to_string();
+                .to_string();
 
         let close_button = icon_button(
             appearance,

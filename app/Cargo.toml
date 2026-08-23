@@ -506,7 +506,7 @@ crash_reporting = [
 ]
 creating_shared_sessions = []
 cross_repo_context = []
-codebase_index_persistence = ["full_source_code_embedding"]
+codebase_index_persistence = []
 well_known_mcp_ids = []
 factory_mcp = []
 default = [
@@ -757,7 +757,6 @@ create_project_flow = []
 agent_mode_evals = [
     "integration_tests",
     "warpui/defer_scene_build",
-    "full_source_code_embedding",
     "cross_repo_context",
     "cloud_object_models/agent_mode_evals",
     "rust-embed/debug-embed",
@@ -837,7 +836,7 @@ predict_am_queries = []
 quake_mode = []
 record_app_active_events = []
 recording_mode = []
-remote_codebase_indexing = ["full_source_code_embedding"]
+remote_codebase_indexing = []
 
 # This feature should only be enabled when building a release bundle with
 # the bundle script, and can be used to conditionally enable functionality
@@ -909,7 +908,6 @@ autoupdate_ui_revamp = []
 warp_packs = []
 suggested_rules = []
 command_correction_key = []
-full_source_code_embedding = []
 use_tantivy_search = []
 agent_management_popup = []
 simulate_github_unauthed = []

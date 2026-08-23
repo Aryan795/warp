@@ -10,7 +10,6 @@ use ai::index::locations::CodeContextLocation;
 use anyhow::{Context as _, anyhow};
 use futures_util::stream::AbortHandle;
 use instant::Instant;
-use warp_core::features::FeatureFlag;
 use warp_errors::report_error;
 use warpui::{AppContext, Entity, ModelContext, ModelHandle, SingletonEntity};
 
@@ -241,31 +240,29 @@ impl GetRelevantFilesController {
     ) -> Result<(), GetRelevantFilesError> {
         const MINIMUM_FILE_COUNT_FOR_API_CALL: usize = 2;
 
-        if FeatureFlag::FullSourceCodeEmbedding.is_enabled() {
-            let codebase_mgr = CodebaseIndexManager::handle(ctx);
-            if let Some(base_path) = codebase_mgr.as_ref(ctx).root_path_for_codebase(directory) {
-                match codebase_mgr.update(ctx, |index_manager, ctx| {
-                    index_manager.retrieve_relevant_files(query.clone(), base_path.as_path(), ctx)
-                }) {
-                    Ok(retrieval_request_id) => {
-                        log::info!("Using full source code embedding for search");
-                        let search_start = Instant::now();
-                        self.pending_requests.insert(
-                            action_id,
-                            RequestHandle::RetrievalID {
-                                repo_path: base_path.clone(),
-                                retrieval_id: retrieval_request_id,
-                                start_time: search_start,
-                            },
-                        );
+        let codebase_mgr = CodebaseIndexManager::handle(ctx);
+        if let Some(base_path) = codebase_mgr.as_ref(ctx).root_path_for_codebase(directory) {
+            match codebase_mgr.update(ctx, |index_manager, ctx| {
+                index_manager.retrieve_relevant_files(query.clone(), base_path.as_path(), ctx)
+            }) {
+                Ok(retrieval_request_id) => {
+                    log::info!("Using full source code embedding for search");
+                    let search_start = Instant::now();
+                    self.pending_requests.insert(
+                        action_id,
+                        RequestHandle::RetrievalID {
+                            repo_path: base_path.clone(),
+                            retrieval_id: retrieval_request_id,
+                            start_time: search_start,
+                        },
+                    );
 
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        log::info!(
-                            "Failed to initiate full source code search: {e}, falling back to outline-based search"
-                        );
-                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    log::info!(
+                        "Failed to initiate full source code search: {e}, falling back to outline-based search"
+                    );
                 }
             }
         }
@@ -423,15 +420,13 @@ impl GetRelevantFilesController {
 
     /// Returns the path to the root directory for a codebase search where pwd is `directory`.
     pub fn root_directory_for_search(&self, directory: &Path, app: &AppContext) -> Option<PathBuf> {
-        let mut start = None;
-        if FeatureFlag::FullSourceCodeEmbedding.is_enabled() {
-            start = CodebaseIndexManager::as_ref(app).root_path_for_codebase(directory);
-        }
-        start.or_else(|| {
-            RepoOutlines::as_ref(app)
-                .get_outline(directory)
-                .map(|(_, root)| root)
-        })
+        CodebaseIndexManager::as_ref(app)
+            .root_path_for_codebase(directory)
+            .or_else(|| {
+                RepoOutlines::as_ref(app)
+                    .get_outline(directory)
+                    .map(|(_, root)| root)
+            })
     }
 
     pub fn root_directory_for_remote_search(

@@ -24,7 +24,6 @@ use repo_metadata::repositories::{DetectedRepositories, DetectedRepositoriesEven
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "local_fs")]
 use warp_core::channel::ChannelState;
-use warp_core::features::FeatureFlag;
 use warp_errors::report_if_error;
 #[cfg(feature = "local_fs")]
 use warp_util::{local_or_remote_path::LocalOrRemotePath, standardized_path::StandardizedPath};
@@ -240,72 +239,69 @@ impl PersistedWorkspace {
             })
             .collect();
 
-        if FeatureFlag::FullSourceCodeEmbedding.is_enabled() {
-            ctx.subscribe_to_model(&CodebaseIndexManager::handle(ctx), |me, _, event, ctx| {
-                match event {
-                    CodebaseIndexManagerEvent::IndexMetadataUpdated { root_path, event } => {
-                        me.handle_index_metadata_event(root_path, *event);
-                    }
-                    CodebaseIndexManagerEvent::RemoveExpiredIndexMetadata { expired_metadata } => {
-                        // TODO: Disable expired metadata removal once we have other consumers of the workspace metadata.
-                        me.clean_up_expired_metadata(expired_metadata.clone(), ctx);
-                    }
-                    _ => {}
+        ctx.subscribe_to_model(&CodebaseIndexManager::handle(ctx), |me, _, event, ctx| {
+            match event {
+                CodebaseIndexManagerEvent::IndexMetadataUpdated { root_path, event } => {
+                    me.handle_index_metadata_event(root_path, *event);
                 }
-            });
-
-            // Subscribe to AI conversation events to trigger incremental sync
-            ctx.subscribe_to_model(
-                &BlocklistAIHistoryModel::handle(ctx),
-                |me, _, event, ctx| {
-                    if let BlocklistAIHistoryEvent::StartedNewConversation {
-                        terminal_surface_id,
-                        ..
-                    } = event
-                    {
-                        #[cfg(feature = "local_fs")]
-                        me.clean_up_deleted_indices(ctx);
-
-                        me.trigger_incremental_sync_for_conversation(*terminal_surface_id, ctx);
-                    }
-                },
-            );
-
-            // Subscribe to changes in workspace settings.
-            ctx.subscribe_to_model(
-                &UserWorkspaces::handle(ctx),
-                |me, _, user_workspaces_event, ctx| {
-                    if let UserWorkspacesEvent::CodebaseContextEnablementChanged =
-                        user_workspaces_event
-                    {
-                        me.on_settings_changed(ctx);
-                    }
-                },
-            );
-
-            // Subscribe to ProjectContextModel events to persist rule changes
-            ctx.subscribe_to_model(&ProjectContextModel::handle(ctx), |me, _, event, _ctx| {
-                if let ProjectContextModelEvent::KnownRulesChanged(delta) = event {
-                    let mut events = vec![];
-
-                    if !delta.discovered_rules.is_empty() {
-                        events.push(ModelEvent::UpsertProjectRules {
-                            project_rule_paths: delta.discovered_rules.clone(),
-                        });
-                    }
-
-                    if !delta.deleted_rules.is_empty() {
-                        events.push(ModelEvent::DeleteProjectRules {
-                            path: delta.deleted_rules.clone(),
-                        });
-                    }
-
-                    if !events.is_empty() {
-                        me.save_to_db(events);
-                    }
+                CodebaseIndexManagerEvent::RemoveExpiredIndexMetadata { expired_metadata } => {
+                    // TODO: Disable expired metadata removal once we have other consumers of the workspace metadata.
+                    me.clean_up_expired_metadata(expired_metadata.clone(), ctx);
                 }
-            });
-        }
+                _ => {}
+            }
+        });
+
+        // Subscribe to AI conversation events to trigger incremental sync
+        ctx.subscribe_to_model(
+            &BlocklistAIHistoryModel::handle(ctx),
+            |me, _, event, ctx| {
+                if let BlocklistAIHistoryEvent::StartedNewConversation {
+                    terminal_surface_id,
+                    ..
+                } = event
+                {
+                    #[cfg(feature = "local_fs")]
+                    me.clean_up_deleted_indices(ctx);
+
+                    me.trigger_incremental_sync_for_conversation(*terminal_surface_id, ctx);
+                }
+            },
+        );
+
+        // Subscribe to changes in workspace settings.
+        ctx.subscribe_to_model(
+            &UserWorkspaces::handle(ctx),
+            |me, _, user_workspaces_event, ctx| {
+                if let UserWorkspacesEvent::CodebaseContextEnablementChanged = user_workspaces_event
+                {
+                    me.on_settings_changed(ctx);
+                }
+            },
+        );
+
+        // Subscribe to ProjectContextModel events to persist rule changes
+        ctx.subscribe_to_model(&ProjectContextModel::handle(ctx), |me, _, event, _ctx| {
+            if let ProjectContextModelEvent::KnownRulesChanged(delta) = event {
+                let mut events = vec![];
+
+                if !delta.discovered_rules.is_empty() {
+                    events.push(ModelEvent::UpsertProjectRules {
+                        project_rule_paths: delta.discovered_rules.clone(),
+                    });
+                }
+
+                if !delta.deleted_rules.is_empty() {
+                    events.push(ModelEvent::DeleteProjectRules {
+                        path: delta.deleted_rules.clone(),
+                    });
+                }
+
+                if !events.is_empty() {
+                    me.save_to_db(events);
+                }
+            }
+        });
 
         // Registered regardless of whether codebase indexing is enabled:
         // `index_repo` also drives project-rules (and, transitively, project
@@ -685,8 +681,7 @@ impl PersistedWorkspace {
                 ctx,
             );
         });
-        if FeatureFlag::FullSourceCodeEmbedding.is_enabled()
-            && UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(ctx)
+        if UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(ctx)
             && *CodeSettings::as_ref(ctx).auto_indexing_enabled
         {
             CodebaseIndexManager::handle(ctx).update(ctx, |manager, ctx| {

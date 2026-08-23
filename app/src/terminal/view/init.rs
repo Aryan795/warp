@@ -994,10 +994,7 @@ pub fn init(app: &mut AppContext) {
         )
         .with_group(bindings::BindingGroup::WarpAi.as_str())
         .with_context_predicate(id!("Terminal") & !id!("IMEOpen"))
-        .with_enabled(|| {
-            FeatureFlag::FullSourceCodeEmbedding.is_enabled()
-                && ChannelState::enable_debug_features()
-        }),
+        .with_enabled(ChannelState::enable_debug_features),
     ]);
 
     app.register_editable_bindings([EditableBinding::new(

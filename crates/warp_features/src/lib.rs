@@ -254,9 +254,6 @@ pub enum FeatureFlag {
     /// Enables prediction of Agent Mode queries.
     PredictAMQueries,
 
-    /// Enables full source code embedding of repos when using codebase context.
-    FullSourceCodeEmbedding,
-
     /// Enables codebase indexing inside remote server daemon processes.
     RemoteCodebaseIndexing,
 
@@ -1027,7 +1024,6 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     // but we need to enable here for dogfood builds.
     FeatureFlag::CrossRepoContext,
     FeatureFlag::CodebaseIndexPersistence,
-    FeatureFlag::FullSourceCodeEmbedding,
     FeatureFlag::CodebaseIndexSpeedbump,
     // End manually enabled Code features.
     FeatureFlag::EditableMarkdownMermaid,

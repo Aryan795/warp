@@ -27814,7 +27814,7 @@ impl TypedActionView for TerminalView {
                 let codebase_context_enabled =
                     UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(ctx);
 
-                if FeatureFlag::FullSourceCodeEmbedding.is_enabled() && codebase_context_enabled {
+                if codebase_context_enabled {
                     #[cfg(feature = "local_fs")]
                     if let Some(current_dir) = self.pwd() {
                         let directory = PathBuf::from(&current_dir);

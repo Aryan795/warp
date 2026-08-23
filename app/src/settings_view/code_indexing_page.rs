@@ -710,31 +710,29 @@ pub fn init_actions_from_parent_view<T: Action + Clone>(
     context: &ContextPredicate,
     builder: fn(SettingsAction) -> T,
 ) {
-    if FeatureFlag::FullSourceCodeEmbedding.is_enabled() {
-        ToggleSettingActionPair::add_toggle_setting_action_pairs_as_bindings(
-            vec![ToggleSettingActionPair::new(
-                "codebase index",
-                builder(SettingsAction::CodeIndexing(
-                    CodeIndexingPageAction::ToggleCodebaseContext,
-                )),
-                &(context.clone() & id!(flags::IS_ANY_AI_ENABLED)),
-                flags::IS_CODEBASE_INDEXING_ENABLED,
-            )],
-            app,
-        );
+    ToggleSettingActionPair::add_toggle_setting_action_pairs_as_bindings(
+        vec![ToggleSettingActionPair::new(
+            "codebase index",
+            builder(SettingsAction::CodeIndexing(
+                CodeIndexingPageAction::ToggleCodebaseContext,
+            )),
+            &(context.clone() & id!(flags::IS_ANY_AI_ENABLED)),
+            flags::IS_CODEBASE_INDEXING_ENABLED,
+        )],
+        app,
+    );
 
-        ToggleSettingActionPair::add_toggle_setting_action_pairs_as_bindings(
-            vec![ToggleSettingActionPair::new(
-                "auto-indexing",
-                builder(SettingsAction::CodeIndexing(
-                    CodeIndexingPageAction::ToggleAutoIndexing,
-                )),
-                &(context.clone() & id!(flags::IS_CODEBASE_INDEXING_ENABLED)),
-                flags::IS_AUTOINDEXING_ENABLED,
-            )],
-            app,
-        );
-    }
+    ToggleSettingActionPair::add_toggle_setting_action_pairs_as_bindings(
+        vec![ToggleSettingActionPair::new(
+            "auto-indexing",
+            builder(SettingsAction::CodeIndexing(
+                CodeIndexingPageAction::ToggleAutoIndexing,
+            )),
+            &(context.clone() & id!(flags::IS_CODEBASE_INDEXING_ENABLED)),
+            flags::IS_AUTOINDEXING_ENABLED,
+        )],
+        app,
+    );
 }
 
 struct CodePageWidget {
@@ -2300,8 +2298,7 @@ impl SettingsPageMeta for CodeIndexingPageView {
     }
 
     fn should_render(&self, _ctx: &AppContext) -> bool {
-        FeatureFlag::FullSourceCodeEmbedding.is_enabled()
-            || FeatureFlag::OpenWarpNewSettingsModes.is_enabled()
+        FeatureFlag::OpenWarpNewSettingsModes.is_enabled()
     }
 
     fn on_page_selected(&mut self, _: bool, ctx: &mut ViewContext<Self>) {

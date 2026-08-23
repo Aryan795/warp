@@ -91,13 +91,11 @@ impl ServerExperiment {
                 // build on an allowlist.
             }
             Self::CodebaseContextExperiment => {
-                FeatureFlag::FullSourceCodeEmbedding.set_enabled(true);
                 FeatureFlag::CodebaseIndexPersistence.set_enabled(true);
                 FeatureFlag::CodebaseIndexSpeedbump.set_enabled(true);
                 FeatureFlag::CrossRepoContext.set_enabled(true);
             }
             Self::CodebaseContextControl => {
-                FeatureFlag::FullSourceCodeEmbedding.set_enabled(false);
                 FeatureFlag::CodebaseIndexPersistence.set_enabled(false);
                 FeatureFlag::CodebaseIndexSpeedbump.set_enabled(false);
                 FeatureFlag::CrossRepoContext.set_enabled(false);

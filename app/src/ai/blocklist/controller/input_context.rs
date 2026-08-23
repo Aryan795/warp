@@ -67,9 +67,7 @@ pub(super) fn input_context_for_request(
         context.push(AIAgentContext::ExecutionEnvironment(env));
     }
 
-    if FeatureFlag::FullSourceCodeEmbedding.is_enabled()
-        && FeatureFlag::CrossRepoContext.is_enabled()
-    {
+    if FeatureFlag::CrossRepoContext.is_enabled() {
         let session_context = SessionContext::from_session(active_session, app);
         if session_context.is_remote() {
             add_remote_codebase_context(&mut context, &session_context, app);

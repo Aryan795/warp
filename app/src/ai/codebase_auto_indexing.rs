@@ -47,9 +47,7 @@ fn codebase_indexing_enabled(
     surface: CodebaseAutoIndexingSurface,
     codebase_context_enabled: bool,
 ) -> bool {
-    FeatureFlag::FullSourceCodeEmbedding.is_enabled()
-        && surface.required_feature_enabled()
-        && codebase_context_enabled
+    surface.required_feature_enabled() && codebase_context_enabled
 }
 
 pub(crate) fn codebase_auto_indexing_enabled(

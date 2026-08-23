@@ -3,7 +3,6 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::{Value, json};
 use strum_macros::{EnumDiscriminants, EnumIter};
-use warp_core::features::FeatureFlag;
 use warp_core::register_telemetry_event;
 use warp_core::telemetry::{EnablementState, TelemetryEvent, TelemetryEventDesc};
 
@@ -212,7 +211,7 @@ impl TelemetryEventDesc for AITelemetryEventDiscriminants {
             | Self::SyncCodebaseContextFailed
             | Self::SyncCodebaseContextSuccess
             | Self::BuildTreeFailed
-            | Self::BuildTreeSuccess => EnablementState::Flag(FeatureFlag::FullSourceCodeEmbedding),
+            | Self::BuildTreeSuccess => EnablementState::Always,
         }
     }
 }
