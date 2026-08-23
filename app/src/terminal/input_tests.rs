@@ -8947,8 +8947,6 @@ fn enter_submits_when_submit_on_ctrl_enter_is_false() {
     use std::rc::Rc;
 
     App::test((), |mut app| async move {
-        let _cli_agent_flag = FeatureFlag::CLIAgentRichInput.override_enabled(true);
-
         initialize_app(&mut app);
 
         // Default must be false (guards existing Enter-submits behaviour).
@@ -9006,8 +9004,6 @@ fn ctrl_enter_emits_ctrl_enter_event_when_submit_on_ctrl_enter_is_false() {
     use std::rc::Rc;
 
     App::test((), |mut app| async move {
-        let _cli_agent_flag = FeatureFlag::CLIAgentRichInput.override_enabled(true);
-
         initialize_app(&mut app);
 
         // Ensure the setting is false (the default).
@@ -9062,8 +9058,6 @@ fn enter_inserts_newline_when_submit_on_ctrl_enter_is_true() {
     use std::rc::Rc;
 
     App::test((), |mut app| async move {
-        let _cli_agent_flag = FeatureFlag::CLIAgentRichInput.override_enabled(true);
-
         initialize_app(&mut app);
 
         AISettings::handle(&app).update(&mut app, |settings, ctx| {
@@ -9117,8 +9111,6 @@ fn ctrl_enter_submits_when_submit_on_ctrl_enter_is_true() {
     use std::rc::Rc;
 
     App::test((), |mut app| async move {
-        let _cli_agent_flag = FeatureFlag::CLIAgentRichInput.override_enabled(true);
-
         initialize_app(&mut app);
 
         AISettings::handle(&app).update(&mut app, |settings, ctx| {
@@ -9185,8 +9177,6 @@ fn ctrl_enter_with_selection_preserves_selection_in_submit_when_setting_is_true(
     use std::rc::Rc;
 
     App::test((), |mut app| async move {
-        let _cli_agent_flag = FeatureFlag::CLIAgentRichInput.override_enabled(true);
-
         initialize_app(&mut app);
 
         AISettings::handle(&app).update(&mut app, |settings, ctx| {
@@ -9253,7 +9243,6 @@ fn ctrl_enter_with_selection_preserves_selection_in_submit_when_setting_is_true(
 fn editor_keymap_context_excludes_ctrl_enter_enters_agent_view_when_rich_input_is_open() {
     App::test((), |mut app| async move {
         let _agent_view_flag = FeatureFlag::AgentView.override_enabled(true);
-        let _cli_agent_flag = FeatureFlag::CLIAgentRichInput.override_enabled(true);
 
         initialize_app(&mut app);
 
@@ -9288,8 +9277,6 @@ fn enter_accepts_inline_menu_item_when_submit_on_ctrl_enter_is_true() {
     use std::rc::Rc;
 
     App::test((), |mut app| async move {
-        let _cli_agent_flag = FeatureFlag::CLIAgentRichInput.override_enabled(true);
-
         initialize_app(&mut app);
 
         AISettings::handle(&app).update(&mut app, |settings, ctx| {
@@ -9366,8 +9353,6 @@ fn ctrl_enter_inserts_newline_when_submit_on_ctrl_enter_is_false() {
     use crate::editor::EnterAction;
 
     App::test((), |mut app| async move {
-        let _cli_agent_flag = FeatureFlag::CLIAgentRichInput.override_enabled(true);
-
         initialize_app(&mut app);
 
         // Ensure the setting is false (the default).
@@ -9471,8 +9456,6 @@ fn ctrl_enter_inserts_newline_in_normal_input_after_rich_input_closes() {
     use crate::editor::EnterAction;
 
     App::test((), |mut app| async move {
-        let _cli_agent_flag = FeatureFlag::CLIAgentRichInput.override_enabled(true);
-
         initialize_app(&mut app);
 
         let terminal = add_window_with_bootstrapped_terminal(&mut app, None, None).await;
