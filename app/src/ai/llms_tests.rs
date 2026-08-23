@@ -17,6 +17,7 @@ use crate::server::server_api::ServerApiProvider;
 use crate::server::server_api::team::MockTeamClient;
 use crate::server::server_api::workspace::MockWorkspaceClient;
 use crate::server::sync_queue::SyncQueue;
+use crate::server::telemetry::context_provider::AppTelemetryContextProvider;
 use crate::settings::PrivacySettings;
 use crate::terminal::input::models::query_model_picker_choices;
 use crate::test_util::settings::initialize_settings_for_tests;
@@ -24,7 +25,8 @@ use crate::workspaces::team::Team;
 use crate::workspaces::team_tester::TeamTesterStatus;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::workspaces::workspace::{
-    BillingMetadata, ManagedByokByoePolicy, TeamByoSettings, TeamSettings, Tier, Workspace,
+    BillingMetadata, ByoApiKeyPolicy, ManagedByokByoePolicy, TeamByoSettings, TeamSettings, Tier,
+    Workspace,
 };
 use crate::{LaunchMode, TuiEntryPoint};
 
@@ -1321,6 +1323,7 @@ fn team_with_byo_policy(uid: i64, allow_member_credentials: bool) -> Team {
         }),
         Some(BillingMetadata {
             tier: Tier {
+                byo_api_key_policy: Some(ByoApiKeyPolicy { enabled: true }),
                 managed_byok_byoe_policy: Some(ManagedByokByoePolicy { enabled: true }),
                 ..Default::default()
             },
@@ -1350,6 +1353,7 @@ fn register_user_workspaces_for_test(app: &mut App, workspace: Workspace) {
     app.add_singleton_model(UpdateManager::mock);
     app.add_singleton_model(|_| TemplatableMCPServerManager::default());
     app.add_singleton_model(PrivacySettings::mock);
+    app.add_singleton_model(AppTelemetryContextProvider::new_context_provider);
     app.add_singleton_model(|ctx| {
         UserWorkspaces::mock(
             Arc::new(MockTeamClient::new()),
@@ -1374,11 +1378,10 @@ fn byo_key_source_for_model_follows_each_windows_own_team() {
 
     App::test((), |mut app| async move {
         register_user_workspaces_for_test(&mut app, workspace);
-        app.add_singleton_model(LLMPreferences::new);
-        app.update(|ctx| {
-            warpui_extras::secure_storage::register_noop("test", ctx);
+        app.add_singleton_model(|ctx| {
+            AIExecutionProfilesModel::new(&LaunchMode::new_for_unit_test(), ctx)
         });
-        app.add_singleton_model(ApiKeyManager::new);
+        app.add_singleton_model(LLMPreferences::new);
         ApiKeyManager::handle(&app)
             .update(&mut app, |manager, ctx| {
                 manager.persist_provider_key(LLMProvider::OpenAI, Some("sk-test".to_owned()), ctx)
