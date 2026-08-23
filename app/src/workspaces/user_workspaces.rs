@@ -930,6 +930,13 @@ impl UserWorkspaces {
     /// to use their own provider API keys. Users with no workspace, or
     /// workspaces without the managed BYOK/BYOE policy, have no team-level
     /// restriction, so this returns true and the normal BYO entitlement applies.
+    ///
+    /// Ambient: [`Self::are_member_byo_keys_allowed_for_scope`] is the window-scoped
+    /// replacement. Its one remaining caller, `warp_tui`'s Grok OAuth policy gate
+    /// (`TuiApiKeysMenuModel::start_grok_oauth`), stays on this getter because that model has
+    /// no window/view handle to resolve a scope from -- unlike `TuiModelMenuModel`, it is not
+    /// constructed with the terminal surface's view. A window-scoped read would need that
+    /// threaded through first.
     pub fn are_member_byo_keys_allowed(&self) -> bool {
         self.current_workspace().is_none_or(|workspace| {
             !workspace.billing_metadata.is_managed_byok_byoe_enabled()
