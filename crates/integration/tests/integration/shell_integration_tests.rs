@@ -78,8 +78,10 @@ integration_tests! {
     // Tests zsh-specific behavior with nounset option.
     test_zsh_bootstraps_with_nounset_option,
     test_zsh_cursor_mode_vi_bindings_do_not_corrupt_commands,
-    // Tests PowerShell-specific behavior with PSReadLine's vi edit mode.
+    // Tests PowerShell-specific behavior with PSReadLine's edit modes.
     test_pwsh_vi_edit_mode_does_not_corrupt_commands,
+    test_pwsh_windows_edit_mode_does_not_corrupt_commands,
+    test_pwsh_emacs_edit_mode_preserves_profile_key_handlers,
 
     // Tests of ssh wrapper logic from bootstrap script.
     test_ssh_wrapper_into_bash,

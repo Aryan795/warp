@@ -367,6 +367,46 @@ zle -N zle-line-init
 /// Regression test for CORE-3804: a profile that selects PSReadLine's vi edit mode must not
 /// corrupt submitted commands.
 pub fn test_pwsh_vi_edit_mode_does_not_corrupt_commands() -> Builder {
+    pwsh_edit_mode_does_not_corrupt_commands("Set-PSReadLineOption -EditMode Vi")
+}
+
+/// PSReadLine's `Windows` edit mode binds Escape to `RevertLine`, which damages a submitted
+/// command much as vi command mode does, so a profile that selects it must not corrupt commands
+/// either.
+pub fn test_pwsh_windows_edit_mode_does_not_corrupt_commands() -> Builder {
+    pwsh_edit_mode_does_not_corrupt_commands("Set-PSReadLineOption -EditMode Windows")
+}
+
+fn pwsh_edit_mode_does_not_corrupt_commands(profile_contents: &'static str) -> Builder {
+    new_builder()
+        .set_should_run_test(|| {
+            let (starter, _) = current_shell_starter_and_version();
+            matches!(starter.shell_type(), shell::ShellType::PowerShell)
+        })
+        .with_setup(move |utils| {
+            let dir = utils.test_dir();
+            write_rc_files_for_test(dir, profile_contents, [ShellRcType::PowerShell]);
+        })
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(0))
+        .with_step(clear_blocklist_to_remove_bootstrapped_blocks())
+        .with_step(execute_command_for_single_terminal_in_tab(
+            0,
+            "echo edit_mode_ok".to_string(),
+            ExpectedExitStatus::Success,
+            "edit_mode_ok",
+        ))
+        .with_step(execute_command_for_single_terminal_in_tab(
+            0,
+            "Write-Output second_command_ok".to_string(),
+            ExpectedExitStatus::Success,
+            "second_command_ok",
+        ))
+}
+
+/// `Set-PSReadLineOption -EditMode` drops every key handler, the user's included, even when the
+/// mode it selects is the one already in effect. A session that is already in Emacs therefore has
+/// to be left alone rather than reasserted.
+pub fn test_pwsh_emacs_edit_mode_preserves_profile_key_handlers() -> Builder {
     new_builder()
         .set_should_run_test(|| {
             let (starter, _) = current_shell_starter_and_version();
@@ -376,7 +416,8 @@ pub fn test_pwsh_vi_edit_mode_does_not_corrupt_commands() -> Builder {
             let dir = utils.test_dir();
             write_rc_files_for_test(
                 dir,
-                "Set-PSReadLineOption -EditMode Vi",
+                "Set-PSReadLineOption -EditMode Emacs\n\
+                 Set-PSReadLineKeyHandler -Chord 'Ctrl+q' -ScriptBlock { }",
                 [ShellRcType::PowerShell],
             );
         })
@@ -384,15 +425,11 @@ pub fn test_pwsh_vi_edit_mode_does_not_corrupt_commands() -> Builder {
         .with_step(clear_blocklist_to_remove_bootstrapped_blocks())
         .with_step(execute_command_for_single_terminal_in_tab(
             0,
-            "echo vi_edit_mode_ok".to_string(),
+            "if (Get-PSReadLineKeyHandler -Bound | Where-Object { $_.Key -eq 'Ctrl+q' }) \
+             { 'handler_survived' } else { 'handler_lost' }"
+                .to_string(),
             ExpectedExitStatus::Success,
-            "vi_edit_mode_ok",
-        ))
-        .with_step(execute_command_for_single_terminal_in_tab(
-            0,
-            "Write-Output second_command_ok".to_string(),
-            ExpectedExitStatus::Success,
-            "second_command_ok",
+            "handler_survived",
         ))
 }
 

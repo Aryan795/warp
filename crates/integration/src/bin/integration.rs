@@ -260,6 +260,8 @@ fn register_tests() -> HashMap<&'static str, BoxedBuilderFn> {
     register_test!(test_zsh_bootstraps_with_nounset_option);
     register_test!(test_zsh_cursor_mode_vi_bindings_do_not_corrupt_commands);
     register_test!(test_pwsh_vi_edit_mode_does_not_corrupt_commands);
+    register_test!(test_pwsh_windows_edit_mode_does_not_corrupt_commands);
+    register_test!(test_pwsh_emacs_edit_mode_preserves_profile_key_handlers);
     register_test!(test_ssh_wrapper_into_bash);
     register_test!(test_ssh_wrapper_into_zsh);
     register_test!(test_ssh_into_fish);

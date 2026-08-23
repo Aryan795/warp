@@ -354,8 +354,11 @@ $null = New-Module -Name Warp-Module -ScriptBlock {
     $script:viEditModeOverridden = $false
 
     function Warp-Configure-PSReadLine {
-        if ((Get-PSReadLineOption).EditMode -eq 'Vi') {
+        $editMode = (Get-PSReadLineOption).EditMode
+        if ($editMode -eq 'Vi') {
             $script:viEditModeOverridden = $true
+        }
+        if ($editMode -ne 'Emacs') {
             Set-PSReadLineOption -EditMode Emacs
         }
 
