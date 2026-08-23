@@ -1419,6 +1419,12 @@ esac
 
     # capture completions by injecting -A parameter into the compadd call.
     # this takes care of matching for us.
+    #
+    # This is deliberately capture-only: -A/-D divert the matches into our arrays instead of zsh's
+    # real match list. Letting them into the real list would restore zsh's early-stop (avoiding the
+    # repeated completer passes the dedup below collapses), but it also makes the list-choices
+    # widget render the candidates into the terminal, leaking text like `Applications/ Documents/`
+    # into the output stream -- so we capture and dedup instead.
     builtin compadd -A __hits -D __dscr "$@"
 
     setopt localoptions norcexpandparam extendedglob
@@ -1461,7 +1467,9 @@ esac
     # line has non-ASCII text (the same class of bug as PowerShell's UTF-16 offsets). `LC_ALL=C`
     # makes it count bytes; nothing later in this function counts characters, so scoping it here is fine.
     local LC_ALL=C
-    warp_mark_replacement_span_for_compadd_override $(( ${#_WARP_NATIVE_COMPLETIONS_LINE} - ${#__replaced_prefix} )) ${#__replaced_prefix}
+    local __span_start=$(( ${#_WARP_NATIVE_COMPLETIONS_LINE} - ${#__replaced_prefix} ))
+    local __span_len=${#__replaced_prefix}
+    warp_mark_replacement_span_for_compadd_override $__span_start $__span_len
 
     # display all matches
     #
@@ -1482,6 +1490,18 @@ esac
 
         local match="$__hits[$i]$dsuf$asuf_str"
 
+        # A capture-only compadd (-A/-D) never adds to zsh's real match list, so _main_complete
+        # concludes every completer failed and runs the whole `completer` list, and _path_files
+        # compadds once per tag -- both re-emit identical rows. Dedup per request on the full
+        # emitted identity (replacement span + inserted text + description) so identical rows
+        # collapse, while a same-name/different-description pair survives (keying on the name alone
+        # would drop the latter -- the silent loss a dedup must avoid).
+        local __dedup_key="${__span_start},${__span_len}"$'\x1f'"${match}"$'\x1f'"${dscr}"
+        if (( ${+_WARP_SEEN_COMPLETIONS[$__dedup_key]} )); then
+            continue
+        fi
+        _WARP_SEEN_COMPLETIONS[$__dedup_key]=1
+
         # Hex-encode both fields: OSC params are semicolon-delimited and only the third is
         # read (see decode_hex_completions_payload in ansi/mod.rs), so a literal `;`, BEL, or
         # ESC in a match or description would otherwise corrupt the sequence.
@@ -1497,6 +1517,10 @@ esac
 
   function warp_mark_start_of_completions_for_compadd_override () {
     warp_mark_start_of_completions
+    # Start of a completion request: reset the per-request dedup set consulted in the compadd
+    # override, so candidates are only deduped within a single request.
+    typeset -gA _WARP_SEEN_COMPLETIONS
+    _WARP_SEEN_COMPLETIONS=()
   }
 
   # Reports the byte-offset range of the line (passed to
