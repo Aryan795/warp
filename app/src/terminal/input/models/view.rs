@@ -34,6 +34,7 @@ use crate::ui_components::icons::Icon;
 use crate::view_components::action_button::{ActionButton, ActionButtonTheme, ButtonSize};
 use crate::view_components::alert::{Alert, AlertConfig};
 use crate::workspace::WorkspaceAction;
+use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
 
 struct ManageDefaultsTheme;
 
@@ -142,20 +143,29 @@ impl InlineModelSelectorView {
             .first()
             .map(|config| config.filters.clone())
             .unwrap_or_default();
-        let mixer = ctx.add_model(|ctx| {
+        // The initial query is deferred rather than run here: `view_handle` above cannot resolve
+        // its window until this constructor returns (see `UserWorkspaces::team_context`'s docs),
+        // so running it synchronously would read the icon/BYO flags for no team at all rather
+        // than this window's own. Deferring lets it run once this view is actually registered.
+        let mixer = ctx.add_model(|_ctx| {
             let mut mixer = SearchMixer::<AcceptModel>::new();
             mixer.add_sync_source(
                 data_source.clone(),
                 [QueryFilter::BaseModels, QueryFilter::FullTerminalUseModels],
             );
-            mixer.run_query(
-                Query {
-                    text: String::new(),
-                    filters: initial_filters,
-                },
-                ctx,
-            );
             mixer
+        });
+        let deferred_initial_query_mixer = mixer.clone();
+        ctx.spawn(std::future::ready(()), move |_, _, ctx| {
+            deferred_initial_query_mixer.update(ctx, |mixer, ctx| {
+                mixer.run_query(
+                    Query {
+                        text: String::new(),
+                        filters: initial_filters,
+                    },
+                    ctx,
+                );
+            });
         });
 
         let menu_view = if FeatureFlag::InlineMenuHeaders.is_enabled() {
@@ -332,6 +342,22 @@ impl InlineModelSelectorView {
                         mixer.run_query(query, ctx);
                     }
                 });
+            }
+        });
+        // The mixer's icon/BYO flags are scoped to this view's own window team (via
+        // `ModelSelectorDataSource`'s view handle), so an open selector must requery when that
+        // window switches teams -- otherwise it keeps showing the previous team's state.
+        ctx.subscribe_to_model(&UserWorkspaces::handle(ctx), |me, _, event, ctx| {
+            let UserWorkspacesEvent::WindowTeamChanged { window_id } = event else {
+                return;
+            };
+            if *window_id == ctx.window_id()
+                && me
+                    .suggestions_mode_model
+                    .as_ref(ctx)
+                    .is_inline_model_selector()
+            {
+                me.rerun_query(ctx);
             }
         });
 

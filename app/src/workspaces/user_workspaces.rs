@@ -522,23 +522,6 @@ impl UserWorkspaces {
         self.team_context_for_window_id(window_id)
     }
 
-    /// A scope naming no team, for a caller that could not resolve a window at all -- a view
-    /// that is not currently attached to one, e.g. because it was dropped, or (for a
-    /// cross-crate caller resolving through [`Self::team_context`]) because it was never
-    /// registered in the first place, such as an offline or pre-login TUI session.
-    ///
-    /// This is the same scope a resolved window with no team selected produces, not a
-    /// different fallback: both mean "no team policy restricts this", and a getter built on
-    /// [`TeamScope`] cannot tell them apart. It exists only because there is deliberately no
-    /// way to construct [`TeamContext`] from anything but a live window -- see its docs -- so
-    /// a caller with no window has nothing else to hand a `TeamScope`-based getter. Reach for
-    /// it only where the caller has already confronted the missing window and decided that
-    /// reading as teamless is the right call for that read; it must not be used to route
-    /// around a resolvable window.
-    pub(crate) fn teamless_scope(&self) -> TeamContext<'static> {
-        TeamContext { team_uid: None }
-    }
-
     /// The team a scope names, when it names one that is still in the current workspace.
     ///
     /// Deliberately private. Callers get a resolved *setting* from a getter that takes their

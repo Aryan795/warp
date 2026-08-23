@@ -403,11 +403,13 @@ impl ModelSearchItem {
         let is_using_bedrock = should_show_bedrock_icon_for_model(llm, view, app);
         let is_using_gemini_enterprise_agent_platform =
             should_show_gemini_enterprise_agent_platform_icon_for_model(llm, view, app);
+        // A view with no resolved window reports no BYO key source rather than fabricating a
+        // no-team scope: `team_byo` is team-specific, so a fabricated scope would read one
+        // arbitrarily-chosen team's configuration for a user who does have a team.
         let workspaces = UserWorkspaces::as_ref(app);
-        let scope = workspaces
+        let byo_key_source = workspaces
             .team_context(view, app)
-            .unwrap_or_else(|| workspaces.teamless_scope());
-        let byo_key_source = byo_key_source_for_model(llm, &scope, app);
+            .and_then(|scope| byo_key_source_for_model(llm, &scope, app));
         let leading_icon = model_leading_icon(
             llm,
             ModelIconFlags {

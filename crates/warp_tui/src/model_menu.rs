@@ -4,7 +4,8 @@ use warp::editor::{CodeEditorModel, CodeEditorModelEvent};
 use warp::settings::AISettings;
 use warp::tui_export::{
     AISettingsChangedEvent, LLMId, LLMInfo, LLMPreferences, LLMPreferencesEvent, ModelPickerChoice,
-    query_model_picker_choices, should_show_bedrock_icon_for_model,
+    UserWorkspaces, UserWorkspacesEvent, query_model_picker_choices,
+    should_show_bedrock_icon_for_model,
     should_show_gemini_enterprise_agent_platform_icon_for_model, should_show_key_icon_for_model,
 };
 use warp_editor::model::CoreEditorModel;
@@ -106,6 +107,18 @@ impl TuiModelMenuModel {
             if model.is_open(ctx)
                 && matches!(event, AISettingsChangedEvent::ExecutionProfiles { .. })
             {
+                model.refresh_rows(ctx);
+            }
+        });
+        // The credential/host icons above are scoped to `terminal_surface`'s window team, so an
+        // open menu must re-derive them when that window switches teams -- otherwise it keeps
+        // showing the previous team's BYO/host state until closed and reopened.
+        let surface_for_team_change = terminal_surface.clone();
+        ctx.subscribe_to_model(&UserWorkspaces::handle(ctx), move |model, _, event, ctx| {
+            let UserWorkspacesEvent::WindowTeamChanged { window_id } = event else {
+                return;
+            };
+            if model.is_open(ctx) && surface_for_team_change.window_id(ctx) == Some(*window_id) {
                 model.refresh_rows(ctx);
             }
         });

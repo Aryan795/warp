@@ -11,7 +11,9 @@ use warp_core::ui::Icon;
 use warp_core::user_preferences::GetUserPreferences;
 use warp_errors::report_error;
 use warp_multi_agent_api as api;
-use warpui::{AppContext, Entity, EntityId, ModelContext, SingletonEntity, WeakViewHandle};
+use warpui::{
+    AppContext, Entity, EntityId, ModelContext, SingletonEntity, ViewContext, WeakViewHandle,
+};
 
 use super::custom_model_routers::{self, CustomModelRouter, ModelConfigError};
 use super::execution_profiles::profiles::AIExecutionProfilesModel;
@@ -20,9 +22,7 @@ use crate::auth::auth_manager::{AuthManager, AuthManagerEvent};
 use crate::network::{NetworkStatus, NetworkStatusEvent, NetworkStatusKind};
 use crate::server::server_api::ServerApiProvider;
 use crate::user_config::{WarpConfig, WarpConfigUpdateEvent};
-use crate::workspaces::user_workspaces::{
-    TeamContext, TeamScope, UserWorkspaces, UserWorkspacesEvent,
-};
+use crate::workspaces::user_workspaces::{TeamScope, UserWorkspaces, UserWorkspacesEvent};
 
 /// Checks if a user's' API key is being used for the given provider.
 /// Returns `true` if BYO API key is enabled and a key exists for the provider.
@@ -151,25 +151,6 @@ pub fn byo_key_source_for_model(
     first_party_key_source_for_provider_for_scope(&llm.provider, scope, app)
 }
 
-/// Resolves `view`'s window team, falling back to a scope naming no team when `view` cannot
-/// resolve one at all -- not yet attached to a window, or (crossing into `warp_tui`, whose
-/// window registration follows its own successful workspaces-metadata response) an offline or
-/// pre-login session that was never registered.
-///
-/// That fallback is the same reading a genuinely teamless user already gets from the getters
-/// below, and every caller here is a display affordance -- which icon shows next to a model,
-/// not a safety control -- so approximating "not yet known" as "no team" is an acceptable
-/// cost rather than a defect.
-fn team_scope_for_view<'a, T: Entity>(
-    workspaces: &'a UserWorkspaces,
-    view: &WeakViewHandle<T>,
-    app: &AppContext,
-) -> TeamContext<'a> {
-    workspaces
-        .team_context(view, app)
-        .unwrap_or_else(|| workspaces.teamless_scope())
-}
-
 /// Whether the key icon should render next to `llm`: a BYO (member- or team-provided)
 /// credential is in use for it.
 ///
@@ -178,14 +159,38 @@ fn team_scope_for_view<'a, T: Entity>(
 /// `warp_tui` (see `tui_export.rs`), which cannot name [`TeamScope`] or [`TeamContext`] (both
 /// `pub(crate)` to this crate) across the crate boundary but can mint its own
 /// [`WeakViewHandle`].
+///
+/// `view` resolving no window at all -- not yet attached to one, or (crossing into
+/// `warp_tui`) an offline or pre-login session that was never registered -- reports no icon
+/// rather than falling back to a scope naming no team: `team_byo` is team-specific by
+/// construction, so a fabricated no-team scope would read one arbitrarily-chosen team's BYO
+/// configuration for a user who does have a team, exactly the defect this migration exists to
+/// remove. A window resolved to genuinely no team (the user belongs to no team, or the
+/// workspace has none to reconcile onto) still reaches [`byo_key_source_for_model`] normally.
 pub fn should_show_key_icon_for_model<T: Entity>(
     llm: &LLMInfo,
     view: &WeakViewHandle<T>,
     app: &AppContext,
 ) -> bool {
     let workspaces = UserWorkspaces::as_ref(app);
-    let scope = team_scope_for_view(workspaces, view, app);
+    let Some(scope) = workspaces.team_context(view, app) else {
+        return false;
+    };
     byo_key_source_for_model(llm, &scope, app).is_some()
+}
+
+/// [`should_show_key_icon_for_model`] for a caller that already holds a live [`ViewContext`]
+/// for the view being rendered, rather than only a [`WeakViewHandle`] -- in particular, a
+/// view's own constructor, whose handle cannot resolve a window until the constructor returns
+/// (see [`UserWorkspaces::team_context`]'s docs). [`ViewContext::window_id`] is valid
+/// throughout construction, so this resolves the correct window immediately instead of
+/// reporting no icon until a later, handle-based read can retry.
+pub fn should_show_key_icon_for_model_for_view<T: Entity>(
+    llm: &LLMInfo,
+    ctx: &ViewContext<T>,
+) -> bool {
+    let scope = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+    byo_key_source_for_model(llm, &scope, ctx).is_some()
 }
 
 fn should_show_host_icon_for_model(
@@ -201,14 +206,17 @@ fn should_show_host_icon_for_model(
 }
 
 /// Whether to badge `llm` with the AWS Bedrock host icon. See [`should_show_key_icon_for_model`]
-/// for why this takes a view rather than a resolved scope.
+/// for why this takes a view rather than a resolved scope, and why an unresolvable one reports
+/// no icon instead of fabricating a scope.
 pub fn should_show_bedrock_icon_for_model<T: Entity>(
     llm: &LLMInfo,
     view: &WeakViewHandle<T>,
     app: &AppContext,
 ) -> bool {
     let workspaces = UserWorkspaces::as_ref(app);
-    let scope = team_scope_for_view(workspaces, view, app);
+    let Some(scope) = workspaces.team_context(view, app) else {
+        return false;
+    };
     should_show_host_icon_for_model(
         llm,
         &LLMModelHost::AwsBedrock,
@@ -217,14 +225,16 @@ pub fn should_show_bedrock_icon_for_model<T: Entity>(
 }
 
 /// See [`should_show_bedrock_icon_for_model`] for why this takes a view rather than a resolved
-/// scope.
+/// scope, and why an unresolvable one reports no icon instead of fabricating a scope.
 pub fn should_show_gemini_enterprise_agent_platform_icon_for_model<T: Entity>(
     llm: &LLMInfo,
     view: &WeakViewHandle<T>,
     app: &AppContext,
 ) -> bool {
     let workspaces = UserWorkspaces::as_ref(app);
-    let scope = team_scope_for_view(workspaces, view, app);
+    let Some(scope) = workspaces.team_context(view, app) else {
+        return false;
+    };
     should_show_host_icon_for_model(
         llm,
         &LLMModelHost::GeminiEnterprise,

@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use warpui::elements::Empty;
 use warpui::platform::WindowStyle;
-use warpui::{App, Element, TypedActionView, View, WindowId};
+use warpui::{App, Element, TypedActionView, View, ViewContext, WindowId};
 
 use super::*;
 use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
@@ -13,6 +13,7 @@ use crate::auth::auth_manager::AuthManager;
 use crate::cloud_object::model::persistence::CloudModel;
 use crate::network::NetworkStatus;
 use crate::server::cloud_objects::update_manager::UpdateManager;
+use crate::server::ids::ServerId;
 use crate::server::server_api::ServerApiProvider;
 use crate::server::server_api::team::MockTeamClient;
 use crate::server::server_api::workspace::MockWorkspaceClient;
@@ -1454,11 +1455,27 @@ fn byo_key_source_for_model_for_a_window_with_no_team_reads_the_workspace() {
     });
 }
 
-#[derive(Default)]
-struct LlmsScopeTestView;
+/// Captures whether the key icon would be shown for `llm` at the moment this view is
+/// constructed, using its own handle -- before that handle is registered in `view_to_window`
+/// (registration happens only after the view's constructor returns; see
+/// [`UserWorkspaces::team_context`]'s docs). This is the concrete case, alongside a `warp_tui`
+/// session whose window exists but has not completed its own workspaces-metadata registration,
+/// where a view's window is genuinely *unknown* rather than resolved-to-no-team.
+struct LlmsScopeTestView {
+    key_icon_shown_during_construction: bool,
+}
 
 impl Entity for LlmsScopeTestView {
     type Event = ();
+}
+
+impl LlmsScopeTestView {
+    fn new(llm: LLMInfo, ctx: &mut ViewContext<Self>) -> Self {
+        let handle = ctx.handle();
+        Self {
+            key_icon_shown_during_construction: should_show_key_icon_for_model(&llm, &handle, ctx),
+        }
+    }
 }
 
 impl View for LlmsScopeTestView {
@@ -1475,33 +1492,147 @@ impl TypedActionView for LlmsScopeTestView {
     type Action = ();
 }
 
-/// A view whose window was never registered with `UserWorkspaces` -- e.g. an offline or
-/// pre-login `warp_tui` session -- is an *unknown* team, not a teamless one (Rule 3). For a
-/// display affordance like the key icon, [`should_show_key_icon_for_model`] deliberately reads
-/// that the same way a teamless user would, rather than erroring or panicking.
+/// A view cannot resolve its own team while it is still under construction, which is exactly
+/// the shape of an *unknown* scope (Rule 3): distinct from a resolved window with no team,
+/// this is a window [`UserWorkspaces`] cannot name at all. [`should_show_key_icon_for_model`]
+/// must not fall back to the workspace's own `team_byo` for that case -- `team_byo` is
+/// team-specific by construction, so for a user who does belong to a team, that fallback would
+/// read one arbitrarily-chosen team's configuration, exactly the defect this migration exists
+/// to remove. The workspace is configured permissively enough, and a real key is registered,
+/// that the wrong (workspace-copy) answer and the correct (no policy) answer differ.
 #[test]
-fn should_show_key_icon_for_model_reads_teamless_for_an_unregistered_window() {
-    let team = team_with_byo_policy(111, false);
-    let workspace = workspace_with_teams(vec![team]);
+fn should_show_key_icon_for_model_reports_no_icon_while_the_views_window_is_unknown() {
+    let team = team_with_byo_policy(111, true);
+    let mut workspace = workspace_with_teams(vec![team]);
+    workspace.settings.team_byo = Some(TeamByoSettings {
+        first_party_enabled: true,
+        endpoints_enabled: true,
+        allow_user_keys: true,
+        allow_user_endpoints: true,
+        first_party_keys: vec![],
+        endpoints: vec![],
+    });
+    let mut llm = agent_llm("gpt-5", "GPT 5");
+    llm.provider = LLMProvider::OpenAI;
 
     App::test((), |mut app| async move {
         register_user_workspaces_for_test(&mut app, workspace);
-        app.add_singleton_model(LLMPreferences::new);
         app.add_singleton_model(|ctx| {
             AIExecutionProfilesModel::new(&LaunchMode::new_for_unit_test(), ctx)
         });
+        app.add_singleton_model(LLMPreferences::new);
+        ApiKeyManager::handle(&app)
+            .update(&mut app, |manager, ctx| {
+                manager.persist_provider_key(LLMProvider::OpenAI, Some("sk-test".to_owned()), ctx)
+            })
+            .expect("no-op secure storage should accept the provider key");
 
-        let (_window_id, view) = app.add_window(WindowStyle::NotStealFocus, |_| LlmsScopeTestView);
-        let weak_view = view.downgrade();
+        let (_window_id, view) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
+            LlmsScopeTestView::new(llm, ctx)
+        });
 
         app.read(|ctx| {
-            let llm = LLMPreferences::as_ref(ctx)
-                .get_active_base_model(ctx, None)
-                .clone();
-            // No BYO key is configured and the workspace's own `team_byo` was never set, so
-            // this should read `false` either way -- the point is that resolving the scope
-            // for a window `UserWorkspaces` has no record of does not panic or error.
-            assert!(!should_show_key_icon_for_model(&llm, &weak_view, ctx));
+            assert!(
+                !view.as_ref(ctx).key_icon_shown_during_construction,
+                "a view that cannot yet resolve its window must not read the workspace's \
+                 permissive team_byo as if it were that view's own team's policy"
+            );
+        });
+    });
+}
+
+struct LlmsViewContextScopeTestView {
+    key_icon_shown_during_construction: bool,
+}
+
+impl Entity for LlmsViewContextScopeTestView {
+    type Event = ();
+}
+
+impl LlmsViewContextScopeTestView {
+    /// Assigns `team_uid` to this constructor's own window -- using [`ViewContext::window_id`],
+    /// valid from the first line of construction -- then immediately reads the key icon flag
+    /// through [`should_show_key_icon_for_model_for_view`], all before returning. This is the
+    /// construction-time path itself, not a proxy for it.
+    fn new(llm: LLMInfo, team_uid: ServerId, ctx: &mut ViewContext<Self>) -> Self {
+        let window_id = ctx.window_id();
+        UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window_id, team_uid, ctx);
+        });
+        Self {
+            key_icon_shown_during_construction: should_show_key_icon_for_model_for_view(&llm, ctx),
+        }
+    }
+}
+
+impl View for LlmsViewContextScopeTestView {
+    fn ui_name() -> &'static str {
+        "LlmsViewContextScopeTestView"
+    }
+
+    fn render(&self, _: &AppContext) -> Box<dyn Element> {
+        Empty::new().finish()
+    }
+}
+
+impl TypedActionView for LlmsViewContextScopeTestView {
+    type Action = ();
+}
+
+/// [`should_show_key_icon_for_model_for_view`] exists precisely because a view's own
+/// constructor cannot resolve a [`WeakViewHandle`] (see the previous test), but
+/// [`ViewContext::window_id`] is valid throughout construction. Pins that it resolves the
+/// *correct* window's team during construction, not merely a safe default: two windows
+/// assigned to opposing teams, each queried from inside its own view's constructor, must
+/// disagree with each other, matching each team's own policy.
+#[test]
+fn should_show_key_icon_for_model_for_view_resolves_the_constructing_views_own_window() {
+    let permissive_team = team_with_byo_policy(111, true);
+    let restrictive_team = team_with_byo_policy(222, false);
+    let workspace = workspace_with_teams(vec![permissive_team.clone(), restrictive_team.clone()]);
+    let mut llm = agent_llm("gpt-5", "GPT 5");
+    llm.provider = LLMProvider::OpenAI;
+
+    App::test((), |mut app| async move {
+        register_user_workspaces_for_test(&mut app, workspace);
+        app.add_singleton_model(|ctx| {
+            AIExecutionProfilesModel::new(&LaunchMode::new_for_unit_test(), ctx)
+        });
+        app.add_singleton_model(LLMPreferences::new);
+        ApiKeyManager::handle(&app)
+            .update(&mut app, |manager, ctx| {
+                manager.persist_provider_key(LLMProvider::OpenAI, Some("sk-test".to_owned()), ctx)
+            })
+            .expect("no-op secure storage should accept the provider key");
+
+        let permissive_llm = llm.clone();
+        let permissive_team_uid = permissive_team.uid;
+        let (_permissive_window, permissive_view) = app
+            .add_window(WindowStyle::NotStealFocus, move |ctx| {
+                LlmsViewContextScopeTestView::new(permissive_llm, permissive_team_uid, ctx)
+            });
+
+        let restrictive_team_uid = restrictive_team.uid;
+        let (_restrictive_window, restrictive_view) = app
+            .add_window(WindowStyle::NotStealFocus, move |ctx| {
+                LlmsViewContextScopeTestView::new(llm, restrictive_team_uid, ctx)
+            });
+
+        app.read(|ctx| {
+            assert!(
+                permissive_view
+                    .as_ref(ctx)
+                    .key_icon_shown_during_construction,
+                "the window under construction on the permissive team should see its own \
+                 team's key in use, resolved during construction"
+            );
+            assert!(
+                !restrictive_view
+                    .as_ref(ctx)
+                    .key_icon_shown_during_construction,
+                "the window under construction on the restrictive team must not inherit the \
+                 permissive team's key, even though construction can't use a WeakViewHandle"
+            );
         });
     });
 }

@@ -48,7 +48,7 @@ use crate::ai::harness_availability::{
 };
 use crate::ai::llms::{
     ByoKeySource, LLMId, LLMInfo, LLMPreferences, LLMPreferencesEvent, LLMSpec,
-    byo_key_source_for_model, dedupe_model_display_names, should_show_key_icon_for_model,
+    byo_key_source_for_model, dedupe_model_display_names, should_show_key_icon_for_model_for_view,
 };
 use crate::appearance::Appearance;
 use crate::cloud_object::model::generic_string_model::StringModel;
@@ -65,7 +65,7 @@ use crate::view_components::action_button::{
 };
 use crate::view_components::{FeaturePopup, NewFeaturePopupEvent, NewFeaturePopupLabel};
 use crate::workspace::WorkspaceAction;
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
 
 const MENU_WIDTH: f32 = 280.;
 const NEW_MODEL_CHOICES_POPUP_DELAY: Duration = Duration::from_millis(500);
@@ -530,6 +530,19 @@ impl ProfileModelSelector {
                 }
             },
         );
+
+        // The model dropdown's key icons are scoped to this view's own window team (see
+        // `refresh_model_menu`), so the cached items must be rebuilt when that window switches
+        // teams -- otherwise a still-open (or already-populated) menu keeps showing the
+        // previous team's BYO state until some other event happens to repaint it.
+        ctx.subscribe_to_model(&UserWorkspaces::handle(ctx), |me, _, event, ctx| {
+            let UserWorkspacesEvent::WindowTeamChanged { window_id } = event else {
+                return;
+            };
+            if me.view_handle.window_id(ctx) == Some(*window_id) {
+                me.refresh_model_menu(ctx);
+            }
+        });
 
         let manage_api_key_button = ctx.add_typed_action_view(|_ctx| {
             ActionButton::new("Manage", SecondaryTheme)
@@ -1103,7 +1116,9 @@ impl ProfileModelSelector {
             for llm in &custom_choices {
                 let mut fields = MenuItemFields::new(llm.menu_display_name())
                     .with_on_select_action(ProfileModelSelectorAction::SelectModel(llm.id.clone()));
-                if should_show_key_icon_for_model(llm, &self.view_handle, ctx) {
+                // Resolves from `ctx` directly, not `self.view_handle`: this method runs
+                // during `Self::new` too, before that handle can resolve a window.
+                if should_show_key_icon_for_model_for_view(llm, ctx) {
                     fields = fields.with_right_side_icon(Icon::Key);
                 }
                 items.push(MenuItem::Item(fields));
@@ -2336,11 +2351,14 @@ impl View for ProfileModelSelector {
                         .cloned();
                     Some(self.render_sidecar_spec_panel(&kind, &sidecar_spec, app))
                 } else if let Some(spec) = info.spec.as_ref() {
+                    // A view with no resolved window reports no BYO key source rather than
+                    // fabricating a no-team scope: `team_byo` is team-specific, so a fabricated
+                    // scope would read one arbitrarily-chosen team's configuration for a user
+                    // who does have a team.
                     let workspaces = UserWorkspaces::as_ref(app);
-                    let scope = workspaces
+                    let byo_key_source = workspaces
                         .team_context(&self.view_handle, app)
-                        .unwrap_or_else(|| workspaces.teamless_scope());
-                    let byo_key_source = byo_key_source_for_model(info, &scope, app);
+                        .and_then(|scope| byo_key_source_for_model(info, &scope, app));
                     Some(self.render_model_spec(spec, byo_key_source, app))
                 } else {
                     None

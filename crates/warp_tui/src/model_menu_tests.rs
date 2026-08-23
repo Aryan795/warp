@@ -1,6 +1,9 @@
+use std::cell::Cell;
+use std::rc::Rc;
+
 use ai::LLMProvider;
 use ai::api_keys::ApiKeyManager;
-use warp::tui_export::register_tui_session_view_test_singletons;
+use warp::tui_export::{UserWorkspaces, register_tui_session_view_test_singletons};
 use warp_core::features::FeatureFlag;
 use warpui::SingletonEntity as _;
 use warpui_core::elements::tui::{TuiElement, TuiText};
@@ -167,5 +170,68 @@ fn provider_key_controls_key_connected_callout() {
             )
         });
         assert_eq!(snapshot_row(&disconnected_row).state_suffix, None);
+    });
+}
+
+/// The credential/host icons in an open menu are scoped to the terminal surface's window
+/// team, so switching that window's team while the menu is open must repaint it -- not leave
+/// it showing the previous team's BYO/host state until the menu is closed and reopened.
+/// Verified by counting `TuiModelMenuEvent` emissions rather than inspecting row content,
+/// since the emission is exactly what `refresh_rows`'s new subscription contributes.
+#[test]
+fn open_menu_repaints_when_its_own_window_switches_team() {
+    App::test((), |mut app| async move {
+        register_tui_session_view_test_singletons(&mut app);
+        let (window_id, surface) = app.update(|ctx| {
+            ctx.add_tui_window(AddWindowOptions::default(), |_| ModelMenuTestSurface)
+        });
+        let (_other_window_id, _other_surface) = app.update(|ctx| {
+            ctx.add_tui_window(AddWindowOptions::default(), |_| ModelMenuTestSurface)
+        });
+
+        let input_editor = app.update(|ctx| ctx.add_model(|ctx| CodeEditorModel::new_tui(80, ctx)));
+        let suggestions_mode =
+            app.update(|ctx| ctx.add_model(|_| TuiInputSuggestionsModeModel::new()));
+        let terminal_view_id = EntityId::new();
+        let menu = app.update(|ctx| {
+            ctx.add_model(|ctx| {
+                TuiModelMenuModel::new(
+                    input_editor.clone(),
+                    suggestions_mode.clone(),
+                    terminal_view_id,
+                    surface.downgrade(),
+                    ctx,
+                )
+            })
+        });
+        menu.update(&mut app, |menu, ctx| menu.open(ctx));
+
+        let repaint_count = Rc::new(Cell::new(0));
+        let repaint_count_for_subscription = repaint_count.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_model(&menu, move |_, _: &TuiModelMenuEvent, _| {
+                repaint_count_for_subscription.set(repaint_count_for_subscription.get() + 1);
+            });
+        });
+
+        let unrelated_team = 111.into();
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.switch_window_to_team(_other_window_id, unrelated_team, ctx);
+        });
+        assert_eq!(
+            repaint_count.get(),
+            0,
+            "a team switch on a different window must not repaint this menu"
+        );
+
+        let this_window_team = 222.into();
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.switch_window_to_team(window_id, this_window_team, ctx);
+        });
+        assert_eq!(
+            repaint_count.get(),
+            1,
+            "switching this menu's own window to a different team must repaint it"
+        );
     });
 }
