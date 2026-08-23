@@ -12,8 +12,9 @@ use warpui::{Action, Element, Entity, ViewContext};
 use crate::ai::custom_model_routers::is_custom_router_id;
 use crate::ai::llms::{
     DisableReason, LLMId, LLMInfo, ModelIconFlags, model_leading_icon,
-    should_show_bedrock_icon_for_model,
-    should_show_gemini_enterprise_agent_platform_icon_for_model, should_show_key_icon_for_model,
+    should_show_bedrock_icon_for_model_for_view,
+    should_show_gemini_enterprise_agent_platform_icon_for_model_for_view,
+    should_show_key_icon_for_model_for_view,
 };
 use crate::menu::{MenuItem, MenuItemFields, MenuTooltipPosition};
 
@@ -86,12 +87,13 @@ fn make_item_fields<A: Action + Clone, V: Entity>(
         llm.menu_display_name()
     };
     // Every call site already holds a `ViewContext`, so the window (and its team) is
-    // resolved from the view rendering this menu rather than left ambient.
-    let view = ctx.handle();
-    let is_using_bedrock = should_show_bedrock_icon_for_model(llm, &view, ctx);
+    // resolved from that context directly -- not from a `WeakViewHandle` minted here, which
+    // would resolve nothing while this runs during the view's own construction (e.g. via
+    // `ProfileModelSelector::new` -> `refresh_state` -> `refresh_model_menu`).
+    let is_using_bedrock = should_show_bedrock_icon_for_model_for_view(llm, ctx);
     let is_using_gemini_enterprise_agent_platform =
-        should_show_gemini_enterprise_agent_platform_icon_for_model(llm, &view, ctx);
-    let is_using_api_key = should_show_key_icon_for_model(llm, &view, ctx);
+        should_show_gemini_enterprise_agent_platform_icon_for_model_for_view(llm, ctx);
+    let is_using_api_key = should_show_key_icon_for_model_for_view(llm, ctx);
     let is_custom_router = is_custom_router_id(llm.id.as_str());
     let leading_icon = model_leading_icon(
         llm,
@@ -203,3 +205,7 @@ pub fn available_model_menu_items<A: Action + Clone, V: Entity>(
         })
         .collect_vec()
 }
+
+#[cfg(test)]
+#[path = "model_menu_items_tests.rs"]
+mod tests;

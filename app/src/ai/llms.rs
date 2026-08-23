@@ -160,20 +160,22 @@ pub fn byo_key_source_for_model(
 /// `pub(crate)` to this crate) across the crate boundary but can mint its own
 /// [`WeakViewHandle`].
 ///
-/// `view` resolving no window at all -- not yet attached to one, or (crossing into
-/// `warp_tui`) an offline or pre-login session that was never registered -- reports no icon
-/// rather than falling back to a scope naming no team: `team_byo` is team-specific by
-/// construction, so a fabricated no-team scope would read one arbitrarily-chosen team's BYO
-/// configuration for a user who does have a team, exactly the defect this migration exists to
-/// remove. A window resolved to genuinely no team (the user belongs to no team, or the
-/// workspace has none to reconcile onto) still reaches [`byo_key_source_for_model`] normally.
+/// Resolves via [`UserWorkspaces::team_context_if_known`], not [`UserWorkspaces::team_context`]:
+/// `team_byo` is team-specific by construction, so a window `UserWorkspaces` has no record of
+/// at all must report no icon, the same as `view` resolving no window whatsoever -- not fall
+/// back to a scope naming no team, which [`byo_key_source_for_model`] would then read as the
+/// workspace's copy (one arbitrarily-chosen team's BYO configuration for a user who does have
+/// a team, exactly the defect this migration exists to remove). A window resolved to
+/// genuinely no team (the user belongs to no team, or the workspace has none to reconcile
+/// onto) is a *known* window with no team assignment, and still reaches
+/// [`byo_key_source_for_model`] normally.
 pub fn should_show_key_icon_for_model<T: Entity>(
     llm: &LLMInfo,
     view: &WeakViewHandle<T>,
     app: &AppContext,
 ) -> bool {
     let workspaces = UserWorkspaces::as_ref(app);
-    let Some(scope) = workspaces.team_context(view, app) else {
+    let Some(scope) = workspaces.team_context_if_known(view, app) else {
         return false;
     };
     byo_key_source_for_model(llm, &scope, app).is_some()
@@ -182,14 +184,19 @@ pub fn should_show_key_icon_for_model<T: Entity>(
 /// [`should_show_key_icon_for_model`] for a caller that already holds a live [`ViewContext`]
 /// for the view being rendered, rather than only a [`WeakViewHandle`] -- in particular, a
 /// view's own constructor, whose handle cannot resolve a window until the constructor returns
-/// (see [`UserWorkspaces::team_context`]'s docs). [`ViewContext::window_id`] is valid
-/// throughout construction, so this resolves the correct window immediately instead of
-/// reporting no icon until a later, handle-based read can retry.
+/// (see [`UserWorkspaces::team_context`]'s docs). [`ViewContext::window_id`] being valid
+/// throughout construction proves the view knows its window; it does not prove
+/// `UserWorkspaces` knows that window's team, so this still goes through
+/// [`UserWorkspaces::team_context_for_view_if_known`] rather than the plain,
+/// always-succeeding [`UserWorkspaces::team_context_for_view`] -- see that method's docs for
+/// why `team_byo` specifically cannot use the plain one.
 pub fn should_show_key_icon_for_model_for_view<T: Entity>(
     llm: &LLMInfo,
     ctx: &ViewContext<T>,
 ) -> bool {
-    let scope = UserWorkspaces::as_ref(ctx).team_context_for_view(ctx);
+    let Some(scope) = UserWorkspaces::as_ref(ctx).team_context_for_view_if_known(ctx) else {
+        return false;
+    };
     byo_key_source_for_model(llm, &scope, ctx).is_some()
 }
 
@@ -207,7 +214,10 @@ fn should_show_host_icon_for_model(
 
 /// Whether to badge `llm` with the AWS Bedrock host icon. See [`should_show_key_icon_for_model`]
 /// for why this takes a view rather than a resolved scope, and why an unresolvable one reports
-/// no icon instead of fabricating a scope.
+/// no icon instead of fabricating a scope. Unlike that getter, an *unknown* window (as opposed
+/// to an unattached view) is not specially guarded here: host availability comes from
+/// `llm_settings`, which -- unlike `team_byo` -- does not turn a no-team fallback into another
+/// team's data (see [`UserWorkspaces::team_context_if_known`]'s docs).
 pub fn should_show_bedrock_icon_for_model<T: Entity>(
     llm: &LLMInfo,
     view: &WeakViewHandle<T>,
@@ -221,6 +231,24 @@ pub fn should_show_bedrock_icon_for_model<T: Entity>(
         llm,
         &LLMModelHost::AwsBedrock,
         workspaces.is_aws_bedrock_credentials_enabled_for_scope(&scope, app),
+    )
+}
+
+/// [`should_show_bedrock_icon_for_model`] for a caller that already holds a live
+/// [`ViewContext`] -- see [`should_show_key_icon_for_model_for_view`] for why that matters
+/// during a view's own construction. Uses the plain, always-succeeding
+/// [`UserWorkspaces::team_context_for_view`], per [`should_show_bedrock_icon_for_model`]'s
+/// note on why host availability does not need the `_if_known` guard `team_byo` does.
+pub fn should_show_bedrock_icon_for_model_for_view<T: Entity>(
+    llm: &LLMInfo,
+    ctx: &ViewContext<T>,
+) -> bool {
+    let workspaces = UserWorkspaces::as_ref(ctx);
+    let scope = workspaces.team_context_for_view(ctx);
+    should_show_host_icon_for_model(
+        llm,
+        &LLMModelHost::AwsBedrock,
+        workspaces.is_aws_bedrock_credentials_enabled_for_scope(&scope, ctx),
     )
 }
 
@@ -239,6 +267,24 @@ pub fn should_show_gemini_enterprise_agent_platform_icon_for_model<T: Entity>(
         llm,
         &LLMModelHost::GeminiEnterprise,
         workspaces.is_gemini_enterprise_credentials_enabled_for_scope(&scope, app),
+    )
+}
+
+/// [`should_show_gemini_enterprise_agent_platform_icon_for_model`] for a caller that already
+/// holds a live [`ViewContext`] -- see [`should_show_key_icon_for_model_for_view`] for why
+/// that matters during a view's own construction. Uses the plain, always-succeeding
+/// [`UserWorkspaces::team_context_for_view`], per [`should_show_bedrock_icon_for_model`]'s
+/// note on why host availability does not need the `_if_known` guard `team_byo` does.
+pub fn should_show_gemini_enterprise_agent_platform_icon_for_model_for_view<T: Entity>(
+    llm: &LLMInfo,
+    ctx: &ViewContext<T>,
+) -> bool {
+    let workspaces = UserWorkspaces::as_ref(ctx);
+    let scope = workspaces.team_context_for_view(ctx);
+    should_show_host_icon_for_model(
+        llm,
+        &LLMModelHost::GeminiEnterprise,
+        workspaces.is_gemini_enterprise_credentials_enabled_for_scope(&scope, ctx),
     )
 }
 

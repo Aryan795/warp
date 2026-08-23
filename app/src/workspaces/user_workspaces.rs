@@ -505,6 +505,54 @@ impl UserWorkspaces {
         self.team_context_for_window_id(ctx.window_id())
     }
 
+    /// Whether this window has an explicit team assignment on record at all -- present in
+    /// `window_team_uids`, even if that entry is itself `None` (a registered teamless window).
+    /// `false` means *unknown*: `UserWorkspaces` has never heard of this window, e.g. because
+    /// registration (via `register_window`/`set_team_for_window`) has not run yet, or (for a
+    /// `warp_tui` session) the workspaces-metadata response that would trigger it hasn't
+    /// arrived. Unknown is not teamless: see [`Self::team_context_if_known`] and
+    /// [`Self::team_context_for_view_if_known`], which are the only correct way to resolve a
+    /// `team_byo` scope from a window that might not be known yet.
+    fn is_window_known(&self, window_id: WindowId) -> bool {
+        self.window_team_uids.contains_key(&window_id)
+    }
+
+    /// [`Self::team_context`], but `None` for an *unknown* window too, not just an unattached
+    /// view. Plain [`Self::team_context`] cannot make this distinction on its own: once it has
+    /// a `window_id`, [`Self::team_context_for_window_id`] reports the same `team_uid: None`
+    /// for "never registered" as it does for "registered with no team", and getters built on
+    /// that scope (like [`Self::team_byo_for_scope`]) then read the workspace's copy -- which,
+    /// for `team_byo` specifically, is one arbitrarily-chosen team's policy for a user who does
+    /// have a team, not a neutral default (see [`TeamScope`]'s contract). Use this instead of
+    /// [`Self::team_context`] wherever the scope feeds a `team_byo`-derived read.
+    pub(crate) fn team_context_if_known<'a, T: Entity>(
+        &'a self,
+        view: &WeakViewHandle<T>,
+        app: &AppContext,
+    ) -> Option<TeamContext<'a>> {
+        let window_id = view.window_id(app)?;
+        if !self.is_window_known(window_id) {
+            return None;
+        }
+        Some(self.team_context_for_window_id(window_id))
+    }
+
+    /// [`Self::team_context_for_view`], but `None` for an *unknown* window (see
+    /// [`Self::team_context_if_known`] for why plain [`Self::team_context_for_view`] cannot
+    /// make that distinction, and when a caller needs it). Use this instead of
+    /// [`Self::team_context_for_view`] wherever the scope feeds a `team_byo`-derived read,
+    /// including during a view's own construction.
+    pub(crate) fn team_context_for_view_if_known<T: Entity>(
+        &self,
+        ctx: &ViewContext<T>,
+    ) -> Option<TeamContext<'_>> {
+        let window_id = ctx.window_id();
+        if !self.is_window_known(window_id) {
+            return None;
+        }
+        Some(self.team_context_for_window_id(window_id))
+    }
+
     fn team_context_for_window_id(&self, window_id: WindowId) -> TeamContext<'_> {
         TeamContext {
             team_uid: self

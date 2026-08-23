@@ -1541,6 +1541,61 @@ fn should_show_key_icon_for_model_reports_no_icon_while_the_views_window_is_unkn
     });
 }
 
+/// [`should_show_key_icon_for_model`]'s other unknown-window case (REV-2205): unlike
+/// [`should_show_key_icon_for_model_reports_no_icon_while_the_views_window_is_unknown`], where
+/// the *view* resolves no window at all, here the window exists (the view is fully
+/// constructed and registered) but `UserWorkspaces` has no `window_team_uids` entry for it --
+/// e.g. a `warp_tui` window created before its workspaces-metadata response registers a team.
+/// The pre-fix `team_context` cannot tell that apart from a registered teamless window, so it
+/// would read the workspace's permissive `team_byo` here too.
+#[test]
+fn should_show_key_icon_for_model_reports_no_icon_for_a_resolved_window_unknown_to_user_workspaces()
+{
+    let team = team_with_byo_policy(111, true);
+    let mut workspace = workspace_with_teams(vec![team]);
+    workspace.settings.team_byo = Some(TeamByoSettings {
+        first_party_enabled: true,
+        endpoints_enabled: true,
+        allow_user_keys: true,
+        allow_user_endpoints: true,
+        first_party_keys: vec![],
+        endpoints: vec![],
+    });
+    let mut llm = agent_llm("gpt-5", "GPT 5");
+    llm.provider = LLMProvider::OpenAI;
+
+    App::test((), |mut app| async move {
+        register_user_workspaces_for_test(&mut app, workspace);
+        app.add_singleton_model(|ctx| {
+            AIExecutionProfilesModel::new(&LaunchMode::new_for_unit_test(), ctx)
+        });
+        app.add_singleton_model(LLMPreferences::new);
+        ApiKeyManager::handle(&app)
+            .update(&mut app, |manager, ctx| {
+                manager.persist_provider_key(LLMProvider::OpenAI, Some("sk-test".to_owned()), ctx)
+            })
+            .expect("no-op secure storage should accept the provider key");
+
+        // The construction-time read (see the other test) reads `false` regardless, since the
+        // handle can't resolve a window yet either way; what this test exercises is the read
+        // made *after* construction, once the view -- and therefore its window -- is real.
+        let (_window_id, view) = app.add_window(WindowStyle::NotStealFocus, {
+            let llm = llm.clone();
+            move |ctx| LlmsScopeTestView::new(llm, ctx)
+        });
+        let weak_view = view.downgrade();
+
+        app.read(|ctx| {
+            assert!(
+                !should_show_key_icon_for_model(&llm, &weak_view, ctx),
+                "a resolved window UserWorkspaces has never registered must not read the \
+                 workspace's permissive team_byo as if it were a genuinely teamless window's \
+                 fallback"
+            );
+        });
+    });
+}
+
 struct LlmsViewContextScopeTestView {
     key_icon_shown_during_construction: bool,
 }
@@ -1550,15 +1605,19 @@ impl Entity for LlmsViewContextScopeTestView {
 }
 
 impl LlmsViewContextScopeTestView {
-    /// Assigns `team_uid` to this constructor's own window -- using [`ViewContext::window_id`],
-    /// valid from the first line of construction -- then immediately reads the key icon flag
-    /// through [`should_show_key_icon_for_model_for_view`], all before returning. This is the
-    /// construction-time path itself, not a proxy for it.
-    fn new(llm: LLMInfo, team_uid: ServerId, ctx: &mut ViewContext<Self>) -> Self {
-        let window_id = ctx.window_id();
-        UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
-            user_workspaces.set_team_for_window(window_id, team_uid, ctx);
-        });
+    /// When `team_uid` is `Some`, assigns it to this constructor's own window -- using
+    /// [`ViewContext::window_id`], valid from the first line of construction -- making the
+    /// window *known* (registered, even if that registration were teamless). When `None`, the
+    /// window is left genuinely *unknown*: no entry at all in `UserWorkspaces`. Either way,
+    /// immediately reads the key icon flag through [`should_show_key_icon_for_model_for_view`]
+    /// before returning. This is the construction-time path itself, not a proxy for it.
+    fn new(llm: LLMInfo, team_uid: Option<ServerId>, ctx: &mut ViewContext<Self>) -> Self {
+        if let Some(team_uid) = team_uid {
+            let window_id = ctx.window_id();
+            UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
+                user_workspaces.set_team_for_window(window_id, team_uid, ctx);
+            });
+        }
         Self {
             key_icon_shown_during_construction: should_show_key_icon_for_model_for_view(&llm, ctx),
         }
@@ -1607,15 +1666,15 @@ fn should_show_key_icon_for_model_for_view_resolves_the_constructing_views_own_w
 
         let permissive_llm = llm.clone();
         let permissive_team_uid = permissive_team.uid;
-        let (_permissive_window, permissive_view) = app
-            .add_window(WindowStyle::NotStealFocus, move |ctx| {
-                LlmsViewContextScopeTestView::new(permissive_llm, permissive_team_uid, ctx)
+        let (_permissive_window, permissive_view) =
+            app.add_window(WindowStyle::NotStealFocus, move |ctx| {
+                LlmsViewContextScopeTestView::new(permissive_llm, Some(permissive_team_uid), ctx)
             });
 
         let restrictive_team_uid = restrictive_team.uid;
         let (_restrictive_window, restrictive_view) = app
             .add_window(WindowStyle::NotStealFocus, move |ctx| {
-                LlmsViewContextScopeTestView::new(llm, restrictive_team_uid, ctx)
+                LlmsViewContextScopeTestView::new(llm, Some(restrictive_team_uid), ctx)
             });
 
         app.read(|ctx| {
@@ -1632,6 +1691,59 @@ fn should_show_key_icon_for_model_for_view_resolves_the_constructing_views_own_w
                     .key_icon_shown_during_construction,
                 "the window under construction on the restrictive team must not inherit the \
                  permissive team's key, even though construction can't use a WeakViewHandle"
+            );
+        });
+    });
+}
+
+/// The other half of `should_show_key_icon_for_model_for_view`'s contract (REV-2205): a window
+/// *known* to `UserWorkspaces` with no team (exercised above, folded into the restrictive
+/// case's absence of team-specific data) is not the same state as a window
+/// `UserWorkspaces` has never heard of at all. A window's own constructor knows its
+/// `WindowId` (`ViewContext::window_id`), but that alone does not mean `UserWorkspaces` has a
+/// `window_team_uids` entry for it -- registration is a separate step this test deliberately
+/// skips. The workspace's own `team_byo` is configured permissively enough, with a real key
+/// registered, that reading it (the pre-fix bug) and correctly reading "no policy" would
+/// disagree.
+#[test]
+fn should_show_key_icon_for_model_for_view_reports_no_icon_for_a_window_unknown_to_user_workspaces()
+{
+    let team = team_with_byo_policy(111, true);
+    let mut workspace = workspace_with_teams(vec![team]);
+    workspace.settings.team_byo = Some(TeamByoSettings {
+        first_party_enabled: true,
+        endpoints_enabled: true,
+        allow_user_keys: true,
+        allow_user_endpoints: true,
+        first_party_keys: vec![],
+        endpoints: vec![],
+    });
+    let mut llm = agent_llm("gpt-5", "GPT 5");
+    llm.provider = LLMProvider::OpenAI;
+
+    App::test((), |mut app| async move {
+        register_user_workspaces_for_test(&mut app, workspace);
+        app.add_singleton_model(|ctx| {
+            AIExecutionProfilesModel::new(&LaunchMode::new_for_unit_test(), ctx)
+        });
+        app.add_singleton_model(LLMPreferences::new);
+        ApiKeyManager::handle(&app)
+            .update(&mut app, |manager, ctx| {
+                manager.persist_provider_key(LLMProvider::OpenAI, Some("sk-test".to_owned()), ctx)
+            })
+            .expect("no-op secure storage should accept the provider key");
+
+        // No `set_team_for_window` call at all: this window is genuinely unknown to
+        // `UserWorkspaces`, not merely resolved-to-no-team.
+        let (_window_id, view) = app.add_window(WindowStyle::NotStealFocus, move |ctx| {
+            LlmsViewContextScopeTestView::new(llm, None, ctx)
+        });
+
+        app.read(|ctx| {
+            assert!(
+                !view.as_ref(ctx).key_icon_shown_during_construction,
+                "a window UserWorkspaces has never registered must not read the workspace's \
+                 permissive team_byo as if it were a genuinely teamless window's fallback"
             );
         });
     });

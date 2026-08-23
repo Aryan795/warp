@@ -12,9 +12,10 @@ use warpui_core::{AddWindowOptions, App, AppContext, Entity, TuiView, TypedActio
 use super::*;
 
 /// Stands in for the terminal surface so [`model_credential_icon_resolver`] has a real window
-/// to resolve, without pulling in `TuiTerminalSessionView`'s full construction. No team is
-/// registered for its window, so the resolver reads as teamless -- exactly the entitlement-only
-/// answer these tests exercise.
+/// to resolve, without pulling in `TuiTerminalSessionView`'s full construction. Unlike
+/// `RootTuiView`, this double does not register its own window on construction, so a caller
+/// that needs the window to read as *known, no team* (rather than *unknown* -- see REV-2205)
+/// must call `UserWorkspaces::register_window` itself.
 struct ModelMenuTestSurface;
 
 impl Entity for ModelMenuTestSurface {
@@ -111,8 +112,16 @@ fn provider_key_controls_key_connected_callout() {
     App::test((), |mut app| async move {
         let _byok = FeatureFlag::SoloUserByok.override_enabled(true);
         register_tui_session_view_test_singletons(&mut app);
-        let (_window_id, surface) = app.update(|ctx| {
+        let (window_id, surface) = app.update(|ctx| {
             ctx.add_tui_window(AddWindowOptions::default(), |_| ModelMenuTestSurface)
+        });
+        // A real TUI window is registered (possibly teamless) the moment `RootTuiView`
+        // constructs -- see its own `register_window` call. This test double bypasses that
+        // constructor, so it registers the window itself to model the same "known, no team"
+        // state rather than leaving `UserWorkspaces` with no entry for it at all, which reads
+        // as *unknown* (REV-2205) and would report no icon regardless of entitlement.
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.register_window(window_id, None, ctx);
         });
         let credential_icons = model_credential_icon_resolver(surface.downgrade());
         let mut llm = app.read(|ctx| {
