@@ -1,7 +1,9 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use warpui::App;
+use warpui::elements::Empty;
+use warpui::platform::WindowStyle;
+use warpui::{App, Element, TypedActionView, View, WindowId};
 
 use super::*;
 use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
@@ -12,11 +14,18 @@ use crate::cloud_object::model::persistence::CloudModel;
 use crate::network::NetworkStatus;
 use crate::server::cloud_objects::update_manager::UpdateManager;
 use crate::server::server_api::ServerApiProvider;
+use crate::server::server_api::team::MockTeamClient;
+use crate::server::server_api::workspace::MockWorkspaceClient;
 use crate::server::sync_queue::SyncQueue;
+use crate::settings::PrivacySettings;
 use crate::terminal::input::models::query_model_picker_choices;
 use crate::test_util::settings::initialize_settings_for_tests;
+use crate::workspaces::team::Team;
 use crate::workspaces::team_tester::TeamTesterStatus;
 use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::workspace::{
+    BillingMetadata, ManagedByokByoePolicy, TeamByoSettings, TeamSettings, Tier, Workspace,
+};
 use crate::{LaunchMode, TuiEntryPoint};
 
 // -- DisableReason::should_clear_preference tests --
@@ -1289,5 +1298,207 @@ fn explicit_child_model_pin_preserves_gui_behavior_and_only_emits_for_effective_
             preferences.set_agent_mode_llm_override(surface_id, LLMId::from("claude-opus"), ctx);
         });
         assert_eq!(active_model_events.get(), 1);
+    });
+}
+
+// -- Half B: `byo_key_source_for_model` / icon scoping to the window's team --
+
+/// A team whose plan manages BYOK/BYOE centrally, with `team_byo` set from `allow_member_credentials`.
+fn team_with_byo_policy(uid: i64, allow_member_credentials: bool) -> Team {
+    Team::from_local_cache(
+        uid.into(),
+        format!("team-{uid}"),
+        Some(TeamSettings {
+            team_byo: Some(TeamByoSettings {
+                first_party_enabled: true,
+                endpoints_enabled: true,
+                allow_user_keys: allow_member_credentials,
+                allow_user_endpoints: allow_member_credentials,
+                first_party_keys: vec![],
+                endpoints: vec![],
+            }),
+            ..Default::default()
+        }),
+        Some(BillingMetadata {
+            tier: Tier {
+                managed_byok_byoe_policy: Some(ManagedByokByoePolicy { enabled: true }),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        None,
+    )
+}
+
+fn workspace_with_teams(teams: Vec<Team>) -> Workspace {
+    Workspace::from_local_cache(
+        "workspace_uid123456789".to_string().into(),
+        "test".to_string(),
+        Some(teams),
+    )
+}
+
+fn register_user_workspaces_for_test(app: &mut App, workspace: Workspace) {
+    initialize_settings_for_tests(app);
+    app.add_singleton_model(|_| ServerApiProvider::new_for_test());
+    app.add_singleton_model(|_| AuthStateProvider::new_for_test());
+    app.add_singleton_model(AuthManager::new_for_test);
+    app.add_singleton_model(|_| NetworkStatus::new());
+    app.add_singleton_model(CloudModel::mock);
+    app.add_singleton_model(TeamTesterStatus::mock);
+    app.add_singleton_model(SyncQueue::mock);
+    app.add_singleton_model(UpdateManager::mock);
+    app.add_singleton_model(|_| TemplatableMCPServerManager::default());
+    app.add_singleton_model(PrivacySettings::mock);
+    app.add_singleton_model(|ctx| {
+        UserWorkspaces::mock(
+            Arc::new(MockTeamClient::new()),
+            Arc::new(MockWorkspaceClient::new()),
+            vec![workspace],
+            ctx,
+        )
+    });
+}
+
+/// The Half B fix: `byo_key_source_for_model` used to read `current_workspace().settings`,
+/// one arbitrarily-chosen team's `team_byo` for a user on more than one team. Scoped, it must
+/// follow the requesting window's own team instead -- with the same BYO key configured, one
+/// window's read must show it in use while the other's must not.
+#[test]
+fn byo_key_source_for_model_follows_each_windows_own_team() {
+    let permissive_team = team_with_byo_policy(111, true);
+    let restrictive_team = team_with_byo_policy(222, false);
+    let workspace = workspace_with_teams(vec![permissive_team.clone(), restrictive_team.clone()]);
+    let mut llm = agent_llm("gpt-5", "GPT 5");
+    llm.provider = LLMProvider::OpenAI;
+
+    App::test((), |mut app| async move {
+        register_user_workspaces_for_test(&mut app, workspace);
+        app.add_singleton_model(LLMPreferences::new);
+        app.update(|ctx| {
+            warpui_extras::secure_storage::register_noop("test", ctx);
+        });
+        app.add_singleton_model(ApiKeyManager::new);
+        ApiKeyManager::handle(&app)
+            .update(&mut app, |manager, ctx| {
+                manager.persist_provider_key(LLMProvider::OpenAI, Some("sk-test".to_owned()), ctx)
+            })
+            .expect("no-op secure storage should accept the provider key");
+
+        let permissive_window = WindowId::new();
+        let restrictive_window = WindowId::new();
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(permissive_window, permissive_team.uid, ctx);
+            user_workspaces.set_team_for_window(restrictive_window, restrictive_team.uid, ctx);
+        });
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            let permissive_scope =
+                user_workspaces.team_context_for_window_for_test(permissive_window);
+            let restrictive_scope =
+                user_workspaces.team_context_for_window_for_test(restrictive_window);
+
+            assert_eq!(
+                byo_key_source_for_model(&llm, &permissive_scope, ctx),
+                Some(ByoKeySource::UserProvided),
+                "the permissive team's window should report the member's own key in use"
+            );
+            assert_eq!(
+                byo_key_source_for_model(&llm, &restrictive_scope, ctx),
+                None,
+                "the restrictive team's window must not report the same member key as usable, \
+                 even though it's the same workspace and the same configured key"
+            );
+        });
+    });
+}
+
+/// A window with no team resolves to the same scope a teamless user gets: the workspace's own
+/// `team_byo`, not "no policy restricts this" and not the union over every team.
+#[test]
+fn byo_key_source_for_model_for_a_window_with_no_team_reads_the_workspace() {
+    let team = team_with_byo_policy(111, false);
+    let mut workspace = workspace_with_teams(vec![team]);
+    workspace.teams.clear();
+    workspace.settings.team_byo = Some(TeamByoSettings {
+        first_party_enabled: true,
+        endpoints_enabled: true,
+        allow_user_keys: false,
+        allow_user_endpoints: false,
+        first_party_keys: vec![],
+        endpoints: vec![],
+    });
+
+    App::test((), |mut app| async move {
+        register_user_workspaces_for_test(&mut app, workspace);
+        app.add_singleton_model(LLMPreferences::new);
+
+        let window_id = WindowId::new();
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.register_window(window_id, None, ctx);
+        });
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            let scope = user_workspaces.team_context_for_window_for_test(window_id);
+            assert_eq!(scope.team_uid(), None);
+            assert!(
+                !user_workspaces.are_member_byo_keys_allowed_for_scope(&scope),
+                "a teamless window must read the workspace's own restrictive team_byo"
+            );
+        });
+    });
+}
+
+#[derive(Default)]
+struct LlmsScopeTestView;
+
+impl Entity for LlmsScopeTestView {
+    type Event = ();
+}
+
+impl View for LlmsScopeTestView {
+    fn ui_name() -> &'static str {
+        "LlmsScopeTestView"
+    }
+
+    fn render(&self, _: &AppContext) -> Box<dyn Element> {
+        Empty::new().finish()
+    }
+}
+
+impl TypedActionView for LlmsScopeTestView {
+    type Action = ();
+}
+
+/// A view whose window was never registered with `UserWorkspaces` -- e.g. an offline or
+/// pre-login `warp_tui` session -- is an *unknown* team, not a teamless one (Rule 3). For a
+/// display affordance like the key icon, [`should_show_key_icon_for_model`] deliberately reads
+/// that the same way a teamless user would, rather than erroring or panicking.
+#[test]
+fn should_show_key_icon_for_model_reads_teamless_for_an_unregistered_window() {
+    let team = team_with_byo_policy(111, false);
+    let workspace = workspace_with_teams(vec![team]);
+
+    App::test((), |mut app| async move {
+        register_user_workspaces_for_test(&mut app, workspace);
+        app.add_singleton_model(LLMPreferences::new);
+        app.add_singleton_model(|ctx| {
+            AIExecutionProfilesModel::new(&LaunchMode::new_for_unit_test(), ctx)
+        });
+
+        let (_window_id, view) = app.add_window(WindowStyle::NotStealFocus, |_| LlmsScopeTestView);
+        let weak_view = view.downgrade();
+
+        app.read(|ctx| {
+            let llm = LLMPreferences::as_ref(ctx)
+                .get_active_base_model(ctx, None)
+                .clone();
+            // No BYO key is configured and the workspace's own `team_byo` was never set, so
+            // this should read `false` either way -- the point is that resolving the scope
+            // for a window `UserWorkspaces` has no record of does not panic or error.
+            assert!(!should_show_key_icon_for_model(&llm, &weak_view, ctx));
+        });
     });
 }

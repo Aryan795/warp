@@ -50,7 +50,7 @@ use warpui::{AddSingletonModel, App, Element, TypedActionView, View, ViewHandle,
 use warpui_extras::user_preferences;
 
 use super::*;
-use crate::ai::llms::{LLMModelHost, LLMProvider};
+use crate::ai::llms::{LLMId, LLMModelHost, LLMProvider};
 use crate::auth::AuthManager;
 use crate::cloud_object::model::persistence::CloudModel;
 use crate::cloud_object::{CloudObject, CloudObjectGuest};
@@ -73,9 +73,9 @@ use crate::workspaces::team_tester::TeamTesterStatus;
 use crate::workspaces::update_manager::TeamUpdateManager;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::workspaces::workspace::{
-    AdminEnablementSetting, ByoFirstPartyKey, HostEnablementSetting, LlmHostSettings,
-    ManagedByokByoePolicy, MultiAdminPolicy, PurchaseAddOnCreditsPolicy, TeamByoSettings,
-    Workspace,
+    AdminEnablementSetting, ByoEndpointMetadata, ByoEndpointModelMetadata, ByoFirstPartyKey,
+    HostEnablementSetting, LlmHostSettings, ManagedByokByoePolicy, MultiAdminPolicy,
+    PurchaseAddOnCreditsPolicy, TeamByoSettings, Workspace,
 };
 
 #[derive(Default)]
@@ -1594,6 +1594,162 @@ fn member_byo_policy_follows_a_window_reconciled_onto_another_team() {
                     &user_workspaces.team_context_for_window_for_test(window_id)
                 ),
                 "the window reconciled onto the restrictive team, so its policy applies now"
+            );
+        });
+    })
+}
+
+/// [`team_first_party_key_follows_each_windows_own_team`]'s counterpart for member-configured
+/// custom endpoints, the other half of Half B's real bug: which BYO endpoint a window's model
+/// picker shows was previously read from one arbitrarily-chosen team.
+#[test]
+fn has_team_byo_endpoint_follows_each_windows_own_team() {
+    let (team_a, mut team_b) = two_teams_with_opposing_byo_policy();
+    let routed_llm_id = LLMId::from("team-b-endpoint-model");
+    team_b.settings.team_byo.as_mut().unwrap().endpoints = vec![ByoEndpointMetadata {
+        uid: "endpoint-uid".to_string(),
+        name: "Team B endpoint".to_string(),
+        enabled: true,
+        credential_uid: "cred-uid".to_string(),
+        models: vec![ByoEndpointModelMetadata {
+            config_key: routed_llm_id.to_string(),
+            slug: "model".to_string(),
+            alias: None,
+            display_name: "Model".to_string(),
+            enabled: true,
+        }],
+    }];
+    let mut workspace = workspace_for_test(&team_a);
+    workspace.teams.push(team_b.clone());
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        let (window_a, _view_a) = create_test_window(&mut app);
+        let (window_b, _view_b) = create_test_window(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window_a, team_a.uid, ctx);
+            user_workspaces.set_team_for_window(window_b, team_b.uid, ctx);
+        });
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert!(
+                !user_workspaces.has_team_byo_endpoint_for_scope(
+                    &user_workspaces.team_context_for_window_for_test(window_a),
+                    &routed_llm_id,
+                ),
+                "team A configures no endpoint, so its window should report none"
+            );
+            assert!(
+                user_workspaces.has_team_byo_endpoint_for_scope(
+                    &user_workspaces.team_context_for_window_for_test(window_b),
+                    &routed_llm_id,
+                ),
+                "team B routes this model through its endpoint, so its window should report one"
+            );
+            assert!(
+                !user_workspaces.has_team_byo_endpoint_for_scope(
+                    &user_workspaces.team_context_for_window_for_test(window_b),
+                    &LLMId::from("unrelated-model"),
+                ),
+                "team B's endpoint does not route this model, so it should report none for it"
+            );
+        });
+    })
+}
+
+/// Two teams under a plan that manages BYOK/BYOE centrally, with an AWS Bedrock host enforced
+/// only for `team_a`. Mirrors [`two_teams_with_opposing_byo_policy`] for the host-credential
+/// getters that retired the `warp_tui` "no window to scope to" aggregate.
+fn two_teams_with_opposing_bedrock_host() -> (Team, Team) {
+    let (mut team_a, mut team_b) = two_teams();
+    team_a.settings.llm_settings.enabled = true;
+    team_a.settings.llm_settings.host_configs.insert(
+        LLMModelHost::AwsBedrock,
+        LlmHostSettings {
+            enabled: true,
+            enablement_setting: HostEnablementSetting::Enforce,
+            gcp_audience: None,
+            gcp_sa_email: None,
+        },
+    );
+    team_b.settings.llm_settings.enabled = true;
+    (team_a, team_b)
+}
+
+/// Pins the getter this slice added to retire `should_show_bedrock_icon_for_model`'s
+/// any-team-enables aggregate: with a real window in hand, the badge should follow that
+/// window's own team rather than any team that happens to enable the host.
+#[test]
+fn aws_bedrock_credentials_for_scope_follows_each_windows_own_team() {
+    let (team_a, team_b) = two_teams_with_opposing_bedrock_host();
+    let mut workspace = workspace_for_test(&team_a);
+    workspace.teams.push(team_b.clone());
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        let (window_a, _view_a) = create_test_window(&mut app);
+        let (window_b, _view_b) = create_test_window(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window_a, team_a.uid, ctx);
+            user_workspaces.set_team_for_window(window_b, team_b.uid, ctx);
+        });
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert!(
+                user_workspaces.is_aws_bedrock_credentials_enabled_for_scope(
+                    &user_workspaces.team_context_for_window_for_test(window_a),
+                    ctx,
+                ),
+                "team A enforces Bedrock, so its window should badge models with it"
+            );
+            assert!(
+                !user_workspaces.is_aws_bedrock_credentials_enabled_for_scope(
+                    &user_workspaces.team_context_for_window_for_test(window_b),
+                    ctx,
+                ),
+                "team B does not enable Bedrock, so its window must not inherit team A's host"
+            );
+        });
+    })
+}
+
+/// A window with no team reads the workspace's own `llm_settings`, matching the fallback the
+/// `team_byo` getters already use -- not the union over every team, and not permanently off.
+#[test]
+fn aws_bedrock_credentials_for_a_window_with_no_team_follows_the_workspace() {
+    let (_team_a, team_b) = two_teams_with_opposing_bedrock_host();
+    let mut workspace = workspace_for_test(&team_b);
+    workspace.teams.clear();
+    workspace.settings.llm_settings.enabled = true;
+    workspace.settings.llm_settings.host_configs.insert(
+        LLMModelHost::AwsBedrock,
+        LlmHostSettings {
+            enabled: true,
+            enablement_setting: HostEnablementSetting::Enforce,
+            gcp_audience: None,
+            gcp_sa_email: None,
+        },
+    );
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        let (window_id, _view) = create_test_window(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.register_window(window_id, None, ctx);
+        });
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            let scope = user_workspaces.team_context_for_window_for_test(window_id);
+            assert_eq!(scope.team_uid(), None);
+            assert!(
+                user_workspaces.is_aws_bedrock_credentials_enabled_for_scope(&scope, ctx),
+                "a teamless window must read the workspace's own Bedrock host setting"
             );
         });
     })
