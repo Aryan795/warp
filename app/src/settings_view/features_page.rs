@@ -2997,16 +2997,16 @@ impl FeaturesPageView {
             editor_widgets.push(Box::new(SyntaxHighlightingWidget::default()))
         }
         if FeatureFlag::NativeShellCompletions.is_enabled() {
+            // Warp completions owns the nested "Open completions menu as you type" subgroup item;
+            // native completions follows it. When the flag is off, as-you-type renders top-level
+            // via CompletionsMenuWhileTypingWidget, as before.
             editor_widgets.push(Box::new(WarpCompletionsWidget::default()));
-        }
-        if input_settings
+            editor_widgets.push(Box::new(NativeShellCompletionsWidget::default()));
+        } else if input_settings
             .completions_open_while_typing
             .is_supported_on_current_platform()
         {
             editor_widgets.push(Box::new(CompletionsMenuWhileTypingWidget::default()));
-        }
-        if FeatureFlag::NativeShellCompletions.is_enabled() {
-            editor_widgets.push(Box::new(NativeShellCompletionsWidget::default()));
         }
         if input_settings
             .command_corrections
@@ -6134,17 +6134,8 @@ impl SettingsWidget for CompletionsMenuWhileTypingWidget {
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
-        // As-you-type only governs Warp's own completions, so when the native-completions feature
-        // is on this setting is nested under the Warp completions toggle and hidden when that
-        // toggle is off. With the feature off there is no Warp/native split, so it renders as a
-        // normal top-level switch, exactly as before.
-        let nested = FeatureFlag::NativeShellCompletions.is_enabled();
-        if nested && !*InputSettings::as_ref(app).warp_completions_enabled.value() {
-            return Flex::column().finish();
-        }
-
         let ui_builder = appearance.ui_builder();
-        let toggle = render_body_item::<FeaturesPageAction>(
+        render_body_item::<FeaturesPageAction>(
             "Open completions menu as you type".into(),
             None,
             LocalOnlyIconState::for_setting(
@@ -6171,26 +6162,24 @@ impl SettingsWidget for CompletionsMenuWhileTypingWidget {
                 })
                 .finish(),
             None,
-        );
-
-        if nested {
-            render_group(vec![toggle], appearance)
-        } else {
-            toggle
-        }
+        )
     }
 }
 
 #[derive(Default)]
 struct WarpCompletionsWidget {
     switch_state: SwitchStateHandle,
+    as_you_type_switch_state: SwitchStateHandle,
 }
 
 impl SettingsWidget for WarpCompletionsWidget {
     type View = FeaturesPageView;
 
+    // Carries the nested "Open completions menu as you type" search terms too, since that setting
+    // now lives inside this widget rather than its own; settings search matches only against these
+    // terms, so it must find them here.
     fn search_terms(&self) -> &str {
-        "warp completions built-in shell command suggestions"
+        "warp completions built-in shell command suggestions open completions menu as you type typing"
     }
 
     fn render(
@@ -6200,7 +6189,10 @@ impl SettingsWidget for WarpCompletionsWidget {
         app: &AppContext,
     ) -> Box<dyn Element> {
         let ui_builder = appearance.ui_builder();
-        render_body_item::<FeaturesPageAction>(
+        let warp_completions_enabled = *InputSettings::as_ref(app).warp_completions_enabled.value();
+
+        let mut column = Flex::column();
+        column.add_child(render_body_item::<FeaturesPageAction>(
             "Warp completions".into(),
             None,
             LocalOnlyIconState::for_setting(
@@ -6216,17 +6208,48 @@ impl SettingsWidget for WarpCompletionsWidget {
             appearance,
             ui_builder
                 .switch(self.switch_state.clone())
-                .check(*InputSettings::as_ref(app).warp_completions_enabled.value())
+                .check(warp_completions_enabled)
                 .build()
                 .on_click(move |ctx, _, _| {
                     ctx.dispatch_typed_action(FeaturesPageAction::ToggleWarpCompletions);
                 })
                 .finish(),
-            Some(
-                "Show Warp's built-in completions for shell commands. Turn this and native shell completions both off to disable command completions."
-                    .to_string(),
-            ),
-        )
+            None,
+        ));
+
+        // As-you-type only governs Warp's own completions, so it's nested under this toggle and
+        // shown only when Warp completions is on.
+        if warp_completions_enabled {
+            let as_you_type_switch = ui_builder
+                .switch(self.as_you_type_switch_state.clone())
+                .check(
+                    *InputSettings::as_ref(app)
+                        .completions_open_while_typing
+                        .value(),
+                )
+                .build()
+                .on_click(move |ctx, _, _| {
+                    ctx.dispatch_typed_action(FeaturesPageAction::ToggleCompletionsOpenWhileTyping);
+                })
+                .finish();
+            let as_you_type_item = view.render_setting_subgroup_item(
+                appearance,
+                LocalOnlyIconState::for_setting(
+                    CompletionsOpenWhileTyping::storage_key(),
+                    CompletionsOpenWhileTyping::sync_to_cloud(),
+                    &mut view
+                        .button_mouse_states
+                        .local_only_icon_tooltip_states
+                        .borrow_mut(),
+                    app,
+                ),
+                as_you_type_switch,
+                "Open completions menu as you type".into(),
+            );
+            column.add_child(render_group([as_you_type_item], appearance));
+        }
+
+        column.finish()
     }
 }
 
@@ -6253,21 +6276,25 @@ impl SettingsWidget for NativeShellCompletionsWidget {
         let warp_on = *input_settings.warp_completions_enabled.value();
         let as_you_type_on = *input_settings.completions_open_while_typing.value();
 
-        // The base description keeps the both-off behavior legible. When as-you-type is actually in
-        // effect -- Warp completions on and as-you-type on -- alongside native completions, swap in
-        // a clarification that the shell is asked only on the completions keybinding, never as you
-        // type, rendering the user's live binding (or a generic phrasing if they have unbound it).
+        // Convention on this page is no subtext unless something is surprising. The one surprise:
+        // with as-you-type actually in effect (Warp completions on, as-you-type on) alongside
+        // native completions, the shell is still only asked on the completions keybinding, never as
+        // you type. Explain just that, rendering the user's live binding (or a generic phrasing if
+        // they have unbound it).
         let description = if warp_on && as_you_type_on && native_on {
             let keystroke = &*view.completions_keystroke;
             if keystroke.is_empty() {
-                "Ask your shell for its own completions for shell commands. Native shell completions aren't generated as you type; open the completion menu to fetch them.".to_string()
-            } else {
-                format!(
-                    "Ask your shell for its own completions for shell commands. Native shell completions aren't generated as you type; press {keystroke} to fetch them."
+                Some(
+                    "Native shell completions aren't generated as you type; open the completion menu to fetch them."
+                        .to_string(),
                 )
+            } else {
+                Some(format!(
+                    "Native shell completions aren't generated as you type; press {keystroke} to fetch them."
+                ))
             }
         } else {
-            "Ask your shell for its own completions for shell commands. Turn this and Warp completions both off to disable command completions.".to_string()
+            None
         };
 
         let ui_builder = appearance.ui_builder();
@@ -6293,7 +6320,7 @@ impl SettingsWidget for NativeShellCompletionsWidget {
                     ctx.dispatch_typed_action(FeaturesPageAction::ToggleNativeShellCompletions);
                 })
                 .finish(),
-            Some(description),
+            description,
         )
     }
 }
