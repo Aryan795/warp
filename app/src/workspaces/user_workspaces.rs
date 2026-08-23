@@ -512,7 +512,8 @@ impl UserWorkspaces {
     /// `warp_tui` session) the workspaces-metadata response that would trigger it hasn't
     /// arrived. Unknown is not teamless: see [`Self::team_context_if_known`] and
     /// [`Self::team_context_for_view_if_known`], which are the only correct way to resolve a
-    /// `team_byo` scope from a window that might not be known yet.
+    /// scope from a window that might not be known yet, for any setting whose no-team fallback
+    /// is `current_workspace().settings` -- not just `team_byo`.
     fn is_window_known(&self, window_id: WindowId) -> bool {
         self.window_team_uids.contains_key(&window_id)
     }
@@ -521,10 +522,13 @@ impl UserWorkspaces {
     /// view. Plain [`Self::team_context`] cannot make this distinction on its own: once it has
     /// a `window_id`, [`Self::team_context_for_window_id`] reports the same `team_uid: None`
     /// for "never registered" as it does for "registered with no team", and getters built on
-    /// that scope (like [`Self::team_byo_for_scope`]) then read the workspace's copy -- which,
-    /// for `team_byo` specifically, is one arbitrarily-chosen team's policy for a user who does
-    /// have a team, not a neutral default (see [`TeamScope`]'s contract). Use this instead of
-    /// [`Self::team_context`] wherever the scope feeds a `team_byo`-derived read.
+    /// that scope (like [`Self::team_byo_for_scope`] and [`Self::llm_settings_for_scope`]) then
+    /// read the workspace's copy -- which is one arbitrarily-chosen team's *effective* settings
+    /// (`GetEffectiveWorkspaceSettingsForWorkspace` server-side) for a user who does have a
+    /// team, not a neutral default (see [`TeamScope`]'s contract). That applies to the whole
+    /// `WorkspaceSettings`/`TeamSettings` object, not to `team_byo` alone -- `llm_settings` is
+    /// not exempt. Use this instead of [`Self::team_context`] wherever the scope feeds a read
+    /// derived from either.
     pub(crate) fn team_context_if_known<'a, T: Entity>(
         &'a self,
         view: &WeakViewHandle<T>,
@@ -540,8 +544,8 @@ impl UserWorkspaces {
     /// [`Self::team_context_for_view`], but `None` for an *unknown* window (see
     /// [`Self::team_context_if_known`] for why plain [`Self::team_context_for_view`] cannot
     /// make that distinction, and when a caller needs it). Use this instead of
-    /// [`Self::team_context_for_view`] wherever the scope feeds a `team_byo`-derived read,
-    /// including during a view's own construction.
+    /// [`Self::team_context_for_view`] wherever the scope feeds a `team_byo`- or
+    /// `llm_settings`-derived read, including during a view's own construction.
     pub(crate) fn team_context_for_view_if_known<T: Entity>(
         &self,
         ctx: &ViewContext<T>,

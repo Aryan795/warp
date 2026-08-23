@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use warp_core::features::FeatureFlag;
 use warpui::elements::Empty;
 use warpui::platform::WindowStyle;
 use warpui::{App, Element, TypedActionView, View, ViewContext, WindowId};
@@ -26,8 +27,8 @@ use crate::workspaces::team::Team;
 use crate::workspaces::team_tester::TeamTesterStatus;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::workspaces::workspace::{
-    BillingMetadata, ByoApiKeyPolicy, ManagedByokByoePolicy, TeamByoSettings, TeamSettings, Tier,
-    Workspace,
+    BillingMetadata, ByoApiKeyPolicy, HostEnablementSetting, LlmHostSettings, LlmSettings,
+    ManagedByokByoePolicy, TeamByoSettings, TeamSettings, Tier, Workspace,
 };
 use crate::{LaunchMode, TuiEntryPoint};
 
@@ -1334,6 +1335,36 @@ fn team_with_byo_policy(uid: i64, allow_member_credentials: bool) -> Team {
     )
 }
 
+/// A team whose `llm_settings` unconditionally enables `host` (`Enforce`, sidestepping the
+/// `AISettings` user toggle `RespectUserSetting` would otherwise consult).
+fn team_with_host_enabled(uid: i64, host: LLMModelHost, enabled: bool) -> Team {
+    let mut host_configs = HashMap::new();
+    if enabled {
+        host_configs.insert(
+            host,
+            LlmHostSettings {
+                enabled: true,
+                enablement_setting: HostEnablementSetting::Enforce,
+                gcp_audience: None,
+                gcp_sa_email: None,
+            },
+        );
+    }
+    Team::from_local_cache(
+        uid.into(),
+        format!("team-{uid}"),
+        Some(TeamSettings {
+            llm_settings: LlmSettings {
+                enabled: true,
+                host_configs,
+            },
+            ..Default::default()
+        }),
+        None,
+        None,
+    )
+}
+
 fn workspace_with_teams(teams: Vec<Team>) -> Workspace {
     Workspace::from_local_cache(
         "workspace_uid123456789".to_string().into(),
@@ -1598,6 +1629,7 @@ fn should_show_key_icon_for_model_reports_no_icon_for_a_resolved_window_unknown_
 
 struct LlmsViewContextScopeTestView {
     key_icon_shown_during_construction: bool,
+    bedrock_icon_shown_during_construction: bool,
 }
 
 impl Entity for LlmsViewContextScopeTestView {
@@ -1609,7 +1641,8 @@ impl LlmsViewContextScopeTestView {
     /// [`ViewContext::window_id`], valid from the first line of construction -- making the
     /// window *known* (registered, even if that registration were teamless). When `None`, the
     /// window is left genuinely *unknown*: no entry at all in `UserWorkspaces`. Either way,
-    /// immediately reads the key icon flag through [`should_show_key_icon_for_model_for_view`]
+    /// immediately reads the key and Bedrock icon flags through
+    /// [`should_show_key_icon_for_model_for_view`] / [`should_show_bedrock_icon_for_model_for_view`]
     /// before returning. This is the construction-time path itself, not a proxy for it.
     fn new(llm: LLMInfo, team_uid: Option<ServerId>, ctx: &mut ViewContext<Self>) -> Self {
         if let Some(team_uid) = team_uid {
@@ -1620,6 +1653,9 @@ impl LlmsViewContextScopeTestView {
         }
         Self {
             key_icon_shown_during_construction: should_show_key_icon_for_model_for_view(&llm, ctx),
+            bedrock_icon_shown_during_construction: should_show_bedrock_icon_for_model_for_view(
+                &llm, ctx,
+            ),
         }
     }
 }
@@ -1744,6 +1780,175 @@ fn should_show_key_icon_for_model_for_view_reports_no_icon_for_a_window_unknown_
                 !view.as_ref(ctx).key_icon_shown_during_construction,
                 "a window UserWorkspaces has never registered must not read the workspace's \
                  permissive team_byo as if it were a genuinely teamless window's fallback"
+            );
+        });
+    });
+}
+
+// -- Round-2 finding 2's other half: `llm_settings`'s no-team fallback is `current_workspace()`
+// too, so the Bedrock/Gemini Enterprise host getters need the same unknown-vs-teamless
+// distinction `team_byo` does (REV-2205 applies to the whole `WorkspaceSettings` object, not
+// just `team_byo`) --
+
+/// [`should_show_bedrock_icon_for_model`]'s share of the unknown-window case
+/// [`should_show_key_icon_for_model_reports_no_icon_for_a_resolved_window_unknown_to_user_workspaces`]
+/// pins for `team_byo`: `llm_settings`'s no-team fallback is likewise
+/// `current_workspace().settings` -- one arbitrarily-chosen team's *effective* settings for a
+/// user who does have a team, not a neutral default -- so an unknown window must not read it
+/// any more than a `team_byo` read may. The workspace is configured permissively enough that
+/// the wrong (workspace-copy) answer and the correct (no policy) answer differ.
+#[test]
+fn should_show_bedrock_icon_for_model_reports_no_icon_for_a_resolved_window_unknown_to_user_workspaces()
+ {
+    let team = team_with_host_enabled(111, LLMModelHost::AwsBedrock, true);
+    let mut workspace = workspace_with_teams(vec![team]);
+    workspace.settings.llm_settings = LlmSettings {
+        enabled: true,
+        host_configs: HashMap::from([(
+            LLMModelHost::AwsBedrock,
+            LlmHostSettings {
+                enabled: true,
+                enablement_setting: HostEnablementSetting::Enforce,
+                gcp_audience: None,
+                gcp_sa_email: None,
+            },
+        )]),
+    };
+    let mut llm = agent_llm("claude-test", "Claude Test");
+    llm.host_configs.insert(
+        LLMModelHost::AwsBedrock,
+        RoutingHostConfig {
+            enabled: true,
+            model_routing_host: LLMModelHost::AwsBedrock,
+        },
+    );
+
+    App::test((), |mut app| async move {
+        register_user_workspaces_for_test(&mut app, workspace);
+        app.add_singleton_model(|ctx| {
+            AIExecutionProfilesModel::new(&LaunchMode::new_for_unit_test(), ctx)
+        });
+        app.add_singleton_model(LLMPreferences::new);
+
+        let (_window_id, view) = app.add_window(WindowStyle::NotStealFocus, {
+            let llm = llm.clone();
+            move |ctx| LlmsScopeTestView::new(llm, ctx)
+        });
+        let weak_view = view.downgrade();
+
+        app.read(|ctx| {
+            assert!(
+                !should_show_bedrock_icon_for_model(&llm, &weak_view, ctx),
+                "a resolved window UserWorkspaces has never registered must not read the \
+                 workspace's permissive llm_settings as if it were a genuinely teamless \
+                 window's fallback"
+            );
+        });
+    });
+}
+
+/// [`should_show_bedrock_icon_for_model_for_view`]'s share of the unknown-window case, mirroring
+/// [`should_show_key_icon_for_model_for_view_reports_no_icon_for_a_window_unknown_to_user_workspaces`]
+/// for the construction-time path -- see the previous test for why `llm_settings` needs the
+/// same guard `team_byo` does.
+#[test]
+fn should_show_bedrock_icon_for_model_for_view_reports_no_icon_for_a_window_unknown_to_user_workspaces()
+ {
+    let team = team_with_host_enabled(111, LLMModelHost::AwsBedrock, true);
+    let mut workspace = workspace_with_teams(vec![team]);
+    workspace.settings.llm_settings = LlmSettings {
+        enabled: true,
+        host_configs: HashMap::from([(
+            LLMModelHost::AwsBedrock,
+            LlmHostSettings {
+                enabled: true,
+                enablement_setting: HostEnablementSetting::Enforce,
+                gcp_audience: None,
+                gcp_sa_email: None,
+            },
+        )]),
+    };
+    let mut llm = agent_llm("claude-test", "Claude Test");
+    llm.host_configs.insert(
+        LLMModelHost::AwsBedrock,
+        RoutingHostConfig {
+            enabled: true,
+            model_routing_host: LLMModelHost::AwsBedrock,
+        },
+    );
+
+    App::test((), |mut app| async move {
+        register_user_workspaces_for_test(&mut app, workspace);
+        app.add_singleton_model(|ctx| {
+            AIExecutionProfilesModel::new(&LaunchMode::new_for_unit_test(), ctx)
+        });
+        app.add_singleton_model(LLMPreferences::new);
+
+        // No `set_team_for_window` call at all: this window is genuinely unknown to
+        // `UserWorkspaces`, not merely resolved-to-no-team.
+        let (_window_id, view) = app.add_window(WindowStyle::NotStealFocus, move |ctx| {
+            LlmsViewContextScopeTestView::new(llm, None, ctx)
+        });
+
+        app.read(|ctx| {
+            assert!(
+                !view.as_ref(ctx).bedrock_icon_shown_during_construction,
+                "a window UserWorkspaces has never registered must not read the workspace's \
+                 permissive llm_settings as if it were a genuinely teamless window's fallback"
+            );
+        });
+    });
+}
+
+/// [`should_show_gemini_enterprise_agent_platform_icon_for_model`]'s own implementation needed
+/// the identical fix (a parallel, independently-written function): confirms it was actually
+/// applied there, not just documented as if it had been.
+#[test]
+fn should_show_gemini_enterprise_agent_platform_icon_for_model_reports_no_icon_for_a_resolved_window_unknown_to_user_workspaces()
+ {
+    let _geap_flag = FeatureFlag::GeminiEnterprise.override_enabled(true);
+    let team = team_with_host_enabled(111, LLMModelHost::GeminiEnterprise, true);
+    let mut workspace = workspace_with_teams(vec![team]);
+    workspace.settings.llm_settings = LlmSettings {
+        enabled: true,
+        host_configs: HashMap::from([(
+            LLMModelHost::GeminiEnterprise,
+            LlmHostSettings {
+                enabled: true,
+                enablement_setting: HostEnablementSetting::Enforce,
+                gcp_audience: None,
+                gcp_sa_email: None,
+            },
+        )]),
+    };
+    let mut llm = agent_llm("gemini-test", "Gemini Test");
+    llm.host_configs.insert(
+        LLMModelHost::GeminiEnterprise,
+        RoutingHostConfig {
+            enabled: true,
+            model_routing_host: LLMModelHost::GeminiEnterprise,
+        },
+    );
+
+    App::test((), |mut app| async move {
+        register_user_workspaces_for_test(&mut app, workspace);
+        app.add_singleton_model(|ctx| {
+            AIExecutionProfilesModel::new(&LaunchMode::new_for_unit_test(), ctx)
+        });
+        app.add_singleton_model(LLMPreferences::new);
+
+        let (_window_id, view) = app.add_window(WindowStyle::NotStealFocus, {
+            let llm = llm.clone();
+            move |ctx| LlmsScopeTestView::new(llm, ctx)
+        });
+        let weak_view = view.downgrade();
+
+        app.read(|ctx| {
+            assert!(
+                !should_show_gemini_enterprise_agent_platform_icon_for_model(&llm, &weak_view, ctx),
+                "a resolved window UserWorkspaces has never registered must not read the \
+                 workspace's permissive llm_settings as if it were a genuinely teamless \
+                 window's fallback"
             );
         });
     });

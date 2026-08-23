@@ -214,17 +214,20 @@ fn should_show_host_icon_for_model(
 
 /// Whether to badge `llm` with the AWS Bedrock host icon. See [`should_show_key_icon_for_model`]
 /// for why this takes a view rather than a resolved scope, and why an unresolvable one reports
-/// no icon instead of fabricating a scope. Unlike that getter, an *unknown* window (as opposed
-/// to an unattached view) is not specially guarded here: host availability comes from
-/// `llm_settings`, which -- unlike `team_byo` -- does not turn a no-team fallback into another
-/// team's data (see [`UserWorkspaces::team_context_if_known`]'s docs).
+/// no icon instead of fabricating a scope. Also resolves via
+/// [`UserWorkspaces::team_context_if_known`], not [`UserWorkspaces::team_context`]: host
+/// availability comes from `llm_settings`, whose no-team fallback is
+/// `current_workspace().settings` -- one arbitrarily-chosen team's *effective* settings
+/// (`GetEffectiveWorkspaceSettingsForWorkspace` server-side) for a user who does have a team,
+/// same as `team_byo`. An *unknown* window must not read that any more than a `team_byo` read
+/// may; a window resolved to genuinely no team still reaches the workspace fallback normally.
 pub fn should_show_bedrock_icon_for_model<T: Entity>(
     llm: &LLMInfo,
     view: &WeakViewHandle<T>,
     app: &AppContext,
 ) -> bool {
     let workspaces = UserWorkspaces::as_ref(app);
-    let Some(scope) = workspaces.team_context(view, app) else {
+    let Some(scope) = workspaces.team_context_if_known(view, app) else {
         return false;
     };
     should_show_host_icon_for_model(
@@ -236,15 +239,17 @@ pub fn should_show_bedrock_icon_for_model<T: Entity>(
 
 /// [`should_show_bedrock_icon_for_model`] for a caller that already holds a live
 /// [`ViewContext`] -- see [`should_show_key_icon_for_model_for_view`] for why that matters
-/// during a view's own construction. Uses the plain, always-succeeding
-/// [`UserWorkspaces::team_context_for_view`], per [`should_show_bedrock_icon_for_model`]'s
-/// note on why host availability does not need the `_if_known` guard `team_byo` does.
+/// during a view's own construction, and why this goes through
+/// [`UserWorkspaces::team_context_for_view_if_known`] rather than the plain,
+/// always-succeeding [`UserWorkspaces::team_context_for_view`].
 pub fn should_show_bedrock_icon_for_model_for_view<T: Entity>(
     llm: &LLMInfo,
     ctx: &ViewContext<T>,
 ) -> bool {
     let workspaces = UserWorkspaces::as_ref(ctx);
-    let scope = workspaces.team_context_for_view(ctx);
+    let Some(scope) = workspaces.team_context_for_view_if_known(ctx) else {
+        return false;
+    };
     should_show_host_icon_for_model(
         llm,
         &LLMModelHost::AwsBedrock,
@@ -253,14 +258,15 @@ pub fn should_show_bedrock_icon_for_model_for_view<T: Entity>(
 }
 
 /// See [`should_show_bedrock_icon_for_model`] for why this takes a view rather than a resolved
-/// scope, and why an unresolvable one reports no icon instead of fabricating a scope.
+/// scope, why an unresolvable one reports no icon instead of fabricating a scope, and why an
+/// *unknown* window must not fall back to the workspace's `llm_settings` either.
 pub fn should_show_gemini_enterprise_agent_platform_icon_for_model<T: Entity>(
     llm: &LLMInfo,
     view: &WeakViewHandle<T>,
     app: &AppContext,
 ) -> bool {
     let workspaces = UserWorkspaces::as_ref(app);
-    let Some(scope) = workspaces.team_context(view, app) else {
+    let Some(scope) = workspaces.team_context_if_known(view, app) else {
         return false;
     };
     should_show_host_icon_for_model(
@@ -272,15 +278,17 @@ pub fn should_show_gemini_enterprise_agent_platform_icon_for_model<T: Entity>(
 
 /// [`should_show_gemini_enterprise_agent_platform_icon_for_model`] for a caller that already
 /// holds a live [`ViewContext`] -- see [`should_show_key_icon_for_model_for_view`] for why
-/// that matters during a view's own construction. Uses the plain, always-succeeding
-/// [`UserWorkspaces::team_context_for_view`], per [`should_show_bedrock_icon_for_model`]'s
-/// note on why host availability does not need the `_if_known` guard `team_byo` does.
+/// that matters during a view's own construction, and why this goes through
+/// [`UserWorkspaces::team_context_for_view_if_known`] rather than the plain,
+/// always-succeeding [`UserWorkspaces::team_context_for_view`].
 pub fn should_show_gemini_enterprise_agent_platform_icon_for_model_for_view<T: Entity>(
     llm: &LLMInfo,
     ctx: &ViewContext<T>,
 ) -> bool {
     let workspaces = UserWorkspaces::as_ref(ctx);
-    let scope = workspaces.team_context_for_view(ctx);
+    let Some(scope) = workspaces.team_context_for_view_if_known(ctx) else {
+        return false;
+    };
     should_show_host_icon_for_model(
         llm,
         &LLMModelHost::GeminiEnterprise,
