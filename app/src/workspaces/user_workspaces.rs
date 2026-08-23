@@ -493,9 +493,10 @@ impl UserWorkspaces {
 
     /// Resolves `view`'s window team for one read. See [`TeamContext`].
     ///
-    /// `view`'s window always resolves -- even mid-construction -- via
-    /// [`WeakViewHandle::window_id`]'s fallback to the window it was created in, so this only
-    /// yields no team when that window itself has none assigned.
+    /// `view`'s window id always resolves -- [`WeakViewHandle::window_id`] falls back to the
+    /// window it was created in when there's no live mapping. The scope is teamless whenever
+    /// [`Self::team_for_window`] can't resolve a current team for that id, not only when none
+    /// is assigned.
     pub(crate) fn team_context<'a, T: Entity>(
         &'a self,
         view: &WeakViewHandle<T>,
