@@ -372,7 +372,8 @@ pub fn test_pwsh_vi_edit_mode_does_not_corrupt_commands() -> Builder {
 
 /// PSReadLine's `Windows` edit mode binds Escape to `RevertLine`, which damages a submitted
 /// command much as vi command mode does, so a profile that selects it must not corrupt commands
-/// either.
+/// either. `Windows` names the edit mode, not the platform: the shell-integration suite does not
+/// run against PowerShell on Windows, so this covers the mode wherever the suite does run.
 pub fn test_pwsh_windows_edit_mode_does_not_corrupt_commands() -> Builder {
     pwsh_edit_mode_does_not_corrupt_commands("Set-PSReadLineOption -EditMode Windows")
 }
