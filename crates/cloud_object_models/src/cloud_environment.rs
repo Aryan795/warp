@@ -16,6 +16,12 @@ pub enum CodeForge {
     GitHub,
     #[serde(rename = "GITLAB")]
     GitLab,
+    /// Container-only marker for an environment whose repositories span more
+    /// than one forge. It is never a valid per-repository value and never
+    /// fills an omitted repository forge; the server only stores it alongside
+    /// repositories that each declare their own concrete forge.
+    #[serde(rename = "MULTIPLE")]
+    Multiple,
 }
 
 impl CodeForge {
@@ -23,6 +29,9 @@ impl CodeForge {
         match self {
             CodeForge::GitHub => "github.com",
             CodeForge::GitLab => "gitlab.com",
+            // MULTIPLE names no host; per-repository forges are concrete by
+            // invariant, so this is a defensive legacy-GitHub fallback.
+            CodeForge::Multiple => "github.com",
         }
     }
 }
@@ -32,6 +41,7 @@ impl fmt::Display for CodeForge {
         match self {
             CodeForge::GitHub => write!(f, "GitHub"),
             CodeForge::GitLab => write!(f, "GitLab"),
+            CodeForge::Multiple => write!(f, "Multiple forges"),
         }
     }
 }
@@ -239,10 +249,15 @@ impl AmbientAgentEnvironment {
         }
     }
 
-    /// Returns the environment's source-control provider, defaulting to GitHub
-    /// for legacy environments.
+    /// Returns the concrete forge used to fill repositories that omit their
+    /// own, defaulting to GitHub for legacy environments. A MULTIPLE container
+    /// also resolves to GitHub here, which is safe because MULTIPLE is only
+    /// ever stored alongside fully-explicit repositories.
     pub fn effective_code_forge(&self) -> CodeForge {
-        self.code_forge.unwrap_or_default()
+        match self.code_forge {
+            Some(CodeForge::Multiple) | None => CodeForge::GitHub,
+            Some(forge) => forge,
+        }
     }
 
     /// Display string for this environment's base image, empty when the

@@ -477,6 +477,10 @@ fn repository_forge_for_repo(repo: &SourceRepo) -> RepositoryForge {
     match repo.code_forge.unwrap_or_default() {
         CodeForge::GitHub => RepositoryForge::GitHub,
         CodeForge::GitLab => RepositoryForge::GitLab,
+        // MULTIPLE is a container-only marker and never a valid
+        // per-repository value; treat it as the legacy GitHub default
+        // defensively.
+        CodeForge::Multiple => RepositoryForge::GitHub,
     }
 }
 fn head_override_matches_repo(head_override: &RepositoryHeadOverride, repo: &SourceRepo) -> bool {
