@@ -136,6 +136,7 @@ impl TurnUsageView {
         .finish();
 
         Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
             .with_child(title)
@@ -160,19 +161,28 @@ impl TurnUsageView {
         } else {
             Icon::ChevronDown
         };
-        let icon_size = appearance.overline_font_size();
+        // A couple of points larger than the base overline size so the
+        // section headers read clearly against the smaller body text.
+        let header_font_size = appearance.overline_font_size() + 2.;
+        let icon_size = header_font_size;
         let icon_color = blended_colors::text_disabled(theme, background);
         let header_row = Hoverable::new(toggle_mouse_state, move |_state| {
             Flex::row()
+                // `MainAxisSize::Max` is required for `SpaceBetween` to have any
+                // room to distribute -- without it the row shrink-wraps to its
+                // content width and the chevron ends up squeezed right next to
+                // the label (or the row overflows and wraps to a second line).
+                .with_main_axis_size(MainAxisSize::Max)
                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
                 .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
                 .with_child(
                     Text::new(
                         label.to_string(),
                         appearance.overline_font_family(),
-                        appearance.overline_font_size(),
+                        header_font_size,
                     )
                     .with_color(icon_color)
+                    .soft_wrap(false)
                     .finish(),
                 )
                 .with_child(
@@ -191,23 +201,28 @@ impl TurnUsageView {
 
         let mut section = Flex::column()
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_child(Container::new(header_row).with_margin_bottom(6.).finish());
+            .with_child(Container::new(header_row).with_margin_bottom(8.).finish());
 
-        if expanded {
+        if expanded && !rows.is_empty() {
+            // Two parallel columns (all labels, then all values), matching
+            // `ConversationUsageView`'s layout: the value column naturally
+            // starts immediately after the widest label in this section and
+            // stays left-aligned there, instead of each row independently
+            // trying (and failing, since a `Flex::row` shrink-wraps to its
+            // content by default) to space its own label/value pair apart.
+            let mut labels: Vec<Box<dyn Element>> = Vec::with_capacity(rows.len());
+            let mut values: Vec<Box<dyn Element>> = Vec::with_capacity(rows.len());
             for (label_el, value_el) in rows {
-                section = section.with_child(
-                    Container::new(
-                        Flex::row()
-                            .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                            .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
-                            .with_child(label_el)
-                            .with_child(value_el)
-                            .finish(),
-                    )
-                    .with_margin_bottom(6.)
-                    .finish(),
-                );
+                labels.push(Container::new(label_el).with_margin_bottom(6.).finish());
+                values.push(Container::new(value_el).with_margin_bottom(6.).finish());
             }
+            section = section.with_child(
+                Flex::row()
+                    .with_spacing(16.)
+                    .with_child(Flex::column().with_children(labels).finish())
+                    .with_child(Flex::column().with_children(values).finish())
+                    .finish(),
+            );
         }
 
         section.finish()
@@ -256,15 +271,6 @@ impl TurnUsageView {
             .with_main_axis_size(MainAxisSize::Min)
             .with_spacing(4.)
             .with_child(
-                Text::new(
-                    format!("{context_usage_pct}%"),
-                    appearance.ui_font_family(),
-                    font_size,
-                )
-                .with_color(text_color)
-                .finish(),
-            )
-            .with_child(
                 ConstrainedBox::new(render_context_window_usage_icon(
                     self.usage_info.context_window_usage,
                     theme,
@@ -272,6 +278,15 @@ impl TurnUsageView {
                 ))
                 .with_width(font_size)
                 .with_height(font_size)
+                .finish(),
+            )
+            .with_child(
+                Text::new(
+                    format!("{context_usage_pct}%"),
+                    appearance.ui_font_family(),
+                    font_size,
+                )
+                .with_color(text_color)
                 .finish(),
             )
             .finish();

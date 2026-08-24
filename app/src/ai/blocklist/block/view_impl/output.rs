@@ -3638,8 +3638,20 @@ fn render_response_footer(props: Props, app: &AppContext) -> Option<Box<dyn Elem
         flex.add_child(fork_button);
     }
 
-    flex.add_child(render_usage_button(props, app));
-    flex.add_child(render_turn_panel_button(props, app));
+    // The turn-scoped usage panel (Surface 3 of the pricing-transparency work) is gated
+    // behind `PricingTransparency`. When it's enabled and there's turn-scoped data to show,
+    // its pie-chart trigger icon replaces the legacy credit-count button rather than sitting
+    // alongside it.
+    let turn_panel_trigger_visible = FeatureFlag::PricingTransparency.is_enabled()
+        && props
+            .model
+            .conversation(app)
+            .is_some_and(|conversation| conversation.tool_calls_for_last_block().is_some());
+    if turn_panel_trigger_visible {
+        flex.add_child(render_turn_panel_button(props, app));
+    } else {
+        flex.add_child(render_usage_button(props, app));
+    }
 
     // Review changes button.
     if props.has_accepted_edits && !props.shared_session_status.is_viewer() {
@@ -3853,10 +3865,11 @@ fn render_turn_panel_button(props: Props, app: &AppContext) -> Box<dyn Element> 
     Hoverable::new(
         props.state_handles.turn_panel_button_handle.clone(),
         move |mouse_state| {
-            let icon_element = ConstrainedBox::new(Icon::Clock.to_warpui_icon(icon_color).finish())
-                .with_width(icon_size)
-                .with_height(icon_size)
-                .finish();
+            let icon_element =
+                ConstrainedBox::new(Icon::TurnUsagePie.to_warpui_icon(icon_color).finish())
+                    .with_width(icon_size)
+                    .with_height(icon_size)
+                    .finish();
             let mut content = Container::new(icon_element).with_uniform_padding(2.);
 
             // Keep the trigger visibly "active" while the panel is open, not

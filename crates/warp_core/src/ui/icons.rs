@@ -267,6 +267,9 @@ pub enum Icon {
     FileCopy,
     Credits,
     CreditCard,
+    /// Small pie/donut-style usage indicator, matching the Figma design for
+    /// the per-turn usage panel trigger.
+    TurnUsagePie,
     AddressedComment,
     ClockSnooze,
     Hand,
@@ -615,6 +618,7 @@ impl From<Icon> for &'static str {
             Icon::FileCopy => "bundled/svg/file_copy.svg",
             Icon::Credits => "bundled/svg/credits.svg",
             Icon::CreditCard => "bundled/svg/credit-card.svg",
+            Icon::TurnUsagePie => "bundled/svg/turn-usage-pie.svg",
             Icon::AddressedComment => "bundled/svg/addressed-comment.svg",
             Icon::ClockSnooze => "bundled/svg/clock-snooze.svg",
             Icon::Hand => "bundled/svg/hand.svg",
