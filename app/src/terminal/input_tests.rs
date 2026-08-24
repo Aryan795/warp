@@ -1273,6 +1273,10 @@ fn test_up_on_first_line_of_multiline_input_opens_history() {
                 editor.single_cursor_to_point(ctx).unwrap(),
                 Point { row: 0, column: 0 },
             );
+            assert!(
+                editor.single_cursor_on_first_line(ctx),
+                "precondition: cursor must be on the buffer's first logical line"
+            );
         });
 
         // Up on the first line of a multi-line buffer should still open history.
@@ -1313,6 +1317,10 @@ fn test_up_on_non_first_line_of_multiline_input_moves_cursor_not_history() {
             assert_eq!(
                 editor.single_cursor_to_point(ctx).unwrap(),
                 Point { row: 1, column: 8 },
+            );
+            assert!(
+                !editor.single_cursor_on_first_line(ctx),
+                "precondition: cursor must NOT be on the buffer's first logical line"
             );
         });
 
@@ -1365,6 +1373,10 @@ fn test_up_on_second_line_after_shift_enter_at_line_start_moves_cursor_not_histo
             assert_eq!(
                 editor.single_cursor_to_point(ctx).unwrap(),
                 Point { row: 1, column: 0 },
+            );
+            assert!(
+                !editor.single_cursor_on_first_line(ctx),
+                "precondition: cursor must NOT be on the buffer's first logical line"
             );
         });
 

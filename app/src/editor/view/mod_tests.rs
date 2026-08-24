@@ -2945,6 +2945,92 @@ fn test_move_to_visual_line_start_non_wrapped_unchanged() -> Result<()> {
     })
 }
 
+/// Regression test for APP-5601: `single_cursor_on_first_visual_row` must distinguish
+/// "unknown" (soft-wrap layout not yet available) from a definite non-first row, since a
+/// caller deciding whether Up should open command history on the buffer's first logical
+/// line must still answer `true` even before the layout is known.
+#[test]
+fn test_single_cursor_on_first_visual_row_distinguishes_unknown_from_wrapped() -> Result<()> {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let (_, view) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
+            EditorView::new_with_base_text("hello", Default::default(), ctx)
+        });
+
+        // Before any layout has been recorded, the soft-wrap row is unknown, not `false`.
+        view.read(&app, |view, ctx| {
+            assert_eq!(view.single_cursor_on_first_visual_row(ctx), None);
+            // The boolean compatibility wrapper still collapses "unknown" to `false`,
+            // matching the behavior its existing callers rely on.
+            assert!(!view.single_cursor_on_first_row(ctx));
+        });
+
+        // Once a single, unwrapped frame is recorded for the line, the cursor is
+        // definitively on the first (and only) visual row.
+        view.update(&mut app, |view, ctx| {
+            let frame_layouts = FrameLayouts::new(vec![Arc::new(TextFrame::mock("hello"))], 0, 1);
+            view.editor_model
+                .as_ref(ctx)
+                .display_map(ctx)
+                .soft_wrap_state()
+                .update(frame_layouts);
+        });
+        view.read(&app, |view, ctx| {
+            assert_eq!(view.single_cursor_on_first_visual_row(ctx), Some(true));
+        });
+
+        Ok(())
+    })
+}
+
+/// Companion to the "unknown" case above: once the soft-wrap layout is known and the
+/// cursor sits on a wrapped continuation row, `single_cursor_on_first_visual_row` must
+/// definitively report `Some(false)`, not `Some(true)`, so that a caller combining it with
+/// the logical-first-line check still moves within the wrap instead of opening history.
+/// Reuses the frame setup already validated by
+/// `test_move_to_visual_line_start_and_end_on_soft_wrapped_row`.
+#[test]
+fn test_single_cursor_on_first_visual_row_false_on_wrapped_continuation_row() -> Result<()> {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let (_, view) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
+            // A single logical line that soft-wraps onto three visual rows of four
+            // characters each.
+            EditorView::new_with_base_text("aaaabbbbcccc", Default::default(), ctx)
+        });
+
+        view.update(&mut app, |view, ctx| {
+            let frame_layouts =
+                FrameLayouts::new(vec![Arc::new(TextFrame::mock("aaaa\nbbbb\ncccc"))], 0, 3);
+            view.editor_model
+                .as_ref(ctx)
+                .display_map(ctx)
+                .soft_wrap_state()
+                .update(frame_layouts);
+
+            // Cursor within "aaaa", the first visual row. Kept in the same update() call as
+            // the rest of this test: crossing an update()/read() boundary lets the real
+            // layout system recompute (and overwrite) the soft-wrap state from the actual
+            // (unwrapped in this window) text, which would silently invalidate this mock.
+            view.select_ranges(vec![DisplayPoint::new(0, 2)..DisplayPoint::new(0, 2)], ctx)?;
+            assert_eq!(view.single_cursor_on_first_visual_row(ctx), Some(true));
+
+            // Cursor within "cccc", the third (last) visual row.
+            view.select_ranges(
+                vec![DisplayPoint::new(0, 10)..DisplayPoint::new(0, 10)],
+                ctx,
+            )?;
+            assert_eq!(view.single_cursor_on_first_visual_row(ctx), Some(false));
+
+            Ok::<(), Error>(())
+        })?;
+
+        Ok(())
+    })
+}
+
 /// Regression guard for the keybinding wiring (including the removal of the
 /// cross-platform Home/End `FixedBinding`s): on Linux/Windows the physical
 /// Home/End keys resolve to the visual-line action, while on macOS they resolve

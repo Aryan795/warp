@@ -9320,10 +9320,17 @@ impl Input {
             return;
         }
 
-        // Otherwise, open the history up menu only from the first visual row of the first
-        // logical line.
+        // Otherwise, open the history up menu when the cursor is on the buffer's first
+        // logical line. When the soft-wrap layout is available, also require the first
+        // visual row, so a wrapped continuation row of that line still moves within the
+        // wrap. When the layout is unavailable or stale, default to opening history: the
+        // logical-line check alone already answers for the buffer's first line.
         let editor = self.editor.as_ref(ctx);
-        if editor.single_cursor_on_first_line(ctx) && editor.single_cursor_on_first_row(ctx) {
+        let should_open_history = editor.single_cursor_on_first_line(ctx)
+            && editor
+                .single_cursor_on_first_visual_row(ctx)
+                .unwrap_or(true);
+        if should_open_history {
             if FeatureFlag::InlineHistoryMenu.is_enabled()
                 && self.suggestions_mode_model.as_ref(ctx).is_closed()
             {

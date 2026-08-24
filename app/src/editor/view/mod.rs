@@ -6733,21 +6733,31 @@ impl EditorView {
     }
 
     /// Whether the cursor appears on the first visual row, taking into account the line's
-    /// current soft-wrapping.
+    /// current soft-wrapping. Collapses the "unknown" case documented on
+    /// [`Self::single_cursor_on_first_visual_row`] to `false`; callers that need to tell
+    /// that case apart from a definite non-first row should call that method instead.
     pub fn single_cursor_on_first_row(&self, ctx: &AppContext) -> bool {
+        self.single_cursor_on_first_visual_row(ctx).unwrap_or(false)
+    }
+
+    /// Whether the cursor's soft-wrapped visual row is row 0, or `None` if that can't yet
+    /// be answered because the soft-wrap layout hasn't been laid out (or is stale
+    /// immediately after an edit, before the next repaint catches up). Distinguishing this
+    /// from a definite non-first row matters for callers like history-on-Up that must
+    /// still answer for the buffer's first logical line even when the visual layout is
+    /// unavailable.
+    pub fn single_cursor_on_first_visual_row(&self, ctx: &AppContext) -> Option<bool> {
         let map = self.editor_model.as_ref(ctx).display_map(ctx);
-        if self.editor_model.as_ref(ctx).is_single_cursor_only(ctx) {
-            let selection = self.first_selection(ctx);
-            let display_point = selection
-                .start()
-                .to_display_point(map, ctx)
-                .expect("Should be able to convert selection to display point");
-            map.to_soft_wrap_point(display_point, selection.clamp_direction)
-                .map(|soft_wrap_point| soft_wrap_point.row() == 0)
-                .unwrap_or(false)
-        } else {
-            false
+        if !self.editor_model.as_ref(ctx).is_single_cursor_only(ctx) {
+            return Some(false);
         }
+        let selection = self.first_selection(ctx);
+        let display_point = selection
+            .start()
+            .to_display_point(map, ctx)
+            .expect("Should be able to convert selection to display point");
+        map.to_soft_wrap_point(display_point, selection.clamp_direction)
+            .map(|soft_wrap_point| soft_wrap_point.row() == 0)
     }
 
     /// Whether the cursor is on the first logical line, regardless of the line's
