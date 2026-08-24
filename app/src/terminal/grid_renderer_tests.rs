@@ -3,8 +3,12 @@ use pathfinder_geometry::vector::{Vector2F, vec2f};
 use warpui::fonts::Cache as FontCache;
 use warpui::units::{IntoLines, Lines, Pixels};
 
-use super::{CachedBackgroundColor, active_or_next_match};
+use super::{
+    CachedBackgroundColor, NativeGlyphType, active_or_next_match, braille_dot_rect,
+    braille_pattern_for_char, native_glyph_for_cell,
+};
 use crate::terminal::grid_size_util::calculate_grid_baseline_position;
+use crate::terminal::model::cell::Cell;
 use crate::terminal::model::index::Point;
 use crate::terminal::model::selection::SelectionPoint;
 use crate::terminal::{SizeInfo, grid_renderer};
@@ -62,6 +66,41 @@ fn test_next_match_same_row_matches() {
     // There should be no more matches left after we advance to point (2,0).
     current_match = active_or_next_match(&mut filter_match_iter, current_match, &Point::new(2, 0));
     assert_eq!(current_match, None);
+}
+
+#[test]
+fn test_native_glyph_for_braille_range() {
+    assert_eq!(braille_pattern_for_char('\u{27ff}'), None);
+    assert_eq!(braille_pattern_for_char('\u{2800}'), Some(0x00));
+    assert_eq!(braille_pattern_for_char('⣿'), Some(0xff));
+    assert_eq!(braille_pattern_for_char('\u{2900}'), None);
+
+    assert_eq!(
+        native_glyph_for_cell(&Cell::from('\u{2800}')),
+        Some(NativeGlyphType::Braille { pattern: 0x00 })
+    );
+    assert_eq!(
+        native_glyph_for_cell(&Cell::from('⣿')),
+        Some(NativeGlyphType::Braille { pattern: 0xff })
+    );
+}
+
+#[test]
+fn test_braille_dot_rect_uses_octant_positions() {
+    let cell_bounds = rect_from_points(10., 20., 26., 60.);
+
+    assert_eq!(
+        braille_dot_rect(cell_bounds, 0),
+        Some(rect_from_points(12., 26., 16., 30.))
+    );
+    assert_eq!(
+        braille_dot_rect(cell_bounds, 3),
+        Some(rect_from_points(20., 26., 24., 30.))
+    );
+    assert_eq!(
+        braille_dot_rect(cell_bounds, 7),
+        Some(rect_from_points(20., 50., 24., 54.))
+    );
 }
 
 #[test]
