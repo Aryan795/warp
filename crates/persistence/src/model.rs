@@ -1647,6 +1647,13 @@ impl ConversationUsageMetadata {
 }
 
 /// See [`ConversationUsageMetadata::turn_usage_baseline`].
+///
+/// Token/cost baselines are intentionally not tracked here: per-model turn
+/// usage is derived from `AIConversation`'s in-memory
+/// `total_token_usage_by_model` map instead (see
+/// `AIConversation::per_model_usage_for_last_block`), which is not persisted
+/// and therefore doesn't survive a restart mid-turn -- an acceptable
+/// degradation for a live-session-only breakdown.
 #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
 pub struct TurnUsageBaseline {
     pub tool_calls: i32,
@@ -1654,13 +1661,6 @@ pub struct TurnUsageBaseline {
     pub lines_added: i32,
     pub lines_removed: i32,
     pub commands_executed: i32,
-    pub total_tokens: u64,
-    /// Provider cost in cents as of the start of the block. `None` when the
-    /// server hadn't yet provided a historical cost baseline (mirrors
-    /// `ConversationUsageMetadata::total_provider_cost_in_cents`'s
-    /// semantics), in which case a turn-scoped cost cannot be derived.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_cost_in_cents: Option<f32>,
 }
 
 #[derive(Debug, Insertable)]

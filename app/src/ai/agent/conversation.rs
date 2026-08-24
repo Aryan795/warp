@@ -105,6 +105,14 @@ pub enum RecordingSpanStatus {
     Captured,
 }
 
+/// Snapshot of a single model's `TokenUsage` totals as of the start of a
+/// turn. See `AIConversation::turn_usage_baseline_per_model`.
+#[derive(Debug, Clone, Copy, Default)]
+struct PerModelTurnBaseline {
+    tokens: u64,
+    cost_in_cents: f32,
+}
+
 fn footer_model_token_usage(
     usage_metadata: &stream_finished::ConversationUsageMetadata,
     llm_preferences: &LLMPreferences,
@@ -337,6 +345,14 @@ pub struct AIConversation {
 
     total_request_cost: RequestCost,
     total_token_usage_by_model: HashMap<String, TokenUsage>,
+    /// Snapshot of `total_token_usage_by_model`, keyed by model_id, as of the
+    /// start of the current turn ("last block"). Used to derive per-model
+    /// turn-scoped token/cost breakdowns -- see
+    /// [`Self::per_model_usage_for_last_block`]. Deliberately not persisted
+    /// (unlike `ConversationUsageMetadata::turn_usage_baseline`): this is a
+    /// live-session-only nicety that is fine to lose across restarts, since
+    /// the next turn's breakdown will be accurate again regardless.
+    turn_usage_baseline_per_model: HashMap<String, PerModelTurnBaseline>,
     /// Server-authoritative cumulative provider cost in US cents. New
     /// conversations start at a known zero; restored legacy conversations can
     /// remain `None` until a server snapshot is available.
@@ -434,6 +450,7 @@ impl AIConversation {
             dismissed_suggestion_ids: Default::default(),
             total_request_cost: RequestCost::new(0.),
             total_token_usage_by_model: Default::default(),
+            turn_usage_baseline_per_model: Default::default(),
             total_provider_cost_in_cents: Some(0.),
             has_usage_metadata: false,
             fallback_display_title: None,
@@ -685,6 +702,7 @@ impl AIConversation {
             dismissed_suggestion_ids: Default::default(),
             total_request_cost: RequestCost::new(0.),
             total_token_usage_by_model: Default::default(),
+            turn_usage_baseline_per_model: Default::default(),
             total_provider_cost_in_cents,
             has_usage_metadata,
             optimistic_cli_subagent_subtask_id: None,
@@ -823,16 +841,6 @@ impl AIConversation {
             .map(|credits| (credits * 10.0).round() / 10.0)
     }
 
-    /// Sums the total token count (warp + byok + custom endpoint) across all
-    /// models in a token-usage snapshot. Used both to compute the current
-    /// cumulative total and to snapshot the turn-usage baseline.
-    fn total_tokens_from_model_usage(models: &[ModelTokenUsage]) -> u64 {
-        models
-            .iter()
-            .map(|m| (m.warp_tokens + m.byok_tokens + m.custom_endpoint_tokens) as u64)
-            .sum()
-    }
-
     /// Tool calls made during the last block (turn), i.e. since the most
     /// recent user input. `None` until the first block completes.
     ///
@@ -913,33 +921,37 @@ impl AIConversation {
         )
     }
 
-    /// Total tokens (warp + byok + custom endpoint, across all models) used
-    /// during the last block (turn). See [`Self::tool_calls_for_last_block`]
-    /// for scoping semantics.
-    pub fn tokens_for_last_block(&self) -> Option<u64> {
-        let baseline = self
-            .conversation_usage_metadata
-            .turn_usage_baseline
-            .as_ref()?;
-        let current =
-            Self::total_tokens_from_model_usage(&self.conversation_usage_metadata.token_usage);
-        Some(current.saturating_sub(baseline.total_tokens))
-    }
-
-    /// Provider cost in cents incurred during the last block (turn). `None`
-    /// when there is no baseline yet, or when either the baseline or current
-    /// provider cost is unknown (legacy conversations without a
-    /// server-provided cost baseline) -- this must not be treated as
-    /// numeric zero. See [`Self::tool_calls_for_last_block`] for scoping
-    /// semantics.
-    pub fn provider_cost_in_cents_for_last_block(&self) -> Option<f32> {
-        let baseline = self
-            .conversation_usage_metadata
-            .turn_usage_baseline
-            .as_ref()?;
-        let baseline_cost = baseline.provider_cost_in_cents?;
-        let current_cost = self.total_provider_cost_in_cents?;
-        Some(current_cost - baseline_cost)
+    /// Per-model token/cost usage during the last block (turn), as
+    /// `(model_id, tokens, cost_in_cents)` triples. A turn can span multiple
+    /// models (e.g. if the user or router switched models mid-turn), so this
+    /// returns one entry per model that had any activity this turn rather
+    /// than a single aggregate. Empty (not scoped by an `Option`, unlike the
+    /// other `*_for_last_block` getters) when no model has been used yet
+    /// this turn -- callers gate the panel's visibility on
+    /// [`Self::tool_calls_for_last_block`] instead.
+    ///
+    /// Derived as the delta between `total_token_usage_by_model`'s
+    /// live-updated running totals and `turn_usage_baseline_per_model`,
+    /// snapshotted at the start of the block. This intentionally uses a
+    /// different (non-persisted) source than the other `*_for_last_block`
+    /// getters, since the persisted `ConversationUsageMetadata::token_usage`
+    /// used by those has no per-model cost breakdown.
+    pub fn per_model_usage_for_last_block(&self) -> Vec<(String, u64, f32)> {
+        self.total_token_usage_by_model
+            .iter()
+            .filter_map(|(model_id, usage)| {
+                let current_tokens = (usage.total_input + usage.output) as u64;
+                let baseline = self
+                    .turn_usage_baseline_per_model
+                    .get(model_id)
+                    .copied()
+                    .unwrap_or_default();
+                let turn_tokens = current_tokens.saturating_sub(baseline.tokens);
+                let turn_cost = usage.cost_in_cents - baseline.cost_in_cents;
+                (turn_tokens > 0 || turn_cost > 0.0)
+                    .then(|| (model_id.clone(), turn_tokens, turn_cost))
+            })
+            .collect()
     }
 
     /// Time to first token for the last completed set of agent responses
@@ -2353,11 +2365,20 @@ impl AIConversation {
                     .tool_usage_metadata
                     .run_command_stats
                     .commands_executed,
-                total_tokens: Self::total_tokens_from_model_usage(
-                    &self.conversation_usage_metadata.token_usage,
-                ),
-                provider_cost_in_cents: self.total_provider_cost_in_cents,
             });
+            self.turn_usage_baseline_per_model = self
+                .total_token_usage_by_model
+                .iter()
+                .map(|(model_id, usage)| {
+                    (
+                        model_id.clone(),
+                        PerModelTurnBaseline {
+                            tokens: (usage.total_input + usage.output) as u64,
+                            cost_in_cents: usage.cost_in_cents,
+                        },
+                    )
+                })
+                .collect();
         }
 
         self.has_usage_metadata |=

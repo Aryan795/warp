@@ -5,18 +5,19 @@
 //! to a single agent turn ("block") -- see the turn-scoped getters on
 //! `AIConversation` (e.g. `tool_calls_for_last_block`).
 //!
-//! Per the per-turn-usage-panel spec's resolved decisions, this panel:
+//! Per resolved user feedback on the per-turn-usage-panel spec, this panel:
 //! * is triggered independently from (and has no cross-navigation link to)
 //!   the "Conversation" popover (Surface 2);
-//! * has collapsible sections (MODEL USAGE / TOOL CALL SUMMARY / RESPONSE
-//!   TIME), each with its own chevron, matching Surface 2's popover rather
-//!   than the always-expanded treatment shown in the original mockup;
+//! * has no per-section collapse/expand affordance -- all sections (MODEL
+//!   USAGE / TOOL CALL SUMMARY / RESPONSE TIME) are always fully expanded;
+//! * aligns the value column across all sections, not just within each
+//!   section;
 //! * is dismissed via a standard "X" close button in the header.
 
 use pathfinder_color::ColorU;
 use pathfinder_geometry::vector::vec2f;
 use warpui::elements::{
-    Border, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, DropShadow, Flex,
+    Border, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, DropShadow, Empty, Flex,
     Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle, ParentElement, Radius, Text,
 };
 use warpui::platform::Cursor;
@@ -28,19 +29,30 @@ use crate::appearance::Appearance;
 use crate::ui_components::blended_colors;
 use crate::ui_components::icons::Icon;
 
+/// A single label/value pair rendered as a row in the panel's shared
+/// label/value columns (see [`TurnUsageView::render`]).
+type LabelValueRow = (Box<dyn Element>, Box<dyn Element>);
+
+/// Turn-scoped token/cost usage for a single model. A turn can involve
+/// multiple models (e.g. if the user or router switched models mid-turn).
+pub struct TurnModelUsage {
+    /// The model's display identifier (e.g. `auto (cost-efficient)`).
+    pub model_id: String,
+    /// Total tokens (across warp/byok/custom-endpoint usage) spent on this
+    /// model during this turn.
+    pub tokens: u64,
+    /// Provider cost incurred on this model during this turn, in US cents.
+    /// `None` when a turn-scoped cost cannot be derived, in which case the
+    /// cost is omitted from the row rather than rendered as `$0.00`.
+    pub cost_in_cents: Option<f32>,
+}
+
 /// Turn-scoped usage data backing the "MODEL USAGE" section. All fields are
 /// scoped to a single agent turn (block), not the whole conversation.
 pub struct TurnUsageInfo {
-    /// The active model's display identifier (e.g. `auto (cost-efficient)`).
-    pub model_id: String,
-    /// Total tokens (across warp/byok/custom-endpoint usage) spent during
-    /// this turn.
-    pub tokens: u64,
-    /// Provider cost incurred during this turn, in US cents. `None` when a
-    /// turn-scoped cost cannot be derived (e.g. no server-provided cost
-    /// baseline yet), in which case the cost row is omitted rather than
-    /// rendered as `$0.00`.
-    pub cost_in_cents: Option<f32>,
+    /// Per-model token/cost usage for this turn. One row is rendered per
+    /// entry.
+    pub models: Vec<TurnModelUsage>,
     /// Context window usage (0.0-1.0). This is inherently a
     /// conversation-level running total -- it cannot be scoped to a single
     /// turn -- but is shown here per the spec, which explicitly calls out
@@ -56,9 +68,6 @@ pub struct TurnUsageInfo {
 /// Typed actions dispatched by widgets inside [`TurnUsageView`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TurnUsageViewAction {
-    ToggleModelUsageExpanded,
-    ToggleToolCallSummaryExpanded,
-    ToggleResponseTimeExpanded,
     /// The user clicked the header's close ("X") button.
     Close,
 }
@@ -74,12 +83,6 @@ pub enum TurnUsageViewEvent {
 pub struct TurnUsageView {
     pub usage_info: TurnUsageInfo,
     pub timing_info: Option<TimingInfo>,
-    model_usage_expanded: bool,
-    tool_call_summary_expanded: bool,
-    response_time_expanded: bool,
-    model_usage_toggle_mouse_state: MouseStateHandle,
-    tool_call_summary_toggle_mouse_state: MouseStateHandle,
-    response_time_toggle_mouse_state: MouseStateHandle,
     close_button_mouse_state: MouseStateHandle,
 }
 
@@ -88,15 +91,6 @@ impl TurnUsageView {
         Self {
             usage_info,
             timing_info,
-            // All three sections start expanded, matching the original
-            // mockup's default appearance; the chevrons let the user
-            // collapse whichever sections they don't need.
-            model_usage_expanded: true,
-            tool_call_summary_expanded: true,
-            response_time_expanded: true,
-            model_usage_toggle_mouse_state: MouseStateHandle::default(),
-            tool_call_summary_toggle_mouse_state: MouseStateHandle::default(),
-            response_time_toggle_mouse_state: MouseStateHandle::default(),
             close_button_mouse_state: MouseStateHandle::default(),
         }
     }
@@ -144,119 +138,63 @@ impl TurnUsageView {
             .finish()
     }
 
-    fn render_section(
-        &self,
-        label: &str,
-        expanded: bool,
-        toggle_mouse_state: MouseStateHandle,
-        action: TurnUsageViewAction,
-        rows: Vec<(Box<dyn Element>, Box<dyn Element>)>,
-        appearance: &Appearance,
-    ) -> Box<dyn Element> {
+    /// Renders a section's small-caps label as a standalone row, to be
+    /// followed by that section's data rows in the shared label/value
+    /// columns. Unlike the original mockup, this is purely decorative (no
+    /// chevron, not clickable): all sections are always fully expanded.
+    fn render_section_header(label: &str, appearance: &Appearance) -> Box<dyn Element> {
         let theme = appearance.theme();
         let background = theme.surface_2();
-
-        let chevron_icon = if expanded {
-            Icon::ChevronUp
-        } else {
-            Icon::ChevronDown
-        };
         // A couple of points larger than the base overline size so the
         // section headers read clearly against the smaller body text.
         let header_font_size = appearance.overline_font_size() + 2.;
-        let icon_size = header_font_size;
-        let icon_color = blended_colors::text_disabled(theme, background);
-        let header_row = Hoverable::new(toggle_mouse_state, move |_state| {
-            Flex::row()
-                // `MainAxisSize::Max` is required for `SpaceBetween` to have any
-                // room to distribute -- without it the row shrink-wraps to its
-                // content width and the chevron ends up squeezed right next to
-                // the label (or the row overflows and wraps to a second line).
-                .with_main_axis_size(MainAxisSize::Max)
-                .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
-                .with_child(
-                    Text::new(
-                        label.to_string(),
-                        appearance.overline_font_family(),
-                        header_font_size,
-                    )
-                    .with_color(icon_color)
-                    .soft_wrap(false)
-                    .finish(),
-                )
-                .with_child(
-                    ConstrainedBox::new(chevron_icon.to_warpui_icon(icon_color.into()).finish())
-                        .with_width(icon_size)
-                        .with_height(icon_size)
-                        .finish(),
-                )
-                .finish()
-        })
-        .with_cursor(Cursor::PointingHand)
-        .on_click(move |ctx, _, _| {
-            ctx.dispatch_typed_action(action.clone());
-        })
-        .finish();
-
-        let mut section = Flex::column()
-            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_child(Container::new(header_row).with_margin_bottom(8.).finish());
-
-        if expanded && !rows.is_empty() {
-            // Two parallel columns (all labels, then all values), matching
-            // `ConversationUsageView`'s layout: the value column naturally
-            // starts immediately after the widest label in this section and
-            // stays left-aligned there, instead of each row independently
-            // trying (and failing, since a `Flex::row` shrink-wraps to its
-            // content by default) to space its own label/value pair apart.
-            let mut labels: Vec<Box<dyn Element>> = Vec::with_capacity(rows.len());
-            let mut values: Vec<Box<dyn Element>> = Vec::with_capacity(rows.len());
-            for (label_el, value_el) in rows {
-                labels.push(Container::new(label_el).with_margin_bottom(6.).finish());
-                values.push(Container::new(value_el).with_margin_bottom(6.).finish());
-            }
-            section = section.with_child(
-                Flex::row()
-                    .with_spacing(16.)
-                    .with_child(Flex::column().with_children(labels).finish())
-                    .with_child(Flex::column().with_children(values).finish())
-                    .finish(),
-            );
-        }
-
-        section.finish()
+        Text::new(
+            label.to_string(),
+            appearance.overline_font_family(),
+            header_font_size,
+        )
+        .with_color(blended_colors::text_disabled(theme, background))
+        .soft_wrap(false)
+        .finish()
     }
 
-    fn render_model_usage_section(&self, appearance: &Appearance) -> Box<dyn Element> {
+    fn model_usage_rows(&self, appearance: &Appearance) -> Vec<LabelValueRow> {
         let font_size = appearance.ui_font_size() + 2.;
         let theme = appearance.theme();
         let background = theme.surface_2();
         let text_color = blended_colors::text_main(theme, background);
         let label_color = blended_colors::text_sub(theme, background);
 
-        let mut model_value_parts = vec![format_tokens(self.usage_info.tokens)];
-        if let Some(cost_in_cents) = self.usage_info.cost_in_cents {
-            model_value_parts.push(format_dollars(cost_in_cents));
-        }
-        let model_label = Text::new(
-            self.usage_info.model_id.clone(),
-            appearance.ui_font_family(),
-            font_size,
-        )
-        .with_style(warpui::fonts::Properties {
-            weight: warpui::fonts::Weight::Medium,
-            ..Default::default()
-        })
-        .with_color(text_color)
-        .finish();
-        let model_value = Text::new(
-            model_value_parts.join("  /  "),
-            appearance.ui_font_family(),
-            font_size,
-        )
-        .with_color(text_color)
-        .finish();
+        let mut rows: Vec<LabelValueRow> = self
+            .usage_info
+            .models
+            .iter()
+            .map(|model| {
+                let mut value_parts = vec![format_tokens(model.tokens)];
+                if let Some(cost_in_cents) = model.cost_in_cents {
+                    value_parts.push(format_dollars(cost_in_cents));
+                }
+                let label = Text::new(
+                    model.model_id.clone(),
+                    appearance.ui_font_family(),
+                    font_size,
+                )
+                .with_style(warpui::fonts::Properties {
+                    weight: warpui::fonts::Weight::Medium,
+                    ..Default::default()
+                })
+                .with_color(text_color)
+                .finish();
+                let value = Text::new(
+                    value_parts.join("  /  "),
+                    appearance.ui_font_family(),
+                    font_size,
+                )
+                .with_color(text_color)
+                .finish();
+                (label, value)
+            })
+            .collect();
 
         let context_window_label = Text::new(
             "Context window usage".to_string(),
@@ -291,20 +229,11 @@ impl TurnUsageView {
             )
             .finish();
 
-        self.render_section(
-            "MODEL USAGE",
-            self.model_usage_expanded,
-            self.model_usage_toggle_mouse_state.clone(),
-            TurnUsageViewAction::ToggleModelUsageExpanded,
-            vec![
-                (model_label, model_value),
-                (context_window_label, context_window_value),
-            ],
-            appearance,
-        )
+        rows.push((context_window_label, context_window_value));
+        rows
     }
 
-    fn render_tool_call_summary_section(&self, appearance: &Appearance) -> Box<dyn Element> {
+    fn tool_call_summary_rows(&self, appearance: &Appearance) -> Vec<LabelValueRow> {
         let font_size = appearance.ui_font_size() + 2.;
         let theme = appearance.theme();
 
@@ -332,31 +261,24 @@ impl TurnUsageView {
             )
             .finish();
 
-        self.render_section(
-            "TOOL CALL SUMMARY",
-            self.tool_call_summary_expanded,
-            self.tool_call_summary_toggle_mouse_state.clone(),
-            TurnUsageViewAction::ToggleToolCallSummaryExpanded,
-            vec![
-                (
-                    render_label_text("Tool calls", appearance),
-                    render_value_text(self.usage_info.tool_calls.to_string(), appearance),
-                ),
-                (
-                    render_label_text("Files changed", appearance),
-                    render_value_text(self.usage_info.files_changed.to_string(), appearance),
-                ),
-                (render_label_text("Diffs applied", appearance), diffs_value),
-                (
-                    render_label_text("Commands executed", appearance),
-                    render_value_text(self.usage_info.commands_executed.to_string(), appearance),
-                ),
-            ],
-            appearance,
-        )
+        vec![
+            (
+                render_label_text("Tool calls", appearance),
+                render_value_text(self.usage_info.tool_calls.to_string(), appearance),
+            ),
+            (
+                render_label_text("Files changed", appearance),
+                render_value_text(self.usage_info.files_changed.to_string(), appearance),
+            ),
+            (render_label_text("Diffs applied", appearance), diffs_value),
+            (
+                render_label_text("Commands executed", appearance),
+                render_value_text(self.usage_info.commands_executed.to_string(), appearance),
+            ),
+        ]
     }
 
-    fn render_response_time_section(&self, appearance: &Appearance) -> Option<Box<dyn Element>> {
+    fn response_time_rows(&self, appearance: &Appearance) -> Option<Vec<LabelValueRow>> {
         let timing = self.timing_info.as_ref()?;
 
         let mut rows = vec![
@@ -379,14 +301,7 @@ impl TurnUsageView {
             ));
         }
 
-        Some(self.render_section(
-            "RESPONSE TIME",
-            self.response_time_expanded,
-            self.response_time_toggle_mouse_state.clone(),
-            TurnUsageViewAction::ToggleResponseTimeExpanded,
-            rows,
-            appearance,
-        ))
+        Some(rows)
     }
 }
 
@@ -399,7 +314,57 @@ impl View for TurnUsageView {
         let appearance = Appearance::as_ref(app);
         let theme = appearance.theme();
 
-        let mut content = Flex::column()
+        // All rows across all three sections share one pair of label/value
+        // columns, so the value column stays vertically aligned across
+        // section boundaries (not just within a single section). Section
+        // headers occupy the label column with an empty value-column
+        // placeholder, matching `ConversationUsageView`'s layout.
+        let mut labels: Vec<Box<dyn Element>> = Vec::new();
+        let mut values: Vec<Box<dyn Element>> = Vec::new();
+        let mut push_row =
+            |label: Box<dyn Element>, value: Box<dyn Element>, margin_bottom: f32| {
+                labels.push(
+                    Container::new(label)
+                        .with_margin_bottom(margin_bottom)
+                        .finish(),
+                );
+                values.push(
+                    Container::new(value)
+                        .with_margin_bottom(margin_bottom)
+                        .finish(),
+                );
+            };
+
+        push_row(
+            Self::render_section_header("MODEL USAGE", appearance),
+            Empty::new().finish(),
+            8.,
+        );
+        for (label, value) in self.model_usage_rows(appearance) {
+            push_row(label, value, 6.);
+        }
+
+        push_row(
+            Self::render_section_header("TOOL CALL SUMMARY", appearance),
+            Empty::new().finish(),
+            8.,
+        );
+        for (label, value) in self.tool_call_summary_rows(appearance) {
+            push_row(label, value, 6.);
+        }
+
+        if let Some(rows) = self.response_time_rows(appearance) {
+            push_row(
+                Self::render_section_header("RESPONSE TIME", appearance),
+                Empty::new().finish(),
+                8.,
+            );
+            for (label, value) in rows {
+                push_row(label, value, 6.);
+            }
+        }
+
+        let content = Flex::column()
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
             .with_child(
                 Container::new(self.render_header(appearance))
@@ -407,21 +372,15 @@ impl View for TurnUsageView {
                     .finish(),
             )
             .with_child(
-                Container::new(self.render_model_usage_section(appearance))
-                    .with_margin_bottom(12.)
+                Flex::row()
+                    .with_spacing(16.)
+                    .with_child(Flex::column().with_children(labels).finish())
+                    .with_child(Flex::column().with_children(values).finish())
                     .finish(),
             )
-            .with_child(
-                Container::new(self.render_tool_call_summary_section(appearance))
-                    .with_margin_bottom(12.)
-                    .finish(),
-            );
+            .finish();
 
-        if let Some(response_time_section) = self.render_response_time_section(appearance) {
-            content = content.with_child(response_time_section);
-        }
-
-        Container::new(content.finish())
+        Container::new(content)
             .with_uniform_padding(12.)
             .with_background(theme.surface_2())
             .with_border(Border::all(1.0).with_border_fill(theme.outline()))
@@ -444,18 +403,6 @@ impl TypedActionView for TurnUsageView {
 
     fn handle_action(&mut self, action: &Self::Action, ctx: &mut ViewContext<Self>) {
         match action {
-            TurnUsageViewAction::ToggleModelUsageExpanded => {
-                self.model_usage_expanded = !self.model_usage_expanded;
-                ctx.notify();
-            }
-            TurnUsageViewAction::ToggleToolCallSummaryExpanded => {
-                self.tool_call_summary_expanded = !self.tool_call_summary_expanded;
-                ctx.notify();
-            }
-            TurnUsageViewAction::ToggleResponseTimeExpanded => {
-                self.response_time_expanded = !self.response_time_expanded;
-                ctx.notify();
-            }
             TurnUsageViewAction::Close => {
                 ctx.emit(TurnUsageViewEvent::CloseRequested);
             }
@@ -479,11 +426,11 @@ fn render_value_text(text: String, appearance: &Appearance) -> Box<dyn Element> 
         .finish()
 }
 
-fn format_tokens(tokens: u64) -> String {
+pub(crate) fn format_tokens(tokens: u64) -> String {
     format!("{tokens} token{}", if tokens == 1 { "" } else { "s" })
 }
 
-fn format_dollars(cost_in_cents: f32) -> String {
+pub(crate) fn format_dollars(cost_in_cents: f32) -> String {
     format!("${:.2}", cost_in_cents / 100.0)
 }
 

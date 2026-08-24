@@ -256,7 +256,7 @@ use crate::ai::blocklist::usage::conversation_usage_view::{
     ConversationUsageInfo, ConversationUsageView, TimingInfo,
 };
 use crate::ai::blocklist::usage::turn_usage_view::{
-    TurnUsageInfo, TurnUsageView, TurnUsageViewEvent,
+    TurnModelUsage, TurnUsageInfo, TurnUsageView, TurnUsageViewEvent,
 };
 use crate::ai::blocklist::{
     AIBlock, AIBlockEvent, ATTACH_AS_AGENT_MODE_CONTEXT_TEXT, AutofireAction,
@@ -7113,23 +7113,35 @@ impl TerminalView {
         let lines_added = conversation.lines_added_for_last_block().unwrap_or(0);
         let lines_removed = conversation.lines_removed_for_last_block().unwrap_or(0);
         let commands_executed = conversation.commands_executed_for_last_block().unwrap_or(0);
-        let tokens = conversation.tokens_for_last_block().unwrap_or(0);
-        let cost_in_cents = conversation.provider_cost_in_cents_for_last_block();
 
-        // The active model for this turn. Multi-model turns (e.g. full
-        // terminal use alongside the primary agent) aren't disambiguated
-        // here -- we show the most recently used model, which matches the
-        // common single-model-per-turn case the mockup depicts.
-        let model_id = conversation
-            .token_usage()
-            .last()
-            .map(|m| m.model_id.clone())
-            .unwrap_or_else(|| "auto".to_string());
+        // Multiple models can be used within a single turn (e.g. if the
+        // router switched models mid-turn), so this is a list of rows
+        // rather than a single aggregate. Sorted by descending token usage
+        // (then model_id) for a stable, usage-ranked display order.
+        let mut models: Vec<TurnModelUsage> = conversation
+            .per_model_usage_for_last_block()
+            .into_iter()
+            .map(|(model_id, tokens, cost_in_cents)| TurnModelUsage {
+                model_id,
+                tokens,
+                cost_in_cents: Some(cost_in_cents),
+            })
+            .collect();
+        models.sort_by(|a, b| {
+            b.tokens
+                .cmp(&a.tokens)
+                .then_with(|| a.model_id.cmp(&b.model_id))
+        });
+        if models.is_empty() {
+            models.push(TurnModelUsage {
+                model_id: "auto".to_string(),
+                tokens: 0,
+                cost_in_cents: None,
+            });
+        }
 
         let turn_usage_info = TurnUsageInfo {
-            model_id,
-            tokens,
-            cost_in_cents,
+            models,
             context_window_usage: conversation.context_window_usage(),
             tool_calls,
             files_changed,

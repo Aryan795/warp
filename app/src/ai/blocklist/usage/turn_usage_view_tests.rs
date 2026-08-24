@@ -1,6 +1,5 @@
-//! Regression tests for [`TurnUsageView`]'s collapse/expand and close
-//! handlers, following the same `handle_action`-driven pattern as
-//! `conversation_usage_view_tests.rs`.
+//! Regression tests for [`TurnUsageView`]'s close handler, following the
+//! same `handle_action`-driven pattern as `conversation_usage_view_tests.rs`.
 
 use warp_core::ui::appearance::Appearance;
 use warpui::App;
@@ -10,9 +9,11 @@ use super::*;
 
 fn placeholder_usage_info() -> TurnUsageInfo {
     TurnUsageInfo {
-        model_id: "auto (cost-efficient)".to_string(),
-        tokens: 4,
-        cost_in_cents: Some(60.0),
+        models: vec![TurnModelUsage {
+            model_id: "auto (cost-efficient)".to_string(),
+            tokens: 4,
+            cost_in_cents: Some(60.0),
+        }],
         context_window_usage: 0.001,
         tool_calls: 2,
         files_changed: 1,
@@ -28,54 +29,6 @@ fn initialize_test_app(app: &mut App) {
 
 fn build_view(_ctx: &mut warpui::ViewContext<TurnUsageView>) -> TurnUsageView {
     TurnUsageView::new(placeholder_usage_info(), None)
-}
-
-#[test]
-fn sections_start_expanded_and_toggle_independently() {
-    App::test((), |mut app| async move {
-        initialize_test_app(&mut app);
-        let (_window_id, view) = app.add_window(WindowStyle::NotStealFocus, build_view);
-
-        view.read(&app, |view, _| {
-            assert!(view.model_usage_expanded);
-            assert!(view.tool_call_summary_expanded);
-            assert!(view.response_time_expanded);
-        });
-
-        view.update(&mut app, |view, ctx| {
-            view.handle_action(&TurnUsageViewAction::ToggleModelUsageExpanded, ctx);
-        });
-        view.read(&app, |view, _| {
-            assert!(!view.model_usage_expanded, "model usage should collapse");
-            assert!(
-                view.tool_call_summary_expanded,
-                "toggling one section must not affect others"
-            );
-            assert!(view.response_time_expanded);
-        });
-
-        view.update(&mut app, |view, ctx| {
-            view.handle_action(&TurnUsageViewAction::ToggleToolCallSummaryExpanded, ctx);
-        });
-        view.read(&app, |view, _| {
-            assert!(!view.tool_call_summary_expanded);
-        });
-
-        view.update(&mut app, |view, ctx| {
-            view.handle_action(&TurnUsageViewAction::ToggleResponseTimeExpanded, ctx);
-        });
-        view.read(&app, |view, _| {
-            assert!(!view.response_time_expanded);
-        });
-
-        // Toggling back should re-expand.
-        view.update(&mut app, |view, ctx| {
-            view.handle_action(&TurnUsageViewAction::ToggleModelUsageExpanded, ctx);
-        });
-        view.read(&app, |view, _| {
-            assert!(view.model_usage_expanded);
-        });
-    });
 }
 
 #[test]

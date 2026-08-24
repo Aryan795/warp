@@ -103,6 +103,7 @@ use crate::ai::blocklist::inline_action::web_search::WebSearchView;
 use crate::ai::blocklist::keyboard_navigable_buttons::KeyboardNavigableButtons;
 use crate::ai::blocklist::secret_redaction::SecretRedactionState;
 use crate::ai::blocklist::usage::rollup::compute_orchestration_rollup;
+use crate::ai::blocklist::usage::turn_usage_view::{format_dollars, format_tokens};
 use crate::ai::blocklist::view_util::{
     FAILED_OUTPUT_USAGE_NOTICE_TEXT, format_credits, should_show_failed_output_usage_notice,
 };
@@ -3856,10 +3857,29 @@ fn render_turn_panel_button(props: Props, app: &AppContext) -> Box<dyn Element> 
 
     let appearance = Appearance::as_ref(app);
     let ui_builder = appearance.ui_builder().clone();
-    let icon_size = icon_size(app);
+    // Scaled down from the standard action-row icon size so the pie chart
+    // visually matches its sibling icons (fork, continue, etc.), which are
+    // rendered via `icon_button` at a smaller effective glyph size than this
+    // row's raw line-height-based `icon_size`.
+    let icon_size = icon_size(app) * 0.7;
     let icon_color = appearance
         .theme()
         .sub_text_color(appearance.theme().background());
+
+    // Sum turn-scoped per-model usage for the tooltip, so it reads as the
+    // same total the panel's per-model rows add up to.
+    let (turn_tokens, turn_cost_in_cents) =
+        conversation.per_model_usage_for_last_block().iter().fold(
+            (0u64, 0f32),
+            |(tokens, cost), (_, model_tokens, model_cost)| {
+                (tokens + model_tokens, cost + model_cost)
+            },
+        );
+    let mut tooltip_parts = vec![format_tokens(turn_tokens)];
+    if turn_cost_in_cents > 0.0 {
+        tooltip_parts.push(format_dollars(turn_cost_in_cents));
+    }
+    let tooltip_text = tooltip_parts.join("  /  ");
 
     let is_turn_panel_expanded = props.is_turn_panel_expanded;
     Hoverable::new(
@@ -3887,10 +3907,7 @@ fn render_turn_panel_button(props: Props, app: &AppContext) -> Box<dyn Element> 
                     .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)));
 
                 let mut stack = Stack::new().with_child(content.finish());
-                let tooltip = ui_builder
-                    .tool_tip("Show turn usage details".to_string())
-                    .build()
-                    .finish();
+                let tooltip = ui_builder.tool_tip(tooltip_text.clone()).build().finish();
                 if mouse_state.is_hovered() {
                     stack.add_positioned_overlay_child(
                         tooltip,
