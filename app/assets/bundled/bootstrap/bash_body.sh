@@ -886,13 +886,21 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
        command -p tr '\n\n' ' ' <<< "$*" | command -p od -An -v -tx1 | command -p tr -d ' \n'
     }
 
-    # warp_hex_encode_string hex-encodes its argument with bash builtins (no external forks),
-    # producing a long hex string that Rust decodes and parses. `LC_ALL=C` makes the loop
-    # index by byte rather than by locale character, keeping it correct for UTF-8 text.
+    # warp_hex_encode_string hex-encodes its argument into a long hex string that Rust decodes.
+    # `LC_ALL=C` keeps indexing byte-wise, so it stays correct for UTF-8 text. The fork-free bash
+    # loop (added in 304f1dec to avoid a fork per completion match) is quadratic on large inputs
+    # because `${input:i:1}` rescans from the start each iteration, which froze the shell on long
+    # pasted command lines; so above a small threshold fall back to the O(n) `od` pipeline. That
+    # pipeline is fed with `printf '%s'` (not `echo`) so an argument like `-n`/`-e` is encoded
+    # literally instead of being eaten as an option.
     # Accepts one argument: the string to encode.
     warp_hex_encode_string () {
       local LC_ALL=C
       local input="$1"
+      if (( ${#input} > 256 )); then
+        printf '%s' "$input" | command -p od -An -v -tx1 | command -p tr -d ' \n'
+        return
+      fi
       local i byte_hex hex=""
       for (( i = 0; i < ${#input}; i++ )); do
         printf -v byte_hex '%02x' "'${input:i:1}"
