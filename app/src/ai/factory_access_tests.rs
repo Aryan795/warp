@@ -27,6 +27,14 @@ async fn await_probe(app: &mut App, model: &ModelHandle<FactoryAccessModel>) {
 }
 
 #[test]
+fn new_for_test_and_set_access_for_test_set_access_directly() {
+    let mut model = FactoryAccessModel::new_for_test(FactoryAccess::Unknown);
+    assert_eq!(model.access(), FactoryAccess::Unknown);
+    model.set_access_for_test(FactoryAccess::Allowed);
+    assert_eq!(model.access(), FactoryAccess::Allowed);
+}
+
+#[test]
 #[serial_test::serial]
 fn fetches_eagerly_and_resolves_allowed() {
     let mock = {

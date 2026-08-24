@@ -62,6 +62,26 @@ impl FactoryAccessModel {
         me
     }
 
+    /// Test-only constructor that sets a specific access value directly, bypassing the network
+    /// probe. Lets dependent-crate tests (e.g. the TUI's) simulate the probe having already
+    /// resolved, or resolving later via [`Self::set_access_for_test`], without a mocked client.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn new_for_test(access: FactoryAccess) -> Self {
+        Self {
+            access,
+            requested: true,
+            probe: None,
+        }
+    }
+
+    /// Test-only setter that simulates the probe resolving (or re-resolving) to a new access
+    /// value after construction, e.g. to verify that cloud-run links re-resolve at click time
+    /// rather than caching whatever destination was current when a run was spawned.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn set_access_for_test(&mut self, access: FactoryAccess) {
+        self.access = access;
+    }
+
     pub fn access(&self) -> FactoryAccess {
         self.access
     }

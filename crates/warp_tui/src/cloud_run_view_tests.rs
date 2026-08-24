@@ -1,6 +1,7 @@
 use warp::appearance::Appearance;
 use warp::tui_export::{
     AmbientAgentTaskId, BlocklistAIHistoryModel, CloudAgentStartupBlocker, ConversationStatus,
+    FactoryAccess, FactoryAccessModel,
 };
 use warpui::platform::WindowStyle;
 use warpui::{AddWindowOptions, SingletonEntity as _};
@@ -316,5 +317,86 @@ fn cloud_child_first_interrupt_arms_kill_window_not_exit_window() {
             );
         });
         let _ = conversation_id; // suppress unused warning
+    });
+}
+
+#[test]
+fn cloud_run_link_re_resolves_when_factory_access_changes_after_spawn() {
+    // The view must resolve the cloud-run link fresh from the run ID every time it's rendered
+    // or clicked, rather than caching whatever destination was current at spawn time: a Factory
+    // access probe that resolves later must still change where an enrolled viewer lands.
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|_| Appearance::mock());
+        app.add_singleton_model(|_| BlocklistAIHistoryModel::default());
+        app.add_singleton_model(|_| FactoryAccessModel::new_for_test(FactoryAccess::Unknown));
+        let window_id = app.update(|ctx| {
+            ctx.add_tui_window(
+                AddWindowOptions {
+                    window_style: WindowStyle::NotStealFocus,
+                    ..Default::default()
+                },
+                |_| TestHostView,
+            )
+            .0
+        });
+        let state = app.add_model(|_| TuiCloudRunState::new());
+        let view = app.update(|ctx| {
+            ctx.add_typed_action_tui_view(window_id, |ctx| TuiCloudRunView::new(state.clone(), ctx))
+        });
+        app.update(|ctx| {
+            state.update(ctx, |state, ctx| {
+                state.set_spawned(
+                    TASK_ID
+                        .parse::<AmbientAgentTaskId>()
+                        .expect("hardcoded task id parses"),
+                    "019f71ef-6285-7480-90f6-3ad84d8e0d1e".to_string(),
+                    ctx,
+                );
+            });
+        });
+
+        // Spawned while access is still Unknown: the link stays on Oz.
+        app.read(|ctx| {
+            let mut presenter = TuiPresenter::new();
+            let frame = presenter.present_element(
+                view.as_ref(ctx).render(ctx),
+                TuiRect::new(0, 0, 112, 24),
+                ctx,
+            );
+            let lines = frame.buffer.to_lines();
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line
+                        .contains("oz.warp.dev/runs/019f71ef-6285-7480-90f6-3ad84d8e0d1e")),
+                "expected an Oz link while Factory access is still Unknown; rendered: {}",
+                lines.join("\n")
+            );
+        });
+
+        // The probe resolves to Allowed after the run was already spawned (simulating it
+        // landing between spawn and the viewer clicking the link).
+        app.update(|ctx| {
+            FactoryAccessModel::handle(ctx).update(ctx, |model, _| {
+                model.set_access_for_test(FactoryAccess::Allowed)
+            });
+        });
+
+        app.read(|ctx| {
+            let mut presenter = TuiPresenter::new();
+            let frame = presenter.present_element(
+                view.as_ref(ctx).render(ctx),
+                TuiRect::new(0, 0, 112, 24),
+                ctx,
+            );
+            let lines = frame.buffer.to_lines();
+            assert!(
+                lines.iter().any(|line| line
+                    .contains("platform.warp.dev/runs/019f71ef-6285-7480-90f6-3ad84d8e0d1e")),
+                "expected the link to move to Platform once Factory access resolved to Allowed; \
+                 rendered: {}",
+                lines.join("\n")
+            );
+        });
     });
 }
