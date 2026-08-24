@@ -33,11 +33,11 @@ The desktop client currently builds every cloud-run URL from the legacy Oz origi
 
 5. Warp never delays a click while it waits for the access check. A link always opens immediately.
 
-6. The fail-to-Oz rule has a visible consequence. An enrolled viewer who clicks during the short startup or refresh window can still land in the old UI. Warp accepts this temporary regression because the run remains openable. The opposite choice can strand a waitlisted viewer on a request-access screen. The access check starts eagerly, so the startup window normally lasts only for the first network round trip and ends before the viewer opens a details panel or menu.
+6. The fail-to-Oz rule has a visible consequence. An enrolled viewer who clicks during the short startup window can still land in the old UI. Warp accepts this temporary regression because the run remains openable. The opposite choice can strand a waitlisted viewer on a request-access screen. The access check starts eagerly, so the startup window normally lasts only for the first network round trip and ends before the viewer opens a details panel or menu.
 
-7. Warp updates the destination used by the next click when a newer access result arrives. An already-open browser page does not move between hosts.
+7. Warp uses the first successful access result for the rest of the authenticated session. If the result arrives while a panel or menu is open, the next click uses it. An already-open browser page does not move between hosts.
 
-8. Warp refreshes access periodically. A viewer whose eligibility changes during a long-running Warp session does not need to restart Warp permanently to receive the new destination.
+8. Warp does not refresh or retry the access check during the session. If the initial check fails, Warp uses Oz until the next authenticated session. If the viewer's eligibility changes during a session, Warp picks up the change on the next launch or account login. This limitation is acceptable because eligibility changes during an active session are rare and this branch will be removed when Platform reaches general availability.
 
 ### Included user-facing links
 9. The cloud-task details panel:

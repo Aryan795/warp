@@ -21,7 +21,7 @@ The reported behavior is not caused by an incorrect run ID or route path. Every 
 At warp-server commit [`6f7fcb96`](https://github.com/warpdotdev/warp-server/tree/6f7fcb960786152eee279c88b973ef3dcfd37633):
 
 - [`logic/factory_access.go:25`](https://github.com/warpdotdev/warp-server/blob/6f7fcb960786152eee279c88b973ef3dcfd37633/logic/factory_access.go#L25) computes access from the Factory feature flag, dogfood mode, user overrides, team overrides, and domain overrides. A user-level control assignment can deny access even when a team is allowlisted.
-- [`client/packages/factory/src/api/access.ts:24`](https://github.com/warpdotdev/warp-server/blob/6f7fcb960786152eee279c88b973ef3dcfd37633/client/packages/factory/src/api/access.ts#L24) calls `GET /api/v1/factory/access`. A valid response is `{ "allowed": boolean }`. The web client uses a five-second request timeout and a five-minute stale time.
+- [`client/packages/factory/src/api/access.ts:24`](https://github.com/warpdotdev/warp-server/blob/6f7fcb960786152eee279c88b973ef3dcfd37633/client/packages/factory/src/api/access.ts#L24) calls `GET /api/v1/factory/access`. A valid response is `{ "allowed": boolean }`. The desktop client reuses the endpoint contract and five-second request timeout, but it does not copy the web client's periodic cache refresh.
 - [`client/packages/factory/src/FactoryApp.tsx:199`](https://github.com/warpdotdev/warp-server/blob/6f7fcb960786152eee279c88b973ef3dcfd37633/client/packages/factory/src/FactoryApp.tsx#L199) defines global `/runs` and `/runs/:runId` Platform routes.
 - The same router has no global `/agents/:agentId`, `/skills/:skillId`, or `/memory/...` route. Its agent routes are factory-scoped and require a factory ID.
 
@@ -49,22 +49,19 @@ Register one non-persisted application singleton, named for example `FactoryAcce
 The model owns:
 
 - `Unknown`, `Allowed`, and `Denied` states.
-- The time of the last successful response.
-- At most one in-flight request.
-- A refresh timer and bounded retry state.
+- One startup request for the current authenticated session.
 
 Lifecycle:
 
 1. Start the first request immediately after `AuthManagerEvent::AuthComplete`.
-2. Cache each successful `Allowed` or `Denied` result for five minutes.
-3. When the five-minute value expires, replace it with `Unknown` before refreshing. Do not continue using a stale `Allowed` value.
-4. Refresh on the expiry timer while Warp is active. If the timer elapsed while Warp was suspended, refresh when Warp returns to the foreground.
-5. Opening a relevant panel or menu may request a refresh when the value is expired. Rendering that surface must not request access. Every trigger must reuse the single in-flight request.
-6. On timeout, transport error, non-success status, or malformed response, store `Unknown`. Retry with bounded backoff. Retry work must not block UI rendering or clicks.
-7. Reset to `Unknown` and cancel old work on logout or authenticated-user change. Do not persist access across launches or accounts.
-8. Channel and server origins are fixed for the lifetime of a normal client process. A process restart reconstructs the model from the new channel config. A test or development runtime override that changes either origin must also reset access to `Unknown`.
+2. Store a successful `Allowed` or `Denied` result for the rest of that authenticated session.
+3. On timeout, transport error, non-success status, or malformed response, keep `Unknown` for the rest of the session. Do not retry.
+4. Do not refresh on a timer, foreground transition, panel or menu open, render, or click.
+5. Reset to `Unknown` and cancel old work on logout or authenticated-user change. The next successful authentication starts one new request.
+6. Do not persist access across launches or accounts. A process restart starts a new request after authentication.
+7. Channel and server origins are fixed for the lifetime of a normal client process. A process restart reconstructs the model from the new channel config. A test or development runtime override that changes either origin must also start a new authenticated session before evaluating access.
 
-The model exposes a synchronous state read for render and click handlers. It notifies subscribed views when the state changes, but link destinations are resolved again at click time.
+The model exposes a synchronous state read for render and click handlers. It notifies subscribed views when the startup result changes `Unknown` to `Allowed` or `Denied`, but link destinations are resolved again at click time.
 
 ### Central URL resolver
 Add one resolver for the included cloud-run destinations. It accepts:
@@ -127,19 +124,19 @@ Leave these destinations unchanged:
 ### REST probe instead of experiment sync
 - **Chosen:** Call `GET /api/v1/factory/access`.
   - Advantage: one authoritative answer that matches server enforcement.
-  - Cost: one authenticated request at startup and at five-minute refresh intervals.
+  - Cost: one authenticated request per authenticated client session.
   - Latency: off the click path. Navigation never waits for it.
 - **Rejected:** Sync only `FACTORY_EARLY_ACCESS` to the client.
   - Advantage: no new REST request.
   - Rejected because it duplicates incomplete policy and can disagree with the server.
 
-### Five-minute, memory-only cache
-- **Chosen:** Match the Platform web client's five-minute stale time.
-  - Advantage: prevents per-render requests and updates eligibility during a long session.
-  - Cost: a small background request rate and a brief fallback window during refresh.
-- **Rejected:** Fetch once per process.
-  - Advantage: least network traffic.
-  - Rejected because allowlist changes would require an app restart.
+### Once-per-session, memory-only state
+- **Chosen:** Fetch once after authentication and hold the result for that session.
+  - Advantage: no per-render requests, refresh timer, foreground hook, request coalescing, or background refresh state.
+  - Cost: an eligibility change is not visible until the next launch or account login.
+- **Rejected:** Refresh periodically.
+  - Advantage: picks up eligibility changes during a long-running session.
+  - Rejected because such changes are rare, the conditional is temporary, and the extra lifecycle machinery does not earn its cost.
 - **Rejected:** Persist the result.
   - Advantage: no cold-start unknown state.
   - Rejected because an old account or revoked entitlement could incorrectly route to Platform.
@@ -147,8 +144,10 @@ Leave these destinations unchanged:
 ### Fail to Oz without delaying a click
 - **Chosen:** `Unknown` and all probe failures use Oz immediately.
   - Advantage: every run remains openable.
-  - Cost: an enrolled viewer can see the exact legacy UI reported in APP-5583 during the first network round trip or an outage.
+  - Cost: an enrolled viewer can see the exact legacy UI reported in APP-5583 during the first network round trip. A failed probe keeps that viewer on Oz for the session.
   - Rationale: the eager request makes this window uncommon in normal use, while routing an ineligible viewer to Platform produces a hard access dead end.
+- **Chosen:** Do not retry a failed initial probe.
+  - Rationale: authentication has already completed over the network before this request starts, so a startup connectivity race is less likely. One retry would add delayed task state for a code path scheduled for removal, while the safe Oz fallback still works.
 - **Rejected:** Wait for the access response when the user clicks.
   - Rejected because navigation latency would depend on a request with a five-second timeout.
 - **Rejected:** Treat unknown as allowed.
@@ -181,11 +180,11 @@ Leave these destinations unchanged:
 Add deterministic model tests with a fake client and fake clock:
 
 - `factory_access_fetches_eagerly_after_auth`
-- `factory_access_coalesces_concurrent_refresh_requests`
-- `factory_access_expires_after_five_minutes`
+- `factory_access_holds_successful_result_for_session`
+- `factory_access_does_not_refresh_on_time_or_foreground_changes`
 - `factory_access_resets_on_logout_or_user_change`
+- `factory_access_failure_remains_unknown_without_retry`
 - `factory_access_maps_timeout_http_error_and_malformed_body_to_unknown`
-- `factory_access_retries_without_render_driven_request_fanout`
 
 ### Automated URL tests
 Add a resolver matrix that checks:
@@ -241,9 +240,10 @@ Use computer-use recording against the dev build. The proof must show:
 Use deterministic test accounts or a local access-endpoint fixture to exercise both states. The recording must show the browser host and must not expose credentials or tokens. Attach the video to the implementation PR and the originating Slack thread.
 
 ## Risks and mitigations
-- **First-click legacy routing for an enrolled viewer.** Mitigation: fetch eagerly after authentication, refresh in the background, and resolve again on every activation.
+- **First-click legacy routing for an enrolled viewer.** Mitigation: fetch eagerly after authentication and resolve again on every activation after the startup result arrives.
+- **Eligibility changes or a failed probe remain stale for the session.** Accepted because the Oz fallback remains usable, mid-session eligibility changes are rare, and APP-5602 removes this temporary branch at general availability.
 - **Staging silently uses production Platform.** Mitigation: keep the origin in channel config, land the generator PR first, pin it, and verify generated dev/stable JSON before the video.
-- **Access probe request fanout.** Mitigation: one application singleton, one in-flight request, five-minute cache, no render-triggered requests.
+- **Access probe request fanout.** Mitigation: only the authentication-complete lifecycle starts the single session request. UI surfaces never fetch access.
 - **Scope expands into broken Platform paths.** Mitigation: only run routes move. Every excluded destination is listed above.
 - **Temporary code becomes permanent.** Mitigation: APP-5602 exists with a policy-based trigger and explicit deletion criteria.
 
