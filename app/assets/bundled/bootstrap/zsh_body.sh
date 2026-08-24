@@ -570,6 +570,10 @@ if [[ -z $WARP_BOOTSTRAPPED ]]; then
   # UTF-8 bytes rather than its code point. The loop is quadratic on large inputs, so above a small
   # threshold fall back to the O(n) `od` pipeline. That pipeline is fed with `printf '%s'` (not
   # `echo`) so an argument like `-n`/`-e` is encoded literally instead of being eaten as an option.
+  # This body deliberately avoids `printf -v`, which the zsh on an old remote (Warp ssh's into hosts
+  # as old as Ubuntu 14.04, zsh 5.0.2) may not support: an unsupported flag here leaves the hook
+  # payload empty and the shell never finishes bootstrapping. `typeset -g` and arithmetic base
+  # conversion are available in every zsh Warp bootstraps.
   # Accepts two arguments: the name of the variable to assign to, and the string to encode.
   warp_hex_encode_string_into () {
     setopt localoptions nomultibyte
@@ -577,16 +581,17 @@ if [[ -z $WARP_BOOTSTRAPPED ]]; then
     local __warp_hex_var="$1"
     local __warp_hex_in="$2"
     if (( ${#__warp_hex_in} > 256 )); then
-      printf -v "$__warp_hex_var" '%s' \
-        "$(printf '%s' "$__warp_hex_in" | command -p od -An -v -tx1 | command -p tr -d ' \n')"
+      typeset -g "$__warp_hex_var=$(printf '%s' "$__warp_hex_in" \
+        | command -p od -An -v -tx1 | command -p tr -d ' \n')"
       return
     fi
-    local __warp_hex_i __warp_hex_byte __warp_hex_acc=""
+    local __warp_hex_i __warp_hex_char __warp_hex_byte __warp_hex_acc=""
     for (( __warp_hex_i = 1; __warp_hex_i <= ${#__warp_hex_in}; __warp_hex_i++ )); do
-      printf -v __warp_hex_byte '%02x' "'${__warp_hex_in[__warp_hex_i]}"
-      __warp_hex_acc+="$__warp_hex_byte"
+      __warp_hex_char=${__warp_hex_in[__warp_hex_i]}
+      __warp_hex_byte=$(( [##16] #__warp_hex_char ))
+      __warp_hex_acc+=${(l:2::0:)${(L)__warp_hex_byte}}
     done
-    printf -v "$__warp_hex_var" '%s' "$__warp_hex_acc"
+    typeset -g "$__warp_hex_var=$__warp_hex_acc"
   }
 
   # Writes the hex encoding of its argument to stdout.
