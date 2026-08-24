@@ -31,14 +31,6 @@ impl ShellCompletion {
             }
         }
     }
-
-    /// Sorts completions by name. Lives here (rather than at the call site) because `name` is
-    /// private to this module.
-    pub fn sort_by_name(completions: &mut [ShellCompletion]) {
-        // TODO: we need to get metadata from the shell about how the results
-        // should be sorted (intra- and inter-groups).
-        completions.sort_by(|a, b| a.name.cmp(&b.name));
-    }
 }
 
 impl From<ShellCompletion> for MatchedSuggestion {

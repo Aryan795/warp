@@ -3337,10 +3337,9 @@ impl ansi::Handler for TerminalModel {
             IsReceivingCompletionsOutput::No,
         ) {
             IsReceivingCompletionsOutput::Yes {
-                mut output,
+                output,
                 replacement_span,
             } => {
-                ShellCompletion::sort_by_name(&mut output);
                 self.event_proxy
                     .send_terminal_event(Event::CompletionsFinished(output, replacement_span));
             }
