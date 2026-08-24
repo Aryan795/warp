@@ -888,11 +888,6 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
       printf '%s' "$1" | command -p od -An -v -tx1 | command -p tr -d ' \n'
     }
 
-    # Hex-encodes its second argument into the variable named by its first.
-    #
-    # Reserved for the native completions path, which encodes once per match and so cannot afford
-    # warp_hex_encode_string's fork per call. The hooks that run on every command of every session
-    # stay on that older encoder, so a defect here can only reach a user who asks for completions.
     warp_completions_hex_encode_into () {
       # `LC_ALL=C` keeps indexing byte-wise, so it stays correct for UTF-8 text.
       local LC_ALL=C

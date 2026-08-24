@@ -68,13 +68,7 @@ function warp_hex_encode_string
   printf '%s' "$argv" | od -An -v -tx1 | command tr -d ' \n'
 end
 
-# Hex-encodes the given string to stdout.
-#
-# Reserved for the native completions path, which encodes once per match and so cannot afford
-# warp_hex_encode_string's second fork per call; stripping od's spaces and line-wrap newlines with
-# the builtin `string replace` costs one fork rather than two. The hooks that run on every command
-# of every session stay on that older encoder, so a defect here can only reach a user who asks for
-# completions. fish has no byte-safe string indexing, so unlike bash and zsh it still needs `od`.
+# fish has no byte-safe string indexing, so `od` is still needed to reach the raw UTF-8 bytes.
 function warp_completions_hex_encode
   set -l od_output (printf '%s' "$argv" | od -An -v -tx1)
   string replace -a -- ' ' '' (string join '' $od_output)
