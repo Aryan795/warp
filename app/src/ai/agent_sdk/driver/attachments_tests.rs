@@ -90,7 +90,7 @@ fn mock_client_returning(attachments: Vec<TaskAttachment>) -> Arc<MockAIClient> 
 #[tokio::test]
 async fn e2e_happy_path_downloads_all_and_writes_to_disk() {
     // Two attachments, both served 200 with distinct payloads. The pipeline must write each
-    // byte stream to `{attachments_dir}/handoff/{file_id}` and report the dir back.
+    // byte stream to `{attachments_dir}/handoff/{filename}` and report the dir back.
     let _guard = FeatureFlag::OzHandoff.override_enabled(true);
     let tempdir = handoff_tempdir();
     let attachments_dir = tempdir.path().to_path_buf();
@@ -127,7 +127,6 @@ async fn e2e_happy_path_downloads_all_and_writes_to_disk() {
     .expect("should not be fatal");
 
     assert_eq!(result.as_deref(), Some(&*attachments_dir.to_string_lossy()));
-    // Written under the logical filename, not the storage-side file_id.
     assert_eq!(
         fs::read(attachments_dir.join("handoff").join("alpha.patch")).unwrap(),
         b"alpha-body"
@@ -161,7 +160,11 @@ async fn e2e_checkpoint_mode_storage_name_does_not_leak_into_the_written_path() 
         .create_async()
         .await;
 
-    let attachments = vec![make_attachment(&server.url(), file_id, "snapshot_state.json")];
+    let attachments = vec![make_attachment(
+        &server.url(),
+        file_id,
+        "snapshot_state.json",
+    )];
     let result = fetch_and_download_handoff_snapshot_attachments(
         mock_client_returning(attachments),
         &http,
@@ -181,6 +184,81 @@ async fn e2e_checkpoint_mode_storage_name_does_not_leak_into_the_written_path() 
         "the storage name's generation segment must never be materialized as a directory"
     );
     mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn e2e_traversal_in_filename_cannot_escape_the_handoff_dir() {
+    // `filename` is server-supplied. A name carrying path segments is reduced to its basename
+    // and lands inside the handoff dir, never above it.
+    let _guard = FeatureFlag::OzHandoff.override_enabled(true);
+    let tempdir = handoff_tempdir();
+    let attachments_dir = tempdir.path().to_path_buf();
+    let http = build_test_http_client();
+    let mut server = Server::new_async().await;
+
+    let mock = server
+        .mock("GET", download_path("escape-uuid"))
+        .with_status(200)
+        .with_body("contained")
+        .expect(1)
+        .create_async()
+        .await;
+
+    let attachments = vec![make_attachment(
+        &server.url(),
+        "escape-uuid",
+        "../../escape.json",
+    )];
+    let result = fetch_and_download_handoff_snapshot_attachments(
+        mock_client_returning(attachments),
+        &http,
+        fake_task_id(),
+        attachments_dir.clone(),
+    )
+    .await
+    .expect("should not be fatal");
+
+    assert_eq!(result.as_deref(), Some(&*attachments_dir.to_string_lossy()));
+    assert_eq!(
+        fs::read(attachments_dir.join("handoff").join("escape.json")).unwrap(),
+        b"contained"
+    );
+    assert!(
+        !attachments_dir.join("escape.json").exists(),
+        "a traversal segment must not write outside the handoff dir"
+    );
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn e2e_filename_without_a_basename_is_rejected_before_downloading() {
+    // `..` has no basename to reduce to, so the entry fails the guard and is never fetched.
+    let _guard = FeatureFlag::OzHandoff.override_enabled(true);
+    let tempdir = handoff_tempdir();
+    let attachments_dir = tempdir.path().to_path_buf();
+    let http = build_test_http_client();
+    let mut server = Server::new_async().await;
+
+    let never_called = server
+        .mock("GET", download_path("dotdot-uuid"))
+        .with_status(200)
+        .with_body("unreachable")
+        .expect(0)
+        .create_async()
+        .await;
+
+    let attachments = vec![make_attachment(&server.url(), "dotdot-uuid", "..")];
+    let result = fetch_and_download_handoff_snapshot_attachments(
+        mock_client_returning(attachments),
+        &http,
+        fake_task_id(),
+        attachments_dir.clone(),
+    )
+    .await
+    .expect("an invalid name is a per-file failure, not a fatal one");
+
+    assert!(result.is_none());
+    never_called.assert_async().await;
 }
 
 #[tokio::test]

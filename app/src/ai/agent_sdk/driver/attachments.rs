@@ -97,15 +97,10 @@ pub(crate) async fn fetch_and_download_handoff_snapshot_attachments(
         .await
         .context("Failed to create handoff attachments directory")?;
 
-    // Join on the logical `filename`, not `file_id`: `file_id` is the GCS *storage* name,
-    // which for a checkpoint-mode snapshot embeds generation path segments (e.g.
-    // `checkpoint/<gen>/snapshot_state.json`). Joining on that would try to create a file
-    // inside a subdirectory that was never made and fail every download.
     let attempts = attachments.len();
-    let download_futures = attachments.into_iter().map(|attachment| {
-        let file_path = handoff_dir.join(&attachment.filename);
-        download_handoff_entry(attachment, file_path, http_client)
-    });
+    let download_futures = attachments
+        .into_iter()
+        .map(|attachment| download_handoff_entry(attachment, &handoff_dir, http_client));
     let results = join_all(download_futures).await;
 
     let mut succeeded: usize = 0;
@@ -113,7 +108,7 @@ pub(crate) async fn fetch_and_download_handoff_snapshot_attachments(
     for result in results {
         match result {
             Ok(()) => succeeded += 1,
-            Err((filename, err)) => failures.push((filename, err)),
+            Err((label, err)) => failures.push((label, err)),
         }
     }
 
@@ -122,7 +117,7 @@ pub(crate) async fn fetch_and_download_handoff_snapshot_attachments(
     } else {
         let detail = failures
             .iter()
-            .map(|(filename, err)| format!("{filename}: {err}"))
+            .map(|(label, err)| format!("{label}: {err}"))
             .collect::<Vec<_>>()
             .join("; ");
         log::warn!(
@@ -204,24 +199,43 @@ async fn download_task_attachment(
     Ok(())
 }
 
-/// Download a single handoff attachment into `file_path`, mapping failure to
-/// `(filename, error_message)` so the aggregator in
+/// Download a single handoff attachment into `handoff_dir`, mapping failure to
+/// `("{filename} ({file_id})", error_message)` so the aggregator in
 /// [`fetch_and_download_handoff_snapshot_attachments`] can log and count per-file outcomes.
+/// Both names are carried because two checkpoint generations share one logical name, and that
+/// aggregated WARN log is the only signal a per-file failure produces.
 async fn download_handoff_entry(
     attachment: TaskAttachment,
-    file_path: PathBuf,
+    handoff_dir: &Path,
     http_client: &http_client::Client,
 ) -> Result<(), (String, String)> {
-    // Factor `filename` and `download_url` out before the retry closure so `attachment` is
-    // fully consumed up-front. The closure borrows the two fields it needs as references.
+    // Factor the fields out before the retry closure so `attachment` is fully consumed
+    // up-front. The closure borrows the two fields it needs as references.
     let TaskAttachment {
+        file_id,
         filename,
         download_url,
         ..
     } = attachment;
+    let label = format!("{filename} ({file_id})");
+
+    // Join on the logical `filename`, not `file_id`: `file_id` is the GCS *storage* name, which
+    // for a checkpoint-mode snapshot embeds generation path segments (e.g.
+    // `checkpoint/<gen>/snapshot_state.json`). Joining on that would try to create a file inside
+    // a subdirectory that was never made and fail every download. Reduce to a basename the way
+    // the sibling [`download_task_attachment`] does, so a server-supplied name can never write
+    // outside `handoff_dir`. This assumes logical names are unique within one listing, which
+    // holds because selection returns a single checkpoint generation or the legacy set, never a
+    // mix; two entries sharing a name would stream into the same path concurrently.
+    let safe_filename = Path::new(&filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| (label.clone(), format!("Invalid filename '{filename}'")))?;
+    let file_path = handoff_dir.join(safe_filename);
+
     download_attachment(http_client, &download_url, &file_path)
         .await
-        .map_err(|e| (filename, format!("{e:#}")))
+        .map_err(|e| (label, format!("{e:#}")))
 }
 
 /// Shared download primitive: GET `download_url`, write the body to `file_path`, and retry
