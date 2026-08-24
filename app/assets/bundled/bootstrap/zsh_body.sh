@@ -565,8 +565,7 @@ if [[ -z $WARP_BOOTSTRAPPED ]]; then
 
   # warp_hex_encode_string_into hex-encodes its second argument into a long hexadecimal string that
   # Rust decodes and parses, and assigns it to the variable named by its first argument, letting
-  # hot callers avoid the `$( )` subshell that forks a process per call -- on top of the two
-  # processes the `od` pipeline itself costs.
+  # hot callers avoid the `$( )` subshell that forks a process per call.
   # `nomultibyte` plus `LC_ALL=C` keeps indexing byte-wise, so a multibyte character encodes as its
   # UTF-8 bytes rather than its code point. The loop is quadratic on large inputs, so above a small
   # threshold fall back to the O(n) `od` pipeline. That pipeline is fed with `printf '%s'` (not

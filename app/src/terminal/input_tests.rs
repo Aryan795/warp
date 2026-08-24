@@ -3077,9 +3077,9 @@ fn input_tab_asks_the_shell_once_when_bundled_specs_are_empty() {
 
 /// The shell's replacement span is attacker-controlled -- any program can emit the OSC that
 /// carries it -- and consumers index the buffer with its `start` directly, as `input_tab`'s
-/// `&input_text[replacement_start..cursor]` does. Reaching those paths with an out-of-range span
-/// takes no arithmetic overflow at all: `S;1000000,1` sits well inside `usize`, and panicked on a
-/// second Tab before this clamp, so the clamp rather than the handler's add is what protects them.
+/// `&input_text[replacement_start..cursor]` does. An out-of-range span needs no arithmetic
+/// overflow to reach them: `S;1000000,1` sits well inside `usize`, which is why the clamp rather
+/// than the handler's saturating add is what keeps those slices in bounds.
 #[test]
 fn native_shell_replacement_span_is_clamped_into_the_buffer_before_the_cursor() {
     let buffer_text = "cd app/D";
@@ -10045,8 +10045,6 @@ mod native_shell_completions_eligibility_tests {
 
     #[test]
     fn as_you_type_fallback_is_unaffected_by_native_shell_completions_either_way() {
-        // AsYouType's fallback strategy was already None regardless of native shell completions
-        // before this function existed; confirm this refactor didn't change that.
         for use_native_shell_completions in [true, false] {
             assert!(matches!(
                 completions_fallback_strategy_for_trigger(
@@ -10254,10 +10252,10 @@ mod strip_control_characters_tests {
 
     #[test]
     fn strips_a_newline() {
-        // The class of bug this exists for: a completion candidate containing a real
-        // newline (e.g. a pathological but legal filename) previously put the editor into a
-        // stuck multi-row state and silently disabled native shell completions for the rest
-        // of the buffer.
+        // The class of bug this exists for: a completion candidate containing a real newline
+        // (e.g. a pathological but legal filename) would otherwise put the editor into a stuck
+        // multi-row state and silently disable native shell completions for the rest of the
+        // buffer.
         assert_eq!(&*strip_control_characters("line1\nline2"), "line1line2");
     }
 

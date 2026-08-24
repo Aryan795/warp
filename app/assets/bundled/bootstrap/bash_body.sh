@@ -892,12 +892,11 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
     # warp_hex_encode_string_into hex-encodes its second argument into a long hex string that Rust
     # decodes, and assigns it to the variable named by its first argument, letting hot callers
     # avoid the `$( )` subshell that forks a process per call.
-    # `LC_ALL=C` keeps indexing byte-wise, so it stays correct for UTF-8 text. The fork-free bash
-    # loop (added in 304f1dec to avoid a fork per completion match) is quadratic on large inputs
-    # because `${input:i:1}` rescans from the start each iteration, which froze the shell on long
-    # pasted command lines; so above a small threshold fall back to the O(n) `od` pipeline. That
-    # pipeline is fed with `printf '%s'` (not `echo`) so an argument like `-n`/`-e` is encoded
-    # literally instead of being eaten as an option.
+    # `LC_ALL=C` keeps indexing byte-wise, so it stays correct for UTF-8 text. The fork-free loop is
+    # quadratic on large inputs, because byte-indexed slicing rescans from the start each iteration,
+    # which on a long pasted command line is slow enough to freeze the shell; so above a small
+    # threshold fall back to the O(n) `od` pipeline. That pipeline is fed with `printf '%s'` (not
+    # `echo`) so an argument like `-n`/`-e` is encoded literally instead of being eaten as an option.
     # Accepts two arguments: the name of the variable to assign to, and the string to encode.
     warp_hex_encode_string_into () {
       local LC_ALL=C
