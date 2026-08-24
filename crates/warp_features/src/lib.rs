@@ -1017,6 +1017,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::Projects,
     FeatureFlag::ProviderCommand,
     FeatureFlag::MarkdownImages,
+    FeatureFlag::NativeShellCompletions,
     FeatureFlag::FileAndDiffSetComments,
     FeatureFlag::FileGlobV2Warnings,
     FeatureFlag::SummarizationViaMessageReplacement,
@@ -1049,8 +1050,6 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::BoxDrawingGlyphs,
     FeatureFlag::PricingTransparency,
     FeatureFlag::PeriodicHandoffCheckpoints,
-    FeatureFlag::CtrlCCancelsThirdPartyHarness,
-    FeatureFlag::NativeShellCompletions,
 ];
 
 /// Features enabled for feature preview build users (e.g.: Friends of Warp).
