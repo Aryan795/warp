@@ -122,7 +122,8 @@ use session_sharing_protocol::sharer::{
 use settings::{Setting, ToggleableSetting};
 use shared_session::cloud_conversation_continuation::CloudConversationContinuationUiState;
 pub(crate) use shared_session::cloud_conversation_continuation::{
-    AIQueryRouting, resolve_ai_query_routing,
+    AIQueryRouting, CompletedChildPresentation, ConversationAccess,
+    completed_child_conversation_access, completed_child_presentation, resolve_ai_query_routing,
 };
 use shared_session::{SharedSessionAdapter, Viewer};
 use ssh_file_upload::{FileUpload, FileUploadEvent};
@@ -199,7 +200,7 @@ use super::ssh::util::{InteractiveSshCommand, SshWarpifyCommand, parse_interacti
 use super::warpify::WarpificationSource;
 use super::warpify::success_block::{WarpifySuccessBlock, WarpifySuccessBlockEvent};
 use super::warpify::trigger_state::{SshBlockState, WarpifyState};
-use super::{CLIAgent, GridType, cli_agent};
+use super::{CLIAgent, GridType, cli_agent, should_right_click_paste};
 #[cfg(any(test, feature = "integration_tests"))]
 use crate::ai::agent::UserQueryMode;
 use crate::ai::agent::api::ServerConversationToken;
@@ -217,7 +218,8 @@ use crate::ai::agent::{
 use crate::ai::agent::{CurrentHead, DiffBase};
 use crate::ai::agent_conversations_model::{AgentConversationsModel, AgentConversationsModelEvent};
 use crate::ai::ambient_agents::{
-    AmbientAgentTaskId, AmbientConversationStatus, conversation_output_status_from_conversation,
+    AmbientAgentTask, AmbientAgentTaskId, AmbientConversationStatus,
+    conversation_output_status_from_conversation,
 };
 use crate::ai::blocklist::agent_view::agent_input_footer::toolbar_item::AgentToolbarItemKind;
 use crate::ai::blocklist::agent_view::orchestration_conversation_links::pane_group_id_containing_terminal_view;
@@ -2028,6 +2030,20 @@ pub enum Event {
         conversation_id: AIConversationId,
         session_id: session_sharing_protocol::common::SessionId,
     },
+    /// Unified-stack counterpart to [`Self::EnsureSharedSessionViewerChildPane`].
+    /// Carries the fetched task snapshot so pane construction uses the same
+    /// current-state materialization decision as pill-click restoration.
+    EnsureUnifiedViewerChildPane {
+        conversation_id: AIConversationId,
+        task: Box<AmbientAgentTask>,
+    },
+    /// A unified-stack child viewer could not join its dedicated live
+    /// execution session. The pane group keeps the child passive and
+    /// re-drives it from current task metadata.
+    OrchestrationChildSharedSessionJoinFailed {
+        conversation_id: AIConversationId,
+        session_id: session_sharing_protocol::common::SessionId,
+    },
     /// Emitted when "Open in new tab" is picked from a child pill's 3-dot menu.
     /// Bubbles up to the workspace to create the new tab.
     OpenChildAgentInNewTab {
@@ -2870,6 +2886,9 @@ pub struct TerminalView {
 
     ambient_agent_view_model: Option<ModelHandle<ambient_agent::AmbientAgentViewModel>>,
     pending_cloud_followup_task_id: Option<AmbientAgentTaskId>,
+    /// A passive orchestration child whose live execution session could not
+    /// be joined. Task refresh may later replace this with a transcript.
+    orchestration_child_live_unavailable: bool,
 
     /// Conversation details panel (side panel showing conversation/task metadata).
     /// Available for cloud Oz runs and for any active local AI conversation.
@@ -3142,6 +3161,7 @@ impl TerminalView {
         ctx: &mut ViewContext<Self>,
     ) -> Self {
         let terminal_view_id = ctx.view_id();
+        let terminal_view = ctx.handle();
         let active_session = ctx.add_model(|ctx| {
             ActiveSession::new(sessions.clone(), model_events_handle.clone(), ctx)
         });
@@ -3519,6 +3539,8 @@ impl TerminalView {
         });
 
         let get_relevant_files_controller = ctx.add_model(GetRelevantFilesController::new);
+        let ai_action_team_context_resolver =
+            UserWorkspaces::team_context_resolver(terminal_view.clone());
         let ai_action_model = ctx.add_model(|ctx| {
             BlocklistAIActionModel::new(
                 model.clone(),
@@ -3526,6 +3548,7 @@ impl TerminalView {
                 &model_events_handle,
                 get_relevant_files_controller.clone(),
                 terminal_view_id,
+                ai_action_team_context_resolver,
                 ctx,
             )
         });
@@ -3538,6 +3561,7 @@ impl TerminalView {
                 active_session.clone(),
                 model.clone(),
                 terminal_view_id,
+                terminal_view,
                 ctx,
             )
         });
@@ -4440,6 +4464,7 @@ impl TerminalView {
             has_auto_opened_conversation_details_panel: false,
             conversation_details_panel_auto_open_policy: Default::default(),
             pending_cloud_followup_task_id: None,
+            orchestration_child_live_unavailable: false,
             conversation_details_panel_toggle_mouse_state: Default::default(),
             ambient_agent_cancel_mouse_state: Default::default(),
             active_init_project_model: None,
@@ -6255,8 +6280,7 @@ impl TerminalView {
                     );
                 });
                 let ai_block_clone = ai_block.clone();
-                let is_passive_conversation =
-                    ai_block_clone.as_ref(ctx).is_passive_conversation(ctx);
+                let is_passive_conversation = ai_block_clone.as_ref(ctx).is_passive_conversation();
                 self.find_model.update(ctx, move |find_model, _ctx| {
                     find_model.register_findable_rich_content_view(ai_block_clone);
                 });
@@ -6897,13 +6921,7 @@ impl TerminalView {
         }
 
         self.ai_controller.update(ctx, |controller, ctx| {
-            controller.resume_conversation(
-                *conversation_id,
-                /*can_attempt_resume_on_error*/ true,
-                /*is_auto_resume_after_error*/ false,
-                vec![],
-                ctx,
-            );
+            controller.resume_conversation(*conversation_id, vec![], ctx);
         });
     }
 
@@ -6945,6 +6963,8 @@ impl TerminalView {
             conversation.total_agent_response_time_since_last_user_query_ms();
         let wall_to_wall_response_time_ms =
             conversation.wall_to_wall_response_time_since_last_query();
+        let usage_totals = conversation.usage_totals();
+        let charged_usage_for_last_block = conversation.charged_usage_for_last_block();
 
         let conversation_usage_info = ConversationUsageInfo {
             credits_spent: conversation.inference_credits_spent(),
@@ -6958,6 +6978,11 @@ impl TerminalView {
             lines_added: tool_usage.apply_file_diff_stats.lines_added,
             lines_removed: tool_usage.apply_file_diff_stats.lines_removed,
             commands_executed: tool_usage.run_command_stats.commands_executed,
+            total_tokens: usage_totals.charged_usage.map(|usage| usage.total_tokens()),
+            total_cost_in_cents: usage_totals.total_cost_in_cents(),
+            tokens_for_last_block: charged_usage_for_last_block.map(|usage| usage.total_tokens()),
+            cost_in_cents_for_last_block: charged_usage_for_last_block
+                .map(|usage| usage.total_cost_in_cents()),
         };
 
         let timing_info = TimingInfo {
@@ -8174,6 +8199,29 @@ impl TerminalView {
             ConversationDetailsPanelAutoOpenPolicy::DefaultClosed;
     }
 
+    pub(crate) fn set_orchestration_child_live_unavailable(
+        &mut self,
+        unavailable: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if self.orchestration_child_live_unavailable == unavailable {
+            return;
+        }
+        self.orchestration_child_live_unavailable = unavailable;
+        ctx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_orchestration_child_live_unavailable_for_test(&self) -> bool {
+        self.orchestration_child_live_unavailable
+    }
+    #[cfg(test)]
+    pub(crate) fn has_agent_view_zero_state_for_test(&self) -> bool {
+        self.rich_content_views
+            .iter()
+            .any(|view| view.is_agent_view_zero_state())
+    }
+
     #[cfg(test)]
     pub(crate) fn is_initial_conversation_details_panel_auto_open_suppressed_for_test(
         &self,
@@ -9381,9 +9429,25 @@ impl TerminalView {
         });
     }
 
-    /// Writes a shared session viewer's bytes to the pty
+    /// Writes a shared session viewer's bytes to the pty.
+    ///
+    /// A lone Ctrl-C byte that is actually forwarded to the PTY is
+    /// additionally observed by `CLIAgentSessionsModel` so that an interrupt
+    /// which silently kills a third-party harness turn (no plugin hook fires
+    /// on user interrupt) can still resolve the session, and its task, to
+    /// Cancelled. See `CLIAgentSessionsModel::observe_ctrl_c_write`.
+    /// Observation never delays or drops the write itself, and never arms a
+    /// window for a byte that `write_user_bytes_to_pty` rejected (e.g. the
+    /// active block is under agent control).
     pub fn write_viewer_bytes_to_pty(&mut self, bytes: Vec<u8>, ctx: &mut ViewContext<Self>) {
-        self.write_user_bytes_to_pty(bytes, ctx);
+        let is_ctrl_c = bytes == [0x03];
+        let forwarded = self.write_user_bytes_to_pty(bytes, ctx);
+        if forwarded && is_ctrl_c && FeatureFlag::CtrlCCancelsThirdPartyHarness.is_enabled() {
+            let terminal_view_id = self.view_id;
+            CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
+                sessions.observe_ctrl_c_write(terminal_view_id, ctx);
+            });
+        }
     }
 
     /// Ends the current line before writing the given bytes to the PTY.
@@ -9405,17 +9469,19 @@ impl TerminalView {
     }
 
     /// Writes to the PTY, resets selected blocks and updates scroll position.
-    /// Also calls logic to emit a sync event.
+    /// Also calls logic to emit a sync event. Returns whether the bytes were
+    /// actually forwarded to the PTY: `false` when the active block is under
+    /// agent control, in which case nothing is written.
     fn write_user_bytes_to_pty<B: Into<Cow<'static, [u8]>>>(
         &mut self,
         data: B,
         ctx: &mut ViewContext<Self>,
-    ) {
+    ) -> bool {
         {
             let mut terminal_model = self.model.lock();
             let active_block = terminal_model.block_list().active_block();
             if active_block.is_agent_in_control() {
-                return;
+                return false;
             }
             if active_block.is_active_and_long_running() && !active_block.has_received_user_input()
             {
@@ -9432,6 +9498,7 @@ impl TerminalView {
         self.update_scroll_position_locking(ScrollPositionUpdate::AfterWriteUserBytesToPty, ctx);
         self.write_to_pty(bytes, ctx);
         self.emit_non_editor_typed_event(bytes_vec, ctx);
+        true
     }
 
     /// Write to the PTY if the session has finished bootstrapping and
@@ -11181,13 +11248,7 @@ impl TerminalView {
             };
 
             self.ai_controller.update(ctx, |controller, ctx| {
-                controller.resume_conversation(
-                    conversation_id,
-                    /*can_attempt_resume_on_error*/ true,
-                    /*is_auto_resume_after_error*/ false,
-                    resume_context,
-                    ctx,
-                );
+                controller.resume_conversation(conversation_id, resume_context, ctx);
             });
         }
 
@@ -11877,7 +11938,15 @@ impl TerminalView {
                 {
                     let output_truncated =
                         if let BlockType::User(completed) = &block_completed_event.block_type {
-                            Some(completed.output_truncated.clone())
+                            Some(
+                                completed
+                                    .output_truncated
+                                    .get_with(|compute| {
+                                        let model = self.model.lock();
+                                        compute(model.block_list())
+                                    })
+                                    .to_owned(),
+                            )
                         } else {
                             None
                         };
@@ -12209,12 +12278,16 @@ impl TerminalView {
                     let honor_ps1_enabled = match &block_type {
                         // If we have access to the value of honor_ps1 that the
                         // block was holding, use that.
-                        BlockType::User(UserBlockCompleted {
-                            serialized_block, ..
-                        })
-                        | BlockType::BootstrapVisible(serialized_block) => {
-                            serialized_block.honor_ps1
+                        BlockType::User(user_block_completed) => {
+                            user_block_completed
+                                .serialized_block
+                                .get_with(|compute| {
+                                    let model = self.model.lock();
+                                    compute(model.block_list())
+                                })
+                                .honor_ps1
                         }
+                        BlockType::BootstrapVisible(serialized_block) => serialized_block.honor_ps1,
                         // Otherwise, grab the current value.
                         _ => *SessionSettings::as_ref(ctx).honor_ps1,
                     };
@@ -12222,6 +12295,11 @@ impl TerminalView {
                         let is_universal_developer_input_enabled =
                             InputSettings::as_ref(ctx).is_universal_developer_input_enabled(ctx);
                         let is_in_agent_view = self.agent_view_controller.as_ref(ctx).is_active();
+                        let serialized_block =
+                            user_block_completed.serialized_block.get_with(|compute| {
+                                let model = self.model.lock();
+                                compute(model.block_list())
+                            });
                         send_telemetry_from_ctx!(
                             TelemetryEvent::BlockCompleted {
                                 block_finished_to_precmd_delay_ms: delay_ms,
@@ -12230,9 +12308,7 @@ impl TerminalView {
                                 num_output_lines: user_block_completed.num_output_lines,
                                 num_output_lines_truncated: user_block_completed
                                     .num_output_lines_truncated,
-                                terminal_session_id: user_block_completed
-                                    .serialized_block
-                                    .session_id,
+                                terminal_session_id: serialized_block.session_id,
                                 is_udi_enabled: is_universal_developer_input_enabled,
                                 is_in_agent_view,
                             },
@@ -12250,14 +12326,18 @@ impl TerminalView {
                                     num_output_lines: user_block_completed.num_output_lines,
                                     num_output_lines_truncated: user_block_completed
                                         .num_output_lines_truncated,
-                                    command: user_block_completed.command.clone(),
+                                    command: user_block_completed
+                                        .command
+                                        .get_with(|compute| {
+                                            let model = self.model.lock();
+                                            compute(model.block_list())
+                                        })
+                                        .to_owned(),
                                     duration: self
-                                        .block_duration(&user_block_completed.serialized_block)
+                                        .block_duration(serialized_block)
                                         .unwrap_or_default(),
-                                    exit_code: user_block_completed.serialized_block.exit_code,
-                                    terminal_session_id: user_block_completed
-                                        .serialized_block
-                                        .session_id,
+                                    exit_code: serialized_block.exit_code,
+                                    terminal_session_id: serialized_block.session_id,
                                 },
                                 ctx
                             );
@@ -12278,9 +12358,16 @@ impl TerminalView {
                 );
 
                 let pending_command_succeeded = match &block_type {
-                    BlockType::User(UserBlockCompleted {
-                        serialized_block, ..
-                    }) => Some(serialized_block.exit_code.was_successful()),
+                    BlockType::User(user_block_completed) => Some(
+                        user_block_completed
+                            .serialized_block
+                            .get_with(|compute| {
+                                let model = self.model.lock();
+                                compute(model.block_list())
+                            })
+                            .exit_code
+                            .was_successful(),
+                    ),
                     BlockType::BootstrapHidden
                     | BlockType::BootstrapVisible(_)
                     | BlockType::Restored
@@ -12367,9 +12454,16 @@ impl TerminalView {
                         || FeatureFlag::GithubPrPromptChip.is_enabled())
                         && match &block_type {
                             BlockType::User(user_block_completed) => {
-                                let command = user_block_completed.command.as_str();
+                                let command = user_block_completed.command.get_with(|compute| {
+                                    let model = self.model.lock();
+                                    compute(model.block_list())
+                                });
                                 let top_level = user_block_completed
                                     .serialized_block
+                                    .get_with(|compute| {
+                                        let model = self.model.lock();
+                                        compute(model.block_list())
+                                    })
                                     .session_id
                                     .and_then(|session_id| {
                                         self.sessions.as_ref(ctx).get(session_id)
@@ -12406,9 +12500,11 @@ impl TerminalView {
                 }
 
                 if let BlockType::User(block_completed) = block_type {
-                    if let Some(block_duration) =
-                        self.block_duration(&block_completed.serialized_block)
-                    {
+                    let serialized_block = block_completed.serialized_block.get_with(|compute| {
+                        let model = self.model.lock();
+                        compute(model.block_list())
+                    });
+                    if let Some(block_duration) = self.block_duration(serialized_block) {
                         self.maybe_send_block_completed_notification(
                             block_completed,
                             block_duration,
@@ -12430,7 +12526,7 @@ impl TerminalView {
                     // Check if the user tried to run an AWS login command but AWS CLI wasn't installed.
                     // This runs after other suggestion checks and may add its own banner alongside them.
                     self.maybe_show_aws_cli_not_installed_suggestion(
-                        block_completed.serialized_block.exit_code,
+                        serialized_block.exit_code,
                         ctx,
                     );
 
@@ -12460,8 +12556,7 @@ impl TerminalView {
                     }
 
                     let exit_code_data =
-                        &json!({"exit_code": block_completed.serialized_block.as_ref().exit_code})
-                            .to_string();
+                        &json!({"exit_code": serialized_block.exit_code}).to_string();
 
                     // If the block was a cloud workflow, record the workflow execution as an object action.
                     if let Some(cloud_workflow_id) = cloud_workflow_id {
@@ -12502,9 +12597,9 @@ impl TerminalView {
                         Some(model_event_sender),
                     ) = (
                         self.active_block_session_id(),
-                        block_completed.serialized_block.as_ref().exit_code,
-                        block_completed.serialized_block.as_ref().start_ts,
-                        block_completed.serialized_block.as_ref().completed_ts,
+                        serialized_block.exit_code,
+                        serialized_block.start_ts,
+                        serialized_block.completed_ts,
                         &self.model_event_sender,
                     ) {
                         History::handle(ctx).update(ctx, move |history, _ctx| {
@@ -12549,10 +12644,13 @@ impl TerminalView {
                     // Emit the event to the parent view. This will save the block to sqlite if
                     // session restoration is enabled.
                     ctx.emit(Event::BlockCompleted {
-                        block: block_completed.serialized_block.clone(),
+                        block: serialized_block.clone(),
                         is_local: !self.is_block_considered_remote(
-                            block_completed.serialized_block.session_id,
-                            Some(&block_completed.command),
+                            serialized_block.session_id,
+                            Some(block_completed.command.get_with(|compute| {
+                                let model = self.model.lock();
+                                compute(model.block_list())
+                            })),
                             ctx,
                         ),
                     });
@@ -13508,7 +13606,8 @@ impl TerminalView {
                     }
                     CLIAgentSessionStatus::InProgress
                     | CLIAgentSessionStatus::Success
-                    | CLIAgentSessionStatus::Failed { .. } => {
+                    | CLIAgentSessionStatus::Failed { .. }
+                    | CLIAgentSessionStatus::Cancelled => {
                         // Auto-open rich input when the agent resumes or completes.
                         if !self.has_active_cli_agent_input_session(ctx) {
                             self.open_cli_agent_rich_input(CLIAgentInputEntrypoint::AutoShow, ctx);
@@ -14284,11 +14383,24 @@ impl TerminalView {
         ctx: &mut ViewContext<Self>,
     ) {
         let cli_name = ChannelState::channel().cli_command_name();
-        let cmd = &block_completed.command;
-        let is_env_create =
-            cmd.contains(cli_name) && cmd.contains("environment") && cmd.contains("create");
+        let is_env_create = {
+            let cmd = block_completed.command.get_with(|compute| {
+                let model = self.model.lock();
+                compute(model.block_list())
+            });
+            cmd.contains(cli_name) && cmd.contains("environment") && cmd.contains("create")
+        };
 
-        if !is_env_create || !block_completed.serialized_block.exit_code.was_successful() {
+        if !is_env_create
+            || !block_completed
+                .serialized_block
+                .get_with(|compute| {
+                    let model = self.model.lock();
+                    compute(model.block_list())
+                })
+                .exit_code
+                .was_successful()
+        {
             return;
         }
 
@@ -15047,17 +15159,16 @@ impl TerminalView {
     }
 
     async fn fetch_command_corrections(
-        block: UserBlockCompleted,
+        command: String,
+        output_truncated: String,
+        exit_code: ExitCode,
+        pwd: Option<String>,
         session: Option<Arc<Session>>,
         history_commands: Vec<HistoryEntry>,
     ) -> Vec<Correction> {
         // Create the command
-        let (input, output, exit_code, working_dir) = (
-            block.command.as_str(),
-            block.output_truncated.as_str(),
-            block.serialized_block.exit_code,
-            block.serialized_block.pwd.as_ref(),
-        );
+        let (input, output, working_dir) =
+            (command.as_str(), output_truncated.as_str(), pwd.as_deref());
 
         let mut command = Command::new(input, output, exit_code.into());
         if let Some(working_dir) = working_dir {
@@ -15198,7 +15309,7 @@ impl TerminalView {
                 if ai_metadata
                     .ai_block_handle
                     .as_ref(ctx)
-                    .is_passive_conversation(ctx)
+                    .is_passive_conversation()
                     && matches!(
                         ai_metadata.ai_block_handle.as_ref(ctx).status(ctx),
                         AIBlockOutputStatus::Failed { .. }
@@ -15225,7 +15336,7 @@ impl TerminalView {
         self.rich_content_views.retain(|rich_content| {
             if let Some(ai_metadata) = rich_content.ai_block_metadata() {
                 let is_hidden = ai_metadata.ai_block_handle.read(ctx, |ai_block, ctx| {
-                    ai_block.is_hidden(ctx) && ai_block.is_passive_conversation(ctx)
+                    ai_block.is_passive_conversation() && ai_block.is_hidden(ctx)
                 });
                 if is_hidden {
                     ai_block_ids_to_remove.push(ai_metadata.ai_block_handle.id());
@@ -15716,8 +15827,6 @@ impl TerminalView {
         block_completed: &UserBlockCompleted,
         ctx: &mut ViewContext<TerminalView>,
     ) {
-        let block_completed = block_completed.to_owned();
-
         if *InputSettings::as_ref(ctx).command_corrections.value() {
             let session_id = self.active_block_session_id();
 
@@ -15729,8 +15838,36 @@ impl TerminalView {
                 .cloned()
                 .collect();
 
+            let command = block_completed
+                .command
+                .get_with(|compute| {
+                    let model = self.model.lock();
+                    compute(model.block_list())
+                })
+                .to_owned();
+            let output_truncated = block_completed
+                .output_truncated
+                .get_with(|compute| {
+                    let model = self.model.lock();
+                    compute(model.block_list())
+                })
+                .to_owned();
+            let serialized_block = block_completed.serialized_block.get_with(|compute| {
+                let model = self.model.lock();
+                compute(model.block_list())
+            });
+            let exit_code = serialized_block.exit_code;
+            let pwd = serialized_block.pwd.clone();
+
             let _ = ctx.spawn(
-                Self::fetch_command_corrections(block_completed.clone(), session, history_entries),
+                Self::fetch_command_corrections(
+                    command,
+                    output_truncated,
+                    exit_code,
+                    pwd,
+                    session,
+                    history_entries,
+                ),
                 Self::after_command_correction_generation,
             );
         }
@@ -15769,7 +15906,13 @@ impl TerminalView {
             .active_block_session_id()
             .and_then(|id| self.sessions.as_ref(ctx).get(id))
         {
-            let command = block_completed.command.clone();
+            let command = block_completed
+                .command
+                .get_with(|compute| {
+                    let model = self.model.lock();
+                    compute(model.block_list())
+                })
+                .to_owned();
             ctx.spawn(
                 async move { check_for_alias_async(&command, session).await },
                 move |view, aliased_command, ctx| {
@@ -15816,7 +15959,13 @@ impl TerminalView {
 
         let notification_settings = session_settings_handle.notifications.value().clone();
         let long_running_trigger = NotificationsTrigger::LongRunningCommand(
-            !block.serialized_block.has_failed(),
+            !block
+                .serialized_block
+                .get_with(|compute| {
+                    let model = self.model.lock();
+                    compute(model.block_list())
+                })
+                .has_failed(),
             block_duration,
         );
         match notification_settings.mode {
@@ -15852,10 +16001,20 @@ impl TerminalView {
                     // Otherwise, since the block completed, check if we
                     // should send a notification for long-running command
                     let notification_content = long_running_trigger.create_notification_content(
-                        block.command.clone(),
+                        block
+                            .command
+                            .get_with(|compute| {
+                                let model = self.model.lock();
+                                compute(model.block_list())
+                            })
+                            .to_owned(),
                         // Only include the last line when displaying a notification.
                         block
                             .output_truncated
+                            .get_with(|compute| {
+                                let model = self.model.lock();
+                                compute(model.block_list())
+                            })
                             .lines()
                             .last()
                             .map_or_else(String::new, ToOwned::to_owned),
@@ -16633,7 +16792,7 @@ impl TerminalView {
                 Some(highlighted_link),
                 _,
             ) => {
-                match highlighted_link {
+                let mut items = match highlighted_link {
                     GridHighlightedLink::Url(url) => {
                         let url_content =
                             Some(model.link_at_range(url, RespectObfuscatedSecrets::Yes));
@@ -16713,7 +16872,14 @@ impl TerminalView {
                                 .into_item(),
                         ]
                     }
+                };
+
+                if !items.is_empty() {
+                    items.push(MenuItem::Separator);
                 }
+                items.push(self.paste_menu_item(ctx));
+
+                items
             }
             (
                 BlockListMenuSource::RegularTextRightClick { .. }
@@ -16827,6 +16993,15 @@ impl TerminalView {
                     "Share..."
                 };
 
+                // Only right-click sources offer general terminal actions like "Paste";
+                // the overflow-button and keybinding menus are scoped to the selected block(s).
+                let is_right_click_source = matches!(
+                    menu_source,
+                    BlockListMenuSource::RegularBlockRightClick { .. }
+                        | BlockListMenuSource::RichContentBlockRightClick { .. }
+                        | BlockListMenuSource::OutsideBlockRightClick { .. }
+                );
+
                 let mut items = vec![
                     MenuItemFields::new(copy_str)
                         .with_on_select_action(TerminalAction::ContextMenu(
@@ -16848,6 +17023,54 @@ impl TerminalView {
                         ))
                         .with_disabled(is_copy_commands_disabled)
                         .into_item(),
+                ];
+
+                if is_single_selection {
+                    let mut copy_output_menu_item = MenuItemFields::new("Copy output")
+                        .with_on_select_action(TerminalAction::ContextMenu(
+                            ContextMenuAction::CopyBlockOutputs,
+                        ))
+                        .with_disabled(tail_block.output_grid().is_empty());
+
+                    // If there is an active filter on a block, then we want to display a
+                    // Copy filtered output option and assign the "terminal:copy_outputs" keybinding to it.
+                    if tail_block.has_active_filter() {
+                        items.insert(
+                            1,
+                            MenuItemFields::new("Copy filtered output")
+                                .with_on_select_action(TerminalAction::ContextMenu(
+                                    ContextMenuAction::CopyBlockFilteredOutputs,
+                                ))
+                                .with_key_shortcut_label(keybinding_name_to_display_string(
+                                    "terminal:copy_outputs",
+                                    ctx,
+                                ))
+                                .into_item(),
+                        );
+                        items.insert(2, copy_output_menu_item.into_item());
+                    } else {
+                        copy_output_menu_item = copy_output_menu_item.with_key_shortcut_label(
+                            keybinding_name_to_display_string("terminal:copy_outputs", ctx),
+                        );
+                        items.insert(2, copy_output_menu_item.into_item());
+                    }
+
+                    let mut prompt_items = self.copy_prompt_menu_items(
+                        self.input_is_on_git_branch(&model),
+                        self.is_rprompt_shown(&model),
+                        PromptPosition::Block(tail_block_index),
+                    );
+                    items.append(&mut prompt_items);
+                }
+
+                // "Paste" closes out the copy-related section so clipboard actions for
+                // the block sit together, ending with the general clipboard paste.
+                if is_right_click_source {
+                    items.push(self.paste_menu_item(ctx));
+                }
+
+                items.push(MenuItem::Separator);
+                items.push(
                     MenuItemFields::new(share_block_label)
                         .with_on_select_action(TerminalAction::ContextMenu(
                             ContextMenuAction::OpenShareBlockModal {
@@ -16860,7 +17083,7 @@ impl TerminalView {
                         ))
                         .with_disabled(is_share_disabled)
                         .into_item(),
-                ];
+                );
 
                 if FeatureFlag::CreatingSharedSessions.is_enabled()
                     && ContextFlag::CreateSharedSession.is_enabled()
@@ -16928,45 +17151,6 @@ impl TerminalView {
                                 .into_item(),
                         ]);
                     }
-                }
-
-                if is_single_selection {
-                    let mut copy_output_menu_item = MenuItemFields::new("Copy output")
-                        .with_on_select_action(TerminalAction::ContextMenu(
-                            ContextMenuAction::CopyBlockOutputs,
-                        ))
-                        .with_disabled(tail_block.output_grid().is_empty());
-
-                    // If there is an active filter on a block, then we want to display a
-                    // Copy filtered output option and assign the "terminal:copy_outputs" keybinding to it.
-                    if tail_block.has_active_filter() {
-                        items.insert(
-                            1,
-                            MenuItemFields::new("Copy filtered output")
-                                .with_on_select_action(TerminalAction::ContextMenu(
-                                    ContextMenuAction::CopyBlockFilteredOutputs,
-                                ))
-                                .with_key_shortcut_label(keybinding_name_to_display_string(
-                                    "terminal:copy_outputs",
-                                    ctx,
-                                ))
-                                .into_item(),
-                        );
-                        items.insert(2, copy_output_menu_item.into_item());
-                    } else {
-                        copy_output_menu_item = copy_output_menu_item.with_key_shortcut_label(
-                            keybinding_name_to_display_string("terminal:copy_outputs", ctx),
-                        );
-                        items.insert(2, copy_output_menu_item.into_item());
-                    }
-
-                    let mut prompt_items = self.copy_prompt_menu_items(
-                        self.input_is_on_git_branch(&model),
-                        self.is_rprompt_shown(&model),
-                        PromptPosition::Block(tail_block_index),
-                    );
-                    items.push(MenuItem::Separator);
-                    items.append(&mut prompt_items);
                 }
 
                 items.append(&mut vec![
@@ -17236,6 +17420,15 @@ impl TerminalView {
         }
 
         items
+    }
+
+    fn paste_menu_item(&self, ctx: &mut ViewContext<Self>) -> MenuItem<TerminalAction> {
+        let is_clipboard_empty = ctx.clipboard().read().is_empty();
+        MenuItemFields::new("Paste")
+            .with_on_select_action(TerminalAction::Paste)
+            .with_key_shortcut_label(keybinding_name_to_display_string("terminal:paste", ctx))
+            .with_disabled(is_clipboard_empty)
+            .into_item()
     }
 
     /// Builds the "Clear Blocks" entry for the terminal right-click context
@@ -20895,8 +21088,8 @@ impl TerminalView {
             let ai_block = ai_metadata.ai_block_handle.as_ref(ctx);
 
             (!ai_block.is_finished()
-                && !ai_block.is_hidden(ctx)
-                && !ai_block.is_passive_conversation(ctx))
+                && !ai_block.is_passive_conversation()
+                && !ai_block.is_hidden(ctx))
             .then_some(&ai_metadata.ai_block_handle)
         })
     }
@@ -23752,6 +23945,42 @@ impl TerminalView {
         .finish()
     }
 
+    fn render_orchestration_child_live_unavailable(&self, app: &AppContext) -> Box<dyn Element> {
+        let appearance = Appearance::as_ref(app);
+        let color = appearance
+            .theme()
+            .sub_text_color(appearance.theme().background());
+
+        SavePosition::new(
+            Align::new(
+                Flex::column()
+                    .with_child(
+                        Text::new_inline(
+                            "Live session unavailable",
+                            appearance.ui_font_family(),
+                            14.,
+                        )
+                        .with_color(color.into())
+                        .finish(),
+                    )
+                    .with_child(
+                        Text::new_inline(
+                            "The transcript will appear when this child finishes.",
+                            appearance.ui_font_family(),
+                            12.,
+                        )
+                        .with_color(color.into())
+                        .finish(),
+                    )
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .finish(),
+            )
+            .finish(),
+            &self.content_element_position_id,
+        )
+        .finish()
+    }
+
     fn render_bookmark_element(
         index: BlockIndex,
         bookmark_mouse_state: MouseStateHandle,
@@ -24777,7 +25006,7 @@ impl TerminalView {
             SavePosition::new(
                 EventHandler::new(child)
                     .on_right_mouse_down(
-                        enclose!((position_id, input_position_id) move |ctx, _app, position | {
+                        enclose!((position_id, input_position_id) move |ctx, app, position, modifiers| {
                                 if let Some(position_in_terminal_view) = offset_position_outside_block(
                                     position,
                                     &position_id,
@@ -24785,6 +25014,10 @@ impl TerminalView {
                                     block_list_height_px,
                                     ctx,
                                 ) {
+                                    if should_right_click_paste(modifiers.shift, app) {
+                                        ctx.dispatch_typed_action(TerminalAction::Paste);
+                                        return DispatchEventResult::StopPropagation;
+                                    }
                                     ctx.dispatch_typed_action(TerminalAction::BlockListContextMenu(
                                         BlockListMenuSource::OutsideBlockRightClick {
                                             position_in_terminal_view,
@@ -25475,8 +25708,8 @@ impl TerminalView {
                     // Log to sentry if unknown error
                     if let RequestPermissionsOutcome::OtherError { error_message } = &outcome {
                         report_error!(
-                            "Unknown error when requesting notification permissions",
-                            extra: { "error_message" => %error_message }
+                            anyhow::anyhow!("{error_message}")
+                                .context("Unknown error when requesting notification permissions")
                         );
                     }
 
@@ -26209,15 +26442,16 @@ impl TerminalView {
 
     pub(super) fn toggle_file_tree(
         &mut self,
+        source: crate::server::telemetry::FileTreeSource,
         cli_agent: Option<crate::server::telemetry::CLIAgentType>,
         ctx: &mut ViewContext<Self>,
     ) {
-        use crate::server::telemetry::{FileTreeSource, TelemetryEvent};
+        use crate::server::telemetry::TelemetryEvent;
 
         self.toggle_left_panel_file_tree(false, ctx);
         send_telemetry_from_ctx!(
             TelemetryEvent::FileTreeToggled {
-                source: FileTreeSource::LeftPanelToolbelt,
+                source,
                 is_code_mode_v2: true,
                 cli_agent,
             },
@@ -26365,7 +26599,14 @@ impl TerminalSurface for TerminalView {
         // Only user-executed (and bootstrap/background) blocks carry a serialized
         // block with an exit code; other block types don't terminate an upload.
         let exit_code = match &completed.block_type {
-            BlockType::User(user) => user.serialized_block.exit_code,
+            BlockType::User(user) => {
+                user.serialized_block
+                    .get_with(|compute| {
+                        let model = self.model.lock();
+                        compute(model.block_list())
+                    })
+                    .exit_code
+            }
             BlockType::BootstrapVisible(block) | BlockType::Background(block) => block.exit_code,
             BlockType::BootstrapHidden
             | BlockType::Restored
@@ -27960,7 +28201,9 @@ impl View for TerminalView {
                         && !self.is_ambient_agent_session(app);
                     let is_loading_transcript = model.is_loading_conversation_transcript();
                     let should_show_loading = is_view_pending_clause || is_loading_transcript;
-                    let output_area = if should_show_loading {
+                    let output_area = if self.orchestration_child_live_unavailable {
+                        self.render_orchestration_child_live_unavailable(app)
+                    } else if should_show_loading {
                         self.render_viewer_loading(app)
                     } else if is_alt_screen_active {
                         did_wrap_terminal_size = true;
