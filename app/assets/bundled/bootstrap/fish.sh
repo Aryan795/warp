@@ -194,7 +194,10 @@ function warp_run_generator_command_native_completions
     printf '\e]9280;A\a'
     # A whitespace-only or empty line has no useful completions, and `complete -C` on it would
     # synchronously list every command on $PATH; trim before checking to catch both.
-    if test -n "$(string trim -- "$line")"
+    # Assign first rather than substituting inline: `$(...)` is a parse error before fish 3.4, and
+    # a parse error here costs the whole file, not just this function.
+    set -l trimmed_line (string trim -- "$line")
+    if test -n "$trimmed_line"
         # `complete -C "<line>"` computes completions for an arbitrary line, returning one
         # "match\tdescription" pair per line.
         for entry in (complete -C "$line")
