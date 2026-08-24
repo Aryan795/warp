@@ -467,6 +467,10 @@ pub enum TerminalAction {
 
     /// Allow the blocked clipboard operation by adjusting the OSC 52 clipboard access setting.
     Osc52AllowBlockedClipboardOperation,
+
+    /// Retry a failed conversation transcript load. Dispatched from the retry
+    /// link shown in the persistent load-failure state.
+    RetryConversationTranscriptLoad,
 }
 
 // Manually implementing Debug to avoid leaking sensitive information in logs
@@ -754,6 +758,7 @@ impl fmt::Debug for TerminalAction {
             Osc52AllowBlockedClipboardOperation => {
                 write!(f, "Osc52AllowBlockedClipboardOperation")
             }
+            RetryConversationTranscriptLoad => write!(f, "RetryConversationTranscriptLoad"),
         }
     }
 }

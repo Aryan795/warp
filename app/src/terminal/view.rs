@@ -2070,6 +2070,9 @@ pub enum Event {
     /// [`ambient_agent::wire_ambient_agent_session_events`]) so follow-up runs after the
     /// previous VM ends re-attach the viewer to the new execution session.
     AmbientAgentViewModelCreated,
+    /// Emitted when the user clicks the retry link shown in the persistent
+    /// conversation transcript load-failure state.
+    RetryConversationTranscriptLoad,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2354,6 +2357,7 @@ struct TerminalViewMouseStates {
     jump_to_bottom_of_block_button: MouseStateHandle,
 
     parent_conversation_header_link: MouseStateHandle,
+    retry_conversation_transcript_load_link: MouseStateHandle,
     /// Persistent horizontal scroll state for the orchestration breadcrumb
     /// row. Lives here (rather than as a `MouseStateHandle`) so the user's
     /// scroll position survives across renders — in narrow split-off panes
@@ -24564,12 +24568,30 @@ impl TerminalView {
     }
 
     /// Renders a persistent error state for a conversation transcript viewer whose
-    /// conversation data failed to load, replacing the loading spinner.
+    /// conversation data failed to load, replacing the loading spinner. Includes a
+    /// retry link that re-attempts the load without recreating the pane; the link
+    /// disappears on click since the viewer immediately transitions to the loading
+    /// state, which prevents double-fires.
     fn render_viewer_load_failed(&self, app: &AppContext) -> Box<dyn Element> {
         let appearance = Appearance::as_ref(app);
         let color = appearance
             .theme()
             .sub_text_color(appearance.theme().background());
+
+        let retry_link = appearance
+            .ui_builder()
+            .link(
+                "Retry".to_string(),
+                None,
+                Some(Box::new(|ctx: &mut EventContext| {
+                    ctx.dispatch_typed_action(TerminalAction::RetryConversationTranscriptLoad);
+                })),
+                self.mouse_states
+                    .retry_conversation_transcript_load_link
+                    .clone(),
+            )
+            .build()
+            .finish();
 
         SavePosition::new(
             Align::new(
@@ -24591,6 +24613,7 @@ impl TerminalView {
                         .with_color(color.into())
                         .finish(),
                     )
+                    .with_child(Container::new(retry_link).with_margin_top(4.).finish())
                     .with_cross_axis_alignment(CrossAxisAlignment::Center)
                     .finish(),
             )
@@ -26998,7 +27021,8 @@ impl TypedActionView for TerminalView {
             | CycleNextOrchestrationChildAgent
             | ToggleCLIAgentRichInput
             | ToggleSessionRecording
-            | Osc52AllowBlockedClipboardOperation => Empty,
+            | Osc52AllowBlockedClipboardOperation
+            | RetryConversationTranscriptLoad => Empty,
         }
     }
 
@@ -28163,6 +28187,9 @@ impl TypedActionView for TerminalView {
                     self.osc52_clipboard_blocked_type = None;
                     ctx.notify();
                 }
+            }
+            RetryConversationTranscriptLoad => {
+                ctx.emit(Event::RetryConversationTranscriptLoad);
             }
         }
     }

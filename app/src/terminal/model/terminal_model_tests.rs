@@ -11,6 +11,7 @@ use warpui::r#async::executor::Background;
 use warpui::text::{SelectionType, str_to_byte_vec};
 
 use super::*;
+use crate::ai::agent::api::ServerConversationToken;
 use crate::ai::agent::conversation::AIConversationId;
 use crate::terminal::color;
 use crate::terminal::event_listener::ChannelEventListener;
@@ -234,13 +235,21 @@ fn failed_conversation_transcript_load_is_a_distinct_read_only_terminal_state() 
     assert!(model.is_loading_conversation_transcript());
     assert!(!model.is_conversation_transcript_load_failed());
 
+    let server_token = ServerConversationToken::new("test-server-token".to_string());
     model.set_conversation_transcript_viewer_status(Some(
-        ConversationTranscriptViewerStatus::Failed,
+        ConversationTranscriptViewerStatus::Failed {
+            server_token: server_token.clone(),
+            ambient_agent_task_id: None,
+        },
     ));
     assert!(model.is_conversation_transcript_viewer());
     assert!(model.is_read_only());
     assert!(model.is_conversation_transcript_load_failed());
     assert!(!model.is_loading_conversation_transcript());
+    assert_eq!(
+        model.conversation_transcript_load_retry_target(),
+        Some((server_token, None))
+    );
 }
 
 fn iterm_file_osc(name: &str, inline: bool, payload: &[u8]) -> String {

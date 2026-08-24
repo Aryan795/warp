@@ -2012,8 +2012,9 @@ fn fail_conversation_transcript_viewer_sets_a_persistent_failed_status() {
         initialize_app(&mut app);
         let pane_group = mock_pane_group(&mut app, Default::default());
 
+        let server_token = ServerConversationToken::new("test-server-token".to_string());
         pane_group.update(&mut app, |panes, ctx| {
-            panes.fail_conversation_transcript_viewer(ctx);
+            panes.fail_conversation_transcript_viewer(server_token.clone(), None, ctx);
         });
 
         pane_group.read(&app, |panes, ctx| {
@@ -2027,7 +2028,10 @@ fn fail_conversation_transcript_viewer_sets_a_persistent_failed_status() {
             assert!(!model.is_loading_conversation_transcript());
             assert_eq!(
                 model.conversation_transcript_viewer_status(),
-                Some(&ConversationTranscriptViewerStatus::Failed)
+                Some(&ConversationTranscriptViewerStatus::Failed {
+                    server_token,
+                    ambient_agent_task_id: None,
+                })
             );
         });
     });

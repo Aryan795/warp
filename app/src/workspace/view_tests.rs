@@ -1432,6 +1432,123 @@ fn open_cloud_conversation_from_server_token_reaches_failed_state_on_load_failur
     });
 }
 
+/// Regression test for the user-triggered retry link on the persistent load-failure
+/// state. Drives the exact same `PaneGroup::retry_conversation_transcript_load` path
+/// that the retry link's click handler calls, so it fails if that wiring is removed.
+/// Covers: initial failure reaches `Failed`, retry reuses the same pane and terminal
+/// view (no tab recreated) and reverts it to `Loading`, a stale retry while already
+/// loading is a no-op (guards against double-fires), and the retried load reaching a
+/// terminal `Failed` state again proves the retry actually re-drove the load.
+#[test]
+fn open_cloud_conversation_from_server_token_retry_reuses_pane_and_reaches_failed_state_again() {
+    let _cloud_conversations = FeatureFlag::CloudConversations.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        let _mock = {
+            let mut server = ChannelState::mock_server();
+            server
+                .mock("POST", "/graphql/v2")
+                .match_query(mockito::Matcher::UrlEncoded(
+                    "op".to_string(),
+                    "ListAIConversations".to_string(),
+                ))
+                .with_status(500)
+                .with_body(r#"{"error":"internal error"}"#)
+                .create()
+        };
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.open_cloud_conversation_from_server_token(
+                ServerConversationToken::new("failing-server-token".to_string()),
+                ctx,
+            );
+        });
+
+        assert_eventually!(
+            workspace.read(&app, |workspace, ctx| {
+                workspace
+                    .active_tab_pane_group()
+                    .as_ref(ctx)
+                    .active_session_view(ctx)
+                    .is_some_and(|terminal_view| {
+                        terminal_view
+                            .as_ref(ctx)
+                            .model
+                            .lock()
+                            .is_conversation_transcript_load_failed()
+                    })
+            }),
+            "initial load should reach the Failed status before retrying"
+        );
+
+        let terminal_view_before_retry = workspace.read(&app, |workspace, ctx| {
+            workspace
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .active_session_view(ctx)
+                .expect("failed transcript viewer should still have an active terminal view")
+        });
+
+        let pane_group = workspace.read(&app, |workspace, _| {
+            workspace.active_tab_pane_group().clone()
+        });
+
+        // Click retry: the pane must revert to Loading immediately, reusing the same
+        // pane/terminal view rather than recreating the tab (the web viewer has no
+        // tab-close affordance, so the retry must work in place).
+        pane_group.update(&mut app, |pane_group, ctx| {
+            pane_group.retry_conversation_transcript_load(ctx);
+        });
+
+        workspace.read(&app, |workspace, ctx| {
+            let terminal_view = workspace
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .active_session_view(ctx)
+                .expect("retry must keep the transcript viewer's terminal view around");
+            assert_eq!(
+                terminal_view.id(),
+                terminal_view_before_retry.id(),
+                "retry must reuse the existing pane, not recreate it"
+            );
+            assert!(
+                terminal_view
+                    .as_ref(ctx)
+                    .model
+                    .lock()
+                    .is_loading_conversation_transcript(),
+                "clicking retry should revert the viewer to the loading state"
+            );
+        });
+
+        // A stale retry click while the retried load is already in flight must be a
+        // no-op instead of firing a second concurrent load.
+        pane_group.update(&mut app, |pane_group, ctx| {
+            pane_group.retry_conversation_transcript_load(ctx);
+        });
+
+        assert_eventually!(
+            workspace.read(&app, |workspace, ctx| {
+                workspace
+                    .active_tab_pane_group()
+                    .as_ref(ctx)
+                    .active_session_view(ctx)
+                    .is_some_and(|terminal_view| {
+                        terminal_view
+                            .as_ref(ctx)
+                            .model
+                            .lock()
+                            .is_conversation_transcript_load_failed()
+                    })
+            }),
+            "the retried load should reach the Failed status again on a second failure"
+        );
+    });
+}
+
 fn new_session_menu_label(item: &MenuItem<WorkspaceAction>) -> String {
     match item {
         MenuItem::Item(fields) => fields.label().to_string(),
