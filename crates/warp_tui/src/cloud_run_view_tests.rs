@@ -14,7 +14,10 @@ use crate::terminal_session_view::CTRL_C_KILL_CHILD_HINT;
 use crate::test_fixtures::TestHostView;
 use crate::tui_builder::TuiUiBuilder;
 
-const RUN_URL: &str = "https://oz.staging.warp.dev/runs/019f71ef-6285-7480-90f6-3ad84d8e0d1e";
+// Resolved from the default (production) channel config: no `FactoryAccessModel` singleton is
+// registered in these tests, so the viewer's Factory access is `Unknown` and the link stays on
+// Oz per `cloud_run_web_url` (APP-5583).
+const RUN_URL: &str = "https://oz.warp.dev/runs/019f71ef-6285-7480-90f6-3ad84d8e0d1e";
 const TASK_ID: &str = "11111111-1111-1111-1111-111111111111";
 
 #[test]
@@ -129,7 +132,6 @@ fn spawned_cloud_view_matches_figma_in_progress_and_succeeded_states() {
                         .parse::<AmbientAgentTaskId>()
                         .expect("hardcoded task id parses"),
                     "019f71ef-6285-7480-90f6-3ad84d8e0d1e".to_string(),
-                    RUN_URL.to_string(),
                     ctx,
                 );
             });
@@ -267,7 +269,6 @@ fn cloud_child_first_interrupt_arms_kill_window_not_exit_window() {
                         .parse::<AmbientAgentTaskId>()
                         .expect("hardcoded task id parses"),
                     "019f71ef-6285-7480-90f6-3ad84d8e0d1e".to_string(),
-                    RUN_URL.to_string(),
                     ctx,
                 );
             });

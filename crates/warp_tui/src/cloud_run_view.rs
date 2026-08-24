@@ -1,7 +1,7 @@
 use instant::Instant;
 use warp::tui_export::{
     BlocklistAIHistoryModel, CloudAgentStartupAuthFlow, CloudAgentStartupPresentation,
-    ConversationStatus, loaded_subtree_rollup,
+    ConversationStatus, cloud_run_url, loaded_subtree_rollup,
 };
 use warp_errors::report_error;
 use warpui::SingletonEntity as _;
@@ -285,7 +285,7 @@ impl TuiCloudRunView {
                     status_label: status_label.to_string(),
                     detail: None,
                     link_instruction: Some("to view or click the link below"),
-                    link_url: state.run_url().map(str::to_string),
+                    link_url: state.run_id().map(|run_id| cloud_run_url(run_id, ctx)),
                 }
             }
         }
