@@ -1245,7 +1245,6 @@ fn completion_replacement_span_records_valid_pair_and_drops_overflow() {
         .expect("a CompletionsFinished event should have been emitted");
     assert_eq!(well_formed, Some((3, 7)));
 
-    // start + length overflows usize; the handler must drop it rather than panic in `Span::new`.
     terminal.start_completions_output();
     terminal.on_completion_replacement_span_received(usize::MAX, 1);
     terminal.end_completions_output();
