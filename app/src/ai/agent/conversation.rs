@@ -2394,6 +2394,7 @@ impl AIConversation {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn update_cost_and_usage_for_request(
         &mut self,
         stream_id: &ResponseStreamId,

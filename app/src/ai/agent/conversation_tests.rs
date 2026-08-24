@@ -1016,7 +1016,15 @@ fn update_cost_and_usage_resets_stale_charged_usage_for_last_block_on_new_user_t
 
         app.read(|ctx| {
             conversation
-                .update_cost_and_usage_for_request(None, None, vec![], None, true, ctx)
+                .update_cost_and_usage_for_request(
+                    &ResponseStreamId::new_for_test(),
+                    None,
+                    None,
+                    vec![],
+                    None,
+                    true,
+                    ctx,
+                )
                 .expect("usage should update");
         });
 
