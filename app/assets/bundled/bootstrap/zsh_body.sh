@@ -82,8 +82,7 @@ if [[ -z $WARP_BOOTSTRAPPED ]]; then
       # Note that because the JSON string may contain characters that we don't control (including
       # unicode), we encode it as hexadecimal string to avoid prematurely calling unhook if
       # one of the bytes in JSON is 9c (ST) or other (CAN, SUB, ESC).
-      local msg
-      warp_hex_encode_string_into msg "$1"
+      local msg=$(warp_hex_encode_string "$1")
       # We send the InitShell hook via OSCs when on WSL and via DCSs otherwise.
       if [ "$WARP_USING_WINDOWS_CON_PTY" = true ]; then
         printf $OSC_START$DCS_JSON_MARKER$OSC_PARAM_SEPARATOR$msg$OSC_END
@@ -148,8 +147,7 @@ if [[ -z $WARP_BOOTSTRAPPED ]]; then
   # Note: If we're on windows, we send a reset grid to erase any cursor mutations caused by
   # the in-band command.
   warp_send_generator_output_osc() {
-      local hex_encoded_message
-      warp_hex_encode_string_into hex_encoded_message "$1"
+      local hex_encoded_message=$(warp_hex_encode_string "$1")
       local byte_count=$(LC_ALL="C"; printf "${#hex_encoded_message}")
       printf "%b%i;%s%b" $OSC_START_GENERATOR_OUTPUT $byte_count $hex_encoded_message $OSC_END_GENERATOR_OUTPUT
       warp_maybe_send_reset_grid_osc
@@ -565,7 +563,20 @@ if [[ -z $WARP_BOOTSTRAPPED ]]; then
 
   }
 
-  warp_hex_encode_string_into () {
+  # warp_hex_encode_string encodes the entire DCS string (JSON) with od making it essentially
+  # a very long hexadecimal string.
+  # Afterwards it's decoded in rust and parsed as usual.
+  # Accepts one argument: DCS JSON string
+  warp_hex_encode_string () {
+    printf '%s' "$1" | command -p od -An -v -tx1 | command -p tr -d ' \n'
+  }
+
+  # Hex-encodes its second argument into the variable named by its first.
+  #
+  # Reserved for the native completions path, which encodes once per match and so cannot afford
+  # warp_hex_encode_string's fork per call. The hooks that run on every command of every session
+  # stay on that older encoder, so a defect here can only reach a user who asks for completions.
+  warp_completions_hex_encode_into () {
     setopt localoptions nomultibyte
     # `LC_ALL=C` keeps indexing byte-wise, so a multibyte character encodes as its UTF-8 bytes rather than its code point.
     local LC_ALL=C
@@ -587,12 +598,6 @@ if [[ -z $WARP_BOOTSTRAPPED ]]; then
       __warp_hex_acc+=${(l:2::0:)${(L)__warp_hex_byte}}
     done
     typeset -g "$__warp_hex_var=$__warp_hex_acc"
-  }
-
-  warp_hex_encode_string () {
-    local __warp_hex_result
-    warp_hex_encode_string_into __warp_hex_result "$1"
-    printf '%s' "$__warp_hex_result"
   }
 
   warp_hex_decode_string () {
@@ -1515,10 +1520,10 @@ esac
         fi
         _WARP_SEEN_COMPLETIONS[$__dedup_key]=1
 
-        warp_hex_encode_string_into __warp_hex_match "$match"
+        warp_completions_hex_encode_into __warp_hex_match "$match"
         print -n "\e]9280;C"$OSC_PARAM_SEPARATOR$__warp_hex_match$OSC_END
         if [[ -n "$dscr" ]]; then
-            warp_hex_encode_string_into __warp_hex_dscr "$dscr"
+            warp_completions_hex_encode_into __warp_hex_dscr "$dscr"
             print -n "\e]9280;D?description"$OSC_PARAM_SEPARATOR$__warp_hex_dscr$OSC_END
         fi
     done

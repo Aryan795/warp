@@ -63,7 +63,19 @@ function warp_maybe_send_reset_grid_osc
 end
 
 
-function warp_hex_encode_string
+# warp_hex_encode_string hex-encodes the given string with `od`.
+function warp_hex_encode_string 
+  printf '%s' "$argv" | od -An -v -tx1 | command tr -d ' \n'
+end
+
+# Hex-encodes the given string to stdout.
+#
+# Reserved for the native completions path, which encodes once per match and so cannot afford
+# warp_hex_encode_string's second fork per call; stripping od's spaces and line-wrap newlines with
+# the builtin `string replace` costs one fork rather than two. The hooks that run on every command
+# of every session stay on that older encoder, so a defect here can only reach a user who asks for
+# completions. fish has no byte-safe string indexing, so unlike bash and zsh it still needs `od`.
+function warp_completions_hex_encode
   set -l od_output (printf '%s' "$argv" | od -An -v -tx1)
   string replace -a -- ' ' '' (string join '' $od_output)
 end
@@ -188,9 +200,9 @@ function warp_run_generator_command_native_completions
             # Hex-encode both fields: OSC params are semicolon-delimited and only the third is
             # read (see decode_hex_completions_payload in ansi/mod.rs), so a literal `;`, BEL,
             # or ESC in a match or description would otherwise corrupt the sequence.
-            printf '\e]9280;C;%s\a' (warp_hex_encode_string $parts[1])
+            printf '\e]9280;C;%s\a' (warp_completions_hex_encode $parts[1])
             if test (count $parts) -gt 1 -a -n "$parts[2]"
-                printf '\e]9280;D?description;%s\a' (warp_hex_encode_string $parts[2])
+                printf '\e]9280;D?description;%s\a' (warp_completions_hex_encode $parts[2])
             end
         end
     end

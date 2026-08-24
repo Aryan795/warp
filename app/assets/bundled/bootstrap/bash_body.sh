@@ -72,7 +72,7 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
         # Note that because the JSON string may contain characters that we don't control (including
         # unicode), we encode it as hexadecimal string to avoid prematurely calling unhook if
         # one of the bytes in JSON is 9c (ST) or other (CAN, SUB, ESC).
-        warp_hex_encode_string_into encoded_message "$1"
+        encoded_message=$(warp_hex_encode_string "$1")
         # We send the InitShell hook via OSCs when on WSL or MSYS2 or SSH from Windows and via DCSs otherwise.
         # Note that $WARP_USING_WINDOWS_CON_PTY is set in the init shell script.
         if [ "$WARP_USING_WINDOWS_CON_PTY" = true ]; then
@@ -160,8 +160,7 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
     #
     # The payload of the OSC is "<content_length>;<hex-encoded content>".
     warp_send_generator_output_osc () {
-        local hex_encoded_message
-        warp_hex_encode_string_into hex_encoded_message "$1"
+        local hex_encoded_message=$(warp_hex_encode_string "$1")
         warp_send_generator_output_osc_pre_hex_encoded "$hex_encoded_message"
     }
 
@@ -388,10 +387,10 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
           reply="${BASH_REMATCH[1]}"
         fi
 
-        warp_hex_encode_string_into __warp_hex_match "$reply"
+        warp_completions_hex_encode_into __warp_hex_match "$reply"
         printf '\e]9280;C;%s\a' "$__warp_hex_match"
         if [[ -n "$reply_description" ]]; then
-          warp_hex_encode_string_into __warp_hex_dscr "$reply_description"
+          warp_completions_hex_encode_into __warp_hex_dscr "$reply_description"
           printf '\e]9280;D?description;%s\a' "$__warp_hex_dscr"
         fi
       done
@@ -881,7 +880,20 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
        command -p tr '\n\n' ' ' <<< "$*" | command -p od -An -v -tx1 | command -p tr -d ' \n'
     }
 
-    warp_hex_encode_string_into () {
+    # warp_hex_encode_string encodes the entire DCS string (JSON) with od making it essentially
+    # a very long hexadecimal string.
+    # Afterwards it's decoded in rust and parsed as usual.
+    # Accepts one argument: DCS JSON string
+    warp_hex_encode_string () {
+      printf '%s' "$1" | command -p od -An -v -tx1 | command -p tr -d ' \n'
+    }
+
+    # Hex-encodes its second argument into the variable named by its first.
+    #
+    # Reserved for the native completions path, which encodes once per match and so cannot afford
+    # warp_hex_encode_string's fork per call. The hooks that run on every command of every session
+    # stay on that older encoder, so a defect here can only reach a user who asks for completions.
+    warp_completions_hex_encode_into () {
       # `LC_ALL=C` keeps indexing byte-wise, so it stays correct for UTF-8 text.
       local LC_ALL=C
       local __warp_hex_var="$1"
@@ -905,12 +917,6 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
       printf -v "$__warp_hex_var" '%s' "$__warp_hex_acc"
     }
 
-    warp_hex_encode_string () {
-      local __warp_hex_result
-      warp_hex_encode_string_into __warp_hex_result "$1"
-      printf '%s' "$__warp_hex_result"
-    }
-
     warp_hex_decode_string () {
       if command -pv xxd >/dev/null 2>&1; then
         printf '%s' "$1" | command -p xxd -p -r
@@ -927,9 +933,7 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
     # Accepts one argument: shell [bash, zsh, fish (future)]
     init_shell_hook () {
       init_shell="{\"hook\": \"InitShell\", \"value\": {\"shell\": \"$1\"}}"
-      local init_shell_hex
-      warp_hex_encode_string_into init_shell_hex "$init_shell"
-      echo "$init_shell_hex"
+      echo $(warp_hex_encode_string "$init_shell")
     }
 
     # Checks whether the current version of bash is at least as high as the expected ($1) one.
