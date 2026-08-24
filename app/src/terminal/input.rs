@@ -9171,6 +9171,60 @@ impl Input {
         ctx.notify();
     }
 
+    /// Whether Up reaches past the top of the input rather than moving the cursor up a line:
+    /// a single cursor on the buffer's first logical line and, when the soft-wrap layout is
+    /// known, on that line's first visual row, so a wrapped continuation row of the first
+    /// line still moves within the wrap. An unavailable or stale layout answers `true`,
+    /// because the logical-line check alone already settles the buffer's first line.
+    fn single_cursor_at_input_top(&self, ctx: &AppContext) -> bool {
+        let editor = self.editor.as_ref(ctx);
+        editor.single_cursor_on_first_line(ctx)
+            && editor
+                .single_cursor_on_first_visual_row(ctx)
+                .unwrap_or(true)
+    }
+
+    /// Whether the inline history menu is currently previewing its highlighted row into the
+    /// input buffer, which is what decides who owns Up and Down while the menu is open: the
+    /// text is the menu's to cycle when it put it there, and the user's to navigate when it
+    /// did not.
+    fn inline_history_menu_is_previewing_buffer(&self, ctx: &AppContext) -> bool {
+        let buffer_text = self.editor.as_ref(ctx).buffer_text(ctx);
+        if self.is_cloud_mode_input_v2_composing(ctx) {
+            self.cloud_mode_v2_history_menu_view
+                .as_ref()
+                .and_then(|view| view.as_ref(ctx).selected_query_text(ctx))
+                .is_some_and(|selected_text| selected_text == buffer_text)
+        } else {
+            self.inline_history_menu_view
+                .as_ref(ctx)
+                .model()
+                .as_ref(ctx)
+                .selected_item()
+                .and_then(|item| item.buffer_replacement_text())
+                .is_some_and(|selected_item_text| *selected_item_text == buffer_text)
+        }
+    }
+
+    /// Whether Up, pressed while the inline history menu is open, moves the cursor up a line
+    /// instead of moving the menu's highlight. Cycling the list keeps Up unconditionally
+    /// while the menu owns the buffer, so a multi-line history entry does not trap the
+    /// cursor inside its own preview; otherwise Up navigates the user's text, and still
+    /// reaches the menu from the top of the input.
+    fn inline_history_up_should_move_cursor(&self, ctx: &AppContext) -> bool {
+        !self.inline_history_menu_is_previewing_buffer(ctx) && !self.single_cursor_at_input_top(ctx)
+    }
+
+    /// The Down counterpart of [`Self::inline_history_up_should_move_cursor`]. The bottom of
+    /// the input is the last logical line rather than the last visual row, because there is
+    /// no soft-wrap-aware counterpart to [`EditorView::single_cursor_on_first_visual_row`];
+    /// Down there keeps its existing meaning of stepping to the next history row and
+    /// dismissing the menu past the last one.
+    fn inline_history_down_should_move_cursor(&self, ctx: &AppContext) -> bool {
+        !self.inline_history_menu_is_previewing_buffer(ctx)
+            && !self.editor.as_ref(ctx).single_cursor_on_last_line(ctx)
+    }
+
     fn editor_up(&mut self, ctx: &mut ViewContext<Self>) {
         if self.should_show_auth_secret_ftux(ctx) {
             if let Some(ftux_view) = self.auth_secret_ftux_view().cloned() {
@@ -9276,7 +9330,9 @@ impl Input {
                 true
             }
             InputSuggestionsMode::InlineHistoryMenu { .. } => {
-                if self.is_cloud_mode_input_v2_composing(ctx) {
+                if self.inline_history_up_should_move_cursor(ctx) {
+                    self.editor.update(ctx, |editor, ctx| editor.move_up(ctx));
+                } else if self.is_cloud_mode_input_v2_composing(ctx) {
                     if let Some(view) = self.cloud_mode_v2_history_menu_view.clone() {
                         view.update(ctx, |view, ctx| {
                             view.select_up(ctx);
@@ -9320,17 +9376,8 @@ impl Input {
             return;
         }
 
-        // Otherwise, open the history up menu when the cursor is on the buffer's first
-        // logical line. When the soft-wrap layout is available, also require the first
-        // visual row, so a wrapped continuation row of that line still moves within the
-        // wrap. When the layout is unavailable or stale, default to opening history: the
-        // logical-line check alone already answers for the buffer's first line.
-        let editor = self.editor.as_ref(ctx);
-        let should_open_history = editor.single_cursor_on_first_line(ctx)
-            && editor
-                .single_cursor_on_first_visual_row(ctx)
-                .unwrap_or(true);
-        if should_open_history {
+        // Otherwise, open the history up menu when Up reaches past the top of the input.
+        if self.single_cursor_at_input_top(ctx) {
             if FeatureFlag::InlineHistoryMenu.is_enabled()
                 && self.suggestions_mode_model.as_ref(ctx).is_closed()
             {
@@ -9677,7 +9724,9 @@ impl Input {
             .as_ref(ctx)
             .is_inline_history_menu()
         {
-            if self.is_cloud_mode_input_v2_composing(ctx) {
+            if self.inline_history_down_should_move_cursor(ctx) {
+                self.editor.update(ctx, |editor, ctx| editor.move_down(ctx));
+            } else if self.is_cloud_mode_input_v2_composing(ctx) {
                 if let Some(view) = self.cloud_mode_v2_history_menu_view.clone() {
                     view.update(ctx, |view, ctx| {
                         view.select_down(ctx);

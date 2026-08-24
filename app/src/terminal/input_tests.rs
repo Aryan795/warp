@@ -1399,6 +1399,199 @@ fn test_up_on_second_line_after_shift_enter_at_line_start_moves_cursor_not_histo
     });
 }
 
+/// A three-line draft, so Up and Down both have a line to move to from the middle.
+const MULTILINE_DRAFT: &str = "echo one\necho two\necho three";
+
+/// Reproduces the state behind the report: a multi-line draft with the inline history panel
+/// open over it and no row previewed into the buffer, which is the "No results" panel the
+/// reporter was looking at. Leaves the cursor where opening the panel left it, on the first
+/// line.
+fn open_inline_history_menu_over_multiline_draft(input: &ViewHandle<Input>, app: &mut App) {
+    input.update(app, |input, ctx| {
+        input.replace_buffer_content(MULTILINE_DRAFT, ctx);
+        input.editor.update(ctx, |editor, ctx| {
+            editor.move_to_buffer_start(ctx);
+        });
+        input.editor_up(ctx);
+    });
+    input.read(app, |input, ctx| {
+        assert!(
+            input
+                .suggestions_mode_model
+                .as_ref(ctx)
+                .is_inline_history_menu(),
+            "precondition: Up on the first line must open the inline history panel"
+        );
+        assert!(
+            !input.inline_history_menu_is_previewing_buffer(ctx),
+            "precondition: the panel must not be previewing a row into the buffer"
+        );
+        assert_eq!(input.buffer_text(ctx), MULTILINE_DRAFT);
+    });
+}
+
+#[test]
+fn test_up_with_inline_history_menu_open_moves_cursor_below_first_line() {
+    App::test((), |mut app| async move {
+        let _inline_history_menu = FeatureFlag::InlineHistoryMenu.override_enabled(true);
+        initialize_app(&mut app);
+
+        let terminal = add_window_with_bootstrapped_terminal(&mut app, None, None).await;
+        let (input, editor) = terminal.read(&app, |view, ctx| {
+            let input = view.input().clone();
+            let editor = input.as_ref(ctx).editor().clone();
+            (input, editor)
+        });
+
+        open_inline_history_menu_over_multiline_draft(&input, &mut app);
+        editor.update(&mut app, |editor, ctx| {
+            editor.move_to_buffer_end(ctx);
+        });
+        editor.read(&app, |editor, ctx| {
+            assert_eq!(editor.single_cursor_to_point(ctx).unwrap().row, 2);
+        });
+
+        input.update(&mut app, |input, ctx| {
+            input.editor_up(ctx);
+        });
+
+        editor.read(&app, |editor, ctx| {
+            assert_eq!(
+                editor.single_cursor_to_point(ctx).unwrap().row,
+                1,
+                "Up below the first line must move the cursor up a line"
+            );
+        });
+        input.read(&app, |input, ctx| {
+            assert!(
+                input
+                    .suggestions_mode_model
+                    .as_ref(ctx)
+                    .is_inline_history_menu(),
+                "moving the cursor must leave the history panel open"
+            );
+            assert_eq!(input.buffer_text(ctx), MULTILINE_DRAFT);
+        });
+    });
+}
+
+#[test]
+fn test_down_with_inline_history_menu_open_moves_cursor_above_last_line() {
+    App::test((), |mut app| async move {
+        let _inline_history_menu = FeatureFlag::InlineHistoryMenu.override_enabled(true);
+        initialize_app(&mut app);
+
+        let terminal = add_window_with_bootstrapped_terminal(&mut app, None, None).await;
+        let (input, editor) = terminal.read(&app, |view, ctx| {
+            let input = view.input().clone();
+            let editor = input.as_ref(ctx).editor().clone();
+            (input, editor)
+        });
+
+        open_inline_history_menu_over_multiline_draft(&input, &mut app);
+        editor.read(&app, |editor, ctx| {
+            assert_eq!(editor.single_cursor_to_point(ctx).unwrap().row, 0);
+        });
+
+        input.update(&mut app, |input, ctx| {
+            input.editor_down(ctx);
+        });
+
+        editor.read(&app, |editor, ctx| {
+            assert_eq!(
+                editor.single_cursor_to_point(ctx).unwrap().row,
+                1,
+                "Down above the last line must move the cursor down a line"
+            );
+        });
+        input.read(&app, |input, ctx| {
+            assert!(
+                input
+                    .suggestions_mode_model
+                    .as_ref(ctx)
+                    .is_inline_history_menu(),
+                "moving the cursor must leave the history panel open"
+            );
+            assert_eq!(input.buffer_text(ctx), MULTILINE_DRAFT);
+        });
+    });
+}
+
+#[test]
+fn test_up_at_top_of_input_with_inline_history_menu_open_goes_to_the_menu() {
+    App::test((), |mut app| async move {
+        let _inline_history_menu = FeatureFlag::InlineHistoryMenu.override_enabled(true);
+        initialize_app(&mut app);
+
+        let terminal = add_window_with_bootstrapped_terminal(&mut app, None, None).await;
+        let (input, editor) = terminal.read(&app, |view, ctx| {
+            let input = view.input().clone();
+            let editor = input.as_ref(ctx).editor().clone();
+            (input, editor)
+        });
+
+        open_inline_history_menu_over_multiline_draft(&input, &mut app);
+        // Park the cursor mid-line, where an Up that moved the cursor would visibly pull it
+        // back to column 0 instead of reaching the history list.
+        editor.update(&mut app, |editor, ctx| {
+            for _ in 0..4 {
+                editor.move_right(/* stop at line end */ false, ctx);
+            }
+        });
+        editor.read(&app, |editor, ctx| {
+            assert_eq!(
+                editor.single_cursor_to_point(ctx).unwrap(),
+                Point { row: 0, column: 4 },
+            );
+        });
+
+        input.update(&mut app, |input, ctx| {
+            input.editor_up(ctx);
+        });
+
+        editor.read(&app, |editor, ctx| {
+            assert_eq!(
+                editor.single_cursor_to_point(ctx).unwrap(),
+                Point { row: 0, column: 4 },
+                "Up on the first line belongs to the history list, so the cursor must not move"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_down_at_bottom_of_input_with_inline_history_menu_open_dismisses_the_menu() {
+    App::test((), |mut app| async move {
+        let _inline_history_menu = FeatureFlag::InlineHistoryMenu.override_enabled(true);
+        initialize_app(&mut app);
+
+        let terminal = add_window_with_bootstrapped_terminal(&mut app, None, None).await;
+        let (input, editor) = terminal.read(&app, |view, ctx| {
+            let input = view.input().clone();
+            let editor = input.as_ref(ctx).editor().clone();
+            (input, editor)
+        });
+
+        open_inline_history_menu_over_multiline_draft(&input, &mut app);
+        editor.update(&mut app, |editor, ctx| {
+            editor.move_to_buffer_end(ctx);
+        });
+
+        input.update(&mut app, |input, ctx| {
+            input.editor_down(ctx);
+        });
+
+        // Only the dismissal is asserted. What the close does to the draft is the
+        // snapshot/restore half of APP-5610, which this change deliberately leaves alone.
+        input.read(&app, |input, ctx| {
+            assert!(
+                input.suggestions_mode_model.as_ref(ctx).is_closed(),
+                "Down on the last line must still dismiss the history panel"
+            );
+        });
+    });
+}
+
 #[test]
 fn test_history_up_for_shared_session_executor() {
     App::test((), |mut app| async move {
