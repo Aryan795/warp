@@ -1533,3 +1533,21 @@ fn osc_completions_description_degrades_to_empty_on_malformed_hex_payload() {
 
     assert_eq!(handler.completion_description_updates, vec!["".to_string()]);
 }
+
+#[test]
+fn osc_completions_replacement_span_forwards_well_formed_pair() {
+    let bytes: &[u8] = b"\x1b]9280;S;12,5\x07";
+    let (_, handler) = parse_bytes(bytes);
+
+    assert_eq!(handler.replacement_spans, vec![(12, 5)]);
+}
+
+#[test]
+fn osc_completions_replacement_span_forwards_out_of_range_pair() {
+    // The parser accepts any non-negative pair; guarding the `start + length` overflow is the
+    // handler's job (see `TerminalModel::on_completion_replacement_span_received`).
+    let payload = format!("\x1b]9280;S;{},1\x07", usize::MAX);
+    let (_, handler) = parse_bytes(payload.as_bytes());
+
+    assert_eq!(handler.replacement_spans, vec![(usize::MAX, 1)]);
+}

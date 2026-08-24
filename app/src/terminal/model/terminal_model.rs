@@ -3359,7 +3359,17 @@ impl ansi::Handler for TerminalModel {
             IsReceivingCompletionsOutput::Yes {
                 replacement_span, ..
             } => {
-                *replacement_span = Some(Span::new(start, start + length));
+                // The shell reports `start` and `length` and any program can emit this OSC, so
+                // guard the addition: `Span::new` asserts `end >= start`, and release builds don't
+                // trap overflow, so an out-of-range pair would otherwise wrap and panic.
+                let Some(end) = start.checked_add(length) else {
+                    log::warn!(
+                        "Ignoring completions replacement span whose start + length overflows: \
+                         start={start}, length={length}"
+                    );
+                    return;
+                };
+                *replacement_span = Some(Span::new(start, end));
             }
             IsReceivingCompletionsOutput::No => {
                 log::warn!("Unexpectedly received a completions replacement span");

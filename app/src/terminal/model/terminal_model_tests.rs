@@ -1227,6 +1227,38 @@ fn normal_lifecycle_pipeline_emits_completion_and_prompt_side_effects_once() {
 }
 
 #[test]
+fn completion_replacement_span_records_valid_pair_and_drops_overflow() {
+    let (event_tx, event_rx) = async_channel::unbounded();
+    let event_proxy = ChannelEventListener::builder_for_test()
+        .with_terminal_events_tx(event_tx)
+        .build();
+    let mut terminal = TerminalModel::mock(None, Some(event_proxy));
+
+    terminal.start_completions_output();
+    terminal.on_completion_replacement_span_received(3, 4);
+    terminal.end_completions_output();
+    let well_formed = std::iter::from_fn(|| event_rx.try_recv().ok())
+        .find_map(|event| match event {
+            Event::CompletionsFinished(_, span) => Some(span.map(|s| (s.start(), s.end()))),
+            _ => None,
+        })
+        .expect("a CompletionsFinished event should have been emitted");
+    assert_eq!(well_formed, Some((3, 7)));
+
+    // start + length overflows usize; the handler must drop it rather than panic in `Span::new`.
+    terminal.start_completions_output();
+    terminal.on_completion_replacement_span_received(usize::MAX, 1);
+    terminal.end_completions_output();
+    let overflow = std::iter::from_fn(|| event_rx.try_recv().ok())
+        .find_map(|event| match event {
+            Event::CompletionsFinished(_, span) => Some(span.map(|s| (s.start(), s.end()))),
+            _ => None,
+        })
+        .expect("a CompletionsFinished event should have been emitted");
+    assert_eq!(overflow, None);
+}
+
+#[test]
 fn precmd_with_completion_metadata_records_completion_mismatch_without_overwriting_completed_block()
 {
     let (event_tx, event_rx) = async_channel::unbounded();
