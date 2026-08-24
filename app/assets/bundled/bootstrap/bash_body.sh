@@ -72,7 +72,7 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
         # Note that because the JSON string may contain characters that we don't control (including
         # unicode), we encode it as hexadecimal string to avoid prematurely calling unhook if
         # one of the bytes in JSON is 9c (ST) or other (CAN, SUB, ESC).
-        encoded_message=$(warp_hex_encode_string "$1")
+        warp_hex_encode_string_into encoded_message "$1"
         # We send the InitShell hook via OSCs when on WSL or MSYS2 or SSH from Windows and via DCSs otherwise.
         # Note that $WARP_USING_WINDOWS_CON_PTY is set in the init shell script.
         if [ "$WARP_USING_WINDOWS_CON_PTY" = true ]; then
@@ -160,7 +160,8 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
     #
     # The payload of the OSC is "<content_length>;<hex-encoded content>".
     warp_send_generator_output_osc () {
-        local hex_encoded_message=$(warp_hex_encode_string "$1")
+        local hex_encoded_message
+        warp_hex_encode_string_into hex_encoded_message "$1"
         warp_send_generator_output_osc_pre_hex_encoded "$hex_encoded_message"
     }
 
@@ -897,7 +898,9 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
     # which on a long pasted command line is slow enough to freeze the shell; so above a small
     # threshold fall back to the O(n) `od` pipeline. That pipeline is fed with `printf '%s'` (not
     # `echo`) so an argument like `-n`/`-e` is encoded literally instead of being eaten as an option.
-    # Accepts two arguments: the name of the variable to assign to, and the string to encode.
+    # Accepts two arguments: the name of the variable to assign to, and the string to encode. The
+    # first must not name one of this function's own locals, which an indirect write would target
+    # instead of the caller's variable.
     warp_hex_encode_string_into () {
       local LC_ALL=C
       local __warp_hex_var="$1"
@@ -941,7 +944,9 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
     # Accepts one argument: shell [bash, zsh, fish (future)]
     init_shell_hook () {
       init_shell="{\"hook\": \"InitShell\", \"value\": {\"shell\": \"$1\"}}"
-      echo $(warp_hex_encode_string "$init_shell")
+      local init_shell_hex
+      warp_hex_encode_string_into init_shell_hex "$init_shell"
+      echo "$init_shell_hex"
     }
 
     # Checks whether the current version of bash is at least as high as the expected ($1) one.

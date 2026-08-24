@@ -82,7 +82,8 @@ if [[ -z $WARP_BOOTSTRAPPED ]]; then
       # Note that because the JSON string may contain characters that we don't control (including
       # unicode), we encode it as hexadecimal string to avoid prematurely calling unhook if
       # one of the bytes in JSON is 9c (ST) or other (CAN, SUB, ESC).
-      local msg=$(warp_hex_encode_string "$1")
+      local msg
+      warp_hex_encode_string_into msg "$1"
       # We send the InitShell hook via OSCs when on WSL and via DCSs otherwise.
       if [ "$WARP_USING_WINDOWS_CON_PTY" = true ]; then
         printf $OSC_START$DCS_JSON_MARKER$OSC_PARAM_SEPARATOR$msg$OSC_END
@@ -147,7 +148,8 @@ if [[ -z $WARP_BOOTSTRAPPED ]]; then
   # Note: If we're on windows, we send a reset grid to erase any cursor mutations caused by
   # the in-band command.
   warp_send_generator_output_osc() {
-      local hex_encoded_message=$(warp_hex_encode_string "$1")
+      local hex_encoded_message
+      warp_hex_encode_string_into hex_encoded_message "$1"
       local byte_count=$(LC_ALL="C"; printf "${#hex_encoded_message}")
       printf "%b%i;%s%b" $OSC_START_GENERATOR_OUTPUT $byte_count $hex_encoded_message $OSC_END_GENERATOR_OUTPUT
       warp_maybe_send_reset_grid_osc
@@ -574,7 +576,9 @@ if [[ -z $WARP_BOOTSTRAPPED ]]; then
   # as old as Ubuntu 14.04, zsh 5.0.2) may not support: an unsupported flag here leaves the hook
   # payload empty and the shell never finishes bootstrapping. `typeset -g` and arithmetic base
   # conversion are available in every zsh Warp bootstraps.
-  # Accepts two arguments: the name of the variable to assign to, and the string to encode.
+  # Accepts two arguments: the name of the variable to assign to, and the string to encode. The
+  # first must not name one of this function's own locals, which an indirect write would target
+  # instead of the caller's variable.
   warp_hex_encode_string_into () {
     setopt localoptions nomultibyte
     local LC_ALL=C
