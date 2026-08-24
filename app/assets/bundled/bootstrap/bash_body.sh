@@ -380,6 +380,7 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
         split_cobra_padding=1
       fi
 
+      local __warp_hex_match __warp_hex_dscr
       for reply in "${COMPREPLY[@]}"; do
         # COMPREPLY entries can carry a trailing space (bash appends one when a completion
         # is unambiguous); trim it so the client controls spacing.
@@ -395,9 +396,11 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
         # Hex-encode both fields: OSC params are semicolon-delimited and only the third is
         # read (see decode_hex_completions_payload in ansi/mod.rs), so a literal `;`, BEL, or
         # ESC in a match or description would otherwise corrupt the sequence.
-        printf '\e]9280;C;%s\a' "$(warp_hex_encode_string "$reply")"
+        warp_hex_encode_string_into __warp_hex_match "$reply"
+        printf '\e]9280;C;%s\a' "$__warp_hex_match"
         if [[ -n "$reply_description" ]]; then
-          printf '\e]9280;D?description;%s\a' "$(warp_hex_encode_string "$reply_description")"
+          warp_hex_encode_string_into __warp_hex_dscr "$reply_description"
+          printf '\e]9280;D?description;%s\a' "$__warp_hex_dscr"
         fi
       done
     }
@@ -886,27 +889,39 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
        command -p tr '\n\n' ' ' <<< "$*" | command -p od -An -v -tx1 | command -p tr -d ' \n'
     }
 
-    # warp_hex_encode_string hex-encodes its argument into a long hex string that Rust decodes.
+    # warp_hex_encode_string_into hex-encodes its second argument into a long hex string that Rust
+    # decodes, and assigns it to the variable named by its first argument, letting hot callers
+    # avoid the `$( )` subshell that forks a process per call.
     # `LC_ALL=C` keeps indexing byte-wise, so it stays correct for UTF-8 text. The fork-free bash
     # loop (added in 304f1dec to avoid a fork per completion match) is quadratic on large inputs
     # because `${input:i:1}` rescans from the start each iteration, which froze the shell on long
     # pasted command lines; so above a small threshold fall back to the O(n) `od` pipeline. That
     # pipeline is fed with `printf '%s'` (not `echo`) so an argument like `-n`/`-e` is encoded
     # literally instead of being eaten as an option.
-    # Accepts one argument: the string to encode.
-    warp_hex_encode_string () {
+    # Accepts two arguments: the name of the variable to assign to, and the string to encode.
+    warp_hex_encode_string_into () {
       local LC_ALL=C
-      local input="$1"
-      if (( ${#input} > 256 )); then
-        printf '%s' "$input" | command -p od -An -v -tx1 | command -p tr -d ' \n'
+      local __warp_hex_var="$1"
+      local __warp_hex_in="$2"
+      if (( ${#__warp_hex_in} > 256 )); then
+        printf -v "$__warp_hex_var" '%s' \
+          "$(printf '%s' "$__warp_hex_in" | command -p od -An -v -tx1 | command -p tr -d ' \n')"
         return
       fi
-      local i byte_hex hex=""
-      for (( i = 0; i < ${#input}; i++ )); do
-        printf -v byte_hex '%02x' "'${input:i:1}"
-        hex+="$byte_hex"
+      local __warp_hex_i __warp_hex_byte __warp_hex_acc=""
+      for (( __warp_hex_i = 0; __warp_hex_i < ${#__warp_hex_in}; __warp_hex_i++ )); do
+        printf -v __warp_hex_byte '%02x' "'${__warp_hex_in:__warp_hex_i:1}"
+        __warp_hex_acc+="$__warp_hex_byte"
       done
-      printf '%s' "$hex"
+      printf -v "$__warp_hex_var" '%s' "$__warp_hex_acc"
+    }
+
+    # Writes the hex encoding of its argument to stdout.
+    # Accepts one argument: the string to encode.
+    warp_hex_encode_string () {
+      local __warp_hex_result
+      warp_hex_encode_string_into __warp_hex_result "$1"
+      printf '%s' "$__warp_hex_result"
     }
 
     # Reverses warp_hex_encode_string: decodes a hex-encoded string back to its original

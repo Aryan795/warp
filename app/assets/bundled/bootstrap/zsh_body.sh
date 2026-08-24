@@ -563,12 +563,39 @@ if [[ -z $WARP_BOOTSTRAPPED ]]; then
 
   }
 
-  # warp_hex_encode_string encodes the entire DCS string (JSON) with od making it essentially
-  # a very long hexadecimal string.
-  # Afterwards it's decoded in rust and parsed as usual.
-  # Accepts one argument: DCS JSON string
+  # warp_hex_encode_string_into hex-encodes its second argument into a long hexadecimal string that
+  # Rust decodes and parses, and assigns it to the variable named by its first argument, letting
+  # hot callers avoid the `$( )` subshell that forks a process per call -- on top of the two
+  # processes the `od` pipeline itself costs.
+  # `nomultibyte` plus `LC_ALL=C` keeps indexing byte-wise, so a multibyte character encodes as its
+  # UTF-8 bytes rather than its code point. The loop is quadratic on large inputs, so above a small
+  # threshold fall back to the O(n) `od` pipeline. That pipeline is fed with `printf '%s'` (not
+  # `echo`) so an argument like `-n`/`-e` is encoded literally instead of being eaten as an option.
+  # Accepts two arguments: the name of the variable to assign to, and the string to encode.
+  warp_hex_encode_string_into () {
+    setopt localoptions nomultibyte
+    local LC_ALL=C
+    local __warp_hex_var="$1"
+    local __warp_hex_in="$2"
+    if (( ${#__warp_hex_in} > 256 )); then
+      printf -v "$__warp_hex_var" '%s' \
+        "$(printf '%s' "$__warp_hex_in" | command -p od -An -v -tx1 | command -p tr -d ' \n')"
+      return
+    fi
+    local __warp_hex_i __warp_hex_byte __warp_hex_acc=""
+    for (( __warp_hex_i = 1; __warp_hex_i <= ${#__warp_hex_in}; __warp_hex_i++ )); do
+      printf -v __warp_hex_byte '%02x' "'${__warp_hex_in[__warp_hex_i]}"
+      __warp_hex_acc+="$__warp_hex_byte"
+    done
+    printf -v "$__warp_hex_var" '%s' "$__warp_hex_acc"
+  }
+
+  # Writes the hex encoding of its argument to stdout.
+  # Accepts one argument: the string to encode.
   warp_hex_encode_string () {
-    printf '%s' "$1" | command -p od -An -v -tx1 | command -p tr -d ' \n'
+    local __warp_hex_result
+    warp_hex_encode_string_into __warp_hex_result "$1"
+    printf '%s' "$__warp_hex_result"
   }
 
   # Reverses warp_hex_encode_string: decodes a hex-encoded string back to its original bytes,
@@ -1478,6 +1505,7 @@ esac
     # only $asuf belongs in the inserted text. Without it, `--color` for `ls --col` loses its `=`.
     local asuf_str="${(v)asuf}"
     local dsuf dscr
+    local __warp_hex_match __warp_hex_dscr
     for i in {1..$#__hits}; do
         # Add a dir suffix? Test the real path, not the bare basename: $__hits[$i] is a basename
         # only when $__hint_prefix is non-empty, so testing it alone resolves against $PWD and
@@ -1505,8 +1533,14 @@ esac
         # Hex-encode both fields: OSC params are semicolon-delimited and only the third is
         # read (see decode_hex_completions_payload in ansi/mod.rs), so a literal `;`, BEL, or
         # ESC in a match or description would otherwise corrupt the sequence.
-        print -n "\e]9280;C"$OSC_PARAM_SEPARATOR$(warp_hex_encode_string $match)$OSC_END
-        print -n "\e]9280;D?description"$OSC_PARAM_SEPARATOR$(warp_hex_encode_string $dscr)$OSC_END
+        warp_hex_encode_string_into __warp_hex_match "$match"
+        print -n "\e]9280;C"$OSC_PARAM_SEPARATOR$__warp_hex_match$OSC_END
+        # Most candidates have no description, and encoding and emitting an empty one is pure
+        # overhead on a menu with thousands of rows; bash and fish already skip it.
+        if [[ -n "$dscr" ]]; then
+            warp_hex_encode_string_into __warp_hex_dscr "$dscr"
+            print -n "\e]9280;D?description"$OSC_PARAM_SEPARATOR$__warp_hex_dscr$OSC_END
+        fi
     done
   }
 
