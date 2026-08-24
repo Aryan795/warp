@@ -1248,6 +1248,146 @@ fn test_history_up_buffer_restoration() {
 }
 
 #[test]
+fn test_up_on_first_line_of_multiline_input_opens_history() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let history_file_commands = vec!["ls".to_string()];
+        let terminal =
+            add_window_with_bootstrapped_terminal(&mut app, Some(history_file_commands), None)
+                .await;
+        let (input, editor) = terminal.read(&app, |view, ctx| {
+            let input = view.input().clone();
+            let editor = input.as_ref(ctx).editor().clone();
+            (input, editor)
+        });
+
+        input.update(&mut app, |input, ctx| {
+            input.replace_buffer_content("echo one\necho two", ctx);
+            input.editor.update(ctx, |editor, ctx| {
+                editor.move_to_buffer_start(ctx);
+            });
+        });
+        editor.read(&app, |editor, ctx| {
+            assert_eq!(
+                editor.single_cursor_to_point(ctx).unwrap(),
+                Point { row: 0, column: 0 },
+            );
+        });
+
+        // Up on the first line of a multi-line buffer should still open history.
+        input.update(&mut app, |input, ctx| {
+            input.editor_up(ctx);
+        });
+        input.read(&app, |input, ctx| {
+            assert!(
+                input.suggestions_mode_model.as_ref(ctx).is_visible(),
+                "History should still open when Up is pressed on the first line"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_up_on_non_first_line_of_multiline_input_moves_cursor_not_history() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let history_file_commands = vec!["ls".to_string()];
+        let terminal =
+            add_window_with_bootstrapped_terminal(&mut app, Some(history_file_commands), None)
+                .await;
+        let (input, editor) = terminal.read(&app, |view, ctx| {
+            let input = view.input().clone();
+            let editor = input.as_ref(ctx).editor().clone();
+            (input, editor)
+        });
+
+        input.update(&mut app, |input, ctx| {
+            input.replace_buffer_content("echo one\necho two", ctx);
+            input.editor.update(ctx, |editor, ctx| {
+                editor.move_to_buffer_end(ctx);
+            });
+        });
+        editor.read(&app, |editor, ctx| {
+            assert_eq!(
+                editor.single_cursor_to_point(ctx).unwrap(),
+                Point { row: 1, column: 8 },
+            );
+        });
+
+        // Up on the second line of a multi-line buffer should move the cursor up a line, not
+        // open history.
+        input.update(&mut app, |input, ctx| {
+            input.editor_up(ctx);
+        });
+        input.read(&app, |input, ctx| {
+            assert!(
+                input.suggestions_mode_model.as_ref(ctx).is_closed(),
+                "History should not open when Up is pressed on a non-first line"
+            );
+            assert_eq!(input.buffer_text(ctx), "echo one\necho two");
+        });
+        editor.read(&app, |editor, ctx| {
+            assert_eq!(editor.single_cursor_to_point(ctx).unwrap().row, 0);
+        });
+    });
+}
+
+#[test]
+fn test_up_on_second_line_after_shift_enter_at_line_start_moves_cursor_not_history() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let history_file_commands = vec!["ls".to_string()];
+        let terminal =
+            add_window_with_bootstrapped_terminal(&mut app, Some(history_file_commands), None)
+                .await;
+        let (input, editor) = terminal.read(&app, |view, ctx| {
+            let input = view.input().clone();
+            let editor = input.as_ref(ctx).editor().clone();
+            (input, editor)
+        });
+
+        // Reproduce the reported repro: type text, move to the beginning of the line, then
+        // Shift+Enter to push it onto a second line, leaving an empty first line.
+        input.update(&mut app, |input, ctx| {
+            input.user_insert("echo hi", ctx);
+        });
+        editor.update(&mut app, |editor, ctx| {
+            editor.move_to_buffer_start(ctx);
+            editor.handle_action(&EditorAction::ShiftEnter, ctx);
+        });
+        input.read(&app, |input, ctx| {
+            assert_eq!(input.buffer_text(ctx), "\necho hi");
+        });
+        editor.read(&app, |editor, ctx| {
+            assert_eq!(
+                editor.single_cursor_to_point(ctx).unwrap(),
+                Point { row: 1, column: 0 },
+            );
+        });
+
+        input.update(&mut app, |input, ctx| {
+            input.editor_up(ctx);
+        });
+        input.read(&app, |input, ctx| {
+            assert!(
+                input.suggestions_mode_model.as_ref(ctx).is_closed(),
+                "History should not open when Up is pressed on the second line"
+            );
+            assert_eq!(input.buffer_text(ctx), "\necho hi");
+        });
+        editor.read(&app, |editor, ctx| {
+            assert_eq!(
+                editor.single_cursor_to_point(ctx).unwrap(),
+                Point { row: 0, column: 0 },
+            );
+        });
+    });
+}
+
+#[test]
 fn test_history_up_for_shared_session_executor() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);

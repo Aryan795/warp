@@ -9320,10 +9320,10 @@ impl Input {
             return;
         }
 
-        // Otherwise, check if the cursor is on the first row and open the
-        // history up menu.
+        // Otherwise, open the history up menu only from the first visual row of the first
+        // logical line.
         let editor = self.editor.as_ref(ctx);
-        if editor.single_cursor_on_first_row(ctx) {
+        if editor.single_cursor_on_first_line(ctx) && editor.single_cursor_on_first_row(ctx) {
             if FeatureFlag::InlineHistoryMenu.is_enabled()
                 && self.suggestions_mode_model.as_ref(ctx).is_closed()
             {
