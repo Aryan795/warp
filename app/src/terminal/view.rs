@@ -201,7 +201,7 @@ use super::ssh::util::{InteractiveSshCommand, SshWarpifyCommand, parse_interacti
 use super::warpify::WarpificationSource;
 use super::warpify::success_block::{WarpifySuccessBlock, WarpifySuccessBlockEvent};
 use super::warpify::trigger_state::{SshBlockState, WarpifyState};
-use super::{CLIAgent, GridType, cli_agent};
+use super::{CLIAgent, GridType, cli_agent, should_right_click_paste};
 #[cfg(any(test, feature = "integration_tests"))]
 use crate::ai::agent::UserQueryMode;
 use crate::ai::agent::api::ServerConversationToken;
@@ -3166,6 +3166,7 @@ impl TerminalView {
         ctx: &mut ViewContext<Self>,
     ) -> Self {
         let terminal_view_id = ctx.view_id();
+        let terminal_view = ctx.handle();
         let active_session = ctx.add_model(|ctx| {
             ActiveSession::new(sessions.clone(), model_events_handle.clone(), ctx)
         });
@@ -3543,6 +3544,8 @@ impl TerminalView {
         });
 
         let get_relevant_files_controller = ctx.add_model(GetRelevantFilesController::new);
+        let ai_action_team_context_resolver =
+            UserWorkspaces::team_context_resolver(terminal_view.clone());
         let ai_action_model = ctx.add_model(|ctx| {
             BlocklistAIActionModel::new(
                 model.clone(),
@@ -3550,6 +3553,7 @@ impl TerminalView {
                 &model_events_handle,
                 get_relevant_files_controller.clone(),
                 terminal_view_id,
+                ai_action_team_context_resolver,
                 ctx,
             )
         });
@@ -3562,6 +3566,7 @@ impl TerminalView {
                 active_session.clone(),
                 model.clone(),
                 terminal_view_id,
+                terminal_view,
                 ctx,
             )
         });
@@ -6964,6 +6969,8 @@ impl TerminalView {
             conversation.total_agent_response_time_since_last_user_query_ms();
         let wall_to_wall_response_time_ms =
             conversation.wall_to_wall_response_time_since_last_query();
+        let usage_totals = conversation.usage_totals();
+        let charged_usage_for_last_block = conversation.charged_usage_for_last_block();
 
         let conversation_usage_info = ConversationUsageInfo {
             credits_spent: conversation.inference_credits_spent(),
@@ -6977,6 +6984,11 @@ impl TerminalView {
             lines_added: tool_usage.apply_file_diff_stats.lines_added,
             lines_removed: tool_usage.apply_file_diff_stats.lines_removed,
             commands_executed: tool_usage.run_command_stats.commands_executed,
+            total_tokens: usage_totals.charged_usage.map(|usage| usage.total_tokens()),
+            total_cost_in_cents: usage_totals.total_cost_in_cents(),
+            tokens_for_last_block: charged_usage_for_last_block.map(|usage| usage.total_tokens()),
+            cost_in_cents_for_last_block: charged_usage_for_last_block
+                .map(|usage| usage.total_cost_in_cents()),
         };
 
         let timing_info = TimingInfo {
@@ -12012,7 +12024,15 @@ impl TerminalView {
                 {
                     let output_truncated =
                         if let BlockType::User(completed) = &block_completed_event.block_type {
-                            Some(completed.output_truncated.clone())
+                            Some(
+                                completed
+                                    .output_truncated
+                                    .get_with(|compute| {
+                                        let model = self.model.lock();
+                                        compute(model.block_list())
+                                    })
+                                    .to_owned(),
+                            )
                         } else {
                             None
                         };
@@ -12344,12 +12364,16 @@ impl TerminalView {
                     let honor_ps1_enabled = match &block_type {
                         // If we have access to the value of honor_ps1 that the
                         // block was holding, use that.
-                        BlockType::User(UserBlockCompleted {
-                            serialized_block, ..
-                        })
-                        | BlockType::BootstrapVisible(serialized_block) => {
-                            serialized_block.honor_ps1
+                        BlockType::User(user_block_completed) => {
+                            user_block_completed
+                                .serialized_block
+                                .get_with(|compute| {
+                                    let model = self.model.lock();
+                                    compute(model.block_list())
+                                })
+                                .honor_ps1
                         }
+                        BlockType::BootstrapVisible(serialized_block) => serialized_block.honor_ps1,
                         // Otherwise, grab the current value.
                         _ => *SessionSettings::as_ref(ctx).honor_ps1,
                     };
@@ -12357,6 +12381,11 @@ impl TerminalView {
                         let is_universal_developer_input_enabled =
                             InputSettings::as_ref(ctx).is_universal_developer_input_enabled(ctx);
                         let is_in_agent_view = self.agent_view_controller.as_ref(ctx).is_active();
+                        let serialized_block =
+                            user_block_completed.serialized_block.get_with(|compute| {
+                                let model = self.model.lock();
+                                compute(model.block_list())
+                            });
                         send_telemetry_from_ctx!(
                             TelemetryEvent::BlockCompleted {
                                 block_finished_to_precmd_delay_ms: delay_ms,
@@ -12365,9 +12394,7 @@ impl TerminalView {
                                 num_output_lines: user_block_completed.num_output_lines,
                                 num_output_lines_truncated: user_block_completed
                                     .num_output_lines_truncated,
-                                terminal_session_id: user_block_completed
-                                    .serialized_block
-                                    .session_id,
+                                terminal_session_id: serialized_block.session_id,
                                 is_udi_enabled: is_universal_developer_input_enabled,
                                 is_in_agent_view,
                             },
@@ -12385,14 +12412,18 @@ impl TerminalView {
                                     num_output_lines: user_block_completed.num_output_lines,
                                     num_output_lines_truncated: user_block_completed
                                         .num_output_lines_truncated,
-                                    command: user_block_completed.command.clone(),
+                                    command: user_block_completed
+                                        .command
+                                        .get_with(|compute| {
+                                            let model = self.model.lock();
+                                            compute(model.block_list())
+                                        })
+                                        .to_owned(),
                                     duration: self
-                                        .block_duration(&user_block_completed.serialized_block)
+                                        .block_duration(serialized_block)
                                         .unwrap_or_default(),
-                                    exit_code: user_block_completed.serialized_block.exit_code,
-                                    terminal_session_id: user_block_completed
-                                        .serialized_block
-                                        .session_id,
+                                    exit_code: serialized_block.exit_code,
+                                    terminal_session_id: serialized_block.session_id,
                                 },
                                 ctx
                             );
@@ -12413,9 +12444,16 @@ impl TerminalView {
                 );
 
                 let pending_command_succeeded = match &block_type {
-                    BlockType::User(UserBlockCompleted {
-                        serialized_block, ..
-                    }) => Some(serialized_block.exit_code.was_successful()),
+                    BlockType::User(user_block_completed) => Some(
+                        user_block_completed
+                            .serialized_block
+                            .get_with(|compute| {
+                                let model = self.model.lock();
+                                compute(model.block_list())
+                            })
+                            .exit_code
+                            .was_successful(),
+                    ),
                     BlockType::BootstrapHidden
                     | BlockType::BootstrapVisible(_)
                     | BlockType::Restored
@@ -12502,9 +12540,16 @@ impl TerminalView {
                         || FeatureFlag::GithubPrPromptChip.is_enabled())
                         && match &block_type {
                             BlockType::User(user_block_completed) => {
-                                let command = user_block_completed.command.as_str();
+                                let command = user_block_completed.command.get_with(|compute| {
+                                    let model = self.model.lock();
+                                    compute(model.block_list())
+                                });
                                 let top_level = user_block_completed
                                     .serialized_block
+                                    .get_with(|compute| {
+                                        let model = self.model.lock();
+                                        compute(model.block_list())
+                                    })
                                     .session_id
                                     .and_then(|session_id| {
                                         self.sessions.as_ref(ctx).get(session_id)
@@ -12541,9 +12586,11 @@ impl TerminalView {
                 }
 
                 if let BlockType::User(block_completed) = block_type {
-                    if let Some(block_duration) =
-                        self.block_duration(&block_completed.serialized_block)
-                    {
+                    let serialized_block = block_completed.serialized_block.get_with(|compute| {
+                        let model = self.model.lock();
+                        compute(model.block_list())
+                    });
+                    if let Some(block_duration) = self.block_duration(serialized_block) {
                         self.maybe_send_block_completed_notification(
                             block_completed,
                             block_duration,
@@ -12565,7 +12612,7 @@ impl TerminalView {
                     // Check if the user tried to run an AWS login command but AWS CLI wasn't installed.
                     // This runs after other suggestion checks and may add its own banner alongside them.
                     self.maybe_show_aws_cli_not_installed_suggestion(
-                        block_completed.serialized_block.exit_code,
+                        serialized_block.exit_code,
                         ctx,
                     );
 
@@ -12595,8 +12642,7 @@ impl TerminalView {
                     }
 
                     let exit_code_data =
-                        &json!({"exit_code": block_completed.serialized_block.as_ref().exit_code})
-                            .to_string();
+                        &json!({"exit_code": serialized_block.exit_code}).to_string();
 
                     // If the block was a cloud workflow, record the workflow execution as an object action.
                     if let Some(cloud_workflow_id) = cloud_workflow_id {
@@ -12637,9 +12683,9 @@ impl TerminalView {
                         Some(model_event_sender),
                     ) = (
                         self.active_block_session_id(),
-                        block_completed.serialized_block.as_ref().exit_code,
-                        block_completed.serialized_block.as_ref().start_ts,
-                        block_completed.serialized_block.as_ref().completed_ts,
+                        serialized_block.exit_code,
+                        serialized_block.start_ts,
+                        serialized_block.completed_ts,
                         &self.model_event_sender,
                     ) {
                         History::handle(ctx).update(ctx, move |history, _ctx| {
@@ -12684,10 +12730,13 @@ impl TerminalView {
                     // Emit the event to the parent view. This will save the block to sqlite if
                     // session restoration is enabled.
                     ctx.emit(Event::BlockCompleted {
-                        block: block_completed.serialized_block.clone(),
+                        block: serialized_block.clone(),
                         is_local: !self.is_block_considered_remote(
-                            block_completed.serialized_block.session_id,
-                            Some(&block_completed.command),
+                            serialized_block.session_id,
+                            Some(block_completed.command.get_with(|compute| {
+                                let model = self.model.lock();
+                                compute(model.block_list())
+                            })),
                             ctx,
                         ),
                     });
@@ -14420,11 +14469,24 @@ impl TerminalView {
         ctx: &mut ViewContext<Self>,
     ) {
         let cli_name = ChannelState::channel().cli_command_name();
-        let cmd = &block_completed.command;
-        let is_env_create =
-            cmd.contains(cli_name) && cmd.contains("environment") && cmd.contains("create");
+        let is_env_create = {
+            let cmd = block_completed.command.get_with(|compute| {
+                let model = self.model.lock();
+                compute(model.block_list())
+            });
+            cmd.contains(cli_name) && cmd.contains("environment") && cmd.contains("create")
+        };
 
-        if !is_env_create || !block_completed.serialized_block.exit_code.was_successful() {
+        if !is_env_create
+            || !block_completed
+                .serialized_block
+                .get_with(|compute| {
+                    let model = self.model.lock();
+                    compute(model.block_list())
+                })
+                .exit_code
+                .was_successful()
+        {
             return;
         }
 
@@ -15183,17 +15245,16 @@ impl TerminalView {
     }
 
     async fn fetch_command_corrections(
-        block: UserBlockCompleted,
+        command: String,
+        output_truncated: String,
+        exit_code: ExitCode,
+        pwd: Option<String>,
         session: Option<Arc<Session>>,
         history_commands: Vec<HistoryEntry>,
     ) -> Vec<Correction> {
         // Create the command
-        let (input, output, exit_code, working_dir) = (
-            block.command.as_str(),
-            block.output_truncated.as_str(),
-            block.serialized_block.exit_code,
-            block.serialized_block.pwd.as_ref(),
-        );
+        let (input, output, working_dir) =
+            (command.as_str(), output_truncated.as_str(), pwd.as_deref());
 
         let mut command = Command::new(input, output, exit_code.into());
         if let Some(working_dir) = working_dir {
@@ -15852,8 +15913,6 @@ impl TerminalView {
         block_completed: &UserBlockCompleted,
         ctx: &mut ViewContext<TerminalView>,
     ) {
-        let block_completed = block_completed.to_owned();
-
         if *InputSettings::as_ref(ctx).command_corrections.value() {
             let session_id = self.active_block_session_id();
 
@@ -15865,8 +15924,36 @@ impl TerminalView {
                 .cloned()
                 .collect();
 
+            let command = block_completed
+                .command
+                .get_with(|compute| {
+                    let model = self.model.lock();
+                    compute(model.block_list())
+                })
+                .to_owned();
+            let output_truncated = block_completed
+                .output_truncated
+                .get_with(|compute| {
+                    let model = self.model.lock();
+                    compute(model.block_list())
+                })
+                .to_owned();
+            let serialized_block = block_completed.serialized_block.get_with(|compute| {
+                let model = self.model.lock();
+                compute(model.block_list())
+            });
+            let exit_code = serialized_block.exit_code;
+            let pwd = serialized_block.pwd.clone();
+
             let _ = ctx.spawn(
-                Self::fetch_command_corrections(block_completed.clone(), session, history_entries),
+                Self::fetch_command_corrections(
+                    command,
+                    output_truncated,
+                    exit_code,
+                    pwd,
+                    session,
+                    history_entries,
+                ),
                 Self::after_command_correction_generation,
             );
         }
@@ -15905,7 +15992,13 @@ impl TerminalView {
             .active_block_session_id()
             .and_then(|id| self.sessions.as_ref(ctx).get(id))
         {
-            let command = block_completed.command.clone();
+            let command = block_completed
+                .command
+                .get_with(|compute| {
+                    let model = self.model.lock();
+                    compute(model.block_list())
+                })
+                .to_owned();
             ctx.spawn(
                 async move { check_for_alias_async(&command, session).await },
                 move |view, aliased_command, ctx| {
@@ -15952,7 +16045,13 @@ impl TerminalView {
 
         let notification_settings = session_settings_handle.notifications.value().clone();
         let long_running_trigger = NotificationsTrigger::LongRunningCommand(
-            !block.serialized_block.has_failed(),
+            !block
+                .serialized_block
+                .get_with(|compute| {
+                    let model = self.model.lock();
+                    compute(model.block_list())
+                })
+                .has_failed(),
             block_duration,
         );
         match notification_settings.mode {
@@ -15988,10 +16087,20 @@ impl TerminalView {
                     // Otherwise, since the block completed, check if we
                     // should send a notification for long-running command
                     let notification_content = long_running_trigger.create_notification_content(
-                        block.command.clone(),
+                        block
+                            .command
+                            .get_with(|compute| {
+                                let model = self.model.lock();
+                                compute(model.block_list())
+                            })
+                            .to_owned(),
                         // Only include the last line when displaying a notification.
                         block
                             .output_truncated
+                            .get_with(|compute| {
+                                let model = self.model.lock();
+                                compute(model.block_list())
+                            })
                             .lines()
                             .last()
                             .map_or_else(String::new, ToOwned::to_owned),
@@ -16769,7 +16878,7 @@ impl TerminalView {
                 Some(highlighted_link),
                 _,
             ) => {
-                match highlighted_link {
+                let mut items = match highlighted_link {
                     GridHighlightedLink::Url(url) => {
                         let url_content =
                             Some(model.link_at_range(url, RespectObfuscatedSecrets::Yes));
@@ -16849,7 +16958,14 @@ impl TerminalView {
                                 .into_item(),
                         ]
                     }
+                };
+
+                if !items.is_empty() {
+                    items.push(MenuItem::Separator);
                 }
+                items.push(self.paste_menu_item(ctx));
+
+                items
             }
             (
                 BlockListMenuSource::RegularTextRightClick { .. }
@@ -16963,6 +17079,15 @@ impl TerminalView {
                     "Share..."
                 };
 
+                // Only right-click sources offer general terminal actions like "Paste";
+                // the overflow-button and keybinding menus are scoped to the selected block(s).
+                let is_right_click_source = matches!(
+                    menu_source,
+                    BlockListMenuSource::RegularBlockRightClick { .. }
+                        | BlockListMenuSource::RichContentBlockRightClick { .. }
+                        | BlockListMenuSource::OutsideBlockRightClick { .. }
+                );
+
                 let mut items = vec![
                     MenuItemFields::new(copy_str)
                         .with_on_select_action(TerminalAction::ContextMenu(
@@ -16984,6 +17109,54 @@ impl TerminalView {
                         ))
                         .with_disabled(is_copy_commands_disabled)
                         .into_item(),
+                ];
+
+                if is_single_selection {
+                    let mut copy_output_menu_item = MenuItemFields::new("Copy output")
+                        .with_on_select_action(TerminalAction::ContextMenu(
+                            ContextMenuAction::CopyBlockOutputs,
+                        ))
+                        .with_disabled(tail_block.output_grid().is_empty());
+
+                    // If there is an active filter on a block, then we want to display a
+                    // Copy filtered output option and assign the "terminal:copy_outputs" keybinding to it.
+                    if tail_block.has_active_filter() {
+                        items.insert(
+                            1,
+                            MenuItemFields::new("Copy filtered output")
+                                .with_on_select_action(TerminalAction::ContextMenu(
+                                    ContextMenuAction::CopyBlockFilteredOutputs,
+                                ))
+                                .with_key_shortcut_label(keybinding_name_to_display_string(
+                                    "terminal:copy_outputs",
+                                    ctx,
+                                ))
+                                .into_item(),
+                        );
+                        items.insert(2, copy_output_menu_item.into_item());
+                    } else {
+                        copy_output_menu_item = copy_output_menu_item.with_key_shortcut_label(
+                            keybinding_name_to_display_string("terminal:copy_outputs", ctx),
+                        );
+                        items.insert(2, copy_output_menu_item.into_item());
+                    }
+
+                    let mut prompt_items = self.copy_prompt_menu_items(
+                        self.input_is_on_git_branch(&model),
+                        self.is_rprompt_shown(&model),
+                        PromptPosition::Block(tail_block_index),
+                    );
+                    items.append(&mut prompt_items);
+                }
+
+                // "Paste" closes out the copy-related section so clipboard actions for
+                // the block sit together, ending with the general clipboard paste.
+                if is_right_click_source {
+                    items.push(self.paste_menu_item(ctx));
+                }
+
+                items.push(MenuItem::Separator);
+                items.push(
                     MenuItemFields::new(share_block_label)
                         .with_on_select_action(TerminalAction::ContextMenu(
                             ContextMenuAction::OpenShareBlockModal {
@@ -16996,7 +17169,7 @@ impl TerminalView {
                         ))
                         .with_disabled(is_share_disabled)
                         .into_item(),
-                ];
+                );
 
                 if FeatureFlag::CreatingSharedSessions.is_enabled()
                     && ContextFlag::CreateSharedSession.is_enabled()
@@ -17064,45 +17237,6 @@ impl TerminalView {
                                 .into_item(),
                         ]);
                     }
-                }
-
-                if is_single_selection {
-                    let mut copy_output_menu_item = MenuItemFields::new("Copy output")
-                        .with_on_select_action(TerminalAction::ContextMenu(
-                            ContextMenuAction::CopyBlockOutputs,
-                        ))
-                        .with_disabled(tail_block.output_grid().is_empty());
-
-                    // If there is an active filter on a block, then we want to display a
-                    // Copy filtered output option and assign the "terminal:copy_outputs" keybinding to it.
-                    if tail_block.has_active_filter() {
-                        items.insert(
-                            1,
-                            MenuItemFields::new("Copy filtered output")
-                                .with_on_select_action(TerminalAction::ContextMenu(
-                                    ContextMenuAction::CopyBlockFilteredOutputs,
-                                ))
-                                .with_key_shortcut_label(keybinding_name_to_display_string(
-                                    "terminal:copy_outputs",
-                                    ctx,
-                                ))
-                                .into_item(),
-                        );
-                        items.insert(2, copy_output_menu_item.into_item());
-                    } else {
-                        copy_output_menu_item = copy_output_menu_item.with_key_shortcut_label(
-                            keybinding_name_to_display_string("terminal:copy_outputs", ctx),
-                        );
-                        items.insert(2, copy_output_menu_item.into_item());
-                    }
-
-                    let mut prompt_items = self.copy_prompt_menu_items(
-                        self.input_is_on_git_branch(&model),
-                        self.is_rprompt_shown(&model),
-                        PromptPosition::Block(tail_block_index),
-                    );
-                    items.push(MenuItem::Separator);
-                    items.append(&mut prompt_items);
                 }
 
                 items.append(&mut vec![
@@ -17372,6 +17506,15 @@ impl TerminalView {
         }
 
         items
+    }
+
+    fn paste_menu_item(&self, ctx: &mut ViewContext<Self>) -> MenuItem<TerminalAction> {
+        let is_clipboard_empty = ctx.clipboard().read().is_empty();
+        MenuItemFields::new("Paste")
+            .with_on_select_action(TerminalAction::Paste)
+            .with_key_shortcut_label(keybinding_name_to_display_string("terminal:paste", ctx))
+            .with_disabled(is_clipboard_empty)
+            .into_item()
     }
 
     /// Builds the "Clear Blocks" entry for the terminal right-click context
@@ -24951,7 +25094,7 @@ impl TerminalView {
             SavePosition::new(
                 EventHandler::new(child)
                     .on_right_mouse_down(
-                        enclose!((position_id, input_position_id) move |ctx, _app, position | {
+                        enclose!((position_id, input_position_id) move |ctx, app, position, modifiers| {
                                 if let Some(position_in_terminal_view) = offset_position_outside_block(
                                     position,
                                     &position_id,
@@ -24959,6 +25102,10 @@ impl TerminalView {
                                     block_list_height_px,
                                     ctx,
                                 ) {
+                                    if should_right_click_paste(modifiers.shift, app) {
+                                        ctx.dispatch_typed_action(TerminalAction::Paste);
+                                        return DispatchEventResult::StopPropagation;
+                                    }
                                     ctx.dispatch_typed_action(TerminalAction::BlockListContextMenu(
                                         BlockListMenuSource::OutsideBlockRightClick {
                                             position_in_terminal_view,
@@ -26540,7 +26687,14 @@ impl TerminalSurface for TerminalView {
         // Only user-executed (and bootstrap/background) blocks carry a serialized
         // block with an exit code; other block types don't terminate an upload.
         let exit_code = match &completed.block_type {
-            BlockType::User(user) => user.serialized_block.exit_code,
+            BlockType::User(user) => {
+                user.serialized_block
+                    .get_with(|compute| {
+                        let model = self.model.lock();
+                        compute(model.block_list())
+                    })
+                    .exit_code
+            }
             BlockType::BootstrapVisible(block) | BlockType::Background(block) => block.exit_code,
             BlockType::BootstrapHidden
             | BlockType::Restored
