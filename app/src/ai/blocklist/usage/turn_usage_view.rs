@@ -17,7 +17,7 @@
 use pathfinder_color::ColorU;
 use pathfinder_geometry::vector::vec2f;
 use warpui::elements::{
-    Border, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, DropShadow, Empty, Flex,
+    Border, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, DropShadow, Flex,
     Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle, ParentElement, Radius, Text,
 };
 use warpui::platform::Cursor;
@@ -32,6 +32,10 @@ use crate::ui_components::icons::Icon;
 /// A single label/value pair rendered as a row in the panel's shared
 /// label/value columns (see [`TurnUsageView::render`]).
 type LabelValueRow = (Box<dyn Element>, Box<dyn Element>);
+
+/// The panel's two shared columns, as parallel `(labels, values)` vectors.
+/// See [`TurnUsageView::build_label_value_columns`].
+type LabelValueColumns = (Vec<Box<dyn Element>>, Vec<Box<dyn Element>>);
 
 /// Turn-scoped token/cost usage for a single model. A turn can involve
 /// multiple models (e.g. if the user or router switched models mid-turn).
@@ -305,20 +309,24 @@ impl TurnUsageView {
     }
 }
 
-impl View for TurnUsageView {
-    fn ui_name() -> &'static str {
-        "TurnUsageView"
-    }
-
-    fn render(&self, app: &AppContext) -> Box<dyn Element> {
-        let appearance = Appearance::as_ref(app);
-        let theme = appearance.theme();
-
-        // All rows across all three sections share one pair of label/value
-        // columns, so the value column stays vertically aligned across
-        // section boundaries (not just within a single section). Section
-        // headers occupy the label column with an empty value-column
-        // placeholder, matching `ConversationUsageView`'s layout.
+impl TurnUsageView {
+    /// Builds the panel's two shared label/value columns as flat, parallel
+    /// vectors (row `i` in `labels` always corresponds to row `i` in
+    /// `values`). Extracted from `render()` so tests can verify row-by-row
+    /// alignment without needing a full GUI layout pass.
+    ///
+    /// Section headers occupy the label column with a *value-column
+    /// companion* built via the same [`Self::render_section_header`]
+    /// helper (passed an empty label) rather than an `Empty` placeholder.
+    /// This matters because `Empty`'s layout height resolves to zero while
+    /// the header `Text`'s height reflects real font metrics -- pairing
+    /// `Empty` opposite a real header would shift every later row in the
+    /// value column up relative to its label, compounding once per section
+    /// header. Using the same `Text`-producing helper for both columns
+    /// guarantees identical heights regardless of content, matching
+    /// `ConversationUsageView::render_section_header`'s established
+    /// pattern of pairing a real (if empty) header `Text` in both columns.
+    fn build_label_value_columns(&self, appearance: &Appearance) -> LabelValueColumns {
         let mut labels: Vec<Box<dyn Element>> = Vec::new();
         let mut values: Vec<Box<dyn Element>> = Vec::new();
         let mut push_row =
@@ -337,7 +345,7 @@ impl View for TurnUsageView {
 
         push_row(
             Self::render_section_header("MODEL USAGE", appearance),
-            Empty::new().finish(),
+            Self::render_section_header("", appearance),
             8.,
         );
         for (label, value) in self.model_usage_rows(appearance) {
@@ -346,7 +354,7 @@ impl View for TurnUsageView {
 
         push_row(
             Self::render_section_header("TOOL CALL SUMMARY", appearance),
-            Empty::new().finish(),
+            Self::render_section_header("", appearance),
             8.,
         );
         for (label, value) in self.tool_call_summary_rows(appearance) {
@@ -356,13 +364,32 @@ impl View for TurnUsageView {
         if let Some(rows) = self.response_time_rows(appearance) {
             push_row(
                 Self::render_section_header("RESPONSE TIME", appearance),
-                Empty::new().finish(),
+                Self::render_section_header("", appearance),
                 8.,
             );
             for (label, value) in rows {
                 push_row(label, value, 6.);
             }
         }
+
+        (labels, values)
+    }
+}
+
+impl View for TurnUsageView {
+    fn ui_name() -> &'static str {
+        "TurnUsageView"
+    }
+
+    fn render(&self, app: &AppContext) -> Box<dyn Element> {
+        let appearance = Appearance::as_ref(app);
+        let theme = appearance.theme();
+
+        // All rows across all three sections share one pair of label/value
+        // columns, so the value column stays vertically aligned across
+        // section boundaries (not just within a single section). See
+        // `build_label_value_columns` for how row pairing is maintained.
+        let (labels, values) = self.build_label_value_columns(appearance);
 
         let content = Flex::column()
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
