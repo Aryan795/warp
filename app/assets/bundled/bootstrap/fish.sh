@@ -63,16 +63,11 @@ function warp_maybe_send_reset_grid_osc
 end
 
 
-# warp_hex_encode_string hex-encodes the given string with `od`, producing a hex string that
-# Rust decodes and parses. od's output arrives as a fish list split on newlines, so join it
-# before stripping the spaces `od` inserts.
 function warp_hex_encode_string
   set -l od_output (printf '%s' "$argv" | od -An -v -tx1)
   string replace -a -- ' ' '' (string join '' $od_output)
 end
 
-# Reverses warp_hex_encode_string: decodes a hex-encoded string back to its original bytes,
-# letting the Rust app pass arbitrary argument text without shell quoting.
 function warp_hex_decode_string
     if test (count $argv) -eq 0 -o -z "$argv[1]"
         return
@@ -85,9 +80,6 @@ function warp_hex_decode_string
         set escaped "$escaped\\x$pair"
         set i (math $i + 2)
     end
-    # Use fish's builtin printf, not `command printf`: BSD/macOS's external printf(1) doesn't
-    # support \xNN escapes for %b, so it would decode every completion to literal "\x67..."
-    # text on macOS.
     printf '%b' $escaped
 end
 
@@ -179,11 +171,8 @@ function warp_run_generator_command
     _warp_run_generator_command_internal $argv
 end
 
-# Computes native shell completions for the given (hex-encoded) command line and emits
-# them over the completions OSC protocol.
-#
-# Usage:
-#   warp_run_generator_command_native_completions <hex-encoded line>
+# Computes native shell completions for the given (hex-encoded) command line and emits them over the
+# completions OSC protocol.
 function warp_run_generator_command_native_completions
     set -g _WARP_GENERATOR_COMMAND 1
     set -l line
@@ -192,14 +181,8 @@ function warp_run_generator_command_native_completions
     end
 
     printf '\e]9280;A\a'
-    # A whitespace-only or empty line has no useful completions, and `complete -C` on it would
-    # synchronously list every command on $PATH; trim before checking to catch both.
-    # Assign first rather than substituting inline: `$(...)` is a parse error before fish 3.4, and
-    # a parse error here costs the whole file, not just this function.
     set -l trimmed_line (string trim -- "$line")
     if test -n "$trimmed_line"
-        # `complete -C "<line>"` computes completions for an arbitrary line, returning one
-        # "match\tdescription" pair per line.
         for entry in (complete -C "$line")
             set -l parts (string split -m 1 \t -- $entry)
             # Hex-encode both fields: OSC params are semicolon-delimited and only the third is

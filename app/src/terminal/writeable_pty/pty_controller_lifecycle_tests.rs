@@ -151,15 +151,7 @@ fn native_shell_completions_queues_the_generator_command_for_the_active_sessions
             else {
                 panic!("expected a queued RunNativeShellCompletions write");
             };
-            // Pinning the exact literal (rather than comparing against
-            // `generator_command_for`'s own output) keeps this test meaningful if that
-            // function's encoding ever changes; the assertion that matters most here is
-            // `shell_type` above, confirming it comes from the active session rather than
-            // some default.
             assert_eq!(*shell_type, ShellType::Fish);
-            // Leading space omits the command from fish's own history file (fish's only,
-            // non-configurable, history-exclusion mechanism), matching the convention
-            // `InBandCommandExecutor::execute_command_internal` already uses for fish.
             assert_eq!(
                 command,
                 " warp_run_generator_command_native_completions 676974206368"

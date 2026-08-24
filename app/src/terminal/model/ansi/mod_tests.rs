@@ -1450,10 +1450,6 @@ fn parse_osc7_non_drive_slash_letter_untouched() {
 
 #[test]
 fn decode_hex_completions_payload_round_trips_semicolon_bel_esc_and_multibyte() {
-    // Each of these would otherwise corrupt the OSC itself if sent raw: `;` splits it into
-    // extra params, and BEL/ESC end it outright (see decode_hex_completions_payload's doc
-    // comment). An empty payload is also exercised since it's a valid (if degenerate) hex
-    // string.
     for raw in [
         "int Count { get; }",
         "bell\x07byte",
@@ -1544,8 +1540,6 @@ fn osc_completions_replacement_span_forwards_well_formed_pair() {
 
 #[test]
 fn osc_completions_replacement_span_forwards_out_of_range_pair() {
-    // The parser accepts any non-negative pair; guarding the `start + length` overflow is the
-    // handler's job (see `TerminalModel::on_completion_replacement_span_received`).
     let payload = format!("\x1b]9280;S;{},1\x07", usize::MAX);
     let (_, handler) = parse_bytes(payload.as_bytes());
 

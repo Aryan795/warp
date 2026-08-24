@@ -28,9 +28,6 @@ use crate::util::AsciiDebug;
 #[derive(Clone)]
 /// Events sent to the main thread by the terminal model & event loop.
 pub enum Event {
-    /// The second element is the shell's own notion of the range of the buffer the completions
-    /// replace, if it reported one (see `Handler::on_completion_replacement_span_received`).
-    /// `None` for shells that don't send this yet.
     CompletionsFinished(Vec<ShellCompletion>, Option<warp_completer::meta::Span>),
     MouseCursorDirty,
     Title(String),

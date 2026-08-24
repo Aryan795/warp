@@ -72,15 +72,7 @@ const WARP_COMPLETIONS_OSC_MARKER: &[u8] = b"9280";
 const WARP_COMPLETIONS_START_BYTE: &[u8] = b"A";
 const WARP_COMPLETIONS_END_BYTE: &[u8] = b"B";
 const WARP_COMPLETIONS_MATCH_RESULT_BYTE: &[u8] = b"C";
-/// Denotes an OSC that reports the shell's own notion of the range the completions replace, as a
-/// `<start>,<length>` byte pair (see `Handler::on_completion_replacement_span_received`). Optional:
-/// sent by shells that have it (e.g. PowerShell); otherwise the client falls back to a
-/// whitespace-derived span.
 const WARP_COMPLETIONS_REPLACEMENT_SPAN_BYTE: &[u8] = b"S";
-
-/// Denotes an OSC that sends metadata about the last match result.
-/// The sequence begins with `D?` followed by the field that should be updated.
-/// For example: `D?description'{OSC_PAYLOAD}` updates the description of the last match.
 const WARP_COMPLETIONS_MATCH_UPDATE_METADATA: &[u8] = b"D?";
 
 const WARP_KV_START_BYTE: &[u8] = b"A";
@@ -181,11 +173,7 @@ fn osc_7_host_is_local(host: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Decodes a completions OSC's hex-encoded match/description payload (see the shells'
-/// `warp_hex_encode_string`/`Warp-Encode-HexString`). Raw text can contain a `;` (which OSC
-/// parameter parsing splits on, truncating the payload), a BEL, or an ESC (which end the OSC at
-/// the parser level); hex-encoding sidesteps all three. Returns `None` if `param` is absent, isn't
-/// valid hex, or isn't valid UTF-8 -- callers degrade gracefully rather than use a wrong string.
+/// Decodes a completions OSC's hex-encoded match/description payload.
 fn decode_hex_completions_payload(param: Option<&&[u8]>) -> Option<String> {
     let hex_str = param.map(|osc_data| String::from_utf8_lossy(osc_data))?;
     let decoded_bytes = hex::decode(&*hex_str).ok()?;
@@ -1189,8 +1177,6 @@ where
                     self.handler.end_completions_output();
                 }
                 Some(&WARP_COMPLETIONS_MATCH_RESULT_BYTE) => {
-                    // The payload (3rd parameter) is hex-encoded; see
-                    // `decode_hex_completions_payload`.
                     let Some(match_text) = decode_hex_completions_payload(params.get(2)) else {
                         log::warn!(
                             "Warp completions match result OSC marker was missing or had an \
@@ -1205,8 +1191,6 @@ where
                         .on_completion_result_received(shell_completion_result);
                 }
                 Some(&WARP_COMPLETIONS_REPLACEMENT_SPAN_BYTE) => {
-                    // The payload for the OSC is contained in the third parameter, as a
-                    // `<start>,<length>` pair of decimal byte offsets.
                     let Some(data_str) = params
                         .get(2)
                         .map(|osc_data| String::from_utf8_lossy(osc_data))
@@ -1246,9 +1230,6 @@ where
                     // Determine which field we are trying to update.
                     match &parameter[2..] {
                         "description" => {
-                            // The payload (3rd parameter) is hex-encoded (see
-                            // `decode_hex_completions_payload`); a missing or malformed one
-                            // degrades to "no description".
                             let value =
                                 decode_hex_completions_payload(params.get(2)).unwrap_or_default();
                             self.handler.update_last_completion_result(

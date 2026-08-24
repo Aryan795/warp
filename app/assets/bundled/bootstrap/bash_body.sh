@@ -268,14 +268,9 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
       (_warp_run_generator_command_internal "$@" &)
     }
 
-    # Computes native shell completions for the given (hex-encoded) command line and emits
-    # them over the completions OSC protocol.
-    #
-    # Usage:
-    #   warp_run_generator_command_native_completions <hex-encoded line>
+    # Computes native shell completions for the given (hex-encoded) command line and emits them over
+    # the completions OSC protocol.
     warp_run_generator_command_native_completions() {
-      # Setting this environment variable prevents warp_precmd from emitting the
-      # 'Block started' hook to the Rust app, matching warp_run_generator_command.
       _WARP_GENERATOR_COMMAND=1
       _USER_PRECMD_FUNCTIONS=("${precmd_functions[@]}")
       precmd_functions=(warp_precmd)
@@ -288,9 +283,8 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
       printf '\e]9280;B\a'
     }
 
-    # Populates COMPREPLY for the given line using bash's own completion machinery
-    # (resolved via `complete -p`), then prints each entry via the completions OSC. Splits
-    # without `eval` so an unbalanced quote or `$( )` in the line can't execute.
+    # Populates COMPREPLY for the given line using bash's own completion machinery (resolved via
+    # `complete -p`), then prints each entry via the completions OSC.
     _warp_native_bash_completions() {
       local line="$1"
       # Force the default IFS; the session's may have been changed by a plugin or the user.
@@ -394,9 +388,6 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
           reply="${BASH_REMATCH[1]}"
         fi
 
-        # Hex-encode both fields: OSC params are semicolon-delimited and only the third is
-        # read (see decode_hex_completions_payload in ansi/mod.rs), so a literal `;`, BEL, or
-        # ESC in a match or description would otherwise corrupt the sequence.
         warp_hex_encode_string_into __warp_hex_match "$reply"
         printf '\e]9280;C;%s\a' "$__warp_hex_match"
         if [[ -n "$reply_description" ]]; then
@@ -890,26 +881,20 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
        command -p tr '\n\n' ' ' <<< "$*" | command -p od -An -v -tx1 | command -p tr -d ' \n'
     }
 
-    # warp_hex_encode_string_into hex-encodes its second argument into a long hex string that Rust
-    # decodes, and assigns it to the variable named by its first argument, letting hot callers
-    # avoid the `$( )` subshell that forks a process per call.
-    # `LC_ALL=C` keeps indexing byte-wise, so it stays correct for UTF-8 text. The fork-free loop is
-    # quadratic on large inputs, because byte-indexed slicing rescans from the start each iteration,
-    # which on a long pasted command line is slow enough to freeze the shell; so above a small
-    # threshold fall back to the O(n) `od` pipeline. That pipeline is fed with `printf '%s'` (not
-    # `echo`) so an argument like `-n`/`-e` is encoded literally instead of being eaten as an option.
-    # Accepts two arguments: the name of the variable to assign to, and the string to encode. The
-    # first must not name one of this function's own locals, which an indirect write would target
-    # instead of the caller's variable.
     warp_hex_encode_string_into () {
+      # `LC_ALL=C` keeps indexing byte-wise, so it stays correct for UTF-8 text.
       local LC_ALL=C
       local __warp_hex_var="$1"
       local __warp_hex_in="$2"
+      # This branch is faster for longer values.
       if (( ${#__warp_hex_in} > 256 )); then
         printf -v "$__warp_hex_var" '%s' \
           "$(printf '%s' "$__warp_hex_in" | command -p od -An -v -tx1 | command -p tr -d ' \n')"
         return
       fi
+      # This branch is faster for shorter values. The "for" loop is O(n²) which is fine for short
+      # values, bad for long values. The case above avoids that at the cost of using piping into
+      # subprocesses instead.
       local __warp_hex_i __warp_hex_byte __warp_hex_acc=""
       for (( __warp_hex_i = 0; __warp_hex_i < ${#__warp_hex_in}; __warp_hex_i++ )); do
         printf -v __warp_hex_byte '%02x' "'${__warp_hex_in:__warp_hex_i:1}"
@@ -920,16 +905,12 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
       printf -v "$__warp_hex_var" '%s' "$__warp_hex_acc"
     }
 
-    # Writes the hex encoding of its argument to stdout.
-    # Accepts one argument: the string to encode.
     warp_hex_encode_string () {
       local __warp_hex_result
       warp_hex_encode_string_into __warp_hex_result "$1"
       printf '%s' "$__warp_hex_result"
     }
 
-    # Reverses warp_hex_encode_string: decodes a hex-encoded string back to its original
-    # bytes, letting the Rust app pass arbitrary argument text without shell quoting.
     warp_hex_decode_string () {
       if command -pv xxd >/dev/null 2>&1; then
         printf '%s' "$1" | command -p xxd -p -r

@@ -72,8 +72,6 @@ $null = New-Module -Name Warp-Module -ScriptBlock {
             [BitConverter]::ToString([System.Text.Encoding]::UTF8.GetBytes($str)).Replace('-', '')
         }
 
-        # Reverses Warp-Encode-HexString: decodes a hex-encoded string back to its original UTF-8
-        # text, letting the Rust app pass arbitrary argument text without shell quoting.
         function Warp-Decode-HexString([string]$hex) {
             # Guard empty/missing input: otherwise the loop leaves $bytes null and GetString throws.
             if ([string]::IsNullOrEmpty($hex)) {
@@ -818,39 +816,26 @@ $null = New-Module -Name Warp-Module -ScriptBlock {
     }
 
     # Computes native shell completions for a command line and emits them over the OSC 9280 wire
-    # protocol, like the other three shells. Run as an ordinary in-band foreground command (the
-    # `Warp-Run-GeneratorCommand` prefix marks it as a generator command, excluded from history and
-    # prompt) rather than a PSReadLine key handler: `CompleteInput` takes the line as a plain string,
-    # and since nothing is ever typed into the real buffer there is no kill-buffer chord to race and
-    # nothing to restore.
+    # protocol.
     function Warp-Run-GeneratorCommand-NativeCompletion {
         [CmdletBinding()]
         param([string]$hexEncodedLine)
 
         $status = $?
         $code = $global:LASTEXITCODE
-
-        # Prevents Warp-Precmd from emitting the 'Block started' hook, like Warp-Run-GeneratorCommand;
-        # this is a generator command, not a real user command.
         $script:generatorCommand = $true
 
         Write-Host -NoNewline "$([char]0x1b)]9280;A$oscEnd"
         try {
             $line = Warp-Decode-HexString $hexEncodedLine
 
-            # An empty line has no useful completions, and CompleteInput('') would enumerate every
-            # command on $PATH synchronously.
+            # An empty line has no useful completions.
             if (-not [string]::IsNullOrEmpty($line)) {
                 $completion = [System.Management.Automation.CommandCompletion]::CompleteInput(
                     $line, $line.Length, $null)
-                # PowerShell knows the exact range these matches replace (e.g. the zero-length span
-                # after the `.` in `$_.`), narrower than the client's whitespace-derived guess; report
-                # it so the client doesn't filter the shell's correct candidates against a wrong guess.
-                #
                 # ReplacementIndex/ReplacementLength are UTF-16 code-unit offsets, but the client
                 # slices a UTF-8 buffer, so convert to byte offsets here (a multi-byte char left of
-                # the token otherwise lands mid-character and panicked the app). A negative index (a
-                # whitespace-only line) is skipped in favor of the client's fallback span.
+                # the token otherwise lands mid-character and panicked the app).
                 if ($completion.ReplacementIndex -ge 0) {
                     $utf8 = [System.Text.Encoding]::UTF8
                     $replacementStartBytes = $utf8.GetByteCount($line.Substring(0, $completion.ReplacementIndex))
@@ -861,9 +846,6 @@ $null = New-Module -Name Warp-Module -ScriptBlock {
                     Write-Host -NoNewline "$([char]0x1b)]9280;S;$replacementStartBytes,$($replacementEndBytes - $replacementStartBytes)$oscEnd"
                 }
                 foreach ($match in $completion.CompletionMatches) {
-                    # Hex-encode both fields: OSC params are semicolon-delimited and only the third
-                    # is read, so a literal `;`, BEL, or ESC in a match or description would
-                    # otherwise corrupt the sequence.
                     Write-Host -NoNewline "$([char]0x1b)]9280;C;$(Warp-Encode-HexString $match.CompletionText)$oscEnd"
                     if (-not [string]::IsNullOrEmpty($match.ToolTip) -and $match.ToolTip -ne $match.CompletionText) {
                         # Cmdlet/parameter tooltips can span multiple lines; collapse to one line.
@@ -875,11 +857,8 @@ $null = New-Module -Name Warp-Module -ScriptBlock {
         } catch {
             Write-Verbose "Native completions failed: $($_.Exception.Message)"
         } finally {
-            # Always emit the terminator, even if decoding or completion above threw, so the client
-            # never blocks waiting on a response that will never arrive.
             Write-Host -NoNewline "$([char]0x1b)]9280;B$oscEnd"
-            # Restore the user's error status, like Warp-Run-GeneratorCommand -- computing a
-            # completion must not clobber the $?/$LASTEXITCODE the user's own last command left.
+            # Restore the user's error status.
             $global:LASTEXITCODE = $code
             if ($status -eq $false) {
                 $PSCmdlet.WriteError([System.Management.Automation.ErrorRecord]::new(

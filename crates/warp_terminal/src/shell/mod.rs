@@ -390,16 +390,8 @@ impl ShellType {
         }
     }
 
-    /// Builds the native-completions generator-command line for this shell from an
-    /// already-hex-encoded line to complete. The caller encodes the payload (a hex string needs no
-    /// shell quoting), so this only supplies the per-shell function name and fish's leading-space
-    /// history exclusion. The function name matches each shell's `warp_run_generator_command` /
-    /// `Warp-Run-GeneratorCommand` convention so the shell's own bookkeeping hides it from history
-    /// and treats it as in-band.
     pub fn native_completions_generator_command(self, hex_encoded_line: &str) -> String {
         match self {
-            // zsh must run this in the foreground (no command substitution around the
-            // ZLE-activating `select` loop); bash shares the same entry point.
             ShellType::Zsh | ShellType::Bash => {
                 format!("warp_run_generator_command_native_completions {hex_encoded_line}")
             }

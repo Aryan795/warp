@@ -70,10 +70,7 @@ impl MatchStrategy {
                 }
 
                 // Only fall back to a subsequence match for a query with at least one alphanumeric
-                // character. A query that is all punctuation (e.g. ".", "$(date).") would otherwise
-                // subsequence-match any candidate that merely contains those characters -- a lone
-                // "." matches every `$PATH` entry with a dot in it, like "vim.basic" -- producing
-                // spurious command completions. Prefix/exact matches above are unaffected.
+                // character. Fuzzy matches on punctuation produce poor results.
                 if !partial.chars().any(|c| c.is_alphanumeric()) {
                     return None;
                 }

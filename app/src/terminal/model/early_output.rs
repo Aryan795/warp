@@ -369,18 +369,6 @@ impl ansi::Handler for EarlyOutputHandler<'_> {
         }
     }
 
-    fn backspace(&mut self) {
-        delegate!(self.backspace());
-    }
-
-    fn move_backward(&mut self, columns: usize) {
-        delegate!(self.move_backward(columns));
-    }
-
-    fn move_forward(&mut self, columns: usize) {
-        delegate!(self.move_forward(columns));
-    }
-
     fn linefeed(&mut self) -> ScrollDelta {
         if self.inner().handle_potential_typeahead('\n') {
             // If we match a newline as typeahead, this means the shell will
@@ -501,6 +489,14 @@ impl ansi::Handler for EarlyOutputHandler<'_> {
         delegate!(self.device_status(writer, arg));
     }
 
+    fn move_forward(&mut self, columns: usize) {
+        delegate!(self.move_forward(columns));
+    }
+
+    fn move_backward(&mut self, columns: usize) {
+        delegate!(self.move_backward(columns));
+    }
+
     fn move_down_and_cr(&mut self, rows: usize) {
         delegate!(self.move_down_and_cr(rows));
     }
@@ -511,6 +507,10 @@ impl ansi::Handler for EarlyOutputHandler<'_> {
 
     fn put_tab(&mut self, count: u16) {
         delegate!(self.put_tab(count));
+    }
+
+    fn backspace(&mut self) {
+        delegate!(self.backspace());
     }
 
     fn bell(&mut self) {

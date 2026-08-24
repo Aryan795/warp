@@ -350,9 +350,7 @@ pub trait Handler {
 
     /// Callback to handle the OSC reporting the shell's own notion of the range of the buffer
     /// the completions being sent (or about to be sent) replace, as a `(start, length)` byte
-    /// pair. Optional: only some shells send this; when they don't, the client falls back to a
-    /// whitespace-derived span. Should be called at most once per completions response, any
-    /// time between `start_completions_output` and `end_completions_output`.
+    /// pair.
     fn on_completion_replacement_span_received(&mut self, _start: usize, _length: usize) {}
 
     /// Callback invoked when we've received a native completion result from the shell.

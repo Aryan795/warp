@@ -449,8 +449,6 @@ pub enum ModelEvent {
     FinishUpdate(FinishUpdateValue),
     SelectedTextChanged,
     ShellSpawned(ShellType),
-    /// The second element is the shell's own notion of the range of the buffer the completions
-    /// replace, if it reported one; see `Event::CompletionsFinished`.
     CompletionsFinished(Vec<ShellCompletion>, Option<warp_completer::meta::Span>),
     ImageReceived {
         image_id: u32,

@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::ops::Not as _;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -2997,9 +2998,6 @@ impl FeaturesPageView {
             editor_widgets.push(Box::new(SyntaxHighlightingWidget::default()))
         }
         if FeatureFlag::NativeShellCompletions.is_enabled() {
-            // Warp completions owns the nested "Open completions menu as you type" subgroup item;
-            // native completions follows it. When the flag is off, as-you-type renders top-level
-            // via CompletionsMenuWhileTypingWidget, as before.
             editor_widgets.push(Box::new(WarpCompletionsWidget::default()));
             editor_widgets.push(Box::new(NativeShellCompletionsWidget::default()));
         } else if input_settings
@@ -6175,9 +6173,6 @@ struct WarpCompletionsWidget {
 impl SettingsWidget for WarpCompletionsWidget {
     type View = FeaturesPageView;
 
-    // Carries the nested "Open completions menu as you type" search terms too, since that setting
-    // now lives inside this widget rather than its own; settings search matches only against these
-    // terms, so it must find them here.
     fn search_terms(&self) -> &str {
         "warp completions built-in shell command suggestions open completions menu as you type typing"
     }
@@ -6217,8 +6212,6 @@ impl SettingsWidget for WarpCompletionsWidget {
             None,
         ));
 
-        // As-you-type only governs Warp's own completions, so it's nested under this toggle and
-        // shown only when Warp completions is on.
         if warp_completions_enabled {
             let as_you_type_switch = ui_builder
                 .switch(self.as_you_type_switch_state.clone())
@@ -6276,23 +6269,11 @@ impl SettingsWidget for NativeShellCompletionsWidget {
         let warp_on = *input_settings.warp_completions_enabled.value();
         let as_you_type_on = *input_settings.completions_open_while_typing.value();
 
-        // Convention on this page is no subtext unless something is surprising. The one surprise:
-        // with as-you-type actually in effect (Warp completions on, as-you-type on) alongside
-        // native completions, the shell is still only asked on the completions keybinding, never as
-        // you type. Explain just that, rendering the user's live binding (or a generic phrasing if
-        // they have unbound it).
         let description = if warp_on && as_you_type_on && native_on {
             let keystroke = &*view.completions_keystroke;
-            if keystroke.is_empty() {
-                Some(
-                    "Native shell completions aren't generated as you type; open the completion menu to fetch them."
-                        .to_string(),
-                )
-            } else {
-                Some(format!(
-                    "Native shell completions aren't generated as you type; press {keystroke} to fetch them."
-                ))
-            }
+            keystroke.is_empty().not().then_some(format!(
+                "Native shell completions aren't generated as you type; press {keystroke} to fetch them."
+            ))
         } else {
             None
         };

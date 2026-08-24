@@ -565,30 +565,21 @@ if [[ -z $WARP_BOOTSTRAPPED ]]; then
 
   }
 
-  # warp_hex_encode_string_into hex-encodes its second argument into a long hexadecimal string that
-  # Rust decodes and parses, and assigns it to the variable named by its first argument, letting
-  # hot callers avoid the `$( )` subshell that forks a process per call.
-  # `nomultibyte` plus `LC_ALL=C` keeps indexing byte-wise, so a multibyte character encodes as its
-  # UTF-8 bytes rather than its code point. The loop is quadratic on large inputs, so above a small
-  # threshold fall back to the O(n) `od` pipeline. That pipeline is fed with `printf '%s'` (not
-  # `echo`) so an argument like `-n`/`-e` is encoded literally instead of being eaten as an option.
-  # This body deliberately avoids `printf -v`, which the zsh on an old remote (Warp ssh's into hosts
-  # as old as Ubuntu 14.04, zsh 5.0.2) may not support: an unsupported flag here leaves the hook
-  # payload empty and the shell never finishes bootstrapping. `typeset -g` and arithmetic base
-  # conversion are available in every zsh Warp bootstraps.
-  # Accepts two arguments: the name of the variable to assign to, and the string to encode. The
-  # first must not name one of this function's own locals, which an indirect write would target
-  # instead of the caller's variable.
   warp_hex_encode_string_into () {
     setopt localoptions nomultibyte
+    # `LC_ALL=C` keeps indexing byte-wise, so a multibyte character encodes as its UTF-8 bytes rather than its code point.
     local LC_ALL=C
     local __warp_hex_var="$1"
     local __warp_hex_in="$2"
+    # This branch is faster for longer values.
     if (( ${#__warp_hex_in} > 256 )); then
       typeset -g "$__warp_hex_var=$(printf '%s' "$__warp_hex_in" \
         | command -p od -An -v -tx1 | command -p tr -d ' \n')"
       return
     fi
+    # This branch is faster for shorter values. The "for" loop is O(n²) which is fine for short
+    # values, bad for long values. The case above avoids that at the cost of using piping into
+    # subprocesses instead.
     local __warp_hex_i __warp_hex_char __warp_hex_byte __warp_hex_acc=""
     for (( __warp_hex_i = 1; __warp_hex_i <= ${#__warp_hex_in}; __warp_hex_i++ )); do
       __warp_hex_char=${__warp_hex_in[__warp_hex_i]}
@@ -598,16 +589,12 @@ if [[ -z $WARP_BOOTSTRAPPED ]]; then
     typeset -g "$__warp_hex_var=$__warp_hex_acc"
   }
 
-  # Writes the hex encoding of its argument to stdout.
-  # Accepts one argument: the string to encode.
   warp_hex_encode_string () {
     local __warp_hex_result
     warp_hex_encode_string_into __warp_hex_result "$1"
     printf '%s' "$__warp_hex_result"
   }
 
-  # Reverses warp_hex_encode_string: decodes a hex-encoded string back to its original bytes,
-  # letting the Rust app pass arbitrary argument text without shell quoting.
   warp_hex_decode_string () {
     if command -pv xxd >/dev/null 2>&1; then
       printf '%s' "$1" | command -p xxd -p -r
@@ -666,10 +653,6 @@ if [[ -z $WARP_BOOTSTRAPPED ]]; then
     # set the WARP_DISABLE_AUTO_TITLE flag.
     [[ "${WARP_DISABLE_AUTO_TITLE:-}" != true ]] || return
 
-    # Registered before the user's RC files, so it runs before `warp_preexec` and fires for
-    # generator commands too, before `_WARP_GENERATOR_COMMAND` is set -- check the command text
-    # directly (like `warp_preexec`). Without this, a native-completions request briefly sets
-    # the tab title to "warp_run_generator_comma...".
     _is_warp_generator_command "$1" || return
 
     emulate -L zsh
@@ -1452,14 +1435,7 @@ esac
         fi
     fi
 
-    # capture completions by injecting -A parameter into the compadd call.
-    # this takes care of matching for us.
-    #
-    # This is deliberately capture-only: -A/-D divert the matches into our arrays instead of zsh's
-    # real match list. Letting them into the real list would restore zsh's early-stop (avoiding the
-    # repeated completer passes the dedup below collapses), but it also makes the list-choices
-    # widget render the candidates into the terminal, leaking text like `Applications/ Documents/`
-    # into the output stream -- so we capture and dedup instead.
+    # Capture completions by injecting -A parameter into the compadd call. This takes care of matching for us.
     builtin compadd -A __hits -D __dscr "$@"
 
     setopt localoptions norcexpandparam extendedglob
@@ -1494,13 +1470,14 @@ esac
         __replaced_prefix="${PREFIX#$__hint_prefix}"
     fi
 
-    # Native completions only complete up to the cursor (see native_completions_generator_command
-    # in the Rust ShellType), so there's no $SUFFIX and $__replaced_prefix is a trailing substring
-    # of the line, in the exact characters typed: its start is the line length minus its own.
+    # Native completions only complete up to the cursor, so there's no $SUFFIX and
+    # $__replaced_prefix is a trailing substring of the line, in the exact characters typed: its
+    # start is the line length minus its own.
     #
     # The wire format is byte offsets, but zsh's `${#...}` counts characters, not bytes, once the
     # line has non-ASCII text (the same class of bug as PowerShell's UTF-16 offsets). `LC_ALL=C`
-    # makes it count bytes; nothing later in this function counts characters, so scoping it here is fine.
+    # makes it count bytes; nothing later in this function counts characters, so scoping it here is
+    # fine.
     local LC_ALL=C
     local __span_start=$(( ${#_WARP_NATIVE_COMPLETIONS_LINE} - ${#__replaced_prefix} ))
     local __span_len=${#__replaced_prefix}
@@ -1538,13 +1515,8 @@ esac
         fi
         _WARP_SEEN_COMPLETIONS[$__dedup_key]=1
 
-        # Hex-encode both fields: OSC params are semicolon-delimited and only the third is
-        # read (see decode_hex_completions_payload in ansi/mod.rs), so a literal `;`, BEL, or
-        # ESC in a match or description would otherwise corrupt the sequence.
         warp_hex_encode_string_into __warp_hex_match "$match"
         print -n "\e]9280;C"$OSC_PARAM_SEPARATOR$__warp_hex_match$OSC_END
-        # Most candidates have no description, and encoding and emitting an empty one is pure
-        # overhead on a menu with thousands of rows; bash and fish already skip it.
         if [[ -n "$dscr" ]]; then
             warp_hex_encode_string_into __warp_hex_dscr "$dscr"
             print -n "\e]9280;D?description"$OSC_PARAM_SEPARATOR$__warp_hex_dscr$OSC_END
@@ -1565,10 +1537,7 @@ esac
     _WARP_SEEN_COMPLETIONS=()
   }
 
-  # Reports the byte-offset range of the line (passed to
-  # warp_run_generator_command_native_completions) that the matches replace, so the client uses
-  # it instead of its whitespace-derived guess. Without it, a completion that replaces only part
-  # of the current word (after a `/`, a `$`/`${` sigil, or inside a quote) gets filtered out.
+  # Reports the byte-offset range of the line that the matches replace.
   function warp_mark_replacement_span_for_compadd_override () {
     printf '\e]9280;S;%s,%s\a' $1 $2
   }
@@ -1629,9 +1598,7 @@ esac
     fi
     _WARP_NATIVE_COMPLETIONS_ZLE_LINE_INIT_RUNNING=1
     {
-      # zle-line-init can fire more than once while we own the widget (e.g. `select`
-      # re-reads on some inputs), so guard the actual capture behind the armed flag; once
-      # it has run, later firings just chain to whatever we took the widget over from.
+      # zle-line-init can fire more than once while we own the widget
       if (( ! _WARP_NATIVE_COMPLETIONS_ARMED )); then
         (( ${+widgets[_warp_saved_zle_line_init]} )) && zle _warp_saved_zle_line_init
         return 0
@@ -1666,21 +1633,13 @@ esac
   # backgrounded or in command substitution) so a `select` can reach a real ZLE completion
   # context, and so it cannot be cancelled by PID. See the "Native shell completions: foreground
   # generator" comment above `_warp_native_completions_zle_line_init`.
-  #
-  # Usage:
-  #   warp_run_generator_command_native_completions <hex-encoded line>
   warp_run_generator_command_native_completions() {
-    # Setting this environment variable prevents warp_precmd from emitting the
-    # 'Block started' hook to the Rust app, matching warp_run_generator_command.
     _WARP_GENERATOR_COMMAND=1
     _USER_PRECMD_FUNCTIONS=($precmd_functions)
     precmd_functions=(${(M)precmd_functions:#*(warp|p9k)*})
 
     local line=$(warp_hex_decode_string "$1")
 
-    # Report zero matches (and let the client fall back to the bundled completer) when there's no
-    # usable ZLE -- a non-interactive shell, `unsetopt zle`, or `TERM=emacs` -- or when the line
-    # is empty or whitespace-only, which would otherwise list every command on $PATH synchronously.
     if [[ -z ${line//[[:space:]]/} ]] || ! { [[ -o zle ]] && [[ -o interactive ]] && [[ "$TERM" != emacs ]] }; then
       printf '\e]9280;A\a'
       printf '\e]9280;B\a'
@@ -1707,9 +1666,6 @@ esac
     echo -n "${DCS_START}a"
     { select _ in 1; do break; done } 2>/dev/null
     echo -n "$DCS_END"
-
-    # zle-line-init is deliberately left bound to our capture widget -- see the comment
-    # above this function for why restoring/deleting it per-request is not done here.
 
     # Fail safe: if the capture widget never ran (some other zle-line-init fired, or `select`
     # never entered ZLE), the armed flag would hijack the next real prompt read. Clear it and

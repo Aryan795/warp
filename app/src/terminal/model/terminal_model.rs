@@ -322,20 +322,13 @@ enum IsReceivingInBandCommandOutput {
 
 /// Represents whether or not bytes read from the PTY should be considered completions output.
 enum IsReceivingCompletionsOutput {
-    /// We're currently expecting completions data to come over the PTY.
     Yes {
-        /// The typed completion results received so far, in receipt order. Sorted by name when
-        /// completions output ends (see `end_completions_output`).
+        /// The typed completion results received so far, in receipt order.
         output: Vec<ShellCompletion>,
-        /// The shell's own notion of the range of the buffer these completions replace, if the
-        /// shell reported one (see `Handler::on_completion_replacement_span_received`). `None`
-        /// for shells that don't send this yet; the client falls back to a whitespace-derived
-        /// span in that case (see `completions_fallback_strategy_for_trigger`'s caller in
-        /// `input.rs`).
+        /// The shell's own notion of the range of the buffer these completions replace.
         replacement_span: Option<Span>,
     },
 
-    /// PTY output should be handled normally.
     No,
 }
 
@@ -3349,10 +3342,6 @@ impl ansi::Handler for TerminalModel {
         }
     }
 
-    /// Records the shell's own notion of the range of the buffer the completions it's about to
-    /// send (or has already started sending) replace. Optional: not every shell reports this
-    /// yet, in which case `Event::CompletionsFinished` carries `None` and the client falls back
-    /// to a whitespace-derived span.
     fn on_completion_replacement_span_received(&mut self, start: usize, length: usize) {
         match &mut self.is_receiving_completions_output {
             IsReceivingCompletionsOutput::Yes {
