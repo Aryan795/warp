@@ -3359,14 +3359,7 @@ impl ansi::Handler for TerminalModel {
             IsReceivingCompletionsOutput::Yes {
                 replacement_span, ..
             } => {
-                let Some(end) = start.checked_add(length) else {
-                    log::warn!(
-                        "Ignoring completions replacement span whose start + length overflows: \
-                         start={start}, length={length}"
-                    );
-                    return;
-                };
-                *replacement_span = Some(Span::new(start, end));
+                *replacement_span = Some(Span::new(start, start.saturating_add(length)));
             }
             IsReceivingCompletionsOutput::No => {
                 log::warn!("Unexpectedly received a completions replacement span");

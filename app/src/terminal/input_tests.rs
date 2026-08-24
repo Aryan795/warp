@@ -3075,6 +3075,72 @@ fn input_tab_asks_the_shell_once_when_bundled_specs_are_empty() {
     });
 }
 
+/// The shell's replacement span is attacker-controlled -- any program can emit the OSC that
+/// carries it -- and consumers index the buffer with its `start` directly, as `input_tab`'s
+/// `&input_text[replacement_start..cursor]` does. Reaching those paths with an out-of-range span
+/// takes no arithmetic overflow at all: `S;1000000,1` sits well inside `usize`, and panicked on a
+/// second Tab before this clamp, so the clamp rather than the handler's add is what protects them.
+#[test]
+fn native_shell_replacement_span_is_clamped_into_the_buffer_before_the_cursor() {
+    let buffer_text = "cd app/D";
+    let cursor_position = buffer_text.len();
+
+    let honored = native_shell_suggestion_results(
+        Vec::new(),
+        Some(Span::new(3, 8)),
+        buffer_text,
+        cursor_position,
+    );
+    assert_eq!(
+        honored.replacement_span,
+        Span::new(3, 8),
+        "a span a shell can really report must survive untouched"
+    );
+
+    let out_of_range = native_shell_suggestion_results(
+        Vec::new(),
+        Some(Span::new(1_000_000, 1_000_001)),
+        buffer_text,
+        cursor_position,
+    );
+    assert_eq!(out_of_range.replacement_span, Span::new(8, 8));
+
+    let saturated = native_shell_suggestion_results(
+        Vec::new(),
+        Some(Span::new(usize::MAX, usize::MAX)),
+        buffer_text,
+        cursor_position,
+    );
+    assert_eq!(saturated.replacement_span, Span::new(8, 8));
+}
+
+/// Clamping to the whole buffer would not be enough: a `start` that is in the buffer but past the
+/// cursor still panics the `&input_text[replacement_start..cursor]` slice, so the bound is the
+/// prefix the shell was actually given.
+#[test]
+fn native_shell_replacement_span_is_clamped_to_the_cursor_not_the_whole_buffer() {
+    let buffer_text = "cd app/Documents";
+    let cursor_position = "cd app/D".len();
+
+    let results = native_shell_suggestion_results(
+        Vec::new(),
+        Some(Span::new(12, 16)),
+        buffer_text,
+        cursor_position,
+    );
+
+    assert_eq!(results.replacement_span, Span::new(8, 8));
+}
+
+#[test]
+fn native_shell_replacement_span_falls_back_to_the_whitespace_token_when_none_is_reported() {
+    let buffer_text = "cd app/D";
+
+    let results = native_shell_suggestion_results(Vec::new(), None, buffer_text, buffer_text.len());
+
+    assert_eq!(results.replacement_span, Span::new(3, 8));
+}
+
 #[test]
 fn test_tab_completion_with_multibyte_chars() {
     App::test((), |mut app| async move {

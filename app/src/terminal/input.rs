@@ -1662,17 +1662,23 @@ fn native_shell_suggestion_results(
     cursor_position: usize,
 ) -> SuggestionResults {
     let suggestions = shell_results.into_iter().map(Into::into).collect_vec();
-    let replacement_span = shell_replacement_span.unwrap_or_else(|| {
-        let token_end = cursor_position;
-        // Within the section of the buffer from the start to the end of this token, find the last
-        // whitespace char before the token end; the token starts just after it (or at the start
-        // of the buffer if there's none).
-        let token_start = buffer_text[0..token_end]
-            .rfind(char::is_whitespace)
-            .map(|pos| pos + 1)
-            .unwrap_or_default();
-        (token_start, token_end).into()
-    });
+    let buffer_text_before_cursor = &buffer_text[0..cursor_position];
+    let replacement_span = match shell_replacement_span {
+        // Any program can emit the OSC carrying this span, and consumers go on to index the buffer
+        // with its `start` directly, so pull it inside the prefix the shell was given. A span a
+        // shell really reports already lies in that prefix, so this leaves those untouched.
+        Some(span) => span.clamped_to(buffer_text_before_cursor),
+        None => {
+            // Within the section of the buffer from the start to the end of this token, find the
+            // last whitespace char before the token end; the token starts just after it (or at the
+            // start of the buffer if there's none).
+            let token_start = buffer_text_before_cursor
+                .rfind(char::is_whitespace)
+                .map(|pos| pos + 1)
+                .unwrap_or_default();
+            (token_start, cursor_position).into()
+        }
+    };
     SuggestionResults {
         replacement_span,
         suggestions,
