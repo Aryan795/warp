@@ -127,16 +127,60 @@ async fn e2e_happy_path_downloads_all_and_writes_to_disk() {
     .expect("should not be fatal");
 
     assert_eq!(result.as_deref(), Some(&*attachments_dir.to_string_lossy()));
+    // Written under the logical filename, not the storage-side file_id.
     assert_eq!(
-        fs::read(attachments_dir.join("handoff").join("alpha-uuid")).unwrap(),
+        fs::read(attachments_dir.join("handoff").join("alpha.patch")).unwrap(),
         b"alpha-body"
     );
     assert_eq!(
-        fs::read(attachments_dir.join("handoff").join("beta-uuid")).unwrap(),
+        fs::read(attachments_dir.join("handoff").join("beta.patch")).unwrap(),
         b"beta-body"
     );
     first_mock.assert();
     second_mock.assert();
+}
+
+#[tokio::test]
+async fn e2e_checkpoint_mode_storage_name_does_not_leak_into_the_written_path() {
+    // Regression test: a checkpoint-mode snapshot's file_id is a storage path
+    // (`checkpoint/<generation>/<logical name>`), while filename stays a plain name. The
+    // download must land at `{handoff_dir}/{filename}`, not fail trying to create a
+    // `checkpoint/<generation>/` subdirectory that was never made.
+    let _guard = FeatureFlag::OzHandoff.override_enabled(true);
+    let tempdir = handoff_tempdir();
+    let attachments_dir = tempdir.path().to_path_buf();
+    let http = build_test_http_client();
+    let mut server = Server::new_async().await;
+
+    let file_id = "checkpoint/1787245813225-2/snapshot_state.json";
+    let mock = server
+        .mock("GET", download_path(&regex::escape(file_id)))
+        .with_status(200)
+        .with_body("checkpoint-body")
+        .expect(1)
+        .create_async()
+        .await;
+
+    let attachments = vec![make_attachment(&server.url(), file_id, "snapshot_state.json")];
+    let result = fetch_and_download_handoff_snapshot_attachments(
+        mock_client_returning(attachments),
+        &http,
+        fake_task_id(),
+        attachments_dir.clone(),
+    )
+    .await
+    .expect("should not be fatal");
+
+    assert_eq!(result.as_deref(), Some(&*attachments_dir.to_string_lossy()));
+    assert_eq!(
+        fs::read(attachments_dir.join("handoff").join("snapshot_state.json")).unwrap(),
+        b"checkpoint-body"
+    );
+    assert!(
+        !attachments_dir.join("handoff").join("checkpoint").exists(),
+        "the storage name's generation segment must never be materialized as a directory"
+    );
+    mock.assert_async().await;
 }
 
 #[tokio::test]
@@ -176,7 +220,7 @@ async fn e2e_transient_5xx_retried_then_succeeds() {
 
     assert_eq!(result.as_deref(), Some(&*attachments_dir.to_string_lossy()));
     assert_eq!(
-        fs::read(attachments_dir.join("handoff").join("flaky-uuid")).unwrap(),
+        fs::read(attachments_dir.join("handoff").join("flaky.patch")).unwrap(),
         b"finally-here"
     );
     flaky_fail.assert_async().await;
@@ -212,10 +256,7 @@ async fn e2e_permanent_4xx_fails_fast_without_retries() {
 
     assert!(result.is_none(), "no file landed, dir should be None");
     assert!(
-        !attachments_dir
-            .join("handoff")
-            .join("missing-uuid")
-            .exists(),
+        !attachments_dir.join("handoff").join("gone.patch").exists(),
         "no file should be written on permanent failure"
     );
     missing.assert_async().await;
@@ -249,14 +290,14 @@ async fn e2e_retry_exhaustion_marks_failed() {
     .unwrap();
 
     assert!(result.is_none());
-    assert!(!attachments_dir.join("handoff").join("dead-uuid").exists());
+    assert!(!attachments_dir.join("handoff").join("dead.patch").exists());
     persistent.assert_async().await;
 }
 
 #[tokio::test]
 async fn e2e_partial_success_returns_dir_with_downloaded_subset() {
     // One attachment succeeds, one fails permanently. The dir is returned so the caller can
-    // still see `{handoff_dir}/ok-uuid` downstream; the failed sibling's file is absent.
+    // still see `{handoff_dir}/ok.patch` downstream; the failed sibling's file is absent.
     let _guard = FeatureFlag::OzHandoff.override_enabled(true);
     let tempdir = handoff_tempdir();
     let attachments_dir = tempdir.path().to_path_buf();
@@ -293,10 +334,10 @@ async fn e2e_partial_success_returns_dir_with_downloaded_subset() {
 
     assert_eq!(result.as_deref(), Some(&*attachments_dir.to_string_lossy()));
     assert_eq!(
-        fs::read(attachments_dir.join("handoff").join("ok-uuid")).unwrap(),
+        fs::read(attachments_dir.join("handoff").join("ok.patch")).unwrap(),
         b"present"
     );
-    assert!(!attachments_dir.join("handoff").join("bad-uuid").exists());
+    assert!(!attachments_dir.join("handoff").join("bad.patch").exists());
     ok_mock.assert_async().await;
     bad_mock.assert_async().await;
 }

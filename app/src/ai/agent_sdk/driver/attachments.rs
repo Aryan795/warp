@@ -60,7 +60,7 @@ pub(crate) async fn fetch_and_download_attachments(
 }
 
 /// Fetches handoff snapshot attachments for the active execution and downloads
-/// them into `{attachments_dir}/handoff/{attachment_uuid}` so the runtime's
+/// them into `{attachments_dir}/handoff/{filename}` so the runtime's
 /// rehydration prompt references always point at a file that exists on disk.
 ///
 /// Returns `Some(attachments_dir)` when at least one attachment wrote to disk, mirroring
@@ -97,9 +97,13 @@ pub(crate) async fn fetch_and_download_handoff_snapshot_attachments(
         .await
         .context("Failed to create handoff attachments directory")?;
 
+    // Join on the logical `filename`, not `file_id`: `file_id` is the GCS *storage* name,
+    // which for a checkpoint-mode snapshot embeds generation path segments (e.g.
+    // `checkpoint/<gen>/snapshot_state.json`). Joining on that would try to create a file
+    // inside a subdirectory that was never made and fail every download.
     let attempts = attachments.len();
     let download_futures = attachments.into_iter().map(|attachment| {
-        let file_path = handoff_dir.join(&attachment.file_id);
+        let file_path = handoff_dir.join(&attachment.filename);
         download_handoff_entry(attachment, file_path, http_client)
     });
     let results = join_all(download_futures).await;
@@ -208,16 +212,16 @@ async fn download_handoff_entry(
     file_path: PathBuf,
     http_client: &http_client::Client,
 ) -> Result<(), (String, String)> {
-    // Factor `file_id` and `download_url` out before the retry closure so `attachment` is fully
-    // consumed up-front. The closure borrows the two fields it needs as references.
+    // Factor `filename` and `download_url` out before the retry closure so `attachment` is
+    // fully consumed up-front. The closure borrows the two fields it needs as references.
     let TaskAttachment {
-        file_id,
+        filename,
         download_url,
         ..
     } = attachment;
     download_attachment(http_client, &download_url, &file_path)
         .await
-        .map_err(|e| (file_id, format!("{e:#}")))
+        .map_err(|e| (filename, format!("{e:#}")))
 }
 
 /// Shared download primitive: GET `download_url`, write the body to `file_path`, and retry
