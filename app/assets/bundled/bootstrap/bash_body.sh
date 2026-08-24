@@ -913,7 +913,9 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
       local __warp_hex_i __warp_hex_byte __warp_hex_acc=""
       for (( __warp_hex_i = 0; __warp_hex_i < ${#__warp_hex_in}; __warp_hex_i++ )); do
         printf -v __warp_hex_byte '%02x' "'${__warp_hex_in:__warp_hex_i:1}"
-        __warp_hex_acc+="$__warp_hex_byte"
+        # Keep only the low byte. bash 3.2, which macOS still ships, reads a character code above
+        # 0x7f as a negative number, and `%02x` then sign-extends it to sixteen digits.
+        __warp_hex_acc+="${__warp_hex_byte: -2}"
       done
       printf -v "$__warp_hex_var" '%s' "$__warp_hex_acc"
     }
