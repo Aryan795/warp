@@ -131,6 +131,8 @@ pub struct Menu<A: Action + Clone = ()> {
     /// If false, selecting a menu item updates selection and emits menu events
     /// without dispatching the item's typed action directly from the menu.
     dispatch_item_actions: bool,
+    /// See [`Self::with_hover_tracks_drag`].
+    hover_tracks_drag: bool,
 }
 
 #[derive(Clone, Default)]
@@ -1178,6 +1180,7 @@ impl<A: Action + Clone> MenuItemFields<A> {
         dispatch_item_actions: bool,
         is_selected: bool,
         ignore_hover_when_covered: bool,
+        hover_tracks_drag: bool,
         safe_zone_suppresses_hover: bool,
         submenu_being_shown_for_item: bool,
         appearance: &Appearance,
@@ -1416,6 +1419,9 @@ impl<A: Action + Clone> MenuItemFields<A> {
             }
         });
         ret = ret.with_defer_events_to_children();
+        if hover_tracks_drag {
+            ret = ret.with_hover_during_drag();
+        }
 
         let on_select_action = self.on_select_action.clone();
 
@@ -1551,6 +1557,7 @@ impl<A: Action + Clone> MenuItem<A> {
         dispatch_item_actions: bool,
         is_row_selected: bool,
         ignore_hover_when_covered: bool,
+        hover_tracks_drag: bool,
         safe_zone_suppresses_hover: bool,
         submenu_being_shown_for_item: bool,
         appearance: &Appearance,
@@ -1566,6 +1573,7 @@ impl<A: Action + Clone> MenuItem<A> {
                 dispatch_item_actions,
                 is_row_selected,
                 ignore_hover_when_covered,
+                hover_tracks_drag,
                 safe_zone_suppresses_hover,
                 submenu_being_shown_for_item,
                 appearance,
@@ -1589,6 +1597,7 @@ impl<A: Action + Clone> MenuItem<A> {
                             dispatch_item_actions,
                             is_row_selected && selected_item_in_row.unwrap_or_default() == item_idx,
                             ignore_hover_when_covered,
+                            hover_tracks_drag,
                             safe_zone_suppresses_hover,
                             submenu_being_shown_for_item,
                             appearance,
@@ -1631,6 +1640,7 @@ impl<A: Action + Clone> MenuItem<A> {
                     dispatch_item_actions,
                     is_row_selected,
                     ignore_hover_when_covered,
+                    hover_tracks_drag,
                     safe_zone_suppresses_hover,
                     submenu_being_shown_for_item,
                     appearance,
@@ -1666,6 +1676,7 @@ impl<A: Action + Clone> MenuItem<A> {
                                 dispatch_item_actions,
                                 is_row_selected,
                                 ignore_hover_when_covered,
+                                hover_tracks_drag,
                                 safe_zone_suppresses_hover,
                                 submenu_being_shown_for_item,
                                 appearance,
@@ -1684,6 +1695,7 @@ impl<A: Action + Clone> MenuItem<A> {
                                 dispatch_item_actions,
                                 is_row_selected,
                                 ignore_hover_when_covered,
+                                hover_tracks_drag,
                                 safe_zone_suppresses_hover,
                                 submenu_being_shown_for_item,
                                 appearance,
@@ -1705,6 +1717,7 @@ impl<A: Action + Clone> MenuItem<A> {
                         dispatch_item_actions,
                         is_row_selected,
                         ignore_hover_when_covered,
+                        hover_tracks_drag,
                         safe_zone_suppresses_hover,
                         submenu_being_shown_for_item,
                         appearance,
@@ -2126,6 +2139,7 @@ impl<A: Action + Clone> SubMenu<A> {
         selected_item: Option<usize>,
         dispatch_item_actions: bool,
         ignore_hover_when_covered: bool,
+        hover_tracks_drag: bool,
         safe_zone_anchor_row: Option<usize>,
         submenu_being_shown_for_item_index: Option<usize>,
         appearance: &Appearance,
@@ -2156,6 +2170,7 @@ impl<A: Action + Clone> SubMenu<A> {
                                     dispatch_item_actions,
                                     is_selected,
                                     ignore_hover_when_covered,
+                                    hover_tracks_drag,
                                     safe_zone_suppresses_hover,
                                     submenu_being_shown_for_item,
                                     appearance,
@@ -2187,6 +2202,7 @@ impl<A: Action + Clone> SubMenu<A> {
                     menu.selected_item_index,
                     dispatch_item_actions,
                     ignore_hover_when_covered,
+                    hover_tracks_drag,
                     None,
                     None,
                     appearance,
@@ -2213,6 +2229,7 @@ impl<A: Action + Clone> SubMenu<A> {
                             dispatch_item_actions,
                             is_selected,
                             ignore_hover_when_covered,
+                            hover_tracks_drag,
                             safe_zone_suppresses_hover,
                             submenu_being_shown_for_item,
                             appearance,
@@ -2269,6 +2286,7 @@ impl<A: Action + Clone> Menu<A> {
             content_bottom_padding_override: None,
             width_match_position_id: None,
             dispatch_item_actions: true,
+            hover_tracks_drag: false,
         }
     }
 
@@ -2320,6 +2338,17 @@ impl<A: Action + Clone> Menu<A> {
     /// This is useful when a sidecar panel overlays the menu.
     pub fn with_ignore_hover_when_covered(mut self) -> Self {
         self.ignore_hover_when_covered = true;
+        self
+    }
+
+    /// Keeps row hover tracking the pointer during a left-mouse drag instead
+    /// of freezing at the row hovered when the drag began. Off by default
+    /// because most menus rely on `Hoverable`'s drag suppression for
+    /// behaviors where a drag must not retarget hover; opt in only for menus
+    /// where a press-and-hold should behave like a hover (e.g. the tab
+    /// config selector).
+    pub fn with_hover_tracks_drag(mut self) -> Self {
+        self.hover_tracks_drag = true;
         self
     }
 
@@ -2736,6 +2765,7 @@ impl<A: Action + Clone> SubMenu<A> {
         prevent_interaction_with_other_elements: bool,
         dispatch_item_actions: bool,
         ignore_hover_when_covered: bool,
+        hover_tracks_drag: bool,
         safe_zone_anchor_row: Option<usize>,
         submenu_being_shown_for_item_index: Option<usize>,
         flatten_bottom_corners: bool,
@@ -2757,6 +2787,7 @@ impl<A: Action + Clone> SubMenu<A> {
             selected_item_index,
             dispatch_item_actions,
             ignore_hover_when_covered,
+            hover_tracks_drag,
             safe_zone_anchor_row,
             submenu_being_shown_for_item_index,
             appearance,
@@ -2925,6 +2956,7 @@ impl<A: Action + Clone> View for Menu<A> {
             self.prevent_interaction_with_other_elements,
             self.dispatch_item_actions,
             self.ignore_hover_when_covered,
+            self.hover_tracks_drag,
             safe_zone_anchor_row,
             self.submenu_being_shown_for_item_index,
             self.flatten_bottom_corners,
