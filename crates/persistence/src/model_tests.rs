@@ -4,7 +4,7 @@ use warp_multi_agent_api as api;
 
 use super::{
     AgentConversation, AgentConversationData, AgentConversationSummary, ConversationUsageMetadata,
-    ModelTokenUsage,
+    ModelTokenUsage, PersistedModelTokenCost, TurnUsageBaseline,
 };
 
 fn parentless_task(id: &str, message_count: usize) -> api::Task {
@@ -132,6 +132,70 @@ fn conversation_usage_metadata_preserves_known_zero_provider_cost() {
         serde_json::to_string(&metadata)
             .unwrap()
             .contains("\"total_provider_cost_in_cents\":0.0")
+    );
+}
+
+/// Legacy persisted rows written before `cumulative_token_cost_by_model` and
+/// `TurnUsageBaseline::per_model` existed must still deserialize cleanly,
+/// defaulting both to empty maps.
+#[test]
+fn conversation_usage_metadata_defaults_missing_per_model_usage_to_empty() {
+    let metadata: ConversationUsageMetadata = serde_json::from_str(
+        r#"{"was_summarized":false,"context_window_usage":0.0,"credits_spent":0.0,"turn_usage_baseline":{"tool_calls":1,"files_changed":0,"lines_added":0,"lines_removed":0,"commands_executed":0}}"#,
+    )
+    .unwrap();
+
+    assert!(metadata.cumulative_token_cost_by_model.is_empty());
+    assert!(
+        metadata
+            .turn_usage_baseline
+            .expect("turn_usage_baseline should be present")
+            .per_model
+            .is_empty()
+    );
+}
+
+/// A per-model token/cost snapshot (both the conversation-cumulative map and
+/// the turn-start baseline nested inside it) must round-trip through
+/// serialization exactly, since this is what makes turn-scoped per-model
+/// usage survive an app restart / conversation restore.
+#[test]
+fn conversation_usage_metadata_round_trips_per_model_token_cost() {
+    let metadata = ConversationUsageMetadata {
+        cumulative_token_cost_by_model: HashMap::from([(
+            "claude-sonnet".to_string(),
+            PersistedModelTokenCost {
+                tokens: 1_500,
+                cost_in_cents: 42.5,
+            },
+        )]),
+        turn_usage_baseline: Some(TurnUsageBaseline {
+            tool_calls: 2,
+            per_model: HashMap::from([(
+                "claude-sonnet".to_string(),
+                PersistedModelTokenCost {
+                    tokens: 1_000,
+                    cost_in_cents: 30.0,
+                },
+            )]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let serialized = serde_json::to_string(&metadata).expect("should serialize");
+    let deserialized: ConversationUsageMetadata =
+        serde_json::from_str(&serialized).expect("should deserialize");
+
+    // `HashMap` equality doesn't depend on iteration order, so a direct
+    // struct comparison is safe here.
+    assert_eq!(
+        deserialized.cumulative_token_cost_by_model,
+        metadata.cumulative_token_cost_by_model
+    );
+    assert_eq!(
+        deserialized.turn_usage_baseline,
+        metadata.turn_usage_baseline
     );
 }
 

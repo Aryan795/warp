@@ -203,6 +203,9 @@ impl From<&ConversationUsageMetadata> for persistence::model::ConversationUsageM
             context_window_segments: gql.context_window_segments.iter().map(Into::into).collect(),
             // No turn-scoped baseline is available from server-hydrated usage snapshots.
             turn_usage_baseline: None,
+            // The server doesn't report a per-model cost breakdown; this is
+            // only ever populated client-side as requests complete.
+            cumulative_token_cost_by_model: Default::default(),
         }
     }
 }

@@ -927,6 +927,61 @@ fn usage_totals_reads_gui_credits_and_accumulates_provider_cost() {
     });
 }
 
+/// Per-model turn-scoped usage is derived from persisted state
+/// (`ConversationUsageMetadata::cumulative_token_cost_by_model` diffed
+/// against `turn_usage_baseline.per_model`), so it must still be correct
+/// after a conversation is torn down and reloaded from persisted data --
+/// unlike the live-only `total_token_usage_by_model` map, which does not
+/// survive a restore.
+#[test]
+fn per_model_usage_for_last_block_survives_restore() {
+    App::test((), |mut app| async move {
+        initialize_custom_endpoint_usage_test_app(&mut app);
+        app.add_singleton_model(LLMPreferences::new);
+
+        let mut conversation = AIConversation::new(false, false);
+        app.read(|ctx| {
+            // First turn: establishes a baseline for the next turn.
+            conversation
+                .update_cost_and_usage_for_request(
+                    None,
+                    vec![stream_token_usage("model-a", 100, 20, 1.5)],
+                    None,
+                    true,
+                    ctx,
+                )
+                .expect("usage should update");
+            // Second turn: only this call's usage should count as "last block".
+            conversation
+                .update_cost_and_usage_for_request(
+                    None,
+                    vec![stream_token_usage("model-a", 50, 10, 2.5)],
+                    None,
+                    true,
+                    ctx,
+                )
+                .expect("usage should update");
+        });
+
+        let live_usage = conversation.per_model_usage_for_last_block();
+        assert_eq!(live_usage, vec![("model-a".to_string(), 60, 2.5)]);
+
+        // Simulate an app restart: persist and reload only the conversation's
+        // usage metadata, dropping all in-memory-only state (e.g.
+        // `total_token_usage_by_model`).
+        let restored = restored_conversation(Some(AgentConversationData {
+            conversation_usage_metadata: Some(conversation.usage_metadata()),
+            ..conversation_data_with_provider_cost(None)
+        }));
+
+        assert_eq!(
+            restored.per_model_usage_for_last_block(),
+            live_usage,
+            "per-model turn usage must survive a restore now that it is persisted"
+        );
+    });
+}
+
 #[allow(deprecated)]
 #[test]
 fn footer_model_token_usage_keeps_custom_endpoint_usage_distinct_from_same_labeled_models() {

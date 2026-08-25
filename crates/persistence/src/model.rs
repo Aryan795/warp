@@ -1638,6 +1638,15 @@ pub struct ConversationUsageMetadata {
     /// credits but only cumulative totals for these other fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_usage_baseline: Option<TurnUsageBaseline>,
+    /// Cumulative token count and provider cost per model, across the whole
+    /// conversation. Updated incrementally on every request (unlike
+    /// `token_usage`, which is fully overwritten on each footer refresh and
+    /// has no per-model cost breakdown). Diffing this against
+    /// `turn_usage_baseline.per_model` yields turn-scoped per-model usage
+    /// that survives restarts/restores, keyed by model_id. Empty until the
+    /// first request completes.
+    #[serde(default)]
+    pub cumulative_token_cost_by_model: HashMap<String, PersistedModelTokenCost>,
 }
 
 impl ConversationUsageMetadata {
@@ -1646,14 +1655,17 @@ impl ConversationUsageMetadata {
     }
 }
 
+/// Cumulative token count and provider cost for a single model, as of some
+/// point in a conversation. See
+/// [`ConversationUsageMetadata::cumulative_token_cost_by_model`] and
+/// [`TurnUsageBaseline::per_model`].
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, Default, PartialEq)]
+pub struct PersistedModelTokenCost {
+    pub tokens: u64,
+    pub cost_in_cents: f32,
+}
+
 /// See [`ConversationUsageMetadata::turn_usage_baseline`].
-///
-/// Token/cost baselines are intentionally not tracked here: per-model turn
-/// usage is derived from `AIConversation`'s in-memory
-/// `total_token_usage_by_model` map instead (see
-/// `AIConversation::per_model_usage_for_last_block`), which is not persisted
-/// and therefore doesn't survive a restart mid-turn -- an acceptable
-/// degradation for a live-session-only breakdown.
 #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
 pub struct TurnUsageBaseline {
     pub tool_calls: i32,
@@ -1661,6 +1673,11 @@ pub struct TurnUsageBaseline {
     pub lines_added: i32,
     pub lines_removed: i32,
     pub commands_executed: i32,
+    /// Per-model token/cost baseline as of the start of the block, keyed by
+    /// model_id. See
+    /// [`ConversationUsageMetadata::cumulative_token_cost_by_model`].
+    #[serde(default)]
+    pub per_model: HashMap<String, PersistedModelTokenCost>,
 }
 
 #[derive(Debug, Insertable)]

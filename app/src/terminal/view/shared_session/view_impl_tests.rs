@@ -761,6 +761,7 @@ fn server_conversation_metadata(
             tool_usage_metadata: Default::default(),
             context_window_segments: Vec::new(),
             turn_usage_baseline: None,
+            cumulative_token_cost_by_model: Default::default(),
         },
         metadata: ServerMetadata {
             uid: ServerId::default(),
