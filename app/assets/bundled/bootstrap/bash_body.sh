@@ -1403,28 +1403,64 @@ esac
       ! { bind -m "$1" -p 2>/dev/null; bind -m "$1" -X 2>/dev/null; } | command -p grep -qF '"\e]"'
     }
 
-    __warp_report_raw_keypress_ctrl_r_selection() {
-      local escaped_selection="$(warp_escape_json "$READLINE_LINE")"
-      warp_send_json_message "{ \"hook\": \"ExternalCtrlRRawKeypressSelection\", \"value\": { \"buffer\": \"$escaped_selection\", \"session_id\": $WARP_SESSION_ID } }"
+    # Reports the outcome of a raw-keypress ctrl-r handoff back to Warp. `token` is the decimal
+    # handoff id Warp pasted into the line buffer to start this handoff (see
+    # `raw_keypress_ctrl_r_handoff_payload` in view.rs); Warp echoes it back to the pending
+    # handoff it started, rejecting the report if they don't match. `selection` is the command
+    # text the user selected, or empty if they cancelled.
+    __warp_report_raw_keypress_ctrl_r_selection() { # token, selection
+      local escaped_token="$(warp_escape_json "$1")"
+      local escaped_selection="$(warp_escape_json "$2")"
+      warp_send_json_message "{ \"hook\": \"ExternalCtrlRRawKeypressSelection\", \"value\": { \"buffer\": \"$escaped_selection\", \"token\": \"$escaped_token\", \"session_id\": $WARP_SESSION_ID } }"
+    }
+
+    # Fallback binding target for a keymap with no real ctrl-r widget to re-invoke: the pasted
+    # token is sitting alone in the line buffer (nothing else runs), so report it immediately
+    # with an empty selection.
+    __warp_report_raw_keypress_ctrl_r_selection_immediate() {
+      local token="$READLINE_LINE"
       READLINE_LINE=''
       READLINE_POINT=0
+      __warp_report_raw_keypress_ctrl_r_selection "$token" ''
     }
 
     # READLINE_LINE/READLINE_POINT are live globals for the duration of a `bind -x` binding, so
     # the eval'd widget's assignments are visible here and readline picks them up when we return.
     # A distinct function per keymap (rather than one shared function) is required because each
     # keymap can capture a different original binding (e.g. atuin's emacs vs. vi-insert widgets).
+    #
+    # The token is captured and the buffer cleared *before* the real widget runs: the buffer
+    # holds the pasted token at that point, and after the widget runs it holds the selection
+    # instead.
     __warp_run_raw_keypress_ctrl_r_widget_emacs() {
+      local token="$READLINE_LINE"
+      READLINE_LINE=''
+      READLINE_POINT=0
       eval "$__warp_raw_keypress_ctrl_r_orig_emacs"
-      __warp_report_raw_keypress_ctrl_r_selection
+      local selection="$READLINE_LINE"
+      READLINE_LINE=''
+      READLINE_POINT=0
+      __warp_report_raw_keypress_ctrl_r_selection "$token" "$selection"
     }
     __warp_run_raw_keypress_ctrl_r_widget_vi_insert() {
+      local token="$READLINE_LINE"
+      READLINE_LINE=''
+      READLINE_POINT=0
       eval "$__warp_raw_keypress_ctrl_r_orig_vi_insert"
-      __warp_report_raw_keypress_ctrl_r_selection
+      local selection="$READLINE_LINE"
+      READLINE_LINE=''
+      READLINE_POINT=0
+      __warp_report_raw_keypress_ctrl_r_selection "$token" "$selection"
     }
     __warp_run_raw_keypress_ctrl_r_widget_vi_command() {
+      local token="$READLINE_LINE"
+      READLINE_LINE=''
+      READLINE_POINT=0
       eval "$__warp_raw_keypress_ctrl_r_orig_vi_command"
-      __warp_report_raw_keypress_ctrl_r_selection
+      local selection="$READLINE_LINE"
+      READLINE_LINE=''
+      READLINE_POINT=0
+      __warp_report_raw_keypress_ctrl_r_selection "$token" "$selection"
     }
 
     if [ "$WARP_IN_MSYS2" = false ]; then
@@ -1432,7 +1468,7 @@ esac
         if __warp_raw_keypress_ctrl_r_orig_emacs=$(__warp_classify_raw_keypress_ctrl_r_binding emacs); then
           bind -m emacs -x '"\e]": __warp_run_raw_keypress_ctrl_r_widget_emacs'
         else
-          bind -m emacs -x '"\e]": __warp_report_raw_keypress_ctrl_r_selection'
+          bind -m emacs -x '"\e]": __warp_report_raw_keypress_ctrl_r_selection_immediate'
         fi
         shell_plugins+=(external_ctrl_r_raw_keypress)
       fi
@@ -1440,7 +1476,7 @@ esac
         if __warp_raw_keypress_ctrl_r_orig_vi_insert=$(__warp_classify_raw_keypress_ctrl_r_binding vi-insert); then
           bind -m vi-insert -x '"\e]": __warp_run_raw_keypress_ctrl_r_widget_vi_insert'
         else
-          bind -m vi-insert -x '"\e]": __warp_report_raw_keypress_ctrl_r_selection'
+          bind -m vi-insert -x '"\e]": __warp_report_raw_keypress_ctrl_r_selection_immediate'
         fi
         shell_plugins+=(external_ctrl_r_raw_keypress)
       fi
@@ -1448,7 +1484,7 @@ esac
         if __warp_raw_keypress_ctrl_r_orig_vi_command=$(__warp_classify_raw_keypress_ctrl_r_binding vi-command); then
           bind -m vi-command -x '"\e]": __warp_run_raw_keypress_ctrl_r_widget_vi_command'
         else
-          bind -m vi-command -x '"\e]": __warp_report_raw_keypress_ctrl_r_selection'
+          bind -m vi-command -x '"\e]": __warp_report_raw_keypress_ctrl_r_selection_immediate'
         fi
         shell_plugins+=(external_ctrl_r_raw_keypress)
       fi

@@ -1007,16 +1007,32 @@ pub struct InputBufferValue {
 /// reporting the command the user selected. Empty when the user cancelled without selecting
 /// anything. Warp inserts the selection into the input editor without executing it.
 ///
-/// Unlike the foreground-command handoff's `ExternalCtrlRSelection` hook (PR #15513), this carries
-/// no per-invocation token: a raw keypress has no payload channel to hand one to the wrapper. The
-/// client instead accepts a reply only while a handoff is actually pending for `session_id` (see
-/// [`crate::terminal::view::TerminalView::apply_raw_keypress_ctrl_r_selection`]), which the
-/// wrapper's synchronous, single-shot invocation makes a reliable enough guard.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize, Serialize)]
+/// `token` echoes back the handoff token Warp pastes into the shell's line buffer (via bracketed
+/// paste, ahead of the private key sequence) immediately before triggering the wrapper, mirroring
+/// how the foreground-command handoff's `ExternalCtrlRSelection` hook (PR #15513) echoes a token
+/// passed as a shell-helper argument. The wrapper captures it from the buffer before running the
+/// real widget. The client rejects a reply whose token doesn't match the pending handoff (see
+/// [`crate::terminal::view::TerminalView::apply_raw_keypress_ctrl_r_selection`]), so a stale
+/// completion from a superseded attempt can't be misapplied to a newer one.
+#[derive(Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ExternalCtrlRRawKeypressSelectionValue {
     pub buffer: String,
     #[serde(default)]
+    pub token: String,
+    #[serde(default)]
     pub session_id: HookSessionId,
+}
+
+impl std::fmt::Debug for ExternalCtrlRRawKeypressSelectionValue {
+    /// Redacts `buffer`, since it carries the shell command the user selected and may contain
+    /// sensitive data (e.g. a secret typed into an earlier command).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExternalCtrlRRawKeypressSelectionValue")
+            .field("buffer", &"<redacted>")
+            .field("token", &self.token)
+            .field("session_id", &self.session_id)
+            .finish()
+    }
 }
 
 /// Received from the pty when the terminal screen should be cleared (e.g. via

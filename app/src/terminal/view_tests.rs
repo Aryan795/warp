@@ -10093,7 +10093,7 @@ fn raw_keypress_ctrl_r_handoff_triggers_and_forwards_keyseq() {
             });
         });
 
-        terminal.update(&mut app, |view, ctx| {
+        let expected_payload = terminal.update(&mut app, |view, ctx| {
             setup_raw_keypress_ctrl_r_session(view, ctx, session_id, true);
 
             let triggered = view.maybe_trigger_raw_keypress_ctrl_r_handoff(ctx);
@@ -10109,20 +10109,22 @@ fn raw_keypress_ctrl_r_handoff_triggers_and_forwards_keyseq() {
                     .is_raw_keypress_forward_active(),
                 "the active block must be marked as forwarding once the handoff starts"
             );
-            assert!(
-                view.pending_raw_keypress_ctrl_r_handoff.is_some(),
-                "a pending handoff must be tracked"
-            );
+            let id = view
+                .pending_raw_keypress_ctrl_r_handoff
+                .as_ref()
+                .expect("a pending handoff must be tracked")
+                .id;
             assert!(
                 view.pending_raw_keypress_ctrl_r_timeout.is_some(),
                 "a bail-out timer must be armed"
             );
+            raw_keypress_ctrl_r_handoff_payload(id)
         });
 
         assert_eq!(
             *pty_writes.borrow(),
-            vec![RAW_KEYPRESS_CTRL_R_HANDOFF_KEYSEQ.to_vec()],
-            "the private key sequence must be written to the pty exactly once"
+            vec![expected_payload],
+            "the bracketed-paste-wrapped token and private key sequence must be written to the pty exactly once"
         );
     })
 }
@@ -10233,10 +10235,18 @@ fn raw_keypress_ctrl_r_handoff_selection_ignored_for_wrong_session() {
         terminal.update(&mut app, |view, ctx| {
             setup_raw_keypress_ctrl_r_session(view, ctx, session_id, true);
             assert!(view.maybe_trigger_raw_keypress_ctrl_r_handoff(ctx));
+            let token = view
+                .pending_raw_keypress_ctrl_r_handoff
+                .as_ref()
+                .expect("handoff should be pending")
+                .id
+                .0
+                .to_string();
 
             // A selection tagged with a session that isn't the one this handoff started for
-            // must be treated as an unsolicited pty write, not applied.
-            view.apply_raw_keypress_ctrl_r_selection(other_session_id, "echo hi", ctx);
+            // must be treated as an unsolicited pty write, not applied, even though the token
+            // matches.
+            view.apply_raw_keypress_ctrl_r_selection(other_session_id, &token, "echo hi", ctx);
 
             assert!(
                 view.model
@@ -10260,6 +10270,51 @@ fn raw_keypress_ctrl_r_handoff_selection_ignored_for_wrong_session() {
 }
 
 #[test]
+fn raw_keypress_ctrl_r_handoff_selection_ignored_for_wrong_token() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let _flag = FeatureFlag::RawKeypressCtrlRHandoff.override_enabled(true);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let session_id = SessionId::from(0);
+
+        terminal.update(&mut app, |view, ctx| {
+            setup_raw_keypress_ctrl_r_session(view, ctx, session_id, true);
+            assert!(view.maybe_trigger_raw_keypress_ctrl_r_handoff(ctx));
+            let token = view
+                .pending_raw_keypress_ctrl_r_handoff
+                .as_ref()
+                .expect("handoff should be pending")
+                .id
+                .0
+                .to_string();
+            let wrong_token = format!("{token}0");
+
+            // A completion for the right session but a stale or forged token -- e.g. from a
+            // handoff that was superseded before it finished -- must not be applied.
+            view.apply_raw_keypress_ctrl_r_selection(session_id, &wrong_token, "echo hi", ctx);
+
+            assert!(
+                view.model
+                    .lock()
+                    .block_list()
+                    .active_block()
+                    .is_raw_keypress_forward_active(),
+                "a mismatched-token selection must not end the handoff"
+            );
+            assert!(
+                view.pending_raw_keypress_ctrl_r_handoff.is_some(),
+                "a mismatched-token selection must leave the handoff pending"
+            );
+            assert_eq!(
+                view.input.as_ref(ctx).editor().as_ref(ctx).buffer_text(ctx),
+                "",
+                "a mismatched-token selection must not be applied to the input buffer"
+            );
+        });
+    })
+}
+
+#[test]
 fn raw_keypress_ctrl_r_handoff_selection_applies_and_ends() {
     App::test((), |mut app| async move {
         initialize_app_for_terminal_view(&mut app);
@@ -10270,8 +10325,15 @@ fn raw_keypress_ctrl_r_handoff_selection_applies_and_ends() {
         terminal.update(&mut app, |view, ctx| {
             setup_raw_keypress_ctrl_r_session(view, ctx, session_id, true);
             assert!(view.maybe_trigger_raw_keypress_ctrl_r_handoff(ctx));
+            let token = view
+                .pending_raw_keypress_ctrl_r_handoff
+                .as_ref()
+                .expect("handoff should be pending")
+                .id
+                .0
+                .to_string();
 
-            view.apply_raw_keypress_ctrl_r_selection(session_id, "echo selected", ctx);
+            view.apply_raw_keypress_ctrl_r_selection(session_id, &token, "echo selected", ctx);
 
             assert!(
                 !view

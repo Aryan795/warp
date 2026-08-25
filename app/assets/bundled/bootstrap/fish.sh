@@ -557,25 +557,47 @@ function __warp_raw_keypress_ctrl_r_keyseq_free # mode
   not bind -M $argv[1] \x1b\x5d >/dev/null 2>&1
 end
 
-function __warp_report_raw_keypress_ctrl_r_selection
-  set -l escaped_selection (warp_escape_json (commandline))
-  warp_send_json_message "{ \"hook\": \"ExternalCtrlRRawKeypressSelection\", \"value\": { \"buffer\": \"$escaped_selection\", \"session_id\": $WARP_SESSION_ID } }"
+# Reports the outcome of a raw-keypress ctrl-r handoff back to Warp. `$argv[1]` is the decimal
+# handoff id Warp pasted into the line buffer to start this handoff (see
+# `raw_keypress_ctrl_r_handoff_payload` in view.rs); Warp echoes it back to the pending handoff
+# it started, rejecting the report if they don't match. `$argv[2]` is the command text the user
+# selected, or empty if they cancelled.
+function __warp_report_raw_keypress_ctrl_r_selection # token selection
+  set -l escaped_token (warp_escape_json "$argv[1]")
+  set -l escaped_selection (warp_escape_json "$argv[2]")
+  warp_send_json_message "{ \"hook\": \"ExternalCtrlRRawKeypressSelection\", \"value\": { \"buffer\": \"$escaped_selection\", \"token\": \"$escaped_token\", \"session_id\": $WARP_SESSION_ID } }"
+end
+
+# Fallback binding target for a mode with no real ctrl-r widget to re-invoke: the pasted token
+# is sitting alone in the command line (nothing else runs), so report it immediately with an
+# empty selection.
+function __warp_report_raw_keypress_ctrl_r_selection_immediate
+  set -l token (commandline)
   # Warp owns the command from here; the shell's own buffer must not keep a copy, or the
   # next Enter would submit it twice.
   commandline ''
   commandline -f repaint
+  __warp_report_raw_keypress_ctrl_r_selection "$token" ''
 end
 
 if __warp_raw_keypress_ctrl_r_keyseq_free default
   set -g __warp_raw_keypress_orig_ctrl_r_default (__warp_raw_keypress_ctrl_r_widget default)
   if test -n "$__warp_raw_keypress_orig_ctrl_r_default"
+    # The token is captured and the command line cleared *before* the real widget runs: it
+    # holds the pasted token at that point, and after the widget runs it holds the selection
+    # instead.
     function __warp_run_raw_keypress_ctrl_r_widget_default
+      set -l token (commandline)
+      commandline ''
       eval $__warp_raw_keypress_orig_ctrl_r_default
-      __warp_report_raw_keypress_ctrl_r_selection
+      set -l selection (commandline)
+      commandline ''
+      commandline -f repaint
+      __warp_report_raw_keypress_ctrl_r_selection "$token" "$selection"
     end
     bind -M default \x1b\x5d __warp_run_raw_keypress_ctrl_r_widget_default
   else
-    bind -M default \x1b\x5d __warp_report_raw_keypress_ctrl_r_selection
+    bind -M default \x1b\x5d __warp_report_raw_keypress_ctrl_r_selection_immediate
   end
   set -a shell_plugins external_ctrl_r_raw_keypress
 end
@@ -585,12 +607,17 @@ if bind -M insert > /dev/null 2>&1; and __warp_raw_keypress_ctrl_r_keyseq_free i
   set -g __warp_raw_keypress_orig_ctrl_r_insert (__warp_raw_keypress_ctrl_r_widget insert)
   if test -n "$__warp_raw_keypress_orig_ctrl_r_insert"
     function __warp_run_raw_keypress_ctrl_r_widget_insert
+      set -l token (commandline)
+      commandline ''
       eval $__warp_raw_keypress_orig_ctrl_r_insert
-      __warp_report_raw_keypress_ctrl_r_selection
+      set -l selection (commandline)
+      commandline ''
+      commandline -f repaint
+      __warp_report_raw_keypress_ctrl_r_selection "$token" "$selection"
     end
     bind -M insert \x1b\x5d __warp_run_raw_keypress_ctrl_r_widget_insert
   else
-    bind -M insert \x1b\x5d __warp_report_raw_keypress_ctrl_r_selection
+    bind -M insert \x1b\x5d __warp_report_raw_keypress_ctrl_r_selection_immediate
   end
   set -a shell_plugins external_ctrl_r_raw_keypress
 end

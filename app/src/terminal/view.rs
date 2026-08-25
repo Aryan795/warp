@@ -727,6 +727,23 @@ const RAW_KEYPRESS_CTRL_R_HANDOFF_PLUGIN_TAG: &str = "external_ctrl_r_raw_keypre
 /// per-shell bind syntax that installs the wrapper on this sequence in each keymap.
 const RAW_KEYPRESS_CTRL_R_HANDOFF_KEYSEQ: &[u8] = &[escape_sequences::C0::ESC, b']'];
 
+/// Builds the bytes [`TerminalView::maybe_trigger_raw_keypress_ctrl_r_handoff`] writes to the pty
+/// to trigger a handoff: `id`, formatted as decimal digits, wrapped in bracketed-paste markers so
+/// the shell's line editor inserts it into the (otherwise-idle) line buffer as literal text rather
+/// than interpreting the digits as an editing command (e.g. bash/zsh's own Alt-digit numeric
+/// argument, or vi command mode's repeat count) -- followed by the private key sequence itself.
+/// The wrapper widget captures this pasted text as the handoff's token before invoking the user's
+/// real ctrl-r binding, and echoes it back in the `ExternalCtrlRRawKeypressSelection` hook (see
+/// [`TerminalView::apply_raw_keypress_ctrl_r_selection`]).
+fn raw_keypress_ctrl_r_handoff_payload(id: RawKeypressCtrlRHandoffId) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(BRACKETED_PASTE_PREFIX.as_bytes());
+    bytes.extend_from_slice(id.0.to_string().as_bytes());
+    bytes.extend_from_slice(BRACKETED_PASTE_SUFFIX.as_bytes());
+    bytes.extend_from_slice(RAW_KEYPRESS_CTRL_R_HANDOFF_KEYSEQ);
+    bytes
+}
+
 /// How long [`Block::is_raw_keypress_forward_active`] can stay set with no user activity and no
 /// completion hook before it is force-cleared. Restarted on every keystroke forwarded to the pty
 /// (see `TerminalView::note_raw_keypress_ctrl_r_handoff_activity`), so a user actively browsing
@@ -741,8 +758,12 @@ const RAW_KEYPRESS_CTRL_R_HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
 /// After the timeout bail-out fires, how long a new raw-keypress ctrl-r handoff is refused on
 /// this session. The timeout sends a best-effort Ctrl-C to the pty but cannot confirm the old
 /// wrapper widget actually stopped consuming input; without this cooldown, a user immediately
-/// pressing ctrl-r again could have the new handoff's Alt-] consumed by the still-live old
-/// widget, and a late completion from it misapplied as the new handoff's selection.
+/// pressing ctrl-r again could have the new handoff's pasted token and Alt-] consumed by the
+/// still-live old widget (as ordinary input to whatever it's doing), wasting the new attempt on
+/// another full timeout instead of ever reaching a wrapper that can answer it. A completion from
+/// the old widget itself can no longer be misapplied to the new handoff -- [`RawKeypressCtrlRHandoffId`]
+/// is verified against the token the completion echoes back -- so this cooldown only protects the
+/// new attempt's chance to actually run, not the correctness of what gets applied.
 const RAW_KEYPRESS_CTRL_R_HANDOFF_COOLDOWN: Duration = Duration::from_millis(750);
 
 pub const LONG_RUNNING_AGENT_REQUESTED_COMMAND_CONTEXT_KEY: &str = "LongRunningRequestedCommand";
@@ -9278,12 +9299,13 @@ impl TerminalView {
     /// command search. Prototype: alternative to the foreground-command handoff mechanism in
     /// PR #15513 (`maybe_trigger_external_ctrl_r_history_search` there).
     ///
-    /// Unlike a foreground-command handoff, no shell command is submitted: Warp writes
-    /// [`RAW_KEYPRESS_CTRL_R_HANDOFF_KEYSEQ`] directly to the pty and marks the active block as
+    /// Unlike a foreground-command handoff, no shell command is submitted: Warp pastes this
+    /// handoff's id as a token (see [`raw_keypress_ctrl_r_handoff_payload`]) followed by
+    /// [`RAW_KEYPRESS_CTRL_R_HANDOFF_KEYSEQ`] directly to the pty, and marks the active block as
     /// forwarding (see [`Block::set_raw_keypress_forward_active`]), which hides the input editor
     /// and routes subsequent keystrokes straight to the pty exactly as for a real long-running
-    /// command. The wrapper widget runs the user's own `^R` binding in a genuine key-binding
-    /// context, reads the resulting selection, and reports it back over the
+    /// command. The wrapper widget captures the token, runs the user's own `^R` binding in a
+    /// genuine key-binding context, reads the resulting selection, and reports both back over the
     /// `ExternalCtrlRRawKeypressSelection` DCS hook (see
     /// [`Self::apply_raw_keypress_ctrl_r_selection`]), which ends the handoff.
     ///
@@ -9341,7 +9363,7 @@ impl TerminalView {
         self.pending_raw_keypress_ctrl_r_timeout =
             Some(self.spawn_raw_keypress_ctrl_r_handoff_timeout(id, ctx));
 
-        self.write_user_bytes_to_pty(RAW_KEYPRESS_CTRL_R_HANDOFF_KEYSEQ, ctx);
+        self.write_user_bytes_to_pty(raw_keypress_ctrl_r_handoff_payload(id), ctx);
         true
     }
 
@@ -9382,23 +9404,24 @@ impl TerminalView {
     }
 
     /// Called when the shell reports the command selected in the raw-keypress ctrl-r handoff
-    /// wrapper widget. Applies the selection only if `session_id` matches an in-flight handoff
-    /// this session started (see [`PendingRawKeypressCtrlRHandoff`]); otherwise ignores it as an
-    /// unsolicited write to the pty. Ends the handoff either way that it matches, restoring normal
-    /// input editor behavior.
-    ///
-    /// The shell has no way to echo back a [`RawKeypressCtrlRHandoffId`], so this necessarily
-    /// trusts that whatever handoff is currently pending for `session_id` is the one this
-    /// completion answers. That assumption can only be wrong if an earlier handoff's widget is
-    /// still alive on the pty when a newer one starts, which [`RAW_KEYPRESS_CTRL_R_HANDOFF_COOLDOWN`]
-    /// guards against for the timeout path.
+    /// wrapper widget. Applies the selection only if `session_id` and `token` both match an
+    /// in-flight handoff this session started (see [`PendingRawKeypressCtrlRHandoff`]); otherwise
+    /// ignores it as unsolicited or stale. Ends the handoff on a match, restoring normal input
+    /// editor behavior.
     fn apply_raw_keypress_ctrl_r_selection(
         &mut self,
         session_id: SessionId,
+        token: &str,
         selection: &str,
         ctx: &mut ViewContext<Self>,
     ) {
-        if !self.end_raw_keypress_ctrl_r_handoff(session_id, ctx) {
+        let matches_pending = self
+            .pending_raw_keypress_ctrl_r_handoff
+            .as_ref()
+            .is_some_and(|handoff| {
+                handoff.session_id == session_id && handoff.id.0.to_string() == token
+            });
+        if !matches_pending || !self.end_raw_keypress_ctrl_r_handoff(session_id, ctx) {
             return;
         }
 
@@ -13143,7 +13166,12 @@ impl TerminalView {
             }
             ModelEvent::ExternalCtrlRRawKeypressSelection(data) => {
                 if let Some(session_id) = data.session_id.map(SessionId::from) {
-                    self.apply_raw_keypress_ctrl_r_selection(session_id, &data.buffer, ctx);
+                    self.apply_raw_keypress_ctrl_r_selection(
+                        session_id,
+                        &data.token,
+                        &data.buffer,
+                        ctx,
+                    );
                 }
             }
             ModelEvent::SelectedTextChanged => {

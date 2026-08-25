@@ -1363,28 +1363,65 @@ esac
     [[ -z "$result" || "$result" == *undefined-key* ]]
   }
 
-  __warp_report_raw_keypress_ctrl_r_selection() {
-    local escaped_selection="$(warp_escape_json "$BUFFER")"
-    warp_send_json_message "{ \"hook\": \"ExternalCtrlRRawKeypressSelection\", \"value\": { \"buffer\": \"$escaped_selection\", \"session_id\": $WARP_SESSION_ID } }"
+  # Reports the outcome of a raw-keypress ctrl-r handoff back to Warp. `token` is the decimal
+  # handoff id Warp pasted into the line buffer to start this handoff (see
+  # `raw_keypress_ctrl_r_handoff_payload` in view.rs); Warp echoes it back to the pending
+  # handoff it started, rejecting the report if they don't match. `selection` is the command
+  # text the user selected, or empty if they cancelled.
+  __warp_report_raw_keypress_ctrl_r_selection() { # token, selection
+    local escaped_token="$(warp_escape_json "$1")"
+    local escaped_selection="$(warp_escape_json "$2")"
+    warp_send_json_message "{ \"hook\": \"ExternalCtrlRRawKeypressSelection\", \"value\": { \"buffer\": \"$escaped_selection\", \"token\": \"$escaped_token\", \"session_id\": $WARP_SESSION_ID } }"
+  }
+
+  # Fallback binding target for a keymap with no real ctrl-r widget to re-invoke: the pasted
+  # token is sitting alone in BUFFER (nothing else runs), so report it immediately with an
+  # empty selection.
+  __warp_report_raw_keypress_ctrl_r_selection_immediate() {
+    local token="$BUFFER"
     # Warp owns the command from here; the shell's own buffer must not keep a copy, or the
     # next Enter would submit it twice.
     BUFFER=''
     CURSOR=0
     zle reset-prompt
+    __warp_report_raw_keypress_ctrl_r_selection "$token" ''
   }
-  zle -N __warp_report_raw_keypress_ctrl_r_selection
+  zle -N __warp_report_raw_keypress_ctrl_r_selection_immediate
 
+  # The token is captured and the buffer cleared *before* the real widget runs: BUFFER holds
+  # the pasted token at that point, and after the widget runs it holds the selection instead.
   function __warp_run_raw_keypress_ctrl_r_widget_emacs () {
+    local token="$BUFFER"
+    BUFFER=''
+    CURSOR=0
     zle "$__warp_raw_keypress_orig_ctrl_r_widget_emacs"
-    __warp_report_raw_keypress_ctrl_r_selection
+    local selection="$BUFFER"
+    BUFFER=''
+    CURSOR=0
+    zle reset-prompt
+    __warp_report_raw_keypress_ctrl_r_selection "$token" "$selection"
   }
   function __warp_run_raw_keypress_ctrl_r_widget_viins () {
+    local token="$BUFFER"
+    BUFFER=''
+    CURSOR=0
     zle "$__warp_raw_keypress_orig_ctrl_r_widget_viins"
-    __warp_report_raw_keypress_ctrl_r_selection
+    local selection="$BUFFER"
+    BUFFER=''
+    CURSOR=0
+    zle reset-prompt
+    __warp_report_raw_keypress_ctrl_r_selection "$token" "$selection"
   }
   function __warp_run_raw_keypress_ctrl_r_widget_vicmd () {
+    local token="$BUFFER"
+    BUFFER=''
+    CURSOR=0
     zle "$__warp_raw_keypress_orig_ctrl_r_widget_vicmd"
-    __warp_report_raw_keypress_ctrl_r_selection
+    local selection="$BUFFER"
+    BUFFER=''
+    CURSOR=0
+    zle reset-prompt
+    __warp_report_raw_keypress_ctrl_r_selection "$token" "$selection"
   }
 
   if __warp_raw_keypress_ctrl_r_keyseq_free emacs; then
@@ -1392,7 +1429,7 @@ esac
       zle -N __warp_run_raw_keypress_ctrl_r_widget_emacs
       bindkey -M emacs '\e]' __warp_run_raw_keypress_ctrl_r_widget_emacs
     else
-      bindkey -M emacs '\e]' __warp_report_raw_keypress_ctrl_r_selection
+      bindkey -M emacs '\e]' __warp_report_raw_keypress_ctrl_r_selection_immediate
     fi
     shell_plugins+=(external_ctrl_r_raw_keypress)
   fi
@@ -1401,7 +1438,7 @@ esac
       zle -N __warp_run_raw_keypress_ctrl_r_widget_viins
       bindkey -M viins '\e]' __warp_run_raw_keypress_ctrl_r_widget_viins
     else
-      bindkey -M viins '\e]' __warp_report_raw_keypress_ctrl_r_selection
+      bindkey -M viins '\e]' __warp_report_raw_keypress_ctrl_r_selection_immediate
     fi
     shell_plugins+=(external_ctrl_r_raw_keypress)
   fi
@@ -1410,7 +1447,7 @@ esac
       zle -N __warp_run_raw_keypress_ctrl_r_widget_vicmd
       bindkey -M vicmd '\e]' __warp_run_raw_keypress_ctrl_r_widget_vicmd
     else
-      bindkey -M vicmd '\e]' __warp_report_raw_keypress_ctrl_r_selection
+      bindkey -M vicmd '\e]' __warp_report_raw_keypress_ctrl_r_selection_immediate
     fi
     shell_plugins+=(external_ctrl_r_raw_keypress)
   fi
