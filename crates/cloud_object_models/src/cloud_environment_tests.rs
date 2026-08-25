@@ -132,7 +132,7 @@ fn deserialize_environment_with_unrecognized_forge_still_succeeds() {
     // deserialization of the whole environment.
     let json = serde_json::json!({
         "name": "future-forge-env",
-        "code_forge": "BITBUCKET",
+        "code_forge": "SOURCEHUT",
         "github_repos": [],
         "setup_commands": ["echo hello"]
     });
@@ -140,6 +140,20 @@ fn deserialize_environment_with_unrecognized_forge_still_succeeds() {
     let env: AmbientAgentEnvironment = serde_json::from_value(json).unwrap();
 
     assert_eq!(env.effective_code_forge(), CodeForge::Unknown);
+}
+
+#[test]
+fn bitbucket_forge_round_trips_serde_host_and_display() {
+    // BITBUCKET is a recognized value on this client build: it must
+    // deserialize to the concrete variant, not the Unknown catch-all.
+    let forge: CodeForge = serde_json::from_value(serde_json::json!("BITBUCKET")).unwrap();
+    assert_eq!(forge, CodeForge::Bitbucket);
+    assert_eq!(
+        serde_json::to_value(CodeForge::Bitbucket).unwrap(),
+        serde_json::json!("BITBUCKET")
+    );
+    assert_eq!(CodeForge::Bitbucket.host(), "bitbucket.org");
+    assert_eq!(CodeForge::Bitbucket.to_string(), "Bitbucket");
 }
 
 #[test]
@@ -182,6 +196,37 @@ fn deserialize_gitlab_environment_uses_authoritative_source_repos() {
 }
 
 #[test]
+fn deserialize_bitbucket_environment_uses_authoritative_source_repos() {
+    let json = serde_json::json!({
+        "name": "bitbucket-env",
+        "code_forge": "BITBUCKET",
+        "github_repos": [{"owner": "legacy-mirror", "repo": "ignored"}],
+        "source_repos": [{
+            "owner": "warp-workspace",
+            "repo": "api"
+        }],
+        "docker_image": "ubuntu:latest"
+    });
+
+    let env: AmbientAgentEnvironment = serde_json::from_value(json).unwrap();
+
+    assert_eq!(env.effective_code_forge(), CodeForge::Bitbucket);
+    assert_eq!(env.source_repos.as_ref().unwrap()[0].code_forge, None);
+    assert_eq!(
+        env.effective_repos(),
+        vec![SourceRepo::new(
+            CodeForge::Bitbucket,
+            "warp-workspace".into(),
+            "api".into()
+        )]
+    );
+    assert_eq!(
+        env.effective_repos()[0].https_clone_url(),
+        "https://bitbucket.org/warp-workspace/api.git"
+    );
+}
+
+#[test]
 fn deserialize_mixed_forge_environment_with_multiple_container() {
     // A mixed environment stores code_forge MULTIPLE with every repository
     // declaring its own concrete forge; MULTIPLE itself never fills one.
@@ -191,7 +236,8 @@ fn deserialize_mixed_forge_environment_with_multiple_container() {
         "github_repos": [{"owner": "warpdotdev", "repo": "warp"}],
         "source_repos": [
             {"code_forge": "GITHUB", "owner": "warpdotdev", "repo": "warp"},
-            {"code_forge": "GITLAB", "owner": "platform/backend", "repo": "api"}
+            {"code_forge": "GITLAB", "owner": "platform/backend", "repo": "api"},
+            {"code_forge": "BITBUCKET", "owner": "warp-workspace", "repo": "tooling"}
         ],
         "docker_image": "ubuntu:latest"
     });
@@ -204,6 +250,7 @@ fn deserialize_mixed_forge_environment_with_multiple_container() {
     let repos = env.effective_repos();
     assert_eq!(repos[0].code_forge, Some(CodeForge::GitHub));
     assert_eq!(repos[1].code_forge, Some(CodeForge::GitLab));
+    assert_eq!(repos[2].code_forge, Some(CodeForge::Bitbucket));
     assert_eq!(
         repos[0].https_clone_url(),
         "https://github.com/warpdotdev/warp.git"
@@ -211,6 +258,10 @@ fn deserialize_mixed_forge_environment_with_multiple_container() {
     assert_eq!(
         repos[1].https_clone_url(),
         "https://gitlab.com/platform/backend/api.git"
+    );
+    assert_eq!(
+        repos[2].https_clone_url(),
+        "https://bitbucket.org/warp-workspace/tooling.git"
     );
 }
 

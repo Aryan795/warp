@@ -347,6 +347,8 @@ fn agent_run_parses_repeated_repository_head_override_json() {
         r#"{"code_forge":"GITHUB","repo_owner":"warpdotdev","repo_name":"warp","head":{"type":"COMMIT_SHA","value":"0123456789abcdef0123456789abcdef01234567"}}"#,
         "--repository-head-override-json",
         r#"{"code_forge":"GITLAB","repo_owner":"platform/backend","repo_name":"api","head":{"type":"BRANCH","value":"develop"}}"#,
+        "--repository-head-override-json",
+        r#"{"code_forge":"BITBUCKET","repo_owner":"warp-workspace","repo_name":"tooling","head":{"type":"BRANCH","value":"main"}}"#,
     ])
     .unwrap();
 
@@ -357,7 +359,7 @@ fn agent_run_parses_repeated_repository_head_override_json() {
         panic!("Expected `warp agent run` command");
     };
 
-    assert_eq!(run_args.repository_head_overrides.len(), 2);
+    assert_eq!(run_args.repository_head_overrides.len(), 3);
     assert_eq!(
         run_args.repository_head_overrides[0].code_forge,
         RepositoryForge::GitHub
@@ -377,6 +379,18 @@ fn agent_run_parses_repeated_repository_head_override_json() {
     assert_eq!(
         run_args.repository_head_overrides[1].head,
         RepositoryHeadRef::Branch("develop".to_string())
+    );
+    assert_eq!(
+        run_args.repository_head_overrides[2].code_forge,
+        RepositoryForge::Bitbucket
+    );
+    assert_eq!(
+        run_args.repository_head_overrides[2].repo_owner,
+        "warp-workspace"
+    );
+    assert_eq!(
+        run_args.repository_head_overrides[2].head,
+        RepositoryHeadRef::Branch("main".to_string())
     );
 }
 

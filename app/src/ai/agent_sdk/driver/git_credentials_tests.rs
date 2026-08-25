@@ -100,16 +100,48 @@ fn gitlab_credential() -> GitCredential {
     }
 }
 
+fn bitbucket_credential() -> GitCredential {
+    GitCredential {
+        token: "bitbucket-token".to_string(),
+        username: Some("x-token-auth".to_string()),
+        email: None,
+        host: "bitbucket.org".to_string(),
+    }
+}
+
 #[test]
 fn merged_credentials_include_each_provider_host() {
-    let content =
-        merge_git_credentials_file_content("", &[github_credential(), gitlab_credential()]);
+    let content = merge_git_credentials_file_content(
+        "",
+        &[
+            github_credential(),
+            gitlab_credential(),
+            bitbucket_credential(),
+        ],
+    );
 
     assert_eq!(
         content,
         "https://x-access-token:github-token@github.com\n\
-         https://oauth2:gitlab-token@gitlab.com\n"
+         https://oauth2:gitlab-token@gitlab.com\n\
+         https://x-token-auth:bitbucket-token@bitbucket.org\n"
     );
+}
+
+#[test]
+fn cli_config_writes_exclude_bitbucket_credentials() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+
+    // A bitbucket.org credential authenticates git itself through
+    // ~/.git-credentials; it must not leak into the GitHub or GitLab CLI
+    // configs, and on its own it must not create either config.
+    write_gh_hosts_yml(&[bitbucket_credential()], temp_dir.path())?;
+    write_glab_config(&[bitbucket_credential()], temp_dir.path())?;
+
+    assert!(!temp_dir.path().join(".config").join("gh").exists());
+    assert!(!temp_dir.path().join(".config").join("glab-cli").exists());
+
+    Ok(())
 }
 
 #[test]
@@ -165,10 +197,7 @@ fn credential_diagnostics_reports_presence_without_values() {
 
 #[test]
 fn credential_diagnostics_names_the_stale_host() {
-    let diagnostics = credential_diagnostics(
-        &[github_credential()],
-        &["gitlab.com".to_string()],
-    );
+    let diagnostics = credential_diagnostics(&[github_credential()], &["gitlab.com".to_string()]);
 
     assert!(diagnostics.contains("github.com(refreshed"));
     assert!(diagnostics.contains("gitlab.com(stale"));
@@ -187,11 +216,20 @@ fn repository_identity_selects_the_matching_host() {
             name: "warp-factory-1".to_string(),
             email: "1-warp-factory-1@users.noreply.gitlab.com".to_string(),
         },
+        HostIdentity {
+            host: "bitbucket.org".to_string(),
+            name: "warp-workspace-bot".to_string(),
+            email: "bot@warp-workspace.example.com".to_string(),
+        },
     ];
 
     let matched = select_host_identity(&identities, "gitlab.com").expect("an identity");
     assert_eq!(matched.name, "warp-factory-1");
     assert_eq!(matched.email, "1-warp-factory-1@users.noreply.gitlab.com");
+
+    let matched = select_host_identity(&identities, "bitbucket.org").expect("an identity");
+    assert_eq!(matched.name, "warp-workspace-bot");
+    assert_eq!(matched.email, "bot@warp-workspace.example.com");
 }
 
 #[test]

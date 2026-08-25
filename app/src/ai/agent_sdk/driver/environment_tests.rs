@@ -10,7 +10,7 @@ use warp_core::command::ExitCode;
 use super::{
     PrepareEnvironmentError, RepositoryCloneRequest, build_parallel_clone_command,
     build_remove_repository_origins_command, checkout_command_for, checkout_result,
-    merge_repos_deduped, repository_clone_requests, single_repo_name,
+    merge_repos_deduped, repository_clone_requests, repository_forge_for_repo, single_repo_name,
     validate_repository_head_overrides,
 };
 use crate::ai::cloud_environments::{AmbientAgentEnvironment, SourceRepo};
@@ -72,6 +72,25 @@ fn single_repo_name_returns_repo_when_exactly_one_repo() {
 
 fn repo(forge: CodeForge, owner: &str, name: &str) -> SourceRepo {
     SourceRepo::new(forge, owner.to_string(), name.to_string())
+}
+
+#[test]
+fn repository_forge_mapping_covers_every_code_forge() {
+    let forge_for = |forge| repository_forge_for_repo(&repo(forge, "owner", "name"));
+    assert_eq!(forge_for(CodeForge::GitHub), Some(RepositoryForge::GitHub));
+    assert_eq!(forge_for(CodeForge::GitLab), Some(RepositoryForge::GitLab));
+    assert_eq!(
+        forge_for(CodeForge::Bitbucket),
+        Some(RepositoryForge::Bitbucket)
+    );
+    // MULTIPLE is container-only; a repository carrying it falls back to the
+    // legacy GitHub default rather than failing the clone.
+    assert_eq!(
+        forge_for(CodeForge::Multiple),
+        Some(RepositoryForge::GitHub)
+    );
+    assert_eq!(forge_for(CodeForge::None), None);
+    assert_eq!(forge_for(CodeForge::Unknown), None);
 }
 
 #[test]
@@ -169,6 +188,11 @@ fn parallel_clone_command_runs_repos_in_background_and_waits() {
             "platform/backend".to_string(),
             "api".to_string(),
         ),
+        SourceRepo::new(
+            CodeForge::Bitbucket,
+            "warp-workspace".to_string(),
+            "tooling".to_string(),
+        ),
     ];
 
     let command = build_parallel_clone_command(
@@ -184,21 +208,27 @@ fn parallel_clone_command_runs_repos_in_background_and_waits() {
     assert!(command.contains("https://github.com/warpdotdev/warp.git"));
     assert!(command.contains("platform/backend/api"));
     assert!(command.contains("https://gitlab.com/platform/backend/api.git"));
-    assert_eq!(command.matches("clone_repo").count(), 3);
-    assert_eq!(command.matches("2>&1 &").count(), 2);
+    assert!(command.contains("warp-workspace/tooling"));
+    assert!(command.contains("https://bitbucket.org/warp-workspace/tooling.git"));
+    assert_eq!(command.matches("clone_repo").count(), 4);
+    assert_eq!(command.matches("2>&1 &").count(), 3);
     assert!(command.contains("mktemp -d"));
     assert!(command.contains("warp-clone-logs"));
     assert!(command.contains("trap cleanup_clone_logs EXIT"));
     assert!(command.contains("repo-0.log"));
     assert!(command.contains("repo-1.log"));
+    assert!(command.contains("repo-2.log"));
     assert!(command.contains(">\"$log_file_0\" 2>&1 &"));
     assert!(command.contains(">\"$log_file_1\" 2>&1 &"));
+    assert!(command.contains(">\"$log_file_2\" 2>&1 &"));
     assert!(command.contains("pids=\"$pids $!\""));
     assert!(command.contains("wait \"$pid\""));
     assert!(command.contains("===== warpdotdev/warp ====="));
     assert!(command.contains("cat \"$log_file_0\""));
     assert!(command.contains("===== platform/backend/api ====="));
     assert!(command.contains("cat \"$log_file_1\""));
+    assert!(command.contains("===== warp-workspace/tooling ====="));
+    assert!(command.contains("cat \"$log_file_2\""));
     assert!(command.contains("exit \"$failed\""));
 }
 
@@ -355,6 +385,27 @@ fn head_overrides_replace_checkout_ref_only_for_matching_repos() {
     assert_eq!(
         prepared[1].checkout,
         Some(RepositoryHeadRef::Branch("old-pin".to_string()))
+    );
+}
+
+#[test]
+fn head_overrides_match_bitbucket_repositories() {
+    let repos = vec![repo(CodeForge::Bitbucket, "warp-workspace", "api")];
+    let overrides = vec![commit_head_override(
+        RepositoryForge::Bitbucket,
+        "warp-workspace",
+        "api",
+        "0123456789abcdef0123456789abcdef01234567",
+    )];
+
+    validate_repository_head_overrides(&repos, &overrides)
+        .expect("a bitbucket override must match its bitbucket repository");
+    let prepared = repository_clone_requests(&repos, &overrides).unwrap();
+    assert_eq!(
+        prepared[0].checkout,
+        Some(RepositoryHeadRef::CommitSha(
+            "0123456789abcdef0123456789abcdef01234567".to_string(),
+        ))
     );
 }
 

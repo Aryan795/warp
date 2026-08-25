@@ -102,8 +102,8 @@ fn merge_git_credentials_file_content(existing: &str, credentials: &[GitCredenti
         if trimmed.is_empty() {
             continue;
         }
-        let superseded = host_of_credentials_line(trimmed)
-            .is_some_and(|host| refreshed_hosts.contains(&host));
+        let superseded =
+            host_of_credentials_line(trimmed).is_some_and(|host| refreshed_hosts.contains(&host));
         if !superseded {
             lines.push(trimmed.to_string());
         }
@@ -248,7 +248,10 @@ fn write_glab_config(credentials: &[GitCredential], home: &std::path::Path) -> R
 /// `failed_hosts` are named alongside the fresh ones so a partial cycle is
 /// legible in the log: the surprising state is not "this host is missing" but
 /// "this host is running on a credential older than the others".
-pub(crate) fn credential_diagnostics(credentials: &[GitCredential], failed_hosts: &[String]) -> String {
+pub(crate) fn credential_diagnostics(
+    credentials: &[GitCredential],
+    failed_hosts: &[String],
+) -> String {
     let mut entries = credentials
         .iter()
         .map(|credential| {
@@ -423,7 +426,11 @@ fn record_host_identities(credentials: &[GitCredential]) {
         .iter()
         .map(|c| HostIdentity {
             host: c.host.clone(),
-            name: c.username.as_deref().unwrap_or(DEFAULT_GIT_NAME).to_string(),
+            name: c
+                .username
+                .as_deref()
+                .unwrap_or(DEFAULT_GIT_NAME)
+                .to_string(),
             email: c.email.as_deref().unwrap_or(DEFAULT_GIT_EMAIL).to_string(),
         })
         .collect::<Vec<_>>();
@@ -438,7 +445,10 @@ fn record_host_identities(credentials: &[GitCredential]) {
 fn identity_of(credential: Option<&GitCredential>) -> (String, String) {
     match credential {
         Some(c) => (
-            c.username.as_deref().unwrap_or(DEFAULT_GIT_NAME).to_string(),
+            c.username
+                .as_deref()
+                .unwrap_or(DEFAULT_GIT_NAME)
+                .to_string(),
             c.email.as_deref().unwrap_or(DEFAULT_GIT_EMAIL).to_string(),
         ),
         None => (DEFAULT_GIT_NAME.to_string(), DEFAULT_GIT_EMAIL.to_string()),

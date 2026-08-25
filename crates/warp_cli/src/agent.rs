@@ -48,6 +48,8 @@ pub enum RepositoryForge {
     GitHub,
     #[serde(rename = "GITLAB")]
     GitLab,
+    #[serde(rename = "BITBUCKET")]
+    Bitbucket,
 }
 /// Server-supplied repository HEAD used to prepare an agent run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

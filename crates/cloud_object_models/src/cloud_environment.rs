@@ -16,6 +16,8 @@ pub enum CodeForge {
     GitHub,
     #[serde(rename = "GITLAB")]
     GitLab,
+    #[serde(rename = "BITBUCKET")]
+    Bitbucket,
     /// Explicit "no code forge" container value: a repo-less environment
     /// that clones nothing and relies entirely on `setup_commands`.
     #[serde(rename = "NONE")]
@@ -41,6 +43,7 @@ impl CodeForge {
         match self {
             CodeForge::GitHub => "github.com",
             CodeForge::GitLab => "gitlab.com",
+            CodeForge::Bitbucket => "bitbucket.org",
             CodeForge::None | CodeForge::Unknown => "",
             // MULTIPLE names no host; per-repository forges are concrete by
             // invariant, so this is a defensive legacy-GitHub fallback.
@@ -54,6 +57,7 @@ impl fmt::Display for CodeForge {
         match self {
             CodeForge::GitHub => write!(f, "GitHub"),
             CodeForge::GitLab => write!(f, "GitLab"),
+            CodeForge::Bitbucket => write!(f, "Bitbucket"),
             CodeForge::None => write!(f, "None"),
             CodeForge::Multiple => write!(f, "Multiple forges"),
             CodeForge::Unknown => write!(f, "Unknown"),
