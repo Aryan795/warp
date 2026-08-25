@@ -6140,9 +6140,9 @@ impl SettingsWidget for SharedSessionTimeoutWidget {
             "Shows a warning that the shared session is about to end."
         };
         let warning_off_explanation = if end_is_off {
-            "Sessions won't end due to inactivity, so there's nothing to warn about."
+            "Nothing to warn about since sessions won't end."
         } else {
-            "You won't be warned before the session ends due to inactivity."
+            "You won't be warned before the session ends."
         };
 
         Flex::column()
@@ -6155,7 +6155,7 @@ impl SettingsWidget for SharedSessionTimeoutWidget {
                 &view.shared_session_revoke_edit_access_editor,
                 view.valid_shared_session_revoke_edit_access,
                 ToggleState::from(!revoke_is_off),
-                "Edit access will never be revoked due to inactivity.",
+                "Edit access is never revoked due to inactivity.",
                 InactivityPeriodBeforeRevokingRoles::storage_key(),
                 InactivityPeriodBeforeRevokingRoles::sync_to_cloud(),
             ))
