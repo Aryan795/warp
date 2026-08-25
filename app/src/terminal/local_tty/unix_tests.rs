@@ -129,15 +129,17 @@ fn dev_container_exec_args_wraps_bash_in_script_with_quoted_init_path() {
         .iter()
         .position(|arg| arg == "script")
         .expect("args should invoke `script` inside the container");
-    assert_eq!(args[script_pos + 1], "-qfec");
+    assert_eq!(args[script_pos + 1], "-E");
+    assert_eq!(args[script_pos + 2], "never");
+    assert_eq!(args[script_pos + 3], "-qfec");
     assert_eq!(
-        args[script_pos + 2],
+        args[script_pos + 4],
         std::ffi::OsString::from(format!(
             "exec bash --rcfile '{}' --noprofile",
             starter.container_init_script_path()
         ))
     );
-    assert_eq!(args[script_pos + 3], "/dev/null");
+    assert_eq!(args[script_pos + 5], "/dev/null");
 }
 
 #[test]
@@ -241,6 +243,15 @@ fn dev_container_default_user_args_do_not_force_root_unlike_chown_args() {
     // `-u 0`.
     assert!(!default_user_args.iter().any(|arg| arg == "-u"));
     assert!(chown_args.iter().any(|arg| arg == "-u"));
+}
+
+#[test]
+fn dev_container_init_script_sets_window_size_before_the_shell_init_script() {
+    let starter = dev_container_starter(None);
+    let size = SizeInfo::new_without_font_metrics(40, 120);
+    let script = dev_container_init_script(&starter, &size);
+
+    assert!(script.starts_with("command -p stty rows 40 columns 120\n"));
 }
 
 #[test]

@@ -126,6 +126,15 @@ fn docker_sandbox_run_args(starter: &DockerSandboxShellStarter) -> Vec<std::ffi:
 /// Fixing this needs either restoring that raw-mode behavior without `-t`
 /// (manually clearing `ISIG` on the pty this `Command` inherits before exec)
 /// or an entirely different attach transport.
+///
+/// Passes `script -E never`: `script`'s default `--echo=auto` decides
+/// whether to echo on the pty it allocates by inspecting *its own* stdin,
+/// which here is the plain pipe `docker exec -i` gives it, not a real
+/// terminal — confirmed by hand (`stty -a` on the inner pty) that `auto`
+/// leaves echo on because it can't detect otherwise. `never` sets it
+/// explicitly instead of relying on that detection. This does not by
+/// itself fix the escape-sequence noise some blocks show (see the PR
+/// description); that noise persists even with echo forced off.
 fn dev_container_exec_args(starter: &DevContainerShellStarter) -> Vec<std::ffi::OsString> {
     let mut args = vec![
         std::ffi::OsString::from("exec"),
@@ -152,6 +161,8 @@ fn dev_container_exec_args(starter: &DevContainerShellStarter) -> Vec<std::ffi::
         std::ffi::OsString::from("COLORTERM=truecolor"),
         std::ffi::OsString::from(&starter.container_id),
         std::ffi::OsString::from("script"),
+        std::ffi::OsString::from("-E"),
+        std::ffi::OsString::from("never"),
         std::ffi::OsString::from("-qfec"),
         std::ffi::OsString::from(bash_cmd),
         std::ffi::OsString::from("/dev/null"),
@@ -1148,7 +1159,7 @@ fn spawn_dev_container(
     options: PtyOptions,
     dev_container_starter: DevContainerShellStarter,
 ) -> Result<PtySpawnInfo> {
-    if let Err(e) = prepare_dev_container(&dev_container_starter) {
+    if let Err(e) = prepare_dev_container(&dev_container_starter, &options.size) {
         log::error!("Dev Container setup failed: {e:#}");
         return Err(Error::msg(format!("Dev Container setup failed: {e}")));
     }
@@ -1185,14 +1196,17 @@ fn spawn_dev_container(
 /// invocation with the `docker cp`'d init script and host-side environment
 /// variables.
 ///
-/// TODO(prototype): Window size is never propagated after the initial exec.
-/// `docker exec -it` forwards live resizes from our outer pty automatically,
-/// the same as `docker run -it`/`docker attach` do, but [`dev_container_exec_args`]
-/// deliberately doesn't pass `-t` (see its doc comment), which forfeits that
-/// forwarding: resizing a Dev Container pane after it opens does not resize
-/// the remote `bash`. Fixing this needs an explicit resize channel (e.g.
-/// `docker exec`'s `TTY resize` API against the `script`-owned pty, keyed by
-/// exec ID) rather than relying on Docker's implicit `-it` behavior.
+/// TODO(prototype): The *initial* size is set once, by [`prepare_dev_container`]
+/// (see its doc comment), but nothing after that: `docker exec -it` forwards
+/// live resizes from our outer pty automatically, the same as `docker run
+/// -it`/`docker attach` do, but [`dev_container_exec_args`] deliberately
+/// doesn't pass `-t` (see its doc comment), which forfeits that forwarding.
+/// Confirmed by hand that `SIGWINCH` does not reach the inner shell when the
+/// pane is resized after opening: the container-side `bash` keeps using
+/// whatever size it started with. Fixing this needs an explicit resize
+/// channel (e.g. `docker exec`'s `TTY resize` API against the
+/// `script`-owned pty, keyed by exec ID) rather than relying on Docker's
+/// implicit `-it` behavior.
 ///
 /// Does not perform any PTY-level setup; hand the returned `Command` to
 /// [`spawn_command_in_pty`].
@@ -1318,11 +1332,14 @@ fn build_dev_container_command(
 /// with `script` and relaying over a plain pipe (`-i`, no `-t`) does not lose
 /// that handshake.
 ///
+/// This is also where the inner pty's window size gets set; see
+/// [`dev_container_init_script`] for why that's needed.
+///
 /// TODO(prototype): No cleanup on pane close. See the matching TODO on
 /// `prepare_docker_sandbox` — the staged host-side init script *and* its
 /// `docker cp`'d copy inside the container both accumulate across sessions.
 /// Tracking as a follow-up if this graduates past prototype.
-fn prepare_dev_container(starter: &DevContainerShellStarter) -> Result<()> {
+fn prepare_dev_container(starter: &DevContainerShellStarter, size: &SizeInfo) -> Result<()> {
     let host_init_script_path = starter.host_init_script_path();
     let init_dir = host_init_script_path
         .parent()
@@ -1340,8 +1357,7 @@ fn prepare_dev_container(starter: &DevContainerShellStarter) -> Result<()> {
     std::fs::set_permissions(init_dir, std::fs::Permissions::from_mode(0o700))
         .with_context(|| format!("chmod dev container init dir {}", init_dir.display()))?;
 
-    let init_script =
-        raw_init_shell_script_for_shell(ShellType::Bash, &ASSETS, starter.session_id());
+    let init_script = dev_container_init_script(starter, size);
     std::fs::write(&host_init_script_path, init_script)
         .context("write dev container init script")?;
     // `fs::write` creates the file at a mode governed by the process umask,
@@ -1400,6 +1416,23 @@ fn prepare_dev_container(starter: &DevContainerShellStarter) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Builds the Dev Container init script: an explicit `stty rows/columns`
+/// line (see [`prepare_dev_container`] for why that's needed) followed by
+/// the normal shell init script.
+///
+/// `stty rows/columns` runs before `raw_init_shell_script_for_shell`'s own
+/// content (which includes `stty raw`); window size and the raw-mode flags
+/// are independent termios settings, but setting size first means it's in
+/// place for the whole session from the very first line bash reads.
+fn dev_container_init_script(starter: &DevContainerShellStarter, size: &SizeInfo) -> String {
+    format!(
+        "command -p stty rows {} columns {}\n{}",
+        size.rows(),
+        size.columns(),
+        raw_init_shell_script_for_shell(ShellType::Bash, &ASSETS, starter.session_id())
+    )
 }
 
 /// Resolves the username of the account an unqualified `docker exec`
