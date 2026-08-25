@@ -4973,10 +4973,10 @@ fn test_stable_scrolling_during_grid_truncation() {
     })
 }
 
-/// Regression coverage for the terminal-scrollback smooth-scroll wiring (CSAT-6046 phase 2).
-/// Unlike the generic WarpUI scrollables (phase 1), these drive `TerminalView::scroll` and
-/// `TerminalView::advance_smooth_scroll` directly rather than exercising the full
-/// `BlockListElement` paint/dispatch cycle or `TerminalView::drive_smooth_scroll`'s timer loop.
+/// Regression coverage for the terminal-scrollback smooth-scroll wiring. Unlike the generic
+/// WarpUI scrollables, these drive `TerminalView::scroll` and `TerminalView::advance_smooth_scroll`
+/// directly rather than exercising the full `BlockListElement` paint/dispatch cycle or
+/// `TerminalView::drive_smooth_scroll`'s timer loop.
 #[test]
 fn test_smooth_scroll_wheel_animates_and_settles_to_exact_target() {
     App::test((), |mut app| async move {

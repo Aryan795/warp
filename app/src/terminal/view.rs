@@ -19112,8 +19112,6 @@ impl TerminalView {
             }
         }
 
-        // Auto-scroll during a drag-select near the viewport edge, not a wheel notch, so it
-        // always applies immediately rather than animating.
         self.scroll(delta, true /* precise */, ctx);
 
         // Clear the selected block index on mouse drag.

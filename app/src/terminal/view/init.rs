@@ -620,7 +620,6 @@ pub fn init(app: &mut AppContext) {
             "Scroll terminal output up one line",
             TerminalAction::Scroll {
                 delta: 1.0.into_lines(),
-                // Keyboard-triggered, not a wheel notch, so always applies immediately.
                 precise: true,
             },
         )

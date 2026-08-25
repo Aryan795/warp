@@ -34,33 +34,23 @@ use crate::terminal::model::index::Point as IndexPoint;
 /// Shared handle to a [`SmoothScrollController`] animating discrete (non-precise) scroll input
 /// for the block list's vertical scrollback, gated by `FeatureFlag::SmoothScrolling`.
 ///
-/// Unlike a generic WarpUI scrollable's `ClippedScrollStateHandle`, this handle does not own an
-/// absolute scroll position -- the block list's actual position is owned by
-/// [`ScrollState`]/[`ScrollPosition`], whose `FollowsBottomOfMostRecentBlock` and
-/// `ScrollLines::ScrollBottom` anchoring must stay authoritative so scroll position keeps
-/// behaving correctly as content streams in and blocks resize. Instead, this controller tracks
-/// only the *relative, unapplied remainder* of an in-flight animation, mirroring
-/// `warpui_core`'s `Manual`-axis scrollable pattern: [`Self::take_increment`] is applied lazily
-/// to `ScrollState` via `TerminalView::advance_smooth_scroll`, called on every event dispatched
-/// to `BlockListElement` (since the app's redraw machinery replays a synthetic `MouseMoved`
-/// after each repaint requested by [`Self::is_animating`] -- see `PaintContext::repaint_after`).
-/// Applying only a small incremental delta per frame, through the same `AfterScrollEvent` path
-/// a direct scroll uses, means each frame's clamping and mode transitions (e.g. into or out of
-/// `FollowsBottomOfMostRecentBlock`) are recomputed fresh against whatever the block list looks
-/// like *that* frame, so new output arriving mid-animation is handled by the same logic that
-/// already handles it for non-animated scrolling, with no special-casing needed here.
+/// Unlike `ClippedScrollStateHandle`, this doesn't own an absolute position -- the block list's
+/// real position stays owned by `ScrollState`/`ScrollPosition`. It tracks only the relative,
+/// unapplied remainder of an in-flight animation; `TerminalView::drive_smooth_scroll` applies
+/// each increment through the same `AfterScrollEvent` path a direct scroll uses, so existing
+/// clamping and `FollowsBottomOfMostRecentBlock` transitions handle content changing
+/// mid-animation without special-casing.
 ///
-/// The controller itself always operates in pixel-equivalent units (see [`NUM_PIXELS_PER_LINE`]);
-/// `Lines` values are converted in and out at the boundary of this handle.
+/// Always operates in pixel-equivalent units (see [`NUM_PIXELS_PER_LINE`]); `Lines` are
+/// converted at the boundary.
 #[derive(Clone, Default)]
 pub struct SmoothScrollHandle(Arc<Mutex<SmoothScrollHandleState>>);
 
 #[derive(Default)]
 struct SmoothScrollHandleState {
     controller: SmoothScrollController,
-    /// Whether a self-perpetuating `TerminalView::drive_smooth_scroll` timer loop is already
-    /// scheduled to advance this animation. Prevents `TerminalView::scroll` from starting an
-    /// overlapping second loop when called again while one is already running. See
+    /// Whether a `TerminalView::drive_smooth_scroll` timer loop is already scheduled for this
+    /// animation, preventing a second, overlapping loop from starting. See
     /// [`Self::try_start_driving`].
     driving: bool,
 }
@@ -98,9 +88,8 @@ impl SmoothScrollHandle {
     }
 
     /// Atomically checks whether a drive loop is already scheduled for this animation and, if
-    /// not, marks one as started and returns `true`. Called from `TerminalView::scroll` before
-    /// spawning `TerminalView::drive_smooth_scroll`, so repeated non-precise notches while an
-    /// animation is already in flight don't each spawn their own overlapping timer loop.
+    /// not, marks one as started and returns `true`, so repeated notches while one is already
+    /// running don't each spawn their own overlapping timer loop.
     pub fn try_start_driving(&self) -> bool {
         let mut state = self.0.lock().unwrap();
         if state.driving {
@@ -111,8 +100,7 @@ impl SmoothScrollHandle {
         }
     }
 
-    /// Marks the drive loop as stopped. Called once `is_animating` reports the controller has
-    /// settled, so a later `add_delta` knows it needs to start a fresh loop.
+    /// Marks the drive loop as stopped, so a later `add_delta` knows to start a fresh one.
     pub fn mark_driving_stopped(&self) {
         self.0.lock().unwrap().driving = false;
     }
@@ -2151,11 +2139,7 @@ mod smooth_scroll_handle_tests {
 
     /// A one-line notch is a 40px-equivalent delta, well below the controller's 120px "small
     /// delta" reference point, so it must take the long end of the duration ramp (~200ms) --
-    /// the same as an equivalent 40px delta would for a generic WarpUI scrollable. Before the
-    /// pixel-equivalent normalization fix, this delta would have reached the controller as a
-    /// raw magnitude of `1.0`, which is *also* below 120 and would happen to take the same long
-    /// duration by coincidence -- see the large-delta case below for the test that actually
-    /// distinguishes the fixed and unfixed behavior.
+    /// the same as an equivalent 40px delta would for a generic WarpUI scrollable.
     #[test]
     fn one_line_delta_takes_the_long_end_of_the_duration_ramp() {
         let handle = SmoothScrollHandle::default();
@@ -2172,11 +2156,8 @@ mod smooth_scroll_handle_tests {
 
     /// A 20-line notch is an 800px-equivalent delta, comfortably past the controller's 480px
     /// "large delta" reference point, so it must take the short end of the duration ramp
-    /// (~100ms) -- the same as an equivalent 800px delta would for a generic WarpUI scrollable.
-    /// Before the pixel-equivalent normalization fix, this delta would have reached the
-    /// controller as a raw magnitude of `20.0`, which is *nowhere near* the 480 threshold and
-    /// would incorrectly take the long ~200ms duration instead -- this is the case that
-    /// actually catches the regression the fix addresses.
+    /// (~100ms). Catches a regression where a raw `20.0` magnitude (nowhere near 480) would
+    /// incorrectly take the long ~200ms duration instead.
     #[test]
     fn twenty_line_delta_takes_the_short_end_of_the_duration_ramp() {
         let handle = SmoothScrollHandle::default();
