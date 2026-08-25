@@ -1478,11 +1478,11 @@ fn test_first_hidden_section_line_range_none_without_hidden_sections() {
 fn deferred_edit(chars: usize) -> PendingLayout {
     PendingLayout::Edit {
         delta: EditDelta {
-            new_lines: vec![StyledBufferBlock::Text(StyledTextBlock {
+            new_lines: Arc::new(vec![StyledBufferBlock::Text(StyledTextBlock {
                 block: Vec::new(),
                 style: BufferBlockStyle::PlainText,
                 content_length: chars.into(),
-            })],
+            })]),
             ..Default::default()
         },
         hidden_ranges: None,
