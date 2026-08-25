@@ -2069,3 +2069,7 @@ impl TemplatableMCPServerManager {
             .contains_key(&installation_hash)
     }
 }
+
+#[cfg(test)]
+#[path = "native_tests.rs"]
+mod tests;
