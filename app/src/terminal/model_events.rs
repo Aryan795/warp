@@ -5,7 +5,7 @@ use warpui::{Entity, ModelContext, ModelHandle, SingletonEntity};
 
 use super::event::{BootstrappedEvent, SshLoginStatus};
 use super::model::ansi;
-use super::model::ansi::FinishUpdateValue;
+use super::model::ansi::{ExternalCtrlRRawKeypressSelectionValue, FinishUpdateValue};
 use super::model::block::BlockId;
 use super::model::completions::ShellCompletion;
 use super::model::lifecycle::LifecycleTelemetryEvent;
@@ -261,6 +261,9 @@ impl ModelEventDispatcher {
             Event::HonorPS1OutOfSync => ModelEvent::HonorPS1OutOfSync,
             Event::Typeahead => ModelEvent::Typeahead,
             Event::FinishUpdate(data) => ModelEvent::FinishUpdate(data),
+            Event::ExternalCtrlRRawKeypressSelection(data) => {
+                ModelEvent::ExternalCtrlRRawKeypressSelection(data)
+            }
             Event::TextSelectionChanged => ModelEvent::SelectedTextChanged,
             Event::ShellSpawned(shell_type) => ModelEvent::ShellSpawned(shell_type),
             Event::SendCompletionsPrompt => ModelEvent::SendCompletionsPrompt,
@@ -446,6 +449,9 @@ pub enum ModelEvent {
     /// inaccessible to views/models.
     Handler(AnsiHandlerEvent),
     FinishUpdate(FinishUpdateValue),
+    /// Emitted when the shell reports the command selected in its raw-keypress ctrl-r handoff
+    /// wrapper widget (a prototype alternative to the foreground-command handoff in PR #15513).
+    ExternalCtrlRRawKeypressSelection(ExternalCtrlRRawKeypressSelectionValue),
     SelectedTextChanged,
     ShellSpawned(ShellType),
     CompletionsFinished(Vec<ShellCompletion>),

@@ -971,6 +971,14 @@ pub enum FeatureFlag {
     /// always forwarded unchanged and the harness process/sandbox are never
     /// signaled or torn down.
     CtrlCCancelsThirdPartyHarness,
+
+    /// Prototype: alternative to `FzfCtrlRHandoff` (see PR #15513). When the active session's
+    /// shell reports (via the `external_ctrl_r_raw_keypress` shell plugin tag) that it has
+    /// installed a wrapper widget on a private key sequence, hands ctrl-r off to it by writing
+    /// that key sequence to the pty instead of opening Warp's own command search. The wrapper
+    /// invokes the user's own `^R` binding (fzf, atuin, or otherwise) from a genuine
+    /// key-binding context, so no per-tool client code is needed.
+    RawKeypressCtrlRHandoff,
 }
 
 static FLAG_STATES: [AtomicBool; cardinality::<FeatureFlag>()] =
@@ -1045,6 +1053,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::BoxDrawingGlyphs,
     FeatureFlag::PricingTransparency,
     FeatureFlag::PeriodicHandoffCheckpoints,
+    FeatureFlag::RawKeypressCtrlRHandoff,
 ];
 
 /// Features enabled for feature preview build users (e.g.: Friends of Warp).

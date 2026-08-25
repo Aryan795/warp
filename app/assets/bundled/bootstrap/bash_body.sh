@@ -1357,6 +1357,49 @@ esac
 
     shell_plugins=()
 
+    # Prototype (alternative to the foreground-command handoff in PR #15513): if the user has
+    # rebound ctrl-r to a `bind -x` function (as fzf and atuin both do), install a wrapper widget
+    # on the private key sequence ctrl-x ctrl-r that re-invokes the user's own binding from inside
+    # a genuine readline key-binding context, giving it access to READLINE_LINE. Warp writes that
+    # sequence to the pty instead of a bare ^R when this session reports the
+    # `external_ctrl_r_raw_keypress` tag below. Not supported under MSYS2, where ctrl-r always
+    # falls through to Warp's own command search.
+    #
+    # A readline macro (installed by fzf on bash < 4) or a plain readline function name cannot be
+    # re-invoked this way, so those configurations are left undetected and fall back to Warp's own
+    # command search on ctrl-r.
+    __warp_raw_keypress_ctrl_r_orig=""
+    __warp_raw_keypress_ctrl_r_orig_kind=""
+    __warp_classify_raw_keypress_ctrl_r_binding() {
+      local line
+      line=$(bind -X 2>/dev/null | command -p grep -F '"\C-r"' | command -p head -1)
+      if [[ -n $line ]]; then
+        line=${line#*: }
+        line=${line#\"}
+        line=${line%\"}
+        __warp_raw_keypress_ctrl_r_orig=$line
+        __warp_raw_keypress_ctrl_r_orig_kind=funcexec
+      fi
+    }
+
+    __warp_run_raw_keypress_ctrl_r_widget() {
+      # READLINE_LINE/READLINE_POINT are live globals for the duration of this binding, so the
+      # callee's assignments are visible here and readline picks up ours when we return.
+      eval "$__warp_raw_keypress_ctrl_r_orig"
+      local escaped_selection="$(warp_escape_json "$READLINE_LINE")"
+      warp_send_json_message "{ \"hook\": \"ExternalCtrlRRawKeypressSelection\", \"value\": { \"buffer\": \"$escaped_selection\", \"session_id\": $WARP_SESSION_ID } }"
+      READLINE_LINE=''
+      READLINE_POINT=0
+    }
+
+    if [ "$WARP_IN_MSYS2" = false ]; then
+      __warp_classify_raw_keypress_ctrl_r_binding
+      if [[ "$__warp_raw_keypress_ctrl_r_orig_kind" == funcexec ]]; then
+        bind -x '"\C-x\C-r": __warp_run_raw_keypress_ctrl_r_widget'
+        shell_plugins+=(external_ctrl_r_raw_keypress)
+      fi
+    fi
+
     function warp_bootstrapped () {
         local aliases="`alias`"
         local env_var_names="`compgen -e`"
@@ -1388,8 +1431,13 @@ esac
           shell_plugins+=("starship")
         fi
 
+        # Join into a newline-separated list (one tag per line, matching zsh's `print -l --`)
+        # before escaping -- "$shell_plugins" alone would only expand to the array's first
+        # element.
+        local shell_plugins_list="$(printf '%s\n' "${shell_plugins[@]}")"
+
         if [ "$WARP_IN_MSYS2" = false ]; then
-          local escaped_shell_plugins=$(warp_escape_json "$shell_plugins")
+          local escaped_shell_plugins=$(warp_escape_json "$shell_plugins_list")
           local escaped_path="$(warp_escape_json "$PATH")"
           local escaped_shell_options=$(warp_escape_json "$shell_options")
         fi
@@ -1412,7 +1460,7 @@ esac
           warp_send_hook_kv_pair_escaped "function_names" "$function_names"
           warp_send_hook_kv_pair_escaped "builtins" "$builtins"
           warp_send_hook_kv_pair_escaped "keywords" "$keywords"
-          warp_send_hook_kv_pair "shell_plugins" "$shell_plugins"
+          warp_send_hook_kv_pair_escaped "shell_plugins" "$shell_plugins_list"
           warp_send_hook_kv_pair "shell_version" "$BASH_VERSION"
           warp_send_hook_kv_pair "shell_options" "$shell_options"
           warp_send_hook_kv_pair "rcfiles_start_time" "$rcfiles_start_time"
@@ -1427,7 +1475,7 @@ esac
           local escaped_editor="$(warp_escape_json "$EDITOR")"
           local escaped_shell_path="$(warp_escape_json "$BASH")"
           local escaped_cdpath="$(warp_escape_json "$CDPATH")"
-          local escaped_json="{\"hook\": \"Bootstrapped\", \"value\": {\"histfile\": \"$escaped_histfile\", \"session_id\": $WARP_SESSION_ID, \"shell\": \"bash\",  \"home_dir\": \"$HOME\", \"user\":\"$_user\", \"host\":\"$_hostname\", \"path\": \"$escaped_path\", \"cdpath\": \"$escaped_cdpath\", \"editor\": \"$escaped_editor\", \"env_var_names\": \"$escaped_env_var_names\", \"abbreviations\": \"$escaped_abbrs\", \"aliases\": \"$escaped_aliases\", \"function_names\": \"$escaped_function_names\", \"builtins\": \"$escaped_builtins\", \"keywords\": \"$escaped_keywords\", \"shell_version\": \"$BASH_VERSION\", \"shell_options\": \"$escaped_shell_options\", \"rcfiles_start_time\": \"$rcfiles_start_time\", \"rcfiles_end_time\": \"$rcfiles_end_time\", \"vi_mode_enabled\": \"$vi_mode_enabled\", \"os_category\": \"$os_category\", \"linux_distribution\": \"$linux_distribution\", \"wsl_name\": \"$WSL_DISTRO_NAME\", \"shell_path\": \"$escaped_shell_path\"}}"
+          local escaped_json="{\"hook\": \"Bootstrapped\", \"value\": {\"histfile\": \"$escaped_histfile\", \"session_id\": $WARP_SESSION_ID, \"shell\": \"bash\",  \"home_dir\": \"$HOME\", \"user\":\"$_user\", \"host\":\"$_hostname\", \"path\": \"$escaped_path\", \"cdpath\": \"$escaped_cdpath\", \"editor\": \"$escaped_editor\", \"env_var_names\": \"$escaped_env_var_names\", \"abbreviations\": \"$escaped_abbrs\", \"aliases\": \"$escaped_aliases\", \"function_names\": \"$escaped_function_names\", \"builtins\": \"$escaped_builtins\", \"keywords\": \"$escaped_keywords\", \"shell_version\": \"$BASH_VERSION\", \"shell_options\": \"$escaped_shell_options\", \"rcfiles_start_time\": \"$rcfiles_start_time\", \"rcfiles_end_time\": \"$rcfiles_end_time\", \"shell_plugins\": \"$escaped_shell_plugins\", \"vi_mode_enabled\": \"$vi_mode_enabled\", \"os_category\": \"$os_category\", \"linux_distribution\": \"$linux_distribution\", \"wsl_name\": \"$WSL_DISTRO_NAME\", \"shell_path\": \"$escaped_shell_path\"}}"
           warp_send_json_message "$escaped_json"
         fi
     }

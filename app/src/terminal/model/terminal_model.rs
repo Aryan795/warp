@@ -27,7 +27,10 @@ use warpui::r#async::executor::Background;
 use warpui::image_cache::ImageType;
 
 use super::super::{AltScreen, BlockList};
-use super::ansi::{BootstrappedValue, FinishUpdateValue, InputBufferValue, Mode, PendingHook};
+use super::ansi::{
+    BootstrappedValue, ExternalCtrlRRawKeypressSelectionValue, FinishUpdateValue, InputBufferValue,
+    Mode, PendingHook,
+};
 use super::block::{
     AgentInteractionMetadata, Block, BlockId, BlockMetadata, BlockSize, BlockState,
     BlocklistEnvVarMetadata, SerializedBlock,
@@ -3174,6 +3177,14 @@ impl ansi::Handler for TerminalModel {
 
     fn input_buffer(&mut self, data: InputBufferValue) {
         delegate!(self.input_buffer(data));
+    }
+
+    fn external_ctrl_r_raw_keypress_selection(
+        &mut self,
+        data: ExternalCtrlRRawKeypressSelectionValue,
+    ) {
+        self.event_proxy
+            .send_terminal_event(Event::ExternalCtrlRRawKeypressSelection(data));
     }
 
     fn init_subshell(&mut self, data: InitSubshellValue) {

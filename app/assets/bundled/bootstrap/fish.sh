@@ -504,6 +504,50 @@ function warp_escape_json
     string join \n $argv | command sed -E 's/(["\\\\])/\\\\\\1/g; s/'\b'/\\\\b/g; s/'\t'/\\\\t/g; s/'\f'/\\\\f/g; s/'\r'/\\\\r/g; $!s/$/\\\\n/' | command tr -d '\n'
 end
 
+# Tags for shell configurations Warp needs to know about, matching the `shell_plugins` list bash
+# and zsh already report.
+set -g shell_plugins
+
+# Prototype (alternative to the foreground-command handoff in PR #15513): if the user has rebound
+# ctrl-r away from fish's own history search, install a wrapper function on the private key
+# sequence ctrl-x ctrl-r that re-invokes the user's own binding from inside a real `bind` context.
+# Both fzf's and atuin's fish widgets write their result back with the `commandline` builtin,
+# which fails with status 1 outside an interactive-editing context, so invoking the user's binding
+# from this wrapper is what makes fish work at all. Warp writes that sequence to the pty instead
+# of a bare ^R when this session reports the `external_ctrl_r_raw_keypress` tag below.
+#
+# `bind` lists fish's own defaults with a `--preset` flag, so any binding without it is one the
+# user (or a plugin like fzf or atuin) installed.
+function __warp_raw_keypress_ctrl_r_widget
+  set -l widget ""
+  for binding in (bind \cr 2>/dev/null)
+    if string match --quiet -- 'bind --preset *' "$binding"
+      continue
+    end
+    # Strip the leading `bind [-M <mode>] <key>`, leaving just the widget/command.
+    set widget (string replace --regex -- '^bind (-M \S+ +)?\S+ +' '' "$binding")
+  end
+  test -n "$widget"; or return 1
+  echo "$widget"
+end
+
+set -g __warp_raw_keypress_orig_ctrl_r (__warp_raw_keypress_ctrl_r_widget)
+if test -n "$__warp_raw_keypress_orig_ctrl_r"
+  function __warp_run_raw_keypress_ctrl_r_widget
+    eval $__warp_raw_keypress_orig_ctrl_r
+    set -l escaped_selection (warp_escape_json (commandline))
+    warp_send_json_message "{ \"hook\": \"ExternalCtrlRRawKeypressSelection\", \"value\": { \"buffer\": \"$escaped_selection\", \"session_id\": $WARP_SESSION_ID } }"
+    # Warp owns the command from here; the shell's own buffer must not keep a copy, or the
+    # next Enter would submit it twice.
+    commandline ''
+    commandline -f repaint
+  end
+  # Unlike bash's `bind` (\C-x notation) and zsh's `bindkey` (^X notation), fish's `bind` wants
+  # the literal key bytes: \x18 is ctrl-x, \x12 is ctrl-r.
+  bind \x18\x12 __warp_run_raw_keypress_ctrl_r_widget
+  set -a shell_plugins external_ctrl_r_raw_keypress
+end
+
 function warp_bootstrapped
   set -l histfile_directory
   set histfile_directory "$XDG_DATA_HOME"
@@ -546,7 +590,8 @@ function warp_bootstrapped
   # part of its builtins (e.g. "for", "while", etc.).
   set -l escaped_editor (warp_escape_json "$EDITOR")
   set -l escaped_shell_path (warp_escape_json (status fish-path))
-  set -l escaped_json "{\"hook\": \"Bootstrapped\", \"value\": {\"histfile\": \"$escaped_histfile\", \"session_id\": $WARP_SESSION_ID, \"shell\": \"fish\", \"home_dir\": \"$HOME\", \"path\": \"$PATH\", \"editor\": \"$escaped_editor\", \"abbreviations\": \"$escaped_abbr\", \"aliases\": \"$escaped_aliases\", \"function_names\": \"$function_names\", \"env_var_names\": \"$env_var_names\", \"builtins\": \"$escaped_builtins\", \"keywords\": \"\", \"shell_version\": \"$FISH_VERSION\", \"vi_mode_enabled\": \"$vi_mode_enabled\", \"os_category\": \"$os_category\", \"linux_distribution\": \"$linux_distribution\", \"wsl_name\": \"$WSL_DISTRO_NAME\", \"shell_path\": \"$escaped_shell_path\"}}"
+  set -l escaped_shell_plugins (warp_escape_json $shell_plugins)
+  set -l escaped_json "{\"hook\": \"Bootstrapped\", \"value\": {\"histfile\": \"$escaped_histfile\", \"session_id\": $WARP_SESSION_ID, \"shell\": \"fish\", \"home_dir\": \"$HOME\", \"path\": \"$PATH\", \"editor\": \"$escaped_editor\", \"abbreviations\": \"$escaped_abbr\", \"aliases\": \"$escaped_aliases\", \"function_names\": \"$function_names\", \"env_var_names\": \"$env_var_names\", \"builtins\": \"$escaped_builtins\", \"keywords\": \"\", \"shell_version\": \"$FISH_VERSION\", \"shell_plugins\": \"$escaped_shell_plugins\", \"vi_mode_enabled\": \"$vi_mode_enabled\", \"os_category\": \"$os_category\", \"linux_distribution\": \"$linux_distribution\", \"wsl_name\": \"$WSL_DISTRO_NAME\", \"shell_path\": \"$escaped_shell_path\"}}"
   warp_send_json_message $escaped_json
 end
 

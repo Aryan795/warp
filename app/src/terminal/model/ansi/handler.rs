@@ -308,6 +308,14 @@ pub trait Handler {
     /// input buffer (the reporting is itself triggered by Warp).
     fn input_buffer(&mut self, _data: InputBufferValue) {}
 
+    /// Callback for the terminal when the shell reports the command selected in its raw-keypress
+    /// ctrl-r handoff wrapper widget (see [`ExternalCtrlRRawKeypressSelectionValue`]).
+    fn external_ctrl_r_raw_keypress_selection(
+        &mut self,
+        _data: ExternalCtrlRRawKeypressSelectionValue,
+    ) {
+    }
+
     /// Callback emitted during the initialization process for subshells with where the shell type
     /// is initiall not known.
     fn init_subshell(&mut self, _data: InitSubshellValue) {}

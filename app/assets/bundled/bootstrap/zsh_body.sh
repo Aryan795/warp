@@ -1316,6 +1316,35 @@ esac
     shell_plugins+=(vi)
   fi
 
+  # Prototype (alternative to the foreground-command handoff in PR #15513): whatever ^R resolves
+  # to after the user's rc has run -- `bindkey '^R'` prints `"^R" widget-name` -- install a wrapper
+  # widget on the private key sequence ctrl-x ctrl-r that re-invokes that widget via `zle`, giving
+  # it a genuine zle context (zle builtins like `vi-fetch-history` only work when a widget is
+  # actually bound to a key and invoked through zle, not when called as a plain function). Warp
+  # writes that sequence to the pty instead of a bare ^R when this session reports the
+  # `external_ctrl_r_raw_keypress` tag below.
+  __warp_raw_keypress_orig_ctrl_r_widget=${${(z)$(bindkey '^R')}[2]}
+  case "$__warp_raw_keypress_orig_ctrl_r_widget" in
+    ""|history-incremental-search-backward|history-incremental-pattern-search-backward)
+      # Unbound, or still zsh's own default reverse-history-search: nothing to hand off to.
+      ;;
+    *)
+    function __warp_run_raw_keypress_ctrl_r_widget () {
+      zle "$__warp_raw_keypress_orig_ctrl_r_widget"
+      local escaped_selection="$(warp_escape_json "$BUFFER")"
+      warp_send_json_message "{ \"hook\": \"ExternalCtrlRRawKeypressSelection\", \"value\": { \"buffer\": \"$escaped_selection\", \"session_id\": $WARP_SESSION_ID } }"
+      # Warp owns the command from here; the shell's own buffer must not keep a copy, or the
+      # next Enter would submit it twice.
+      BUFFER=''
+      CURSOR=0
+      zle reset-prompt
+    }
+    zle -N __warp_run_raw_keypress_ctrl_r_widget
+    bindkey '^X^R' __warp_run_raw_keypress_ctrl_r_widget
+    shell_plugins+=(external_ctrl_r_raw_keypress)
+    ;;
+  esac
+
   if kernel_name="$(uname)"; then
     if [[ "$kernel_name" == "Darwin" ]]; then
       os_category="MacOS"

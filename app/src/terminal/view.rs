@@ -714,6 +714,18 @@ pub const DEFAULT_ASK_AI_AUTOSUGGESTION_TEXT: &str = "What happened here?";
 
 const WARP_MD_PATH: &str = "WARP.md";
 
+/// `shell_plugins` tag reported by bootstrap when the shell has installed a wrapper widget on
+/// [`RAW_KEYPRESS_CTRL_R_HANDOFF_KEYSEQ`] (a prototype alternative to PR #15513's
+/// `external_ctrl_r_history` tag). Must match the tag name used in the bootstrap scripts under
+/// `app/assets/bundled/bootstrap/`.
+const RAW_KEYPRESS_CTRL_R_HANDOFF_PLUGIN_TAG: &str = "external_ctrl_r_raw_keypress";
+
+/// The private key sequence (ctrl-x ctrl-r) that bootstrap binds the wrapper widget to. Chosen
+/// because it's unbound in stock bash/zsh/fish readline/zle/bind configurations -- see the
+/// bootstrap scripts for the per-shell bind syntax that installs the wrapper on this sequence.
+const RAW_KEYPRESS_CTRL_R_HANDOFF_KEYSEQ: &[u8] =
+    &[escape_sequences::C0::CAN, escape_sequences::C0::DC2];
+
 pub const LONG_RUNNING_AGENT_REQUESTED_COMMAND_CONTEXT_KEY: &str = "LongRunningRequestedCommand";
 pub const LONG_RUNNING_AGENT_REQUESTED_COMMAND_USER_TOOK_OVER_CONTEXT_KEY: &str =
     "LongRunningRequestedUserTookOverCommand";
@@ -2482,6 +2494,16 @@ struct LocalSessionCanonicalPwdCache {
     canonical: CanonicalizedPath,
 }
 
+/// State for an in-flight raw-keypress ctrl-r handoff (see
+/// [`TerminalView::maybe_trigger_raw_keypress_ctrl_r_handoff`]). `session_id` lets
+/// [`TerminalView::apply_raw_keypress_ctrl_r_selection`] verify that an
+/// `ExternalCtrlRRawKeypressSelection` hook is actually the reply to this handoff, rather than an
+/// unsolicited write to the pty.
+struct PendingRawKeypressCtrlRHandoff {
+    session_id: SessionId,
+    block_id: BlockId,
+}
+
 pub struct TerminalView {
     pub model: Arc<FairMutex<TerminalModel>>,
     view_handle: WeakViewHandle<Self>,
@@ -2598,6 +2620,9 @@ pub struct TerminalView {
     /// Commands that should run as separate blocks after the active pending
     /// command finishes successfully.
     pending_command_queue: VecDeque<String>,
+    /// State for an in-flight raw-keypress ctrl-r handoff started by
+    /// [`Self::maybe_trigger_raw_keypress_ctrl_r_handoff`], if any.
+    pending_raw_keypress_ctrl_r_handoff: Option<PendingRawKeypressCtrlRHandoff>,
     /// When true, enter agent view after pending setup commands complete
     /// (i.e. after `PendingCommandCompleted` is emitted). Set by
     /// `pane_tree_from_template_recursive` when a tab config has both
@@ -4351,6 +4376,7 @@ impl TerminalView {
             is_login_shell_bootstrapped: false,
             awaiting_pending_command_completion: false,
             pending_command_queue: Default::default(),
+            pending_raw_keypress_ctrl_r_handoff: None,
             enter_agent_view_after_pending_commands: false,
             slow_bootstrap_banner,
             is_slow_bootstrap_banner_open: false,
@@ -9199,6 +9225,97 @@ impl TerminalView {
             && !model.is_read_only()
     }
 
+    /// If ctrl-r was pressed at an idle prompt on a session whose shell has installed a
+    /// raw-keypress wrapper widget (reported via the [`RAW_KEYPRESS_CTRL_R_HANDOFF_PLUGIN_TAG`]
+    /// shell plugin tag), hands the keypress off to that widget instead of opening Warp's own
+    /// command search. Prototype: alternative to the foreground-command handoff mechanism in
+    /// PR #15513 (`maybe_trigger_external_ctrl_r_history_search` there).
+    ///
+    /// Unlike a foreground-command handoff, no shell command is submitted: Warp writes
+    /// [`RAW_KEYPRESS_CTRL_R_HANDOFF_KEYSEQ`] directly to the pty and marks the active block as
+    /// forwarding (see [`Block::set_raw_keypress_forward_active`]), which hides the input editor
+    /// and routes subsequent keystrokes straight to the pty exactly as for a real long-running
+    /// command. The wrapper widget runs the user's own `^R` binding in a genuine key-binding
+    /// context, reads the resulting selection, and reports it back over the
+    /// `ExternalCtrlRRawKeypressSelection` DCS hook (see
+    /// [`Self::apply_raw_keypress_ctrl_r_selection`]), which ends the handoff.
+    ///
+    /// Returns `true` if the handoff was triggered, in which case the caller should not open
+    /// Warp's command search.
+    pub fn maybe_trigger_raw_keypress_ctrl_r_handoff(
+        &mut self,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        if !FeatureFlag::RawKeypressCtrlRHandoff.is_enabled() || self.is_long_running() {
+            return false;
+        }
+        let Some(session_id) = self.active_block_session_id() else {
+            return false;
+        };
+        let has_raw_keypress_widget =
+            self.sessions
+                .as_ref(ctx)
+                .get(session_id)
+                .is_some_and(|session| {
+                    session
+                        .shell()
+                        .plugins()
+                        .contains(RAW_KEYPRESS_CTRL_R_HANDOFF_PLUGIN_TAG)
+                });
+        if !has_raw_keypress_widget || self.model.lock().is_alt_screen_active() {
+            return false;
+        }
+
+        let block_id = {
+            let mut model = self.model.lock();
+            let active_block = model.block_list_mut().active_block_mut();
+            active_block.set_raw_keypress_forward_active(true);
+            active_block.id().clone()
+        };
+        self.pending_raw_keypress_ctrl_r_handoff = Some(PendingRawKeypressCtrlRHandoff {
+            session_id,
+            block_id,
+        });
+
+        self.write_user_bytes_to_pty(RAW_KEYPRESS_CTRL_R_HANDOFF_KEYSEQ, ctx);
+        true
+    }
+
+    /// Called when the shell reports the command selected in the raw-keypress ctrl-r handoff
+    /// wrapper widget. Applies the selection only if `session_id` matches an in-flight handoff
+    /// this session started (see [`PendingRawKeypressCtrlRHandoff`]); otherwise ignores it as an
+    /// unsolicited write to the pty. Ends the handoff either way that it matches, restoring normal
+    /// input editor behavior.
+    fn apply_raw_keypress_ctrl_r_selection(
+        &mut self,
+        session_id: SessionId,
+        selection: &str,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(handoff) = self
+            .pending_raw_keypress_ctrl_r_handoff
+            .take_if(|handoff| handoff.session_id == session_id)
+        else {
+            return;
+        };
+
+        if let Some(block) = self
+            .model
+            .lock()
+            .block_list_mut()
+            .mut_block_from_id(&handoff.block_id)
+        {
+            block.set_raw_keypress_forward_active(false);
+        }
+
+        if !selection.is_empty() {
+            let editor = self.input.as_ref(ctx).editor().clone();
+            editor.update(ctx, |editor, ctx| {
+                editor.set_buffer_text(selection, ctx);
+            });
+        }
+    }
+
     pub fn was_ever_visible(&self) -> bool {
         self.was_ever_visible
     }
@@ -9321,7 +9438,11 @@ impl TerminalView {
         // Note that we check block started and NOT block.is_long_running(), because
         // the block starts on enter but only becomes long running on receiving Preexec.
         // We want to make sure we capture any input between enter and receiving Preexec.
-        if !model.block_list().active_block().started() {
+        // The one exception is a raw-keypress ctrl-r handoff (see
+        // `maybe_trigger_raw_keypress_ctrl_r_handoff`): the block never starts for that handoff,
+        // but typed characters are the fzf/atuin filter query and must reach the pty.
+        let active_block = model.block_list().active_block();
+        if !active_block.started() && !active_block.is_raw_keypress_forward_active() {
             return false;
         }
 
@@ -12850,6 +12971,11 @@ impl TerminalView {
                     autoupdate::initiate_relaunch_for_update(ctx);
                 } else {
                     log::warn!("Got a FinishUpdate event with non-matching update id!");
+                }
+            }
+            ModelEvent::ExternalCtrlRRawKeypressSelection(data) => {
+                if let Some(session_id) = data.session_id.map(SessionId::from) {
+                    self.apply_raw_keypress_ctrl_r_selection(session_id, &data.buffer, ctx);
                 }
             }
             ModelEvent::SelectedTextChanged => {

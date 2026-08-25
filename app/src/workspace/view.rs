@@ -17276,6 +17276,20 @@ impl Workspace {
             return;
         }
 
+        // If the active session's shell has installed a raw-keypress wrapper widget on ctrl-r
+        // (a prototype alternative to PR #15513's foreground-command handoff), hand the keypress
+        // off to it instead of opening command search. Only applies to the default (ctrl-r-shaped)
+        // invocation, not the dedicated history-search binding, which explicitly asks for Warp's
+        // own UI.
+        if query_filter.is_none()
+            && let Some(terminal_view_handle) = self.active_session_view(ctx)
+            && terminal_view_handle.update(ctx, |terminal_view, ctx| {
+                terminal_view.maybe_trigger_raw_keypress_ctrl_r_handoff(ctx)
+            })
+        {
+            return;
+        }
+
         // Close all overlays including chip menus before opening command search
         self.close_all_overlays(ctx);
 

@@ -10,7 +10,7 @@ pub use remote_server::setup::RemoteServerSetupState;
 use warp_util::lazy::Lazy;
 
 use super::history::HistoryEntry;
-use super::model::ansi::FinishUpdateValue;
+use super::model::ansi::{ExternalCtrlRRawKeypressSelectionValue, FinishUpdateValue};
 use super::model::block::BlockId;
 use super::model::lifecycle::LifecycleRecoveryRecord;
 use super::model::session::{SessionId, SessionInfo};
@@ -130,6 +130,9 @@ pub enum Event {
     /// Emitted when the assisted auto-update has completed and we're ready to
     /// relaunch the app.
     FinishUpdate(FinishUpdateValue),
+    /// Emitted when the shell reports the command selected in its raw-keypress ctrl-r handoff
+    /// wrapper widget (a prototype alternative to the foreground-command handoff in PR #15513).
+    ExternalCtrlRRawKeypressSelection(ExternalCtrlRRawKeypressSelectionValue),
     TextSelectionChanged,
     ShellSpawned(ShellType),
     SendCompletionsPrompt,
@@ -532,6 +535,15 @@ impl Debug for Event {
                 )
             }
             Event::FinishUpdate(data) => write!(f, "FinishUpdate({})", data.update_id),
+            Event::ExternalCtrlRRawKeypressSelection(data) => {
+                // The buffer is a selected shell command, which may carry a credential; log only
+                // its length rather than its contents.
+                write!(
+                    f,
+                    "ExternalCtrlRRawKeypressSelection(buffer_len: {})",
+                    data.buffer.len()
+                )
+            }
             Event::TextSelectionChanged => write!(f, "TextSelectionChanged"),
             Event::ShellSpawned(shell_type) => write!(f, "ShellSpawned({shell_type:?})"),
             Event::SendCompletionsPrompt => write!(f, "SendCompletionsPrompt"),

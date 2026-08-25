@@ -323,6 +323,14 @@ pub struct Block {
     was_long_running: AtomicBool,
     bootstrap_stage: BootstrapStage,
 
+    /// Prototype (alternative to PR #15513): `true` while a raw-keypress ctrl-r handoff (see
+    /// [`crate::terminal::view::TerminalView::maybe_trigger_raw_keypress_ctrl_r_handoff`]) is in
+    /// flight for this block. The block never transitions out of `BeforeExecution` for this
+    /// handoff -- unlike the foreground-command handoff, no shell command is actually submitted --
+    /// so [`Self::is_active_and_long_running`] would otherwise stay `false` and the input editor
+    /// would keep intercepting keystrokes meant for the shell's history widget.
+    raw_keypress_forward_active: bool,
+
     show_bootstrap_block: bool,
     show_in_band_command_blocks: bool,
     show_memory_stats: bool,
@@ -977,6 +985,7 @@ impl Block {
             padding: sizes.block_padding,
             render_delay_complete: Arc::new(AtomicBool::new(false)),
             was_long_running: AtomicBool::new(false),
+            raw_keypress_forward_active: false,
             state: BlockState::BeforeExecution,
             precmd_state: PrecmdState::BeforePrecmd,
             exit_code: ExitCode::from(0),
@@ -1701,9 +1710,22 @@ impl Block {
             && self.output_grid.should_show_as_empty_when_finished()
     }
 
+    /// See [`Self::raw_keypress_forward_active`]'s field doc comment.
+    pub fn is_raw_keypress_forward_active(&self) -> bool {
+        self.raw_keypress_forward_active
+    }
+
+    /// See [`Self::raw_keypress_forward_active`]'s field doc comment.
+    pub fn set_raw_keypress_forward_active(&mut self, active: bool) {
+        self.raw_keypress_forward_active = active;
+    }
+
     /// Whether a command is long running.
     /// We use this to determine whether to hide the input box.
     pub fn is_active_and_long_running(&self) -> bool {
+        if self.raw_keypress_forward_active {
+            return true;
+        }
         if self.is_empty_pre_bootstrap_block() {
             return false;
         }

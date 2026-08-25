@@ -69,6 +69,12 @@ pub(super) enum DProtoHook {
     InputBuffer {
         value: InputBufferValue,
     },
+    /// Reports the command selected in the shell's raw-keypress ctrl-r handoff wrapper widget
+    /// (see [`ExternalCtrlRRawKeypressSelectionValue`]), a prototype alternative to the
+    /// foreground-command handoff in PR #15513.
+    ExternalCtrlRRawKeypressSelection {
+        value: ExternalCtrlRRawKeypressSelectionValue,
+    },
     Clear {
         value: ClearValue,
     },
@@ -96,6 +102,7 @@ const DPROTO_HOOK_VARIANTS: &[&str] = &[
     "SSH",
     "InitShell",
     "InputBuffer",
+    "ExternalCtrlRRawKeypressSelection",
     "Clear",
     "InitSubshell",
     "SourcedRcFileForWarp",
@@ -149,6 +156,9 @@ impl<'de> Deserialize<'de> for DProtoHook {
             "InputBuffer" => DProtoHook::InputBuffer {
                 value: parse_hook_value::<_, D::Error>(raw.value)?,
             },
+            "ExternalCtrlRRawKeypressSelection" => DProtoHook::ExternalCtrlRRawKeypressSelection {
+                value: parse_hook_value::<_, D::Error>(raw.value)?,
+            },
             "Clear" => DProtoHook::Clear {
                 value: parse_hook_value::<_, D::Error>(raw.value)?,
             },
@@ -185,6 +195,9 @@ impl DProtoHook {
             DProtoHook::SSH { .. } => "SSH",
             DProtoHook::InitShell { .. } => "InitShell",
             DProtoHook::InputBuffer { .. } => "InputBuffer",
+            DProtoHook::ExternalCtrlRRawKeypressSelection { .. } => {
+                "ExternalCtrlRRawKeypressSelection"
+            }
             DProtoHook::Clear { .. } => "Clear",
             DProtoHook::InitSubshell { .. } => "InitSubshell",
             DProtoHook::SourcedRcFileForWarp { .. } => "SourcedRcFileForWarp",
@@ -204,6 +217,9 @@ impl DProtoHook {
             DProtoHook::CommandFinished { value } => value.session_id.map(SessionId::from),
             DProtoHook::Bootstrapped { value } => value.session_id.map(SessionId::from),
             DProtoHook::InputBuffer { value } => value.session_id.map(SessionId::from),
+            DProtoHook::ExternalCtrlRRawKeypressSelection { value } => {
+                value.session_id.map(SessionId::from)
+            }
             DProtoHook::Clear { value } => value.session_id.map(SessionId::from),
             DProtoHook::FinishUpdate { value } => value.session_id.map(SessionId::from),
             DProtoHook::PreInteractiveSSHSession { value } => value.session_id.map(SessionId::from),
@@ -225,6 +241,7 @@ impl DProtoHook {
             | DProtoHook::SSH { .. }
             | DProtoHook::InitShell { .. }
             | DProtoHook::InputBuffer { .. }
+            | DProtoHook::ExternalCtrlRRawKeypressSelection { .. }
             | DProtoHook::Clear { .. }
             | DProtoHook::InitSubshell { .. }
             | DProtoHook::FinishUpdate { .. }
@@ -980,6 +997,23 @@ pub struct SourcedRcFileForWarpValue {
 /// [`TerminalView::request_input_buffer`]).
 #[derive(Debug, Default, PartialEq, Eq, Clone, Deserialize, Serialize)]
 pub struct InputBufferValue {
+    pub buffer: String,
+    #[serde(default)]
+    pub session_id: HookSessionId,
+}
+
+/// Received from the pty after the shell's raw-keypress ctrl-r handoff wrapper widget (see
+/// [`crate::terminal::view::TerminalView::maybe_trigger_raw_keypress_ctrl_r_handoff`]) finishes,
+/// reporting the command the user selected. Empty when the user cancelled without selecting
+/// anything. Warp inserts the selection into the input editor without executing it.
+///
+/// Unlike the foreground-command handoff's `ExternalCtrlRSelection` hook (PR #15513), this carries
+/// no per-invocation token: a raw keypress has no payload channel to hand one to the wrapper. The
+/// client instead accepts a reply only while a handoff is actually pending for `session_id` (see
+/// [`crate::terminal::view::TerminalView::apply_raw_keypress_ctrl_r_selection`]), which the
+/// wrapper's synchronous, single-shot invocation makes a reliable enough guard.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ExternalCtrlRRawKeypressSelectionValue {
     pub buffer: String,
     #[serde(default)]
     pub session_id: HookSessionId,
