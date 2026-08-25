@@ -77,6 +77,23 @@ enum Config {
         /// image".
         base_image: Option<String>,
     },
+    /// A shell running inside a Dev Container that has already been brought
+    /// up (via `devcontainer up`) for the given host project directory.
+    /// Attaches via plain `docker exec` (not `devcontainer exec`); see the
+    /// matching [`ShellLaunchData::DevContainer`] doc comment for why.
+    #[cfg_attr(not(feature = "local_tty"), allow(dead_code))]
+    DevContainer {
+        /// Host directory containing `.devcontainer/devcontainer.json`.
+        workspace_folder: PathBuf,
+        /// Resolved path to the `docker` CLI binary on the host.
+        docker_path: PathBuf,
+        container_id: String,
+        remote_user: Option<String>,
+        remote_workspace_folder: String,
+        /// Sandbox ID picked when the container was brought up (see
+        /// [`crate::terminal::local_tty::dev_container::generate_sandbox_id`]).
+        sandbox_id: String,
+    },
 }
 
 // The concept of specifying an available shell does not exist on non-local filesystems. So we allow
@@ -124,6 +141,7 @@ impl AvailableShell {
             Config::Wsl { distro } => Cow::from(distro),
             Config::Custom(_) => Cow::from("Custom"),
             Config::DockerSandbox { .. } => Cow::from("Docker Sandbox"),
+            Config::DevContainer { .. } => Cow::from("Dev Container"),
         }
     }
 
@@ -141,6 +159,9 @@ impl AvailableShell {
                 executable_path, ..
             }) => Cow::from(format!("Custom: {}", executable_path.display())),
             Config::DockerSandbox { .. } => Cow::from("Docker Sandbox"),
+            Config::DevContainer {
+                workspace_folder, ..
+            } => Cow::from(format!("Dev Container ({})", workspace_folder.display())),
         }
     }
 
@@ -153,6 +174,7 @@ impl AvailableShell {
             Config::Wsl { .. } => "WSL".to_string(),
             Config::Custom(_) => "Custom".to_string(),
             Config::DockerSandbox { .. } => "DockerSandbox".to_string(),
+            Config::DevContainer { .. } => "DevContainer".to_string(),
         }
     }
 
@@ -184,6 +206,11 @@ impl AvailableShell {
                 executable_path, ..
             }) => format!("{} ({})", self.short_name(), executable_path.display()),
             Config::DockerSandbox { .. } => "Docker Sandbox".to_string(),
+            Config::DevContainer {
+                workspace_folder, ..
+            } => {
+                format!("Dev Container ({})", workspace_folder.display())
+            }
         }
     }
 
@@ -268,6 +295,21 @@ impl AvailableShell {
                 sbx_path: sbx_path.clone(),
                 base_image: base_image.clone(),
             }),
+            Config::DevContainer {
+                workspace_folder,
+                docker_path,
+                container_id,
+                remote_user,
+                remote_workspace_folder,
+                sandbox_id,
+            } => Some(ShellLaunchData::DevContainer {
+                workspace_folder: workspace_folder.clone(),
+                docker_path: docker_path.clone(),
+                container_id: container_id.clone(),
+                remote_user: remote_user.clone(),
+                remote_workspace_folder: remote_workspace_folder.clone(),
+                sandbox_id: sandbox_id.clone(),
+            }),
         }
     }
 
@@ -334,6 +376,32 @@ impl AvailableShell {
     pub fn is_docker_sandbox(&self) -> bool {
         matches!(self.state.as_ref(), Config::DockerSandbox { .. })
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_dev_container_shell(
+        workspace_folder: PathBuf,
+        docker_path: PathBuf,
+        container_id: String,
+        remote_user: Option<String>,
+        remote_workspace_folder: String,
+        sandbox_id: String,
+    ) -> Self {
+        Self {
+            id: None,
+            state: Arc::new(Config::DevContainer {
+                workspace_folder,
+                docker_path,
+                container_id,
+                remote_user,
+                remote_workspace_folder,
+                sandbox_id,
+            }),
+        }
+    }
+
+    pub fn is_dev_container(&self) -> bool {
+        matches!(self.state.as_ref(), Config::DevContainer { .. })
+    }
 }
 
 impl From<AvailableShell> for NewSessionShell {
@@ -357,6 +425,9 @@ impl From<AvailableShell> for NewSessionShell {
             // TODO(advait): If we ever let users pin the sandbox as their
             // default shell, add a `NewSessionShell::DockerSandbox` variant.
             Config::DockerSandbox { .. } => NewSessionShell::SystemDefault,
+            // Same rationale as `DockerSandbox` above: not persistable as a
+            // default shell today.
+            Config::DevContainer { .. } => NewSessionShell::SystemDefault,
         }
     }
 }
@@ -378,6 +449,7 @@ impl From<AvailableShell> for StartupShell {
             // NewSessionShell`: the sandbox isn't persistable as a startup
             // shell today, so fall back to default.
             Config::DockerSandbox { .. } => StartupShell::Default,
+            Config::DevContainer { .. } => StartupShell::Default,
         }
     }
 }
@@ -937,7 +1009,8 @@ impl AvailableShells {
                     Config::Custom(_)
                     | Config::SystemDefault
                     | Config::Wsl { .. }
-                    | Config::DockerSandbox { .. } => {
+                    | Config::DockerSandbox { .. }
+                    | Config::DevContainer { .. } => {
                         return false;
                     }
                 };

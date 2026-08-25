@@ -808,6 +808,29 @@ pub enum ShellLaunchData {
         /// image".
         base_image: Option<String>,
     },
+    /// A shell running inside a Dev Container (`.devcontainer/devcontainer.json`)
+    /// that has already been brought up via the `@devcontainers/cli`.
+    ///
+    /// The container was brought up with `devcontainer up`, but this attaches
+    /// with plain `docker exec` rather than `devcontainer exec`: empirically,
+    /// `devcontainer exec` does not reliably deliver Warp's DCS-based
+    /// `InitShell` hook to an interactive `bash --rcfile` session (see the
+    /// comment on `local_tty::unix::prepare_dev_container`), so we bypass it
+    /// for the attach step and use the `containerId`/`remoteUser`/
+    /// `remoteWorkspaceFolder` that `devcontainer up` already reports.
+    DevContainer {
+        /// Host project directory containing `.devcontainer`, kept for
+        /// display purposes only (e.g. `shell_detail`).
+        workspace_folder: PathBuf,
+        /// Resolved path to the `docker` CLI binary on the host.
+        docker_path: PathBuf,
+        container_id: String,
+        remote_user: Option<String>,
+        remote_workspace_folder: String,
+        /// Sandbox ID picked when the container was brought up; determines
+        /// the host-side init-script bind-mount path.
+        sandbox_id: String,
+    },
 }
 
 impl ShellLaunchData {
@@ -832,7 +855,9 @@ impl ShellLaunchData {
                 .ok()
             }
             // Paths inside the sandbox container are plain Unix paths.
-            ShellLaunchData::DockerSandbox { .. } => Some(PathBuf::from(path_str)),
+            ShellLaunchData::DockerSandbox { .. } | ShellLaunchData::DevContainer { .. } => {
+                Some(PathBuf::from(path_str))
+            }
         }
     }
 
@@ -842,9 +867,9 @@ impl ShellLaunchData {
         shell_encoded_path: TypedPathBuf,
     ) -> Option<PathBuf> {
         match self {
-            ShellLaunchData::Executable { .. } | ShellLaunchData::DockerSandbox { .. } => {
-                PathBuf::try_from(shell_encoded_path).ok()
-            }
+            ShellLaunchData::Executable { .. }
+            | ShellLaunchData::DockerSandbox { .. }
+            | ShellLaunchData::DevContainer { .. } => PathBuf::try_from(shell_encoded_path).ok(),
             ShellLaunchData::WSL { distro } => {
                 convert_wsl_to_windows_host_path(&shell_encoded_path.to_path(), distro).ok()
             }
@@ -870,7 +895,9 @@ impl ShellLaunchData {
             }
             // The container is Unix; Warp runs on the host, so paths are
             // already in the host's native encoding. Pass through unchanged.
-            ShellLaunchData::DockerSandbox { .. } => Some(PathBuf::from(path_str)),
+            ShellLaunchData::DockerSandbox { .. } | ShellLaunchData::DevContainer { .. } => {
+                Some(PathBuf::from(path_str))
+            }
         }
     }
 
@@ -886,7 +913,8 @@ impl ShellLaunchData {
             }
             ShellLaunchData::WSL { .. }
             | ShellLaunchData::MSYS2 { .. }
-            | ShellLaunchData::DockerSandbox { .. } => TypedPath::unix(path_str),
+            | ShellLaunchData::DockerSandbox { .. }
+            | ShellLaunchData::DevContainer { .. } => TypedPath::unix(path_str),
         }
     }
 
@@ -923,6 +951,11 @@ impl ShellLaunchData {
                 Some(image) => format!("Docker sandbox ({image})"),
                 None => "Docker sandbox".to_owned(),
             },
+            Self::DevContainer {
+                workspace_folder, ..
+            } => {
+                format!("Dev container ({})", workspace_folder.display())
+            }
         }
     }
 }
@@ -934,6 +967,7 @@ impl From<ShellLaunchData> for SessionPlatform {
             ShellLaunchData::WSL { .. } => SessionPlatform::WSL,
             ShellLaunchData::MSYS2 { .. } => SessionPlatform::MSYS2,
             ShellLaunchData::DockerSandbox { .. } => SessionPlatform::DockerSandbox,
+            ShellLaunchData::DevContainer { .. } => SessionPlatform::DevContainer,
         }
     }
 }

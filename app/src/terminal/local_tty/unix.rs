@@ -34,6 +34,7 @@ use super::{ChildEvent, EventedPty, EventedReadWrite, PtyOptions, SizeInfo};
 use crate::ASSETS;
 use crate::terminal::bootstrap::raw_init_shell_script_for_shell;
 use crate::terminal::cli_agent_sessions::event::current_protocol_version;
+use crate::terminal::local_tty::dev_container::DevContainerShellStarter;
 use crate::terminal::local_tty::docker_sandbox::{
     DOCKER_SANDBOX_HOME_DIR, DockerSandboxShellStarter,
 };
@@ -96,6 +97,38 @@ fn docker_sandbox_run_args(starter: &DockerSandboxShellStarter) -> Vec<std::ffi:
         std::ffi::OsString::from("--"),
         std::ffi::OsString::from("-c"),
         std::ffi::OsString::from(bash_cmd),
+    ]);
+    args
+}
+
+/// Builds the `docker exec` args that attach a bash shell (sourcing the
+/// bind-mounted init script) to an already-running Dev Container.
+///
+/// This attaches with plain `docker exec` rather than `devcontainer exec`;
+/// see the doc comment on [`crate::terminal::shell::ShellLaunchData::DevContainer`]
+/// for why. Args are passed as literal argv entries, so no shell quoting is
+/// needed for the init path.
+fn dev_container_exec_args(starter: &DevContainerShellStarter) -> Vec<std::ffi::OsString> {
+    let mut args = vec![
+        std::ffi::OsString::from("exec"),
+        std::ffi::OsString::from("-it"),
+    ];
+    if let Some(remote_user) = &starter.remote_user {
+        args.push(std::ffi::OsString::from("-u"));
+        args.push(std::ffi::OsString::from(remote_user));
+    }
+    args.extend([
+        std::ffi::OsString::from("-w"),
+        std::ffi::OsString::from(&starter.remote_workspace_folder),
+        std::ffi::OsString::from("-e"),
+        std::ffi::OsString::from("TERM=xterm-256color"),
+        std::ffi::OsString::from("-e"),
+        std::ffi::OsString::from("COLORTERM=truecolor"),
+        std::ffi::OsString::from(&starter.container_id),
+        std::ffi::OsString::from("bash"),
+        std::ffi::OsString::from("--rcfile"),
+        starter.init_path().into_os_string(),
+        std::ffi::OsString::from("--noprofile"),
     ]);
     args
 }
@@ -229,6 +262,10 @@ pub(super) fn spawn(options: PtyOptions) -> Result<PtySpawnInfo> {
     if let ShellStarter::DockerSandbox(docker_starter) = &options.shell_starter {
         let docker_starter = docker_starter.clone();
         return spawn_docker_sandbox(options, docker_starter);
+    }
+    if let ShellStarter::DevContainer(dev_container_starter) = &options.shell_starter {
+        let dev_container_starter = dev_container_starter.clone();
+        return spawn_dev_container(options, dev_container_starter);
     }
 
     let PtyOptions {
@@ -978,6 +1015,209 @@ fn prepare_docker_sandbox(starter: &DockerSandboxShellStarter) -> Result<()> {
     // sandbox does not inherit access to the user's home directory or the
     // current local repository by default.
     mk_owner_only_dir(&starter.workspace_dir())?;
+
+    Ok(())
+}
+
+/// Spawn the PTY for a Dev Container session.
+///
+/// The container itself is assumed to already be running (`devcontainer up`
+/// having completed, with the init-script bind mount configured) — see
+/// `crate::terminal::view::dev_container` for that lifecycle step, which runs
+/// before a `DevContainerShellStarter`, and therefore this function, ever
+/// exists. This function only writes the init script to the host path it
+/// will be mounted at, then delegates to the shared [`spawn_command_in_pty`]
+/// helper so PTY/`pre_exec` setup stays identical to the host-shell path.
+fn spawn_dev_container(
+    options: PtyOptions,
+    dev_container_starter: DevContainerShellStarter,
+) -> Result<PtySpawnInfo> {
+    if let Err(e) = prepare_dev_container(&dev_container_starter) {
+        log::error!("Dev Container setup failed: {e:#}");
+        return Err(Error::msg(format!("Dev Container setup failed: {e}")));
+    }
+
+    let PtyOptions {
+        size,
+        window_id,
+        shell_starter: _,
+        start_dir: _,
+        env_vars,
+        enable_ssh_wrapper,
+        reuse_ssh_control_master,
+        shell_debug_mode,
+        honor_ps1,
+        node_version_chip_enabled,
+        close_fds,
+    } = options;
+
+    let command = build_dev_container_command(
+        &dev_container_starter,
+        window_id,
+        env_vars,
+        enable_ssh_wrapper,
+        reuse_ssh_control_master,
+        shell_debug_mode,
+        honor_ps1,
+        node_version_chip_enabled,
+    );
+
+    spawn_command_in_pty(command, &size, close_fds)
+}
+
+/// Builds the `Command` for a Dev Container PTY session: `docker exec`
+/// invocation with the bind-mounted init script and host-side environment
+/// variables. Window size is not passed at exec time: Docker forwards live
+/// resizes from our outer pty automatically for `-it` sessions, the same as
+/// it does for `docker run -it`/`docker attach`.
+///
+/// Does not perform any PTY-level setup; hand the returned `Command` to
+/// [`spawn_command_in_pty`].
+#[allow(clippy::too_many_arguments)]
+fn build_dev_container_command(
+    dev_container_starter: &DevContainerShellStarter,
+    window_id: Option<usize>,
+    env_vars: HashMap<OsString, OsString>,
+    enable_ssh_wrapper: bool,
+    reuse_ssh_control_master: bool,
+    shell_debug_mode: bool,
+    honor_ps1: bool,
+    node_version_chip_enabled: bool,
+) -> Command {
+    let pw = resolve_current_user();
+
+    log::info!(
+        "Starting Dev Container via {}",
+        dev_container_starter.logical_shell_path().display()
+    );
+
+    let mut builder = Command::new(dev_container_starter.logical_shell_path());
+    for arg in dev_container_exec_args(dev_container_starter) {
+        builder.arg(arg);
+    }
+
+    let home_dir = std::env::var("HOME")
+        .ok()
+        .or_else(|| pw.as_ref().map(|pw| pw.dir.to_owned()))
+        .unwrap_or_else(|| "/".to_owned());
+
+    // Environment variables set on the host-side `docker exec` process.
+    // Mirrors `build_docker_sandbox_command`'s env list; see the TODO there
+    // about auditing which of these the in-container bash session actually
+    // needs versus which only matter for the host-side CLI process.
+    if let Some(user_name) = pw
+        .as_ref()
+        .map(|pw| pw.name.to_owned())
+        .or_else(|| std::env::var("USER").ok())
+        .or_else(|| std::env::var("LOGNAME").ok())
+    {
+        builder.env("LOGNAME", &user_name);
+        builder.env("USER", &user_name);
+    }
+    builder.env("HOME", &home_dir);
+    builder.env("TERM", "xterm-256color");
+    builder.env("TERM_PROGRAM", "WarpTerminal");
+    builder.env("COLORTERM", "truecolor");
+    builder.env_remove("DESKTOP_STARTUP_ID");
+    if let Some(version) = ChannelState::app_version() {
+        builder.env("TERM_PROGRAM_VERSION", version);
+        builder.env(WARP_CLIENT_VERSION_ENV, version);
+    } else {
+        builder.env(WARP_CLIENT_VERSION_ENV, "local");
+    }
+    builder.env("SHELL", dev_container_starter.logical_shell_path());
+    if let Some(window_id) = window_id {
+        builder.env("WINDOWID", format!("{window_id}"));
+    }
+    builder.env(
+        "WARP_USE_SSH_WRAPPER",
+        if enable_ssh_wrapper { "1" } else { "0" },
+    );
+    builder.env(
+        "WARP_SSH_REUSE_CONTROL_MASTER",
+        if reuse_ssh_control_master { "1" } else { "0" },
+    );
+    builder.env("SSH_SOCKET_DIR", ssh_socket_dir());
+    builder.env("WARP_IS_LOCAL_SHELL_SESSION", "1");
+    if FeatureFlag::HOANotifications.is_enabled() {
+        builder.env(
+            WARP_CLI_AGENT_PROTOCOL_VERSION_ENV,
+            current_protocol_version().to_string(),
+        );
+    }
+    if shell_debug_mode {
+        builder.env("WARP_SHELL_DEBUG_MODE", "1");
+    }
+    builder.env("WARP_HONOR_PS1", if honor_ps1 { "1" } else { "0" });
+    builder.env(
+        "WARP_PROMPT_NODE_VERSION_ENABLED",
+        if node_version_chip_enabled { "1" } else { "0" },
+    );
+    let path_append = extra_path_entries()
+        .map(|p| p.to_string_lossy().into_owned())
+        .join(":");
+    builder.env("WARP_PATH_APPEND", path_append);
+    // Dev Container shell is always bash, matching the host-shell path's
+    // behavior for bash shells.
+    builder.env("HISTFILESIZE", BASH_HISTORY_SIZE_SENTINEL);
+    builder.env("HISTSIZE", BASH_HISTORY_SIZE_SENTINEL);
+    builder.env("WARP_INITIAL_HISTFILESIZE", BASH_HISTORY_SIZE_SENTINEL);
+    builder.env("WARP_INITIAL_HISTSIZE", BASH_HISTORY_SIZE_SENTINEL);
+    // Intentionally do NOT set `WARP_INITIAL_WORKING_DIR`: `docker exec -w`
+    // already starts in the container's configured workspace folder.
+
+    // Apply any caller-provided environment overrides last, so they win.
+    for (key, value) in env_vars {
+        builder.env(key, value);
+    }
+
+    builder.current_dir(home_dir);
+
+    builder
+}
+
+/// Prepare the Dev Container session before spawning the PTY: write the bash
+/// init script to this session's dedicated host init dir, which was already
+/// bind-mounted into the container (read-only) when it was brought up.
+///
+/// The path is derived from `starter.sandbox_id` so multiple concurrent Warp
+/// panes attaching to Dev Containers don't race on or share the same host
+/// init-script path.
+///
+/// TODO(prototype): No cleanup on pane close. See the matching TODO on
+/// `prepare_docker_sandbox` — the same host-side init dir accumulates across
+/// sessions. Tracking as a follow-up if this graduates past prototype.
+fn prepare_dev_container(starter: &DevContainerShellStarter) -> Result<()> {
+    let mk_owner_only_dir = |path: &Path| -> Result<()> {
+        DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
+            .with_context(|| format!("create dev container init dir {}", path.display()))
+    };
+
+    // `docker exec -it` relays bytes from the container's pty to our outer
+    // pty across an extra hop (through the Docker daemon). Measured
+    // empirically: without a delay, that hop's latency loses a race against
+    // bash's own interactive-mode terminal setup (which runs immediately
+    // after the rcfile finishes sourcing) often enough that the InitShell
+    // DCS hook below never reaches Warp, leaving the pane stuck showing
+    // "Starting bash..." forever. This is the same class of "double-PTY
+    // proxy drops data" issue already documented for `docker`/`podman exec`
+    // subshells in `pty_controller.rs` (which works around it with chunked
+    // writes); a short sleep here is the equivalent fix for our top-level
+    // session, giving the relay time to flush the hook before bash moves on.
+    // (`devcontainer exec` was tried first here, but empirically drops this
+    // DCS hook outright regardless of delay — not just a race — so the
+    // attach step shells out to plain `docker exec` instead; see
+    // `ShellLaunchData::DevContainer`.)
+    let init_script = format!(
+        "{};sleep 0.2",
+        raw_init_shell_script_for_shell(ShellType::Bash, &ASSETS, starter.session_id())
+    );
+    let init_dir = starter.init_dir();
+    mk_owner_only_dir(&init_dir)?;
+    std::fs::write(starter.init_path(), init_script).context("write dev container init script")?;
 
     Ok(())
 }

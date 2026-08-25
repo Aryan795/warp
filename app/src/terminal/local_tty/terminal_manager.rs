@@ -612,6 +612,10 @@ fn on_shell_determined<S: TerminalSurface>(
             executable_path: docker_starter.logical_shell_path().to_owned(),
             shell_type: docker_starter.shell_type(),
         },
+        ShellStarter::DevContainer(dev_container_starter) => ShellLaunchData::Executable {
+            executable_path: dev_container_starter.logical_shell_path().to_owned(),
+            shell_type: dev_container_starter.shell_type(),
+        },
         ShellStarter::Wsl(shell_starter) => ShellLaunchData::WSL {
             distro: shell_starter.distribution().to_owned(),
         },
@@ -633,6 +637,7 @@ fn on_shell_determined<S: TerminalSurface>(
     let generated_session_id = match &shell_starter {
         ShellStarter::Direct(starter) | ShellStarter::MSYS2(starter) => starter.session_id(),
         ShellStarter::DockerSandbox(starter) => starter.session_id(),
+        ShellStarter::DevContainer(starter) => starter.session_id(),
         ShellStarter::Wsl(starter) => starter.session_id(),
     };
     manager

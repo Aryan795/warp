@@ -30,6 +30,7 @@ use warp_util::standardized_path::StandardizedPath;
 
 use crate::ai::block_context::BlockContext;
 use crate::global_resource_handles::GlobalResourceHandlesProvider;
+pub(crate) mod dev_container;
 pub(crate) mod docker_sandbox;
 mod link_detection;
 mod open_in_warp;
@@ -21923,6 +21924,13 @@ impl TerminalView {
                 }
                 self.create_and_push_docker_sandbox(ctx);
             }
+            InputEvent::CreateDevContainer => {
+                if !FeatureFlag::LocalDevContainer.is_enabled() {
+                    log::warn!("Local dev container feature flag is disabled");
+                    return;
+                }
+                self.find_and_start_dev_container(ctx);
+            }
             InputEvent::ExitCloudModeAndStartLocalAgent { initial_prompt } => {
                 let origin = AgentViewEntryOrigin::Input {
                     was_prompt_autodetected: false,
@@ -25976,6 +25984,13 @@ impl TerminalView {
                     .shell_path()
                     .to_string_lossy()
                     .to_string(),
+                ShellStarter::DevContainer(dev_container_shell_starter) => {
+                    dev_container_shell_starter
+                        .direct
+                        .shell_path()
+                        .to_string_lossy()
+                        .to_string()
+                }
                 ShellStarter::Wsl(wsl_shell_starter) => wsl_shell_starter.shell_path(),
             };
             Some((shell_path, shell_starter.shell_type()))
