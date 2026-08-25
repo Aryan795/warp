@@ -175,17 +175,16 @@ fn dev_container_cp_args(
     ]
 }
 
-/// Args for `docker exec -u 0 <container> id -un`, used to resolve the
-/// username of the account `bash --rcfile` will actually run as when
-/// `devcontainer up` didn't report a `remoteUser` (the real attach then runs
-/// with no `-u`, i.e. whatever the image's default exec user is). `-u 0`
-/// (numeric, not `root`) so this doesn't depend on an `/etc/passwd` entry
-/// existing for uid 0.
+/// Args for `docker exec <container> id -un`, used to resolve the username
+/// of the account `bash --rcfile` will actually run as when `devcontainer
+/// up` didn't report a `remoteUser`. Deliberately unqualified (no `-u`),
+/// matching exactly how the real attach in [`dev_container_exec_args`] runs
+/// in that case — passing `-u 0` here would always report `root` regardless
+/// of the image's actual default exec user, defeating the point of the
+/// probe.
 fn dev_container_default_user_args(starter: &DevContainerShellStarter) -> Vec<std::ffi::OsString> {
     vec![
         std::ffi::OsString::from("exec"),
-        std::ffi::OsString::from("-u"),
-        std::ffi::OsString::from("0"),
         std::ffi::OsString::from(&starter.container_id),
         std::ffi::OsString::from("id"),
         std::ffi::OsString::from("-un"),
@@ -198,9 +197,10 @@ fn dev_container_default_user_args(starter: &DevContainerShellStarter) -> Vec<st
 /// relationship to `target_user`'s uid inside the container (different
 /// images and user namespaces), so without this, `target_user` can end up
 /// unable to read its own `--rcfile`, or the copy can be left readable by
-/// other users in the container. `-u 0` for the same reason as
-/// [`dev_container_default_user_args`]; only uid 0 can `chown` to a
-/// different user.
+/// other users in the container. `-u 0` (numeric, not `root`) so this
+/// doesn't depend on an `/etc/passwd` entry existing for uid 0; unlike
+/// [`dev_container_default_user_args`], this genuinely needs uid 0's
+/// privilege — only it can `chown` to a different user.
 fn dev_container_chown_args(
     starter: &DevContainerShellStarter,
     target_user: &str,

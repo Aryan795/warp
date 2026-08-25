@@ -124,23 +124,25 @@ fn dev_container_up_failure_message_falls_back_to_stderr_tail_and_trims_blank_li
 
 #[test]
 fn dev_container_script_preflight_args_without_remote_user() {
-    let args = dev_container_script_preflight_args("abc123", None);
+    let args = dev_container_script_preflight_args("abc123", None, "/workspaces/project");
 
     assert_eq!(
         args,
         vec![
             std::ffi::OsString::from("exec"),
+            std::ffi::OsString::from("-w"),
+            std::ffi::OsString::from("/workspaces/project"),
             std::ffi::OsString::from("abc123"),
             std::ffi::OsString::from("sh"),
             std::ffi::OsString::from("-c"),
-            std::ffi::OsString::from("command -v script"),
+            std::ffi::OsString::from("command -v script && command -v bash"),
         ]
     );
 }
 
 #[test]
 fn dev_container_script_preflight_args_with_remote_user() {
-    let args = dev_container_script_preflight_args("abc123", Some("vscode"));
+    let args = dev_container_script_preflight_args("abc123", Some("vscode"), "/workspaces/project");
 
     assert_eq!(
         args,
@@ -148,12 +150,22 @@ fn dev_container_script_preflight_args_with_remote_user() {
             std::ffi::OsString::from("exec"),
             std::ffi::OsString::from("-u"),
             std::ffi::OsString::from("vscode"),
+            std::ffi::OsString::from("-w"),
+            std::ffi::OsString::from("/workspaces/project"),
             std::ffi::OsString::from("abc123"),
             std::ffi::OsString::from("sh"),
             std::ffi::OsString::from("-c"),
-            std::ffi::OsString::from("command -v script"),
+            std::ffi::OsString::from("command -v script && command -v bash"),
         ]
     );
+}
+
+#[test]
+fn dev_container_script_preflight_args_checks_both_script_and_bash() {
+    let args = dev_container_script_preflight_args("abc123", None, "/workspaces/project");
+    let check = args.last().expect("args should be non-empty");
+
+    assert_eq!(check, "command -v script && command -v bash");
 }
 
 #[test]

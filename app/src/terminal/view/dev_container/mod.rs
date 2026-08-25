@@ -315,14 +315,17 @@ impl TerminalView {
         });
     }
 
-    /// Checks that the container is actually attachable — that it has the
-    /// `script` binary [`crate::terminal::local_tty::unix::dev_container_exec_args`]'s
-    /// attach mechanism depends on (not guaranteed present in every image),
-    /// and that `remote_user` (if any) is a real user in the container —
-    /// *before* creating a pane. Without this, either failure would only
-    /// surface once `bash --rcfile` is already running inside a freshly
-    /// created pane that then immediately exits, well past the point where
-    /// an error toast with no pane is still possible.
+    /// Checks that the container is actually attachable — that it has both
+    /// `script` and `bash`
+    /// ([`crate::terminal::local_tty::unix::dev_container_exec_args`]'s
+    /// attach mechanism depends on both, and neither is guaranteed present
+    /// in every image), and that `remote_user`/`remote_workspace_folder`
+    /// (using the exact same `-u`/`-w` the real attach uses) are actually
+    /// valid in the container — *before* creating a pane. Without this, any
+    /// of those failures would only surface once `bash --rcfile` is already
+    /// running inside a freshly created pane that then immediately exits,
+    /// well past the point where an error toast with no pane is still
+    /// possible.
     #[cfg(feature = "local_tty")]
     #[allow(clippy::too_many_arguments)]
     fn preflight_and_attach_dev_container(
@@ -339,11 +342,13 @@ impl TerminalView {
             let docker_path = docker_path.clone();
             let container_id = container_id.clone();
             let remote_user = remote_user.clone();
+            let remote_workspace_folder = remote_workspace_folder.clone();
             async move {
                 Command::new(&docker_path)
                     .args(dev_container_script_preflight_args(
                         &container_id,
                         remote_user.as_deref(),
+                        &remote_workspace_folder,
                     ))
                     .output()
                     .await
@@ -374,8 +379,9 @@ impl TerminalView {
                 let detail = tail_lines(&String::from_utf8_lossy(&output.stderr), 5);
                 me.show_dev_container_toast(
                     format!(
-                        "Dev container is missing the `script` utility Warp needs to attach a \
-                         session, or its configured remote user doesn't exist: {detail}"
+                        "Dev container isn't ready to attach: it may be missing `script` or \
+                         `bash`, or its configured remote user or workspace folder may not \
+                         exist: {detail}"
                     ),
                     ToastFlavor::Error,
                     ctx,
@@ -530,17 +536,19 @@ fn dev_container_up_failure_message(stdout: &[u8], stderr: &[u8]) -> String {
     })
 }
 
-/// Args for a preflight `docker exec` that checks both that the container has
-/// a `script` binary — a hard dependency of
-/// `crate::terminal::local_tty::unix::dev_container_exec_args`'s attach
-/// mechanism, and not guaranteed present in every image — and that
-/// `remote_user` (if any) actually exists in the container, since an
-/// unqualified `-u <bad user>` fails the same way `sh` not finding `script`
-/// does: a non-zero exit with no pane created.
+/// Args for a preflight `docker exec` that checks the same things the real
+/// attach in `crate::terminal::local_tty::unix::dev_container_exec_args`
+/// needs to succeed, run with the exact same `-u`/`-w` it uses: that the
+/// container has both `script` and `bash` (neither guaranteed present in
+/// every image), and that `remote_user` and `remote_workspace_folder` (if
+/// set) are actually valid in the container — an unqualified `-u <bad
+/// user>` or `-w <missing dir>` fails a `docker exec` the same way `sh` not
+/// finding `script`/`bash` does: a non-zero exit with no pane created.
 #[cfg(feature = "local_tty")]
 fn dev_container_script_preflight_args(
     container_id: &str,
     remote_user: Option<&str>,
+    remote_workspace_folder: &str,
 ) -> Vec<std::ffi::OsString> {
     let mut args = vec![std::ffi::OsString::from("exec")];
     if let Some(remote_user) = remote_user {
@@ -548,10 +556,12 @@ fn dev_container_script_preflight_args(
         args.push(std::ffi::OsString::from(remote_user));
     }
     args.extend([
+        std::ffi::OsString::from("-w"),
+        std::ffi::OsString::from(remote_workspace_folder),
         std::ffi::OsString::from(container_id),
         std::ffi::OsString::from("sh"),
         std::ffi::OsString::from("-c"),
-        std::ffi::OsString::from("command -v script"),
+        std::ffi::OsString::from("command -v script && command -v bash"),
     ]);
     args
 }

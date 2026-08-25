@@ -212,17 +212,35 @@ fn dev_container_default_user_args_query_the_unqualified_exec_user() {
     let starter = dev_container_starter(None);
     let args = dev_container_default_user_args(&starter);
 
+    // Deliberately no `-u` here: the point is to ask the container what user
+    // an unqualified `docker exec` (the same as the real attach uses when
+    // there's no `remoteUser`) actually runs as. Passing `-u 0` would always
+    // answer "root" regardless of the image's real default user.
     assert_eq!(
         args,
         vec![
             std::ffi::OsString::from("exec"),
-            std::ffi::OsString::from("-u"),
-            std::ffi::OsString::from("0"),
             std::ffi::OsString::from("abc123"),
             std::ffi::OsString::from("id"),
             std::ffi::OsString::from("-un"),
         ]
     );
+}
+
+#[test]
+fn dev_container_default_user_args_do_not_force_root_unlike_chown_args() {
+    let starter = dev_container_starter(None);
+    let default_user_args = dev_container_default_user_args(&starter);
+    let chown_args = dev_container_chown_args(&starter, "someuser");
+
+    // The default-user probe and the chown step have opposite goals for
+    // *which* user runs the command: the probe must run unqualified to
+    // observe the real default user, while chown must run as root (uid 0)
+    // to be able to change ownership at all. Guard against ever
+    // "simplifying" the probe back to reusing the chown/chmod/rm helpers'
+    // `-u 0`.
+    assert!(!default_user_args.iter().any(|arg| arg == "-u"));
+    assert!(chown_args.iter().any(|arg| arg == "-u"));
 }
 
 #[test]
