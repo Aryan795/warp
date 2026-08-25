@@ -365,6 +365,23 @@ impl<T: EventLoopSender> PtyController<T> {
         pending_session_info: &SessionInfo,
         ctx: &mut ModelContext<Self>,
     ) {
+        // Dev Container sessions never reach here needing a write: the small
+        // init script `local_tty::unix::prepare_dev_container` stages into
+        // the container (and passes to `bash --rcfile`) already `source`s
+        // the full bootstrap script staged alongside it, so the container
+        // bootstraps itself entirely from files by the time this `InitShell`
+        // hook is even received. Typing the bootstrap script here as well
+        // would be redundant (bash_body.sh's own `WARP_BOOTSTRAPPED` guard
+        // makes it a no-op) but would still retype ~35KB into a live,
+        // already-interactive prompt — reintroducing the readline-echoed
+        // heredoc noise this staging exists to avoid.
+        if matches!(
+            pending_session_info.launch_data,
+            Some(crate::terminal::ShellLaunchData::DevContainer { .. })
+        ) {
+            return;
+        }
+
         let shell_type = pending_session_info.shell.shell_type();
 
         #[cfg(feature = "local_fs")]

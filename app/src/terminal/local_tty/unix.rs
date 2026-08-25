@@ -32,7 +32,7 @@ use super::event_loop::{PTY_TOKEN, SIGNALS_TOKEN};
 use super::spawner::{PtyHandle, PtySpawnInfo, PtySpawner};
 use super::{ChildEvent, EventedPty, EventedReadWrite, PtyOptions, SizeInfo};
 use crate::ASSETS;
-use crate::terminal::bootstrap::raw_init_shell_script_for_shell;
+use crate::terminal::bootstrap::{raw_init_shell_script_for_shell, script_for_shell};
 use crate::terminal::cli_agent_sessions::event::current_protocol_version;
 use crate::terminal::local_tty::dev_container::DevContainerShellStarter;
 use crate::terminal::local_tty::docker_sandbox::{
@@ -170,19 +170,18 @@ fn dev_container_exec_args(starter: &DevContainerShellStarter) -> Vec<std::ffi::
     args
 }
 
-/// Args for `docker cp <host_init_script_path> <container>:<container_init_script_path>`.
+/// Args for `docker cp <host_path> <container>:<container_path>`. Used for
+/// both the init script and the full bootstrap script; the caller supplies
+/// which container-side path this particular file is destined for.
 fn dev_container_cp_args(
     starter: &DevContainerShellStarter,
-    host_init_script_path: &Path,
+    host_path: &Path,
+    container_path: &str,
 ) -> Vec<std::ffi::OsString> {
     vec![
         std::ffi::OsString::from("cp"),
-        host_init_script_path.as_os_str().to_owned(),
-        std::ffi::OsString::from(format!(
-            "{}:{}",
-            starter.container_id,
-            starter.container_init_script_path()
-        )),
+        host_path.as_os_str().to_owned(),
+        std::ffi::OsString::from(format!("{}:{}", starter.container_id, container_path)),
     ]
 }
 
@@ -203,18 +202,19 @@ fn dev_container_default_user_args(starter: &DevContainerShellStarter) -> Vec<st
 }
 
 /// Args for `docker exec -u 0 <container> chown <target_user> <path>`, run
-/// immediately after `docker cp` copies the init script in. `docker cp`
+/// immediately after `docker cp` copies a staged file in. `docker cp`
 /// preserves the *host* file's numeric uid, which has no guaranteed
 /// relationship to `target_user`'s uid inside the container (different
 /// images and user namespaces), so without this, `target_user` can end up
-/// unable to read its own `--rcfile`, or the copy can be left readable by
-/// other users in the container. `-u 0` (numeric, not `root`) so this
-/// doesn't depend on an `/etc/passwd` entry existing for uid 0; unlike
-/// [`dev_container_default_user_args`], this genuinely needs uid 0's
-/// privilege — only it can `chown` to a different user.
+/// unable to read its own `--rcfile`/bootstrap script, or the copy can be
+/// left readable by other users in the container. `-u 0` (numeric, not
+/// `root`) so this doesn't depend on an `/etc/passwd` entry existing for uid
+/// 0; unlike [`dev_container_default_user_args`], this genuinely needs uid
+/// 0's privilege — only it can `chown` to a different user.
 fn dev_container_chown_args(
     starter: &DevContainerShellStarter,
     target_user: &str,
+    container_path: &str,
 ) -> Vec<std::ffi::OsString> {
     vec![
         std::ffi::OsString::from("exec"),
@@ -223,15 +223,19 @@ fn dev_container_chown_args(
         std::ffi::OsString::from(&starter.container_id),
         std::ffi::OsString::from("chown"),
         std::ffi::OsString::from(target_user),
-        std::ffi::OsString::from(starter.container_init_script_path()),
+        std::ffi::OsString::from(container_path),
     ]
 }
 
 /// Args for `docker exec -u 0 <container> chmod 400 <path>`, run right after
-/// [`dev_container_chown_args`] so the init script — which embeds this
-/// session's DCS integrity token — is readable only by the user that now
+/// [`dev_container_chown_args`] so a staged file — the init script embeds
+/// this session's DCS integrity token, and the bootstrap script is Warp's
+/// full shell-integration payload — is readable only by the user that now
 /// owns it, regardless of whatever mode `docker cp` left it at.
-fn dev_container_chmod_args(starter: &DevContainerShellStarter) -> Vec<std::ffi::OsString> {
+fn dev_container_chmod_args(
+    starter: &DevContainerShellStarter,
+    container_path: &str,
+) -> Vec<std::ffi::OsString> {
     vec![
         std::ffi::OsString::from("exec"),
         std::ffi::OsString::from("-u"),
@@ -239,15 +243,18 @@ fn dev_container_chmod_args(starter: &DevContainerShellStarter) -> Vec<std::ffi:
         std::ffi::OsString::from(&starter.container_id),
         std::ffi::OsString::from("chmod"),
         std::ffi::OsString::from("400"),
-        std::ffi::OsString::from(starter.container_init_script_path()),
+        std::ffi::OsString::from(container_path),
     ]
 }
 
 /// Args for `docker exec -u 0 <container> rm -f <path>`: best-effort cleanup
-/// of the copied init script if [`dev_container_chown_args`]/
-/// [`dev_container_chmod_args`] fail partway, so a copy with unknown or
-/// insecure ownership isn't left behind in the container.
-fn dev_container_rm_args(starter: &DevContainerShellStarter) -> Vec<std::ffi::OsString> {
+/// of a copied file if [`dev_container_chown_args`]/[`dev_container_chmod_args`]
+/// fail partway, so a copy with unknown or insecure ownership isn't left
+/// behind in the container.
+fn dev_container_rm_args(
+    starter: &DevContainerShellStarter,
+    container_path: &str,
+) -> Vec<std::ffi::OsString> {
     vec![
         std::ffi::OsString::from("exec"),
         std::ffi::OsString::from("-u"),
@@ -255,7 +262,7 @@ fn dev_container_rm_args(starter: &DevContainerShellStarter) -> Vec<std::ffi::Os
         std::ffi::OsString::from(&starter.container_id),
         std::ffi::OsString::from("rm"),
         std::ffi::OsString::from("-f"),
-        std::ffi::OsString::from(starter.container_init_script_path()),
+        std::ffi::OsString::from(container_path),
     ]
 }
 
@@ -1313,13 +1320,111 @@ fn build_dev_container_command(
     builder
 }
 
-/// Prepare the Dev Container session before spawning the PTY: stage the bash
-/// init script on the host, then `docker cp` it into the container at the
-/// path [`dev_container_exec_args`] passes to `bash --rcfile`.
+/// Runs `docker <args>` (or podman, etc. — whatever `starter`'s resolved CLI
+/// path is) to completion, treating a non-zero exit as an error.
+fn run_dev_container_docker_command(
+    starter: &DevContainerShellStarter,
+    args: Vec<OsString>,
+) -> Result<()> {
+    let args_display = args.iter().map(|a| a.to_string_lossy()).join(" ");
+    let status = Command::new(starter.logical_shell_path())
+        .args(&args)
+        .status()
+        .with_context(|| format!("run `docker {args_display}`"))?;
+    if !status.success() {
+        return Err(Error::msg(format!(
+            "`docker {args_display}` exited with {status}"
+        )));
+    }
+    Ok(())
+}
+
+/// Stages `contents` on the host at `host_path`, `docker cp`s it into the
+/// container at `container_path`, then chowns it to `target_user` and locks
+/// it down to owner-read-only. Used for both the small init script (which
+/// carries this session's DCS integrity token) and the full bootstrap script
+/// (Warp's shell-integration payload) — neither should be readable by any
+/// other user in the container.
 ///
-/// The path is derived from `starter.sandbox_id` so multiple concurrent Warp
-/// panes attaching to Dev Containers don't race on or share the same staged
-/// init-script path.
+/// On failure after the `docker cp` succeeds, best-effort removes the
+/// container-side copy rather than leaving it with unknown/insecure
+/// ownership.
+fn stage_and_secure_dev_container_file(
+    starter: &DevContainerShellStarter,
+    host_path: &Path,
+    contents: &[u8],
+    container_path: &str,
+    target_user: &str,
+) -> Result<()> {
+    let host_dir = host_path
+        .parent()
+        .context("dev container staged file path has no parent directory")?;
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(host_dir)
+        .with_context(|| format!("create dev container staging dir {}", host_dir.display()))?;
+    // `DirBuilder::create` (like `create_dir_all`) only applies `mode` to
+    // directories it actually creates, silently leaving a pre-existing
+    // directory's permissions untouched. Re-assert 0700 unconditionally so a
+    // scratch dir shared across every Dev Container session on this host
+    // can't end up traversable by other local users because of that.
+    std::fs::set_permissions(host_dir, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("chmod dev container staging dir {}", host_dir.display()))?;
+
+    std::fs::write(host_path, contents)
+        .with_context(|| format!("write dev container staged file {}", host_path.display()))?;
+    // `fs::write` creates the file at a mode governed by the process umask,
+    // which may be group/world-readable. Force owner-only regardless.
+    std::fs::set_permissions(host_path, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("chmod dev container staged file {}", host_path.display()))?;
+
+    run_dev_container_docker_command(
+        starter,
+        dev_container_cp_args(starter, host_path, container_path),
+    )
+    .with_context(|| format!("copy {container_path} into the container"))?;
+
+    // `docker cp` preserves the *host* file's numeric uid/gid, which has no
+    // guaranteed relationship to the uid of the user that will actually read
+    // this file inside the container (different images, users, and
+    // namespaces).
+    let secure_copy = run_dev_container_docker_command(
+        starter,
+        dev_container_chown_args(starter, target_user, container_path),
+    )
+    .with_context(|| format!("chown {container_path}"))
+    .and_then(|_| {
+        run_dev_container_docker_command(starter, dev_container_chmod_args(starter, container_path))
+            .with_context(|| format!("chmod {container_path}"))
+    });
+    if let Err(e) = secure_copy {
+        // Best-effort: don't leave a copy with unknown/insecure permissions
+        // sitting in the container just because we couldn't lock it down.
+        let _ = run_dev_container_docker_command(
+            starter,
+            dev_container_rm_args(starter, container_path),
+        );
+        return Err(e);
+    }
+
+    Ok(())
+}
+
+/// Prepare the Dev Container session before spawning the PTY: stage the
+/// small bash init script *and* the full bootstrap script on the host, then
+/// `docker cp` both into the container. The init script (passed to `bash
+/// --rcfile`) `source`s the bootstrap script directly, so the entire
+/// bootstrap — InitShell hook, rcfile sourcing, the `Bootstrapped` hook —
+/// runs from files the container reads itself; Warp never has to type any
+/// of it into the live pty. See [`dev_container_init_script`] for the
+/// `source` line and `write_bootstrap_script_to_shell` in
+/// `writeable_pty::pty_controller` for the corresponding no-op on the
+/// `InitShell`-triggered bootstrap-injection path.
+///
+/// Both paths are derived from `starter.sandbox_id` so multiple concurrent
+/// Warp panes attaching to Dev Containers don't race on or share the same
+/// staged paths.
 ///
 /// `docker cp` (rather than a bind mount configured at `devcontainer up`
 /// time) is what lets [`dev_container_exec_args`] attach with plain `docker
@@ -1336,99 +1441,63 @@ fn build_dev_container_command(
 /// [`dev_container_init_script`] for why that's needed.
 ///
 /// TODO(prototype): No cleanup on pane close. See the matching TODO on
-/// `prepare_docker_sandbox` — the staged host-side init script *and* its
-/// `docker cp`'d copy inside the container both accumulate across sessions.
-/// Tracking as a follow-up if this graduates past prototype.
+/// `prepare_docker_sandbox` — the staged host-side files *and* their
+/// `docker cp`'d copies inside the container both accumulate across
+/// sessions. Tracking as a follow-up if this graduates past prototype.
 fn prepare_dev_container(starter: &DevContainerShellStarter, size: &SizeInfo) -> Result<()> {
-    let host_init_script_path = starter.host_init_script_path();
-    let init_dir = host_init_script_path
-        .parent()
-        .context("dev container init script path has no parent directory")?;
-    DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(init_dir)
-        .with_context(|| format!("create dev container init dir {}", init_dir.display()))?;
-    // `DirBuilder::create` (like `create_dir_all`) only applies `mode` to
-    // directories it actually creates, silently leaving a pre-existing
-    // directory's permissions untouched. Re-assert 0700 unconditionally so a
-    // scratch dir shared across every Dev Container session on this host
-    // can't end up traversable by other local users because of that.
-    std::fs::set_permissions(init_dir, std::fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("chmod dev container init dir {}", init_dir.display()))?;
-
-    let init_script = dev_container_init_script(starter, size);
-    std::fs::write(&host_init_script_path, init_script)
-        .context("write dev container init script")?;
-    // `fs::write` creates the file at a mode governed by the process umask,
-    // which may be group/world-readable. Force owner-only regardless: this
-    // script embeds the session's DCS integrity token.
-    std::fs::set_permissions(
-        &host_init_script_path,
-        std::fs::Permissions::from_mode(0o600),
-    )
-    .with_context(|| {
-        format!(
-            "chmod dev container init script {}",
-            host_init_script_path.display()
-        )
-    })?;
-
-    let run_docker = |args: Vec<OsString>| -> Result<()> {
-        let args_display = args.iter().map(|a| a.to_string_lossy()).join(" ");
-        let status = Command::new(starter.logical_shell_path())
-            .args(&args)
-            .status()
-            .with_context(|| format!("run `docker {args_display}`"))?;
-        if !status.success() {
-            return Err(Error::msg(format!(
-                "`docker {args_display}` exited with {status}"
-            )));
-        }
-        Ok(())
-    };
-
-    run_docker(dev_container_cp_args(starter, &host_init_script_path))
-        .context("copy dev container init script into the container")?;
-
-    // `docker cp` preserves the *host* file's numeric uid/gid, which has no
-    // guaranteed relationship to the uid of the user that will actually
-    // source this via `--rcfile` inside the container (different images,
-    // users, and namespaces). Explicitly chown it to that user and lock the
-    // mode down, so it's readable by the right user and invisible to every
-    // other user in the container. If `devcontainer up` didn't report a
-    // `remoteUser`, resolve whichever user the real attach's unqualified
-    // `docker exec` (no `-u`) would actually run as.
+    // If `devcontainer up` didn't report a `remoteUser`, resolve whichever
+    // user the real attach's unqualified `docker exec` (no `-u`) would
+    // actually run as; both staged files are owned by the same user.
     let target_user = match &starter.remote_user {
         Some(remote_user) => remote_user.clone(),
         None => resolve_default_container_user(starter)?,
     };
-    let secure_copy = run_docker(dev_container_chown_args(starter, &target_user))
-        .context("chown dev container init script")
-        .and_then(|_| {
-            run_docker(dev_container_chmod_args(starter)).context("chmod dev container init script")
-        });
-    if let Err(e) = secure_copy {
-        // Best-effort: don't leave a copy with unknown/insecure permissions
-        // sitting in the container just because we couldn't lock it down.
-        let _ = run_docker(dev_container_rm_args(starter));
-        return Err(e);
-    }
+
+    let init_script = dev_container_init_script(starter, size);
+    stage_and_secure_dev_container_file(
+        starter,
+        &starter.host_init_script_path(),
+        init_script.as_bytes(),
+        &starter.container_init_script_path(),
+        &target_user,
+    )?;
+
+    // The same bootstrap script every local bash session gets, staged as a
+    // file instead of typed into the pty. See `dev_container_init_script`.
+    let bootstrap_script = script_for_shell(ShellType::Bash, &ASSETS);
+    stage_and_secure_dev_container_file(
+        starter,
+        &starter.host_bootstrap_script_path(),
+        &bootstrap_script,
+        &starter.container_bootstrap_script_path(),
+        &target_user,
+    )?;
 
     Ok(())
 }
 
 /// Builds the Dev Container init script: an explicit `stty rows/columns`
-/// line (see [`prepare_dev_container`] for why that's needed) followed by
-/// the normal shell init script.
+/// line (see [`prepare_dev_container`] for why that's needed), the normal
+/// shell init script (sends the `InitShell` hook), and finally a `source`
+/// of the full bootstrap script `prepare_dev_container` stages alongside it.
 ///
 /// `stty rows/columns` runs before `raw_init_shell_script_for_shell`'s own
 /// content (which includes `stty raw`); window size and the raw-mode flags
 /// are independent termios settings, but setting size first means it's in
 /// place for the whole session from the very first line bash reads.
+///
+/// Sourcing the bootstrap script here — rather than relying on Warp to type
+/// it into the pty once it sees the `InitShell` hook, as happens for local
+/// shells — means the entire bootstrap (`InitShell`, rcfile sourcing,
+/// `Bootstrapped`) runs as one `--rcfile` execution the container reads from
+/// disk, with nothing crossing the `docker exec` relay as typed input.
 fn dev_container_init_script(starter: &DevContainerShellStarter, size: &SizeInfo) -> String {
+    let bootstrap_path_quoted = format!(
+        "'{}'",
+        shell_escape_single_quotes(&starter.container_bootstrap_script_path(), ShellType::Bash)
+    );
     format!(
-        "command -p stty rows {} columns {}\n{}",
+        "command -p stty rows {} columns {}\n{}\nsource {bootstrap_path_quoted}\n",
         size.rows(),
         size.columns(),
         raw_init_shell_script_for_shell(ShellType::Bash, &ASSETS, starter.session_id())

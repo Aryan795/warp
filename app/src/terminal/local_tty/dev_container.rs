@@ -107,6 +107,23 @@ pub fn container_init_script_path_for_sandbox_id(sandbox_id: &str) -> String {
     format!("/tmp/.warp-devcontainer-init-{sandbox_id}.sh")
 }
 
+/// Host path where Warp stages a Dev Container session's full bootstrap
+/// script (the same script content used for local shells) before copying it
+/// into the container with `docker cp`, keyed by `sandbox_id` for the same
+/// reason as [`host_init_script_path_for_sandbox_id`].
+pub fn host_bootstrap_script_path_for_sandbox_id(sandbox_id: &str) -> PathBuf {
+    dev_container_host_root()
+        .join("init")
+        .join(format!("{sandbox_id}-bootstrap.sh"))
+}
+
+/// Path *inside the container* that the full bootstrap script is copied to.
+/// The init script's `--rcfile` content `source`s this path directly, so the
+/// large bootstrap script never has to be typed into the live pty.
+pub fn container_bootstrap_script_path_for_sandbox_id(sandbox_id: &str) -> String {
+    format!("/tmp/.warp-devcontainer-bootstrap-{sandbox_id}.sh")
+}
+
 /// Wraps a [`DirectShellStarter`] and adds Dev Container-specific parameters.
 ///
 /// Each instance carries a unique `sandbox_id` so multiple Warp panes
@@ -192,5 +209,16 @@ impl DevContainerShellStarter {
     /// Path inside the container the init script is copied to.
     pub fn container_init_script_path(&self) -> String {
         container_init_script_path_for_sandbox_id(&self.sandbox_id)
+    }
+
+    /// Host path where this session's full bootstrap script is staged before
+    /// `docker cp`.
+    pub fn host_bootstrap_script_path(&self) -> PathBuf {
+        host_bootstrap_script_path_for_sandbox_id(&self.sandbox_id)
+    }
+
+    /// Path inside the container the full bootstrap script is copied to.
+    pub fn container_bootstrap_script_path(&self) -> String {
+        container_bootstrap_script_path_for_sandbox_id(&self.sandbox_id)
     }
 }

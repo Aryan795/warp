@@ -155,11 +155,11 @@ fn dev_container_exec_args_includes_remote_user_when_present() {
 }
 
 #[test]
-fn dev_container_cp_args_targets_the_container_init_script_path() {
+fn dev_container_cp_args_targets_the_given_container_path() {
     let starter = dev_container_starter(None);
     let host_path =
         PathBuf::from("/home/user/.cache/warp-terminal-local/dev-container/init/deadbeef.sh");
-    let args = dev_container_cp_args(&starter, &host_path);
+    let args = dev_container_cp_args(&starter, &host_path, &starter.container_init_script_path());
 
     assert_eq!(
         args,
@@ -174,7 +174,7 @@ fn dev_container_cp_args_targets_the_container_init_script_path() {
 #[test]
 fn dev_container_chown_args_run_as_root_targeting_the_given_user() {
     let starter = dev_container_starter(Some("vscode"));
-    let args = dev_container_chown_args(&starter, "vscode");
+    let args = dev_container_chown_args(&starter, "vscode", &starter.container_init_script_path());
 
     assert_eq!(
         args,
@@ -193,7 +193,7 @@ fn dev_container_chown_args_run_as_root_targeting_the_given_user() {
 #[test]
 fn dev_container_chmod_args_lock_the_init_script_to_owner_read_only() {
     let starter = dev_container_starter(None);
-    let args = dev_container_chmod_args(&starter);
+    let args = dev_container_chmod_args(&starter, &starter.container_init_script_path());
 
     assert_eq!(
         args,
@@ -205,6 +205,29 @@ fn dev_container_chmod_args_lock_the_init_script_to_owner_read_only() {
             std::ffi::OsString::from("chmod"),
             std::ffi::OsString::from("400"),
             std::ffi::OsString::from(starter.container_init_script_path()),
+        ]
+    );
+}
+
+#[test]
+fn dev_container_cp_args_also_work_for_the_bootstrap_script_path() {
+    let starter = dev_container_starter(None);
+    let host_path = starter.host_bootstrap_script_path();
+    let args = dev_container_cp_args(
+        &starter,
+        &host_path,
+        &starter.container_bootstrap_script_path(),
+    );
+
+    assert_eq!(
+        args,
+        vec![
+            std::ffi::OsString::from("cp"),
+            std::ffi::OsString::from(&host_path),
+            std::ffi::OsString::from(format!(
+                "abc123:{}",
+                starter.container_bootstrap_script_path()
+            )),
         ]
     );
 }
@@ -233,7 +256,8 @@ fn dev_container_default_user_args_query_the_unqualified_exec_user() {
 fn dev_container_default_user_args_do_not_force_root_unlike_chown_args() {
     let starter = dev_container_starter(None);
     let default_user_args = dev_container_default_user_args(&starter);
-    let chown_args = dev_container_chown_args(&starter, "someuser");
+    let chown_args =
+        dev_container_chown_args(&starter, "someuser", &starter.container_init_script_path());
 
     // The default-user probe and the chown step have opposite goals for
     // *which* user runs the command: the probe must run unqualified to
@@ -255,9 +279,23 @@ fn dev_container_init_script_sets_window_size_before_the_shell_init_script() {
 }
 
 #[test]
-fn dev_container_rm_args_remove_the_container_side_init_script() {
+fn dev_container_init_script_sources_the_staged_bootstrap_script() {
     let starter = dev_container_starter(None);
-    let args = dev_container_rm_args(&starter);
+    let size = SizeInfo::new_without_font_metrics(40, 120);
+    let script = dev_container_init_script(&starter, &size);
+
+    // The bootstrap script is `source`d directly from a file the container
+    // already has, rather than typed into the pty by Warp later.
+    assert!(script.contains(&format!(
+        "source '{}'\n",
+        starter.container_bootstrap_script_path()
+    )));
+}
+
+#[test]
+fn dev_container_rm_args_remove_the_given_container_path() {
+    let starter = dev_container_starter(None);
+    let args = dev_container_rm_args(&starter, &starter.container_init_script_path());
 
     assert_eq!(
         args,
