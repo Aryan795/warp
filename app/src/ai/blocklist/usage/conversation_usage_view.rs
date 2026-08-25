@@ -32,7 +32,7 @@ use crate::persistence::model::{
     ContextWindowSegment, ContextWindowSegmentType, FULL_TERMINAL_USE_CATEGORY, ModelTokenUsage,
     PRIMARY_AGENT_CATEGORY, token_usage_category_display_name,
 };
-use crate::settings::{AISettings, UsageDisplayUnit};
+use crate::settings::{AISettings, AISettingsChangedEvent, UsageDisplayUnit};
 use crate::ui_components::blended_colors;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +177,14 @@ impl ConversationUsageView {
         parent_conversation_id: AIConversationId,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
+        // Re-render immediately when the usage display unit changes, since
+        // `render_unified_layout` reads it directly at render time.
+        ctx.subscribe_to_model(&AISettings::handle(ctx), |_, _, event, ctx| {
+            if matches!(event, AISettingsChangedEvent::UsageDisplayUnit { .. }) {
+                ctx.notify();
+            }
+        });
+
         let history_model = BlocklistAIHistoryModel::handle(ctx);
         ctx.subscribe_to_model(&history_model, move |_, history, event, ctx| {
             // Narrow to events that can actually change *this* orchestrator's

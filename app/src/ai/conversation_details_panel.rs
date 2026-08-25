@@ -63,9 +63,7 @@ use crate::send_telemetry_from_ctx;
 use crate::server::ids::{ServerId, SyncId};
 use crate::server::server_api::ServerApiProvider;
 use crate::server::server_api::ai::AmbientAgentTask;
-use crate::settings::ai::AISettings;
-#[cfg(not(target_family = "wasm"))]
-use crate::settings::ai::AISettingsChangedEvent;
+use crate::settings::ai::{AISettings, AISettingsChangedEvent};
 use crate::ui_components::avatar::{Avatar, AvatarContent};
 use crate::ui_components::blended_colors;
 use crate::ui_components::buttons::icon_button;
@@ -770,9 +768,12 @@ impl ConversationDetailsPanel {
                     ctx.dispatch_typed_action(ConversationDetailsPanelAction::OpenInOz);
                 })
         });
-        #[cfg(not(target_family = "wasm"))]
         ctx.subscribe_to_model(&AISettings::handle(ctx), |_, _, event, ctx| {
-            if matches!(event, AISettingsChangedEvent::IsAnyAIEnabled { .. }) {
+            if matches!(
+                event,
+                AISettingsChangedEvent::IsAnyAIEnabled { .. }
+                    | AISettingsChangedEvent::UsageDisplayUnit { .. }
+            ) {
                 ctx.notify();
             }
         });
