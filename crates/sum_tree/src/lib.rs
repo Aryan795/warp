@@ -151,15 +151,20 @@ impl<T: Item> SumTree<T> {
         }
     }
 
+    /// Appends a single item.
+    ///
+    /// The item is handed to [`SumTree::push_tree`] as a bare one-item leaf rather than wrapped in
+    /// an internal node. Wrapping it made `push_tree_recursive` take its `height_delta == 0` branch
+    /// once the destination outgrew a single leaf, which adopts the pushed node's children whole and
+    /// so gave every item a leaf of its own. A bare leaf is underflowing, so it descends to the
+    /// rightmost leaf and merges — the path a partial leaf from [`SumTree::extend`] already takes.
     pub fn push(&mut self, item: T) {
         let summary = item.summary();
-        self.push_tree(SumTree::from_child_trees(vec![SumTree(Arc::new(
-            Node::Leaf {
-                summary: summary.clone(),
-                items: ArrayVec::from_iter(Some(item)),
-                item_summaries: ArrayVec::from_iter(Some(summary)),
-            },
-        ))]))
+        self.push_tree(SumTree(Arc::new(Node::Leaf {
+            summary: summary.clone(),
+            items: ArrayVec::from_iter(Some(item)),
+            item_summaries: ArrayVec::from_iter(Some(summary)),
+        })))
     }
 
     pub fn push_tree(&mut self, other: Self) {
