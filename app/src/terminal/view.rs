@@ -9277,11 +9277,9 @@ impl TerminalView {
     ) {
         // Every direct/programmatic scroll operation reaches this single choke point, so a
         // universal guard here covers all of them: cancel any in-flight smooth-scroll animation
-        // before applying anything other than a scroll-wheel event. `AfterScrollEvent` itself is
-        // exempted because it's used both by the animation's own incremental frame emission (see
-        // `advance_smooth_scroll`, which must not cancel the very animation it's advancing) and
-        // by the immediate precise/flag-off wheel path in `scroll`, which explicitly cancels
-        // beforehand itself since it needs to happen before, not after, this dispatch.
+        // before applying anything other than a scroll-wheel event. `AfterScrollEvent` is
+        // exempted because canceling here would cancel the very animation update it's applying;
+        // any path that needs to cancel before one does so explicitly ahead of this call.
         if !matches!(update, ScrollPositionUpdate::AfterScrollEvent { .. }) {
             self.smooth_scroll.cancel(Instant::now());
         }
@@ -9723,29 +9721,15 @@ impl TerminalView {
     /// Drives an in-flight smooth-scroll animation to completion independently of the app's
     /// paint/hover-replay machinery.
     ///
-    /// The generic WarpUI `Manual`-axis scrollables advance lazily off of
-    /// `BlockListElement::dispatch_event`, which fires on every event the element receives --
-    /// including the synthetic `MouseMoved` the app replays after each repaint
-    /// (`AppContext::build_scene`) to keep `Hoverable` state correct. That replay only fires when
-    /// `AppContext::window_last_mouse_moved_event` already holds a real, previously observed
-    /// `MouseMoved` for the window. A window that has never received one -- e.g. one scrolled
-    /// immediately under a cursor that has never moved over it -- never gets that replay, so
-    /// nothing would ever call `advance_smooth_scroll`, leaving the animation registered but
-    /// permanently unapplied while `is_animating()` keeps requesting repaints forever.
+    /// The generic scrollables advance off the app's synthetic `MouseMoved` replay after each
+    /// repaint, which never fires for a window that has never received a real one, so an
+    /// animation there would sit registered and unapplied while requesting repaints forever.
     ///
-    /// This instead drives its own advance via a single long-lived stream
-    /// (`ctx.spawn_stream_local`), independent of any cached pointer state, that ticks every
-    /// `SMOOTH_SCROLL_FRAME_INTERVAL` and ends itself once the controller reports it's settled.
-    /// A single stream is spawned onto the background executor once (here) and left running for
-    /// the duration of the animation, rather than a self-rescheduling `ctx.spawn(Timer::after
-    /// (...), ...)` per tick, which would pay a fresh background-task-spawn-and-channel-bridge
-    /// round trip on every single tick -- acceptable for the occasional one-shot delayed actions
-    /// elsewhere in this file, but disproportionate overhead for a tight ~8ms cadence.
-    ///
-    /// `handle` is a clone of `self.smooth_scroll`, captured by value into the stream (which
-    /// polls on a background thread via `Timer::after`, checking `is_animating` directly on the
-    /// thread-safe handle) rather than reaching back into `self`, since the stream must be
-    /// `'static` and cannot borrow the view.
+    /// Drives its own advance via a single long-lived stream (`ctx.spawn_stream_local`) rather
+    /// than a self-rescheduling `ctx.spawn(Timer::after(...), ...)` per tick, which would pay a
+    /// fresh background-task-spawn-and-channel-bridge round trip every tick -- disproportionate
+    /// for a tight ~8ms cadence. Captures a clone of `self.smooth_scroll` by value rather than
+    /// borrowing `self`, since the stream must be `'static`.
     fn drive_smooth_scroll(handle: SmoothScrollHandle, ctx: &mut ViewContext<Self>) {
         let stream = futures::stream::unfold(handle, |handle| async move {
             Timer::after(SMOOTH_SCROLL_FRAME_INTERVAL).await;

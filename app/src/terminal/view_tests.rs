@@ -5277,8 +5277,7 @@ fn test_smooth_scroll_advances_on_its_own_without_any_cached_mouse_position() {
 /// path -- polling `scroll_position` from outside via small real sleeps, the same way an
 /// external observer (a screenshot, a human) would, rather than calling `advance_smooth_scroll`
 /// manually. The controller's own modeled duration tops out at ~200ms; this asserts the animation
-/// is visibly done well within that, with slack for scheduling overhead but nowhere near the
-/// ~1-second gliding the visual pass reported for a terminal burst.
+/// is visibly done well within that.
 #[test]
 fn test_smooth_scroll_drive_loop_settles_within_modeled_duration_via_real_polling() {
     App::test((), |mut app| async move {
