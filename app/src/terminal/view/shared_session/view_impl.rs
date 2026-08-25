@@ -1055,10 +1055,7 @@ impl TerminalView {
     }
 
     /// Arms a timer for `phase` to fire after `duration`, dispatching to the right handler
-    /// when it expires. Shared by [`Self::reset_sharer_inactivity_timer`] (arming the first
-    /// enabled phase from a fresh activity reset) and
-    /// [`Self::revoke_roles_on_inactivity_period_expired`] (arming the next enabled phase
-    /// after revoking roles).
+    /// when it expires.
     fn arm_inactivity_timer(
         &mut self,
         phase: InactivityPhase,
@@ -1107,11 +1104,9 @@ impl TerminalView {
         }
 
         // Arm the next enabled phase (warning, or end if warning is disabled) from the
-        // snapshot captured when this idle period began -- not live settings -- so a
-        // settings change made while the just-fired revoke timer was in flight can't
-        // produce a phase gap computed from a mix of old and new durations (see
-        // `InactivityLadderSnapshot`). If both are disabled, the session stays shared and
-        // read-only indefinitely.
+        // snapshot captured for this idle period, not live settings, so the gap can't be
+        // computed from a mix of old and new durations. If both are disabled, the session
+        // stays shared and read-only indefinitely.
         let Some(sharer) = self.shared_session_sharer_mut() else {
             return;
         };
@@ -1144,9 +1139,8 @@ impl TerminalView {
             return;
         }
 
-        // Snapshot the current settings for this fresh idle period: every later phase
-        // transition within it (see `revoke_roles_on_inactivity_period_expired`) will use
-        // this same snapshot rather than re-reading (possibly since-changed) live settings.
+        // Snapshot the current settings for this fresh idle period; later phase
+        // transitions within it read this snapshot rather than live settings.
         let snapshot = InactivityLadderSnapshot::capture(SharedSessionSettings::as_ref(ctx));
 
         let Some(sharer) = self.shared_session_sharer_mut() else {

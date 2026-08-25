@@ -15,10 +15,7 @@ pub struct Sharer {
     pub(super) is_inactivity_warning_modal_open: bool,
     pub(super) inactivity_modal: ViewHandle<InactivityModal>,
     /// The inactivity durations in effect for the idle period currently being timed, if
-    /// any -- see [`InactivityLadderSnapshot`]. Captured fresh by
-    /// `TerminalView::reset_sharer_inactivity_timer` each time a new idle period begins,
-    /// and consulted (rather than the live settings) by every later phase transition within
-    /// that same period.
+    /// any. `None` before the first idle period starts.
     pub(super) inactivity_snapshot: Option<InactivityLadderSnapshot>,
 }
 
@@ -47,10 +44,9 @@ impl Sharer {
         self.is_inactivity_warning_modal_open
     }
 
-    /// Opens inactivity warning modal and resets the timer, using the snapshot captured for
-    /// the current idle period (see [`InactivityLadderSnapshot`]) rather than live settings,
-    /// so this stays consistent with whichever durations the rest of this idle period's
-    /// ladder is using.
+    /// Opens inactivity warning modal and resets the timer, using the current idle
+    /// period's snapshotted duration rather than live settings, for consistency with the
+    /// rest of that period's ladder.
     pub fn open_inactivity_warning_modal(&mut self, ctx: &mut ViewContext<TerminalView>) {
         let duration = self
             .inactivity_snapshot

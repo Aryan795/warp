@@ -66,16 +66,10 @@ pub enum InactivityPhase {
     EndSession,
 }
 
-/// A frozen copy of the three inactivity durations, taken once when a sharer's idle period
-/// begins (see `TerminalView::reset_sharer_inactivity_timer`) and held for that whole
-/// period, so every phase transition within it is judged against the same durations.
-///
-/// Without this, a settings change made while a timer is already armed could leave a
-/// single idle period computing later phases from a mix of old and new durations: the
-/// already-armed timer keeps running on the duration it started with, but the *next*
-/// phase's gap (via [`Self::next_phase_after_revoke`]) would otherwise be computed by
-/// re-reading the (possibly changed) live setting for the phase that just fired, instead of
-/// the duration it actually elapsed under.
+/// A frozen copy of the three inactivity durations, held for one sharer idle period so
+/// every phase transition within it is judged against the same durations, rather than a
+/// mix of old and new ones if the settings change while a timer for that period is already
+/// armed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InactivityLadderSnapshot {
     pub revoke: Duration,
@@ -180,18 +174,26 @@ impl SharedSessionSettings {
         InactivityLadderSnapshot::capture(self).next_phase_after_revoke()
     }
 
-    /// Whether `earlier` is allowed to occur at or before `later` in the inactivity ladder.
-    ///
-    /// A zero duration means that phase is disabled, not "immediately" -- it isn't a point
-    /// on the same numeric axis as an enabled phase, so it's exempt from the comparison in
-    /// either position rather than treated as the smallest legal duration.
-    fn ladder_phase_order_ok(earlier: Duration, later: Duration) -> bool {
-        earlier.is_zero() || later.is_zero() || earlier <= later
+    /// Advances the running "floor" a ladder phase must meet or exceed. A disabled
+    /// (zero) phase passes through unchanged and leaves the floor untouched -- it isn't a
+    /// point on the same numeric axis as an enabled phase, so it's exempt from the ordering
+    /// entirely -- while an enabled phase is clamped up to at least the floor and becomes
+    /// the new floor itself. Threading one floor through the whole sequence (rather than
+    /// only comparing each field to its immediate neighbor) is what catches a disabled
+    /// middle phase: otherwise the two enabled phases on either side of it would never be
+    /// compared to each other.
+    fn advance_ladder_floor(phase: Duration, floor: &mut Duration) -> Duration {
+        if phase.is_zero() {
+            return phase;
+        }
+        let corrected = phase.max(*floor);
+        *floor = corrected;
+        corrected
     }
 
-    /// Corrects the inactivity durations in place if they violate the required
-    /// `revoke <= warn <= end` ordering, clamping an out-of-order value up to its earlier
-    /// neighbor rather than rejecting the update outright.
+    /// Corrects the inactivity durations in place if the enabled ones among them violate
+    /// the required `revoke <= warn <= end` ordering, clamping an out-of-order value up to
+    /// the highest enabled value before it rather than rejecting the update outright.
     fn correct_inactivity_ordering(handle: &ModelHandle<Self>, ctx: &mut AppContext) {
         let (revoke, warn, end) = handle.read(ctx, |settings, _| {
             (
@@ -201,16 +203,10 @@ impl SharedSessionSettings {
             )
         });
 
-        let corrected_warn = if Self::ladder_phase_order_ok(revoke, warn) {
-            warn
-        } else {
-            revoke
-        };
-        let corrected_end = if Self::ladder_phase_order_ok(corrected_warn, end) {
-            end
-        } else {
-            corrected_warn
-        };
+        let mut floor = Duration::ZERO;
+        Self::advance_ladder_floor(revoke, &mut floor);
+        let corrected_warn = Self::advance_ladder_floor(warn, &mut floor);
+        let corrected_end = Self::advance_ladder_floor(end, &mut floor);
 
         handle.clone().update(ctx, |settings, ctx| {
             if corrected_warn != warn {
@@ -230,21 +226,9 @@ impl SharedSessionSettings {
         });
     }
 
-    /// Keeps the inactivity durations in a valid `revoke <= warn <= end` order (zero,
-    /// meaning disabled, exempt) no matter how they change outside of the settings UI: at
-    /// startup (including a hand-edited settings file), via cloud sync, and via disk
-    /// hot-reload -- paths the UI's own clamp in `app/src/settings_view/features_page.rs`
-    /// doesn't cover. Corrects the values once immediately, then again on every subsequent
-    /// change to any of the three.
-    ///
-    /// Called once from `app/src/settings/init.rs`, separately from
-    /// [`Self::register`], so that registration itself stays the same plain call every
-    /// other settings group uses.
-    ///
-    /// This ordering is required by the sharer inactivity ladder (see
-    /// [`InactivityLadderSnapshot`]), which derives the time between phases via `Duration`
-    /// subtraction and would otherwise be handed an inconsistent triple whenever these
-    /// settings are loaded or synced out of order.
+    /// Keeps the inactivity durations in a valid `revoke <= warn <= end` order among
+    /// whichever are enabled (zero means disabled and exempt), no matter how they change
+    /// outside of the settings UI, which clamps its own edits separately.
     pub fn enforce_inactivity_ordering(ctx: &mut AppContext) {
         let handle = Self::handle(ctx);
         Self::correct_inactivity_ordering(&handle, ctx);

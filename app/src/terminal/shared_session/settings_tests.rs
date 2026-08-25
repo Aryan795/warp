@@ -163,27 +163,76 @@ fn ordering_enforcement_leaves_zeros_alone() {
 }
 
 #[test]
-fn zero_is_exempt_from_the_ordering_comparison() {
-    // A disabled (zero) phase in either position never violates ordering.
-    assert!(SharedSessionSettings::ladder_phase_order_ok(
+fn advance_ladder_floor_leaves_disabled_phases_alone_but_keeps_the_floor_for_later_ones() {
+    let mut floor = Duration::ZERO;
+    assert_eq!(
+        SharedSessionSettings::advance_ladder_floor(SECS_25, &mut floor),
+        SECS_25,
+        "an enabled phase with no floor yet is left alone"
+    );
+    assert_eq!(
+        SharedSessionSettings::advance_ladder_floor(Duration::ZERO, &mut floor),
         Duration::ZERO,
-        SECS_10
-    ));
-    assert!(SharedSessionSettings::ladder_phase_order_ok(
-        SECS_10,
-        Duration::ZERO
-    ));
-    assert!(SharedSessionSettings::ladder_phase_order_ok(
-        Duration::ZERO,
-        Duration::ZERO
-    ));
-    // Ordinary non-zero comparisons are unaffected.
-    assert!(SharedSessionSettings::ladder_phase_order_ok(
-        SECS_10, SECS_25
-    ));
-    assert!(!SharedSessionSettings::ladder_phase_order_ok(
-        SECS_25, SECS_10
-    ));
+        "a disabled phase is always left as zero"
+    );
+    assert_eq!(floor, SECS_25, "a disabled phase must not reset the floor");
+    assert_eq!(
+        SharedSessionSettings::advance_ladder_floor(SECS_10, &mut floor),
+        SECS_25,
+        "an enabled phase below the floor set by an earlier enabled phase -- even with a \
+         disabled one in between -- is clamped up to it"
+    );
+}
+
+#[test]
+fn zero_middle_phase_does_not_let_its_two_enabled_neighbors_skip_comparison() {
+    App::test((), |mut app| async move {
+        let _guard = FeatureFlag::SettingsFile.override_enabled(true);
+        app.update(init_test_app);
+
+        // revoke=10m, warning disabled, end=5m: the disabled middle phase must not let
+        // revoke and end skip being compared against each other.
+        app.update(|ctx| {
+            write_public(
+                ctx,
+                InactivityPeriodBeforeRevokingRoles::storage_key(),
+                Duration::from_secs(600),
+            );
+            write_public(
+                ctx,
+                InactivityPeriodBeforeWarning::storage_key(),
+                Duration::ZERO,
+            );
+            write_public(
+                ctx,
+                InactivityPeriodBeforeEndingSession::storage_key(),
+                Duration::from_secs(300),
+            );
+        });
+
+        app.update(|ctx| {
+            SharedSessionSettings::register(ctx);
+            SharedSessionSettings::enforce_inactivity_ordering(ctx);
+        });
+
+        app.read(|ctx| {
+            let settings = SharedSessionSettings::as_ref(ctx);
+            let revoke = *settings.inactivity_period_before_revoking_roles.value();
+            let warn = *settings.inactivity_period_before_warning.value();
+            let end = *settings.inactivity_period_before_ending_session.value();
+            assert_eq!(
+                warn,
+                Duration::ZERO,
+                "the disabled warning phase must stay disabled"
+            );
+            assert!(
+                revoke <= end,
+                "end must be pulled up to at least revoke's value even with the disabled \
+                 warning phase in between: revoke={revoke:?} end={end:?}"
+            );
+            assert_eq!(end, revoke, "end should be pulled up to revoke's value");
+        });
+    });
 }
 
 // ---------------------------------------------------------------------------
