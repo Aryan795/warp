@@ -59,7 +59,9 @@ use crate::terminal::shared_session::presence_manager::{
 use crate::terminal::shared_session::role_change_modal::{
     RoleChangeCloseSource, RoleChangeOpenSource,
 };
-use crate::terminal::shared_session::settings::{InactivityPhase, SharedSessionSettings};
+use crate::terminal::shared_session::settings::{
+    InactivityLadderSnapshot, InactivityPhase, SharedSessionSettings,
+};
 use crate::terminal::shared_session::{
     COPY_LINK_TEXT, SharedSessionActionSource, SharedSessionScrollbackType, SharedSessionSource,
     SharedSessionStatus, join_link,
@@ -1104,11 +1106,19 @@ impl TerminalView {
             );
         }
 
-        // Arm the next enabled phase (warning, or end if warning is disabled). If both are
-        // disabled, the session stays shared and read-only indefinitely.
-        if let Some((phase, duration)) =
-            SharedSessionSettings::as_ref(ctx).next_phase_after_revoke()
-        {
+        // Arm the next enabled phase (warning, or end if warning is disabled) from the
+        // snapshot captured when this idle period began -- not live settings -- so a
+        // settings change made while the just-fired revoke timer was in flight can't
+        // produce a phase gap computed from a mix of old and new durations (see
+        // `InactivityLadderSnapshot`). If both are disabled, the session stays shared and
+        // read-only indefinitely.
+        let Some(sharer) = self.shared_session_sharer_mut() else {
+            return;
+        };
+        let Some(snapshot) = sharer.inactivity_snapshot else {
+            return;
+        };
+        if let Some((phase, duration)) = snapshot.next_phase_after_revoke() {
             self.arm_inactivity_timer(phase, duration, ctx);
         }
     }
@@ -1134,6 +1144,11 @@ impl TerminalView {
             return;
         }
 
+        // Snapshot the current settings for this fresh idle period: every later phase
+        // transition within it (see `revoke_roles_on_inactivity_period_expired`) will use
+        // this same snapshot rather than re-reading (possibly since-changed) live settings.
+        let snapshot = InactivityLadderSnapshot::capture(SharedSessionSettings::as_ref(ctx));
+
         let Some(sharer) = self.shared_session_sharer_mut() else {
             return;
         };
@@ -1147,9 +1162,9 @@ impl TerminalView {
         if let Some(old_abort_handle) = sharer.inactivity_timer_abort_handle.take() {
             old_abort_handle.abort();
         }
+        sharer.inactivity_snapshot = Some(snapshot);
 
-        let Some((phase, duration)) = SharedSessionSettings::as_ref(ctx).next_inactivity_phase()
-        else {
+        let Some((phase, duration)) = snapshot.next_inactivity_phase() else {
             // Every phase is disabled -- no idle timeout at all.
             return;
         };

@@ -1,4 +1,190 @@
+use settings::{PublicPreferences, Setting, SettingsManager};
+use warp_core::features::FeatureFlag;
+use warpui::{App, AppContext, SingletonEntity};
+use warpui_extras::user_preferences;
+
 use super::*;
+
+fn init_test_app(ctx: &mut AppContext) {
+    ctx.add_singleton_model(move |_| {
+        PublicPreferences::new(Box::<user_preferences::in_memory::InMemoryPreferences>::default())
+    });
+    ctx.add_singleton_model(move |_| -> settings::PrivatePreferences {
+        settings::PrivatePreferences::new(
+            Box::<user_preferences::in_memory::InMemoryPreferences>::default(),
+        )
+    });
+    ctx.add_singleton_model(|_| SettingsManager::default());
+}
+
+fn write_public(ctx: &AppContext, key: &str, duration: Duration) {
+    // Any of the three (now-public) settings routes to the same PublicPreferences backend;
+    // `preferences_for_setting` is the public API for reaching it from outside the
+    // `settings` crate.
+    InactivityPeriodBeforeRevokingRoles::preferences_for_setting(ctx)
+        .write_value(key, serde_json::to_string(&duration).unwrap())
+        .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Ordering enforcement (review findings: file-originated and cloud-originated triples)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn register_corrects_out_of_order_values_from_storage() {
+    App::test((), |mut app| async move {
+        let _guard = FeatureFlag::SettingsFile.override_enabled(true);
+        app.update(init_test_app);
+
+        // Simulate a hand-edited settings file with revoke > warn.
+        app.update(|ctx| {
+            write_public(
+                ctx,
+                InactivityPeriodBeforeRevokingRoles::storage_key(),
+                Duration::from_secs(1000),
+            );
+            write_public(
+                ctx,
+                InactivityPeriodBeforeWarning::storage_key(),
+                Duration::from_secs(500),
+            );
+        });
+
+        app.update(|ctx| {
+            SharedSessionSettings::register(ctx);
+            SharedSessionSettings::enforce_inactivity_ordering(ctx);
+        });
+
+        app.read(|ctx| {
+            let settings = SharedSessionSettings::as_ref(ctx);
+            let revoke = *settings.inactivity_period_before_revoking_roles.value();
+            let warn = *settings.inactivity_period_before_warning.value();
+            let end = *settings.inactivity_period_before_ending_session.value();
+            assert!(
+                revoke <= warn && warn <= end,
+                "ordering must hold after loading an inconsistent file: \
+                 revoke={revoke:?} warn={warn:?} end={end:?}"
+            );
+            assert_eq!(warn, revoke, "warn should be pulled up to revoke's value");
+        });
+    });
+}
+
+#[test]
+fn cloud_sync_update_producing_bad_ordering_gets_corrected() {
+    App::test((), |mut app| async move {
+        let _guard = FeatureFlag::SettingsFile.override_enabled(true);
+        app.update(init_test_app);
+
+        app.update(|ctx| {
+            SharedSessionSettings::register(ctx);
+            SharedSessionSettings::enforce_inactivity_ordering(ctx);
+        });
+
+        // A cloud-synced update sets `end` below the current `warn` (defaults: revoke=600s,
+        // warn=1500s, end=1800s).
+        app.update(|ctx| {
+            SharedSessionSettings::handle(ctx).update(ctx, |settings, ctx| {
+                settings
+                    .inactivity_period_before_ending_session
+                    .set_value_from_cloud_sync(Duration::from_secs(100), ctx)
+                    .unwrap();
+            });
+        });
+
+        app.read(|ctx| {
+            let settings = SharedSessionSettings::as_ref(ctx);
+            let revoke = *settings.inactivity_period_before_revoking_roles.value();
+            let warn = *settings.inactivity_period_before_warning.value();
+            let end = *settings.inactivity_period_before_ending_session.value();
+            assert!(
+                revoke <= warn && warn <= end,
+                "ordering must hold after a bad cloud sync update: \
+                 revoke={revoke:?} warn={warn:?} end={end:?}"
+            );
+            assert_eq!(
+                end, warn,
+                "end should be pulled back up to warn's value rather than left below it"
+            );
+        });
+    });
+}
+
+#[test]
+fn ordering_enforcement_leaves_zeros_alone() {
+    App::test((), |mut app| async move {
+        let _guard = FeatureFlag::SettingsFile.override_enabled(true);
+        app.update(init_test_app);
+
+        // A TOML file (or cloud update) disabling revoke and warning, with end enabled --
+        // an internally consistent all-but-end-disabled configuration that must not be
+        // "corrected" into something else just because zero is numerically the smallest
+        // value.
+        app.update(|ctx| {
+            write_public(
+                ctx,
+                InactivityPeriodBeforeRevokingRoles::storage_key(),
+                Duration::ZERO,
+            );
+            write_public(
+                ctx,
+                InactivityPeriodBeforeWarning::storage_key(),
+                Duration::ZERO,
+            );
+            write_public(
+                ctx,
+                InactivityPeriodBeforeEndingSession::storage_key(),
+                SECS_30,
+            );
+        });
+
+        app.update(|ctx| {
+            SharedSessionSettings::register(ctx);
+            SharedSessionSettings::enforce_inactivity_ordering(ctx);
+        });
+
+        app.read(|ctx| {
+            let settings = SharedSessionSettings::as_ref(ctx);
+            assert_eq!(
+                *settings.inactivity_period_before_revoking_roles.value(),
+                Duration::ZERO
+            );
+            assert_eq!(
+                *settings.inactivity_period_before_warning.value(),
+                Duration::ZERO
+            );
+            assert_eq!(
+                *settings.inactivity_period_before_ending_session.value(),
+                SECS_30,
+                "end must be left untouched -- a disabled revoke/warning is not a bound on it"
+            );
+        });
+    });
+}
+
+#[test]
+fn zero_is_exempt_from_the_ordering_comparison() {
+    // A disabled (zero) phase in either position never violates ordering.
+    assert!(SharedSessionSettings::ladder_phase_order_ok(
+        Duration::ZERO,
+        SECS_10
+    ));
+    assert!(SharedSessionSettings::ladder_phase_order_ok(
+        SECS_10,
+        Duration::ZERO
+    ));
+    assert!(SharedSessionSettings::ladder_phase_order_ok(
+        Duration::ZERO,
+        Duration::ZERO
+    ));
+    // Ordinary non-zero comparisons are unaffected.
+    assert!(SharedSessionSettings::ladder_phase_order_ok(
+        SECS_10, SECS_25
+    ));
+    assert!(!SharedSessionSettings::ladder_phase_order_ok(
+        SECS_25, SECS_10
+    ));
+}
 
 // ---------------------------------------------------------------------------
 // Zero-disables-a-phase matrix (APP-5313 follow-up)
@@ -99,9 +285,9 @@ fn revoke_enabled_with_only_end_enabled_skips_the_warning() {
 
 #[test]
 fn derived_intervals_never_panic_on_out_of_order_values() {
-    // Directly construct an inconsistent group to prove the derived-interval helpers are
-    // defensive regardless of how a bad ordering arises (e.g. a hand-edited settings file),
-    // since nothing enforces the ordering outside of the settings UI's own clamping.
+    // Directly construct an inconsistent group (bypassing ordering enforcement, which
+    // operates on a registered model, not a plain value) to prove the derived-interval
+    // helpers are defensive regardless of how a bad ordering arises.
     let settings = SharedSessionSettings {
         onboarding_block_shown: SessionSharingOnboardingBlockShown::new(None),
         inactivity_period_before_ending_session: InactivityPeriodBeforeEndingSession::new(Some(

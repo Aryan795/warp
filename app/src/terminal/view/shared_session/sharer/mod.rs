@@ -3,10 +3,10 @@ use async_channel::Sender;
 use inactivity_modal::InactivityModal;
 use warpui::r#async::SpawnedFutureHandle;
 use warpui::elements::MouseStateHandle;
-use warpui::{SingletonEntity, ViewContext, ViewHandle};
+use warpui::{ViewContext, ViewHandle};
 
 use crate::terminal::TerminalView;
-use crate::terminal::shared_session::settings::SharedSessionSettings;
+use crate::terminal::shared_session::settings::InactivityLadderSnapshot;
 
 pub struct Sharer {
     pub(super) activity_tx: Sender<()>,
@@ -14,6 +14,12 @@ pub struct Sharer {
     pub(super) inactivity_timer_abort_handle: Option<SpawnedFutureHandle>,
     pub(super) is_inactivity_warning_modal_open: bool,
     pub(super) inactivity_modal: ViewHandle<InactivityModal>,
+    /// The inactivity durations in effect for the idle period currently being timed, if
+    /// any -- see [`InactivityLadderSnapshot`]. Captured fresh by
+    /// `TerminalView::reset_sharer_inactivity_timer` each time a new idle period begins,
+    /// and consulted (rather than the live settings) by every later phase transition within
+    /// that same period.
+    pub(super) inactivity_snapshot: Option<InactivityLadderSnapshot>,
 }
 
 impl Sharer {
@@ -29,6 +35,7 @@ impl Sharer {
             inactivity_timer_abort_handle: None,
             is_inactivity_warning_modal_open: false,
             inactivity_modal,
+            inactivity_snapshot: None,
         }
     }
 
@@ -40,10 +47,15 @@ impl Sharer {
         self.is_inactivity_warning_modal_open
     }
 
-    /// Opens inactivity warning modal and resets the timer.
+    /// Opens inactivity warning modal and resets the timer, using the snapshot captured for
+    /// the current idle period (see [`InactivityLadderSnapshot`]) rather than live settings,
+    /// so this stays consistent with whichever durations the rest of this idle period's
+    /// ladder is using.
     pub fn open_inactivity_warning_modal(&mut self, ctx: &mut ViewContext<TerminalView>) {
-        let duration = SharedSessionSettings::as_ref(ctx)
-            .inactivity_period_between_warning_and_ending_session();
+        let duration = self
+            .inactivity_snapshot
+            .map(|snapshot| snapshot.period_between_warning_and_ending_session())
+            .unwrap_or_default();
         self.is_inactivity_warning_modal_open = true;
         self.inactivity_modal.update(ctx, |modal, ctx| {
             modal.reset_timer(duration, ctx);

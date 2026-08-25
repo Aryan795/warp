@@ -2,6 +2,8 @@ use std::time::Duration;
 
 use settings::macros::define_settings_group;
 use settings::{RespectUserSyncSetting, Setting, SupportedPlatforms, SyncToCloud};
+use warp_errors::report_if_error;
+use warpui::{AppContext, ModelHandle, SingletonEntity};
 
 define_settings_group!(SharedSessionSettings, settings: [
     onboarding_block_shown: SessionSharingOnboardingBlockShown {
@@ -64,46 +66,37 @@ pub enum InactivityPhase {
     EndSession,
 }
 
-impl SharedSessionSettings {
-    /// Returns time between showing the inactivity warning modal and ending the session.
-    ///
-    /// Uses `saturating_sub` as defense-in-depth: these three durations are cumulative
-    /// time-since-last-activity (each setting's default doc comment says "after a total of
-    /// N min"), which requires `revoke <= warn <= end` for a meaningful ladder, but nothing
-    /// actively enforces that ordering outside of the settings UI's own clamping (see
-    /// `app/src/settings_view/features_page.rs`). A hand-edited settings file or a cloud
-    /// sync could still hand this an inconsistent triple; `saturating_sub` degrades that to
-    /// an immediately-firing phase instead of a panic. Callers must only reach this once
-    /// they've confirmed (via [`Self::next_inactivity_phase`] or
-    /// [`Self::next_phase_after_revoke`]) that both the warning and end phases are enabled
-    /// -- a zero `end` disables the warning phase entirely, so this is never a meaningful
-    /// duration to compute in that case.
-    pub fn inactivity_period_between_warning_and_ending_session(&self) -> Duration {
-        self.inactivity_period_before_ending_session
-            .value()
-            .saturating_sub(*self.inactivity_period_before_warning.value())
-    }
+/// A frozen copy of the three inactivity durations, taken once when a sharer's idle period
+/// begins (see `TerminalView::reset_sharer_inactivity_timer`) and held for that whole
+/// period, so every phase transition within it is judged against the same durations.
+///
+/// Without this, a settings change made while a timer is already armed could leave a
+/// single idle period computing later phases from a mix of old and new durations: the
+/// already-armed timer keeps running on the duration it started with, but the *next*
+/// phase's gap (via [`Self::next_phase_after_revoke`]) would otherwise be computed by
+/// re-reading the (possibly changed) live setting for the phase that just fired, instead of
+/// the duration it actually elapsed under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InactivityLadderSnapshot {
+    pub revoke: Duration,
+    pub warn: Duration,
+    pub end: Duration,
+}
 
-    /// Returns time between revoking roles and showing the inactivity warning modal.
-    ///
-    /// See [`Self::inactivity_period_between_warning_and_ending_session`] for why this
-    /// uses `saturating_sub` and must only be called once the warning phase is confirmed
-    /// enabled.
-    pub fn inactivity_period_between_revoking_roles_and_warning(&self) -> Duration {
-        self.inactivity_period_before_warning
-            .value()
-            .saturating_sub(*self.inactivity_period_before_revoking_roles.value())
+impl InactivityLadderSnapshot {
+    pub fn capture(settings: &SharedSessionSettings) -> Self {
+        Self {
+            revoke: *settings.inactivity_period_before_revoking_roles.value(),
+            warn: *settings.inactivity_period_before_warning.value(),
+            end: *settings.inactivity_period_before_ending_session.value(),
+        }
     }
 
     /// Whether the warning phase is enabled: it needs both a non-zero warning duration of
     /// its own, and a non-zero end duration -- a countdown to an end that will never come
     /// would be misleading, so disabling the end phase disables the warning too.
-    pub fn is_warning_phase_enabled(&self) -> bool {
-        !self.inactivity_period_before_warning.value().is_zero()
-            && !self
-                .inactivity_period_before_ending_session
-                .value()
-                .is_zero()
+    fn is_warning_phase_enabled(&self) -> bool {
+        !self.warn.is_zero() && !self.end.is_zero()
     }
 
     /// Determines which phase of the inactivity ladder should be armed next, and how long
@@ -111,9 +104,8 @@ impl SharedSessionSettings {
     /// disabled (zero-duration) phase. Returns `None` when every phase is disabled, meaning
     /// no idle timeout should be armed at all.
     pub fn next_inactivity_phase(&self) -> Option<(InactivityPhase, Duration)> {
-        let revoke = *self.inactivity_period_before_revoking_roles.value();
-        if !revoke.is_zero() {
-            return Some((InactivityPhase::RevokeEditorRoles, revoke));
+        if !self.revoke.is_zero() {
+            return Some((InactivityPhase::RevokeEditorRoles, self.revoke));
         }
         self.next_phase_after_revoke()
     }
@@ -124,16 +116,149 @@ impl SharedSessionSettings {
     /// should stop advancing (the session stays shared, permanently read-only if roles were
     /// revoked, until the sharer changes these settings or ends it explicitly).
     pub fn next_phase_after_revoke(&self) -> Option<(InactivityPhase, Duration)> {
-        let revoke = *self.inactivity_period_before_revoking_roles.value();
-        let end = *self.inactivity_period_before_ending_session.value();
         if self.is_warning_phase_enabled() {
-            let warn = *self.inactivity_period_before_warning.value();
-            return Some((InactivityPhase::ShowWarning, warn.saturating_sub(revoke)));
+            return Some((
+                InactivityPhase::ShowWarning,
+                self.warn.saturating_sub(self.revoke),
+            ));
         }
-        if !end.is_zero() {
-            return Some((InactivityPhase::EndSession, end.saturating_sub(revoke)));
+        if !self.end.is_zero() {
+            return Some((
+                InactivityPhase::EndSession,
+                self.end.saturating_sub(self.revoke),
+            ));
         }
         None
+    }
+
+    /// Returns time between showing the inactivity warning modal and ending the session.
+    ///
+    /// Uses `saturating_sub` as defense-in-depth: these three durations are cumulative
+    /// time-since-last-activity (each setting's default doc comment says "after a total of
+    /// N min"), which requires `revoke <= warn <= end` for a meaningful ladder --
+    /// `SharedSessionSettings::enforce_inactivity_ordering` maintains that invariant on
+    /// every non-UI update path, and the settings UI's own clamping (see
+    /// `app/src/settings_view/features_page.rs`) maintains it for UI edits, but
+    /// `saturating_sub` still guards against a panic if either is ever bypassed. Callers
+    /// must only reach this once they've confirmed (via [`Self::next_inactivity_phase`] or
+    /// [`Self::next_phase_after_revoke`]) that both the warning and end phases are enabled
+    /// -- a zero `end` disables the warning phase entirely, so this is never a meaningful
+    /// duration to compute in that case.
+    pub fn period_between_warning_and_ending_session(&self) -> Duration {
+        self.end.saturating_sub(self.warn)
+    }
+}
+
+impl SharedSessionSettings {
+    /// See [`InactivityLadderSnapshot::period_between_warning_and_ending_session`].
+    pub fn inactivity_period_between_warning_and_ending_session(&self) -> Duration {
+        InactivityLadderSnapshot::capture(self).period_between_warning_and_ending_session()
+    }
+
+    /// Returns time between revoking roles and showing the inactivity warning modal.
+    ///
+    /// See [`Self::inactivity_period_between_warning_and_ending_session`] for why this
+    /// uses `saturating_sub`.
+    pub fn inactivity_period_between_revoking_roles_and_warning(&self) -> Duration {
+        self.inactivity_period_before_warning
+            .value()
+            .saturating_sub(*self.inactivity_period_before_revoking_roles.value())
+    }
+
+    /// See [`InactivityLadderSnapshot::is_warning_phase_enabled`].
+    pub fn is_warning_phase_enabled(&self) -> bool {
+        InactivityLadderSnapshot::capture(self).is_warning_phase_enabled()
+    }
+
+    /// See [`InactivityLadderSnapshot::next_inactivity_phase`].
+    pub fn next_inactivity_phase(&self) -> Option<(InactivityPhase, Duration)> {
+        InactivityLadderSnapshot::capture(self).next_inactivity_phase()
+    }
+
+    /// See [`InactivityLadderSnapshot::next_phase_after_revoke`].
+    pub fn next_phase_after_revoke(&self) -> Option<(InactivityPhase, Duration)> {
+        InactivityLadderSnapshot::capture(self).next_phase_after_revoke()
+    }
+
+    /// Whether `earlier` is allowed to occur at or before `later` in the inactivity ladder.
+    ///
+    /// A zero duration means that phase is disabled, not "immediately" -- it isn't a point
+    /// on the same numeric axis as an enabled phase, so it's exempt from the comparison in
+    /// either position rather than treated as the smallest legal duration.
+    fn ladder_phase_order_ok(earlier: Duration, later: Duration) -> bool {
+        earlier.is_zero() || later.is_zero() || earlier <= later
+    }
+
+    /// Corrects the inactivity durations in place if they violate the required
+    /// `revoke <= warn <= end` ordering, clamping an out-of-order value up to its earlier
+    /// neighbor rather than rejecting the update outright.
+    fn correct_inactivity_ordering(handle: &ModelHandle<Self>, ctx: &mut AppContext) {
+        let (revoke, warn, end) = handle.read(ctx, |settings, _| {
+            (
+                *settings.inactivity_period_before_revoking_roles.value(),
+                *settings.inactivity_period_before_warning.value(),
+                *settings.inactivity_period_before_ending_session.value(),
+            )
+        });
+
+        let corrected_warn = if Self::ladder_phase_order_ok(revoke, warn) {
+            warn
+        } else {
+            revoke
+        };
+        let corrected_end = if Self::ladder_phase_order_ok(corrected_warn, end) {
+            end
+        } else {
+            corrected_warn
+        };
+
+        handle.clone().update(ctx, |settings, ctx| {
+            if corrected_warn != warn {
+                report_if_error!(
+                    settings
+                        .inactivity_period_before_warning
+                        .set_value(corrected_warn, ctx)
+                );
+            }
+            if corrected_end != end {
+                report_if_error!(
+                    settings
+                        .inactivity_period_before_ending_session
+                        .set_value(corrected_end, ctx)
+                );
+            }
+        });
+    }
+
+    /// Keeps the inactivity durations in a valid `revoke <= warn <= end` order (zero,
+    /// meaning disabled, exempt) no matter how they change outside of the settings UI: at
+    /// startup (including a hand-edited settings file), via cloud sync, and via disk
+    /// hot-reload -- paths the UI's own clamp in `app/src/settings_view/features_page.rs`
+    /// doesn't cover. Corrects the values once immediately, then again on every subsequent
+    /// change to any of the three.
+    ///
+    /// Called once from `app/src/settings/init.rs`, separately from
+    /// [`Self::register`], so that registration itself stays the same plain call every
+    /// other settings group uses.
+    ///
+    /// This ordering is required by the sharer inactivity ladder (see
+    /// [`InactivityLadderSnapshot`]), which derives the time between phases via `Duration`
+    /// subtraction and would otherwise be handed an inconsistent triple whenever these
+    /// settings are loaded or synced out of order.
+    pub fn enforce_inactivity_ordering(ctx: &mut AppContext) {
+        let handle = Self::handle(ctx);
+        Self::correct_inactivity_ordering(&handle, ctx);
+
+        ctx.subscribe_to_model(&handle, |settings_handle, event, ctx| {
+            if matches!(
+                event,
+                SharedSessionSettingsChangedEvent::InactivityPeriodBeforeRevokingRoles { .. }
+                    | SharedSessionSettingsChangedEvent::InactivityPeriodBeforeWarning { .. }
+                    | SharedSessionSettingsChangedEvent::InactivityPeriodBeforeEndingSession { .. }
+            ) {
+                Self::correct_inactivity_ordering(&settings_handle, ctx);
+            }
+        });
     }
 }
 
