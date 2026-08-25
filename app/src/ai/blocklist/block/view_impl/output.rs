@@ -3868,13 +3868,15 @@ fn render_turn_panel_button(props: Props, app: &AppContext) -> Box<dyn Element> 
 
     // Sum turn-scoped per-model usage for the tooltip, so it reads as the
     // same total the panel's per-model rows add up to.
-    let (turn_tokens, turn_cost_in_cents) =
-        conversation.per_model_usage_for_last_block().iter().fold(
-            (0u64, 0f32),
-            |(tokens, cost), (_, model_tokens, model_cost)| {
-                (tokens + model_tokens, cost + model_cost)
-            },
-        );
+    let (turn_tokens, turn_cost_in_cents) = conversation
+        .per_model_usage_for_last_block()
+        .iter()
+        .fold((0u64, 0f32), |(tokens, cost), (_, model_usage)| {
+            (
+                tokens + model_usage.tokens(),
+                cost + model_usage.cost_in_cents,
+            )
+        });
     let mut tooltip_parts = vec![format_tokens(turn_tokens)];
     if turn_cost_in_cents > 0.0 {
         tooltip_parts.push(format_dollars(turn_cost_in_cents));

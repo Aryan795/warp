@@ -13,10 +13,14 @@ fn placeholder_usage_info() -> TurnUsageInfo {
     TurnUsageInfo {
         models: vec![TurnModelUsage {
             model_id: "auto (cost-efficient)".to_string(),
-            tokens: 4,
+            total_input: 3,
+            output: 1,
+            input_cache_read: 0,
+            input_cache_write: 0,
             cost_in_cents: Some(60.0),
         }],
         context_window_usage: 0.001,
+        platform_usage_in_cents: None,
         tool_calls: 2,
         files_changed: 1,
         lines_added: 4,
@@ -78,16 +82,23 @@ fn build_label_value_columns_keeps_every_row_aligned_across_sections() {
             models: vec![
                 TurnModelUsage {
                     model_id: "claude-sonnet".to_string(),
-                    tokens: 100,
+                    total_input: 80,
+                    output: 20,
+                    input_cache_read: 0,
+                    input_cache_write: 0,
                     cost_in_cents: Some(12.0),
                 },
                 TurnModelUsage {
                     model_id: "gpt-5".to_string(),
-                    tokens: 50,
+                    total_input: 40,
+                    output: 10,
+                    input_cache_read: 0,
+                    input_cache_write: 0,
                     cost_in_cents: Some(6.0),
                 },
             ],
             context_window_usage: 0.25,
+            platform_usage_in_cents: Some(8.0),
             tool_calls: 3,
             files_changed: 2,
             lines_added: 5,
@@ -152,11 +163,89 @@ fn build_label_value_columns_keeps_every_row_aligned_across_sections() {
                 .expect("Context window usage row should be present");
             assert_eq!(value_lines[context_window_index], "25%");
 
+            let platform_usage_index = label_lines
+                .iter()
+                .position(|line| *line == "Platform usage")
+                .expect("Platform usage row should be present");
+            assert_eq!(value_lines[platform_usage_index], "$0.08");
+
             let tool_calls_index = label_lines
                 .iter()
                 .position(|line| *line == "Tool calls")
                 .expect("Tool calls row should be present");
             assert_eq!(value_lines[tool_calls_index], "3");
+        });
+    });
+}
+
+/// Toggling a model row's expanded state should insert its input/output/
+/// cache breakdown rows immediately after that row, and collapsing it again
+/// should remove them.
+#[test]
+fn toggle_model_expanded_shows_and_hides_breakdown_rows() {
+    App::test((), |mut app| async move {
+        initialize_test_app(&mut app);
+
+        let usage_info = TurnUsageInfo {
+            models: vec![TurnModelUsage {
+                model_id: "claude-sonnet".to_string(),
+                total_input: 80,
+                output: 20,
+                input_cache_read: 5,
+                input_cache_write: 3,
+                cost_in_cents: Some(12.0),
+            }],
+            context_window_usage: 0.1,
+            platform_usage_in_cents: None,
+            tool_calls: 1,
+            files_changed: 0,
+            lines_added: 0,
+            lines_removed: 0,
+            commands_executed: 0,
+        };
+        let (_window_id, view) = app.add_window(WindowStyle::NotStealFocus, |_ctx| {
+            TurnUsageView::new(usage_info, None)
+        });
+
+        let labels_text = |view: &TurnUsageView, ctx: &warpui::AppContext| {
+            let appearance = Appearance::as_ref(ctx);
+            let (labels, _values) = view.build_label_value_columns(appearance);
+            Flex::column()
+                .with_children(labels)
+                .finish()
+                .debug_text_content()
+                .unwrap_or_default()
+        };
+
+        view.read(&app, |view, ctx| {
+            let text = labels_text(view, ctx);
+            assert!(
+                !text.contains("Input") && !text.contains("Output") && !text.contains("Cache"),
+                "breakdown rows should not be present while collapsed:\n{text}"
+            );
+        });
+
+        view.update(&mut app, |view, ctx| {
+            view.handle_action(&TurnUsageViewAction::ToggleModelExpanded(0), ctx);
+        });
+
+        view.read(&app, |view, ctx| {
+            let text = labels_text(view, ctx);
+            assert!(text.contains("Input"), "expected Input row:\n{text}");
+            assert!(text.contains("Output"), "expected Output row:\n{text}");
+            assert!(text.contains("Cache"), "expected Cache row:\n{text}");
+        });
+
+        view.update(&mut app, |view, ctx| {
+            view.handle_action(&TurnUsageViewAction::ToggleModelExpanded(0), ctx);
+        });
+
+        view.read(&app, |view, ctx| {
+            let text = labels_text(view, ctx);
+            assert!(
+                !text.contains("Input") && !text.contains("Output") && !text.contains("Cache"),
+                "breakdown rows should be removed after collapsing:\n{text}"
+            );
         });
     });
 }

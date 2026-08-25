@@ -517,6 +517,7 @@ impl BlocklistAIController {
                 .map(|conversation| stream_finished::ConversationUsageMetadata {
                     context_window_usage: conversation.context_window_usage(),
                     credits_spent: conversation.inference_credits_spent(),
+                    #[allow(deprecated)]
                     platform_credits_spent: conversation.platform_credits_spent(),
                     summarized: conversation.was_summarized(),
                     total_input_tokens: 0,
@@ -547,6 +548,9 @@ impl BlocklistAIController {
                         .iter()
                         .map(Into::into)
                         .collect(),
+                    // Synthetic cancellation event: no per-request charge
+                    // breakdown is available (or needed) for this notification.
+                    total_charges: None,
                 })
         });
 
@@ -561,7 +565,11 @@ impl BlocklistAIController {
                     conversation_usage_metadata: usage_metadata,
                     token_usage: vec![],
                     should_refresh_model_config: false,
+                    #[allow(deprecated)]
                     request_cost: None,
+                    // Synthetic cancellation event: no per-request charge
+                    // breakdown is available (or needed) for this notification.
+                    request_charges: None,
                 },
             )),
         };

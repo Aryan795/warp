@@ -7121,21 +7121,27 @@ impl TerminalView {
         let mut models: Vec<TurnModelUsage> = conversation
             .per_model_usage_for_last_block()
             .into_iter()
-            .map(|(model_id, tokens, cost_in_cents)| TurnModelUsage {
+            .map(|(model_id, usage)| TurnModelUsage {
                 model_id,
-                tokens,
-                cost_in_cents: Some(cost_in_cents),
+                total_input: usage.total_input,
+                output: usage.output,
+                input_cache_read: usage.input_cache_read,
+                input_cache_write: usage.input_cache_write,
+                cost_in_cents: Some(usage.cost_in_cents),
             })
             .collect();
         models.sort_by(|a, b| {
-            b.tokens
-                .cmp(&a.tokens)
+            b.tokens()
+                .cmp(&a.tokens())
                 .then_with(|| a.model_id.cmp(&b.model_id))
         });
         if models.is_empty() {
             models.push(TurnModelUsage {
                 model_id: "auto".to_string(),
-                tokens: 0,
+                total_input: 0,
+                output: 0,
+                input_cache_read: 0,
+                input_cache_write: 0,
                 cost_in_cents: None,
             });
         }
@@ -7143,6 +7149,7 @@ impl TerminalView {
         let turn_usage_info = TurnUsageInfo {
             models,
             context_window_usage: conversation.context_window_usage(),
+            platform_usage_in_cents: conversation.platform_usage_in_cents_for_last_block(),
             tool_calls,
             files_changed,
             lines_added,

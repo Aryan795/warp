@@ -165,7 +165,10 @@ fn conversation_usage_metadata_round_trips_per_model_token_cost() {
         cumulative_token_cost_by_model: HashMap::from([(
             "claude-sonnet".to_string(),
             PersistedModelTokenCost {
-                tokens: 1_500,
+                total_input: 1_200,
+                output: 300,
+                input_cache_read: 50,
+                input_cache_write: 20,
                 cost_in_cents: 42.5,
             },
         )]),
@@ -174,7 +177,10 @@ fn conversation_usage_metadata_round_trips_per_model_token_cost() {
             per_model: HashMap::from([(
                 "claude-sonnet".to_string(),
                 PersistedModelTokenCost {
-                    tokens: 1_000,
+                    total_input: 800,
+                    output: 200,
+                    input_cache_read: 30,
+                    input_cache_write: 10,
                     cost_in_cents: 30.0,
                 },
             )]),

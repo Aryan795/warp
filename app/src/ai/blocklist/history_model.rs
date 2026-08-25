@@ -17,7 +17,7 @@ use warp_core::features::FeatureFlag;
 use warp_multi_agent_api::client_action::{Action, StartNewConversation};
 use warp_multi_agent_api::message::tool_call::Tool;
 use warp_multi_agent_api::response_event::stream_finished::{
-    ConversationUsageMetadata, TokenUsage,
+    ConversationUsageMetadata, RequestCharges, TokenUsage,
 };
 use warpui::{AppContext, Entity, EntityId, ModelContext, SingletonEntity};
 
@@ -1986,12 +1986,14 @@ impl BlocklistAIHistoryModel {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn update_conversation_cost_and_usage_for_request(
         &mut self,
         conversation_id: AIConversationId,
         request_cost: Option<RequestCost>,
         token_usage: Vec<TokenUsage>,
         usage_metadata: Option<ConversationUsageMetadata>,
+        request_charges: Option<RequestCharges>,
         was_user_initiated_request: bool,
         ctx: &mut ModelContext<Self>,
     ) {
@@ -2007,6 +2009,7 @@ impl BlocklistAIHistoryModel {
                 request_cost,
                 token_usage,
                 usage_metadata,
+                request_charges,
                 was_user_initiated_request,
                 ctx,
             ) {

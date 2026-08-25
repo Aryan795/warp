@@ -20,7 +20,7 @@ use warp_core::ui::theme::WarpTheme;
 use warp_core::ui::theme::color::internal_colors;
 use warp_errors::report_error;
 use warp_multi_agent_api::response_event::stream_finished;
-use warp_multi_agent_api::response_event::stream_finished::TokenUsage;
+use warp_multi_agent_api::response_event::stream_finished::{RequestCharges, TokenUsage};
 use warp_multi_agent_api::{self as api};
 use warpui::color::ColorU;
 use warpui::{AppContext, EntityId, ModelContext, SingletonEntity};
@@ -67,7 +67,7 @@ use crate::notebooks::NotebookId;
 use crate::persistence::ModelEvent;
 use crate::persistence::model::{
     AgentConversationData, ContextWindowSegment, ConversationUsageMetadata, ModelTokenUsage,
-    PersistedAutoexecuteMode, ToolUsageMetadata, TurnUsageBaseline,
+    PersistedAutoexecuteMode, PersistedModelTokenCost, ToolUsageMetadata, TurnUsageBaseline,
 };
 use crate::server::ids::ServerId;
 use crate::terminal::general_settings::GeneralSettings;
@@ -830,6 +830,13 @@ impl AIConversation {
             .map(|credits| (credits * 10.0).round() / 10.0)
     }
 
+    /// Platform usage charged (in US cents) over the last block (turn). See
+    /// [`ConversationUsageMetadata::platform_usage_in_cents_for_last_block`].
+    pub fn platform_usage_in_cents_for_last_block(&self) -> Option<f32> {
+        self.conversation_usage_metadata
+            .platform_usage_in_cents_for_last_block
+    }
+
     /// Tool calls made during the last block (turn), i.e. since the most
     /// recent user input. `None` until the first block completes.
     ///
@@ -910,20 +917,20 @@ impl AIConversation {
         )
     }
 
-    /// Per-model token/cost usage during the last block (turn), as
-    /// `(model_id, tokens, cost_in_cents)` triples. A turn can span multiple
-    /// models (e.g. if the user or router switched models mid-turn), so this
-    /// returns one entry per model that had any activity this turn rather
-    /// than a single aggregate. Empty when there is no baseline yet or no
-    /// model has been used this turn -- callers gate the panel's visibility
-    /// on [`Self::tool_calls_for_last_block`] instead.
+    /// Per-model token/cost usage during the last block (turn), broken down
+    /// by input/output/cache read/cache write plus total cost. A turn can
+    /// span multiple models (e.g. if the user or router switched models
+    /// mid-turn), so this returns one entry per model that had any activity
+    /// this turn rather than a single aggregate. Empty when there is no
+    /// baseline yet or no model has been used this turn -- callers gate the
+    /// panel's visibility on [`Self::tool_calls_for_last_block`] instead.
     ///
     /// Derived as the delta between the persisted
     /// `cumulative_token_cost_by_model` and the baseline snapshotted in
     /// `turn_usage_baseline.per_model` at the start of the block. Unlike the
     /// live-only `total_token_usage_by_model`/`total_token_usage()`, both
     /// sides of this diff are persisted, so it survives restarts/restores.
-    pub fn per_model_usage_for_last_block(&self) -> Vec<(String, u64, f32)> {
+    pub fn per_model_usage_for_last_block(&self) -> Vec<(String, PersistedModelTokenCost)> {
         let Some(baseline) = self
             .conversation_usage_metadata
             .turn_usage_baseline
@@ -940,10 +947,8 @@ impl AIConversation {
                     .get(model_id)
                     .copied()
                     .unwrap_or_default();
-                let turn_tokens = current.tokens.saturating_sub(base.tokens);
-                let turn_cost = current.cost_in_cents - base.cost_in_cents;
-                (turn_tokens > 0 || turn_cost > 0.0)
-                    .then(|| (model_id.clone(), turn_tokens, turn_cost))
+                let turn = current.saturating_sub(&base);
+                (turn.tokens() > 0 || turn.cost_in_cents > 0.0).then(|| (model_id.clone(), turn))
             })
             .collect()
     }
@@ -2325,6 +2330,7 @@ impl AIConversation {
         request_cost: Option<RequestCost>,
         token_usage: Vec<TokenUsage>,
         usage_metadata: Option<stream_finished::ConversationUsageMetadata>,
+        request_charges: Option<RequestCharges>,
         was_user_initiated_request: bool,
         ctx: &AppContext,
     ) -> Result<(), UpdateConversationError> {
@@ -2392,15 +2398,16 @@ impl AIConversation {
 
             // Persisted counterpart of `total_token_usage_by_model`, kept in
             // lockstep so `per_model_usage_for_last_block` can derive
-            // turn-scoped per-model usage that survives restarts. Only
-            // tracks tokens + cost (not the cache-read/write breakdown),
-            // since that's all the turn panel needs.
+            // turn-scoped per-model usage that survives restarts.
             let persisted_entry = self
                 .conversation_usage_metadata
                 .cumulative_token_cost_by_model
                 .entry(usage.model_id.clone())
                 .or_default();
-            persisted_entry.tokens += (usage.total_input + usage.output) as u64;
+            persisted_entry.total_input += usage.total_input as u64;
+            persisted_entry.output += usage.output as u64;
+            persisted_entry.input_cache_read += usage.input_cache_read as u64;
+            persisted_entry.input_cache_write += usage.input_cache_write as u64;
             persisted_entry.cost_in_cents += usage.cost_in_cents;
         }
 
@@ -2421,12 +2428,38 @@ impl AIConversation {
             self.total_request_cost += request_cost;
         }
 
+        // `RequestCharges` reports this specific request's charges (unlike
+        // `ConversationUsageMetadata.total_charges`, which is a
+        // conversation-cumulative sum), so platform usage is accumulated the
+        // same way as `credits_spent_for_last_block` above: reset at the
+        // start of each turn, then summed across every request within it.
+        if let Some(request_charges) = request_charges {
+            let platform_usage_for_last_block = self
+                .conversation_usage_metadata
+                .platform_usage_in_cents_for_last_block
+                .get_or_insert(0.0);
+
+            if was_user_initiated_request {
+                *platform_usage_for_last_block = 0.;
+            }
+
+            let platform_usage_in_cents_this_request: f32 = request_charges
+                .usage_by_category
+                .values()
+                .map(|usage| usage.platform_usage_in_cents)
+                .sum();
+            *platform_usage_for_last_block += platform_usage_in_cents_this_request;
+        }
+
         if let Some(usage_metadata) = usage_metadata {
             self.conversation_usage_metadata.context_window_usage =
                 usage_metadata.context_window_usage;
             self.conversation_usage_metadata.credits_spent = usage_metadata.credits_spent;
-            self.conversation_usage_metadata.platform_credits_spent =
-                usage_metadata.platform_credits_spent;
+            #[allow(deprecated)]
+            {
+                self.conversation_usage_metadata.platform_credits_spent =
+                    usage_metadata.platform_credits_spent;
+            }
             let llm_preferences = LLMPreferences::as_ref(ctx);
             self.conversation_usage_metadata.token_usage =
                 footer_model_token_usage(&usage_metadata, llm_preferences);

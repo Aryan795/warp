@@ -15,7 +15,9 @@ use crate::ai::llms::LLMPreferences;
 use crate::auth::AuthStateProvider;
 use crate::auth::auth_manager::AuthManager;
 use crate::network::NetworkStatus;
-use crate::persistence::model::{AgentConversationData, ConversationUsageMetadata};
+use crate::persistence::model::{
+    AgentConversationData, ConversationUsageMetadata, PersistedModelTokenCost,
+};
 use crate::server::server_api::ServerApiProvider;
 use crate::test_util::settings::initialize_settings_for_tests;
 use crate::workspaces::user_workspaces::UserWorkspaces;
@@ -315,6 +317,7 @@ fn custom_endpoint_usage_metadata(
                 token_usage_by_category: HashMap::from([(category, total_tokens)]),
             },
         )]),
+        total_charges: None,
     }
 }
 
@@ -667,6 +670,7 @@ fn restored_usage_totals_preserve_server_provider_cost_and_add_follow_up() {
                         None,
                         vec![stream_token_usage("model-a", 10, 2, 1.2)],
                         Some(credits_usage_metadata(1.0, 0.0)),
+                        None,
                         false,
                         ctx,
                     )
@@ -740,6 +744,7 @@ fn restored_legacy_conversation_keeps_provider_cost_unavailable_after_follow_up(
                     None,
                     vec![stream_token_usage("legacy-model", 10, 2, 1.5)],
                     Some(credits_usage_metadata(1.0, 0.0)),
+                    None,
                     false,
                     ctx,
                 )
@@ -781,6 +786,7 @@ fn update_cost_and_usage_resolves_custom_endpoint_alias_for_footer_usage() {
                     None,
                     vec![],
                     Some(custom_endpoint_usage_metadata("config-key", 6)),
+                    None,
                     false,
                     ctx,
                 )
@@ -816,6 +822,7 @@ fn update_cost_and_usage_uses_fallback_label_for_unknown_custom_endpoint() {
                     None,
                     vec![],
                     Some(custom_endpoint_usage_metadata("missing-config-key", 9)),
+                    None,
                     false,
                     ctx,
                 )
@@ -871,6 +878,7 @@ fn credits_usage_metadata(
         byok_token_usage: HashMap::new(),
         context_window_segments: Vec::new(),
         custom_endpoint_token_usage: HashMap::new(),
+        total_charges: None,
     }
 }
 
@@ -896,6 +904,7 @@ fn usage_totals_reads_gui_credits_and_accumulates_provider_cost() {
                     None,
                     vec![stream_token_usage("model-a", 100, 20, 1.5)],
                     Some(credits_usage_metadata(2.0, 0.5)),
+                    None,
                     false,
                     ctx,
                 )
@@ -908,6 +917,7 @@ fn usage_totals_reads_gui_credits_and_accumulates_provider_cost() {
                     None,
                     vec![stream_token_usage("model-a", 50, 10, 1.2)],
                     Some(credits_usage_metadata(3.0, 0.5)),
+                    None,
                     false,
                     ctx,
                 )
@@ -947,6 +957,7 @@ fn per_model_usage_for_last_block_survives_restore() {
                     None,
                     vec![stream_token_usage("model-a", 100, 20, 1.5)],
                     None,
+                    None,
                     true,
                     ctx,
                 )
@@ -957,6 +968,7 @@ fn per_model_usage_for_last_block_survives_restore() {
                     None,
                     vec![stream_token_usage("model-a", 50, 10, 2.5)],
                     None,
+                    None,
                     true,
                     ctx,
                 )
@@ -964,7 +976,19 @@ fn per_model_usage_for_last_block_survives_restore() {
         });
 
         let live_usage = conversation.per_model_usage_for_last_block();
-        assert_eq!(live_usage, vec![("model-a".to_string(), 60, 2.5)]);
+        assert_eq!(
+            live_usage,
+            vec![(
+                "model-a".to_string(),
+                PersistedModelTokenCost {
+                    total_input: 50,
+                    output: 10,
+                    input_cache_read: 0,
+                    input_cache_write: 0,
+                    cost_in_cents: 2.5,
+                }
+            )]
+        );
 
         // Simulate an app restart: persist and reload only the conversation's
         // usage metadata, dropping all in-memory-only state (e.g.
@@ -1033,6 +1057,7 @@ fn footer_model_token_usage_keeps_custom_endpoint_usage_distinct_from_same_label
                 },
             )]),
             context_window_segments: Vec::new(),
+            total_charges: None,
         };
 
         let model_usage =
@@ -1091,6 +1116,7 @@ fn footer_model_token_usage_preserves_unresolved_custom_endpoint_usage_with_fall
                 },
             )]),
             context_window_segments: Vec::new(),
+            total_charges: None,
         };
 
         let model_usage =

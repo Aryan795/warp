@@ -1619,6 +1619,15 @@ pub struct ConversationUsageMetadata {
     pub total_provider_cost_in_cents: Option<f32>,
     #[serde(default)]
     pub credits_spent_for_last_block: Option<f32>,
+    /// Platform usage charged (in US cents) over the last block ("turn"),
+    /// i.e. since the most recent user-initiated request. Accumulated
+    /// additively from each request's `RequestCharges`, mirroring
+    /// `credits_spent_for_last_block` (the server reports per-request
+    /// deltas for charges, not cumulative totals, so this is a running sum
+    /// reset at the start of each turn rather than a baseline-subtracted
+    /// value). `None` until the first request with charge data completes.
+    #[serde(default)]
+    pub platform_usage_in_cents_for_last_block: Option<f32>,
     #[serde(default)]
     pub token_usage: Vec<ModelTokenUsage>,
     #[serde(default)]
@@ -1655,14 +1664,46 @@ impl ConversationUsageMetadata {
     }
 }
 
-/// Cumulative token count and provider cost for a single model, as of some
-/// point in a conversation. See
+/// Cumulative token count (broken down by input/output/cache) and provider
+/// cost for a single model, as of some point in a conversation. See
 /// [`ConversationUsageMetadata::cumulative_token_cost_by_model`] and
 /// [`TurnUsageBaseline::per_model`].
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, Default, PartialEq)]
 pub struct PersistedModelTokenCost {
-    pub tokens: u64,
+    #[serde(default)]
+    pub total_input: u64,
+    #[serde(default)]
+    pub output: u64,
+    #[serde(default)]
+    pub input_cache_read: u64,
+    #[serde(default)]
+    pub input_cache_write: u64,
     pub cost_in_cents: f32,
+}
+
+impl PersistedModelTokenCost {
+    /// Billable "headline" token total (input + output). Deliberately
+    /// excludes cache read/write tokens, which are broken out separately in
+    /// the UI and typically priced very differently.
+    pub fn tokens(&self) -> u64 {
+        self.total_input + self.output
+    }
+
+    /// Component-wise delta against an earlier baseline snapshot of the same
+    /// model. Each token field saturates at zero rather than going negative.
+    pub fn saturating_sub(&self, baseline: &Self) -> Self {
+        Self {
+            total_input: self.total_input.saturating_sub(baseline.total_input),
+            output: self.output.saturating_sub(baseline.output),
+            input_cache_read: self
+                .input_cache_read
+                .saturating_sub(baseline.input_cache_read),
+            input_cache_write: self
+                .input_cache_write
+                .saturating_sub(baseline.input_cache_write),
+            cost_in_cents: self.cost_in_cents - baseline.cost_in_cents,
+        }
+    }
 }
 
 /// See [`ConversationUsageMetadata::turn_usage_baseline`].

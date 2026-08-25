@@ -42,13 +42,31 @@ type LabelValueColumns = (Vec<Box<dyn Element>>, Vec<Box<dyn Element>>);
 pub struct TurnModelUsage {
     /// The model's display identifier (e.g. `auto (cost-efficient)`).
     pub model_id: String,
-    /// Total tokens (across warp/byok/custom-endpoint usage) spent on this
-    /// model during this turn.
-    pub tokens: u64,
+    /// Non-cached input tokens spent on this model during this turn.
+    pub total_input: u64,
+    /// Output tokens spent on this model during this turn.
+    pub output: u64,
+    /// Cache-read input tokens spent on this model during this turn. Only
+    /// populated for providers (e.g. Anthropic) that report granular cache
+    /// usage.
+    pub input_cache_read: u64,
+    /// Cache-write input tokens spent on this model during this turn. Only
+    /// populated for providers (e.g. Anthropic) that report granular cache
+    /// usage.
+    pub input_cache_write: u64,
     /// Provider cost incurred on this model during this turn, in US cents.
     /// `None` when a turn-scoped cost cannot be derived, in which case the
     /// cost is omitted from the row rather than rendered as `$0.00`.
     pub cost_in_cents: Option<f32>,
+}
+
+impl TurnModelUsage {
+    /// Total tokens (input + output) spent on this model during this turn.
+    /// Cache-read/write tokens are shown separately in the row's expanded
+    /// breakdown and are not double-counted here.
+    pub fn tokens(&self) -> u64 {
+        self.total_input + self.output
+    }
 }
 
 /// Turn-scoped usage data backing the "MODEL USAGE" section. All fields are
@@ -62,6 +80,10 @@ pub struct TurnUsageInfo {
     /// turn -- but is shown here per the spec, which explicitly calls out
     /// this scope mixing as deliberate.
     pub context_window_usage: f32,
+    /// Platform usage charged (in US cents) over this turn. `None` when no
+    /// request with charge data has completed yet; the row is omitted in
+    /// that case rather than rendered as `$0.00`.
+    pub platform_usage_in_cents: Option<f32>,
     pub tool_calls: i32,
     pub files_changed: i32,
     pub lines_added: i32,
@@ -74,6 +96,10 @@ pub struct TurnUsageInfo {
 pub enum TurnUsageViewAction {
     /// The user clicked the header's close ("X") button.
     Close,
+    /// The user clicked a model row's label to expand/collapse its
+    /// input/output/cache token breakdown. Carries the row's index into
+    /// [`TurnUsageInfo::models`].
+    ToggleModelExpanded(usize),
 }
 
 /// Emitted so the owning view (the terminal view) can remove this panel
@@ -88,14 +114,28 @@ pub struct TurnUsageView {
     pub usage_info: TurnUsageInfo,
     pub timing_info: Option<TimingInfo>,
     close_button_mouse_state: MouseStateHandle,
+    /// One mouse state per row in `usage_info.models`, used to make each
+    /// model's label row clickable to expand/collapse its token breakdown.
+    model_row_mouse_states: Vec<MouseStateHandle>,
+    /// Whether each model row (by index into `usage_info.models`) is
+    /// currently expanded to show its input/output/cache breakdown.
+    model_row_expanded: Vec<bool>,
 }
 
 impl TurnUsageView {
     pub fn new(usage_info: TurnUsageInfo, timing_info: Option<TimingInfo>) -> Self {
+        let model_row_mouse_states = usage_info
+            .models
+            .iter()
+            .map(|_| MouseStateHandle::default())
+            .collect();
+        let model_row_expanded = vec![false; usage_info.models.len()];
         Self {
             usage_info,
             timing_info,
             close_button_mouse_state: MouseStateHandle::default(),
+            model_row_mouse_states,
+            model_row_expanded,
         }
     }
 
@@ -162,50 +202,102 @@ impl TurnUsageView {
         .finish()
     }
 
-    fn model_usage_rows(&self, appearance: &Appearance) -> Vec<LabelValueRow> {
+    /// Builds the clickable label/value row for a single model, plus (when
+    /// that row is expanded) the indented input/output/cache breakdown rows
+    /// immediately following it.
+    fn model_row(&self, index: usize, appearance: &Appearance) -> Vec<LabelValueRow> {
+        let model = &self.usage_info.models[index];
         let font_size = appearance.ui_font_size() + 2.;
         let theme = appearance.theme();
         let background = theme.surface_2();
         let text_color = blended_colors::text_main(theme, background);
-        let label_color = blended_colors::text_sub(theme, background);
+        let expanded = self.model_row_expanded.get(index).copied().unwrap_or(false);
 
-        let mut rows: Vec<LabelValueRow> = self
-            .usage_info
-            .models
-            .iter()
-            .map(|model| {
-                let mut value_parts = vec![format_tokens(model.tokens)];
-                if let Some(cost_in_cents) = model.cost_in_cents {
-                    value_parts.push(format_dollars(cost_in_cents));
-                }
-                let label = Text::new(
-                    model.model_id.clone(),
-                    appearance.ui_font_family(),
-                    font_size,
-                )
+        let mut value_parts = vec![format_tokens(model.tokens())];
+        if let Some(cost_in_cents) = model.cost_in_cents {
+            value_parts.push(format_dollars(cost_in_cents));
+        }
+        let value = Text::new(
+            value_parts.join("  /  "),
+            appearance.ui_font_family(),
+            font_size,
+        )
+        .with_color(text_color)
+        .finish();
+
+        let font_family = appearance.ui_font_family();
+        let model_name = model.model_id.clone();
+        let chevron_icon = if expanded {
+            Icon::ChevronUp
+        } else {
+            Icon::ChevronDown
+        };
+        let label = Hoverable::new(self.model_row_mouse_states[index].clone(), move |_state| {
+            let text_element = Text::new(model_name.clone(), font_family, font_size)
                 .with_style(warpui::fonts::Properties {
                     weight: warpui::fonts::Weight::Medium,
                     ..Default::default()
                 })
                 .with_color(text_color)
                 .finish();
-                let value = Text::new(
-                    value_parts.join("  /  "),
-                    appearance.ui_font_family(),
-                    font_size,
-                )
-                .with_color(text_color)
-                .finish();
-                (label, value)
-            })
+            let icon_element =
+                ConstrainedBox::new(chevron_icon.to_warpui_icon(text_color.into()).finish())
+                    .with_width(font_size)
+                    .with_height(font_size)
+                    .finish();
+            Flex::row()
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_main_axis_size(MainAxisSize::Min)
+                .with_spacing(4.)
+                .with_child(icon_element)
+                .with_child(text_element)
+                .finish()
+        })
+        .with_cursor(Cursor::PointingHand)
+        .on_click(move |ctx, _, _| {
+            ctx.dispatch_typed_action(TurnUsageViewAction::ToggleModelExpanded(index));
+        })
+        .finish();
+
+        let mut rows = vec![(label, value)];
+        if expanded {
+            rows.push((
+                render_indented_label_text("Input", appearance),
+                render_value_text(format_tokens(model.total_input), appearance),
+            ));
+            rows.push((
+                render_indented_label_text("Output", appearance),
+                render_value_text(format_tokens(model.output), appearance),
+            ));
+            let cache_tokens = model.input_cache_read + model.input_cache_write;
+            if cache_tokens > 0 {
+                rows.push((
+                    render_indented_label_text("Cache", appearance),
+                    render_value_text(format_tokens(cache_tokens), appearance),
+                ));
+            }
+        }
+        rows
+    }
+
+    fn model_usage_rows(&self, appearance: &Appearance) -> Vec<LabelValueRow> {
+        let font_size = appearance.ui_font_size() + 2.;
+        let theme = appearance.theme();
+        let text_color = blended_colors::text_main(theme, theme.surface_2());
+
+        let mut rows: Vec<LabelValueRow> = (0..self.usage_info.models.len())
+            .flat_map(|index| self.model_row(index, appearance))
             .collect();
 
+        // Matches the model row labels' color (rather than the dimmer
+        // `text_sub` used by other section labels) since context window
+        // usage is displayed alongside model usage in the same section.
         let context_window_label = Text::new(
             "Context window usage".to_string(),
             appearance.ui_font_family(),
             font_size,
         )
-        .with_color(label_color)
+        .with_color(text_color)
         .finish();
         let context_usage_pct = (self.usage_info.context_window_usage * 100.).round();
         let context_window_value = Flex::row()
@@ -234,6 +326,14 @@ impl TurnUsageView {
             .finish();
 
         rows.push((context_window_label, context_window_value));
+
+        if let Some(platform_usage_in_cents) = self.usage_info.platform_usage_in_cents {
+            rows.push((
+                render_label_text("Platform usage", appearance),
+                render_value_text(format_dollars(platform_usage_in_cents), appearance),
+            ));
+        }
+
         rows
     }
 
@@ -433,6 +533,12 @@ impl TypedActionView for TurnUsageView {
             TurnUsageViewAction::Close => {
                 ctx.emit(TurnUsageViewEvent::CloseRequested);
             }
+            TurnUsageViewAction::ToggleModelExpanded(index) => {
+                if let Some(expanded) = self.model_row_expanded.get_mut(*index) {
+                    *expanded = !*expanded;
+                }
+                ctx.notify();
+            }
         }
     }
 }
@@ -442,6 +548,14 @@ fn render_label_text(text: &str, appearance: &Appearance) -> Box<dyn Element> {
     let font_size = appearance.ui_font_size() + 2.;
     Text::new(text.to_string(), appearance.ui_font_family(), font_size)
         .with_color(blended_colors::text_sub(theme, theme.surface_2()))
+        .finish()
+}
+
+/// Like [`render_label_text`], but indented to sit under an expanded model
+/// row's breakdown.
+fn render_indented_label_text(text: &str, appearance: &Appearance) -> Box<dyn Element> {
+    Container::new(render_label_text(text, appearance))
+        .with_margin_left(16.)
         .finish()
 }
 
