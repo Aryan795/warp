@@ -90,11 +90,17 @@ enum RunPollMode {
     InitialRun,
     Followup {
         previous_session_id: Option<SessionId>,
-        /// When this follow-up was accepted, client-side. Compared against the
-        /// server's `state_changed_at` on each poll so a residual observation of the
-        /// prior run's terminal state (reported before this moment) can be told apart
-        /// from a state change the follow-up's own execution actually caused.
-        submitted_at: DateTime<Utc>,
+        /// When this follow-up was accepted, by the server's own clock. Compared
+        /// against the server's `state_changed_at` on each poll so a residual
+        /// observation of the prior run's terminal state (reported before this
+        /// moment) can be told apart from a state change the follow-up's own
+        /// execution actually caused.
+        ///
+        /// `None` when an older server accepted the follow-up without reporting
+        /// `accepted_at` (either omitting the field or returning no body at all).
+        /// Without it there is nothing to compare `state_changed_at` against, so
+        /// polling falls back to the pre-timestamp heuristic instead.
+        submitted_at: Option<DateTime<Utc>>,
     },
 }
 
@@ -181,7 +187,9 @@ pub fn submit_run_followup(
         // no earlier than this moment, so a `state_changed_at` at or after it can only
         // belong to this follow-up's own execution, never to the prior run. Using the
         // server's timestamp instead of a client-local one avoids misjudging that
-        // comparison when the client and server clocks have drifted apart.
+        // comparison when the client and server clocks have drifted apart. An older
+        // server that does not report `accepted_at` yields `None`, and polling falls
+        // back to the pre-timestamp heuristic below.
         let submitted_at = match ai_client.submit_run_followup(&run_id, request).await {
             Ok(response) => response.accepted_at,
             Err(err) => {
@@ -275,16 +283,20 @@ fn poll_run_until_joinable_session(
                             }
 
                             // A residual observation of the prior run's state: authoritatively
-                            // when the server reports `state_changed_at` older than when this
-                            // follow-up was submitted, or by the fallback heuristic otherwise.
-                            // Never true for a working state, nor for `InitialRun`.
+                            // when both the server's `state_changed_at` and this follow-up's
+                            // `submitted_at` are known and the former predates the latter, or by
+                            // the fallback heuristic when either is unavailable (an older server
+                            // omitting one or the other). Never true for a working state, nor for
+                            // `InitialRun`.
                             let residual_prior_state = !task.state.is_working()
                                 && match &mode {
                                     RunPollMode::InitialRun => false,
                                     RunPollMode::Followup { submitted_at, .. } => {
-                                        match task.state_changed_at {
-                                            Some(state_changed_at) => state_changed_at < *submitted_at,
-                                            None => {
+                                        match (task.state_changed_at, submitted_at) {
+                                            (Some(state_changed_at), Some(submitted_at)) => {
+                                                state_changed_at < *submitted_at
+                                            }
+                                            _ => {
                                                 !seen_working_state
                                                     && task.state != AmbientAgentTaskState::Cancelled
                                             }

@@ -7,7 +7,7 @@ use ai::index::full_source_code_embedding::store_client::{IntermediateNode, Stor
 use ai::index::full_source_code_embedding::{
     self, CodebaseContextConfig, ContentHash, EmbeddingConfig, NodeHash, RepoMetadata,
 };
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use base64::Engine;
 use chrono::{DateTime, Utc};
@@ -337,9 +337,14 @@ pub struct RunFollowupRequest {
 /// clock at acceptance, so callers that gate a subsequent poll on the run's `state_changed_at`
 /// can compare against it instead of a client-local timestamp, avoiding clock skew between the
 /// client and the server.
-#[derive(Debug, Clone, Copy, serde::Deserialize)]
+///
+/// `None` both when an older server omits the field and when an older server returns no body
+/// at all (`#[serde(default)]` covers the latter case; `Option` covers the former). Callers must
+/// fall back to the pre-timestamp heuristic rather than treat either case as an error.
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
 pub struct RunFollowupResponse {
-    pub accepted_at: DateTime<Utc>,
+    #[serde(default)]
+    pub accepted_at: Option<DateTime<Utc>>,
 }
 
 // --- Orchestrations V2 messaging types ---
@@ -2280,8 +2285,23 @@ impl AIClient for ServerApi {
         run_id: &AmbientAgentTaskId,
         request: RunFollowupRequest,
     ) -> anyhow::Result<RunFollowupResponse, anyhow::Error> {
-        self.post_public_api(&build_run_followup_url(run_id), &request)
+        let response = self
+            .post_public_api_response(&build_run_followup_url(run_id), &request)
+            .await?;
+        let url = response.url().clone();
+        let body = response
+            .text()
             .await
+            .with_context(|| format!("Failed to read response body from {url}"))?;
+        // An older server accepts the follow-up but returns no body at all -- this call
+        // used to go through post_public_api_unit, which discarded the body entirely.
+        // Treat that the same as a body that omits `accepted_at`: the caller falls back
+        // to the pre-timestamp heuristic instead of failing the follow-up outright.
+        if body.trim().is_empty() {
+            return Ok(RunFollowupResponse::default());
+        }
+        serde_json::from_str(&body)
+            .with_context(|| format!("Failed to deserialize response from {url}"))
     }
 
     async fn get_scheduled_agent_history(
