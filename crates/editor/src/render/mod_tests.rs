@@ -1,5 +1,7 @@
 //! End-to-end editor tests.
 
+use std::sync::Arc;
+
 use rangemap::RangeSet;
 use string_offset::CharOffset;
 use warp_core::features::FeatureFlag;
@@ -431,21 +433,23 @@ fn replacement_delta(lines: &[&str]) -> EditDelta {
     EditDelta {
         precise_deltas: Vec::new(),
         old_offset: CharOffset::zero()..CharOffset::zero(),
-        new_lines: lines
-            .iter()
-            .map(|line| {
-                StyledBufferBlock::Text(StyledTextBlock {
-                    block: vec![StyledBufferRun {
-                        run: line.to_string(),
-                        text_styles: TextStylesWithMetadata::default(),
-                        block_style: BufferBlockStyle::PlainText,
-                    }],
-                    style: BufferBlockStyle::PlainText,
-                    // The block's newline counts as a character.
-                    content_length: CharOffset::from(line.chars().count() + 1),
+        new_lines: Arc::new(
+            lines
+                .iter()
+                .map(|line| {
+                    StyledBufferBlock::Text(StyledTextBlock {
+                        block: vec![StyledBufferRun {
+                            run: line.to_string(),
+                            text_styles: TextStylesWithMetadata::default(),
+                            block_style: BufferBlockStyle::PlainText,
+                        }],
+                        style: BufferBlockStyle::PlainText,
+                        // The block's newline counts as a character.
+                        content_length: CharOffset::from(line.chars().count() + 1),
+                    })
                 })
-            })
-            .collect(),
+                .collect(),
+        ),
     }
 }
 
