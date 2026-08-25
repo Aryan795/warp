@@ -138,6 +138,16 @@ runs:
           # don't do it.
           sudo apt-get update -y
 
+          # Same rationale as the macOS branch above: in warpdotdev/warp-internal the private
+          # warp-channel-config repo must be installable (SSH access is set up above regardless
+          # of target_os), so require it here too instead of leaving Linux as the one platform
+          # that never even attempts it. Elsewhere, keep tolerating the failure.
+          if ${{ github.repository == 'warpdotdev/warp-internal' }}; then
+            ./script/install_channel_config
+          else
+            ./script/install_channel_config || true
+          fi
+
           if ${{ inputs.install_test_deps == 'true' }}; then
             ./script/linux/install_test_deps
           elif ${{ inputs.install_release_deps == 'true' }}; then
