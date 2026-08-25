@@ -9363,6 +9363,15 @@ impl TerminalView {
         self.pending_raw_keypress_ctrl_r_timeout =
             Some(self.spawn_raw_keypress_ctrl_r_handoff_timeout(id, ctx));
 
+        // `raw_keypress_forward_active` drives `is_active_and_long_running()`, which in turn
+        // hides the input editor -- but only once focus is redetermined. Without this, focus
+        // stays on the input editor from the idle prompt that preceded this handoff: control
+        // keys (e.g. arrows, Enter) still reach the terminal via global keybindings, but typed
+        // filter characters would be consumed by the input editor instead of reaching the pty,
+        // silently breaking the wrapper widget's live filtering. Mirrors the same call in
+        // `end_raw_keypress_ctrl_r_handoff`.
+        self.redetermine_global_focus(ctx);
+
         self.write_user_bytes_to_pty(raw_keypress_ctrl_r_handoff_payload(id), ctx);
         true
     }

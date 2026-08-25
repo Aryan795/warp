@@ -10129,6 +10129,81 @@ fn raw_keypress_ctrl_r_handoff_triggers_and_forwards_keyseq() {
     })
 }
 
+/// Regression test: at the idle prompt the handoff always starts from, the input editor is
+/// focused. Unlike `should_write_typed_chars_to_pty` (which already exempted the handoff from
+/// the "block must have started" check), nothing previously moved focus off the input editor
+/// when the handoff began -- so a `TypedCharacters` event never reached `TerminalView` at all;
+/// the still-focused input editor consumed it first. `maybe_trigger_raw_keypress_ctrl_r_handoff`
+/// must redetermine focus itself, mirroring `end_raw_keypress_ctrl_r_handoff`'s teardown call.
+#[test]
+fn raw_keypress_ctrl_r_handoff_moves_focus_off_input_so_typed_chars_reach_pty() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let _flag = FeatureFlag::RawKeypressCtrlRHandoff.override_enabled(true);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let session_id = SessionId::from(0);
+
+        let pty_writes: Rc<RefCell<Vec<Vec<u8>>>> = Rc::new(RefCell::new(Vec::new()));
+        let writes = pty_writes.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_view(&terminal, move |_, event, _| {
+                if let Event::WriteBytesToPty { bytes } = event {
+                    writes.borrow_mut().push(bytes.to_vec());
+                }
+            });
+        });
+
+        terminal.update(&mut app, |view, ctx| {
+            setup_raw_keypress_ctrl_r_session(view, ctx, session_id, true);
+
+            // Simulate the idle prompt the handoff always starts from: the input editor is
+            // focused, exactly as it normally is between commands.
+            view.focus_input_box(ctx);
+        });
+        terminal.update(&mut app, |view, ctx| {
+            assert!(
+                view.input().is_self_or_child_focused(ctx),
+                "the input editor should be focused before the handoff starts"
+            );
+        });
+
+        terminal.update(&mut app, |view, ctx| {
+            assert!(view.maybe_trigger_raw_keypress_ctrl_r_handoff(ctx));
+        });
+        terminal.update(&mut app, |view, ctx| {
+            assert!(
+                !view.input().is_self_or_child_focused(ctx),
+                "the handoff must move focus off the input editor -- otherwise the wrapper \
+                 widget's filter keystrokes are captured by the input editor instead of \
+                 reaching the pty"
+            );
+        });
+
+        pty_writes.borrow_mut().clear();
+        terminal.update(&mut app, |view, ctx| {
+            view.typed_characters_on_terminal("echo", ctx);
+        });
+
+        assert_eq!(
+            *pty_writes.borrow(),
+            vec![b"echo".to_vec()],
+            "typed filter characters must reach the pty once the handoff has moved focus off \
+             the input editor"
+        );
+        terminal.read(&app, |view, ctx| {
+            assert_eq!(
+                view.input()
+                    .as_ref(ctx)
+                    .editor()
+                    .as_ref(ctx)
+                    .buffer_text(ctx),
+                "",
+                "typed filter characters must not land in the input editor's buffer"
+            );
+        });
+    })
+}
+
 #[test]
 fn raw_keypress_ctrl_r_handoff_stale_timeout_is_ignored() {
     App::test((), |mut app| async move {
