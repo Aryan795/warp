@@ -1317,33 +1317,69 @@ esac
   fi
 
   # Prototype (alternative to the foreground-command handoff in PR #15513): whatever ^R resolves
-  # to after the user's rc has run -- `bindkey '^R'` prints `"^R" widget-name` -- install a wrapper
-  # widget on the private key sequence ctrl-x ctrl-r that re-invokes that widget via `zle`, giving
-  # it a genuine zle context (zle builtins like `vi-fetch-history` only work when a widget is
-  # actually bound to a key and invoked through zle, not when called as a plain function). Warp
-  # writes that sequence to the pty instead of a bare ^R when this session reports the
-  # `external_ctrl_r_raw_keypress` tag below.
-  __warp_raw_keypress_orig_ctrl_r_widget=${${(z)$(bindkey '^R')}[2]}
-  case "$__warp_raw_keypress_orig_ctrl_r_widget" in
-    ""|history-incremental-search-backward|history-incremental-pattern-search-backward)
-      # Unbound, or still zsh's own default reverse-history-search: nothing to hand off to.
-      ;;
-    *)
-    function __warp_run_raw_keypress_ctrl_r_widget () {
-      zle "$__warp_raw_keypress_orig_ctrl_r_widget"
-      local escaped_selection="$(warp_escape_json "$BUFFER")"
-      warp_send_json_message "{ \"hook\": \"ExternalCtrlRRawKeypressSelection\", \"value\": { \"buffer\": \"$escaped_selection\", \"session_id\": $WARP_SESSION_ID } }"
-      # Warp owns the command from here; the shell's own buffer must not keep a copy, or the
-      # next Enter would submit it twice.
-      BUFFER=''
-      CURSOR=0
-      zle reset-prompt
-    }
-    zle -N __warp_run_raw_keypress_ctrl_r_widget
-    bindkey '^X^R' __warp_run_raw_keypress_ctrl_r_widget
+  # to in each of zsh's three keymaps (emacs, viins, vicmd -- each can bind ^R to a different
+  # widget, e.g. fzf binds the same widget in all three but atuin only binds emacs/viins and uses
+  # a different key in vicmd) after the user's rc has run -- `bindkey -M <keymap> '^R'` prints
+  # `"^R" widget-name` -- install a wrapper in that same keymap on the private key sequence Alt-]
+  # that re-invokes that keymap's widget via `zle`, giving it a genuine zle context (zle builtins
+  # like `vi-fetch-history` only work when a widget is actually bound to a key and invoked
+  # through zle, not when called as a plain function). Warp writes that sequence to the pty
+  # instead of a bare ^R when this session reports the `external_ctrl_r_raw_keypress` tag below.
+  #
+  # Alt-] was verified empirically to be unbound in stock zsh (emacs, viins, vicmd), bash (emacs,
+  # vi-insert, vi-command), and fish (default, insert).
+  __warp_classify_raw_keypress_ctrl_r_binding() { # keymap
+    local widget=${${(z)$(bindkey -M "$1" '^R' 2>/dev/null)}[2]}
+    case "$widget" in
+      ""|history-incremental-search-backward|history-incremental-pattern-search-backward)
+        # Unbound in this keymap, or still zsh's own default reverse-history-search: nothing to
+        # hand off to.
+        return 1
+        ;;
+      *)
+        printf '%s' "$widget"
+        ;;
+    esac
+  }
+
+  __warp_report_raw_keypress_ctrl_r_selection() {
+    local escaped_selection="$(warp_escape_json "$BUFFER")"
+    warp_send_json_message "{ \"hook\": \"ExternalCtrlRRawKeypressSelection\", \"value\": { \"buffer\": \"$escaped_selection\", \"session_id\": $WARP_SESSION_ID } }"
+    # Warp owns the command from here; the shell's own buffer must not keep a copy, or the
+    # next Enter would submit it twice.
+    BUFFER=''
+    CURSOR=0
+    zle reset-prompt
+  }
+
+  function __warp_run_raw_keypress_ctrl_r_widget_emacs () {
+    zle "$__warp_raw_keypress_orig_ctrl_r_widget_emacs"
+    __warp_report_raw_keypress_ctrl_r_selection
+  }
+  function __warp_run_raw_keypress_ctrl_r_widget_viins () {
+    zle "$__warp_raw_keypress_orig_ctrl_r_widget_viins"
+    __warp_report_raw_keypress_ctrl_r_selection
+  }
+  function __warp_run_raw_keypress_ctrl_r_widget_vicmd () {
+    zle "$__warp_raw_keypress_orig_ctrl_r_widget_vicmd"
+    __warp_report_raw_keypress_ctrl_r_selection
+  }
+
+  if __warp_raw_keypress_orig_ctrl_r_widget_emacs=$(__warp_classify_raw_keypress_ctrl_r_binding emacs); then
+    zle -N __warp_run_raw_keypress_ctrl_r_widget_emacs
+    bindkey -M emacs '\e]' __warp_run_raw_keypress_ctrl_r_widget_emacs
     shell_plugins+=(external_ctrl_r_raw_keypress)
-    ;;
-  esac
+  fi
+  if __warp_raw_keypress_orig_ctrl_r_widget_viins=$(__warp_classify_raw_keypress_ctrl_r_binding viins); then
+    zle -N __warp_run_raw_keypress_ctrl_r_widget_viins
+    bindkey -M viins '\e]' __warp_run_raw_keypress_ctrl_r_widget_viins
+    shell_plugins+=(external_ctrl_r_raw_keypress)
+  fi
+  if __warp_raw_keypress_orig_ctrl_r_widget_vicmd=$(__warp_classify_raw_keypress_ctrl_r_binding vicmd); then
+    zle -N __warp_run_raw_keypress_ctrl_r_widget_vicmd
+    bindkey -M vicmd '\e]' __warp_run_raw_keypress_ctrl_r_widget_vicmd
+    shell_plugins+=(external_ctrl_r_raw_keypress)
+  fi
 
   if kernel_name="$(uname)"; then
     if [[ "$kernel_name" == "Darwin" ]]; then

@@ -509,18 +509,26 @@ end
 set -g shell_plugins
 
 # Prototype (alternative to the foreground-command handoff in PR #15513): if the user has rebound
-# ctrl-r away from fish's own history search, install a wrapper function on the private key
-# sequence ctrl-x ctrl-r that re-invokes the user's own binding from inside a real `bind` context.
-# Both fzf's and atuin's fish widgets write their result back with the `commandline` builtin,
-# which fails with status 1 outside an interactive-editing context, so invoking the user's binding
-# from this wrapper is what makes fish work at all. Warp writes that sequence to the pty instead
-# of a bare ^R when this session reports the `external_ctrl_r_raw_keypress` tag below.
+# ctrl-r away from fish's own history search in one or more of fish's bind modes ("default", and
+# "insert" once `fish_vi_key_bindings` is loaded -- fzf and atuin both bind ctrl-r in both modes
+# when vi bindings are active), install a wrapper in that same mode on the private key sequence
+# Alt-] that re-invokes that mode's own binding from inside a real `bind` context. Both fzf's and
+# atuin's fish widgets write their result back with the `commandline` builtin, which fails with
+# status 1 outside an interactive-editing context, so invoking the user's binding from this
+# wrapper is what makes fish work at all. Warp writes that sequence to the pty instead of a bare
+# ^R when this session reports the `external_ctrl_r_raw_keypress` tag below.
+#
+# Alt-] (\x1b\x5d) was verified empirically to be unbound in stock fish (default, insert), bash
+# (emacs, vi-insert, vi-command), and zsh (emacs, viins, vicmd) -- unlike \x18\x12 (ctrl-x
+# ctrl-r), which an unqualified `bind` (no `-M`) only installs into the default mode: after
+# `fish_vi_key_bindings`, that left insert mode -- where fzf/atuin also bind ctrl-r -- with no
+# wrapper at all, silently stranding a vi-mode user with keystrokes forwarded nowhere.
 #
 # `bind` lists fish's own defaults with a `--preset` flag, so any binding without it is one the
 # user (or a plugin like fzf or atuin) installed.
-function __warp_raw_keypress_ctrl_r_widget
+function __warp_raw_keypress_ctrl_r_widget # mode
   set -l widget ""
-  for binding in (bind \cr 2>/dev/null)
+  for binding in (bind -M $argv[1] \cr 2>/dev/null)
     if string match --quiet -- 'bind --preset *' "$binding"
       continue
     end
@@ -531,21 +539,36 @@ function __warp_raw_keypress_ctrl_r_widget
   echo "$widget"
 end
 
-set -g __warp_raw_keypress_orig_ctrl_r (__warp_raw_keypress_ctrl_r_widget)
-if test -n "$__warp_raw_keypress_orig_ctrl_r"
-  function __warp_run_raw_keypress_ctrl_r_widget
-    eval $__warp_raw_keypress_orig_ctrl_r
-    set -l escaped_selection (warp_escape_json (commandline))
-    warp_send_json_message "{ \"hook\": \"ExternalCtrlRRawKeypressSelection\", \"value\": { \"buffer\": \"$escaped_selection\", \"session_id\": $WARP_SESSION_ID } }"
-    # Warp owns the command from here; the shell's own buffer must not keep a copy, or the
-    # next Enter would submit it twice.
-    commandline ''
-    commandline -f repaint
+function __warp_report_raw_keypress_ctrl_r_selection
+  set -l escaped_selection (warp_escape_json (commandline))
+  warp_send_json_message "{ \"hook\": \"ExternalCtrlRRawKeypressSelection\", \"value\": { \"buffer\": \"$escaped_selection\", \"session_id\": $WARP_SESSION_ID } }"
+  # Warp owns the command from here; the shell's own buffer must not keep a copy, or the
+  # next Enter would submit it twice.
+  commandline ''
+  commandline -f repaint
+end
+
+set -g __warp_raw_keypress_orig_ctrl_r_default (__warp_raw_keypress_ctrl_r_widget default)
+if test -n "$__warp_raw_keypress_orig_ctrl_r_default"
+  function __warp_run_raw_keypress_ctrl_r_widget_default
+    eval $__warp_raw_keypress_orig_ctrl_r_default
+    __warp_report_raw_keypress_ctrl_r_selection
   end
-  # Unlike bash's `bind` (\C-x notation) and zsh's `bindkey` (^X notation), fish's `bind` wants
-  # the literal key bytes: \x18 is ctrl-x, \x12 is ctrl-r.
-  bind \x18\x12 __warp_run_raw_keypress_ctrl_r_widget
+  bind -M default \x1b\x5d __warp_run_raw_keypress_ctrl_r_widget_default
   set -a shell_plugins external_ctrl_r_raw_keypress
+end
+
+# The "insert" mode only exists once `fish_vi_key_bindings` has been loaded.
+if bind -M insert > /dev/null 2>&1
+  set -g __warp_raw_keypress_orig_ctrl_r_insert (__warp_raw_keypress_ctrl_r_widget insert)
+  if test -n "$__warp_raw_keypress_orig_ctrl_r_insert"
+    function __warp_run_raw_keypress_ctrl_r_widget_insert
+      eval $__warp_raw_keypress_orig_ctrl_r_insert
+      __warp_report_raw_keypress_ctrl_r_selection
+    end
+    bind -M insert \x1b\x5d __warp_run_raw_keypress_ctrl_r_widget_insert
+    set -a shell_plugins external_ctrl_r_raw_keypress
+  end
 end
 
 function warp_bootstrapped
