@@ -250,11 +250,9 @@ fn inverse_delta_duration_ramps_between_the_two_reference_points() {
 }
 
 /// Pins the exact shape of the ramp between the two reference points, not just that it's
-/// monotonic and unbroken: this is a *linear* interpolation (a direct port of Chromium's
-/// `kInverseDeltaSlope`/`kInverseDeltaOffset`), not the hyperbola an earlier revision used. At
-/// the exact midpoint of the ramp (300px, halfway between 120 and 480), a linear ramp lands on
-/// exactly the midpoint duration (150ms, halfway between 100ms and 200ms); the hyperbola this
-/// replaced would have landed on 120ms instead, so this assertion would fail under that model.
+/// monotonic and unbroken: at the exact midpoint (300px, halfway between 120 and 480), a
+/// *linear* ramp lands on exactly the midpoint duration (150ms, halfway between 100ms and
+/// 200ms), which a curved ramp would not.
 #[test]
 fn inverse_delta_duration_ramps_linearly_not_hyperbolically() {
     let actual = inverse_delta_duration(300.0);
@@ -310,8 +308,7 @@ fn cubic_bezier_ease_in_out_matches_known_reference_values() {
     assert!(ease(0.75) > 0.8);
 }
 
-/// Direct unit coverage for the two guards `velocity_based_duration_bound` ports from
-/// Chromium's `VelocityBasedDurationBound`, beyond what
+/// Direct unit coverage for `velocity_based_duration_bound`'s two guards, beyond what
 /// `velocity_preserving_duration_bound_shrinks_when_moving_fast_toward_a_small_remaining_delta`
 /// already exercises through the composed function.
 #[test]
@@ -327,8 +324,8 @@ fn velocity_based_duration_bound_guards() {
     assert_eq!(velocity_based_duration_bound(10.0, -5.0), Duration::MAX);
     assert_eq!(velocity_based_duration_bound(-10.0, 5.0), Duration::MAX);
 
-    // A same-signed, ordinary case: the bound is `(remaining_delta / velocity).abs() * 2.5`,
-    // matching Chromium's documented fudge factor exactly.
+    // A same-signed, ordinary case: the bound is `(remaining_delta / velocity).abs() *
+    // VELOCITY_DURATION_BOUND_FACTOR`.
     assert_eq!(
         velocity_based_duration_bound(100.0, 200.0),
         Duration::from_secs_f32(100.0 / 200.0 * 2.5)

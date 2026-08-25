@@ -18,8 +18,7 @@
 //!   the currently displayed position.
 //!
 //! This mirrors Chromium's wheel-scroll animation, `cc::ScrollOffsetAnimationCurve`
-//! (`cc/animation/scroll_offset_animation_curve.cc`); ported constants cite it at their
-//! definitions.
+//! (`cc/animation/scroll_offset_animation_curve.cc`).
 
 use std::time::Duration;
 
@@ -31,8 +30,8 @@ use warp_features::FeatureFlag;
 pub const SMOOTH_SCROLL_FRAME_INTERVAL: Duration = Duration::from_millis(8);
 
 /// Pixels-per-line for converting a non-precise (line-based) scroll delta into the
-/// pixel-equivalent units this controller operates in. Matches the value Chromium and Flutter
-/// use, chosen over the OS-reported ~10px/line default because that reads as too slow.
+/// pixel-equivalent units this controller operates in. Chosen over the OS-reported ~10px/line
+/// default because that reads as too slow.
 pub const NUM_PIXELS_PER_LINE: f32 = 40.0;
 
 /// Whether a scroll input should be animated by a [`SmoothScrollController`] rather than applied
@@ -42,33 +41,21 @@ pub fn should_animate_scroll(precise: bool) -> bool {
     !precise && FeatureFlag::SmoothScrolling.is_enabled()
 }
 
-/// Chromium's inverse-delta ramp constants (`kInverseDelta*` in
-/// `cc/animation/scroll_offset_animation_curve.cc`), expressed in 60ths of a second the way
-/// Chromium expresses them (`kInverseDeltaMinDuration = 6.0`, `kInverseDeltaMaxDuration = 12.0`,
-/// divided by `kDurationDivisor = 60.0`): a wheel delta at or below
-/// [`INVERSE_DELTA_RAMP_START_PX`] gets [`INVERSE_DELTA_MAX_DURATION_60THS`] (slow, gentle); a
-/// delta at or above [`INVERSE_DELTA_RAMP_END_PX`] gets [`INVERSE_DELTA_MIN_DURATION_60THS`]
-/// (fast, snappy); between them, duration ramps linearly.
-const INVERSE_DELTA_MIN_DURATION_60THS: f32 = 6.0;
-const INVERSE_DELTA_MAX_DURATION_60THS: f32 = 12.0;
+/// A wheel delta at or below [`INVERSE_DELTA_RAMP_START_PX`] gets [`INVERSE_DELTA_MAX_DURATION`]
+/// (slow, gentle); a delta at or above [`INVERSE_DELTA_RAMP_END_PX`] gets
+/// [`INVERSE_DELTA_MIN_DURATION`] (fast, snappy); between them, duration ramps linearly.
 const INVERSE_DELTA_RAMP_START_PX: f32 = 120.0;
 const INVERSE_DELTA_RAMP_END_PX: f32 = 480.0;
-const DURATION_DIVISOR: f32 = 60.0;
+const INVERSE_DELTA_MAX_DURATION: Duration = Duration::from_millis(200);
+const INVERSE_DELTA_MIN_DURATION: Duration = Duration::from_millis(100);
 
 /// Never let a retarget's reshaped duration collapse below this floor (roughly one frame at
 /// 60Hz), even if the velocity-based bound would otherwise push it toward zero.
 const MIN_RETARGET_DURATION: Duration = Duration::from_millis(16);
 
-/// [`INVERSE_DELTA_MAX_DURATION_60THS`]/[`INVERSE_DELTA_MIN_DURATION_60THS`] expressed directly
-/// as [`Duration`]s, so the two ends of the ramp are exact values rather than round-tripping
-/// through an `f32` division by [`DURATION_DIVISOR`] (which cannot represent `1/60` exactly).
-const INVERSE_DELTA_MAX_DURATION: Duration = Duration::from_millis(200);
-const INVERSE_DELTA_MIN_DURATION: Duration = Duration::from_millis(100);
-
-/// Duration for a scroll delta, given its absolute magnitude in pixels. A direct port of
-/// Chromium's `DurationBehavior::kInverseDelta` linear ramp.
+/// Duration for a scroll delta, given its absolute magnitude in pixels, ramping linearly
+/// between the two ends of the ramp.
 fn inverse_delta_duration(abs_delta: f32) -> Duration {
-    // Return the exact boundary constants rather than the formula below; see their doc comment.
     if abs_delta <= INVERSE_DELTA_RAMP_START_PX {
         return INVERSE_DELTA_MAX_DURATION;
     }
@@ -76,17 +63,11 @@ fn inverse_delta_duration(abs_delta: f32) -> Duration {
         return INVERSE_DELTA_MIN_DURATION;
     }
 
-    // kInverseDeltaSlope = (kInverseDeltaMinDuration - kInverseDeltaMaxDuration)
-    //                    / (kInverseDeltaRampEndPx - kInverseDeltaRampStartPx)
-    let slope = (INVERSE_DELTA_MIN_DURATION_60THS - INVERSE_DELTA_MAX_DURATION_60THS)
+    let t = (abs_delta - INVERSE_DELTA_RAMP_START_PX)
         / (INVERSE_DELTA_RAMP_END_PX - INVERSE_DELTA_RAMP_START_PX);
-    // kInverseDeltaOffset = kInverseDeltaMaxDuration - kInverseDeltaRampStartPx * kInverseDeltaSlope
-    let offset = INVERSE_DELTA_MAX_DURATION_60THS - INVERSE_DELTA_RAMP_START_PX * slope;
-    let duration_60ths = (offset + abs_delta * slope).clamp(
-        INVERSE_DELTA_MIN_DURATION_60THS,
-        INVERSE_DELTA_MAX_DURATION_60THS,
-    );
-    Duration::from_secs_f32(duration_60ths / DURATION_DIVISOR)
+    let max = INVERSE_DELTA_MAX_DURATION.as_secs_f32();
+    let min = INVERSE_DELTA_MIN_DURATION.as_secs_f32();
+    Duration::from_secs_f32(max + (min - max) * t)
 }
 
 /// The x-coordinate of a bezier curve's first control point, fixed across every curve this
@@ -269,13 +250,11 @@ impl Segment {
     }
 }
 
-/// The fudge factor in Chromium's `VelocityBasedDurationBound`, whose source comment attributes
-/// it to compensating for the ease-out tail of the curve.
+/// The fudge factor compensating for the ease-out tail of the curve.
 const VELOCITY_DURATION_BOUND_FACTOR: f32 = 2.5;
 
-/// A direct port of Chromium's `VelocityBasedDurationBound`: caps a retarget's duration so a
-/// fast-moving animation with a small remaining distance can't overshoot the target and
-/// rubber-band back.
+/// Caps a retarget's duration so a fast-moving animation with a small remaining distance can't
+/// overshoot the target and rubber-band back.
 ///
 /// Zero when `remaining_delta` is already zero; unbounded when `current_velocity` is zero or
 /// points away from `remaining_delta` (the bound only applies while already moving toward the
