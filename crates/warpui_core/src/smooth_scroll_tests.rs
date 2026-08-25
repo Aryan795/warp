@@ -254,7 +254,7 @@ fn inverse_delta_duration_ramps_between_the_two_reference_points() {
 /// *linear* ramp lands on exactly the midpoint duration (150ms, halfway between 100ms and
 /// 200ms), which a curved ramp would not.
 #[test]
-fn inverse_delta_duration_ramps_linearly_not_hyperbolically() {
+fn inverse_delta_duration_ramps_linearly() {
     let actual = inverse_delta_duration(300.0);
     let expected = Duration::from_millis(150);
     let tolerance = Duration::from_micros(10);
@@ -332,8 +332,6 @@ fn velocity_based_duration_bound_guards() {
     );
 }
 
-/// `take_increment` hoists the "track what's already been applied, return only the remainder"
-/// pattern that `ScrollState`/`SmoothScrollHandle` used to hand-roll themselves.
 #[test]
 fn take_increment_reports_only_the_unapplied_remainder() {
     let start = Instant::now();
