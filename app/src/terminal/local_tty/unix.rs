@@ -1211,6 +1211,19 @@ fn prepare_dev_container(starter: &DevContainerShellStarter) -> Result<()> {
     // DCS hook outright regardless of delay — not just a race — so the
     // attach step shells out to plain `docker exec` instead; see
     // `ShellLaunchData::DevContainer`.)
+    //
+    // Follow-up investigation (see the PR description for #4460): this is a
+    // delivery problem, not a parsing problem — the sequence is verifiably
+    // absent from the raw bytes reaching the outer pty. The existing chunked
+    // writes for `is_container_subshell` don't apply (they pace Warp writing
+    // the bootstrap into the pty *after* this handshake is received, not
+    // receiving the handshake itself). Deferring emission to `bash`'s
+    // `PROMPT_COMMAND` — mirroring how `write_init_subshell_bytes_to_pty`
+    // injects the subshell hook only once the nested shell has been running
+    // long enough to be stable — did not fix it either, and a config that
+    // worked earlier in testing later failed consistently with no change in
+    // system load. This needs either a different attach mechanism or a
+    // handshake that doesn't depend on a byte sequence surviving this relay.
     let init_script = format!(
         "{};sleep 0.2",
         raw_init_shell_script_for_shell(ShellType::Bash, &ASSETS, starter.session_id())
