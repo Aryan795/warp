@@ -31,6 +31,7 @@ use crate::ai::execution_profiles::AIExecutionProfileAppExt;
 use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
 use crate::ai::llms::{LLMId, LLMPreferences};
 use crate::ai::mcp::TemplatableMCPServerManager;
+use crate::server::ids::ServerId;
 use crate::server::server_api::AIApiError;
 use crate::settings::AISettings;
 use crate::terminal::safe_mode_settings::get_secret_obfuscation_mode;
@@ -115,6 +116,26 @@ impl TryFrom<ServerConversationToken>
 
     fn try_from(token: ServerConversationToken) -> Result<Self, Self::Error> {
         token.as_str().parse()
+    }
+}
+
+/// The team an outbound `/ai/multi-agent` (or passive suggestions) request is scoped to.
+///
+/// Only a [`TeamScope`] can make one, so the uid sent as `X-Warp-Team-Uid` always came from a
+/// deliberately resolved team rather than a loose `Option<ServerId>`. `Copy`, so one capture
+/// serves every retry and a retry cannot drift to the window's later team. See
+/// `specs/multi-team-api-context/TECH.md`.
+#[derive(Debug, Clone, Copy)]
+pub struct RequestTeamScope(Option<ServerId>);
+
+impl RequestTeamScope {
+    pub fn from_scope(scope: &impl TeamScope) -> Self {
+        Self(scope.team_uid())
+    }
+
+    /// The wire uid. `None` sends no team header, leaving the server to its own default.
+    pub(crate) fn team_uid(self) -> Option<ServerId> {
+        self.0
     }
 }
 

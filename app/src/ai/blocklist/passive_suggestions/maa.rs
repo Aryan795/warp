@@ -9,7 +9,7 @@ use warpui::r#async::SpawnedFutureHandle;
 use warpui::{Entity, EntityId, ModelContext, ModelHandle, SingletonEntity};
 
 use super::super::controller::{BlocklistAIController, BlocklistAIControllerEvent};
-use crate::ai::agent::api::generate_multi_agent_output;
+use crate::ai::agent::api::{RequestTeamScope, generate_multi_agent_output};
 use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::agent::{
     AIIdentifiers, FileContext, PassiveCodeDiffEntry, PassiveSuggestionTrigger,
@@ -197,14 +197,19 @@ impl PassiveSuggestionsModel {
         let server_api = ServerApiProvider::as_ref(ctx).get();
         let (cancellation_tx, cancellation_rx) = futures::channel::oneshot::channel();
 
+        // Resolved before spawning, so a mid-flight team switch cannot re-attribute the request.
+        let team_scope =
+            RequestTeamScope::from_scope(&self.ai_controller.as_ref(ctx).team_context(ctx));
+
         let stream_handle = ctx.spawn(
             async move {
-                // TODO(multi-team): thread `TeamContext` from the owning terminal view once
-                // `BlocklistAIController`'s request-construction path carries one (see the
-                // matching TODO in `controller.rs`). See specs/multi-team-api-context/TECH.md.
-                let stream_result =
-                    generate_multi_agent_output(server_api, request_params, None, cancellation_rx)
-                        .await;
+                let stream_result = generate_multi_agent_output(
+                    server_api,
+                    request_params,
+                    team_scope,
+                    cancellation_rx,
+                )
+                .await;
                 extract_suggestion_from_stream(stream_result).await
             },
             move |me, result, ctx| {

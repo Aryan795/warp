@@ -2522,6 +2522,8 @@ impl BlocklistAIController {
         }
 
         let scope = self.team_context(ctx);
+        // Pinned at send, so the request keeps the team the surface was on when the user sent it.
+        let team_scope = api::RequestTeamScope::from_scope(&scope);
         let mut request_params = api::RequestParams::new(
             Some(self.terminal_surface_id),
             SessionContext::from_session(self.active_session.as_ref(ctx), ctx),
@@ -2546,13 +2548,13 @@ impl BlocklistAIController {
                 client_exchange_id: None,
                 model_id: Some(request_params.model.clone()),
             };
-            // TODO(multi-team): capture `TeamContext` at the originating view (one of
-            // `BlocklistAIController`'s ~20 public `send_*` entry points) and thread it down to
-            // this call so `X-Warp-Team-Uid` is sent on `/ai/multi-agent` requests. Deferred
-            // because `BlocklistAIController` itself must not store ambient `TeamContext` (it
-            // outlives any one operation); only the view that starts a request has one to give.
-            // See specs/multi-team-api-context/TECH.md.
-            ResponseStream::new(request_params.clone(), ai_identifiers, recovery, None, ctx)
+            ResponseStream::new(
+                request_params.clone(),
+                ai_identifiers,
+                recovery,
+                team_scope,
+                ctx,
+            )
         });
         let response_stream_id = response_stream.as_ref(ctx).id().clone();
         let response_stream_clone = response_stream.clone();
