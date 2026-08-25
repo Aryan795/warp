@@ -174,14 +174,8 @@ impl SharedSessionSettings {
         InactivityLadderSnapshot::capture(self).next_phase_after_revoke()
     }
 
-    /// Advances the running "floor" a ladder phase must meet or exceed. A disabled
-    /// (zero) phase passes through unchanged and leaves the floor untouched -- it isn't a
-    /// point on the same numeric axis as an enabled phase, so it's exempt from the ordering
-    /// entirely -- while an enabled phase is clamped up to at least the floor and becomes
-    /// the new floor itself. Threading one floor through the whole sequence (rather than
-    /// only comparing each field to its immediate neighbor) is what catches a disabled
-    /// middle phase: otherwise the two enabled phases on either side of it would never be
-    /// compared to each other.
+    /// Keeps each enabled phase at or above every earlier enabled phase, without
+    /// re-enabling zero-disabled phases.
     fn advance_ladder_floor(phase: Duration, floor: &mut Duration) -> Duration {
         if phase.is_zero() {
             return phase;

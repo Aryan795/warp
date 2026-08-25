@@ -163,28 +163,6 @@ fn ordering_enforcement_leaves_zeros_alone() {
 }
 
 #[test]
-fn advance_ladder_floor_leaves_disabled_phases_alone_but_keeps_the_floor_for_later_ones() {
-    let mut floor = Duration::ZERO;
-    assert_eq!(
-        SharedSessionSettings::advance_ladder_floor(SECS_25, &mut floor),
-        SECS_25,
-        "an enabled phase with no floor yet is left alone"
-    );
-    assert_eq!(
-        SharedSessionSettings::advance_ladder_floor(Duration::ZERO, &mut floor),
-        Duration::ZERO,
-        "a disabled phase is always left as zero"
-    );
-    assert_eq!(floor, SECS_25, "a disabled phase must not reset the floor");
-    assert_eq!(
-        SharedSessionSettings::advance_ladder_floor(SECS_10, &mut floor),
-        SECS_25,
-        "an enabled phase below the floor set by an earlier enabled phase -- even with a \
-         disabled one in between -- is clamped up to it"
-    );
-}
-
-#[test]
 fn zero_middle_phase_does_not_let_its_two_enabled_neighbors_skip_comparison() {
     App::test((), |mut app| async move {
         let _guard = FeatureFlag::SettingsFile.override_enabled(true);
