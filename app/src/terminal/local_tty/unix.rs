@@ -102,21 +102,47 @@ fn docker_sandbox_run_args(starter: &DockerSandboxShellStarter) -> Vec<std::ffi:
 }
 
 /// Builds the `docker exec` args that attach a bash shell (sourcing the
-/// bind-mounted init script) to an already-running Dev Container.
+/// init script `docker cp`'d in by [`prepare_dev_container`]) to an
+/// already-running Dev Container.
 ///
 /// This attaches with plain `docker exec` rather than `devcontainer exec`;
 /// see the doc comment on [`crate::terminal::shell::ShellLaunchData::DevContainer`]
-/// for why. Args are passed as literal argv entries, so no shell quoting is
-/// needed for the init path.
+/// for why. It also runs `-i` (no `-t`) with `bash` wrapped in `script`
+/// *inside* the container rather than the more obvious `docker exec -it
+/// ... bash`; see [`prepare_dev_container`] for why.
+///
+/// TODO(prototype): This trades the old "pane hangs forever" bug for a new
+/// one. Without `-t`, the local `docker exec` process is the sole member of
+/// the foreground process group on our host pty, so sending Ctrl-C (which
+/// Warp delivers as a literal `ETX` byte, not a host-level signal) triggers
+/// the *kernel's* line discipline to SIGINT that local `docker exec`
+/// process directly, terminating the whole attach rather than interrupting
+/// whatever's running remotely. Confirmed by hand: `docker exec` exits
+/// immediately on Ctrl-C while the remote `script`/`bash`/foreground-job
+/// tree is left running, orphaned, inside the container, unreachable by any
+/// existing pane. `docker exec -it` doesn't have this problem because `-t`
+/// makes the local Docker CLI put our host pty in raw mode, which disables
+/// `ISIG` and forwards the byte instead of converting it to a local signal.
+/// Fixing this needs either restoring that raw-mode behavior without `-t`
+/// (manually clearing `ISIG` on the pty this `Command` inherits before exec)
+/// or an entirely different attach transport.
 fn dev_container_exec_args(starter: &DevContainerShellStarter) -> Vec<std::ffi::OsString> {
     let mut args = vec![
         std::ffi::OsString::from("exec"),
-        std::ffi::OsString::from("-it"),
+        std::ffi::OsString::from("-i"),
     ];
     if let Some(remote_user) = &starter.remote_user {
         args.push(std::ffi::OsString::from("-u"));
         args.push(std::ffi::OsString::from(remote_user));
     }
+    // `script -c`'s command runs through the container's `/bin/sh`, so the
+    // init path needs shell quoting here even though the rest of these args
+    // are passed as literal argv entries to `docker exec` itself.
+    let init_path_quoted = format!(
+        "'{}'",
+        shell_escape_single_quotes(&starter.container_init_script_path(), ShellType::Bash)
+    );
+    let bash_cmd = format!("exec bash --rcfile {init_path_quoted} --noprofile");
     args.extend([
         std::ffi::OsString::from("-w"),
         std::ffi::OsString::from(&starter.remote_workspace_folder),
@@ -125,10 +151,10 @@ fn dev_container_exec_args(starter: &DevContainerShellStarter) -> Vec<std::ffi::
         std::ffi::OsString::from("-e"),
         std::ffi::OsString::from("COLORTERM=truecolor"),
         std::ffi::OsString::from(&starter.container_id),
-        std::ffi::OsString::from("bash"),
-        std::ffi::OsString::from("--rcfile"),
-        starter.init_path().into_os_string(),
-        std::ffi::OsString::from("--noprofile"),
+        std::ffi::OsString::from("script"),
+        std::ffi::OsString::from("-qfec"),
+        std::ffi::OsString::from(bash_cmd),
+        std::ffi::OsString::from("/dev/null"),
     ]);
     args
 }
@@ -1022,12 +1048,13 @@ fn prepare_docker_sandbox(starter: &DockerSandboxShellStarter) -> Result<()> {
 /// Spawn the PTY for a Dev Container session.
 ///
 /// The container itself is assumed to already be running (`devcontainer up`
-/// having completed, with the init-script bind mount configured) — see
-/// `crate::terminal::view::dev_container` for that lifecycle step, which runs
-/// before a `DevContainerShellStarter`, and therefore this function, ever
-/// exists. This function only writes the init script to the host path it
-/// will be mounted at, then delegates to the shared [`spawn_command_in_pty`]
-/// helper so PTY/`pre_exec` setup stays identical to the host-shell path.
+/// having completed) — see `crate::terminal::view::dev_container` for that
+/// lifecycle step, which runs before a `DevContainerShellStarter`, and
+/// therefore this function, ever exists. This function stages the init
+/// script and `docker cp`s it into the container (see
+/// [`prepare_dev_container`]), then delegates to the shared
+/// [`spawn_command_in_pty`] helper so PTY/`pre_exec` setup stays identical to
+/// the host-shell path.
 fn spawn_dev_container(
     options: PtyOptions,
     dev_container_starter: DevContainerShellStarter,
@@ -1066,10 +1093,17 @@ fn spawn_dev_container(
 }
 
 /// Builds the `Command` for a Dev Container PTY session: `docker exec`
-/// invocation with the bind-mounted init script and host-side environment
-/// variables. Window size is not passed at exec time: Docker forwards live
-/// resizes from our outer pty automatically for `-it` sessions, the same as
-/// it does for `docker run -it`/`docker attach`.
+/// invocation with the `docker cp`'d init script and host-side environment
+/// variables.
+///
+/// TODO(prototype): Window size is never propagated after the initial exec.
+/// `docker exec -it` forwards live resizes from our outer pty automatically,
+/// the same as `docker run -it`/`docker attach` do, but [`dev_container_exec_args`]
+/// deliberately doesn't pass `-t` (see its doc comment), which forfeits that
+/// forwarding: resizing a Dev Container pane after it opens does not resize
+/// the remote `bash`. Fixing this needs an explicit resize channel (e.g.
+/// `docker exec`'s `TTY resize` API against the `script`-owned pty, keyed by
+/// exec ID) rather than relying on Docker's implicit `-it` behavior.
 ///
 /// Does not perform any PTY-level setup; hand the returned `Command` to
 /// [`spawn_command_in_pty`].
@@ -1176,61 +1210,60 @@ fn build_dev_container_command(
     builder
 }
 
-/// Prepare the Dev Container session before spawning the PTY: write the bash
-/// init script to this session's dedicated host init dir, which was already
-/// bind-mounted into the container (read-only) when it was brought up.
+/// Prepare the Dev Container session before spawning the PTY: stage the bash
+/// init script on the host, then `docker cp` it into the container at the
+/// path [`dev_container_exec_args`] passes to `bash --rcfile`.
 ///
 /// The path is derived from `starter.sandbox_id` so multiple concurrent Warp
-/// panes attaching to Dev Containers don't race on or share the same host
+/// panes attaching to Dev Containers don't race on or share the same staged
 /// init-script path.
 ///
+/// `docker cp` (rather than a bind mount configured at `devcontainer up`
+/// time) is what lets [`dev_container_exec_args`] attach with plain `docker
+/// exec -i` + an in-container `script` instead of `docker exec -it`: with
+/// `-it`, bytes from the container's pty are relayed to our outer pty across
+/// an extra hop through the Docker daemon, and that hop unreliably drops the
+/// Warp handshake escape sequence bash emits right after the rcfile finishes
+/// sourcing, leaving the pane stuck on "Starting bash..." (see the PR for
+/// #4460 for the investigation). Allocating the pty *inside* the container
+/// with `script` and relaying over a plain pipe (`-i`, no `-t`) does not lose
+/// that handshake.
+///
 /// TODO(prototype): No cleanup on pane close. See the matching TODO on
-/// `prepare_docker_sandbox` — the same host-side init dir accumulates across
+/// `prepare_docker_sandbox` — the staged init script accumulates across
 /// sessions. Tracking as a follow-up if this graduates past prototype.
 fn prepare_dev_container(starter: &DevContainerShellStarter) -> Result<()> {
-    let mk_owner_only_dir = |path: &Path| -> Result<()> {
-        DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(path)
-            .with_context(|| format!("create dev container init dir {}", path.display()))
-    };
+    let host_init_script_path = starter.host_init_script_path();
+    let init_dir = host_init_script_path
+        .parent()
+        .context("dev container init script path has no parent directory")?;
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(init_dir)
+        .with_context(|| format!("create dev container init dir {}", init_dir.display()))?;
 
-    // `docker exec -it` relays bytes from the container's pty to our outer
-    // pty across an extra hop (through the Docker daemon). Measured
-    // empirically: without a delay, that hop's latency loses a race against
-    // bash's own interactive-mode terminal setup (which runs immediately
-    // after the rcfile finishes sourcing) often enough that the InitShell
-    // DCS hook below never reaches Warp, leaving the pane stuck showing
-    // "Starting bash..." forever. This is the same class of "double-PTY
-    // proxy drops data" issue already documented for `docker`/`podman exec`
-    // subshells in `pty_controller.rs` (which works around it with chunked
-    // writes); a short sleep here is the equivalent fix for our top-level
-    // session, giving the relay time to flush the hook before bash moves on.
-    // (`devcontainer exec` was tried first here, but empirically drops this
-    // DCS hook outright regardless of delay — not just a race — so the
-    // attach step shells out to plain `docker exec` instead; see
-    // `ShellLaunchData::DevContainer`.)
-    //
-    // Follow-up investigation (see the PR description for #4460): this is a
-    // delivery problem, not a parsing problem — the sequence is verifiably
-    // absent from the raw bytes reaching the outer pty. The existing chunked
-    // writes for `is_container_subshell` don't apply (they pace Warp writing
-    // the bootstrap into the pty *after* this handshake is received, not
-    // receiving the handshake itself). Deferring emission to `bash`'s
-    // `PROMPT_COMMAND` — mirroring how `write_init_subshell_bytes_to_pty`
-    // injects the subshell hook only once the nested shell has been running
-    // long enough to be stable — did not fix it either, and a config that
-    // worked earlier in testing later failed consistently with no change in
-    // system load. This needs either a different attach mechanism or a
-    // handshake that doesn't depend on a byte sequence surviving this relay.
-    let init_script = format!(
-        "{};sleep 0.2",
-        raw_init_shell_script_for_shell(ShellType::Bash, &ASSETS, starter.session_id())
+    let init_script =
+        raw_init_shell_script_for_shell(ShellType::Bash, &ASSETS, starter.session_id());
+    std::fs::write(&host_init_script_path, init_script)
+        .context("write dev container init script")?;
+
+    let container_dest = format!(
+        "{}:{}",
+        starter.container_id,
+        starter.container_init_script_path()
     );
-    let init_dir = starter.init_dir();
-    mk_owner_only_dir(&init_dir)?;
-    std::fs::write(starter.init_path(), init_script).context("write dev container init script")?;
+    let status = Command::new(starter.logical_shell_path())
+        .arg("cp")
+        .arg(&host_init_script_path)
+        .arg(&container_dest)
+        .status()
+        .context("run docker cp for dev container init script")?;
+    if !status.success() {
+        return Err(Error::msg(format!(
+            "`docker cp` of the init script into the Dev Container exited with {status}"
+        )));
+    }
 
     Ok(())
 }

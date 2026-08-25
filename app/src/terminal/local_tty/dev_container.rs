@@ -3,7 +3,7 @@
 //! This module owns everything specific to running a Warp shell inside a
 //! container that `devcontainer up` (from `@devcontainers/cli`) has already
 //! brought up: the [`DevContainerShellStarter`] that carries per-instance
-//! state and the host-side init-script mount-point layout.
+//! state and the init-script staging/copy layout.
 //!
 //! Bringing the container up is *not* this module's concern — that happens
 //! before a `DevContainerShellStarter` is ever constructed, driven from
@@ -73,50 +73,45 @@ pub fn resolve_docker_cli_path(ctx: &mut AppContext) -> BoxFuture<'static, Optio
 }
 
 /// Root directory on the host under which Dev Container scratch files (bash
-/// init scripts) live.
+/// init scripts, staged before `docker cp`) live.
 ///
 /// Lives under the Warp per-user cache directory for the same reasons as
 /// [`super::docker_sandbox::docker_sandbox_host_root`]: protected by the
-/// user's home-directory permissions, and additionally mode 0700 per
-/// sub-directory.
-///
-/// Layout: `<cache_dir>/dev-container/init/<sandbox_id>/`.
+/// user's home-directory permissions. Unlike the Docker sandbox (and this
+/// module's own earlier bind-mount design), this directory is never mounted
+/// into a container — see [`DevContainerShellStarter::new`] for why a bind
+/// mount doesn't work here.
 fn dev_container_host_root() -> PathBuf {
     warp_core::paths::cache_dir().join("dev-container")
 }
 
 /// Generates a fresh sandbox ID: 8 hex chars (32 bits), plenty for realistic
 /// concurrent session counts and keeps paths readable.
-///
-/// The caller (`crate::terminal::view::dev_container`) must generate this
-/// *before* bringing the container up, since the same ID determines the
-/// host-side init-script path that gets bind-mounted at `devcontainer up`
-/// time — it can't be regenerated later when the [`DevContainerShellStarter`]
-/// is constructed, unlike the Docker sandbox's `sandbox_id`, which is
-/// generated fresh at PTY-spawn time because sandbox creation and shell
-/// attachment happen together there.
 pub fn generate_sandbox_id() -> String {
     format!("{:08x}", rand::random::<u32>())
 }
 
-/// Host directory where Warp writes a Dev Container session's bash init
-/// script, keyed by `sandbox_id`. Mounted read-only into the container at
-/// the same absolute path when it is brought up.
-pub fn init_dir_for_sandbox_id(sandbox_id: &str) -> PathBuf {
-    dev_container_host_root().join("init").join(sandbox_id)
+/// Host path where Warp stages a Dev Container session's bash init script
+/// before copying it into the container with `docker cp`, keyed by
+/// `sandbox_id` so concurrent Warp panes don't collide.
+pub fn host_init_script_path_for_sandbox_id(sandbox_id: &str) -> PathBuf {
+    dev_container_host_root()
+        .join("init")
+        .join(format!("{sandbox_id}.sh"))
 }
 
-/// Full path to a Dev Container session's `init.sh` on the host (also valid
-/// inside the container once mounted).
-pub fn init_path_for_sandbox_id(sandbox_id: &str) -> PathBuf {
-    init_dir_for_sandbox_id(sandbox_id).join("init.sh")
+/// Path *inside the container* that the init script is copied to, and that
+/// gets passed to `bash --rcfile`. Lives under `/tmp`, which is writable in
+/// essentially every dev container image regardless of the configured user.
+pub fn container_init_script_path_for_sandbox_id(sandbox_id: &str) -> String {
+    format!("/tmp/.warp-devcontainer-init-{sandbox_id}.sh")
 }
 
 /// Wraps a [`DirectShellStarter`] and adds Dev Container-specific parameters.
 ///
-/// Each instance carries a unique `sandbox_id` so multiple Warp panes can
-/// attach independent init scripts without colliding on the host-side mount
-/// directory, even if they target the same container.
+/// Each instance carries a unique `sandbox_id` so multiple Warp panes
+/// attaching to the same (or different) Dev Containers don't collide on the
+/// staged/copied init-script path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DevContainerShellStarter {
     pub direct: DirectShellStarter,
@@ -130,17 +125,27 @@ pub struct DevContainerShellStarter {
     /// Workspace folder inside the container reported by `devcontainer up`
     /// (`docker exec -w`).
     pub remote_workspace_folder: String,
-    /// Unique per-instance ID used to derive the host-side init script path.
-    /// Generated at construction time; see [`Self::new`].
+    /// Unique per-instance ID used to derive the init-script staging and
+    /// in-container paths. Generated at construction time; see [`Self::new`].
     pub sandbox_id: String,
     /// The client-generated session ID injected into this container's init script.
     pub session_id: SessionId,
 }
 
 impl DevContainerShellStarter {
-    /// Construct a new starter for the given `sandbox_id`, which must be the
-    /// same ID used to bind-mount the init-script directory when the
-    /// container was brought up (see [`generate_sandbox_id`]).
+    /// Construct a new starter for the given `sandbox_id`.
+    ///
+    /// `sandbox_id` need not match anything from the `devcontainer up` step:
+    /// unlike the Docker sandbox (and an earlier version of this feature),
+    /// the init script is delivered via `docker cp` immediately before
+    /// `docker exec` runs, not a bind mount configured back when the
+    /// container was created. A bind mount only takes effect the *first*
+    /// time a container is created; `devcontainer up` reuses an existing
+    /// container (matched by workspace label) on subsequent invocations
+    /// without re-applying `--mount`, so a fresh per-invocation mount path
+    /// would silently stop existing inside the container after the first
+    /// session. `docker cp` has no such lifecycle coupling — it works
+    /// against any running container regardless of how it was created.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         direct: DirectShellStarter,
@@ -178,17 +183,14 @@ impl DevContainerShellStarter {
         self.session_id
     }
 
-    /// Host directory where Warp writes this session's bash init script.
-    /// Mounted read-only into the container at the same absolute path (the
-    /// mount is set up when the container is brought up; see
-    /// `crate::terminal::view::dev_container`).
-    pub fn init_dir(&self) -> PathBuf {
-        init_dir_for_sandbox_id(&self.sandbox_id)
+    /// Host path where this session's init script is staged before
+    /// `docker cp`.
+    pub fn host_init_script_path(&self) -> PathBuf {
+        host_init_script_path_for_sandbox_id(&self.sandbox_id)
     }
 
-    /// Full path to this session's `init.sh` on the host (also valid inside
-    /// the container once mounted).
-    pub fn init_path(&self) -> PathBuf {
-        init_path_for_sandbox_id(&self.sandbox_id)
+    /// Path inside the container the init script is copied to.
+    pub fn container_init_script_path(&self) -> String {
+        container_init_script_path_for_sandbox_id(&self.sandbox_id)
     }
 }

@@ -442,10 +442,11 @@ impl<T: EventLoopSender> PtyController<T> {
                     self.write_terminating_bootstrap_bytes(ctx);
                 }
             }
-        } else if bootstrap::is_container_subshell(pending_session_info) {
+        } else if bootstrap::is_container_exec_relayed_session(pending_session_info) {
             // Write in 4KB chunks with 50ms delays to avoid overwhelming
-            // PTY buffers in container exec sessions (podman/docker exec -it),
-            // where the double-PTY proxy drops data for large writes.
+            // PTY buffers in container exec sessions (podman/docker exec
+            // subshells, and top-level Dev Container sessions), where the
+            // double-relay proxy drops or mangles data for large writes.
             const CHUNK_SIZE: usize = 4096;
             let bytes: Vec<u8> = bootstrap.into_owned();
             let chunks: Vec<Vec<u8>> = bytes.chunks(CHUNK_SIZE).map(|c| c.to_vec()).collect();

@@ -42,8 +42,7 @@ use crate::terminal::TerminalManager;
 use crate::terminal::available_shells::AvailableShell;
 #[cfg(feature = "local_tty")]
 use crate::terminal::local_tty::dev_container::{
-    generate_sandbox_id, init_dir_for_sandbox_id, resolve_devcontainer_cli_path,
-    resolve_docker_cli_path,
+    generate_sandbox_id, resolve_devcontainer_cli_path, resolve_docker_cli_path,
 };
 #[cfg(all(feature = "local_tty", not(feature = "remote_tty")))]
 use crate::terminal::local_tty::{
@@ -253,12 +252,13 @@ impl TerminalView {
         }
     }
 
-    /// Runs `devcontainer up` for `workspace_folder`, bind-mounting a
-    /// dedicated per-session init-script directory so the eventual `bash
-    /// --rcfile` session (see `crate::terminal::local_tty::dev_container`)
-    /// can source Warp's shell integration from inside the container. Only
-    /// opens a pane once `up` reports success; shows an error toast (never a
-    /// pane) otherwise.
+    /// Runs `devcontainer up` for `workspace_folder`. Only opens a pane once
+    /// `up` reports success; shows an error toast (never a pane) otherwise.
+    ///
+    /// The init script that the eventual `bash --rcfile` session (see
+    /// `crate::terminal::local_tty::dev_container`) sources to integrate with
+    /// Warp is delivered separately, via `docker cp`, right before that PTY
+    /// is spawned — it doesn't need to be wired up here.
     #[cfg(feature = "local_tty")]
     fn bring_up_dev_container(
         &self,
@@ -268,26 +268,6 @@ impl TerminalView {
         ctx: &mut ViewContext<Self>,
     ) {
         let sandbox_id = generate_sandbox_id();
-        let init_dir = init_dir_for_sandbox_id(&sandbox_id);
-
-        // The init script itself is written later, right before the PTY is
-        // spawned (once we know the session ID to embed) — see
-        // `prepare_dev_container` in `local_tty::unix`. We only need the
-        // directory to exist now so it's a valid bind-mount source.
-        if let Err(e) = std::fs::create_dir_all(&init_dir) {
-            self.show_dev_container_toast(
-                format!("Couldn't prepare Dev Container session directory: {e}"),
-                ToastFlavor::Error,
-                ctx,
-            );
-            return;
-        }
-
-        let mount_arg = format!(
-            "type=bind,source={},target={},external=true",
-            init_dir.display(),
-            init_dir.display()
-        );
 
         let up_future = {
             let devcontainer_path = devcontainer_path.clone();
@@ -297,8 +277,6 @@ impl TerminalView {
                     .arg("up")
                     .arg("--workspace-folder")
                     .arg(&workspace_folder)
-                    .arg("--mount")
-                    .arg(mount_arg)
                     .output()
                     .await
             }

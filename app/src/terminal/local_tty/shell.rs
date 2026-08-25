@@ -63,9 +63,11 @@ pub enum ShellStarter {
     /// the resolved workspace path, read-only init-script mount, and base
     /// Docker image (`--template <base_image>`).
     DockerSandbox(DockerSandboxShellStarter),
-    /// Bootstrap a shell inside an already-running Dev Container via
-    /// `devcontainer exec`. Bringing the container up happens earlier, before
-    /// this starter is constructed; see `crate::terminal::view::dev_container`.
+    /// Bootstrap a shell inside an already-running Dev Container via plain
+    /// `docker exec` (not `devcontainer exec`; see
+    /// [`DevContainerShellStarter`] for why). Bringing the container up
+    /// happens earlier, before this starter is constructed; see
+    /// `crate::terminal::view::dev_container`.
     DevContainer(DevContainerShellStarter),
 }
 
