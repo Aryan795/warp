@@ -764,8 +764,6 @@ impl ScrollableState {
                     return false;
                 }
 
-                // A non-precise (discrete) delta animates toward its target when the rollout
-                // flag is enabled; precise/trackpad input always applies immediately.
                 let animate = should_animate_scroll(precise);
 
                 // Dispatch scroll event on each axis.
@@ -827,8 +825,6 @@ impl ScrollableState {
                     return false;
                 }
 
-                // A non-precise (discrete) delta animates toward its target when the rollout
-                // flag is enabled; precise/trackpad input always applies immediately.
                 if should_animate_scroll(precise) {
                     config.scroll_to_animated(
                         viewport_size,
@@ -844,11 +840,8 @@ impl ScrollableState {
         true
     }
 
-    /// Applies any pending smooth-scroll increment for a `Manual` axis to its child. A no-op for
-    /// `Clipped` axes, which apply their increment directly during paint instead. Called on
-    /// every event dispatched to this element so the animation keeps advancing as the app's
-    /// existing redraw machinery replays a synthetic `MouseMoved` event after each repaint (see
-    /// `PaintContext::repaint_after` / `AppContext::build_scene`).
+    /// Applies any pending smooth-scroll increment for a `Manual` axis to its child (needs an
+    /// `EventContext`, unlike `Clipped` axes, which apply theirs directly during paint).
     fn advance_manual_smooth_scroll(&mut self, ctx: &mut EventContext) {
         let now = Instant::now();
         match self {

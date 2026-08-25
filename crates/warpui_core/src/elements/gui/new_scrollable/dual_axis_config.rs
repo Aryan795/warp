@@ -987,8 +987,6 @@ fn paint_clipped_internal(
     child.paint(child_origin, ctx, app);
     ctx.position_cache.end();
 
-    // Keep repainting while a smooth-scroll animation is easing in on either axis, so the
-    // displayed position keeps advancing without further input.
     if horizontal.is_animating() || vertical.is_animating() {
         ctx.repaint_after(SMOOTH_SCROLL_FRAME_INTERVAL);
     }

@@ -71,9 +71,7 @@ impl ClippedScrollStateHandle {
         Self::default()
     }
 
-    /// Jumps directly to `start`, cancelling any in-flight smooth-scroll animation. Used by
-    /// every direct scroll operation: scrollbar drag, keyboard/page/home/end, jump-to-bottom,
-    /// scroll-to-item, and other programmatic position changes.
+    /// Jumps directly to `start`, cancelling any in-flight smooth-scroll animation.
     pub fn scroll_to(&self, start: Pixels) {
         self.clipped_scroll_data
             .lock()
@@ -92,9 +90,7 @@ impl ClippedScrollStateHandle {
     }
 
     /// The exact position this handle's scroll animation is heading toward, ignoring the
-    /// animation's current progress. Bounds and nested-scroll-propagation decisions should use
-    /// this rather than [`Self::scroll_start`], so an inner scrollable doesn't accept scroll
-    /// input that belongs to its parent while its own animation is still catching up.
+    /// animation's current progress (unlike [`Self::scroll_start`]).
     pub fn scroll_target(&self) -> Pixels {
         self.clipped_scroll_data
             .lock()
