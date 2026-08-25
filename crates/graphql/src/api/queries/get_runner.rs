@@ -4,7 +4,7 @@ use crate::request_context::RequestContext;
 use crate::response_context::ResponseContext;
 use crate::schema;
 
-#[derive(cynic::InputObject, Debug)]
+#[derive(cynic::InputObject, Debug, Clone)]
 pub struct RunnerSelector {
     pub uid: Option<cynic::Id>,
     pub name: Option<String>,

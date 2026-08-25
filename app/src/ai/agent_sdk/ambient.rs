@@ -46,6 +46,7 @@ use crate::server::server_api::ai::{
     ListAgentMessagesRequest, ReadAgentMessageResponse, RunSortBy, RunSortOrder,
     SendAgentMessageRequest, SendAgentMessageResponse, SpawnAgentRequest, TaskListFilter,
 };
+use crate::server::server_api::factory::get_runner_with_fallback;
 use crate::terminal::shared_session;
 use crate::util::time_format::format_approx_duration_from_now_utc;
 use crate::workspaces::user_workspaces::UserWorkspaces;
@@ -554,8 +555,7 @@ impl AmbientAgentRunner {
                         uid: Some(cynic::Id::new(&runner_identifier)),
                         name: Some(runner_identifier),
                     };
-                    let resolved_uid = factory_client
-                        .get_runner(selector)
+                    let resolved_uid = get_runner_with_fallback(factory_client.as_ref(), selector)
                         .await?
                         .uid
                         .inner()

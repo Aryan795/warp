@@ -53,6 +53,38 @@ pub trait FactoryClient: 'static + Send + Sync {
     async fn delete_runner(&self, uid: String) -> Result<String>;
 }
 
+/// True when a GraphQL error indicates the server doesn't recognize the
+/// `getRunner` query.
+fn is_missing_get_runner_query_error(err: &anyhow::Error) -> bool {
+    let message = err.to_string();
+    message.contains("getRunner") && message.contains("Cannot query field")
+}
+
+/// Resolves a runner via [`FactoryClient::get_runner`], with a fallback to a
+/// uid match against [`FactoryClient::get_runners`].
+pub async fn get_runner_with_fallback(
+    factory: &dyn FactoryClient,
+    selector: RunnerSelector,
+) -> Result<Runner> {
+    let uid = selector.uid.clone();
+    match factory.get_runner(selector).await {
+        Ok(runner) => Ok(runner),
+        Err(err) if is_missing_get_runner_query_error(&err) => {
+            let Some(uid) = uid else {
+                return Err(err);
+            };
+            let uid = uid.inner().to_string();
+            factory
+                .get_runners(None)
+                .await?
+                .into_iter()
+                .find(|runner| runner.uid.inner() == uid)
+                .ok_or_else(|| anyhow!("runner {uid} not found"))
+        }
+        Err(err) => Err(err),
+    }
+}
+
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
 impl FactoryClient for ServerApi {
@@ -117,5 +149,25 @@ impl FactoryClient for ServerApi {
             }
             DeleteRunnerResult::Unknown => Err(anyhow!("failed to delete runner")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_missing_get_runner_query_error;
+
+    #[test]
+    fn detects_the_missing_get_runner_query_error() {
+        let err = anyhow::anyhow!(
+            "missing response data for get_runner: Cannot query field \"getRunner\" on type \"RootQuery\"."
+        );
+        assert!(is_missing_get_runner_query_error(&err));
+    }
+
+    #[test]
+    fn does_not_treat_other_errors_as_a_missing_query() {
+        assert!(!is_missing_get_runner_query_error(&anyhow::anyhow!(
+            "permission denied"
+        )));
     }
 }

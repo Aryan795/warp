@@ -23,6 +23,7 @@ use warpui::{AppContext, ModelContext, SingletonEntity};
 use super::output::{self, TableFormat};
 use crate::ai::runner_display::{arch_display, macos_version_display, os_display};
 use crate::server::server_api::ServerApiProvider;
+use crate::server::server_api::factory::get_runner_with_fallback;
 use crate::util::time_format::format_approx_duration_from_now_utc;
 
 /// Handle runner-related CLI commands.
@@ -146,7 +147,7 @@ impl RunnerCommandRunner {
                 // that aren't being changed (the server upsert takes a full
                 // runner config).
                 let selector = update_selector(&args);
-                let existing = factory.get_runner(selector).await?;
+                let existing = get_runner_with_fallback(factory.as_ref(), selector).await?;
                 let uid = existing.uid.inner().to_string();
 
                 let runner = build_update_input(&args, &existing.config)?;
@@ -193,7 +194,11 @@ impl RunnerCommandRunner {
                     uid: Some(cynic::Id::new(&identifier)),
                     name: Some(identifier),
                 };
-                let uid = factory.get_runner(selector).await?.uid.inner().to_string();
+                let uid = get_runner_with_fallback(factory.as_ref(), selector)
+                    .await?
+                    .uid
+                    .inner()
+                    .to_string();
                 let deleted_uid = factory.delete_runner(uid).await?;
                 println!("Runner deleted successfully: {deleted_uid}");
                 Ok(())
