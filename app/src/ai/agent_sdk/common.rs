@@ -340,15 +340,22 @@ pub(super) fn resolve_environment(
     resolve_environment_by_name(&CloudAmbientAgentEnvironment::get_all(ctx), identifier)
 }
 
+/// Folds a name for comparison: trims whitespace and lowercases.
+fn comparison_key(name: &str) -> String {
+    name.trim().to_lowercase()
+}
+
 /// Find an unambiguous name match among synced environments.
 fn resolve_environment_by_name(
     environments: &[CloudAmbientAgentEnvironment],
     name: &str,
 ) -> Result<CloudAmbientAgentEnvironment, ResolveConfigurationError> {
+    let key = comparison_key(name);
     let matches: Vec<&CloudAmbientAgentEnvironment> = environments
         .iter()
         .filter(|env| {
-            matches!(env.sync_id(), SyncId::ServerId(_)) && env.model().string_model.name == name
+            matches!(env.sync_id(), SyncId::ServerId(_))
+                && comparison_key(&env.model().string_model.name) == key
         })
         .collect();
     match matches.as_slice() {

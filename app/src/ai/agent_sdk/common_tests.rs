@@ -127,6 +127,13 @@ fn resolve_environment_by_name_matches_synced_env_when_unsynced_duplicate_exists
 }
 
 #[test]
+fn resolve_environment_by_name_folds_case_and_surrounding_whitespace() {
+    let environments = vec![make_environment(1, "Prod")];
+    let resolved = resolve_environment_by_name(&environments, "  prod  ").unwrap();
+    assert_eq!(resolved.model().string_model.name, "Prod");
+}
+
+#[test]
 fn parse_ambient_task_id_accepts_valid_ids() {
     let task_id =
         parse_ambient_task_id("550e8400-e29b-41d4-a716-446655440000", "Invalid run ID").unwrap();
