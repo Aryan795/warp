@@ -64,13 +64,9 @@ pub struct Hoverable {
     defer_events_to_children: bool,
 }
 
-/// The window within which two synthetic-caused hover-state changes on the same element are
-/// considered "back-to-back" (see [`MouseState::should_suppress_synthetic_hover_change`]).
-/// Chosen to comfortably cover a same-instant relayout-and-replay cascade (all synchronous, no
-/// awaits) while staying well under the shortest realistic gap between two separate repaint
-/// frames -- including consecutive frames of a smooth-scroll animation, which is only ever
-/// requested no sooner than every 8ms (`SMOOTH_SCROLL_FRAME_INTERVAL`) and is further bounded
-/// below by the display's actual vsync cadence.
+/// The window within which two synthetic-caused hover-state changes are considered
+/// "back-to-back" and the second is suppressed. Covers a same-instant relayout cascade while
+/// staying under the ~8ms gap between separate animation frames (`SMOOTH_SCROLL_FRAME_INTERVAL`).
 const BACK_TO_BACK_SYNTHETIC_WINDOW: Duration = Duration::from_millis(4);
 
 #[derive(Clone, Debug, Default)]
@@ -178,16 +174,9 @@ impl MouseState {
         self.hover_out_timer = None;
     }
 
-    /// Whether a hover-state change caused by a synthetic MouseMoved event should be suppressed
-    /// because another synthetic-caused change on this element happened within
-    /// [`BACK_TO_BACK_SYNTHETIC_WINDOW`]. Guards against a feedback loop where handling a
-    /// synthetic hover change causes a relayout that replays another synthetic MouseMoved
-    /// within the same repaint, flipping the hover state right back -- without suppressing the
-    /// legitimate update a smooth-scroll (or any other content) animation needs on every one of
-    /// its repaint frames, even though each of those frames also carries a synthetic MouseMoved
-    /// (since the physical mouse hasn't moved but content has). A non-synthetic event clears
-    /// the recorded instant so a later synthetic change is never suppressed by an unrelated,
-    /// long-past one.
+    /// Whether a hover-state change from a synthetic MouseMoved should be suppressed: only within
+    /// [`BACK_TO_BACK_SYNTHETIC_WINDOW`], distinguishing a same-instant relayout cascade from a
+    /// legitimate change on a later, separate frame.
     fn should_suppress_synthetic_hover_change(&mut self, is_synthetic: bool, now: Instant) -> bool {
         if !is_synthetic {
             self.last_synthetic_hover_change_at = None;
