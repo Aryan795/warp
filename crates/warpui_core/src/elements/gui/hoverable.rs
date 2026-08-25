@@ -149,6 +149,12 @@ impl MouseState {
         self.is_mouse_over_element
     }
 
+    /// True while a left-mouse drag is in progress, for a `Hoverable` that
+    /// opted into [`Hoverable::with_hover_during_drag`].
+    pub fn is_dragging(&self) -> bool {
+        self.dragging
+    }
+
     pub fn reset_hover_state(&mut self) {
         self.is_hovered = false;
     }

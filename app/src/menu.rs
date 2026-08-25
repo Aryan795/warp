@@ -1450,10 +1450,21 @@ impl<A: Action + Clone> MenuItemFields<A> {
         // an already-selected item, and keeps the safe triangle's position tracking current
         // even when the mouse passes over disabled items.
         if !has_submenu {
-            let mouse_in_behavior = if ignore_hover_when_covered {
+            // While a real drag is in progress on a menu that opted into
+            // `hover_tracks_drag`, ignore synthetic `MouseMoved` events here.
+            // The window replays the last real (pre-drag) `MouseMoved` position
+            // after every scene rebuild; without this guard, that stale replay
+            // re-dispatches `HoverSubmenuLeafNode` for the row the drag began
+            // on, snapping `hovered_row_index` back there even as `Hoverable`'s
+            // own drag-tracked hover (the row highlight) correctly follows the
+            // pointer. Real `LeftMouseDragged` events aren't synthetic, so they
+            // still update `hovered_row_index` (and the safe triangle's tracked
+            // position) on every drag frame, keeping the two in agreement.
+            let is_dragging = hover_tracks_drag && self.mouse_state.lock().unwrap().is_dragging();
+            let mouse_in_behavior = if ignore_hover_when_covered || is_dragging {
                 Some(MouseInBehavior {
-                    fire_on_synthetic_events: true,
-                    fire_when_covered: false,
+                    fire_on_synthetic_events: !is_dragging,
+                    fire_when_covered: !ignore_hover_when_covered,
                 })
             } else {
                 None
