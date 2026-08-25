@@ -285,7 +285,11 @@ impl TerminalView {
         };
 
         ctx.spawn(up_future, move |me, result, ctx| match result {
-            Ok(output) => match interpret_dev_container_up_output(&output) {
+            Ok(output) => match interpret_dev_container_up_output(
+                output.status.success(),
+                &output.stdout,
+                &output.stderr,
+            ) {
                 DevContainerUpOutcome::ReadyToAttach {
                     container_id,
                     remote_user,
@@ -485,15 +489,21 @@ enum DevContainerUpOutcome {
 /// stdout/stderr. Pulled out of [`TerminalView::bring_up_dev_container`] as a
 /// pure function so the partial-result and JSON-fallback cases are unit
 /// testable without actually running `devcontainer`.
+///
+/// Takes the exit status and byte streams as plain primitives, rather than a
+/// `std::process::Output`, so callers (including tests) don't need a real,
+/// platform-specific `ExitStatus` (which has no portable public constructor)
+/// just to exercise this logic.
 #[cfg(feature = "local_tty")]
-fn interpret_dev_container_up_output(output: &std::process::Output) -> DevContainerUpOutcome {
-    if !output.status.success() {
-        return DevContainerUpOutcome::Error(dev_container_up_failure_message(
-            &output.stdout,
-            &output.stderr,
-        ));
+fn interpret_dev_container_up_output(
+    exit_success: bool,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> DevContainerUpOutcome {
+    if !exit_success {
+        return DevContainerUpOutcome::Error(dev_container_up_failure_message(stdout, stderr));
     }
-    match parse_dev_container_up_stdout(&output.stdout) {
+    match parse_dev_container_up_stdout(stdout) {
         Some(up_result) if up_result.outcome == "success" => {
             match (up_result.container_id, up_result.remote_workspace_folder) {
                 (Some(container_id), Some(remote_workspace_folder)) => {
@@ -510,10 +520,7 @@ fn interpret_dev_container_up_output(output: &std::process::Output) -> DevContai
                 ),
             }
         }
-        _ => DevContainerUpOutcome::Error(dev_container_up_failure_message(
-            &output.stdout,
-            &output.stderr,
-        )),
+        _ => DevContainerUpOutcome::Error(dev_container_up_failure_message(stdout, stderr)),
     }
 }
 

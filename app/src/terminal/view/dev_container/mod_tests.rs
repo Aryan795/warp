@@ -1,21 +1,10 @@
-use std::os::unix::process::ExitStatusExt as _;
-use std::process::{ExitStatus, Output};
-
 use super::*;
-
-fn output(exit_code: i32, stdout: &str, stderr: &str) -> Output {
-    Output {
-        status: ExitStatus::from_raw(exit_code << 8),
-        stdout: stdout.as_bytes().to_vec(),
-        stderr: stderr.as_bytes().to_vec(),
-    }
-}
 
 #[test]
 fn interpret_dev_container_up_output_ready_to_attach_on_full_success() {
     let stdout = r#"Some progress line
 {"outcome":"success","containerId":"abc123","remoteUser":"vscode","remoteWorkspaceFolder":"/workspaces/project"}"#;
-    let outcome = interpret_dev_container_up_output(&output(0, stdout, ""));
+    let outcome = interpret_dev_container_up_output(true, stdout.as_bytes(), b"");
 
     assert_eq!(
         outcome,
@@ -30,7 +19,7 @@ fn interpret_dev_container_up_output_ready_to_attach_on_full_success() {
 #[test]
 fn interpret_dev_container_up_output_ready_to_attach_without_remote_user() {
     let stdout = r#"{"outcome":"success","containerId":"abc123","remoteWorkspaceFolder":"/workspaces/project"}"#;
-    let outcome = interpret_dev_container_up_output(&output(0, stdout, ""));
+    let outcome = interpret_dev_container_up_output(true, stdout.as_bytes(), b"");
 
     assert_eq!(
         outcome,
@@ -45,7 +34,7 @@ fn interpret_dev_container_up_output_ready_to_attach_without_remote_user() {
 #[test]
 fn interpret_dev_container_up_output_errors_on_missing_container_id() {
     let stdout = r#"{"outcome":"success","remoteWorkspaceFolder":"/workspaces/project"}"#;
-    let outcome = interpret_dev_container_up_output(&output(0, stdout, ""));
+    let outcome = interpret_dev_container_up_output(true, stdout.as_bytes(), b"");
 
     assert!(
         matches!(outcome, DevContainerUpOutcome::Error(message) if message.contains("didn't report"))
@@ -55,7 +44,7 @@ fn interpret_dev_container_up_output_errors_on_missing_container_id() {
 #[test]
 fn interpret_dev_container_up_output_errors_on_missing_remote_workspace_folder() {
     let stdout = r#"{"outcome":"success","containerId":"abc123"}"#;
-    let outcome = interpret_dev_container_up_output(&output(0, stdout, ""));
+    let outcome = interpret_dev_container_up_output(true, stdout.as_bytes(), b"");
 
     assert!(
         matches!(outcome, DevContainerUpOutcome::Error(message) if message.contains("didn't report"))
@@ -65,7 +54,7 @@ fn interpret_dev_container_up_output_errors_on_missing_remote_workspace_folder()
 #[test]
 fn interpret_dev_container_up_output_uses_structured_message_on_failure_exit_status() {
     let stdout = r#"{"outcome":"error","message":"Command failed: docker pull nope:latest"}"#;
-    let outcome = interpret_dev_container_up_output(&output(1, stdout, "some stderr noise"));
+    let outcome = interpret_dev_container_up_output(false, stdout.as_bytes(), b"some stderr noise");
 
     assert_eq!(
         outcome,
@@ -77,7 +66,7 @@ fn interpret_dev_container_up_output_uses_structured_message_on_failure_exit_sta
 
 #[test]
 fn interpret_dev_container_up_output_falls_back_to_stderr_tail_when_unparseable() {
-    let outcome = interpret_dev_container_up_output(&output(1, "not json at all", "boom"));
+    let outcome = interpret_dev_container_up_output(false, b"not json at all", b"boom");
 
     assert_eq!(
         outcome,
@@ -90,7 +79,7 @@ fn interpret_dev_container_up_output_errors_when_success_exit_but_outcome_is_err
     // A process can exit 0 while `devcontainer up`'s own JSON still reports
     // an error outcome; make sure that's not misread as ready-to-attach.
     let stdout = r#"{"outcome":"error","message":"something went wrong"}"#;
-    let outcome = interpret_dev_container_up_output(&output(0, stdout, ""));
+    let outcome = interpret_dev_container_up_output(true, stdout.as_bytes(), b"");
 
     assert_eq!(
         outcome,
