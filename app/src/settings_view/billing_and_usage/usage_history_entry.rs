@@ -113,10 +113,6 @@ impl UsageHistoryEntry {
         let total_credits =
             entry.usage_metadata.credits_spent + entry.usage_metadata.platform_credits_spent;
         let usage_display_unit = AISettings::as_ref(app).usage_display_unit;
-        // GAP: this GraphQL-backed source doesn't yet thread through a token
-        // count or dollar cost (see `ConversationUsageInfo::from` in
-        // `gql_convert.rs`), so this always falls back to a plain credits
-        // figure today; it will pick up tokens/dollars once that gap closes.
         let credits_spent = Text::new_inline(
             format_credits_with_cost(total_credits as f32, None, None, usage_display_unit),
             appearance.ui_font_family(),

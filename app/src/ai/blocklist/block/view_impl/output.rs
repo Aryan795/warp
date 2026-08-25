@@ -3725,7 +3725,7 @@ fn render_usage_button(props: Props, app: &AppContext) -> Box<dyn Element> {
 
     let usage_display_unit = AISettings::as_ref(app).usage_display_unit;
     let total_credits_spent = headline_credits;
-    let mut credit_usage_text = format_credits_with_cost(
+    let mut usage_text = format_credits_with_cost(
         total_credits_spent,
         headline_tokens,
         headline_cost_in_cents,
@@ -3750,7 +3750,7 @@ fn render_usage_button(props: Props, app: &AppContext) -> Box<dyn Element> {
                 last_block_charged_usage.map(|usage| usage.total_cost_in_cents()),
                 usage_display_unit,
             );
-            credit_usage_text = format!("{credit_usage_text} (+{last_block_text})");
+            usage_text = format!("{usage_text} (+{last_block_text})");
         }
     }
 
@@ -3761,7 +3761,7 @@ fn render_usage_button(props: Props, app: &AppContext) -> Box<dyn Element> {
         .with_child(
             Container::new(
                 Text::new_inline(
-                    credit_usage_text,
+                    usage_text,
                     appearance.ui_font_family(),
                     appearance.monospace_font_size(),
                 )
