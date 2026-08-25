@@ -127,9 +127,10 @@ mod tests {
     /// Skips (rather than fails) when `warp-channel-config` is not on PATH: it is only
     /// installed via `./script/install_channel_config`, which requires SSH access to a private
     /// repo that is unavailable on the public mirror, fork PRs, and OSS contributor machines.
-    /// `.github/actions/prepare_environment`'s macOS install step now fails outright in
-    /// `warpdotdev/warp-internal`, where that access is expected, so a broken or inaccessible
-    /// pin still fails a required CI job there instead of this test silently no-op'ing.
+    /// `.github/actions/prepare_environment`'s macOS and Linux install steps now fail outright
+    /// in `warpdotdev/warp-internal` when the SSH key needed for that access is supplied, so a
+    /// broken or inaccessible pin still fails a required CI job there instead of this test
+    /// silently no-op'ing.
     #[test]
     fn generator_emits_platform_root_url_for_dev_and_stable() {
         if command::blocking::Command::new(CONFIG_BIN_NAME)
