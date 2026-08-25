@@ -72,12 +72,14 @@ use crate::terminal::model::ansi::{self, BootstrappedValue, InitShellValue, Pree
 use crate::terminal::model::block::AgentViewVisibility;
 use crate::terminal::model::blocks::{TotalIndex, insert_block};
 use crate::terminal::model::grid::Dimensions as _;
+use crate::terminal::model::session::SessionInfo;
 use crate::terminal::model::terminal_model::WithinBlock;
 use crate::terminal::session_settings::AgentToolbarChipSelection;
 use crate::terminal::shared_session::shared_handlers::{
     RemoteUpdateGuard, apply_cli_agent_state_update,
 };
 use crate::terminal::shared_session::{SharedSessionSource, SharedSessionStatus};
+use crate::terminal::shell::Shell;
 use crate::terminal::view::ambient_agent::AmbientAgentViewModelEvent;
 use crate::terminal::view::load_ai_conversation::{
     RestoreConversationEntryBehavior, RestoredAIConversation,
@@ -10017,4 +10019,282 @@ fn back_button_label_resolves_token_only_parent_linkage() {
             );
         });
     });
+}
+
+/// Registers a test session with (or without) the raw-keypress ctrl-r handoff plugin tag, and
+/// points the active block at it, so [`TerminalView::maybe_trigger_raw_keypress_ctrl_r_handoff`]
+/// has a session to resolve.
+fn setup_raw_keypress_ctrl_r_session(
+    view: &mut TerminalView,
+    ctx: &mut ViewContext<TerminalView>,
+    session_id: SessionId,
+    has_plugin_tag: bool,
+) {
+    let mut session_info = SessionInfo::new_for_test().with_id(session_id);
+    if has_plugin_tag {
+        session_info.shell = Shell::new(
+            session_info.shell.shell_type(),
+            session_info.shell.version().clone(),
+            session_info.shell.options().clone(),
+            HashSet::from([RAW_KEYPRESS_CTRL_R_HANDOFF_PLUGIN_TAG.to_string()]),
+            session_info.shell.shell_path().clone(),
+        );
+    }
+    view.sessions_model().update(ctx, |sessions, _ctx| {
+        sessions.register_session_for_test(session_info);
+    });
+    view.active_block_metadata = Some(BlockMetadata::new(Some(session_id), None));
+}
+
+#[test]
+fn raw_keypress_ctrl_r_handoff_requires_plugin_tag() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let _flag = FeatureFlag::RawKeypressCtrlRHandoff.override_enabled(true);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let session_id = SessionId::from(0);
+
+        terminal.update(&mut app, |view, ctx| {
+            setup_raw_keypress_ctrl_r_session(view, ctx, session_id, false);
+
+            let triggered = view.maybe_trigger_raw_keypress_ctrl_r_handoff(ctx);
+            assert!(
+                !triggered,
+                "handoff must not trigger for a session without the plugin tag"
+            );
+            assert!(
+                !view
+                    .model
+                    .lock()
+                    .block_list()
+                    .active_block()
+                    .is_raw_keypress_forward_active(),
+                "the active block must not be marked as forwarding"
+            );
+        });
+    })
+}
+
+#[test]
+fn raw_keypress_ctrl_r_handoff_triggers_and_forwards_keyseq() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let _flag = FeatureFlag::RawKeypressCtrlRHandoff.override_enabled(true);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let session_id = SessionId::from(0);
+
+        let pty_writes: Rc<RefCell<Vec<Vec<u8>>>> = Rc::new(RefCell::new(Vec::new()));
+        let writes = pty_writes.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_view(&terminal, move |_, event, _| {
+                if let Event::WriteBytesToPty { bytes } = event {
+                    writes.borrow_mut().push(bytes.to_vec());
+                }
+            });
+        });
+
+        terminal.update(&mut app, |view, ctx| {
+            setup_raw_keypress_ctrl_r_session(view, ctx, session_id, true);
+
+            let triggered = view.maybe_trigger_raw_keypress_ctrl_r_handoff(ctx);
+            assert!(
+                triggered,
+                "handoff must trigger for a session with the plugin tag"
+            );
+            assert!(
+                view.model
+                    .lock()
+                    .block_list()
+                    .active_block()
+                    .is_raw_keypress_forward_active(),
+                "the active block must be marked as forwarding once the handoff starts"
+            );
+            assert!(
+                view.pending_raw_keypress_ctrl_r_handoff.is_some(),
+                "a pending handoff must be tracked"
+            );
+            assert!(
+                view.pending_raw_keypress_ctrl_r_timeout.is_some(),
+                "a bail-out timer must be armed"
+            );
+        });
+
+        assert_eq!(
+            *pty_writes.borrow(),
+            vec![RAW_KEYPRESS_CTRL_R_HANDOFF_KEYSEQ.to_vec()],
+            "the private key sequence must be written to the pty exactly once"
+        );
+    })
+}
+
+#[test]
+fn raw_keypress_ctrl_r_handoff_stale_timeout_is_ignored() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let _flag = FeatureFlag::RawKeypressCtrlRHandoff.override_enabled(true);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let session_id = SessionId::from(0);
+
+        terminal.update(&mut app, |view, ctx| {
+            setup_raw_keypress_ctrl_r_session(view, ctx, session_id, true);
+            assert!(view.maybe_trigger_raw_keypress_ctrl_r_handoff(ctx));
+            let current_id = view
+                .pending_raw_keypress_ctrl_r_handoff
+                .as_ref()
+                .expect("handoff should be pending")
+                .id;
+
+            // A timer belonging to a hypothetical newer handoff (or a duplicate fired for the
+            // current one after it was already superseded) must not tear down the still-current
+            // handoff.
+            let stale_id = RawKeypressCtrlRHandoffId(current_id.0 + 1);
+            view.on_raw_keypress_ctrl_r_handoff_timeout(stale_id, ctx);
+            assert!(
+                view.model
+                    .lock()
+                    .block_list()
+                    .active_block()
+                    .is_raw_keypress_forward_active(),
+                "a stale timeout must not clear the forwarding flag"
+            );
+            assert_eq!(
+                view.pending_raw_keypress_ctrl_r_handoff
+                    .as_ref()
+                    .map(|handoff| handoff.id),
+                Some(current_id),
+                "a stale timeout must not clear the pending handoff"
+            );
+            assert!(
+                view.raw_keypress_ctrl_r_handoff_cooldown_until.is_none(),
+                "a stale timeout must not start a cooldown"
+            );
+
+            // The timer that actually matches the current handoff must tear it down.
+            view.on_raw_keypress_ctrl_r_handoff_timeout(current_id, ctx);
+            assert!(
+                !view
+                    .model
+                    .lock()
+                    .block_list()
+                    .active_block()
+                    .is_raw_keypress_forward_active(),
+                "the matching timeout must clear the forwarding flag"
+            );
+            assert!(
+                view.pending_raw_keypress_ctrl_r_handoff.is_none(),
+                "the matching timeout must clear the pending handoff"
+            );
+            assert!(
+                view.raw_keypress_ctrl_r_handoff_cooldown_until.is_some(),
+                "the matching timeout must start a cooldown"
+            );
+        });
+    })
+}
+
+#[test]
+fn raw_keypress_ctrl_r_handoff_cooldown_blocks_new_handoff() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let _flag = FeatureFlag::RawKeypressCtrlRHandoff.override_enabled(true);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let session_id = SessionId::from(0);
+
+        terminal.update(&mut app, |view, ctx| {
+            setup_raw_keypress_ctrl_r_session(view, ctx, session_id, true);
+            assert!(view.maybe_trigger_raw_keypress_ctrl_r_handoff(ctx));
+            let current_id = view
+                .pending_raw_keypress_ctrl_r_handoff
+                .as_ref()
+                .expect("handoff should be pending")
+                .id;
+            view.on_raw_keypress_ctrl_r_handoff_timeout(current_id, ctx);
+
+            // Immediately re-pressing ctrl-r must be refused: the timeout's best-effort Ctrl-C
+            // cannot guarantee the old wrapper widget actually stopped consuming pty input.
+            let retriggered = view.maybe_trigger_raw_keypress_ctrl_r_handoff(ctx);
+            assert!(
+                !retriggered,
+                "a new handoff must be refused during the post-timeout cooldown"
+            );
+        });
+    })
+}
+
+#[test]
+fn raw_keypress_ctrl_r_handoff_selection_ignored_for_wrong_session() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let _flag = FeatureFlag::RawKeypressCtrlRHandoff.override_enabled(true);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let session_id = SessionId::from(0);
+        let other_session_id = SessionId::from(1);
+
+        terminal.update(&mut app, |view, ctx| {
+            setup_raw_keypress_ctrl_r_session(view, ctx, session_id, true);
+            assert!(view.maybe_trigger_raw_keypress_ctrl_r_handoff(ctx));
+
+            // A selection tagged with a session that isn't the one this handoff started for
+            // must be treated as an unsolicited pty write, not applied.
+            view.apply_raw_keypress_ctrl_r_selection(other_session_id, "echo hi", ctx);
+
+            assert!(
+                view.model
+                    .lock()
+                    .block_list()
+                    .active_block()
+                    .is_raw_keypress_forward_active(),
+                "a mismatched-session selection must not end the handoff"
+            );
+            assert!(
+                view.pending_raw_keypress_ctrl_r_handoff.is_some(),
+                "a mismatched-session selection must leave the handoff pending"
+            );
+            assert_eq!(
+                view.input.as_ref(ctx).editor().as_ref(ctx).buffer_text(ctx),
+                "",
+                "a mismatched-session selection must not be applied to the input buffer"
+            );
+        });
+    })
+}
+
+#[test]
+fn raw_keypress_ctrl_r_handoff_selection_applies_and_ends() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let _flag = FeatureFlag::RawKeypressCtrlRHandoff.override_enabled(true);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let session_id = SessionId::from(0);
+
+        terminal.update(&mut app, |view, ctx| {
+            setup_raw_keypress_ctrl_r_session(view, ctx, session_id, true);
+            assert!(view.maybe_trigger_raw_keypress_ctrl_r_handoff(ctx));
+
+            view.apply_raw_keypress_ctrl_r_selection(session_id, "echo selected", ctx);
+
+            assert!(
+                !view
+                    .model
+                    .lock()
+                    .block_list()
+                    .active_block()
+                    .is_raw_keypress_forward_active(),
+                "a matching selection must end the handoff"
+            );
+            assert!(
+                view.pending_raw_keypress_ctrl_r_handoff.is_none(),
+                "a matching selection must clear the pending handoff"
+            );
+            assert!(
+                view.pending_raw_keypress_ctrl_r_timeout.is_none(),
+                "a matching selection must abort the bail-out timer"
+            );
+            assert_eq!(
+                view.input.as_ref(ctx).editor().as_ref(ctx).buffer_text(ctx),
+                "echo selected",
+                "the selected command must be applied to the input buffer"
+            );
+        });
+    })
 }

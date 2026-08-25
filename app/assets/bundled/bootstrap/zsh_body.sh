@@ -1326,8 +1326,20 @@ esac
   # through zle, not when called as a plain function). Warp writes that sequence to the pty
   # instead of a bare ^R when this session reports the `external_ctrl_r_raw_keypress` tag below.
   #
+  # Warp cannot tell which keymap is actually active when the user presses ctrl-r, so
+  # `shell_plugins` cannot meaningfully vary per keymap -- it is one session-wide capability
+  # flag. To make that flag's meaning invariant across keymaps, every keymap that lacks a *real*
+  # wrapper (because ^R isn't bound to a re-invokable widget there) still gets an
+  # empty-completion fallback bound to Alt-], so pressing ctrl-r always produces a fast,
+  # deterministic outcome -- a real handoff or an immediate no-op -- rather than a silent
+  # multi-second wait for a key nothing is listening for.
+  #
   # Alt-] was verified empirically to be unbound in stock zsh (emacs, viins, vicmd), bash (emacs,
-  # vi-insert, vi-command), and fish (default, insert).
+  # vi-insert, vi-command), and fish (default, insert). Still, "unbound in stock configurations"
+  # is not the same as unbound in this user's configuration, so each keymap is inspected
+  # immediately before installing anything there; if the user already has a real binding on
+  # Alt-] in a keymap, we leave it alone entirely (no wrapper, no fallback, no capability
+  # claimed for that keymap).
   __warp_classify_raw_keypress_ctrl_r_binding() { # keymap
     local widget=${${(z)$(bindkey -M "$1" '^R' 2>/dev/null)}[2]}
     case "$widget" in
@@ -1342,6 +1354,15 @@ esac
     esac
   }
 
+  # Returns success if Alt-] is not already bound to anything in the given keymap, i.e. it's
+  # safe for us to claim it there. An unbound key still prints a line (ending in
+  # "undefined-key"), not empty output, so we must check for that explicitly rather than
+  # treating any output as "bound".
+  __warp_raw_keypress_ctrl_r_keyseq_free() { # keymap
+    local result=$(bindkey -M "$1" '\e]' 2>/dev/null)
+    [[ -z "$result" || "$result" == *undefined-key* ]]
+  }
+
   __warp_report_raw_keypress_ctrl_r_selection() {
     local escaped_selection="$(warp_escape_json "$BUFFER")"
     warp_send_json_message "{ \"hook\": \"ExternalCtrlRRawKeypressSelection\", \"value\": { \"buffer\": \"$escaped_selection\", \"session_id\": $WARP_SESSION_ID } }"
@@ -1351,6 +1372,7 @@ esac
     CURSOR=0
     zle reset-prompt
   }
+  zle -N __warp_report_raw_keypress_ctrl_r_selection
 
   function __warp_run_raw_keypress_ctrl_r_widget_emacs () {
     zle "$__warp_raw_keypress_orig_ctrl_r_widget_emacs"
@@ -1365,19 +1387,31 @@ esac
     __warp_report_raw_keypress_ctrl_r_selection
   }
 
-  if __warp_raw_keypress_orig_ctrl_r_widget_emacs=$(__warp_classify_raw_keypress_ctrl_r_binding emacs); then
-    zle -N __warp_run_raw_keypress_ctrl_r_widget_emacs
-    bindkey -M emacs '\e]' __warp_run_raw_keypress_ctrl_r_widget_emacs
+  if __warp_raw_keypress_ctrl_r_keyseq_free emacs; then
+    if __warp_raw_keypress_orig_ctrl_r_widget_emacs=$(__warp_classify_raw_keypress_ctrl_r_binding emacs); then
+      zle -N __warp_run_raw_keypress_ctrl_r_widget_emacs
+      bindkey -M emacs '\e]' __warp_run_raw_keypress_ctrl_r_widget_emacs
+    else
+      bindkey -M emacs '\e]' __warp_report_raw_keypress_ctrl_r_selection
+    fi
     shell_plugins+=(external_ctrl_r_raw_keypress)
   fi
-  if __warp_raw_keypress_orig_ctrl_r_widget_viins=$(__warp_classify_raw_keypress_ctrl_r_binding viins); then
-    zle -N __warp_run_raw_keypress_ctrl_r_widget_viins
-    bindkey -M viins '\e]' __warp_run_raw_keypress_ctrl_r_widget_viins
+  if __warp_raw_keypress_ctrl_r_keyseq_free viins; then
+    if __warp_raw_keypress_orig_ctrl_r_widget_viins=$(__warp_classify_raw_keypress_ctrl_r_binding viins); then
+      zle -N __warp_run_raw_keypress_ctrl_r_widget_viins
+      bindkey -M viins '\e]' __warp_run_raw_keypress_ctrl_r_widget_viins
+    else
+      bindkey -M viins '\e]' __warp_report_raw_keypress_ctrl_r_selection
+    fi
     shell_plugins+=(external_ctrl_r_raw_keypress)
   fi
-  if __warp_raw_keypress_orig_ctrl_r_widget_vicmd=$(__warp_classify_raw_keypress_ctrl_r_binding vicmd); then
-    zle -N __warp_run_raw_keypress_ctrl_r_widget_vicmd
-    bindkey -M vicmd '\e]' __warp_run_raw_keypress_ctrl_r_widget_vicmd
+  if __warp_raw_keypress_ctrl_r_keyseq_free vicmd; then
+    if __warp_raw_keypress_orig_ctrl_r_widget_vicmd=$(__warp_classify_raw_keypress_ctrl_r_binding vicmd); then
+      zle -N __warp_run_raw_keypress_ctrl_r_widget_vicmd
+      bindkey -M vicmd '\e]' __warp_run_raw_keypress_ctrl_r_widget_vicmd
+    else
+      bindkey -M vicmd '\e]' __warp_report_raw_keypress_ctrl_r_selection
+    fi
     shell_plugins+=(external_ctrl_r_raw_keypress)
   fi
 

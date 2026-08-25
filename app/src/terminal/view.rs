@@ -727,12 +727,23 @@ const RAW_KEYPRESS_CTRL_R_HANDOFF_PLUGIN_TAG: &str = "external_ctrl_r_raw_keypre
 /// per-shell bind syntax that installs the wrapper on this sequence in each keymap.
 const RAW_KEYPRESS_CTRL_R_HANDOFF_KEYSEQ: &[u8] = &[escape_sequences::C0::ESC, b']'];
 
-/// Hard ceiling on how long [`Block::is_raw_keypress_forward_active`] can stay set without a
-/// completion hook. This mechanism runs whatever the user has bound to ctrl-r and cannot assume
-/// it is present in the shell's active keymap, gets invoked, or ever returns -- so the flag that
-/// hides the input editor and forwards keystrokes must have a bail-out that does not depend on
-/// the wrapper's cooperation. See `TerminalView::on_raw_keypress_ctrl_r_handoff_timeout`.
+/// How long [`Block::is_raw_keypress_forward_active`] can stay set with no user activity and no
+/// completion hook before it is force-cleared. Restarted on every keystroke forwarded to the pty
+/// (see `TerminalView::note_raw_keypress_ctrl_r_handoff_activity`), so a user actively browsing
+/// or typing into the wrapper widget is never cut off mid-interaction -- this is a ceiling on
+/// inactivity, not on the handoff's total duration. This mechanism runs whatever the user has
+/// bound to ctrl-r and cannot assume it is present in the shell's active keymap, gets invoked, or
+/// ever returns, so the flag that hides the input editor and forwards keystrokes must have a
+/// bail-out that does not depend on the wrapper's cooperation. See
+/// `TerminalView::on_raw_keypress_ctrl_r_handoff_timeout`.
 const RAW_KEYPRESS_CTRL_R_HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// After the timeout bail-out fires, how long a new raw-keypress ctrl-r handoff is refused on
+/// this session. The timeout sends a best-effort Ctrl-C to the pty but cannot confirm the old
+/// wrapper widget actually stopped consuming input; without this cooldown, a user immediately
+/// pressing ctrl-r again could have the new handoff's Alt-] consumed by the still-live old
+/// widget, and a late completion from it misapplied as the new handoff's selection.
+const RAW_KEYPRESS_CTRL_R_HANDOFF_COOLDOWN: Duration = Duration::from_millis(750);
 
 pub const LONG_RUNNING_AGENT_REQUESTED_COMMAND_CONTEXT_KEY: &str = "LongRunningRequestedCommand";
 pub const LONG_RUNNING_AGENT_REQUESTED_COMMAND_USER_TOOK_OVER_CONTEXT_KEY: &str =
@@ -2502,12 +2513,24 @@ struct LocalSessionCanonicalPwdCache {
     canonical: CanonicalizedPath,
 }
 
+/// Identifies a single raw-keypress ctrl-r handoff *attempt*, distinct from `session_id`/
+/// `block_id`: a second ctrl-r press on the same block after the first handoff's bail-out timer
+/// fired -- but before its underlying widget actually stopped consuming pty input -- would
+/// otherwise be indistinguishable from the first by session/block alone. Only used to reject a
+/// stale *timer* from tearing down a newer handoff; the shell has no way to echo this back, so a
+/// late completion hook is still applied to whatever handoff is currently pending for its
+/// session (see [`TerminalView::apply_raw_keypress_ctrl_r_selection`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RawKeypressCtrlRHandoffId(u64);
+
 /// State for an in-flight raw-keypress ctrl-r handoff (see
 /// [`TerminalView::maybe_trigger_raw_keypress_ctrl_r_handoff`]). `session_id` lets
 /// [`TerminalView::apply_raw_keypress_ctrl_r_selection`] verify that an
 /// `ExternalCtrlRRawKeypressSelection` hook is actually the reply to this handoff, rather than an
 /// unsolicited write to the pty.
+#[derive(Clone)]
 struct PendingRawKeypressCtrlRHandoff {
+    id: RawKeypressCtrlRHandoffId,
     session_id: SessionId,
     block_id: BlockId,
 }
@@ -2631,12 +2654,19 @@ pub struct TerminalView {
     /// State for an in-flight raw-keypress ctrl-r handoff started by
     /// [`Self::maybe_trigger_raw_keypress_ctrl_r_handoff`], if any.
     pending_raw_keypress_ctrl_r_handoff: Option<PendingRawKeypressCtrlRHandoff>,
-    /// Bail-out timer for the in-flight handoff above. The wrapper widget runs whatever the user
-    /// has bound to ctrl-r, which this mechanism cannot guarantee will ever invoke it or return
-    /// (wrong keymap, rebound key, a hung TUI) -- so the flag that hides the input editor and
-    /// forwards keystrokes must never depend solely on that hook arriving. See
+    /// Bail-out timer for the in-flight handoff above, restarted on every keystroke forwarded to
+    /// the pty (see [`Self::note_raw_keypress_ctrl_r_handoff_activity`]) so it only fires after a
+    /// period of genuine inactivity. The wrapper widget runs whatever the user has bound to
+    /// ctrl-r, which this mechanism cannot guarantee will ever invoke it or return (wrong keymap,
+    /// rebound key, a hung TUI) -- so the flag that hides the input editor and forwards
+    /// keystrokes must never depend solely on that hook arriving. See
     /// [`Self::on_raw_keypress_ctrl_r_handoff_timeout`].
     pending_raw_keypress_ctrl_r_timeout: Option<SpawnedFutureHandle>,
+    /// Monotonically increasing counter used to mint the next [`RawKeypressCtrlRHandoffId`].
+    next_raw_keypress_ctrl_r_handoff_id: u64,
+    /// Set by the timeout bail-out to the instant a new handoff may start again (see
+    /// [`RAW_KEYPRESS_CTRL_R_HANDOFF_COOLDOWN`]). `None` when no cooldown is in effect.
+    raw_keypress_ctrl_r_handoff_cooldown_until: Option<Instant>,
     /// When true, enter agent view after pending setup commands complete
     /// (i.e. after `PendingCommandCompleted` is emitted). Set by
     /// `pane_tree_from_template_recursive` when a tab config has both
@@ -4392,6 +4422,8 @@ impl TerminalView {
             pending_command_queue: Default::default(),
             pending_raw_keypress_ctrl_r_handoff: None,
             pending_raw_keypress_ctrl_r_timeout: None,
+            next_raw_keypress_ctrl_r_handoff_id: 0,
+            raw_keypress_ctrl_r_handoff_cooldown_until: None,
             enter_agent_view_after_pending_commands: false,
             slow_bootstrap_banner,
             is_slow_bootstrap_banner_open: false,
@@ -9264,6 +9296,12 @@ impl TerminalView {
         if !FeatureFlag::RawKeypressCtrlRHandoff.is_enabled() || self.is_long_running() {
             return false;
         }
+        if self
+            .raw_keypress_ctrl_r_handoff_cooldown_until
+            .is_some_and(|until| Instant::now() < until)
+        {
+            return false;
+        }
         let Some(session_id) = self.active_block_session_id() else {
             return false;
         };
@@ -9287,9 +9325,12 @@ impl TerminalView {
             active_block.set_raw_keypress_forward_active(true);
             active_block.id().clone()
         };
+        let id = RawKeypressCtrlRHandoffId(self.next_raw_keypress_ctrl_r_handoff_id);
+        self.next_raw_keypress_ctrl_r_handoff_id += 1;
         self.pending_raw_keypress_ctrl_r_handoff = Some(PendingRawKeypressCtrlRHandoff {
+            id,
             session_id,
-            block_id: block_id.clone(),
+            block_id,
         });
         // This mechanism runs whatever the user has bound to ctrl-r, so it cannot assume the
         // wrapper widget is present in the shell's active keymap, gets invoked, or ever returns.
@@ -9297,18 +9338,47 @@ impl TerminalView {
         // failing would leave `raw_keypress_forward_active` set indefinitely: the input editor
         // stays hidden and every keystroke is forwarded to the pty with no way back except
         // closing the tab. See `on_raw_keypress_ctrl_r_handoff_timeout`.
-        let handle = ctx.spawn(
+        self.pending_raw_keypress_ctrl_r_timeout =
+            Some(self.spawn_raw_keypress_ctrl_r_handoff_timeout(id, ctx));
+
+        self.write_user_bytes_to_pty(RAW_KEYPRESS_CTRL_R_HANDOFF_KEYSEQ, ctx);
+        true
+    }
+
+    fn spawn_raw_keypress_ctrl_r_handoff_timeout(
+        &self,
+        id: RawKeypressCtrlRHandoffId,
+        ctx: &mut ViewContext<Self>,
+    ) -> SpawnedFutureHandle {
+        ctx.spawn(
             async move {
                 Timer::after(RAW_KEYPRESS_CTRL_R_HANDOFF_TIMEOUT).await;
             },
             move |me, _, ctx| {
-                me.on_raw_keypress_ctrl_r_handoff_timeout(session_id, &block_id, ctx);
+                me.on_raw_keypress_ctrl_r_handoff_timeout(id, ctx);
             },
-        );
-        self.pending_raw_keypress_ctrl_r_timeout = Some(handle);
+        )
+    }
 
-        self.write_user_bytes_to_pty(RAW_KEYPRESS_CTRL_R_HANDOFF_KEYSEQ, ctx);
-        true
+    /// Restarts the bail-out timeout for an in-flight raw-keypress ctrl-r handoff, if any. Call
+    /// this whenever a keystroke is forwarded to the pty while the handoff is pending.
+    ///
+    /// The wrapper widget is a real interactive TUI (fzf, atuin) that a user can legitimately
+    /// keep browsing or typing into for far longer than the timeout -- a fixed one-shot timer
+    /// would eventually cut off that session mid-interaction indistinguishably from the wrapper
+    /// actually having hung. Restarting on every keystroke means the timeout only fires after a
+    /// period of genuine inactivity (no user input *and* no completion hook), which still catches
+    /// the failure modes it exists for: the wrapper never starting, or hanging after the user
+    /// stops interacting with it.
+    fn note_raw_keypress_ctrl_r_handoff_activity(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(handoff) = self.pending_raw_keypress_ctrl_r_handoff.clone() else {
+            return;
+        };
+        if let Some(handle) = self.pending_raw_keypress_ctrl_r_timeout.take() {
+            handle.abort();
+        }
+        self.pending_raw_keypress_ctrl_r_timeout =
+            Some(self.spawn_raw_keypress_ctrl_r_handoff_timeout(handoff.id, ctx));
     }
 
     /// Called when the shell reports the command selected in the raw-keypress ctrl-r handoff
@@ -9316,6 +9386,12 @@ impl TerminalView {
     /// this session started (see [`PendingRawKeypressCtrlRHandoff`]); otherwise ignores it as an
     /// unsolicited write to the pty. Ends the handoff either way that it matches, restoring normal
     /// input editor behavior.
+    ///
+    /// The shell has no way to echo back a [`RawKeypressCtrlRHandoffId`], so this necessarily
+    /// trusts that whatever handoff is currently pending for `session_id` is the one this
+    /// completion answers. That assumption can only be wrong if an earlier handoff's widget is
+    /// still alive on the pty when a newer one starts, which [`RAW_KEYPRESS_CTRL_R_HANDOFF_COOLDOWN`]
+    /// guards against for the timeout path.
     fn apply_raw_keypress_ctrl_r_selection(
         &mut self,
         session_id: SessionId,
@@ -9335,31 +9411,35 @@ impl TerminalView {
     }
 
     /// Bail-out for [`Self::maybe_trigger_raw_keypress_ctrl_r_handoff`]: fires
-    /// [`RAW_KEYPRESS_CTRL_R_HANDOFF_TIMEOUT`] after the handoff started, guaranteeing that
+    /// [`RAW_KEYPRESS_CTRL_R_HANDOFF_TIMEOUT`] after a period of inactivity, guaranteeing that
     /// `raw_keypress_forward_active` cannot stay set indefinitely even if the wrapper widget is
-    /// absent from the shell's active keymap, was rebound, or hangs. A no-op if the completion
-    /// hook already ended the handoff (the common, fast path) or a newer handoff for a different
-    /// block has since started.
+    /// absent from the shell's active keymap, was rebound, or hangs. A no-op if `id` doesn't match
+    /// the currently pending handoff -- either the completion hook already ended it (the common,
+    /// fast path), or a newer handoff has since started and this is a stale timer for the old one.
+    ///
+    /// Sends a best-effort Ctrl-C to the pty before tearing down: if the wrapper is a well-behaved
+    /// interactive TUI (fzf, atuin), this gives it a chance to exit on its own. This is not a
+    /// guarantee -- Warp has no way to confirm the widget actually stopped consuming pty input --
+    /// which is why a cooldown (not an immediate re-arm) follows.
     fn on_raw_keypress_ctrl_r_handoff_timeout(
         &mut self,
-        session_id: SessionId,
-        block_id: &BlockId,
+        id: RawKeypressCtrlRHandoffId,
         ctx: &mut ViewContext<Self>,
     ) {
-        let still_pending = self
-            .pending_raw_keypress_ctrl_r_handoff
-            .as_ref()
-            .is_some_and(|handoff| {
-                handoff.session_id == session_id && &handoff.block_id == block_id
-            });
-        if !still_pending {
+        let Some(handoff) = self.pending_raw_keypress_ctrl_r_handoff.clone() else {
+            return;
+        };
+        if handoff.id != id {
             return;
         }
         log::warn!(
             "Raw-keypress ctrl-r handoff timed out after {:?} with no completion hook; restoring input editor",
             RAW_KEYPRESS_CTRL_R_HANDOFF_TIMEOUT
         );
-        self.end_raw_keypress_ctrl_r_handoff(session_id, ctx);
+        self.write_user_bytes_to_pty(vec![escape_sequences::C0::ETX], ctx);
+        self.end_raw_keypress_ctrl_r_handoff(handoff.session_id, ctx);
+        self.raw_keypress_ctrl_r_handoff_cooldown_until =
+            Some(Instant::now() + RAW_KEYPRESS_CTRL_R_HANDOFF_COOLDOWN);
         ctx.notify();
     }
 
@@ -9431,6 +9511,7 @@ impl TerminalView {
 
     fn control_sequence_on_terminal(&mut self, bytes: &[u8], ctx: &mut ViewContext<Self>) {
         if self.is_long_running() {
+            self.note_raw_keypress_ctrl_r_handoff_activity(ctx);
             self.write_user_bytes_to_pty(bytes.to_owned(), ctx);
         } else {
             safe_warn!(
@@ -9499,6 +9580,7 @@ impl TerminalView {
     /// Generally, this should be control characters rather than printable characters.
     fn keydown_on_terminal(&mut self, characters: &str, ctx: &mut ViewContext<Self>) {
         if self.is_long_running() {
+            self.note_raw_keypress_ctrl_r_handoff_activity(ctx);
             self.highlighted_link.invalidate();
             self.report_possible_typeahead(characters);
             self.write_user_bytes_to_pty(characters.as_bytes().to_vec(), ctx);
@@ -9547,6 +9629,7 @@ impl TerminalView {
     /// can go into the input box.
     fn typed_characters_on_terminal(&mut self, characters: &str, ctx: &mut ViewContext<Self>) {
         if self.should_write_typed_chars_to_pty(ctx) {
+            self.note_raw_keypress_ctrl_r_handoff_activity(ctx);
             self.highlighted_link.invalidate();
             self.report_possible_typeahead(characters);
             self.write_user_bytes_to_pty(characters.as_bytes().to_vec(), ctx);
