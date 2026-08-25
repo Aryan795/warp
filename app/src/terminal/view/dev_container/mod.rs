@@ -566,7 +566,7 @@ fn parse_dev_container_up_stdout(stdout: &[u8]) -> Option<DevContainerUpResult> 
 }
 
 #[cfg(all(test, feature = "local_tty"))]
-#[path = "mod_test.rs"]
+#[path = "mod_tests.rs"]
 mod tests;
 
 /// Returns the last `max_lines` non-empty lines of `text`, joined by `\n`.
