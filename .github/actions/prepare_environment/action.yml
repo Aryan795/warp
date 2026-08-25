@@ -116,9 +116,18 @@ runs:
       run: |
         cd "${{ steps.repo-root.outputs.path }}"
         if ${{ inputs.target_os == 'macos' }}; then
-          # Try to install warp-channel-config but don't complain if it cannot
-          # be installed.
-          ./script/install_channel_config || true
+          # In warpdotdev/warp-internal, the private warp-channel-config repo must be
+          # installable (its SSH access is set up above), so a broken or inaccessible pin
+          # fails this required job instead of silently degrading channel config at runtime
+          # (e.g. the APP-5583 Oz-only regression a missing platform_root_url would cause) with
+          # no failing check anywhere. Elsewhere (the public mirror, fork PRs, OSS contributor
+          # machines) that access is unavailable by design, so keep tolerating the failure
+          # there.
+          if ${{ github.repository == 'warpdotdev/warp-internal' }}; then
+            ./script/install_channel_config
+          else
+            ./script/install_channel_config || true
+          fi
           if ${{ inputs.install_release_deps == 'true' }}; then
             ./script/install_cargo_release_deps
           else
