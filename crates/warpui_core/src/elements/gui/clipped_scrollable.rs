@@ -93,7 +93,7 @@ impl ClippedScrollStateHandle {
 
     /// The exact position this handle's scroll animation is heading toward, ignoring the
     /// animation's current progress. Bounds and nested-scroll-propagation decisions should use
-    /// this rather than [`Self::scroll_start`], so an inner scrollable doesn't accept wheel
+    /// this rather than [`Self::scroll_start`], so an inner scrollable doesn't accept scroll
     /// input that belongs to its parent while its own animation is still catching up.
     pub fn scroll_target(&self) -> Pixels {
         self.clipped_scroll_data
@@ -103,10 +103,10 @@ impl ClippedScrollStateHandle {
             .into_pixels()
     }
 
-    /// Adds an eligible discrete (non-precise) wheel delta as a smooth-scroll contribution,
+    /// Adds an eligible discrete (non-precise) scroll delta as a smooth-scroll contribution,
     /// composing with or reversing any contribution already in flight. Unlike
     /// [`Self::scroll_to`]/[`Self::scroll_by`], this does not cancel an animation that's
-    /// already running. See [`SmoothScrollController::add_delta`].
+    /// already running.
     pub fn animate_scroll_by(&self, delta: Pixels, now: Instant) {
         self.clipped_scroll_data
             .lock()

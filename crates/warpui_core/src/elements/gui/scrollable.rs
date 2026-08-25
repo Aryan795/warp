@@ -17,7 +17,7 @@ pub use crate::scene::CornerRadius;
 use crate::scene::Radius;
 use crate::smooth_scroll::{
     NUM_PIXELS_PER_LINE, SMOOTH_SCROLL_FRAME_INTERVAL, SmoothScrollController,
-    should_animate_wheel_input,
+    should_animate_scroll,
 };
 use crate::units::{IntoPixels, Pixels};
 
@@ -34,12 +34,12 @@ pub struct ScrollState {
 }
 
 impl ScrollState {
-    /// Adds an eligible discrete (non-precise) wheel delta as a smooth-scroll contribution,
-    /// composing with or reversing any contribution already in flight. See
-    /// [`SmoothScrollController::add_delta`]. Unlike a `Clipped` scrollable's controller, the
-    /// incremental delta here is applied to the child lazily, via [`Self::take_smooth_scroll_increment`],
-    /// since the child owns its own displayed position and can only be moved through its
-    /// `scroll()` method (which requires an `EventContext`, unavailable during paint).
+    /// Adds an eligible discrete (non-precise) scroll delta as a smooth-scroll contribution,
+    /// composing with or reversing any contribution already in flight. Unlike a `Clipped`
+    /// scrollable's controller, the incremental delta here is applied to the child lazily, via
+    /// [`Self::take_smooth_scroll_increment`], since the child owns its own displayed position
+    /// and can only be moved through its `scroll()` method (which requires an `EventContext`,
+    /// unavailable during paint).
     pub fn animate_scroll_by(&mut self, delta: f32, now: Instant) {
         self.smooth_scroll.add_delta(delta, now);
     }
@@ -355,9 +355,9 @@ impl Scrollable {
             } else {
                 // If the scroll was not `precise`, we need to convert the delta (which is
                 // actually in terms of `Lines`) to the right number of `Pixels`.
-                // See the comment on [`SCROLLBAR_PIXELS_PER_COCOA_TICK`] for more details.
+                // See the comment on [`NUM_PIXELS_PER_LINE`] for more details.
                 let full_delta = delta_along_axis * NUM_PIXELS_PER_LINE;
-                if should_animate_wheel_input(precise) {
+                if should_animate_scroll(precise) {
                     self.state().animate_scroll_by(full_delta, Instant::now());
                     ctx.notify();
                 } else {

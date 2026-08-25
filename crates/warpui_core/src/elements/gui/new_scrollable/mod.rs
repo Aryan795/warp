@@ -5,12 +5,11 @@ mod single_axis_config;
 pub(crate) mod util;
 
 pub use dual_axis_config::*;
+use instant::Instant;
 use pathfinder_color::ColorU;
 use pathfinder_geometry::rect::RectF;
 use pathfinder_geometry::vector::{Vector2F, vec2f};
 pub use single_axis_config::*;
-
-use instant::Instant;
 
 use self::util::adjust_scroll_delta_with_sensitivity_config;
 use super::{
@@ -19,7 +18,7 @@ use super::{
 };
 use crate::elements::Vector2FExt;
 use crate::event::{DispatchedEvent, ModifiersState};
-use crate::smooth_scroll::{NUM_PIXELS_PER_LINE, should_animate_wheel_input};
+use crate::smooth_scroll::{NUM_PIXELS_PER_LINE, should_animate_scroll};
 use crate::text::word_boundaries::WordBoundariesPolicy;
 use crate::text::{IsRect, SelectionDirection, SelectionType};
 use crate::units::{IntoPixels, Pixels};
@@ -765,9 +764,9 @@ impl ScrollableState {
                     return false;
                 }
 
-                // A non-precise (discrete wheel) delta animates toward its target when the
-                // rollout flag is enabled; precise/trackpad input always applies immediately.
-                let animate = should_animate_wheel_input(precise);
+                // A non-precise (discrete) delta animates toward its target when the rollout
+                // flag is enabled; precise/trackpad input always applies immediately.
+                let animate = should_animate_scroll(precise);
 
                 // Dispatch scroll event on each axis.
                 if animate {
@@ -828,9 +827,9 @@ impl ScrollableState {
                     return false;
                 }
 
-                // A non-precise (discrete wheel) delta animates toward its target when the
-                // rollout flag is enabled; precise/trackpad input always applies immediately.
-                if should_animate_wheel_input(precise) {
+                // A non-precise (discrete) delta animates toward its target when the rollout
+                // flag is enabled; precise/trackpad input always applies immediately.
+                if should_animate_scroll(precise) {
                     config.scroll_to_animated(
                         viewport_size,
                         delta.along(*axis).into_pixels(),
