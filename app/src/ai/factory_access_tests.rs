@@ -4,6 +4,7 @@ use warpui::{App, ModelHandle};
 use super::*;
 use crate::auth::AuthStateProvider;
 use crate::auth::auth_manager::AuthManager;
+use crate::auth::user::User;
 use crate::server::server_api::ServerApiProvider;
 
 /// A logged-in `AuthStateProvider` makes the model's constructor take the "already
@@ -211,4 +212,137 @@ fn reset_aborts_a_stale_in_flight_probe() {
         });
     });
     mock.remove();
+}
+
+#[test]
+#[serial_test::serial]
+fn a_completion_already_resolved_before_reset_is_discarded() {
+    // Covers the half of the race `reset_aborts_a_stale_in_flight_probe` cannot: `abort()` has
+    // no effect once a probe's result has already resolved and is sitting in the completion
+    // channel on its way to `complete_probe`. Exercises `complete_probe` directly with the
+    // pre-reset generation/user to simulate that channel delivery landing after `reset()`, since
+    // there is no way to interpose deterministically on the real channel from a test.
+    let mock = {
+        let mut server = ChannelState::mock_server();
+        server
+            .mock("GET", "/api/v1/factory/access")
+            .with_status(200)
+            .with_body(r#"{"allowed":true}"#)
+            .create()
+    };
+    App::test((), |mut app| async move {
+        initialize_logged_in_app(&mut app);
+        let model = app.add_singleton_model(FactoryAccessModel::new);
+        // Let the real startup probe finish cleanly (no dangling background task) before
+        // capturing its session and simulating a late/duplicate delivery of its completion.
+        await_probe(&mut app, &model).await;
+        let (generation, session_user) =
+            model.read(&app, |model, _| (model.generation, model.session_user));
+
+        model.update(&mut app, |model, _| model.reset());
+        model.update(&mut app, |model, ctx| {
+            model.complete_probe(
+                generation,
+                session_user,
+                Ok(FactoryAccessResponse { allowed: true }),
+                ctx,
+            );
+        });
+
+        model.read(&app, |model, _| {
+            assert_eq!(
+                model.access(),
+                FactoryAccess::Unknown,
+                "a completion captured before reset must not overwrite the reset session's access"
+            );
+        });
+    });
+    mock.assert();
+}
+
+#[test]
+#[serial_test::serial]
+fn auth_complete_for_a_different_user_without_logout_starts_a_fresh_session() {
+    // A remote-server daemon handoff (or similar) can replace the authenticated user with a
+    // fresh `AuthComplete` that never goes through `auth::log_out`. `request_if_needed` must
+    // still treat this as a new session rather than keeping the outgoing user's entitlement
+    // just because `requested` was already true. Two real probes fire (A's startup, B's
+    // switch), both served by this mock.
+    let mock = {
+        let mut server = ChannelState::mock_server();
+        server
+            .mock("GET", "/api/v1/factory/access")
+            .with_status(200)
+            .with_body(r#"{"allowed":false}"#)
+            .expect(2)
+            .create()
+    };
+    App::test((), |mut app| async move {
+        initialize_logged_in_app(&mut app);
+        let model = app.add_singleton_model(FactoryAccessModel::new);
+        // Let user A's real startup probe finish cleanly before switching accounts.
+        await_probe(&mut app, &model).await;
+        let (user_a_generation, user_a) =
+            model.read(&app, |model, _| (model.generation, model.session_user));
+
+        // User B replaces user A directly in auth state, then a real `AuthComplete` handler
+        // would call exactly this.
+        let user_b = User {
+            local_id: UserUid::new("user-b"),
+            ..User::test()
+        };
+        app.update(|ctx| {
+            AuthStateProvider::as_ref(ctx).get().set_user(Some(user_b));
+        });
+        model.update(&mut app, |model, ctx| model.request_if_needed(ctx));
+
+        // `begin_session`'s effects are synchronous: a different user immediately starts a new
+        // session with access reset, even before its own probe resolves.
+        let (user_b_generation, user_b_session_user) =
+            model.read(&app, |model, _| (model.generation, model.session_user));
+        assert_ne!(
+            user_b_generation, user_a_generation,
+            "a different authenticated user must start a new session"
+        );
+        assert_eq!(user_b_session_user, Some(UserUid::new("user-b")));
+        model.read(&app, |model, _| {
+            assert_eq!(model.access(), FactoryAccess::Unknown);
+        });
+
+        // Let B's real probe finish cleanly too (no dangling background task) before exercising
+        // the completion logic directly; its specific resolved value doesn't matter here.
+        await_probe(&mut app, &model).await;
+        let access_after_b_probe = model.read(&app, |model, _| model.access());
+
+        // A's probe, had it still resolved after the switch, must not apply to B's session.
+        model.update(&mut app, |model, ctx| {
+            model.complete_probe(
+                user_a_generation,
+                user_a,
+                Ok(FactoryAccessResponse { allowed: true }),
+                ctx,
+            );
+        });
+        model.read(&app, |model, _| {
+            assert_eq!(
+                model.access(),
+                access_after_b_probe,
+                "a stale completion for the outgoing user must not change B's access"
+            );
+        });
+
+        // B's own completion applies normally.
+        model.update(&mut app, |model, ctx| {
+            model.complete_probe(
+                user_b_generation,
+                user_b_session_user,
+                Ok(FactoryAccessResponse { allowed: true }),
+                ctx,
+            );
+        });
+        model.read(&app, |model, _| {
+            assert_eq!(model.access(), FactoryAccess::Allowed);
+        });
+    });
+    mock.assert();
 }

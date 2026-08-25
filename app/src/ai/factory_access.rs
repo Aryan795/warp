@@ -5,9 +5,10 @@
 use warpui::r#async::SpawnedFutureHandle;
 use warpui::{Entity, ModelContext, SingletonEntity};
 
-use crate::auth::AuthStateProvider;
 use crate::auth::auth_manager::{AuthManager, AuthManagerEvent};
+use crate::auth::{AuthStateProvider, UserUid};
 use crate::server::server_api::ServerApiProvider;
+use crate::server::server_api::factory::FactoryAccessResponse;
 
 /// The viewer's Factory access, as last resolved for the current authenticated session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -38,9 +39,25 @@ pub enum FactoryAccessModelEvent {
 pub struct FactoryAccessModel {
     access: FactoryAccess,
     requested: bool,
-    /// The in-flight probe, if any. Aborted on [`Self::reset`] so a response for a prior
-    /// session cannot land after logout and apply to the next authenticated session.
+    /// The in-flight probe, if any. Aborted on a session change as defence in depth (saves the
+    /// wasted request), but this alone cannot guarantee correctness: see [`Self::generation`].
     probe: Option<SpawnedFutureHandle>,
+    /// Bumped every time a new session's probe starts (see [`Self::begin_session`]), i.e. on
+    /// [`Self::reset`] and whenever [`Self::request_if_needed`] observes a different
+    /// authenticated user than [`Self::session_user`]. A probe's completion is applied only if
+    /// this still matches the generation captured when that probe started.
+    ///
+    /// This is the actual correctness guarantee, not [`Self::probe`]'s abort: `ctx.spawn`'s
+    /// `Abortable` wraps only the background future, so once its result has resolved and been
+    /// placed on the completion channel, `abort()` no longer has any effect. Without this
+    /// generation check, a completion already in flight when the session changes would still
+    /// land and overwrite the new session's access.
+    generation: u64,
+    /// The authenticated user the current session's probe/result pertains to, captured
+    /// alongside `generation` at [`Self::begin_session`] and compared at completion time so a
+    /// stale response is discarded even in the (extremely unlikely) case that `generation` were
+    /// to wrap.
+    session_user: Option<UserUid>,
 }
 
 impl FactoryAccessModel {
@@ -55,6 +72,8 @@ impl FactoryAccessModel {
             access: FactoryAccess::Unknown,
             requested: false,
             probe: None,
+            generation: 0,
+            session_user: None,
         };
         if AuthStateProvider::as_ref(ctx).get().is_logged_in() {
             me.request_if_needed(ctx);
@@ -71,6 +90,8 @@ impl FactoryAccessModel {
             access,
             requested: true,
             probe: None,
+            generation: 0,
+            session_user: None,
         }
     }
 
@@ -86,40 +107,76 @@ impl FactoryAccessModel {
         self.access
     }
 
+    /// Starts a probe if this authenticated user hasn't already had one started for it. Called
+    /// on construction (a persisted session already logged in) and on every `AuthComplete`,
+    /// including a token refresh for the same user (a no-op here) and an `AuthComplete` for a
+    /// *different* user that never went through `auth::log_out` (e.g. a remote-server daemon
+    /// handoff) — the latter must still start a fresh session rather than keep the outgoing
+    /// user's entitlement.
     fn request_if_needed(&mut self, ctx: &mut ModelContext<Self>) {
-        if self.requested {
+        let user = AuthStateProvider::as_ref(ctx).get().user_id();
+        if self.requested && user == self.session_user {
             return;
         }
+        self.begin_session(user, ctx);
+    }
+
+    /// Starts a fresh probe for `user`, aborting (defence in depth) and superseding any probe
+    /// still in flight for a prior session.
+    fn begin_session(&mut self, user: Option<UserUid>, ctx: &mut ModelContext<Self>) {
+        if let Some(probe) = self.probe.take() {
+            probe.abort();
+        }
+        self.generation += 1;
+        let generation = self.generation;
+        self.session_user = user;
         self.requested = true;
+        self.access = FactoryAccess::Unknown;
 
         let client = ServerApiProvider::as_ref(ctx).get_factory_client();
         self.probe = Some(ctx.spawn(
             async move { client.get_factory_access().await },
-            |me, result, ctx| {
-                me.probe = None;
-                me.access = match result {
-                    Ok(response) if response.allowed => FactoryAccess::Allowed,
-                    Ok(_) => FactoryAccess::Denied,
-                    Err(error) => {
-                        log::info!(
-                            "Failed to resolve Factory access; cloud-run links stay on Oz \
-                             for this session: {error:#}"
-                        );
-                        FactoryAccess::Unknown
-                    }
-                };
-                ctx.emit(FactoryAccessModelEvent::Resolved);
-            },
+            move |me, result, ctx| me.complete_probe(generation, user, result, ctx),
         ));
     }
 
-    /// Resets to `Unknown` on logout or account change so the next authenticated session
-    /// starts a fresh check. Aborts a still in-flight probe from the ending session so its
-    /// response cannot land afterward and apply to the next session's access instead.
+    /// Applies a probe's result, unless a newer session (a logout, or a different authenticated
+    /// user) has since superseded the one it was captured for — see [`Self::generation`].
+    fn complete_probe(
+        &mut self,
+        generation: u64,
+        user: Option<UserUid>,
+        result: anyhow::Result<FactoryAccessResponse>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if generation != self.generation || user != self.session_user {
+            return;
+        }
+        self.probe = None;
+        self.access = match result {
+            Ok(response) if response.allowed => FactoryAccess::Allowed,
+            Ok(_) => FactoryAccess::Denied,
+            Err(error) => {
+                log::info!(
+                    "Failed to resolve Factory access; cloud-run links stay on Oz \
+                     for this session: {error:#}"
+                );
+                FactoryAccess::Unknown
+            }
+        };
+        ctx.emit(FactoryAccessModelEvent::Resolved);
+    }
+
+    /// Resets to `Unknown` on logout so the next authenticated session starts a fresh check.
+    /// Bumps the generation (see [`Self::generation`]) so a response for the ending session can
+    /// never land afterward and apply to the next session's access, and aborts a still in-flight
+    /// probe as defence in depth.
     pub fn reset(&mut self) {
         if let Some(probe) = self.probe.take() {
             probe.abort();
         }
+        self.generation += 1;
+        self.session_user = None;
         self.access = FactoryAccess::Unknown;
         self.requested = false;
     }
