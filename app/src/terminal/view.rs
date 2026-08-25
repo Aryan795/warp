@@ -2512,7 +2512,7 @@ pub struct TerminalView {
     /// Cached scroll position from before entering agent view, used to restore on exit.
     scroll_position_before_entering_agent_view: Option<ScrollPosition>,
 
-    /// Animates discrete (non-precise) wheel input for the block list's vertical scrollback.
+    /// Animates discrete (non-precise) scroll input for the block list's vertical scrollback.
     /// See [`SmoothScrollHandle`] for why this is separate from `scroll_position`.
     smooth_scroll: SmoothScrollHandle,
 
@@ -9723,7 +9723,7 @@ impl TerminalView {
     /// Drives an in-flight smooth-scroll animation to completion independently of the app's
     /// paint/hover-replay machinery.
     ///
-    /// The generic WarpUI `Manual`-axis scrollables (Phase 1) advance lazily off of
+    /// The generic WarpUI `Manual`-axis scrollables advance lazily off of
     /// `BlockListElement::dispatch_event`, which fires on every event the element receives --
     /// including the synthetic `MouseMoved` the app replays after each repaint
     /// (`AppContext::build_scene`) to keep `Hoverable` state correct. That replay only fires when
@@ -28242,18 +28242,17 @@ impl View for TerminalView {
         let viewport = self.viewport_state(model.block_list(), input_mode, app);
         let is_alt_screen_active = { model.is_alt_screen_active() };
         if is_alt_screen_active {
-            // Phase 2 smooth scrolling applies only to normal block-list scrollback, never to
-            // the alternate screen (see `PRODUCT.md` §17). `Self::drive_smooth_scroll`'s timer
-            // loop keeps running independently of which element is currently rendered, so an
-            // animation already in flight when alt screen is entered would otherwise keep
-            // silently advancing the hidden block-list `scroll_position` in the background for
-            // the rest of its duration -- never PTY-visible, but semantically wrong (Phase 2
-            // explicitly excludes the alternate screen) and wasted work. Cancelling settles it
-            // at its currently displayed position immediately, so returning to the normal
-            // screen later sees exactly where the animation was and nothing more. `cancel` is
-            // cheap and idempotent when nothing is in-flight, so unconditionally cancelling on
-            // every render while alt screen is active (rather than only on the entry
-            // transition) is deliberate defense in depth.
+            // Smooth scrolling applies only to normal block-list scrollback, never to the
+            // alternate screen. `Self::drive_smooth_scroll`'s timer loop keeps running
+            // independently of which element is currently rendered, so an animation already in
+            // flight when alt screen is entered would otherwise keep silently advancing the
+            // hidden block-list `scroll_position` in the background for the rest of its
+            // duration -- never PTY-visible, but semantically wrong and wasted work. Cancelling
+            // settles it at its currently displayed position immediately, so returning to the
+            // normal screen later sees exactly where the animation was and nothing more.
+            // `cancel` is cheap and idempotent when nothing is in-flight, so unconditionally
+            // cancelling on every render while alt screen is active (rather than only on the
+            // entry transition) is deliberate defense in depth.
             self.smooth_scroll.cancel(Instant::now());
         }
         // Compute callout positioning early while we have the model lock.

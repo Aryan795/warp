@@ -31,7 +31,7 @@ use crate::terminal::input::inline_menu::InlineMenuPositioner;
 use crate::terminal::model::blocks::RichContentItem;
 use crate::terminal::model::index::Point as IndexPoint;
 
-/// Shared handle to a [`SmoothScrollController`] animating discrete (non-precise) wheel input
+/// Shared handle to a [`SmoothScrollController`] animating discrete (non-precise) scroll input
 /// for the block list's vertical scrollback, gated by `FeatureFlag::SmoothScrolling`.
 ///
 /// Unlike a generic WarpUI scrollable's `ClippedScrollStateHandle`, this handle does not own an
@@ -66,9 +66,9 @@ struct SmoothScrollHandleState {
 }
 
 impl SmoothScrollHandle {
-    /// Adds a discrete wheel delta as a smooth-scroll contribution. See
-    /// [`SmoothScrollController::add_delta`]. `delta` is converted to pixel-equivalent units
-    /// before reaching the controller, matching every other `SmoothScrollController` consumer.
+    /// Adds a discrete scroll delta as a smooth-scroll contribution. `delta` is converted to
+    /// pixel-equivalent units before reaching the controller, matching every other
+    /// `SmoothScrollController` consumer.
     pub fn add_delta(&self, delta: Lines, now: Instant) {
         self.0
             .lock()
