@@ -45,6 +45,7 @@ query GetWorkspacesMetadataForUser($requestContext: RequestContext!) {
               email
               role
             }
+            visibility
           }
           billingMetadata {
             customerType
@@ -171,6 +172,7 @@ query GetWorkspacesMetadataForUser($requestContext: RequestContext!) {
           pendingEmailInvites {
             email
             expired
+            teamUid
           }
           inviteLinkDomainRestrictions {
             uid
