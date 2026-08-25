@@ -65,13 +65,14 @@ existing scroll distance. Velocity decay would add inertial travel and make the 
 on frame timing.
 
 ## Input eligibility and rollout
-[`should_animate_scroll`](https://github.com/warpdotdev/warp/blob/c0d11956d76695299e569ec0fe153c516efdc90d/crates/warpui_core/src/smooth_scroll.rs#L60-L66)
+[`should_animate_wheel_input`](https://github.com/warpdotdev/warp/blob/c0d11956d76695299e569ec0fe153c516efdc90d/crates/warpui_core/src/smooth_scroll.rs#L60-L66)
 returns true only for non-precise input while `FeatureFlag::SmoothScrolling` is enabled. Eligibility
 is checked by the consumer; no new global wheel-event type or frame event exists.
 
 The single flag serves both phases:
-- `FeatureFlag::SmoothScrolling` is listed in `DOGFOOD_FLAGS`, so it is enabled for the
-  development team's channel and off by default elsewhere.
+- [`smooth_scrolling` is a default Cargo feature](https://github.com/warpdotdev/warp/blob/c0d11956d76695299e569ec0fe153c516efdc90d/app/Cargo.toml#L695-L716).
+- [`FeatureFlag::SmoothScrolling`](https://github.com/warpdotdev/warp/blob/c0d11956d76695299e569ec0fe153c516efdc90d/crates/warp_features/src/lib.rs#L970-L974)
+  is registered when the feature is compiled.
 - The flag appears in `RUNTIME_FEATURE_FLAGS` for local and development control.
 - It is not a separate Phase 1/Phase 2 flag, a remote kill switch, or a user setting.
 
