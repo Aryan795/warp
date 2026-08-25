@@ -8,7 +8,7 @@ use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
 use crate::ai::execution_profiles::{ActionPermission, WriteToPtyPermission};
 use crate::drive::settings::WarpDriveSettings;
 use crate::settings::ai::DefaultSessionMode;
-use crate::settings::{AISettings, CodeSettings};
+use crate::settings::{AISettings, CodeSettings, UsageDisplayUnit};
 use crate::workspace::tab_settings::TabSettings;
 use crate::workspaces::user_workspaces::{TeamContextForOperation, UserWorkspaces};
 use crate::workspaces::workspace::FtueAccountClass;
@@ -28,6 +28,21 @@ pub(crate) fn apply_account_first_onboarding_settings(
             FtueAccountClass::Paid | FtueAccountClass::FreeIcp | FtueAccountClass::FreeStandard,
         ) => true,
     };
+
+    // Brand-new accounts default the usage-unit display to dollars, rather
+    // than the `UsageDisplayUnit` enum's own `Credits` default, which exists
+    // to leave pre-existing users/devices unaffected. `account_class` is
+    // `None` only for `AccountFirstCompletion::AccountSkipped`, which does
+    // not create an account, so this only fires for genuinely new accounts.
+    if account_class.is_some() {
+        AISettings::handle(app).update(app, |settings, ctx| {
+            report_if_error!(
+                settings
+                    .usage_display_unit
+                    .set_value(UsageDisplayUnit::Dollars, ctx)
+            );
+        });
+    }
 
     match selected_settings {
         SelectedSettings::AgentDrivenDevelopment {

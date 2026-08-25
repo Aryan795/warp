@@ -7,12 +7,13 @@ use warpui::elements::{
     MainAxisAlignment, MainAxisSize, MouseStateHandle, ParentElement, Radius, Shrinkable, Text,
 };
 use warpui::platform::Cursor;
-use warpui::{AppContext, Element, View};
+use warpui::{AppContext, Element, SingletonEntity, View};
 
-use crate::ai::blocklist::format_credits;
 use crate::ai::blocklist::usage::conversation_usage_view::{
     ConversationUsageInfo, ConversationUsageView, DisplayMode,
 };
+use crate::ai::blocklist::view_util::format_credits_with_cost;
+use crate::settings::AISettings;
 use crate::settings_view::billing_and_usage_page::BillingAndUsagePageAction;
 use crate::ui_components::blended_colors;
 use crate::ui_components::icons::Icon;
@@ -44,7 +45,7 @@ impl UsageHistoryEntry {
     pub fn render(&self, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
         let mut res = Flex::column()
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_child(self.render_header(appearance));
+            .with_child(self.render_header(appearance, app));
 
         if let Some(entry) = &self.entry
             && self.is_expanded
@@ -77,7 +78,7 @@ impl UsageHistoryEntry {
             .finish()
     }
 
-    fn render_header(&self, appearance: &Appearance) -> Box<dyn Element> {
+    fn render_header(&self, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
         let Some(entry) = &self.entry else {
             return self.render_loading_entry(appearance);
         };
@@ -111,8 +112,13 @@ impl UsageHistoryEntry {
 
         let total_credits =
             entry.usage_metadata.credits_spent + entry.usage_metadata.platform_credits_spent;
+        let usage_display_unit = AISettings::as_ref(app).usage_display_unit;
+        // GAP: this GraphQL-backed source doesn't yet thread through a token
+        // count or dollar cost (see `ConversationUsageInfo::from` in
+        // `gql_convert.rs`), so this always falls back to a plain credits
+        // figure today; it will pick up tokens/dollars once that gap closes.
         let credits_spent = Text::new_inline(
-            format_credits(total_credits as f32),
+            format_credits_with_cost(total_credits as f32, None, None, usage_display_unit),
             appearance.ui_font_family(),
             14.,
         )

@@ -19,6 +19,7 @@ use warpui::{AppContext, Element, EntityId, EventContext, SingletonEntity};
 
 use crate::ai::AIRequestUsageModel;
 use crate::ai::agent::RenderableAIError;
+use crate::settings::UsageDisplayUnit;
 use crate::themes::theme::{AnsiColorIdentifier, Fill, WarpTheme};
 use crate::ui_components::icons::Icon;
 use crate::workspaces::user_workspaces::UserWorkspaces;
@@ -298,59 +299,53 @@ pub fn format_credits(credits: f32) -> String {
     }
 }
 
-/// Builds the `"12,345 tokens, $0.36"`-style parenthetical shared by
-/// [`format_credits_with_cost`] and the conversation details panel's
-/// compact "Credits used" line, gated by `FeatureFlag::PricingTransparency`.
-///
-/// `tokens` and `cost_in_cents` are independent: either, both, or neither
-/// may be `None` (no baseline is available for that figure — never coerced
-/// to zero), and only the figures that are present are included. A `tokens`
-/// value of `0` is treated the same as `None` (omitted) since a "0 tokens"
-/// figure next to a non-zero credit/cost figure would be confusing rather
-/// than informative (e.g. a purely platform-cost request like a paid web
-/// search). Returns `None` when the flag is disabled, or when both figures
-/// are `None`/omitted.
-///
-/// This intentionally supersedes the previous standalone "PRICING
-/// BREAKDOWN" section (per-category input/cache/output/platform/web-search
-/// rows): for now a single inline token+dollar figure next to credits is
-/// enough. The deeper `ChargedUsageTotals` breakdown that section rendered
-/// is still computed and available for a future expandable/dropdown
-/// treatment.
-pub fn format_usage_parenthetical(
-    tokens: Option<u32>,
+/// Formats the single-unit figure (credits or dollars) selected by `unit`.
+/// Returns `None` when `unit` is `Dollars` but no cost figure is available
+/// -- there is no meaningful fallback within the dollar figure itself, so
+/// [`format_credits_with_cost`] falls back to a plain credits total instead.
+fn format_usage_unit_value(
+    credits: f32,
     cost_in_cents: Option<f32>,
+    unit: UsageDisplayUnit,
 ) -> Option<String> {
-    if !FeatureFlag::PricingTransparency.is_enabled() {
-        return None;
-    }
-    let token_part = tokens
-        .filter(|&tokens| tokens > 0)
-        .map(|tokens| format!("{} tokens", tokens.separate_with_commas()));
-    let cost_part = cost_in_cents.map(|cost_in_cents| format!("${:.2}", cost_in_cents / 100.0));
-    match (token_part, cost_part) {
-        (Some(token_part), Some(cost_part)) => Some(format!("{token_part}, {cost_part}")),
-        (Some(token_part), None) => Some(token_part),
-        (None, Some(cost_part)) => Some(cost_part),
-        (None, None) => None,
+    match unit {
+        UsageDisplayUnit::Credits => Some(format_credits(credits)),
+        UsageDisplayUnit::Dollars => {
+            cost_in_cents.map(|cost_in_cents| format!("${:.2}", cost_in_cents / 100.0))
+        }
     }
 }
 
 /// Formats a credit count together with its total token count and real
-/// dollar cost, e.g. `"20 credits (12,345 tokens, $0.36)"`. See
-/// [`format_usage_parenthetical`] for how the parenthetical is built and
-/// when it's omitted (including always, when `FeatureFlag::PricingTransparency`
-/// is disabled).
+/// dollar cost, showing tokens plus exactly one of credits or dollars
+/// (never both) depending on `unit` -- e.g. `"12,345 tokens / 20 credits"`
+/// (Credits) or `"12,345 tokens / $0.36"` (Dollars).
+///
+/// A `tokens` value of `0` is treated the same as `None` (omitted) since a
+/// "0 tokens" figure next to a non-zero credit/cost figure would be
+/// confusing rather than informative (e.g. a purely platform-cost request
+/// like a paid web search).
+///
+/// Falls back to a plain credits-only figure (no tokens) when `unit` is
+/// `Dollars` but no cost figure is available, or when
+/// `FeatureFlag::PricingTransparency` is disabled (today's pre-breakdown
+/// behavior).
 pub fn format_credits_with_cost(
     credits: f32,
     tokens: Option<u32>,
     cost_in_cents: Option<f32>,
+    unit: UsageDisplayUnit,
 ) -> String {
-    let credits_text = format_credits(credits);
-    let Some(parenthetical) = format_usage_parenthetical(tokens, cost_in_cents) else {
-        return credits_text;
+    if !FeatureFlag::PricingTransparency.is_enabled() {
+        return format_credits(credits);
+    }
+    let Some(unit_text) = format_usage_unit_value(credits, cost_in_cents, unit) else {
+        return format_credits(credits);
     };
-    format!("{credits_text} ({parenthetical})")
+    let Some(tokens) = tokens.filter(|&tokens| tokens > 0) else {
+        return unit_text;
+    };
+    format!("{} tokens / {unit_text}", tokens.separate_with_commas())
 }
 
 /// Renders a secondary button with an MCP/skill provider icon and a text label.
