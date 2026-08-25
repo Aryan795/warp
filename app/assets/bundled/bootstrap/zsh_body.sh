@@ -1340,18 +1340,18 @@ esac
   # immediately before installing anything there; if the user already has a real binding on
   # Alt-] in a keymap, we leave it alone entirely (no wrapper, no fallback, no capability
   # claimed for that keymap).
+  # Each keymap has its own zsh-shipped default for ^R when no tool has rebound it --
+  # `history-incremental-search-backward` in emacs, `redisplay` in viins, `redo` in vicmd --
+  # none of which are a history-search tool to hand off to.
+  # `$widgets[<name>]` is zsh's own classification of every widget: `builtin` for anything zsh
+  # ships, `completion:...` for completion widgets, and `user:<function>` only for a widget
+  # actually registered via `zle -N`, which is exactly how fzf, atuin, and every other
+  # third-party ctrl-r tool install themselves. Requiring that classification, rather than
+  # naming individual zsh defaults, correctly rejects all of zsh's own built-in ^R bindings.
   __warp_classify_raw_keypress_ctrl_r_binding() { # keymap
     local widget=${${(z)$(bindkey -M "$1" '^R' 2>/dev/null)}[2]}
-    case "$widget" in
-      ""|history-incremental-search-backward|history-incremental-pattern-search-backward)
-        # Unbound in this keymap, or still zsh's own default reverse-history-search: nothing to
-        # hand off to.
-        return 1
-        ;;
-      *)
-        printf '%s' "$widget"
-        ;;
-    esac
+    [[ "${widgets[$widget]:-}" == user:* ]] || return 1
+    printf '%s' "$widget"
   }
 
   # Returns success if Alt-] is not already bound to anything in the given keymap, i.e. it's
