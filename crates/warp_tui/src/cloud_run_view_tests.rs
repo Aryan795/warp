@@ -321,10 +321,13 @@ fn cloud_child_first_interrupt_arms_kill_window_not_exit_window() {
 }
 
 #[test]
-fn cloud_run_link_re_resolves_when_factory_access_changes_after_spawn() {
-    // The view must resolve the cloud-run link fresh from the run ID every time it's rendered
-    // or clicked, rather than caching whatever destination was current at spawn time: a Factory
-    // access probe that resolves later must still change where an enrolled viewer lands.
+fn cloud_run_link_re_resolves_at_click_time_even_on_a_stale_rendered_frame() {
+    // The regression this guards: the rendered frame's click/Enter handlers used to close over
+    // whatever destination `display_state` produced at render time, so a Factory access probe
+    // that resolved after the frame was drawn had no effect until something re-rendered it.
+    // Deliberately do NOT re-render after the access change below — `primary_url` (what
+    // `OpenPrimaryUrl`'s handler calls to resolve the destination just before opening it) must
+    // still return the new destination against that stale frame.
     App::test((), |mut app| async move {
         app.add_singleton_model(|_| Appearance::mock());
         app.add_singleton_model(|_| BlocklistAIHistoryModel::default());
@@ -355,7 +358,8 @@ fn cloud_run_link_re_resolves_when_factory_access_changes_after_spawn() {
             });
         });
 
-        // Spawned while access is still Unknown: the link stays on Oz.
+        // Render once while access is still Unknown: the frame shows an Oz link. This is the
+        // "stale frame" the fix must not depend on ever being replaced.
         app.read(|ctx| {
             let mut presenter = TuiPresenter::new();
             let frame = presenter.present_element(
@@ -374,28 +378,26 @@ fn cloud_run_link_re_resolves_when_factory_access_changes_after_spawn() {
             );
         });
 
-        // The probe resolves to Allowed after the run was already spawned (simulating it
-        // landing between spawn and the viewer clicking the link).
+        // The probe resolves to Allowed after the run was already spawned and rendered
+        // (simulating it landing between spawn and the viewer clicking the link). No render
+        // happens after this point.
         app.update(|ctx| {
             FactoryAccessModel::handle(ctx).update(ctx, |model, _| {
                 model.set_access_for_test(FactoryAccess::Allowed)
             });
         });
 
+        // Exercise exactly what the click/Enter handlers dispatch: `OpenPrimaryUrl`'s handler
+        // resolves through `primary_url` at click time, not through the stale rendered frame.
         app.read(|ctx| {
-            let mut presenter = TuiPresenter::new();
-            let frame = presenter.present_element(
-                view.as_ref(ctx).render(ctx),
-                TuiRect::new(0, 0, 112, 24),
-                ctx,
-            );
-            let lines = frame.buffer.to_lines();
+            let url = view
+                .as_ref(ctx)
+                .primary_url(ctx)
+                .expect("a spawned run has a primary url");
             assert!(
-                lines.iter().any(|line| line
-                    .contains("platform.warp.dev/runs/019f71ef-6285-7480-90f6-3ad84d8e0d1e")),
-                "expected the link to move to Platform once Factory access resolved to Allowed; \
-                 rendered: {}",
-                lines.join("\n")
+                url.contains("platform.warp.dev/runs/019f71ef-6285-7480-90f6-3ad84d8e0d1e"),
+                "expected a click/Enter dispatched against the stale Oz frame to resolve fresh \
+                 to Platform once Factory access resolved to Allowed; got: {url}"
             );
         });
     });

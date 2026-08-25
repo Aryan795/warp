@@ -133,7 +133,6 @@ pub use crate::ai::connected_self_hosted_workers::{
 pub use crate::ai::conversation_export::{
     ConversationFileExport, ConversationFileExportError, export_conversation_markdown,
 };
-#[cfg(any(test, feature = "test-util"))]
 pub use crate::ai::factory_access::{FactoryAccess, FactoryAccessModel};
 pub use crate::ai::get_relevant_files::controller::GetRelevantFilesController;
 pub use crate::ai::harness_availability::{
