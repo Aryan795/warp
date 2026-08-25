@@ -29,8 +29,8 @@ use super::cloud_conversation_continuation::{
     CloudConversationContinuationUiState, TombstoneCta, conversation_failed_before_task_creation,
     resolve_cloud_conversation_continuation_ui_state,
 };
+use super::sharer::Sharer;
 use super::sharer::inactivity_modal::InactivityModalEvent;
-use super::sharer::{InactivityLadderPosition, Sharer};
 use super::viewer::Viewer;
 use super::{ConversationEndedTombstoneEvent, ConversationEndedTombstoneView};
 use crate::ai::agent_conversations_model::AgentConversationsModel;
@@ -1104,10 +1104,6 @@ impl TerminalView {
             );
         }
 
-        if let Some(sharer) = self.shared_session_sharer_mut() {
-            sharer.ladder_position = InactivityLadderPosition::RolesRevoked;
-        }
-
         // Arm the next enabled phase (warning, or end if warning is disabled). If both are
         // disabled, the session stays shared and read-only indefinitely.
         if let Some((phase, duration)) =
@@ -1151,62 +1147,10 @@ impl TerminalView {
         if let Some(old_abort_handle) = sharer.inactivity_timer_abort_handle.take() {
             old_abort_handle.abort();
         }
-        sharer.ladder_position = InactivityLadderPosition::AwaitingFirstPhase;
 
         let Some((phase, duration)) = SharedSessionSettings::as_ref(ctx).next_inactivity_phase()
         else {
             // Every phase is disabled -- no idle timeout at all.
-            return;
-        };
-        self.arm_inactivity_timer(phase, duration, ctx);
-    }
-
-    /// Re-evaluates the sharer's inactivity ladder after the duration settings change,
-    /// which may happen while a session is already live: aborts whatever timer is
-    /// currently armed, closes an open warning modal if the warning phase just became
-    /// disabled, and re-arms from the sharer's current ladder position (whether roles have
-    /// already been revoked in this idle period or not). Without this, the new settings
-    /// only take effect the next time a timer happens to fire or activity happens to reset
-    /// it -- a timer already in flight keeps running on the duration it was armed with,
-    /// and an already-open warning modal keeps counting down even if `end` was just
-    /// disabled.
-    pub(in crate::terminal::view) fn handle_shared_session_inactivity_settings_changed(
-        &mut self,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        if self.model.lock().is_shared_ambient_agent_session() {
-            return;
-        }
-
-        let warning_still_enabled = SharedSessionSettings::as_ref(ctx).is_warning_phase_enabled();
-        let Some(sharer) = self.shared_session_sharer_mut() else {
-            return;
-        };
-        if sharer.is_inactivity_warning_modal_open && !warning_still_enabled {
-            sharer.close_inactivity_warning_modal(ctx);
-        }
-
-        let Some(sharer) = self.shared_session_sharer_mut() else {
-            return;
-        };
-        if sharer.is_inactivity_warning_modal_open {
-            // The warning phase is still enabled and the modal is still open: leave the
-            // user's in-progress "are you still there?" prompt alone rather than yanking
-            // it away or restarting its countdown out from under them.
-            return;
-        }
-        if let Some(old_abort_handle) = sharer.inactivity_timer_abort_handle.take() {
-            old_abort_handle.abort();
-        }
-        let ladder_position = sharer.ladder_position;
-
-        let settings = SharedSessionSettings::as_ref(ctx);
-        let next_phase = match ladder_position {
-            InactivityLadderPosition::AwaitingFirstPhase => settings.next_inactivity_phase(),
-            InactivityLadderPosition::RolesRevoked => settings.next_phase_after_revoke(),
-        };
-        let Some((phase, duration)) = next_phase else {
-            // Every remaining phase is now disabled -- nothing to arm.
             return;
         };
         self.arm_inactivity_timer(phase, duration, ctx);

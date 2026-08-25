@@ -3,8 +3,7 @@ use std::time::Duration;
 use super::{
     SHARED_SESSION_INACTIVITY_MAX_MINUTES, clamp_shared_session_end_minutes,
     clamp_shared_session_revoke_minutes, clamp_shared_session_warning_minutes,
-    parse_shared_session_inactivity_minutes, shared_session_inactivity_display_text,
-    shared_session_inactivity_minutes,
+    parse_shared_session_inactivity_minutes, shared_session_inactivity_minutes,
 };
 
 /// Zero means "disable this phase" and must be enterable, per APP-5313's zero semantics.
@@ -77,13 +76,6 @@ fn minutes_rounds_up_for_a_nonzero_duration() {
         shared_session_inactivity_minutes(Duration::from_secs(119)),
         2
     );
-}
-
-#[test]
-fn display_text_reads_off_for_zero_and_a_plain_number_otherwise() {
-    assert_eq!(shared_session_inactivity_display_text(0), "Off");
-    assert_eq!(shared_session_inactivity_display_text(1), "1");
-    assert_eq!(shared_session_inactivity_display_text(30), "30");
 }
 
 #[test]

@@ -115,10 +115,6 @@ use crate::workspace::WorkspaceAction;
 use crate::workspace::tab_settings::{NewTabPlacement, TabSettings, TabSettingsChangedEvent};
 use crate::{GlobalResourceHandles, send_telemetry_from_ctx, themes};
 
-#[cfg(test)]
-#[path = "features_page_tests.rs"]
-mod features_page_tests;
-
 cfg_if::cfg_if! {
     if #[cfg(target_os = "macos")] {
         static EXTRA_META_KEYS_LEFT_TEXT: &str = "Left Option key is Meta";
@@ -864,26 +860,13 @@ const SHARED_SESSION_INACTIVITY_MAX_MINUTES: u64 = u64::MAX / 60;
 
 const SHARED_SESSION_INACTIVITY_EDITOR_WIDTH: f32 = 48.;
 
-/// Text shown in a shared-session inactivity field in place of "0" -- a duration of zero
-/// disables that phase of the ladder, and "Off" reads unambiguously as disabled where a
-/// literal "0" could be misread as "immediately".
-const SHARED_SESSION_INACTIVITY_OFF_TEXT: &str = "Off";
-
 const TAB_KEYSTROKE_STR: &str = "Tab";
 
 /// Parses user-entered text into a number of minutes, bounded so converting back to
-/// seconds can never overflow. Zero is valid and means "disable this phase": both the
-/// digit "0" and the "Off" sentinel that [`shared_session_inactivity_display_text`]
-/// renders it as (matched case-insensitively) parse to it, so a field's own committed
-/// display text always reads back as valid rather than tripping the same field's
-/// validity check. Returns `None` for anything else (empty, non-numeric, negative, or
-/// too large).
+/// seconds can never overflow. Zero is valid and means "disable this phase". Returns
+/// `None` for anything else (empty, non-numeric, negative, or too large).
 fn parse_shared_session_inactivity_minutes(text: &str) -> Option<u64> {
-    let trimmed = text.trim();
-    if trimmed.eq_ignore_ascii_case(SHARED_SESSION_INACTIVITY_OFF_TEXT) {
-        return Some(0);
-    }
-    trimmed
+    text.trim()
         .parse::<u64>()
         .ok()
         .filter(|&minutes| minutes <= SHARED_SESSION_INACTIVITY_MAX_MINUTES)
@@ -899,21 +882,16 @@ fn shared_session_inactivity_minutes(duration: Duration) -> u64 {
     }
 }
 
-/// Renders a minute count for display: zero (disabled) as an unmistakable "Off" rather
-/// than the digit "0", anything else as the plain number.
-fn shared_session_inactivity_display_text(minutes: u64) -> String {
-    if minutes == 0 {
-        SHARED_SESSION_INACTIVITY_OFF_TEXT.to_string()
-    } else {
-        minutes.to_string()
-    }
-}
-
 /// Clamps a newly-committed "revoke edit access after" value so it never exceeds the
-/// other two (currently) configured durations, preserving `revoke <= warn <= end`.
-/// Zero (disabled) is always accepted unconditionally; a non-zero value only clamps
-/// against whichever of the other two is itself non-zero (a disabled neighbor isn't a
-/// bound). Leaves the other two settings untouched.
+/// other two (currently) configured durations, preserving `revoke <= warn <= end`. This
+/// ordering matters because the three durations are cumulative time-since-last-activity
+/// (see the default value comments on `app/src/terminal/shared_session/settings.rs`'s
+/// `SharedSessionSettings`), and the sharer derives the gap between phases via
+/// subtraction -- an out-of-order triple would make a later phase fire immediately
+/// rather than after its configured duration. Zero (disabled) is always accepted
+/// unconditionally; a non-zero value only clamps against whichever of the other two is
+/// itself non-zero (a disabled neighbor isn't a bound). Leaves the other two settings
+/// untouched.
 fn clamp_shared_session_revoke_minutes(
     minutes: u64,
     warning_minutes: u64,
@@ -933,9 +911,10 @@ fn clamp_shared_session_revoke_minutes(
 }
 
 /// Clamps a newly-committed "warn before ending" value between the other two (currently)
-/// configured durations, preserving `revoke <= warn <= end`. Zero (disabled) is always
-/// accepted unconditionally; a non-zero value only clamps against whichever of the other
-/// two is itself non-zero.
+/// configured durations, preserving `revoke <= warn <= end`. See
+/// [`clamp_shared_session_revoke_minutes`] for why this ordering matters. Zero (disabled)
+/// is always accepted unconditionally; a non-zero value only clamps against whichever of
+/// the other two is itself non-zero.
 fn clamp_shared_session_warning_minutes(
     minutes: u64,
     revoke_minutes: u64,
@@ -955,9 +934,10 @@ fn clamp_shared_session_warning_minutes(
 }
 
 /// Clamps a newly-committed "end session after" value so it's never less than the other
-/// two (currently) configured durations, preserving `revoke <= warn <= end`. Zero
-/// (disabled) is always accepted unconditionally; a non-zero value only clamps against
-/// whichever of the other two is itself non-zero.
+/// two (currently) configured durations, preserving `revoke <= warn <= end`. See
+/// [`clamp_shared_session_revoke_minutes`] for why this ordering matters. Zero (disabled)
+/// is always accepted unconditionally; a non-zero value only clamps against whichever of
+/// the other two is itself non-zero.
 fn clamp_shared_session_end_minutes(
     minutes: u64,
     revoke_minutes: u64,
@@ -2452,10 +2432,7 @@ impl FeaturesPageView {
                                 let minutes = shared_session_inactivity_minutes(
                                     *settings.as_ref(ctx).inactivity_period_before_revoking_roles,
                                 );
-                                editor.set_buffer_text(
-                                    &shared_session_inactivity_display_text(minutes),
-                                    ctx,
-                                );
+                                editor.set_buffer_text(&minutes.to_string(), ctx);
                             });
                     }
                     SharedSessionSettingsChangedEvent::InactivityPeriodBeforeWarning { .. } => {
@@ -2463,10 +2440,7 @@ impl FeaturesPageView {
                             let minutes = shared_session_inactivity_minutes(
                                 *settings.as_ref(ctx).inactivity_period_before_warning,
                             );
-                            editor.set_buffer_text(
-                                &shared_session_inactivity_display_text(minutes),
-                                ctx,
-                            );
+                            editor.set_buffer_text(&minutes.to_string(), ctx);
                         });
                     }
                     SharedSessionSettingsChangedEvent::InactivityPeriodBeforeEndingSession {
@@ -2477,10 +2451,7 @@ impl FeaturesPageView {
                                 let minutes = shared_session_inactivity_minutes(
                                     *settings.as_ref(ctx).inactivity_period_before_ending_session,
                                 );
-                                editor.set_buffer_text(
-                                    &shared_session_inactivity_display_text(minutes),
-                                    ctx,
-                                );
+                                editor.set_buffer_text(&minutes.to_string(), ctx);
                             });
                     }
                     _ => {}
@@ -2892,10 +2863,7 @@ impl FeaturesPageView {
             EditorView::single_line(width_and_height_editor_options.clone(), ctx)
         });
         shared_session_revoke_edit_access_editor.update(ctx, |editor, ctx| {
-            editor.set_buffer_text(
-                &shared_session_inactivity_display_text(shared_session_revoke_edit_access_minutes),
-                ctx,
-            );
+            editor.set_buffer_text(&shared_session_revoke_edit_access_minutes.to_string(), ctx);
         });
         ctx.subscribe_to_view(
             &shared_session_revoke_edit_access_editor,
@@ -2908,10 +2876,7 @@ impl FeaturesPageView {
             EditorView::single_line(width_and_height_editor_options.clone(), ctx)
         });
         shared_session_warning_editor.update(ctx, |editor, ctx| {
-            editor.set_buffer_text(
-                &shared_session_inactivity_display_text(shared_session_warning_minutes),
-                ctx,
-            );
+            editor.set_buffer_text(&shared_session_warning_minutes.to_string(), ctx);
         });
         ctx.subscribe_to_view(&shared_session_warning_editor, |me, _, event, ctx| {
             me.handle_shared_session_warning_editor_event(event, ctx);
@@ -2921,10 +2886,7 @@ impl FeaturesPageView {
             EditorView::single_line(width_and_height_editor_options.clone(), ctx)
         });
         shared_session_end_session_editor.update(ctx, |editor, ctx| {
-            editor.set_buffer_text(
-                &shared_session_inactivity_display_text(shared_session_end_session_minutes),
-                ctx,
-            );
+            editor.set_buffer_text(&shared_session_end_session_minutes.to_string(), ctx);
         });
         ctx.subscribe_to_view(&shared_session_end_session_editor, |me, _, event, ctx| {
             me.handle_shared_session_end_session_editor_event(event, ctx);
@@ -3137,9 +3099,7 @@ impl FeaturesPageView {
                 .is_supported_on_current_platform()
         {
             session_widgets.push(Box::new(ConfirmCloseSharedSessionWidget::default()));
-            session_widgets.push(Box::new(SharedSessionRevokeEditAccessWidget::default()));
-            session_widgets.push(Box::new(SharedSessionWarningWidget::default()));
-            session_widgets.push(Box::new(SharedSessionEndSessionWidget::default()));
+            session_widgets.push(Box::new(SharedSessionTimeoutWidget::default()));
         }
 
         let mut keys_widgets: Vec<Box<dyn SettingsWidget<View = Self>>> = vec![];
@@ -3713,11 +3673,11 @@ impl FeaturesPageView {
             shared_session_inactivity_minutes(*settings.inactivity_period_before_ending_session);
         let clamped = clamp_shared_session_revoke_minutes(minutes, warning_minutes, end_minutes);
 
-        // Always re-render the committed value, not just when clamping changed it: a
-        // literal "0" the user typed must still be normalized to "Off".
+        // Always re-render the committed value, not just when clamping changed it, so an
+        // oddly-formatted entry (e.g. leading zeros) is normalized to its canonical form.
         self.shared_session_revoke_edit_access_editor
             .update(ctx, |editor, ctx| {
-                editor.set_buffer_text(&shared_session_inactivity_display_text(clamped), ctx);
+                editor.set_buffer_text(&clamped.to_string(), ctx);
             });
 
         let new_duration = Duration::from_secs(clamped * 60);
@@ -3776,11 +3736,11 @@ impl FeaturesPageView {
             shared_session_inactivity_minutes(*settings.inactivity_period_before_ending_session);
         let clamped = clamp_shared_session_warning_minutes(minutes, revoke_minutes, end_minutes);
 
-        // Always re-render the committed value, not just when clamping changed it: a
-        // literal "0" the user typed must still be normalized to "Off".
+        // Always re-render the committed value, not just when clamping changed it, so an
+        // oddly-formatted entry (e.g. leading zeros) is normalized to its canonical form.
         self.shared_session_warning_editor
             .update(ctx, |editor, ctx| {
-                editor.set_buffer_text(&shared_session_inactivity_display_text(clamped), ctx);
+                editor.set_buffer_text(&clamped.to_string(), ctx);
             });
 
         let new_duration = Duration::from_secs(clamped * 60);
@@ -3839,11 +3799,11 @@ impl FeaturesPageView {
             shared_session_inactivity_minutes(*settings.inactivity_period_before_warning);
         let clamped = clamp_shared_session_end_minutes(minutes, revoke_minutes, warning_minutes);
 
-        // Always re-render the committed value, not just when clamping changed it: a
-        // literal "0" the user typed must still be normalized to "Off".
+        // Always re-render the committed value, not just when clamping changed it, so an
+        // oddly-formatted entry (e.g. leading zeros) is normalized to its canonical form.
         self.shared_session_end_session_editor
             .update(ctx, |editor, ctx| {
-                editor.set_buffer_text(&shared_session_inactivity_display_text(clamped), ctx);
+                editor.set_buffer_text(&clamped.to_string(), ctx);
             });
 
         let new_duration = Duration::from_secs(clamped * 60);
@@ -6056,11 +6016,12 @@ impl SettingsWidget for ConfirmCloseSharedSessionWidget {
     }
 }
 
-/// Renders one shared-session inactivity duration row: a minute input, the
-/// word "minutes", and a description of what the duration controls.
+/// Renders one shared-session inactivity duration row: a minute input, the word
+/// "minutes", a description below, and (when the phase is currently off) an inline
+/// explanation of what a value of zero means for this row.
 ///
 /// `toggle_state` is `Disabled` to grey out the row's label when that phase is currently
-/// off, either because the user set this field to "Off" directly, or (for the warning row)
+/// off, either because the user set this field to zero directly, or (for the warning row)
 /// because the end phase being off has forced it off regardless of its own value.
 #[allow(clippy::too_many_arguments)]
 fn render_shared_session_inactivity_row(
@@ -6072,6 +6033,7 @@ fn render_shared_session_inactivity_row(
     editor: &ViewHandle<EditorView>,
     is_valid: bool,
     toggle_state: ToggleState,
+    off_explanation: &str,
     storage_key: &str,
     sync_to_cloud: settings::SyncToCloud,
 ) -> Box<dyn Element> {
@@ -6099,11 +6061,8 @@ fn render_shared_session_inactivity_row(
                 .with_style(editor_style)
                 .build()
                 .finish(),
-        );
-    // "Off" already says everything the "minutes" unit would; pairing them as
-    // "Off minutes" reads as a mistake rather than a deliberately disabled phase.
-    if let ToggleState::Enabled = toggle_state {
-        control.add_child(
+        )
+        .with_child(
             Container::new(
                 Text::new_inline(
                     "minutes",
@@ -6111,6 +6070,20 @@ fn render_shared_session_inactivity_row(
                     appearance.ui_font_size(),
                 )
                 .with_color(theme.active_ui_text_color().into())
+                .finish(),
+            )
+            .with_margin_left(8.)
+            .finish(),
+        );
+    if let ToggleState::Disabled = toggle_state {
+        control.add_child(
+            Container::new(
+                Text::new_inline(
+                    off_explanation.to_string(),
+                    appearance.ui_font_family(),
+                    appearance.ui_font_size(),
+                )
+                .with_color(theme.sub_text_color(theme.background()).into())
                 .finish(),
             )
             .with_margin_left(8.)
@@ -6138,48 +6111,17 @@ fn render_shared_session_inactivity_row(
     )
 }
 
+/// The three shared-session inactivity durations (revoke edit access, warn, end), shown
+/// together as one widget since they form a single related ladder rather than three
+/// independent settings.
 #[derive(Default)]
-struct SharedSessionRevokeEditAccessWidget {}
+struct SharedSessionTimeoutWidget {}
 
-impl SettingsWidget for SharedSessionRevokeEditAccessWidget {
+impl SettingsWidget for SharedSessionTimeoutWidget {
     type View = FeaturesPageView;
 
     fn search_terms(&self) -> &str {
-        "shared session sharing remote control inactivity idle timeout revoke edit access read-only"
-    }
-
-    fn render(
-        &self,
-        view: &Self::View,
-        appearance: &Appearance,
-        app: &AppContext,
-    ) -> Box<dyn Element> {
-        let is_off = SharedSessionSettings::as_ref(app)
-            .inactivity_period_before_revoking_roles
-            .is_zero();
-        render_shared_session_inactivity_row(
-            view,
-            appearance,
-            app,
-            "Revoke edit access after being inactive for",
-            "Switches everyone you're sharing this session with to read-only after this much inactivity. Set to \"Off\" to never revoke edit access.",
-            &view.shared_session_revoke_edit_access_editor,
-            view.valid_shared_session_revoke_edit_access,
-            ToggleState::from(!is_off),
-            InactivityPeriodBeforeRevokingRoles::storage_key(),
-            InactivityPeriodBeforeRevokingRoles::sync_to_cloud(),
-        )
-    }
-}
-
-#[derive(Default)]
-struct SharedSessionWarningWidget {}
-
-impl SettingsWidget for SharedSessionWarningWidget {
-    type View = FeaturesPageView;
-
-    fn search_terms(&self) -> &str {
-        "shared session sharing remote control inactivity idle timeout warn warning ending"
+        "shared session sharing remote control inactivity idle timeout revoke edit access read-only warn warning end disconnect"
     }
 
     fn render(
@@ -6189,59 +6131,61 @@ impl SettingsWidget for SharedSessionWarningWidget {
         app: &AppContext,
     ) -> Box<dyn Element> {
         let settings = SharedSessionSettings::as_ref(app);
+        let revoke_is_off = settings.inactivity_period_before_revoking_roles.is_zero();
         let end_is_off = settings.inactivity_period_before_ending_session.is_zero();
-        let is_off = end_is_off || settings.inactivity_period_before_warning.is_zero();
-        let description = if end_is_off {
-            "Off because \"End the shared session\" is off -- there's nothing to warn about."
+        let warning_is_off = end_is_off || settings.inactivity_period_before_warning.is_zero();
+        let warning_description = if end_is_off {
+            "There's nothing to warn about, since \"End the shared session\" is off."
         } else {
-            "Shows a warning that the shared session is about to end. Set to \"Off\" to never show it."
+            "Shows a warning that the shared session is about to end."
         };
-        render_shared_session_inactivity_row(
-            view,
-            appearance,
-            app,
-            "Warn before ending the session after being inactive for",
-            description,
-            &view.shared_session_warning_editor,
-            view.valid_shared_session_warning,
-            ToggleState::from(!is_off),
-            InactivityPeriodBeforeWarning::storage_key(),
-            InactivityPeriodBeforeWarning::sync_to_cloud(),
-        )
-    }
-}
+        let warning_off_explanation = if end_is_off {
+            "Sessions won't end due to inactivity, so there's nothing to warn about."
+        } else {
+            "You won't be warned before the session ends due to inactivity."
+        };
 
-#[derive(Default)]
-struct SharedSessionEndSessionWidget {}
-
-impl SettingsWidget for SharedSessionEndSessionWidget {
-    type View = FeaturesPageView;
-
-    fn search_terms(&self) -> &str {
-        "shared session sharing remote control inactivity idle timeout end disconnect"
-    }
-
-    fn render(
-        &self,
-        view: &Self::View,
-        appearance: &Appearance,
-        app: &AppContext,
-    ) -> Box<dyn Element> {
-        let is_off = SharedSessionSettings::as_ref(app)
-            .inactivity_period_before_ending_session
-            .is_zero();
-        render_shared_session_inactivity_row(
-            view,
-            appearance,
-            app,
-            "End the shared session after being inactive for",
-            "Automatically ends the shared session and disconnects everyone. Set to \"Off\" for the session to never end due to inactivity.",
-            &view.shared_session_end_session_editor,
-            view.valid_shared_session_end_session,
-            ToggleState::from(!is_off),
-            InactivityPeriodBeforeEndingSession::storage_key(),
-            InactivityPeriodBeforeEndingSession::sync_to_cloud(),
-        )
+        Flex::column()
+            .with_child(render_shared_session_inactivity_row(
+                view,
+                appearance,
+                app,
+                "Revoke edit access after being inactive for",
+                "Switches everyone you're sharing this session with to read-only after this much inactivity.",
+                &view.shared_session_revoke_edit_access_editor,
+                view.valid_shared_session_revoke_edit_access,
+                ToggleState::from(!revoke_is_off),
+                "Edit access will never be revoked due to inactivity.",
+                InactivityPeriodBeforeRevokingRoles::storage_key(),
+                InactivityPeriodBeforeRevokingRoles::sync_to_cloud(),
+            ))
+            .with_child(render_shared_session_inactivity_row(
+                view,
+                appearance,
+                app,
+                "Warn before ending the session after being inactive for",
+                warning_description,
+                &view.shared_session_warning_editor,
+                view.valid_shared_session_warning,
+                ToggleState::from(!warning_is_off),
+                warning_off_explanation,
+                InactivityPeriodBeforeWarning::storage_key(),
+                InactivityPeriodBeforeWarning::sync_to_cloud(),
+            ))
+            .with_child(render_shared_session_inactivity_row(
+                view,
+                appearance,
+                app,
+                "End the shared session after being inactive for",
+                "Automatically ends the shared session and disconnects everyone after this much inactivity.",
+                &view.shared_session_end_session_editor,
+                view.valid_shared_session_end_session,
+                ToggleState::from(!end_is_off),
+                "Shared sessions will not end after an idle period.",
+                InactivityPeriodBeforeEndingSession::storage_key(),
+                InactivityPeriodBeforeEndingSession::sync_to_cloud(),
+            ))
+            .finish()
     }
 }
 
@@ -8445,3 +8389,7 @@ impl SettingsWidget for AsyncFindWidget {
         )
     }
 }
+
+#[cfg(test)]
+#[path = "features_page_tests.rs"]
+mod features_page_tests;
