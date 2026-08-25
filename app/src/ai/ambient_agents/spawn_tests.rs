@@ -10,7 +10,9 @@ use super::{
 };
 use crate::ai::agent::UserQueryMode;
 use crate::ai::ambient_agents::{AmbientAgentTask, AmbientAgentTaskState};
-use crate::server::server_api::ai::{MockAIClient, SpawnAgentResponse, TaskStatusMessage};
+use crate::server::server_api::ai::{
+    MockAIClient, RunFollowupResponse, SpawnAgentResponse, TaskStatusMessage,
+};
 use crate::terminal::shared_session;
 
 fn task_with(
@@ -105,7 +107,9 @@ async fn followup_submits_before_polling_and_ignores_previous_session_id() {
             assert_eq!(observed_run_id.to_string(), run_id().to_string());
             assert_eq!(request.message, "continue from here");
             submitted.store(true, Ordering::SeqCst);
-            Ok(())
+            Ok(RunFollowupResponse {
+                accepted_at: Utc::now(),
+            })
         }
     });
 
@@ -210,7 +214,11 @@ async fn followup_terminal_failure_surfaces_status_message() {
     let mut mock = MockAIClient::new();
     mock.expect_submit_run_followup()
         .times(1)
-        .returning(|_, _| Ok(()));
+        .returning(|_, _| {
+            Ok(RunFollowupResponse {
+                accepted_at: Utc::now(),
+            })
+        });
     mock.expect_get_ambient_agent_task().returning({
         let call_count = call_count.clone();
         move |_| {
@@ -282,7 +290,11 @@ async fn followup_without_previous_session_id_accepts_joinable_session() {
 
     mock.expect_submit_run_followup()
         .times(1)
-        .returning(|_, _| Ok(()));
+        .returning(|_, _| {
+            Ok(RunFollowupResponse {
+                accepted_at: Utc::now(),
+            })
+        });
     mock.expect_get_ambient_agent_task()
         .times(1)
         .returning(move |_| {
@@ -343,7 +355,11 @@ async fn followup_without_previous_session_id_errors_if_run_finishes_before_sess
 
     mock.expect_submit_run_followup()
         .times(1)
-        .returning(|_, _| Ok(()));
+        .returning(|_, _| {
+            Ok(RunFollowupResponse {
+                accepted_at: Utc::now(),
+            })
+        });
     mock.expect_get_ambient_agent_task().returning({
         let call_count = call_count.clone();
         move |_| {
@@ -417,7 +433,11 @@ async fn followup_skips_prior_terminal_state_until_working_then_attaches() {
     let mut mock = MockAIClient::new();
     mock.expect_submit_run_followup()
         .times(1)
-        .returning(|_, _| Ok(()));
+        .returning(|_, _| {
+            Ok(RunFollowupResponse {
+                accepted_at: Utc::now(),
+            })
+        });
     mock.expect_get_ambient_agent_task().returning({
         let call_count = call_count.clone();
         move |_| {
@@ -504,7 +524,11 @@ async fn followup_skips_prior_terminal_then_surfaces_real_failure() {
     let mut mock = MockAIClient::new();
     mock.expect_submit_run_followup()
         .times(1)
-        .returning(|_, _| Ok(()));
+        .returning(|_, _| {
+            Ok(RunFollowupResponse {
+                accepted_at: Utc::now(),
+            })
+        });
     mock.expect_get_ambient_agent_task().returning({
         let call_count = call_count.clone();
         move |_| {
@@ -592,7 +616,11 @@ async fn followup_cancelled_state_breaks_skip_loop() {
     let mut mock = MockAIClient::new();
     mock.expect_submit_run_followup()
         .times(1)
-        .returning(|_, _| Ok(()));
+        .returning(|_, _| {
+            Ok(RunFollowupResponse {
+                accepted_at: Utc::now(),
+            })
+        });
     mock.expect_get_ambient_agent_task()
         .times(1)
         .returning(|_| Ok(task_with(AmbientAgentTaskState::Cancelled, None, None)));
@@ -641,7 +669,11 @@ async fn followup_bounded_skip_for_server_stall() {
     let mut mock = MockAIClient::new();
     mock.expect_submit_run_followup()
         .times(1)
-        .returning(|_, _| Ok(()));
+        .returning(|_, _| {
+            Ok(RunFollowupResponse {
+                accepted_at: Utc::now(),
+            })
+        });
     mock.expect_get_ambient_agent_task().returning({
         let call_count = call_count.clone();
         move |_| {
@@ -703,9 +735,16 @@ async fn followup_authoritative_timestamp_skips_stale_observation_immediately() 
     let new_session_id = SessionId::new();
     let call_count = Arc::new(AtomicUsize::new(0));
     let mut mock = MockAIClient::new();
+    // The server's response carries this exact timestamp, so the test controls
+    // `submitted_at` precisely rather than approximating it with a second `Utc::now()`
+    // call on the client side.
     mock.expect_submit_run_followup()
         .times(1)
-        .returning(|_, _| Ok(()));
+        .returning(move |_, _| {
+            Ok(RunFollowupResponse {
+                accepted_at: submitted_at,
+            })
+        });
     mock.expect_get_ambient_agent_task().returning({
         let call_count = call_count.clone();
         move |_| {
@@ -791,7 +830,11 @@ async fn followup_authoritative_timestamp_surfaces_real_spawn_failure_after_foll
     let mut mock = MockAIClient::new();
     mock.expect_submit_run_followup()
         .times(1)
-        .returning(|_, _| Ok(()));
+        .returning(move |_, _| {
+            Ok(RunFollowupResponse {
+                accepted_at: submitted_at,
+            })
+        });
     mock.expect_get_ambient_agent_task().returning({
         let call_count = call_count.clone();
         move |_| {

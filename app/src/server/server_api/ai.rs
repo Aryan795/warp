@@ -333,6 +333,15 @@ pub struct RunFollowupRequest {
     pub message: String,
 }
 
+/// Response body for `POST /agent/runs/{run_id}/followups`. `accepted_at` is the server's own
+/// clock at acceptance, so callers that gate a subsequent poll on the run's `state_changed_at`
+/// can compare against it instead of a client-local timestamp, avoiding clock skew between the
+/// client and the server.
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+pub struct RunFollowupResponse {
+    pub accepted_at: DateTime<Utc>,
+}
+
 // --- Orchestrations V2 messaging types ---
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1299,7 +1308,7 @@ pub trait AIClient: 'static + Send + Sync {
         &self,
         run_id: &AmbientAgentTaskId,
         request: RunFollowupRequest,
-    ) -> anyhow::Result<(), anyhow::Error>;
+    ) -> anyhow::Result<RunFollowupResponse, anyhow::Error>;
 
     async fn get_scheduled_agent_history(
         &self,
@@ -2270,8 +2279,8 @@ impl AIClient for ServerApi {
         &self,
         run_id: &AmbientAgentTaskId,
         request: RunFollowupRequest,
-    ) -> anyhow::Result<(), anyhow::Error> {
-        self.post_public_api_unit(&build_run_followup_url(run_id), &request)
+    ) -> anyhow::Result<RunFollowupResponse, anyhow::Error> {
+        self.post_public_api(&build_run_followup_url(run_id), &request)
             .await
     }
 

@@ -176,16 +176,19 @@ pub fn submit_run_followup(
     timeout: Option<Duration>,
 ) -> impl Stream<Item = Result<AmbientAgentEvent, anyhow::Error>> {
     async_stream::stream! {
-        // Captured before the request goes out: the server's synchronous requeue (if
-        // any) happens no earlier than the moment it receives this request, so a
-        // `state_changed_at` at or after this instant can only belong to this
-        // follow-up's own execution, never to the prior run.
-        let submitted_at = Utc::now();
         let request = RunFollowupRequest { message };
-        if let Err(err) = ai_client.submit_run_followup(&run_id, request).await {
-            yield Err(err);
-            return;
-        }
+        // The server's own clock at acceptance: its synchronous requeue (if any) happens
+        // no earlier than this moment, so a `state_changed_at` at or after it can only
+        // belong to this follow-up's own execution, never to the prior run. Using the
+        // server's timestamp instead of a client-local one avoids misjudging that
+        // comparison when the client and server clocks have drifted apart.
+        let submitted_at = match ai_client.submit_run_followup(&run_id, request).await {
+            Ok(response) => response.accepted_at,
+            Err(err) => {
+                yield Err(err);
+                return;
+            },
+        };
 
         let mut stream = Box::pin(poll_run_until_joinable_session(
             run_id,
