@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{DirBuilder, File};
 use std::mem::MaybeUninit;
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::{io, ptr};
@@ -157,6 +157,95 @@ fn dev_container_exec_args(starter: &DevContainerShellStarter) -> Vec<std::ffi::
         std::ffi::OsString::from("/dev/null"),
     ]);
     args
+}
+
+/// Args for `docker cp <host_init_script_path> <container>:<container_init_script_path>`.
+fn dev_container_cp_args(
+    starter: &DevContainerShellStarter,
+    host_init_script_path: &Path,
+) -> Vec<std::ffi::OsString> {
+    vec![
+        std::ffi::OsString::from("cp"),
+        host_init_script_path.as_os_str().to_owned(),
+        std::ffi::OsString::from(format!(
+            "{}:{}",
+            starter.container_id,
+            starter.container_init_script_path()
+        )),
+    ]
+}
+
+/// Args for `docker exec -u 0 <container> id -un`, used to resolve the
+/// username of the account `bash --rcfile` will actually run as when
+/// `devcontainer up` didn't report a `remoteUser` (the real attach then runs
+/// with no `-u`, i.e. whatever the image's default exec user is). `-u 0`
+/// (numeric, not `root`) so this doesn't depend on an `/etc/passwd` entry
+/// existing for uid 0.
+fn dev_container_default_user_args(starter: &DevContainerShellStarter) -> Vec<std::ffi::OsString> {
+    vec![
+        std::ffi::OsString::from("exec"),
+        std::ffi::OsString::from("-u"),
+        std::ffi::OsString::from("0"),
+        std::ffi::OsString::from(&starter.container_id),
+        std::ffi::OsString::from("id"),
+        std::ffi::OsString::from("-un"),
+    ]
+}
+
+/// Args for `docker exec -u 0 <container> chown <target_user> <path>`, run
+/// immediately after `docker cp` copies the init script in. `docker cp`
+/// preserves the *host* file's numeric uid, which has no guaranteed
+/// relationship to `target_user`'s uid inside the container (different
+/// images and user namespaces), so without this, `target_user` can end up
+/// unable to read its own `--rcfile`, or the copy can be left readable by
+/// other users in the container. `-u 0` for the same reason as
+/// [`dev_container_default_user_args`]; only uid 0 can `chown` to a
+/// different user.
+fn dev_container_chown_args(
+    starter: &DevContainerShellStarter,
+    target_user: &str,
+) -> Vec<std::ffi::OsString> {
+    vec![
+        std::ffi::OsString::from("exec"),
+        std::ffi::OsString::from("-u"),
+        std::ffi::OsString::from("0"),
+        std::ffi::OsString::from(&starter.container_id),
+        std::ffi::OsString::from("chown"),
+        std::ffi::OsString::from(target_user),
+        std::ffi::OsString::from(starter.container_init_script_path()),
+    ]
+}
+
+/// Args for `docker exec -u 0 <container> chmod 400 <path>`, run right after
+/// [`dev_container_chown_args`] so the init script — which embeds this
+/// session's DCS integrity token — is readable only by the user that now
+/// owns it, regardless of whatever mode `docker cp` left it at.
+fn dev_container_chmod_args(starter: &DevContainerShellStarter) -> Vec<std::ffi::OsString> {
+    vec![
+        std::ffi::OsString::from("exec"),
+        std::ffi::OsString::from("-u"),
+        std::ffi::OsString::from("0"),
+        std::ffi::OsString::from(&starter.container_id),
+        std::ffi::OsString::from("chmod"),
+        std::ffi::OsString::from("400"),
+        std::ffi::OsString::from(starter.container_init_script_path()),
+    ]
+}
+
+/// Args for `docker exec -u 0 <container> rm -f <path>`: best-effort cleanup
+/// of the copied init script if [`dev_container_chown_args`]/
+/// [`dev_container_chmod_args`] fail partway, so a copy with unknown or
+/// insecure ownership isn't left behind in the container.
+fn dev_container_rm_args(starter: &DevContainerShellStarter) -> Vec<std::ffi::OsString> {
+    vec![
+        std::ffi::OsString::from("exec"),
+        std::ffi::OsString::from("-u"),
+        std::ffi::OsString::from("0"),
+        std::ffi::OsString::from(&starter.container_id),
+        std::ffi::OsString::from("rm"),
+        std::ffi::OsString::from("-f"),
+        std::ffi::OsString::from(starter.container_init_script_path()),
+    ]
 }
 
 /// The current user's password-database record, resolved for shell/session
@@ -1230,8 +1319,9 @@ fn build_dev_container_command(
 /// that handshake.
 ///
 /// TODO(prototype): No cleanup on pane close. See the matching TODO on
-/// `prepare_docker_sandbox` — the staged init script accumulates across
-/// sessions. Tracking as a follow-up if this graduates past prototype.
+/// `prepare_docker_sandbox` — the staged host-side init script *and* its
+/// `docker cp`'d copy inside the container both accumulate across sessions.
+/// Tracking as a follow-up if this graduates past prototype.
 fn prepare_dev_container(starter: &DevContainerShellStarter) -> Result<()> {
     let host_init_script_path = starter.host_init_script_path();
     let init_dir = host_init_script_path
@@ -1242,30 +1332,97 @@ fn prepare_dev_container(starter: &DevContainerShellStarter) -> Result<()> {
         .mode(0o700)
         .create(init_dir)
         .with_context(|| format!("create dev container init dir {}", init_dir.display()))?;
+    // `DirBuilder::create` (like `create_dir_all`) only applies `mode` to
+    // directories it actually creates, silently leaving a pre-existing
+    // directory's permissions untouched. Re-assert 0700 unconditionally so a
+    // scratch dir shared across every Dev Container session on this host
+    // can't end up traversable by other local users because of that.
+    std::fs::set_permissions(init_dir, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("chmod dev container init dir {}", init_dir.display()))?;
 
     let init_script =
         raw_init_shell_script_for_shell(ShellType::Bash, &ASSETS, starter.session_id());
     std::fs::write(&host_init_script_path, init_script)
         .context("write dev container init script")?;
+    // `fs::write` creates the file at a mode governed by the process umask,
+    // which may be group/world-readable. Force owner-only regardless: this
+    // script embeds the session's DCS integrity token.
+    std::fs::set_permissions(
+        &host_init_script_path,
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .with_context(|| {
+        format!(
+            "chmod dev container init script {}",
+            host_init_script_path.display()
+        )
+    })?;
 
-    let container_dest = format!(
-        "{}:{}",
-        starter.container_id,
-        starter.container_init_script_path()
-    );
-    let status = Command::new(starter.logical_shell_path())
-        .arg("cp")
-        .arg(&host_init_script_path)
-        .arg(&container_dest)
-        .status()
-        .context("run docker cp for dev container init script")?;
-    if !status.success() {
-        return Err(Error::msg(format!(
-            "`docker cp` of the init script into the Dev Container exited with {status}"
-        )));
+    let run_docker = |args: Vec<OsString>| -> Result<()> {
+        let args_display = args.iter().map(|a| a.to_string_lossy()).join(" ");
+        let status = Command::new(starter.logical_shell_path())
+            .args(&args)
+            .status()
+            .with_context(|| format!("run `docker {args_display}`"))?;
+        if !status.success() {
+            return Err(Error::msg(format!(
+                "`docker {args_display}` exited with {status}"
+            )));
+        }
+        Ok(())
+    };
+
+    run_docker(dev_container_cp_args(starter, &host_init_script_path))
+        .context("copy dev container init script into the container")?;
+
+    // `docker cp` preserves the *host* file's numeric uid/gid, which has no
+    // guaranteed relationship to the uid of the user that will actually
+    // source this via `--rcfile` inside the container (different images,
+    // users, and namespaces). Explicitly chown it to that user and lock the
+    // mode down, so it's readable by the right user and invisible to every
+    // other user in the container. If `devcontainer up` didn't report a
+    // `remoteUser`, resolve whichever user the real attach's unqualified
+    // `docker exec` (no `-u`) would actually run as.
+    let target_user = match &starter.remote_user {
+        Some(remote_user) => remote_user.clone(),
+        None => resolve_default_container_user(starter)?,
+    };
+    let secure_copy = run_docker(dev_container_chown_args(starter, &target_user))
+        .context("chown dev container init script")
+        .and_then(|_| {
+            run_docker(dev_container_chmod_args(starter)).context("chmod dev container init script")
+        });
+    if let Err(e) = secure_copy {
+        // Best-effort: don't leave a copy with unknown/insecure permissions
+        // sitting in the container just because we couldn't lock it down.
+        let _ = run_docker(dev_container_rm_args(starter));
+        return Err(e);
     }
 
     Ok(())
+}
+
+/// Resolves the username of the account an unqualified `docker exec`
+/// (no `-u`) would run as in this container — i.e. the account
+/// [`dev_container_exec_args`] actually attaches as when `devcontainer up`
+/// didn't report a `remoteUser`.
+fn resolve_default_container_user(starter: &DevContainerShellStarter) -> Result<String> {
+    let output = Command::new(starter.logical_shell_path())
+        .args(dev_container_default_user_args(starter))
+        .output()
+        .context("resolve default Dev Container exec user")?;
+    if !output.status.success() {
+        return Err(Error::msg(
+            "could not resolve the Dev Container's default exec user",
+        ));
+    }
+    let user = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if user.is_empty() {
+        return Err(Error::msg(
+            "Dev Container reported an empty default exec user",
+        ));
+    }
+    Ok(user)
 }
 
 #[cfg(test)]

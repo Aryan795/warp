@@ -151,3 +151,95 @@ fn dev_container_exec_args_includes_remote_user_when_present() {
         .expect("args should include -u when a remote user is set");
     assert_eq!(args[user_pos + 1], "vscode");
 }
+
+#[test]
+fn dev_container_cp_args_targets_the_container_init_script_path() {
+    let starter = dev_container_starter(None);
+    let host_path =
+        PathBuf::from("/home/user/.cache/warp-terminal-local/dev-container/init/deadbeef.sh");
+    let args = dev_container_cp_args(&starter, &host_path);
+
+    assert_eq!(
+        args,
+        vec![
+            std::ffi::OsString::from("cp"),
+            std::ffi::OsString::from(&host_path),
+            std::ffi::OsString::from(format!("abc123:{}", starter.container_init_script_path())),
+        ]
+    );
+}
+
+#[test]
+fn dev_container_chown_args_run_as_root_targeting_the_given_user() {
+    let starter = dev_container_starter(Some("vscode"));
+    let args = dev_container_chown_args(&starter, "vscode");
+
+    assert_eq!(
+        args,
+        vec![
+            std::ffi::OsString::from("exec"),
+            std::ffi::OsString::from("-u"),
+            std::ffi::OsString::from("0"),
+            std::ffi::OsString::from("abc123"),
+            std::ffi::OsString::from("chown"),
+            std::ffi::OsString::from("vscode"),
+            std::ffi::OsString::from(starter.container_init_script_path()),
+        ]
+    );
+}
+
+#[test]
+fn dev_container_chmod_args_lock_the_init_script_to_owner_read_only() {
+    let starter = dev_container_starter(None);
+    let args = dev_container_chmod_args(&starter);
+
+    assert_eq!(
+        args,
+        vec![
+            std::ffi::OsString::from("exec"),
+            std::ffi::OsString::from("-u"),
+            std::ffi::OsString::from("0"),
+            std::ffi::OsString::from("abc123"),
+            std::ffi::OsString::from("chmod"),
+            std::ffi::OsString::from("400"),
+            std::ffi::OsString::from(starter.container_init_script_path()),
+        ]
+    );
+}
+
+#[test]
+fn dev_container_default_user_args_query_the_unqualified_exec_user() {
+    let starter = dev_container_starter(None);
+    let args = dev_container_default_user_args(&starter);
+
+    assert_eq!(
+        args,
+        vec![
+            std::ffi::OsString::from("exec"),
+            std::ffi::OsString::from("-u"),
+            std::ffi::OsString::from("0"),
+            std::ffi::OsString::from("abc123"),
+            std::ffi::OsString::from("id"),
+            std::ffi::OsString::from("-un"),
+        ]
+    );
+}
+
+#[test]
+fn dev_container_rm_args_remove_the_container_side_init_script() {
+    let starter = dev_container_starter(None);
+    let args = dev_container_rm_args(&starter);
+
+    assert_eq!(
+        args,
+        vec![
+            std::ffi::OsString::from("exec"),
+            std::ffi::OsString::from("-u"),
+            std::ffi::OsString::from("0"),
+            std::ffi::OsString::from("abc123"),
+            std::ffi::OsString::from("rm"),
+            std::ffi::OsString::from("-f"),
+            std::ffi::OsString::from(starter.container_init_script_path()),
+        ]
+    );
+}

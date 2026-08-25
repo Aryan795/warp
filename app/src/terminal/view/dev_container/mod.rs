@@ -253,7 +253,9 @@ impl TerminalView {
     }
 
     /// Runs `devcontainer up` for `workspace_folder`. Only opens a pane once
-    /// `up` reports success; shows an error toast (never a pane) otherwise.
+    /// `up` reports success *and* the container passes
+    /// [`Self::preflight_and_attach_dev_container`]'s check; shows an error
+    /// toast (never a pane) otherwise.
     ///
     /// The init script that the eventual `bash --rcfile` session (see
     /// `crate::terminal::local_tty::dev_container`) sources to integrate with
@@ -283,50 +285,105 @@ impl TerminalView {
         };
 
         ctx.spawn(up_future, move |me, result, ctx| match result {
-            Ok(output) if output.status.success() => {
-                match parse_dev_container_up_stdout(&output.stdout) {
-                    Some(up_result) if up_result.outcome == "success" => {
-                        let (Some(container_id), Some(remote_workspace_folder)) =
-                            (up_result.container_id, up_result.remote_workspace_folder)
-                        else {
-                            me.show_dev_container_toast(
-                                "Dev container started, but `devcontainer up` didn't report a \
-                                 container ID or workspace folder to attach to."
-                                    .to_owned(),
-                                ToastFlavor::Error,
-                                ctx,
-                            );
-                            return;
-                        };
-                        me.show_dev_container_toast(
-                            format!(
-                                "Dev container ready — opening session in {}…",
-                                workspace_folder.display()
-                            ),
-                            ToastFlavor::Success,
-                            ctx,
-                        );
-                        me.create_and_push_dev_container(
-                            workspace_folder,
-                            docker_path,
-                            container_id,
-                            up_result.remote_user,
-                            remote_workspace_folder,
-                            sandbox_id,
-                            ctx,
-                        );
-                    }
-                    _ => {
-                        me.show_dev_container_up_failure_toast(&output.stdout, &output.stderr, ctx);
-                    }
+            Ok(output) => match interpret_dev_container_up_output(&output) {
+                DevContainerUpOutcome::ReadyToAttach {
+                    container_id,
+                    remote_user,
+                    remote_workspace_folder,
+                } => {
+                    me.preflight_and_attach_dev_container(
+                        workspace_folder,
+                        docker_path,
+                        container_id,
+                        remote_user,
+                        remote_workspace_folder,
+                        sandbox_id,
+                        ctx,
+                    );
                 }
-            }
-            Ok(output) => {
-                me.show_dev_container_up_failure_toast(&output.stdout, &output.stderr, ctx);
-            }
+                DevContainerUpOutcome::Error(message) => {
+                    me.show_dev_container_toast(message, ToastFlavor::Error, ctx);
+                }
+            },
             Err(e) => {
                 me.show_dev_container_toast(
                     format!("Failed to run `devcontainer up`: {e}"),
+                    ToastFlavor::Error,
+                    ctx,
+                );
+            }
+        });
+    }
+
+    /// Checks that the container is actually attachable — that it has the
+    /// `script` binary [`crate::terminal::local_tty::unix::dev_container_exec_args`]'s
+    /// attach mechanism depends on (not guaranteed present in every image),
+    /// and that `remote_user` (if any) is a real user in the container —
+    /// *before* creating a pane. Without this, either failure would only
+    /// surface once `bash --rcfile` is already running inside a freshly
+    /// created pane that then immediately exits, well past the point where
+    /// an error toast with no pane is still possible.
+    #[cfg(feature = "local_tty")]
+    #[allow(clippy::too_many_arguments)]
+    fn preflight_and_attach_dev_container(
+        &self,
+        workspace_folder: PathBuf,
+        docker_path: PathBuf,
+        container_id: String,
+        remote_user: Option<String>,
+        remote_workspace_folder: String,
+        sandbox_id: String,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let preflight_future = {
+            let docker_path = docker_path.clone();
+            let container_id = container_id.clone();
+            let remote_user = remote_user.clone();
+            async move {
+                Command::new(&docker_path)
+                    .args(dev_container_script_preflight_args(
+                        &container_id,
+                        remote_user.as_deref(),
+                    ))
+                    .output()
+                    .await
+            }
+        };
+
+        ctx.spawn(preflight_future, move |me, result, ctx| match result {
+            Ok(output) if output.status.success() => {
+                me.show_dev_container_toast(
+                    format!(
+                        "Dev container ready — opening session in {}…",
+                        workspace_folder.display()
+                    ),
+                    ToastFlavor::Success,
+                    ctx,
+                );
+                me.create_and_push_dev_container(
+                    workspace_folder,
+                    docker_path,
+                    container_id,
+                    remote_user,
+                    remote_workspace_folder,
+                    sandbox_id,
+                    ctx,
+                );
+            }
+            Ok(output) => {
+                let detail = tail_lines(&String::from_utf8_lossy(&output.stderr), 5);
+                me.show_dev_container_toast(
+                    format!(
+                        "Dev container is missing the `script` utility Warp needs to attach a \
+                         session, or its configured remote user doesn't exist: {detail}"
+                    ),
+                    ToastFlavor::Error,
+                    ctx,
+                );
+            }
+            Err(e) => {
+                me.show_dev_container_toast(
+                    format!("Failed to verify the Dev Container is ready to attach: {e}"),
                     ToastFlavor::Error,
                     ctx,
                 );
@@ -400,30 +457,103 @@ impl TerminalView {
             toast_stack.add_persistent_toast(toast, window_id, ctx);
         });
     }
+}
 
-    /// Shows an error toast for a failed `devcontainer up`, preferring the
-    /// structured `message`/`description` from its final JSON status line
-    /// and falling back to the tail of stderr when that's unavailable.
-    #[cfg(feature = "local_tty")]
-    fn show_dev_container_up_failure_toast(
-        &self,
-        stdout: &[u8],
-        stderr: &[u8],
-        ctx: &mut ViewContext<Self>,
-    ) {
-        let structured_message = parse_dev_container_up_stdout(stdout).and_then(|result| {
-            result
-                .message
-                .or(result.description)
-                .map(|detail| format!("Dev container failed to start: {detail}"))
-        });
-        let message = structured_message.unwrap_or_else(|| {
-            let stderr_text = String::from_utf8_lossy(stderr);
-            let tail = tail_lines(&stderr_text, 20);
-            format!("Dev container failed to start:\n{tail}")
-        });
-        self.show_dev_container_toast(message, ToastFlavor::Error, ctx);
+/// The outcome of a completed `devcontainer up` invocation, once its process
+/// exit status and JSON status line have both been interpreted.
+#[cfg(feature = "local_tty")]
+#[cfg_attr(test, derive(Debug, PartialEq))]
+enum DevContainerUpOutcome {
+    /// `up` succeeded and reported enough to attach to.
+    ReadyToAttach {
+        container_id: String,
+        remote_user: Option<String>,
+        remote_workspace_folder: String,
+    },
+    /// `up` failed, or succeeded without reporting what's needed to attach.
+    /// Carries the user-facing error message.
+    Error(String),
+}
+
+/// Interprets a completed `devcontainer up` process's exit status and
+/// stdout/stderr. Pulled out of [`TerminalView::bring_up_dev_container`] as a
+/// pure function so the partial-result and JSON-fallback cases are unit
+/// testable without actually running `devcontainer`.
+#[cfg(feature = "local_tty")]
+fn interpret_dev_container_up_output(output: &std::process::Output) -> DevContainerUpOutcome {
+    if !output.status.success() {
+        return DevContainerUpOutcome::Error(dev_container_up_failure_message(
+            &output.stdout,
+            &output.stderr,
+        ));
     }
+    match parse_dev_container_up_stdout(&output.stdout) {
+        Some(up_result) if up_result.outcome == "success" => {
+            match (up_result.container_id, up_result.remote_workspace_folder) {
+                (Some(container_id), Some(remote_workspace_folder)) => {
+                    DevContainerUpOutcome::ReadyToAttach {
+                        container_id,
+                        remote_user: up_result.remote_user,
+                        remote_workspace_folder,
+                    }
+                }
+                _ => DevContainerUpOutcome::Error(
+                    "Dev container started, but `devcontainer up` didn't report a container ID \
+                     or workspace folder to attach to."
+                        .to_owned(),
+                ),
+            }
+        }
+        _ => DevContainerUpOutcome::Error(dev_container_up_failure_message(
+            &output.stdout,
+            &output.stderr,
+        )),
+    }
+}
+
+/// Builds the error-toast message for a failed (or unparseable) `devcontainer
+/// up`, preferring the structured `message`/`description` from its final
+/// JSON status line and falling back to the tail of stderr when that's
+/// unavailable.
+#[cfg(feature = "local_tty")]
+fn dev_container_up_failure_message(stdout: &[u8], stderr: &[u8]) -> String {
+    let structured_message = parse_dev_container_up_stdout(stdout).and_then(|result| {
+        result
+            .message
+            .or(result.description)
+            .map(|detail| format!("Dev container failed to start: {detail}"))
+    });
+    structured_message.unwrap_or_else(|| {
+        let stderr_text = String::from_utf8_lossy(stderr);
+        let tail = tail_lines(&stderr_text, 20);
+        format!("Dev container failed to start:\n{tail}")
+    })
+}
+
+/// Args for a preflight `docker exec` that checks both that the container has
+/// a `script` binary — a hard dependency of
+/// `crate::terminal::local_tty::unix::dev_container_exec_args`'s attach
+/// mechanism, and not guaranteed present in every image — and that
+/// `remote_user` (if any) actually exists in the container, since an
+/// unqualified `-u <bad user>` fails the same way `sh` not finding `script`
+/// does: a non-zero exit with no pane created.
+#[cfg(feature = "local_tty")]
+fn dev_container_script_preflight_args(
+    container_id: &str,
+    remote_user: Option<&str>,
+) -> Vec<std::ffi::OsString> {
+    let mut args = vec![std::ffi::OsString::from("exec")];
+    if let Some(remote_user) = remote_user {
+        args.push(std::ffi::OsString::from("-u"));
+        args.push(std::ffi::OsString::from(remote_user));
+    }
+    args.extend([
+        std::ffi::OsString::from(container_id),
+        std::ffi::OsString::from("sh"),
+        std::ffi::OsString::from("-c"),
+        std::ffi::OsString::from("command -v script"),
+    ]);
+    args
 }
 
 /// Parses the final JSON status line that `devcontainer up` writes to
@@ -434,6 +564,10 @@ fn parse_dev_container_up_stdout(stdout: &[u8]) -> Option<DevContainerUpResult> 
     let last_line = stdout_text.lines().next_back()?.trim();
     serde_json::from_str(last_line).ok()
 }
+
+#[cfg(all(test, feature = "local_tty"))]
+#[path = "mod_test.rs"]
+mod tests;
 
 /// Returns the last `max_lines` non-empty lines of `text`, joined by `\n`.
 #[cfg(feature = "local_tty")]
