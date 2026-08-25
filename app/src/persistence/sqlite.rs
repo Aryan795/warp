@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryInto;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Once};
 use std::{fs, thread};
@@ -1373,7 +1372,7 @@ fn save_pane_state(
 
             let settings_pane = model::NewSettingsPane {
                 id,
-                current_page: current_page.to_string(),
+                current_page: current_page.slug().to_owned(),
             };
 
             diesel::insert_into(schema::settings_panes::dsl::settings_panes)
@@ -1962,6 +1961,7 @@ fn save_workspace(conn: &mut SqliteConnection, workspace: WorkspaceMetadata) -> 
                 user_uid: member.uid.as_string(),
                 email: member.email.clone(),
                 role: serde_json::to_string(&member.role).unwrap_or_default(),
+                is_disabled: member.is_disabled,
             };
             diesel::insert_into(schema::team_members::dsl::team_members)
                 .values(&new_member)
@@ -2106,6 +2106,7 @@ fn save_workspaces(
                         user_uid: member.uid.as_string(),
                         email: member.email,
                         role: serde_json::to_string(&member.role).unwrap_or_default(),
+                        is_disabled: member.is_disabled,
                     })
                 })
             })
@@ -2352,9 +2353,8 @@ fn read_node(conn: &mut SqliteConnection, node: model::PaneNode) -> Result<PaneN
                         .select(model::SettingsPane::as_select())
                         .first(conn)?;
 
-                    let current_page = SettingsSection::from_str(&settings_pane.current_page)
-                        .ok()
-                        .unwrap_or_default();
+                    let current_page =
+                        SettingsSection::from_slug(&settings_pane.current_page).unwrap_or_default();
                     LeafContents::Settings(SettingsPaneSnapshot::Local {
                         current_page,
                         search_query: None,
@@ -2756,6 +2756,7 @@ fn read_sqlite_data(
                     email: row.email,
                     role: serde_json::from_str(&row.role)
                         .unwrap_or(crate::workspaces::team::MembershipRole::User),
+                    is_disabled: row.is_disabled,
                 };
                 acc.entry(row.team_id).or_default().push(member);
                 acc

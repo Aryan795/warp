@@ -2,9 +2,7 @@ use std::cmp::Ordering;
 
 use serde::{Deserialize, Serialize};
 
-use super::workspace::{
-    BillingMetadata, EmailInvite, InviteLinkDomainRestriction, TeamSettings, WorkspaceInviteCode,
-};
+use super::workspace::{BillingMetadata, EmailInvite, InviteLinkDomainRestriction, TeamSettings};
 use crate::auth::UserUid;
 use crate::server::ids::ServerId;
 
@@ -13,6 +11,23 @@ pub enum MembershipRole {
     Owner,
     Admin,
     User,
+}
+
+/// Governs which workspace members can discover and join a team. Orthogonal to
+/// workspace-level discoverability. Only `Open` teams support an invite link;
+/// `Private` and `Hidden` teams rely on admin-sent email invites instead.
+#[derive(Clone, Copy, Eq, PartialEq, Debug, Default)]
+pub enum TeamVisibility {
+    #[default]
+    Open,
+    Private,
+    Hidden,
+}
+
+impl TeamVisibility {
+    pub fn supports_invite_link(&self) -> bool {
+        matches!(self, TeamVisibility::Open)
+    }
 }
 
 impl MembershipRole {
@@ -30,6 +45,7 @@ pub struct TeamMember {
     pub uid: UserUid,
     pub email: String,
     pub role: MembershipRole,
+    pub is_disabled: bool,
 }
 
 impl PartialOrd for TeamMember {
@@ -81,7 +97,7 @@ pub struct Team {
     pub name: String,
     /// The team's brand color as a hex string (e.g. "#7c3aed"), if set by the team admin.
     pub color: Option<String>,
-    pub invite_code: Option<WorkspaceInviteCode>,
+    pub invite_link: Option<String>,
     pub members: Vec<TeamMember>,
     pub pending_email_invites: Vec<EmailInvite>,
     pub invite_link_domain_restrictions: Vec<InviteLinkDomainRestriction>,
@@ -92,6 +108,7 @@ pub struct Team {
     /// If the team is eligible for discovery, then show toggle for setting discoverability to the team's admin
     pub is_eligible_for_discovery: bool,
     pub has_billing_history: bool,
+    pub visibility: TeamVisibility,
 }
 
 impl Team {
@@ -106,7 +123,7 @@ impl Team {
             uid,
             name,
             color: None,
-            invite_code: Default::default(),
+            invite_link: Default::default(),
             members: members.unwrap_or_default(),
             pending_email_invites: Default::default(),
             invite_link_domain_restrictions: Default::default(),
@@ -115,6 +132,7 @@ impl Team {
             settings: settings.unwrap_or_default(),
             is_eligible_for_discovery: false,
             has_billing_history: false,
+            visibility: TeamVisibility::default(),
         }
     }
 
