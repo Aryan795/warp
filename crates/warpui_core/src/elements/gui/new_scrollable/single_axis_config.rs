@@ -327,7 +327,7 @@ impl SingleAxisConfig {
         }
     }
 
-    /// Scroll child on the given axis with an eligible discrete (non-precise) wheel delta,
+    /// Scroll child on the given axis with an eligible discrete (non-precise) scroll delta,
     /// composing with or reversing any smooth-scroll animation already in flight rather than
     /// applying immediately. For a manually-managed child, the delta is accumulated into a
     /// controller on the shared handle; the incremental amount is applied to the child lazily,

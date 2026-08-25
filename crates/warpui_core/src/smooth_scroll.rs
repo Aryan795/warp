@@ -1,33 +1,41 @@
-//! A deterministic, time-based animation controller for smoothing discrete (non-precise)
-//! mouse-wheel scroll input.
-//!
-//! See `specs/CSAT-6046/TECH.md` for the design rationale. This module intentionally lives
-//! outside the GUI element tree so that both the generic WarpUI scrollables (Phase 1) and
-//! `TerminalView` scrollback (Phase 2) can share the same controller.
+//! A deterministic, time-based controller that eases a scroll position toward an exact target
+//! for discrete (non-precise) scroll input, instead of jumping immediately. Kept outside the GUI
+//! element tree so both generic WarpUI scrollables and terminal scrollback can share it.
 //!
 //! ## Model
+//! - Motion follows a cubic bezier ease-in-out (control points `(0.42, 0)` and `(0.58, 1)`, the
+//!   same shape as CSS's `ease-in-out` keyword): a notch from rest eases in before decelerating
+//!   into the target, rather than launching at full speed.
+//! - Duration is inversely proportional to the delta's magnitude: a small notch gets a longer,
+//!   gentler animation, while a large one collapses toward a shorter, snappier one. See
+//!   [`inverse_delta_duration`].
+//! - A same-direction delta arriving mid-flight *retargets* the running segment rather than
+//!   stacking a second one on top of it, reshaping the curve so its start velocity matches the
+//!   outgoing velocity -- motion stays continuous across the retarget instead of visibly
+//!   restarting:
+//!
+//!   ```text
+//!   position
+//!     ^                                          ,-- new target (after retarget)
+//!     |                                     ,--''
+//!     |                                ,--''
+//!     |              old target  x--''      <- retarget point: same slope carries
+//!     |                    ,--''               through into the reshaped curve
+//!     |              ,--''
+//!     |        ,--''
+//!     |  committed
+//!     +------------------------------------------------------------> time
+//!                          now
+//!   ```
+//!
+//!   [`velocity_preserving_duration`] bounds how long that reshaping may take, so a fast-moving
+//!   retarget with only a small remaining distance can't overshoot past the target.
+//! - Opposite-direction input discards the unrendered remainder and reverses immediately from
+//!   the currently displayed position.
+//!
 //! This mirrors Chromium's wheel-scroll animation, `cc::ScrollOffsetAnimationCurve`
-//! (`cc/animation/scroll_offset_animation_curve.cc`, public on chromium.googlesource.com),
-//! adopted after hands-on feedback that a flat 120ms ease-out cubic did not feel smooth enough:
-//! - Motion follows a cubic bezier ease-in-out, the same shape as CSS's `ease-in-out` keyword
-//!   (control points `(0.42, 0)` and `(0.58, 1)`), rather than an ease-out-only curve. A notch
-//!   from rest eases in before decelerating into the target, instead of launching at full speed.
-//!   This matches Chromium's `EaseInOutWithInitialSlope`, which also fixes the first control
-//!   point's x-coordinate at 0.42 and only varies its y-coordinate to encode a starting slope.
-//! - Duration is inversely proportional to the wheel delta (`DurationBehavior::kInverseDelta`):
-//!   a single small notch gets a longer, gentler animation; fast spinning collapses toward a
-//!   shorter, snappier one. This is a direct port of Chromium's linear ramp between
-//!   `kInverseDeltaRampStartPx`/`kInverseDeltaMaxDuration` and
-//!   `kInverseDeltaRampEndPx`/`kInverseDeltaMinDuration`. See [`inverse_delta_duration`].
-//! - A new same-direction notch arriving mid-flight *retargets* the single running animation
-//!   rather than stacking an independent contribution on top of it: the curve is reshaped so
-//!   its start velocity matches the outgoing velocity of the animation it's replacing, so
-//!   velocity stays continuous across the retarget instead of jumping. A
-//!   [`velocity_preserving_duration`] bound, ported from Chromium's `VelocityBasedDurationBound`,
-//!   keeps that reshaping from overshooting when the controller is already moving fast and the
-//!   newly retargeted distance is small.
-//! - Opposite-direction input still discards the unrendered remainder and reverses immediately
-//!   from the currently displayed position, as approved (this is unaffected by the model above).
+//! (`cc/animation/scroll_offset_animation_curve.cc`); ported constants cite it at their
+//! definitions.
 
 use std::time::Duration;
 
@@ -44,7 +52,7 @@ use warp_features::FeatureFlag;
 /// as often as this display-refresh headroom allows.
 pub const SMOOTH_SCROLL_FRAME_INTERVAL: Duration = Duration::from_millis(8);
 
-/// The number of pixels-per-line used to convert a non-precise (line-based) wheel delta into
+/// The number of pixels-per-line used to convert a non-precise (line-based) scroll delta into
 /// the pixel-equivalent units every [`SmoothScrollController`] operates in, including its
 /// duration ramp's 120/480 reference points. Every consumer of this controller that receives
 /// line-based input converts through this single constant, so a given gesture animates with
@@ -52,16 +60,14 @@ pub const SMOOTH_SCROLL_FRAME_INTERVAL: Duration = Duration::from_millis(8);
 ///
 /// This mirrors the value cocoa scroll events without
 /// [`hasPreciseScrollingDeltas`](https://developer.apple.com/documentation/appkit/nsevent/1525758-hasprecisescrollingdeltas?language=objc)
-/// are converted at (see the historical rationale on the generic scrollables' wheel handlers):
-/// inspired by the value Chromium and Flutter use, chosen over the OS-reported ~10px/line
-/// default because that reads as too slow.
+/// are converted at: inspired by the value Chromium and Flutter use, chosen over the
+/// OS-reported ~10px/line default because that reads as too slow.
 pub const NUM_PIXELS_PER_LINE: f32 = 40.0;
 
-/// Whether a wheel input should be animated by a [`SmoothScrollController`] rather than applied
-/// immediately. Precise (trackpad) input always keeps its existing continuous behavior, and
-/// disabling `FeatureFlag::SmoothScrolling` preserves the pre-existing immediate-jump behavior
-/// for discrete input too.
-pub fn should_animate_wheel_input(precise: bool) -> bool {
+/// Whether a scroll input should be animated by a [`SmoothScrollController`] rather than applied
+/// immediately: `precise` input always applies immediately, and disabling
+/// `FeatureFlag::SmoothScrolling` applies everything immediately.
+pub fn should_animate_scroll(precise: bool) -> bool {
     !precise && FeatureFlag::SmoothScrolling.is_enabled()
 }
 
@@ -88,9 +94,8 @@ const MIN_RETARGET_DURATION: Duration = Duration::from_millis(16);
 const INVERSE_DELTA_MAX_DURATION: Duration = Duration::from_millis(200);
 const INVERSE_DELTA_MIN_DURATION: Duration = Duration::from_millis(100);
 
-/// Duration for a discrete wheel notch, given the absolute magnitude of its delta in pixels.
-/// A direct port of Chromium's `DurationBehavior::kInverseDelta` linear ramp: "makes fast wheel
-/// flings feel snappy while preserving smoothness of slow wheel movements."
+/// Duration for a scroll delta, given its absolute magnitude in pixels. A direct port of
+/// Chromium's `DurationBehavior::kInverseDelta` linear ramp.
 fn inverse_delta_duration(abs_delta: f32) -> Duration {
     // At or beyond either end of the ramp, return the exact `Duration` constant rather than
     // computing it via the formula below: the formula's `f32` division by `DURATION_DIVISOR`
@@ -335,9 +340,8 @@ fn velocity_preserving_duration(remaining_delta: f32, current_velocity: f32) -> 
     base.min(bound).max(MIN_RETARGET_DURATION)
 }
 
-/// Animates a single scroll axis toward an exact target position using Chromium's wheel-scroll
-/// model: a bezier ease-in-out curve, inverse-delta duration, and velocity-preserving retargets.
-/// See the module-level docs for the full rationale.
+/// Animates a single scroll axis toward an exact target position. See the module-level docs for
+/// the model.
 ///
 /// The controller is a pure function of injected time: every method that depends on "now" takes
 /// an explicit [`Instant`] rather than reading the wall clock, which keeps it deterministic and
@@ -385,7 +389,7 @@ impl SmoothScrollController {
 
     /// The exact position this controller is animating toward, ignoring the animation's current
     /// progress. Bounds and nested-scroll-propagation decisions should use this rather than
-    /// [`Self::displayed_position`], so an inner scrollable doesn't accept wheel input that
+    /// [`Self::displayed_position`], so an inner scrollable doesn't accept scroll input that
     /// belongs to its parent while its own animation is still catching up.
     pub fn target(&self) -> f32 {
         self.segment

@@ -967,10 +967,8 @@ pub enum FeatureFlag {
     /// `--no-snapshot` is set. Off by default while the coordinator rolls out.
     PeriodicHandoffCheckpoints,
 
-    /// Rollout gate for animating discrete (non-precise) mouse-wheel scroll input with a short
-    /// ease-out tween instead of applying it immediately. Not a user preference; see
-    /// `specs/CSAT-6046/PRODUCT.md` for the full behavior. Phase 1 covers generic WarpUI
-    /// scrollables only.
+    /// Rollout gate for smoothly animating a scroll position toward its target, instead of
+    /// jumping immediately, for non-precise scroll input in generic WarpUI scrollables.
     SmoothScrolling,
 
     /// Observes Ctrl-C (`0x03`) written on the shared-session viewer input
@@ -1056,6 +1054,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::PricingTransparency,
     FeatureFlag::PeriodicHandoffCheckpoints,
     FeatureFlag::CtrlCCancelsThirdPartyHarness,
+    FeatureFlag::SmoothScrolling,
 ];
 
 /// Features enabled for feature preview build users (e.g.: Friends of Warp).
