@@ -85,23 +85,14 @@ pub struct MouseState {
     /// This property is _not_ delayed by hover delays.
     is_mouse_over_element: bool,
 
-    /// Keep track of whether the last event changing the hover
-    /// state is a synthetic mouse move. If there are two consecutive
-    /// events that both want to alter the hover state, we stop the
-    /// invocation to prevent the potential infinite loop. Note that
-    /// any non-synthetic event should reset this state to false.
-    ///
-    /// Used only by the TUI `TuiHoverable`, which applies the same guard but, unlike the GUI
-    /// `Hoverable` (see [`Self::last_synthetic_hover_change_at`]), has no continuous, time-based
-    /// animation and so has no need for a time-windowed version of it. Gated behind the `tui`
-    /// feature (rather than left always-compiled): `elements::gui` is always compiled, so
-    /// without this gate the field is genuinely dead code whenever `tui` is off, which
-    /// `-D warnings` turns into a hard build failure.
+    /// Whether the last event changing hover state was a synthetic mouse move, guarding against
+    /// a same-instant feedback loop. Gated behind the `tui` feature: `elements::gui` is always
+    /// compiled, so without this gate the field would be dead code whenever `tui` is off, which
+    /// `-D warnings` turns into a build failure.
     #[cfg(feature = "tui")]
     pub(crate) last_event_is_synthetic_hover: bool,
 
-    /// The instant of the most recent hover-state change caused by a *synthetic* MouseMoved
-    /// event, used by the GUI `Hoverable` in place of [`Self::last_event_is_synthetic_hover`].
+    /// The instant of the most recent hover-state change caused by a synthetic MouseMoved event.
     /// See [`Self::should_suppress_synthetic_hover_change`].
     last_synthetic_hover_change_at: Option<Instant>,
 

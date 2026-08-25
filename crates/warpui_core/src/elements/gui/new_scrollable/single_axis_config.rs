@@ -329,9 +329,8 @@ impl SingleAxisConfig {
 
     /// Scroll child on the given axis with an eligible discrete (non-precise) scroll delta,
     /// composing with or reversing any smooth-scroll animation already in flight rather than
-    /// applying immediately. For a manually-managed child, the delta is accumulated into a
-    /// controller on the shared handle; the incremental amount is applied to the child lazily,
-    /// as further events are dispatched to this element (see `ScrollableState::dispatch_event`).
+    /// applying immediately. For a manually-managed child, the delta accumulates on the shared
+    /// handle's controller and is applied to the child lazily.
     pub(super) fn scroll_to_animated(
         &mut self,
         viewport_size: Vector2F,
@@ -437,8 +436,6 @@ fn paint_clipped_internal(
     child.paint(child_origin, ctx, app);
     ctx.position_cache.end();
 
-    // Keep repainting while a smooth-scroll animation is easing in, so the displayed position
-    // keeps advancing without further input.
     if scroll_state.is_animating() {
         ctx.repaint_after(SMOOTH_SCROLL_FRAME_INTERVAL);
     }

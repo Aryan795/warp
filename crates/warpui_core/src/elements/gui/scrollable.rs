@@ -367,10 +367,8 @@ impl Scrollable {
         }
     }
 
-    /// Applies any pending smooth-scroll increment to the child. Called on every event
-    /// dispatched to this element so the animation keeps advancing as the app's existing redraw
-    /// machinery replays a synthetic `MouseMoved` event after each repaint (see
-    /// `PaintContext::repaint_after` / `AppContext::build_scene`).
+    /// Applies any pending smooth-scroll increment to the child; needs an `EventContext`,
+    /// which paint doesn't have.
     fn advance_smooth_scroll(&mut self, ctx: &mut EventContext) {
         let increment = self.state().take_smooth_scroll_increment(Instant::now());
         if increment.abs() > f32::EPSILON {
@@ -576,8 +574,6 @@ impl Element for Scrollable {
 
         self.child_max_z_index = Some(ctx.scene.max_active_z_index());
 
-        // Keep repainting while a smooth-scroll animation is easing in, so the displayed
-        // position keeps advancing without further input.
         if self.state().is_animating_smooth_scroll() {
             ctx.repaint_after(SMOOTH_SCROLL_FRAME_INTERVAL);
         }

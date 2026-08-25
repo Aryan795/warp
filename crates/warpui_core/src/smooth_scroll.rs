@@ -42,26 +42,13 @@ use std::time::Duration;
 use instant::Instant;
 use warp_features::FeatureFlag;
 
-/// Cadence at which a view with an active [`SmoothScrollController`] should request another
-/// repaint. Chosen to comfortably exceed common display refresh rates (e.g. 60Hz / ~16.7ms, or
-/// 120Hz / ~8.3ms) so this code's own self-scheduling is never the limiting factor on frame
-/// cadence -- any remaining throttling is downstream of the platform's actual redraw cadence.
-/// `ShimmeringTextElement` intentionally self-throttles to ~30fps (33ms) because a subtle color
-/// animation doesn't benefit from a faster cadence; scroll position is different -- even small
-/// differences in displayed position are readily perceptible in translation, so it's requested
-/// as often as this display-refresh headroom allows.
+/// Cadence at which an active [`SmoothScrollController`] requests another repaint. Comfortably
+/// exceeds common display refresh rates so this is never the bottleneck on frame cadence.
 pub const SMOOTH_SCROLL_FRAME_INTERVAL: Duration = Duration::from_millis(8);
 
-/// The number of pixels-per-line used to convert a non-precise (line-based) scroll delta into
-/// the pixel-equivalent units every [`SmoothScrollController`] operates in, including its
-/// duration ramp's 120/480 reference points. Every consumer of this controller that receives
-/// line-based input converts through this single constant, so a given gesture animates with
-/// the same feel regardless of which scrollable it lands on.
-///
-/// This mirrors the value cocoa scroll events without
-/// [`hasPreciseScrollingDeltas`](https://developer.apple.com/documentation/appkit/nsevent/1525758-hasprecisescrollingdeltas?language=objc)
-/// are converted at: inspired by the value Chromium and Flutter use, chosen over the
-/// OS-reported ~10px/line default because that reads as too slow.
+/// Pixels-per-line for converting a non-precise (line-based) scroll delta into the
+/// pixel-equivalent units this controller operates in. Matches the value Chromium and Flutter
+/// use, chosen over the OS-reported ~10px/line default because that reads as too slow.
 pub const NUM_PIXELS_PER_LINE: f32 = 40.0;
 
 /// Whether a scroll input should be animated by a [`SmoothScrollController`] rather than applied
@@ -97,11 +84,7 @@ const INVERSE_DELTA_MIN_DURATION: Duration = Duration::from_millis(100);
 /// Duration for a scroll delta, given its absolute magnitude in pixels. A direct port of
 /// Chromium's `DurationBehavior::kInverseDelta` linear ramp.
 fn inverse_delta_duration(abs_delta: f32) -> Duration {
-    // At or beyond either end of the ramp, return the exact `Duration` constant rather than
-    // computing it via the formula below: the formula's `f32` division by `DURATION_DIVISOR`
-    // (60) cannot represent `1/60` exactly, so it lands a few nanoseconds off the boundary
-    // values -- harmless for anything reading a `Duration` back as a float, but visible to an
-    // exact `Duration` comparison.
+    // Return the exact boundary constants rather than the formula below; see their doc comment.
     if abs_delta <= INVERSE_DELTA_RAMP_START_PX {
         return INVERSE_DELTA_MAX_DURATION;
     }
@@ -142,11 +125,8 @@ const EASE_IN_OUT: CubicBezier = CubicBezier {
     y2: BEZIER_Y2,
 };
 
-/// A defensive clamp on a reshaped curve's first control point's y-coordinate: without it, an
-/// unreasonably large starting slope (which [`velocity_preserving_duration`] is meant to
-/// prevent, but which could still arise from an edge case this code hasn't anticipated) would
-/// make the curve overshoot past `y = 1` before `t = 1`. Spot-checked numerically to keep the
-/// curve monotonic at this value.
+/// Clamp on a reshaped curve's initial slope, preventing overshoot past `y = 1` before `t = 1`.
+/// Spot-checked numerically to keep the curve monotonic at this value.
 const MAX_INITIAL_SLOPE_Y1: f32 = 1.0;
 
 /// A cubic bezier timing function mapping normalized time (`x`, always in `[0, 1]`) to
@@ -309,15 +289,13 @@ impl Segment {
 /// it to compensating for the ease-out tail of the curve.
 const VELOCITY_DURATION_BOUND_FACTOR: f32 = 2.5;
 
-/// A direct port of Chromium's `VelocityBasedDurationBound`: caps how long a retarget may take
-/// given the controller's current velocity and the remaining distance, so a fast-moving
-/// animation retargeted by a small amount doesn't get stretched out to a duration that would
-/// make the reshaped curve's starting slope overshoot past the target and rubber-band back.
+/// A direct port of Chromium's `VelocityBasedDurationBound`: caps a retarget's duration so a
+/// fast-moving animation with a small remaining distance can't overshoot the target and
+/// rubber-band back.
 ///
-/// Returns zero when `remaining_delta` is already zero (nothing left to bound), and an
-/// effectively unbounded duration when `current_velocity` is zero or points the opposite
-/// direction from `remaining_delta` (the bound only makes sense while already moving toward the
-/// new target).
+/// Zero when `remaining_delta` is already zero; unbounded when `current_velocity` is zero or
+/// points away from `remaining_delta` (the bound only applies while already moving toward the
+/// target).
 fn velocity_based_duration_bound(remaining_delta: f32, current_velocity: f32) -> Duration {
     if remaining_delta == 0.0 {
         return Duration::ZERO;
@@ -352,9 +330,7 @@ pub struct SmoothScrollController {
     committed: f32,
     /// The single in-flight motion, if any.
     segment: Option<Segment>,
-    /// The displayed position as of the last [`Self::take_increment`] call (or construction,
-    /// or the last [`Self::cancel`]/[`Self::set_position_immediately`]). See
-    /// [`Self::take_increment`].
+    /// The displayed position as of the last [`Self::take_increment`] call. See its doc comment.
     last_taken: f32,
 }
 
@@ -388,9 +364,7 @@ impl SmoothScrollController {
     }
 
     /// The exact position this controller is animating toward, ignoring the animation's current
-    /// progress. Bounds and nested-scroll-propagation decisions should use this rather than
-    /// [`Self::displayed_position`], so an inner scrollable doesn't accept scroll input that
-    /// belongs to its parent while its own animation is still catching up.
+    /// progress (unlike [`Self::displayed_position`]).
     pub fn target(&self) -> f32 {
         self.segment
             .map_or(self.committed, |segment| segment.target)
@@ -415,7 +389,7 @@ impl SmoothScrollController {
     ///
     /// A `delta` in the opposite direction discards the unrendered remainder of the current
     /// motion: the currently displayed position becomes the new settled base, then a fresh
-    /// segment eases from there (at zero velocity), exactly as before this model change.
+    /// segment eases from there (at zero velocity).
     pub fn add_delta(&mut self, delta: f32, now: Instant) {
         if delta == 0.0 {
             return;
@@ -440,8 +414,7 @@ impl SmoothScrollController {
         let remaining = segment.target - current_position;
 
         if remaining != 0.0 && remaining.signum() != delta.signum() {
-            // Opposite direction: cancel at the currently displayed position, then ease in
-            // fresh from there (zero velocity), discarding the unrendered remainder.
+            // Opposite direction: reverse from the currently displayed position.
             self.committed = current_position;
             let target = current_position + delta;
             self.segment = Some(Segment {
@@ -491,10 +464,6 @@ impl SmoothScrollController {
     /// Returns the change in [`Self::displayed_position`] since the last call to this method (or
     /// since construction, or the last [`Self::cancel`]/[`Self::set_position_immediately`]),
     /// settling a completed segment as a side effect like [`Self::displayed_position`].
-    ///
-    /// This hoists the "track what's already been applied, return only the remainder" pattern
-    /// that callers which apply the animation incrementally (rather than painting an absolute
-    /// position directly) would otherwise have to hand-roll themselves.
     pub fn take_increment(&mut self, now: Instant) -> f32 {
         let current = self.displayed_position(now);
         let increment = current - self.last_taken;
