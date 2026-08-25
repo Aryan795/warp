@@ -710,7 +710,7 @@ impl EnvironmentCommandRunner {
         });
     }
 
-    // Helper function to create environment after successful auth check
+    // Helper function to create environment after successful auth check.
     fn create_environment_after_auth_check(
         name: String,
         description: Option<String>,
@@ -737,11 +737,14 @@ impl EnvironmentCommandRunner {
             }
         };
 
-        // Create on the server
         UpdateManager::handle(ctx).update(ctx, |update_manager, ctx| {
-            update_manager.create_ambient_agent_environment(environment, client_id, owner, ctx);
+            update_manager.create_ambient_agent_environment_online_with_events(
+                environment,
+                client_id,
+                owner,
+                ctx,
+            );
         });
-
         // Await creation on the server, then return.
         // We should subscribe to the UpdateManager here because we want to wait
         // for our environment to be assigned a ServerId. Environments are not

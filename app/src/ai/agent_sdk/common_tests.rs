@@ -20,11 +20,12 @@ use crate::auth::auth_manager::AuthManager;
 use crate::auth::{AuthStateProvider, UserUid};
 use crate::cloud_object::model::persistence::CloudModel;
 use crate::cloud_object::{
-    CloudObjectMetadata, CloudObjectPermissions, CloudObjectStatuses, CloudObjectSyncStatus, Owner,
+    CloudObject, CloudObjectMetadata, CloudObjectPermissions, CloudObjectStatuses,
+    CloudObjectSyncStatus, Owner,
 };
 use crate::network::NetworkStatus;
 use crate::server::cloud_objects::update_manager::UpdateManager;
-use crate::server::ids::{ServerId, SyncId};
+use crate::server::ids::{ClientId, ServerId, SyncId};
 use crate::server::server_api::ServerApiProvider;
 use crate::server::sync_queue::SyncQueue;
 use crate::test_util::settings::initialize_settings_for_tests;
@@ -39,6 +40,14 @@ fn test_server_id(seed: u32) -> ServerId {
 }
 
 fn make_environment(seed: u32, name: &str) -> CloudAmbientAgentEnvironment {
+    make_environment_with_id(SyncId::ServerId(test_server_id(seed)), name)
+}
+
+fn make_unsynced_environment(name: &str) -> CloudAmbientAgentEnvironment {
+    make_environment_with_id(SyncId::ClientId(ClientId::new()), name)
+}
+
+fn make_environment_with_id(id: SyncId, name: &str) -> CloudAmbientAgentEnvironment {
     let metadata = CloudObjectMetadata {
         revision: None,
         metadata_last_updated_ts: None,
@@ -72,12 +81,7 @@ fn make_environment(seed: u32, name: &str) -> CloudAmbientAgentEnvironment {
         "docker-image".to_string(),
         Vec::new(),
     ));
-    CloudAmbientAgentEnvironment::new(
-        SyncId::ServerId(test_server_id(seed)),
-        model,
-        metadata,
-        permissions,
-    )
+    CloudAmbientAgentEnvironment::new(id, model, metadata, permissions)
 }
 
 #[test]
@@ -103,6 +107,23 @@ fn resolve_environment_by_name_errors_when_ambiguous() {
     let err = resolve_environment_by_name(&environments, "dup").unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("Multiple environments match"), "got: {msg}");
+}
+
+#[test]
+fn resolve_environment_by_name_ignores_unsynced_environments() {
+    let environments = vec![make_unsynced_environment("foo")];
+    let err = resolve_environment_by_name(&environments, "foo").unwrap_err();
+    assert!(matches!(
+        err,
+        ResolveConfigurationError::ObjectNotFound { .. }
+    ));
+}
+
+#[test]
+fn resolve_environment_by_name_matches_synced_env_when_unsynced_duplicate_exists() {
+    let environments = vec![make_unsynced_environment("foo"), make_environment(1, "foo")];
+    let resolved = resolve_environment_by_name(&environments, "foo").unwrap();
+    assert_eq!(resolved.sync_id(), SyncId::ServerId(test_server_id(1)));
 }
 
 #[test]

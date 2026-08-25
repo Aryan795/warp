@@ -312,13 +312,14 @@ Without an environment, the agent will not be able to access private repositorie
 
     fn get_by_id(id: String, ctx: &AppContext) -> Result<Self, ResolveConfigurationError> {
         let environment = resolve_environment(&id, ctx)?;
-        let resolved_id = match environment.sync_id() {
-            SyncId::ServerId(server_id) => server_id.to_string(),
-            SyncId::ClientId(_) => id,
+        let SyncId::ServerId(server_id) = environment.sync_id() else {
+            return Err(ResolveConfigurationError::Other(anyhow::anyhow!(
+                "Resolved environment '{id}' has no server ID"
+            )));
         };
 
         Ok(EnvironmentChoice::Environment {
-            id: resolved_id,
+            id: server_id.to_string(),
             name: environment.model().string_model.name.clone(),
         })
     }
@@ -339,14 +340,16 @@ pub(super) fn resolve_environment(
     resolve_environment_by_name(&CloudAmbientAgentEnvironment::get_all(ctx), identifier)
 }
 
-/// Find an unambiguous name match among a list of environments.
+/// Find an unambiguous name match among synced environments.
 fn resolve_environment_by_name(
     environments: &[CloudAmbientAgentEnvironment],
     name: &str,
 ) -> Result<CloudAmbientAgentEnvironment, ResolveConfigurationError> {
     let matches: Vec<&CloudAmbientAgentEnvironment> = environments
         .iter()
-        .filter(|env| env.model().string_model.name == name)
+        .filter(|env| {
+            matches!(env.sync_id(), SyncId::ServerId(_)) && env.model().string_model.name == name
+        })
         .collect();
     match matches.as_slice() {
         [] => Err(ResolveConfigurationError::ObjectNotFound {
