@@ -12,24 +12,8 @@
 //! - A same-direction delta arriving mid-flight *retargets* the running segment rather than
 //!   stacking a second one on top of it, reshaping the curve so its start velocity matches the
 //!   outgoing velocity -- motion stays continuous across the retarget instead of visibly
-//!   restarting:
-//!
-//!   ```text
-//!   position
-//!     ^                                          ,-- new target (after retarget)
-//!     |                                     ,--''
-//!     |                                ,--''
-//!     |              old target  x--''      <- retarget point: same slope carries
-//!     |                    ,--''               through into the reshaped curve
-//!     |              ,--''
-//!     |        ,--''
-//!     |  committed
-//!     +------------------------------------------------------------> time
-//!                          now
-//!   ```
-//!
-//!   [`velocity_preserving_duration`] bounds how long that reshaping may take, so a fast-moving
-//!   retarget with only a small remaining distance can't overshoot past the target.
+//!   restarting. [`velocity_preserving_duration`] bounds how long that reshaping may take, so a
+//!   fast-moving retarget with only a small remaining distance can't overshoot past the target.
 //! - Opposite-direction input discards the unrendered remainder and reverses immediately from
 //!   the currently displayed position.
 //!
