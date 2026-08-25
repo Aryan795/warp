@@ -1,0 +1,53 @@
+# Prototype Flatpak manifest for Warp's Linux "delivery wrapper" packaging.
+# Placeholders are substituted by script/linux/bundle_flatpak from the same
+# variables the other script/linux/bundle_* packagers use.
+#
+# This does not attempt to sandbox Warp: the app re-execs itself on the host
+# via `flatpak-spawn --host` at startup (see app/src/platform/linux.rs), so
+# the finish-args below only need to cover what the sandboxed launcher does
+# before that re-exec happens (drawing its first frame, talking to the
+# Flatpak session helper) plus the sockets/devices carried over to the
+# host-side process.
+app-id: @@BUNDLE_ID@@
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: @@BINARY_NAME@@
+finish-args:
+  # GPU rendering for the window drawn before the host re-exec happens.
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # Needed for update checks and, if the host re-exec fails for any reason,
+  # for Warp's own network access from inside the sandbox.
+  - --share=network
+  - --share=ipc
+  # Secret Service (credential storage) over the session bus.
+  - --socket=session-bus
+  # Required to call `flatpak-spawn --host`, which is how Warp exits the
+  # sandbox. GNOME Software surfaces this as "can acquire arbitrary
+  # permissions" -- an accurate description of what a host re-exec grants.
+  - --talk-name=org.freedesktop.Flatpak
+modules:
+  - name: warp
+    buildsystem: simple
+    # `staging` is the exact tree script/linux/bundle_install produces
+    # (opt/warpdotdev/<package>/{@@BINARY_NAME@@,resources} plus
+    # usr/share/{applications,icons}), so these commands only relocate that
+    # tree under /app rather than re-deriving it.
+    build-commands:
+      - install -Dm755 opt/warpdotdev/@@PACKAGE_NAME@@/@@BINARY_NAME@@
+        /app/opt/warpdotdev/@@PACKAGE_NAME@@/@@BINARY_NAME@@
+      - cp -r opt/warpdotdev/@@PACKAGE_NAME@@/resources
+        /app/opt/warpdotdev/@@PACKAGE_NAME@@/resources
+      - install -d /app/bin
+      - ln -s ../opt/warpdotdev/@@PACKAGE_NAME@@/@@BINARY_NAME@@
+        /app/bin/@@BINARY_NAME@@
+      - sed -i -E 's/Exec=warp-terminal/Exec=warp/'
+        usr/share/applications/@@BUNDLE_ID@@.desktop
+      - install -Dm644 usr/share/applications/@@BUNDLE_ID@@.desktop
+        /app/share/applications/@@BUNDLE_ID@@.desktop
+      - cp -r usr/share/icons /app/share/icons
+    sources:
+      - type: dir
+        path: staging

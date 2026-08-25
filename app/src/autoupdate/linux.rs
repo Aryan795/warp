@@ -34,6 +34,10 @@ pub(super) async fn download_update_and_cleanup(
             log::info!("Detected that Warp was installed using {package_manager:?}");
             Ok(DownloadReady::Yes)
         }
+        UpdateMethod::Flatpak(app_id) => {
+            log::info!("Detected that Warp was installed as the Flatpak {app_id}");
+            Ok(DownloadReady::Yes)
+        }
     }
 }
 
@@ -59,6 +63,7 @@ pub(super) fn apply_update(
             );
             Ok(ReadyForRelaunch::No)
         }
+        UpdateMethod::Flatpak(app_id) => flatpak::apply_update(&app_id),
     }
 }
 
@@ -67,6 +72,7 @@ pub(super) fn relaunch() -> Result<()> {
         UpdateMethod::Unknown => bail!("Don't know how to relaunch for an unknown update method!"),
         UpdateMethod::AppImage(appimage_path) => appimage::relaunch(&appimage_path),
         UpdateMethod::PackageManager(_) => package_manager::relaunch(),
+        UpdateMethod::Flatpak(_) => package_manager::relaunch(),
     }
 }
 
@@ -155,6 +161,39 @@ mod appimage {
         log::info!("Relaunching warp for update...");
         command.spawn()?;
         Ok(())
+    }
+}
+
+mod flatpak {
+    use super::*;
+
+    /// Runs `flatpak update` for the given app ID.
+    ///
+    /// Unlike the package-manager path, there's no "review the command
+    /// first" step: `flatpak update` needs no `sudo`, and Flatpak already
+    /// verifies commit signatures against the configured remote before
+    /// installing anything.
+    ///
+    /// Assumes a per-user installation, since that's how this prototype's
+    /// build and install flow was verified; a shipped implementation would
+    /// need to detect system vs. user installs (e.g. via `flatpak info`).
+    pub(super) fn apply_update(app_id: &str) -> Result<ReadyForRelaunch> {
+        let output = command::blocking::Command::new("flatpak")
+            .args([
+                "update",
+                "--user",
+                "--assumeyes",
+                "--noninteractive",
+                app_id,
+            ])
+            .output()?;
+        if !output.status.success() {
+            bail!(
+                "`flatpak update` failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(ReadyForRelaunch::Yes)
     }
 }
 
@@ -315,10 +354,20 @@ pub(crate) enum UpdateMethod {
     AppImage(PathBuf),
     /// Warp can be updated using the given package manager.
     PackageManager(PackageManager),
+    /// Warp is running as a Flatpak with the given app ID and should be
+    /// updated via `flatpak update`.
+    Flatpak(String),
 }
 
 impl UpdateMethod {
     pub(crate) fn detect() -> Self {
+        // Check Flatpak first: a host install left behind by a prior
+        // non-Flatpak installation (e.g. a stale `warp-terminal` .deb) would
+        // otherwise satisfy `PackageManager::detect()` and offer `sudo apt
+        // install`, which does nothing for a Flatpak install.
+        if let Some(app_id) = crate::platform::linux::flatpak_app_id() {
+            return Self::Flatpak(app_id);
+        }
         if let Some(appimage_path) = std::env::var_os("APPIMAGE").map(PathBuf::from) {
             return Self::AppImage(appimage_path);
         }

@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+#
+# Builds a prototype Flatpak as part of the bundling process.
+#
+# This is a spike: it proves out the delivery-wrapper shape (stage the same
+# app-only tree bundle_install produces, drop it under /app, re-exec on the
+# host at startup) rather than a Flathub-ready packaging pipeline. It is not
+# wired into script/linux/bundle's --packages list or CI yet.
+#
+# Required environment variables:
+#   - WORKSPACE_ROOT_DIR: The root directory of the Cargo workspace.
+#   - DIST_DIR: A temporary directory we can use for staging files as we build the package.
+#   - OUT_DIR: The directory into which we should place the final package.
+#   - CARGO_TARGET_OUTPUT_DIR: The cargo target directory containing build output.
+#   - RELEASE_CHANNEL: The release channel we're bundling (e.g.: "dev").
+#   - BUNDLE_ID: The app ID for the bundle (e.g.: "dev.warp.WarpDev").
+#   - EXECUTABLE_PATH: The path to the compiled executable we want to install.
+#   - BINARY_NAME: The name that the compiled executable should have on the target machine.
+#   - ARTIFACT: Which artifact to build; must be "app".
+
+set -e
+
+if [[ "$ARTIFACT" != "app" ]]; then
+  echo "::error ::bundle_flatpak only supports the 'app' artifact, got '$ARTIFACT'" >&2
+  exit 1
+fi
+
+for tool in flatpak flatpak-builder; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "::error ::bundle_flatpak requires '$tool' to be installed" >&2
+    exit 1
+  fi
+done
+
+# Mirrors bundle_deb/bundle_appimage's channel-suffix and package-name derivation.
+CHANNEL_SUFFIX="${BINARY_NAME#warp}"
+PACKAGE_NAME="warp-terminal$CHANNEL_SUFFIX"
+
+STAGE_DIR="$DIST_DIR/flatpakpkg/staging"
+BUILD_DIR="$DIST_DIR/flatpakpkg/build"
+REPO_DIR="$DIST_DIR/flatpakpkg/repo"
+MANIFEST_PATH="$DIST_DIR/flatpakpkg/$BUNDLE_ID.yml"
+
+cleanup() {
+  if [ -d "$DIST_DIR/flatpakpkg" ]; then
+    rm -rf "$DIST_DIR/flatpakpkg"
+  fi
+}
+trap cleanup EXIT
+
+rm -rf "$DIST_DIR/flatpakpkg"
+mkdir -p "$STAGE_DIR"
+
+# Populate the staging directory with the same app-only layout used by the
+# .deb, AppImage, and Arch packagers.
+OPT_DIR="/opt/warpdotdev/$PACKAGE_NAME"
+source "$WORKSPACE_ROOT_DIR/script/linux/bundle_install" "$STAGE_DIR"
+
+sed \
+  "s#@@BUNDLE_ID@@#$BUNDLE_ID#g; s#@@BINARY_NAME@@#$BINARY_NAME#g; s#@@PACKAGE_NAME@@#$PACKAGE_NAME#g" \
+  < "$WORKSPACE_ROOT_DIR/resources/linux/flatpak/manifest.yml.template" \
+  > "$MANIFEST_PATH"
+
+BUILD_ARCH="${BUILD_ARCH:-$(uname -m)}"
+
+echo "Running flatpak-builder for $BUNDLE_ID ($BUILD_ARCH)..."
+flatpak-builder \
+  --force-clean \
+  --disable-rofiles-fuse \
+  --arch="$BUILD_ARCH" \
+  --repo="$REPO_DIR" \
+  "$BUILD_DIR" \
+  "$MANIFEST_PATH"
+
+FLATPAK_PATH="$OUT_DIR/$BUNDLE_ID-$BUILD_ARCH.flatpak"
+flatpak build-bundle --arch="$BUILD_ARCH" "$REPO_DIR" "$FLATPAK_PATH" "$BUNDLE_ID"
+
+echo "Successfully built Flatpak at $FLATPAK_PATH!"
