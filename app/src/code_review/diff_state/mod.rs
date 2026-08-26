@@ -17,6 +17,7 @@ use warp_util::standardized_path::StandardizedPath;
 use warpui::{AppContext, ModelContext, ModelHandle};
 
 use crate::code_review::diff_size_limits::DiffSize;
+use crate::server::team_scope::RequestTeamScope;
 use crate::util::git::{BranchEntry, Commit, FileChangeEntry, PrInfo};
 #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
 mod local;
@@ -750,6 +751,10 @@ impl DiffStateModel {
     }
 
     /// Runs a commit chain (commit, then optionally push/create-PR).
+    ///
+    /// `team_scope` only reaches the local backend's AI request: the remote backend RPCs the
+    /// daemon, which has no window to resolve a team from (see `remote_server::server_model`).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn git_commit_chain(
         &self,
         mode: CommitChainMode,
@@ -757,6 +762,7 @@ impl DiffStateModel {
         include_unstaged: bool,
         branch: String,
         autogenerate_pr_content: bool,
+        team_scope: RequestTeamScope,
         ctx: &mut ModelContext<Self>,
     ) {
         match self {
@@ -767,6 +773,7 @@ impl DiffStateModel {
                     include_unstaged,
                     branch,
                     autogenerate_pr_content,
+                    team_scope,
                     ctx,
                 );
             }),
@@ -784,15 +791,18 @@ impl DiffStateModel {
     }
 
     /// Issues an AI commit-message generation request.
+    ///
+    /// `team_scope` only reaches the local backend's AI request; see [`Self::git_commit_chain`].
     pub(crate) fn generate_commit_message(
         &self,
         include_unstaged: bool,
         branch_name: String,
+        team_scope: RequestTeamScope,
         ctx: &mut ModelContext<Self>,
     ) {
         match self {
             Self::Local(local) => local.update(ctx, |local, ctx| {
-                local.generate_commit_message(include_unstaged, branch_name, ctx);
+                local.generate_commit_message(include_unstaged, branch_name, team_scope, ctx);
             }),
             Self::Remote(remote) => remote.update(ctx, |remote, ctx| {
                 remote.generate_commit_message(include_unstaged, branch_name, ctx);
@@ -815,16 +825,18 @@ impl DiffStateModel {
     /// Creates a PR for the current branch.
     ///
     /// When `autogenerate_content` is set, the PR title/body are AI-generated,
-    /// otherwise fallback to `gh pr create --fill`.
+    /// otherwise fallback to `gh pr create --fill`. `team_scope` only reaches the local
+    /// backend's AI request; see [`Self::git_commit_chain`].
     pub(crate) fn create_pr(
         &self,
         branch: String,
         autogenerate_content: bool,
+        team_scope: RequestTeamScope,
         ctx: &mut ModelContext<Self>,
     ) {
         match self {
             Self::Local(local) => local.update(ctx, |local, ctx| {
-                local.create_pr(branch, autogenerate_content, ctx);
+                local.create_pr(branch, autogenerate_content, team_scope, ctx);
             }),
             Self::Remote(remote) => remote.update(ctx, |remote, ctx| {
                 remote.create_pr(branch, autogenerate_content, ctx);

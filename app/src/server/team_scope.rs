@@ -21,6 +21,14 @@ impl RequestTeamScope {
         Self(scope.team_uid())
     }
 
+    /// No team header, for call sites that genuinely have no window to resolve one from --
+    /// e.g. the headless remote-server daemon, which has no window/team concept at all.
+    /// Distinct from reaching for a fallback team: this says "there is no scope here" rather
+    /// than guessing one.
+    pub fn none_for_headless_context() -> Self {
+        Self(None)
+    }
+
     /// The wire uid. `None` sends no team header, leaving the server to its own default.
     pub(crate) fn team_uid(self) -> Option<ServerId> {
         self.0
