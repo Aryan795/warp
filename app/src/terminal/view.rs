@@ -722,12 +722,14 @@ const RAW_KEYPRESS_CTRL_R_HANDOFF_PLUGIN_TAG: &str = "external_ctrl_r_raw_keypre
 
 /// The private key sequence (Alt-]) that bootstrap binds the wrapper widget to in every relevant
 /// keymap. Verified empirically to be unbound in stock bash (emacs, vi-insert, vi-command), zsh
-/// (emacs, viins, vicmd), and fish (default, insert).
+/// (emacs, viins, vicmd), and fish (default, insert). Bash's own `\C-x\C-r` is unsuitable because
+/// it collides with `re-read-init-file`.
 const RAW_KEYPRESS_CTRL_R_HANDOFF_KEYSEQ: &[u8] = &[escape_sequences::C0::ESC, b']'];
 
-/// Wraps `id` in bracketed-paste markers so the shell's line editor inserts it into the line
-/// buffer as literal text rather than interpreting the digits as an editing command (e.g.
-/// bash/zsh's own Alt-digit numeric argument, or vi command mode's repeat count).
+/// The pty payload that triggers a handoff: `id` wrapped in bracketed-paste markers, followed by
+/// [`RAW_KEYPRESS_CTRL_R_HANDOFF_KEYSEQ`]. The markers make the shell's line editor insert the
+/// digits as literal text rather than interpret them as an editing command (e.g. bash/zsh's own
+/// Alt-digit numeric argument, or vi command mode's repeat count).
 fn raw_keypress_ctrl_r_handoff_payload(id: RawKeypressCtrlRHandoffId) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(BRACKETED_PASTE_PREFIX.as_bytes());

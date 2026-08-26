@@ -629,6 +629,20 @@ def test_fish():
                 preserved,
                 detail=f"insert binds: {insert_binds!r}" if not preserved else "",
             )
+
+            # default mode is left free here, so it still gets a real wrapper. Asserting that is
+            # what makes this the *partial* collision the tag gate exists for, rather than a case
+            # where every mode happens to be occupied.
+            session.send(
+                "bind -M default \\x1b\\x5d | grep -qF __warp_run_raw_keypress_ctrl_r_widget_default "
+                "&& echo FISH_DEFAULT_STILL_WRAPPED\n",
+                wait=1.0,
+            )
+            record(
+                "fish: unoccupied mode still claims Alt-] (default)",
+                b"FISH_DEFAULT_STILL_WRAPPED" in session.buf,
+            )
+
             check_plugin_tag(session, False, "fish (vi insert occupied)")
 
             # ESC enters default mode, then 'i' switches to insert for the handoff.
