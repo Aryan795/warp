@@ -3302,6 +3302,20 @@ impl ansi::Handler for TerminalModel {
 
         let bytes = input.bytes();
 
+        // Let the client know the raw-keypress ctrl-r handoff's wrapper widget has
+        // demonstrably started painting, so it can cancel the handoff's bail-out timer
+        // outright instead of merely rescheduling it. See `Event::
+        // RawKeypressCtrlRHandoffOutputObserved`'s doc comment.
+        if !bytes.is_empty()
+            && self
+                .block_list()
+                .active_block()
+                .is_raw_keypress_forward_active()
+        {
+            self.event_proxy
+                .send_terminal_event(Event::RawKeypressCtrlRHandoffOutputObserved);
+        }
+
         // Send a copy of the bytes to subscribers.
         self.event_proxy.send_pty_read_event(bytes);
 

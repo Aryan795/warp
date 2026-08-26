@@ -744,25 +744,30 @@ fn raw_keypress_ctrl_r_handoff_payload(id: RawKeypressCtrlRHandoffId) -> Vec<u8>
     bytes
 }
 
-/// How long [`Block::is_raw_keypress_forward_active`] can stay set with no user activity and no
-/// completion hook before it is force-cleared. Restarted on every keystroke forwarded to the pty
-/// (see `TerminalView::note_raw_keypress_ctrl_r_handoff_activity`), so a user actively browsing
-/// or typing into the wrapper widget is never cut off mid-interaction -- this is a ceiling on
-/// inactivity, not on the handoff's total duration. This mechanism runs whatever the user has
-/// bound to ctrl-r and cannot assume it is present in the shell's active keymap, gets invoked, or
-/// ever returns, so the flag that hides the input editor and forwards keystrokes must have a
-/// bail-out that does not depend on the wrapper's cooperation. See
+/// How long [`Block::is_raw_keypress_forward_active`] can stay set with no completion hook and no
+/// evidence the wrapper widget ever started, before it is force-cleared. This mechanism runs
+/// whatever the user has bound to ctrl-r and cannot assume it is present in the shell's active
+/// keymap, gets invoked, or ever returns, so the flag that hides the input editor and forwards
+/// keystrokes must have a bail-out that does not depend on the wrapper's cooperation. See
 /// `TerminalView::on_raw_keypress_ctrl_r_handoff_timeout`.
 ///
-/// Originally 5 seconds, which turned out to be far too short: a user who pauses to read the
-/// wrapper widget's filtered list before pressing Enter -- ordinary interactive behavior, not
-/// inactivity -- can easily exceed 5 seconds without pressing a key. When the bail-out fires
-/// mid-read, it force-clears the forwarding flag and restores focus to the (empty) input editor;
-/// the Enter the user then presses to select an entry no longer reaches the pty at all -- it
-/// submits the empty input editor buffer as a command instead, leaving a stray empty block
-/// behind. 30 seconds comfortably covers normal think time while still recovering in a
-/// reasonable window if the wrapper widget is genuinely absent or hung.
-const RAW_KEYPRESS_CTRL_R_HANDOFF_TIMEOUT: Duration = Duration::from_secs(30);
+/// This only bounds time-to-first-output, not the handoff's total duration: it is restarted on
+/// every keystroke forwarded to the pty (`TerminalView::note_raw_keypress_ctrl_r_handoff_activity`)
+/// and, more importantly, cancelled outright -- not merely rescheduled -- the moment any pty
+/// output is observed for the active block (`TerminalView::
+/// note_raw_keypress_ctrl_r_handoff_output_observed`), since that proves the wrapper actually
+/// started. Once cancelled, there is no deadline at all for the rest of the handoff, no matter
+/// how long the user then reads the widget's output or thinks before pressing a key -- exactly
+/// like any other real interactive program running in the terminal. A real widget (fzf, atuin)
+/// paints its first frame within milliseconds, so this only ever fires for the failure mode it
+/// exists to catch: nothing was ever listening for the handoff at all (missing/rebound binding,
+/// dead shell). A previous version of this timeout (5s, later 30s) was rescheduled on activity
+/// alone with no output-based cancellation, so it could still fire while a user was legitimately
+/// reading the widget's already-painted output -- restoring focus to the (empty) input editor
+/// and turning the next Enter into a stray empty-command submission. See also `Block::
+/// arm_raw_keypress_bailout_guard`, which independently guards against exactly that submission
+/// regardless of how this timeout is tuned.
+const RAW_KEYPRESS_CTRL_R_HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// After the timeout bail-out fires, how long a new raw-keypress ctrl-r handoff is refused on
 /// this session. The timeout sends a best-effort Ctrl-C to the pty but cannot confirm the old
@@ -9424,6 +9429,25 @@ impl TerminalView {
             Some(self.spawn_raw_keypress_ctrl_r_handoff_timeout(handoff.id, ctx));
     }
 
+    /// Called when pty output is observed for the active block while a raw-keypress ctrl-r
+    /// handoff is pending (see [`ModelEvent::RawKeypressCtrlRHandoffOutputObserved`]). Cancels
+    /// the bail-out timer outright, rather than rescheduling it like
+    /// [`Self::note_raw_keypress_ctrl_r_handoff_activity`] does: once the wrapper widget has
+    /// demonstrably started and is painting, the failure mode the timer exists to catch --
+    /// nothing ever listening for the handoff -- is ruled out, so there is no longer a deadline
+    /// for the rest of this handoff, no matter how long the user then reads or thinks. If the
+    /// widget later hangs after having started, that's the same as any other frozen interactive
+    /// program in the terminal: not automatically recovered, but still escapable via Ctrl-C
+    /// (still forwarded to the pty) or closing the tab.
+    fn note_raw_keypress_ctrl_r_handoff_output_observed(&mut self) {
+        if self.pending_raw_keypress_ctrl_r_handoff.is_none() {
+            return;
+        }
+        if let Some(handle) = self.pending_raw_keypress_ctrl_r_timeout.take() {
+            handle.abort();
+        }
+    }
+
     /// Called when the shell reports the command selected in the raw-keypress ctrl-r handoff
     /// wrapper widget. Applies the selection only if `session_id` and `token` both match an
     /// in-flight handoff this session started (see [`PendingRawKeypressCtrlRHandoff`]); otherwise
@@ -13207,6 +13231,9 @@ impl TerminalView {
                         ctx,
                     );
                 }
+            }
+            ModelEvent::RawKeypressCtrlRHandoffOutputObserved => {
+                self.note_raw_keypress_ctrl_r_handoff_output_observed();
             }
             ModelEvent::SelectedTextChanged => {
                 ctx.emit(Event::SelectedTextChanged);

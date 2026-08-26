@@ -10301,6 +10301,51 @@ fn raw_keypress_ctrl_r_handoff_typed_characters_via_real_dispatch_reach_pty_not_
     })
 }
 
+/// Pins the mechanism behind Option 2 of the timeout redesign: once pty output is observed for
+/// the active block during a pending handoff (proving the wrapper widget actually started), the
+/// bail-out timer must be cancelled outright -- not merely rescheduled -- so there is no longer
+/// any deadline for the rest of the handoff, no matter how long the user then reads or thinks.
+#[test]
+fn raw_keypress_ctrl_r_handoff_output_observed_cancels_bailout_timer_outright() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let _flag = FeatureFlag::RawKeypressCtrlRHandoff.override_enabled(true);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let session_id = SessionId::from(0);
+
+        terminal.update(&mut app, |view, ctx| {
+            setup_raw_keypress_ctrl_r_session(view, ctx, session_id, true);
+            assert!(view.maybe_trigger_raw_keypress_ctrl_r_handoff(ctx));
+            assert!(
+                view.pending_raw_keypress_ctrl_r_timeout.is_some(),
+                "a bail-out timer must be armed when the handoff starts"
+            );
+
+            view.note_raw_keypress_ctrl_r_handoff_output_observed();
+            assert!(
+                view.pending_raw_keypress_ctrl_r_timeout.is_none(),
+                "observing pty output must cancel the bail-out timer outright, not reschedule it"
+            );
+
+            // Only the timer was cancelled -- the handoff itself is still pending, exactly as
+            // it should be while the wrapper widget is up and the user is free to keep reading
+            // or interacting with it for as long as they like.
+            assert!(
+                view.model
+                    .lock()
+                    .block_list()
+                    .active_block()
+                    .is_raw_keypress_forward_active(),
+                "the handoff must remain active after the timer is cancelled"
+            );
+            assert!(
+                view.pending_raw_keypress_ctrl_r_handoff.is_some(),
+                "the pending handoff state must be untouched by cancelling the timer"
+            );
+        });
+    })
+}
+
 #[test]
 fn raw_keypress_ctrl_r_handoff_stale_timeout_is_ignored() {
     App::test((), |mut app| async move {

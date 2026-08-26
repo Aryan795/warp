@@ -133,6 +133,14 @@ pub enum Event {
     /// Emitted when the shell reports the command selected in its raw-keypress ctrl-r handoff
     /// wrapper widget (a prototype alternative to the foreground-command handoff in PR #15513).
     ExternalCtrlRRawKeypressSelection(ExternalCtrlRRawKeypressSelectionValue),
+    /// Emitted the first time pty output is processed for the active block while a raw-keypress
+    /// ctrl-r handoff (see [`crate::terminal::view::TerminalView::
+    /// maybe_trigger_raw_keypress_ctrl_r_handoff`]) is pending, i.e. once the wrapper widget has
+    /// demonstrably started and is painting. Lets the client cancel the handoff's bail-out timer
+    /// outright instead of merely rescheduling it: the failure mode that timer exists to catch
+    /// -- nothing ever listening for the handoff -- is now ruled out. Never emitted outside an
+    /// active raw-keypress ctrl-r handoff.
+    RawKeypressCtrlRHandoffOutputObserved,
     TextSelectionChanged,
     ShellSpawned(ShellType),
     SendCompletionsPrompt,
@@ -543,6 +551,9 @@ impl Debug for Event {
                     "ExternalCtrlRRawKeypressSelection(buffer_len: {})",
                     data.buffer.len()
                 )
+            }
+            Event::RawKeypressCtrlRHandoffOutputObserved => {
+                write!(f, "RawKeypressCtrlRHandoffOutputObserved")
             }
             Event::TextSelectionChanged => write!(f, "TextSelectionChanged"),
             Event::ShellSpawned(shell_type) => write!(f, "ShellSpawned({shell_type:?})"),

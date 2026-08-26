@@ -264,6 +264,9 @@ impl ModelEventDispatcher {
             Event::ExternalCtrlRRawKeypressSelection(data) => {
                 ModelEvent::ExternalCtrlRRawKeypressSelection(data)
             }
+            Event::RawKeypressCtrlRHandoffOutputObserved => {
+                ModelEvent::RawKeypressCtrlRHandoffOutputObserved
+            }
             Event::TextSelectionChanged => ModelEvent::SelectedTextChanged,
             Event::ShellSpawned(shell_type) => ModelEvent::ShellSpawned(shell_type),
             Event::SendCompletionsPrompt => ModelEvent::SendCompletionsPrompt,
@@ -452,6 +455,8 @@ pub enum ModelEvent {
     /// Emitted when the shell reports the command selected in its raw-keypress ctrl-r handoff
     /// wrapper widget (a prototype alternative to the foreground-command handoff in PR #15513).
     ExternalCtrlRRawKeypressSelection(ExternalCtrlRRawKeypressSelectionValue),
+    /// See [`crate::terminal::event::Event::RawKeypressCtrlRHandoffOutputObserved`]'s doc comment.
+    RawKeypressCtrlRHandoffOutputObserved,
     SelectedTextChanged,
     ShellSpawned(ShellType),
     CompletionsFinished(Vec<ShellCompletion>),
