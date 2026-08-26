@@ -58,6 +58,12 @@ pub struct TurnModelUsage {
     /// `None` when a turn-scoped cost cannot be derived, in which case the
     /// cost is omitted from the row rather than rendered as `$0.00`.
     pub cost_in_cents: Option<f32>,
+    /// Per-field cost breakdown (input/output/cache) plus web search count
+    /// and cost, sourced from the server's `RequestCharges`. `None` when no
+    /// request with charge data has completed yet this turn, in which case
+    /// the expanded breakdown shows token counts only (no dollar values or
+    /// web search row).
+    pub inference_breakdown: Option<TurnModelInferenceBreakdown>,
 }
 
 impl TurnModelUsage {
@@ -67,6 +73,19 @@ impl TurnModelUsage {
     pub fn tokens(&self) -> u64 {
         self.total_input + self.output
     }
+}
+
+/// Per-field cost breakdown for a single model's expanded row. See
+/// [`TurnModelUsage::inference_breakdown`].
+#[derive(Debug, Clone, Copy)]
+pub struct TurnModelInferenceBreakdown {
+    pub input_cost_in_cents: f32,
+    pub output_cost_in_cents: f32,
+    /// Combined cache-read + cache-write cost, matching the row's combined
+    /// "Cache" token count.
+    pub cache_cost_in_cents: f32,
+    pub web_search_count: u64,
+    pub web_search_cost_in_cents: f32,
 }
 
 /// Turn-scoped usage data backing the "MODEL USAGE" section. All fields are
@@ -227,10 +246,12 @@ impl TurnUsageView {
 
         let font_family = appearance.ui_font_family();
         let model_name = model.model_id.clone();
+        // Collapsed points right (the row can be expanded further); expanded
+        // points down (the breakdown is already showing below).
         let chevron_icon = if expanded {
-            Icon::ChevronUp
-        } else {
             Icon::ChevronDown
+        } else {
+            Icon::ChevronRight
         };
         let label = Hoverable::new(self.model_row_mouse_states[index].clone(), move |_state| {
             let text_element = Text::new(model_name.clone(), font_family, font_size)
@@ -261,19 +282,59 @@ impl TurnUsageView {
 
         let mut rows = vec![(label, value)];
         if expanded {
+            // Smaller than the rest of the panel's body text, per feedback,
+            // to visually distinguish the breakdown as a nested detail.
+            let breakdown_font_size = appearance.ui_font_size();
+            let breakdown = model.inference_breakdown.as_ref();
+
             rows.push((
-                render_indented_label_text("Input", appearance),
-                render_value_text(format_tokens(model.total_input), appearance),
+                render_indented_label_text("Input", breakdown_font_size, appearance),
+                render_value_text(
+                    format_tokens_with_optional_cost(
+                        model.total_input,
+                        breakdown.map(|b| b.input_cost_in_cents),
+                    ),
+                    breakdown_font_size,
+                    appearance,
+                ),
             ));
             rows.push((
-                render_indented_label_text("Output", appearance),
-                render_value_text(format_tokens(model.output), appearance),
+                render_indented_label_text("Output", breakdown_font_size, appearance),
+                render_value_text(
+                    format_tokens_with_optional_cost(
+                        model.output,
+                        breakdown.map(|b| b.output_cost_in_cents),
+                    ),
+                    breakdown_font_size,
+                    appearance,
+                ),
             ));
             let cache_tokens = model.input_cache_read + model.input_cache_write;
             if cache_tokens > 0 {
                 rows.push((
-                    render_indented_label_text("Cache", appearance),
-                    render_value_text(format_tokens(cache_tokens), appearance),
+                    render_indented_label_text("Cache", breakdown_font_size, appearance),
+                    render_value_text(
+                        format_tokens_with_optional_cost(
+                            cache_tokens,
+                            breakdown.map(|b| b.cache_cost_in_cents),
+                        ),
+                        breakdown_font_size,
+                        appearance,
+                    ),
+                ));
+            }
+            if let Some(breakdown) = breakdown.filter(|b| b.web_search_count > 0) {
+                rows.push((
+                    render_indented_label_text("Web search", breakdown_font_size, appearance),
+                    render_value_text(
+                        format!(
+                            "{}  /  {}",
+                            format_web_searches(breakdown.web_search_count),
+                            format_dollars(breakdown.web_search_cost_in_cents)
+                        ),
+                        breakdown_font_size,
+                        appearance,
+                    ),
                 ));
             }
         }
@@ -330,7 +391,11 @@ impl TurnUsageView {
         if let Some(platform_usage_in_cents) = self.usage_info.platform_usage_in_cents {
             rows.push((
                 render_label_text("Platform usage", appearance),
-                render_value_text(format_dollars(platform_usage_in_cents), appearance),
+                render_value_text(
+                    format_dollars(platform_usage_in_cents),
+                    font_size,
+                    appearance,
+                ),
             ));
         }
 
@@ -368,32 +433,50 @@ impl TurnUsageView {
         vec![
             (
                 render_label_text("Tool calls", appearance),
-                render_value_text(self.usage_info.tool_calls.to_string(), appearance),
+                render_value_text(
+                    self.usage_info.tool_calls.to_string(),
+                    font_size,
+                    appearance,
+                ),
             ),
             (
                 render_label_text("Files changed", appearance),
-                render_value_text(self.usage_info.files_changed.to_string(), appearance),
+                render_value_text(
+                    self.usage_info.files_changed.to_string(),
+                    font_size,
+                    appearance,
+                ),
             ),
             (render_label_text("Diffs applied", appearance), diffs_value),
             (
                 render_label_text("Commands executed", appearance),
-                render_value_text(self.usage_info.commands_executed.to_string(), appearance),
+                render_value_text(
+                    self.usage_info.commands_executed.to_string(),
+                    font_size,
+                    appearance,
+                ),
             ),
         ]
     }
 
     fn response_time_rows(&self, appearance: &Appearance) -> Option<Vec<LabelValueRow>> {
         let timing = self.timing_info.as_ref()?;
+        let font_size = appearance.ui_font_size() + 2.;
 
         let mut rows = vec![
             (
                 render_label_text("Time to first token", appearance),
-                render_value_text(format_seconds(timing.time_to_first_token_ms), appearance),
+                render_value_text(
+                    format_seconds(timing.time_to_first_token_ms),
+                    font_size,
+                    appearance,
+                ),
             ),
             (
                 render_label_text("Total agent response time", appearance),
                 render_value_text(
                     format_seconds(timing.total_agent_response_time_ms),
+                    font_size,
                     appearance,
                 ),
             ),
@@ -401,7 +484,7 @@ impl TurnUsageView {
         if let Some(wall_ms) = timing.wall_to_wall_response_time_ms {
             rows.push((
                 render_label_text("Total time (including tool calls)", appearance),
-                render_value_text(format_seconds(wall_ms), appearance),
+                render_value_text(format_seconds(wall_ms), font_size, appearance),
             ));
         }
 
@@ -427,6 +510,12 @@ impl TurnUsageView {
     /// `ConversationUsageView::render_section_header`'s established
     /// pattern of pairing a real (if empty) header `Text` in both columns.
     fn build_label_value_columns(&self, appearance: &Appearance) -> LabelValueColumns {
+        // Row spacing within a section. The last row of each section gets
+        // extra bottom margin (on top of this) to visually separate
+        // top-level sections from one another.
+        const ROW_MARGIN_BOTTOM: f32 = 6.;
+        const SECTION_END_EXTRA_MARGIN: f32 = 8.;
+
         let mut labels: Vec<Box<dyn Element>> = Vec::new();
         let mut values: Vec<Box<dyn Element>> = Vec::new();
         let mut push_row =
@@ -442,24 +531,33 @@ impl TurnUsageView {
                         .finish(),
                 );
             };
+        let push_section_rows =
+            |rows: Vec<LabelValueRow>,
+             push_row: &mut dyn FnMut(Box<dyn Element>, Box<dyn Element>, f32)| {
+                let last_index = rows.len().checked_sub(1);
+                for (i, (label, value)) in rows.into_iter().enumerate() {
+                    let margin_bottom = if Some(i) == last_index {
+                        ROW_MARGIN_BOTTOM + SECTION_END_EXTRA_MARGIN
+                    } else {
+                        ROW_MARGIN_BOTTOM
+                    };
+                    push_row(label, value, margin_bottom);
+                }
+            };
 
         push_row(
             Self::render_section_header("MODEL USAGE", appearance),
             Self::render_section_header("", appearance),
             8.,
         );
-        for (label, value) in self.model_usage_rows(appearance) {
-            push_row(label, value, 6.);
-        }
+        push_section_rows(self.model_usage_rows(appearance), &mut push_row);
 
         push_row(
             Self::render_section_header("TOOL CALL SUMMARY", appearance),
             Self::render_section_header("", appearance),
             8.,
         );
-        for (label, value) in self.tool_call_summary_rows(appearance) {
-            push_row(label, value, 6.);
-        }
+        push_section_rows(self.tool_call_summary_rows(appearance), &mut push_row);
 
         if let Some(rows) = self.response_time_rows(appearance) {
             push_row(
@@ -467,9 +565,7 @@ impl TurnUsageView {
                 Self::render_section_header("", appearance),
                 8.,
             );
-            for (label, value) in rows {
-                push_row(label, value, 6.);
-            }
+            push_section_rows(rows, &mut push_row);
         }
 
         (labels, values)
@@ -544,24 +640,34 @@ impl TypedActionView for TurnUsageView {
 }
 
 fn render_label_text(text: &str, appearance: &Appearance) -> Box<dyn Element> {
+    render_label_text_sized(text, appearance.ui_font_size() + 2., appearance)
+}
+
+fn render_label_text_sized(
+    text: &str,
+    font_size: f32,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
     let theme = appearance.theme();
-    let font_size = appearance.ui_font_size() + 2.;
     Text::new(text.to_string(), appearance.ui_font_family(), font_size)
         .with_color(blended_colors::text_sub(theme, theme.surface_2()))
         .finish()
 }
 
 /// Like [`render_label_text`], but indented to sit under an expanded model
-/// row's breakdown.
-fn render_indented_label_text(text: &str, appearance: &Appearance) -> Box<dyn Element> {
-    Container::new(render_label_text(text, appearance))
+/// row's breakdown, at the given font size.
+fn render_indented_label_text(
+    text: &str,
+    font_size: f32,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    Container::new(render_label_text_sized(text, font_size, appearance))
         .with_margin_left(16.)
         .finish()
 }
 
-fn render_value_text(text: String, appearance: &Appearance) -> Box<dyn Element> {
+fn render_value_text(text: String, font_size: f32, appearance: &Appearance) -> Box<dyn Element> {
     let theme = appearance.theme();
-    let font_size = appearance.ui_font_size() + 2.;
     Text::new(text, appearance.ui_font_family(), font_size)
         .with_color(blended_colors::text_main(theme, theme.surface_2()))
         .finish()
@@ -569,6 +675,23 @@ fn render_value_text(text: String, appearance: &Appearance) -> Box<dyn Element> 
 
 pub(crate) fn format_tokens(tokens: u64) -> String {
     format!("{tokens} token{}", if tokens == 1 { "" } else { "s" })
+}
+
+/// Formats a token count, appending the corresponding dollar cost (with a
+/// forward-slash separator) when known.
+fn format_tokens_with_optional_cost(tokens: u64, cost_in_cents: Option<f32>) -> String {
+    match cost_in_cents {
+        Some(cost_in_cents) => format!(
+            "{}  /  {}",
+            format_tokens(tokens),
+            format_dollars(cost_in_cents)
+        ),
+        None => format_tokens(tokens),
+    }
+}
+
+pub(crate) fn format_web_searches(count: u64) -> String {
+    format!("{count} search{}", if count == 1 { "" } else { "es" })
 }
 
 pub(crate) fn format_dollars(cost_in_cents: f32) -> String {

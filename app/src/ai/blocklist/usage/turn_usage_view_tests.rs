@@ -18,6 +18,7 @@ fn placeholder_usage_info() -> TurnUsageInfo {
             input_cache_read: 0,
             input_cache_write: 0,
             cost_in_cents: Some(60.0),
+            inference_breakdown: None,
         }],
         context_window_usage: 0.001,
         platform_usage_in_cents: None,
@@ -87,6 +88,7 @@ fn build_label_value_columns_keeps_every_row_aligned_across_sections() {
                     input_cache_read: 0,
                     input_cache_write: 0,
                     cost_in_cents: Some(12.0),
+                    inference_breakdown: None,
                 },
                 TurnModelUsage {
                     model_id: "gpt-5".to_string(),
@@ -95,6 +97,7 @@ fn build_label_value_columns_keeps_every_row_aligned_across_sections() {
                     input_cache_read: 0,
                     input_cache_write: 0,
                     cost_in_cents: Some(6.0),
+                    inference_breakdown: None,
                 },
             ],
             context_window_usage: 0.25,
@@ -194,6 +197,13 @@ fn toggle_model_expanded_shows_and_hides_breakdown_rows() {
                 input_cache_read: 5,
                 input_cache_write: 3,
                 cost_in_cents: Some(12.0),
+                inference_breakdown: Some(TurnModelInferenceBreakdown {
+                    input_cost_in_cents: 100.0,
+                    output_cost_in_cents: 200.0,
+                    cache_cost_in_cents: 50.0,
+                    web_search_count: 2,
+                    web_search_cost_in_cents: 300.0,
+                }),
             }],
             context_window_usage: 0.1,
             platform_usage_in_cents: None,
@@ -217,10 +227,23 @@ fn toggle_model_expanded_shows_and_hides_breakdown_rows() {
                 .unwrap_or_default()
         };
 
+        let values_text = |view: &TurnUsageView, ctx: &warpui::AppContext| {
+            let appearance = Appearance::as_ref(ctx);
+            let (_labels, values) = view.build_label_value_columns(appearance);
+            Flex::column()
+                .with_children(values)
+                .finish()
+                .debug_text_content()
+                .unwrap_or_default()
+        };
+
         view.read(&app, |view, ctx| {
             let text = labels_text(view, ctx);
             assert!(
-                !text.contains("Input") && !text.contains("Output") && !text.contains("Cache"),
+                !text.contains("Input")
+                    && !text.contains("Output")
+                    && !text.contains("Cache")
+                    && !text.contains("Web search"),
                 "breakdown rows should not be present while collapsed:\n{text}"
             );
         });
@@ -230,10 +253,32 @@ fn toggle_model_expanded_shows_and_hides_breakdown_rows() {
         });
 
         view.read(&app, |view, ctx| {
-            let text = labels_text(view, ctx);
-            assert!(text.contains("Input"), "expected Input row:\n{text}");
-            assert!(text.contains("Output"), "expected Output row:\n{text}");
-            assert!(text.contains("Cache"), "expected Cache row:\n{text}");
+            let labels = labels_text(view, ctx);
+            assert!(labels.contains("Input"), "expected Input row:\n{labels}");
+            assert!(labels.contains("Output"), "expected Output row:\n{labels}");
+            assert!(labels.contains("Cache"), "expected Cache row:\n{labels}");
+            assert!(
+                labels.contains("Web search"),
+                "expected Web search row:\n{labels}"
+            );
+
+            let values = values_text(view, ctx);
+            assert!(
+                values.contains("80 tokens  /  $1.00"),
+                "expected Input row to show tokens and cost:\n{values}"
+            );
+            assert!(
+                values.contains("20 tokens  /  $2.00"),
+                "expected Output row to show tokens and cost:\n{values}"
+            );
+            assert!(
+                values.contains("8 tokens  /  $0.50"),
+                "expected Cache row to show combined cache tokens and cost:\n{values}"
+            );
+            assert!(
+                values.contains("2 searches  /  $3.00"),
+                "expected Web search row to show count and cost:\n{values}"
+            );
         });
 
         view.update(&mut app, |view, ctx| {
@@ -243,7 +288,10 @@ fn toggle_model_expanded_shows_and_hides_breakdown_rows() {
         view.read(&app, |view, ctx| {
             let text = labels_text(view, ctx);
             assert!(
-                !text.contains("Input") && !text.contains("Output") && !text.contains("Cache"),
+                !text.contains("Input")
+                    && !text.contains("Output")
+                    && !text.contains("Cache")
+                    && !text.contains("Web search"),
                 "breakdown rows should be removed after collapsing:\n{text}"
             );
         });

@@ -1656,6 +1656,17 @@ pub struct ConversationUsageMetadata {
     /// first request completes.
     #[serde(default)]
     pub cumulative_token_cost_by_model: HashMap<String, PersistedModelTokenCost>,
+    /// Cumulative per-model inference cost breakdown (input/output/cache
+    /// cost, web search count/cost), across the whole conversation. Sourced
+    /// from the server's `RequestCharges` (unlike
+    /// `cumulative_token_cost_by_model`, which is derived from the coarser
+    /// `TokenUsage` message and only carries a single aggregate cost per
+    /// model). Diffing this against `turn_usage_baseline.per_model_inference`
+    /// yields the turn-scoped breakdown shown in the turn panel's expanded
+    /// per-model rows. Empty until the first request with charge data
+    /// completes.
+    #[serde(default)]
+    pub cumulative_inference_usage_by_model: HashMap<String, PersistedModelInferenceUsage>,
 }
 
 impl ConversationUsageMetadata {
@@ -1719,6 +1730,59 @@ pub struct TurnUsageBaseline {
     /// [`ConversationUsageMetadata::cumulative_token_cost_by_model`].
     #[serde(default)]
     pub per_model: HashMap<String, PersistedModelTokenCost>,
+    /// Per-model inference cost/web-search baseline as of the start of the
+    /// block, keyed by model_id. See
+    /// [`ConversationUsageMetadata::cumulative_inference_usage_by_model`].
+    #[serde(default)]
+    pub per_model_inference: HashMap<String, PersistedModelInferenceUsage>,
+}
+
+/// Cumulative inference cost breakdown (by input/output/cache-read/
+/// cache-write) plus web search count/cost for a single model, as of some
+/// point in a conversation. See
+/// [`ConversationUsageMetadata::cumulative_inference_usage_by_model`] and
+/// [`TurnUsageBaseline::per_model_inference`].
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, Default, PartialEq)]
+pub struct PersistedModelInferenceUsage {
+    #[serde(default)]
+    pub input_cost_in_cents: f32,
+    #[serde(default)]
+    pub output_cost_in_cents: f32,
+    #[serde(default)]
+    pub input_cache_read_cost_in_cents: f32,
+    #[serde(default)]
+    pub input_cache_write_cost_in_cents: f32,
+    #[serde(default)]
+    pub web_search_count: u64,
+    #[serde(default)]
+    pub web_search_cost_in_cents: f32,
+}
+
+impl PersistedModelInferenceUsage {
+    /// Combined cache-read + cache-write cost, matching how the turn panel
+    /// displays a single combined "Cache" row.
+    pub fn cache_cost_in_cents(&self) -> f32 {
+        self.input_cache_read_cost_in_cents + self.input_cache_write_cost_in_cents
+    }
+
+    /// Component-wise delta against an earlier baseline snapshot of the same
+    /// model. `web_search_count` saturates at zero rather than going
+    /// negative.
+    pub fn saturating_sub(&self, baseline: &Self) -> Self {
+        Self {
+            input_cost_in_cents: self.input_cost_in_cents - baseline.input_cost_in_cents,
+            output_cost_in_cents: self.output_cost_in_cents - baseline.output_cost_in_cents,
+            input_cache_read_cost_in_cents: self.input_cache_read_cost_in_cents
+                - baseline.input_cache_read_cost_in_cents,
+            input_cache_write_cost_in_cents: self.input_cache_write_cost_in_cents
+                - baseline.input_cache_write_cost_in_cents,
+            web_search_count: self
+                .web_search_count
+                .saturating_sub(baseline.web_search_count),
+            web_search_cost_in_cents: self.web_search_cost_in_cents
+                - baseline.web_search_cost_in_cents,
+        }
+    }
 }
 
 #[derive(Debug, Insertable)]

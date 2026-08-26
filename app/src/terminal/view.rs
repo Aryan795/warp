@@ -256,7 +256,7 @@ use crate::ai::blocklist::usage::conversation_usage_view::{
     ConversationUsageInfo, ConversationUsageView, TimingInfo,
 };
 use crate::ai::blocklist::usage::turn_usage_view::{
-    TurnModelUsage, TurnUsageInfo, TurnUsageView, TurnUsageViewEvent,
+    TurnModelInferenceBreakdown, TurnModelUsage, TurnUsageInfo, TurnUsageView, TurnUsageViewEvent,
 };
 use crate::ai::blocklist::{
     AIBlock, AIBlockEvent, ATTACH_AS_AGENT_MODE_CONTEXT_TEXT, AutofireAction,
@@ -7118,16 +7118,42 @@ impl TerminalView {
         // router switched models mid-turn), so this is a list of rows
         // rather than a single aggregate. Sorted by descending token usage
         // (then model_id) for a stable, usage-ranked display order.
+        let llm_preferences = LLMPreferences::as_ref(ctx);
+        let mut inference_usage_by_model = conversation.inference_usage_for_last_block();
         let mut models: Vec<TurnModelUsage> = conversation
             .per_model_usage_for_last_block()
             .into_iter()
-            .map(|(model_id, usage)| TurnModelUsage {
-                model_id,
-                total_input: usage.total_input,
-                output: usage.output,
-                input_cache_read: usage.input_cache_read,
-                input_cache_write: usage.input_cache_write,
-                cost_in_cents: Some(usage.cost_in_cents),
+            .map(|(model_id, usage)| {
+                // `inference_usage_by_model` (sourced from `RequestCharges`) is
+                // keyed by the model's human-readable menu display name (e.g.
+                // "Grok 4.5 (medium reasoning)"), while `model_id` here (from
+                // `TokenUsage.model_id`) is the slug LLMId (e.g.
+                // "grok-4.5-medium-reasoning"). Resolve the slug to its menu
+                // display name to join the two turn-scoped usage sources;
+                // fall back to trying the raw `model_id` in case a source
+                // (e.g. a custom endpoint) already keys by it directly.
+                let display_name_key = llm_preferences
+                    .get_llm_info(&LLMId::from(model_id.as_str()))
+                    .map(|info| info.menu_display_name());
+                let inference_breakdown = display_name_key
+                    .and_then(|key| inference_usage_by_model.remove(&key))
+                    .or_else(|| inference_usage_by_model.remove(&model_id))
+                    .map(|inference| TurnModelInferenceBreakdown {
+                        input_cost_in_cents: inference.input_cost_in_cents,
+                        output_cost_in_cents: inference.output_cost_in_cents,
+                        cache_cost_in_cents: inference.cache_cost_in_cents(),
+                        web_search_count: inference.web_search_count,
+                        web_search_cost_in_cents: inference.web_search_cost_in_cents,
+                    });
+                TurnModelUsage {
+                    model_id,
+                    total_input: usage.total_input,
+                    output: usage.output,
+                    input_cache_read: usage.input_cache_read,
+                    input_cache_write: usage.input_cache_write,
+                    cost_in_cents: Some(usage.cost_in_cents),
+                    inference_breakdown,
+                }
             })
             .collect();
         models.sort_by(|a, b| {
@@ -7143,6 +7169,7 @@ impl TerminalView {
                 input_cache_read: 0,
                 input_cache_write: 0,
                 cost_in_cents: None,
+                inference_breakdown: None,
             });
         }
 

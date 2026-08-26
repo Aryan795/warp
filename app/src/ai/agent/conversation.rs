@@ -67,7 +67,8 @@ use crate::notebooks::NotebookId;
 use crate::persistence::ModelEvent;
 use crate::persistence::model::{
     AgentConversationData, ContextWindowSegment, ConversationUsageMetadata, ModelTokenUsage,
-    PersistedAutoexecuteMode, PersistedModelTokenCost, ToolUsageMetadata, TurnUsageBaseline,
+    PersistedAutoexecuteMode, PersistedModelInferenceUsage, PersistedModelTokenCost,
+    ToolUsageMetadata, TurnUsageBaseline,
 };
 use crate::server::ids::ServerId;
 use crate::terminal::general_settings::GeneralSettings;
@@ -949,6 +950,34 @@ impl AIConversation {
                     .unwrap_or_default();
                 let turn = current.saturating_sub(&base);
                 (turn.tokens() > 0 || turn.cost_in_cents > 0.0).then(|| (model_id.clone(), turn))
+            })
+            .collect()
+    }
+
+    /// Per-model inference cost breakdown (input/output/cache cost, web
+    /// search count/cost) during the last block (turn), keyed by model_id.
+    /// See [`Self::per_model_usage_for_last_block`] for the analogous
+    /// token-count-based getter this complements; the two are keyed
+    /// identically so callers can look up a model's breakdown by the same
+    /// `model_id` used there. Empty when there is no baseline yet.
+    pub fn inference_usage_for_last_block(&self) -> HashMap<String, PersistedModelInferenceUsage> {
+        let Some(baseline) = self
+            .conversation_usage_metadata
+            .turn_usage_baseline
+            .as_ref()
+        else {
+            return HashMap::new();
+        };
+        self.conversation_usage_metadata
+            .cumulative_inference_usage_by_model
+            .iter()
+            .map(|(model_id, current)| {
+                let base = baseline
+                    .per_model_inference
+                    .get(model_id)
+                    .copied()
+                    .unwrap_or_default();
+                (model_id.clone(), current.saturating_sub(&base))
             })
             .collect()
     }
@@ -2369,6 +2398,10 @@ impl AIConversation {
                     .conversation_usage_metadata
                     .cumulative_token_cost_by_model
                     .clone(),
+                per_model_inference: self
+                    .conversation_usage_metadata
+                    .cumulative_inference_usage_by_model
+                    .clone(),
             });
         }
 
@@ -2433,7 +2466,7 @@ impl AIConversation {
         // conversation-cumulative sum), so platform usage is accumulated the
         // same way as `credits_spent_for_last_block` above: reset at the
         // start of each turn, then summed across every request within it.
-        if let Some(request_charges) = request_charges {
+        if let Some(request_charges) = &request_charges {
             let platform_usage_for_last_block = self
                 .conversation_usage_metadata
                 .platform_usage_in_cents_for_last_block
@@ -2449,6 +2482,43 @@ impl AIConversation {
                 .map(|usage| usage.platform_usage_in_cents)
                 .sum();
             *platform_usage_for_last_block += platform_usage_in_cents_this_request;
+        }
+
+        // Per-model inference cost breakdown (input/output/cache cost, web
+        // search count/cost), sourced from the same `RequestCharges` used
+        // for platform usage above. Unlike the token-count-based
+        // `cumulative_token_cost_by_model` (which diffs against a baseline
+        // since the server reports conversation-cumulative token totals),
+        // `RequestCharges` is per-request, so these accumulate directly onto
+        // the conversation-cumulative map -- the turn-scoped view is still
+        // derived via baseline diffing in `inference_usage_for_last_block`,
+        // matching `cumulative_token_cost_by_model`'s pattern for
+        // consistency and restart-durability.
+        if let Some(request_charges) = request_charges {
+            for charged_usage in request_charges.usage_by_category.values() {
+                for (model_id, usage) in charged_usage
+                    .direct_api_inference_usage
+                    .iter()
+                    .chain(charged_usage.byok_inference_usage.iter())
+                    .chain(charged_usage.custom_endpoint_inference_usage.iter())
+                {
+                    let entry = self
+                        .conversation_usage_metadata
+                        .cumulative_inference_usage_by_model
+                        .entry(model_id.clone())
+                        .or_default();
+                    if let Some(token_cost) = usage.token_cost.as_ref() {
+                        entry.input_cost_in_cents += token_cost.input_cost_in_cents;
+                        entry.output_cost_in_cents += token_cost.output_cost_in_cents;
+                        entry.input_cache_read_cost_in_cents +=
+                            token_cost.input_cache_read_cost_in_cents;
+                        entry.input_cache_write_cost_in_cents +=
+                            token_cost.input_cache_write_cost_in_cents;
+                    }
+                    entry.web_search_count += usage.web_search_count as u64;
+                    entry.web_search_cost_in_cents += usage.web_search_cost_in_cents;
+                }
+            }
         }
 
         if let Some(usage_metadata) = usage_metadata {
