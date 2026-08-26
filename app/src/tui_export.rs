@@ -277,7 +277,8 @@ pub use crate::util::time_format::format_elapsed_seconds;
 #[cfg(feature = "voice_input")]
 pub use crate::voice::transcriber::{Transcriber, VoiceTranscriber};
 pub use crate::workspaces::user_workspaces::{
-    TeamContext, TeamContextResolver, TeamScope, UserWorkspaces, UserWorkspacesEvent,
+    ResolvedTeamScope, TeamContext, TeamContextResolver, TeamScope, UserWorkspaces,
+    UserWorkspacesEvent,
 };
 pub use crate::workspaces::workspace::{AiCreditsUsageAndCostType, UsageVisibilityGranularity};
 

@@ -55,7 +55,7 @@ use warpui_extras::user_preferences;
 use super::*;
 use crate::ai::blocklist::is_agent_mode_autonomy_allowed;
 use crate::ai::execution_profiles::ActionPermission;
-use crate::ai::llms::{LLMInfo, LLMModelHost, LLMProvider, MODELS_BY_FEATURE_CACHE_KEY};
+use crate::ai::llms::{LLMModelHost, LLMProvider};
 use crate::auth::AuthManager;
 use crate::cloud_object::model::persistence::CloudModel;
 use crate::cloud_object::{CloudObject, CloudObjectGuest};
@@ -232,7 +232,6 @@ fn test_loading_all_spaces_after_switching_from_offline() {
                         workspaces: vec![],
                         joinable_teams: vec![],
                         experiments: None,
-                        feature_model_choices: None,
                         ai_credit_availability: None,
                         user_purchase_policy: None,
                     },
@@ -251,7 +250,6 @@ fn test_loading_all_spaces_after_switching_from_offline() {
                         workspaces: vec![workspace.clone()],
                         joinable_teams: vec![],
                         experiments: None,
-                        feature_model_choices: None,
                         ai_credit_availability: None,
                         user_purchase_policy: None,
                     },
@@ -392,7 +390,6 @@ fn test_aws_bedrock_credentials_respect_user_setting() {
                 workspaces: vec![workspace_for_poll.clone()],
                 joinable_teams: vec![],
                 experiments: None,
-                feature_model_choices: None,
                 ai_credit_availability: None,
                 user_purchase_policy: None,
             },
@@ -450,7 +447,6 @@ fn test_aws_bedrock_credentials_enforced_by_admin() {
                 workspaces: vec![workspace_for_poll.clone()],
                 joinable_teams: vec![],
                 experiments: None,
-                feature_model_choices: None,
                 ai_credit_availability: None,
                 user_purchase_policy: None,
             },
@@ -3420,7 +3416,6 @@ fn test_remove_user_from_team_success_emits_success_event_and_refreshes_members(
                         workspaces: vec![updated_workspace.clone()],
                         joinable_teams: vec![],
                         experiments: None,
-                        feature_model_choices: None,
                         ai_credit_availability: None,
                         user_purchase_policy: None,
                     },
@@ -4053,11 +4048,10 @@ fn gql_feature_model_choice(model_id: &str) -> GqlFeatureModelChoice {
 
 #[test]
 fn team_feature_model_choices_conversion_keeps_each_teams_choice_distinct() {
-    // Each team's uid must map to its own model choice, never a shared or swapped one. Nothing
-    // reads `Team.feature_model_choice`/`Workspace.feature_model_choice` yet -- `LLMPreferences`
-    // still resolves its catalog from the legacy cache -- but the conversion that folds the
-    // catalog into the ordinary `Team`/`Workspace` payload must already keep each team's choice
-    // separate.
+    // Each team's uid must map to its own model choice, never a shared or swapped one. The
+    // catalog now lives directly on `Team.feature_model_choice` (folded in as part of the
+    // ordinary `Team` conversion) rather than a separate per-team map, so this reads that
+    // field instead of the old `WorkspacesMetadataResponse.team_feature_model_choices`.
     let mut team_a = gql_team("team-a", "Team A", &["test-user"]);
     team_a.feature_model_choice = gql_feature_model_choice("team-a-only");
     let mut team_b = gql_team("team-b", "Team B", &["test-user"]);
@@ -4105,51 +4099,4 @@ fn team_feature_model_choices_conversion_keeps_each_teams_choice_distinct() {
         choice_b.info_for_id(&"team-a-only".into()).is_none(),
         "team B's uid must not resolve team A's choice"
     );
-}
-
-#[test]
-fn legacy_cache_migration_yields_a_usable_teamless_catalog() {
-    // The older, pre-`ModelsByFeature` cache shape was a bare `AvailableLLMs`, written when
-    // all available LLMs were solely for Agent Mode. Migrating it must still produce a
-    // catalog whose `agent_mode` bucket resolves the cached model -- a "usable teamless
-    // catalog" -- not an empty or default one.
-    warpui::App::test((), |mut app| async move {
-        app.update(|ctx| {
-            ctx.add_singleton_model(|_| {
-                PrivatePreferences::new(
-                    Box::<user_preferences::in_memory::InMemoryPreferences>::default(),
-                )
-            });
-        });
-
-        let legacy_agent_mode = AvailableLLMs::new(
-            "legacy-model".into(),
-            vec![LLMInfo::new_for_test("legacy-model")],
-            None,
-        )
-        .expect("legacy AvailableLLMs fixture should be valid");
-
-        app.update(|ctx| {
-            ctx.private_user_preferences()
-                .write_value(
-                    MODELS_BY_FEATURE_CACHE_KEY,
-                    serde_json::to_string(&legacy_agent_mode)
-                        .expect("legacy fixture should serialize"),
-                )
-                .expect("legacy cache should be writable");
-        });
-
-        app.update(|ctx| {
-            let migrated = migrate_legacy_feature_model_choices_cache(ctx)
-                .expect("a legacy bare-AvailableLLMs cache should still migrate");
-            assert!(
-                migrated
-                    .agent_mode
-                    .info_for_id(&"legacy-model".into())
-                    .is_some(),
-                "the older bare-AvailableLLMs cache shape should become a usable teamless \
-                 agent_mode catalog"
-            );
-        });
-    });
 }

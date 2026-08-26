@@ -1331,11 +1331,6 @@ pub(crate) fn team_settings_from_gql(team_settings: GqlTeamSettings) -> TeamSett
 /// Converts the server's per-team/workspace model catalog. A malformed catalog is reported
 /// and falls back to [`ModelsByFeature::default`] (a single working `auto` choice per
 /// feature) rather than failing the whole `Team`/`Workspace` conversion over it.
-///
-/// Nothing reads this yet -- `LLMPreferences` still resolves its catalog from the legacy
-/// `models_by_feature`/`MODELS_BY_FEATURE_CACHE_KEY` cache. This just parses and stores the
-/// per-team/workspace payload onto `Team`/`Workspace.feature_model_choice` so a later change
-/// can read it.
 fn feature_model_choice_from_gql(choice: FeatureModelChoice) -> ModelsByFeature {
     choice.try_into().unwrap_or_else(|e: anyhow::Error| {
         report_error!(e.context("Failed to convert FeatureModelChoice from server"));
@@ -1454,10 +1449,6 @@ impl From<GqlWorkspace> for Workspace {
 impl From<GqlUser> for WorkspacesMetadataResponse {
     fn from(gql_user: GqlUser) -> WorkspacesMetadataResponse {
         let user_uid = UserUid::new(&gql_user.profile.uid);
-        let feature_model_choices = gql_user
-            .workspaces
-            .first()
-            .map(|gql_workspace| gql_workspace.feature_model_choice.clone());
 
         let workspaces: Vec<Workspace> = gql_user
             .workspaces
@@ -1501,7 +1492,6 @@ impl From<GqlUser> for WorkspacesMetadataResponse {
             workspaces,
             joinable_teams,
             experiments,
-            feature_model_choices,
             ai_credit_availability: Some(gql_user.ai_credit_availability.into()),
             user_purchase_policy,
         }

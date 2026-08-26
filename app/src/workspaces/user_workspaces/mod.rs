@@ -6,7 +6,6 @@ use warp_core::features::FeatureFlag;
 use warp_core::settings::{ChangeEventReason, Setting};
 use warp_core::user_preferences::GetUserPreferences;
 use warp_errors::report_error;
-use warp_graphql::workspace::FeatureModelChoice;
 use warpui::{
     AppContext, Entity, ModelContext, SingletonEntity, Tracked, ViewContext, WeakViewHandle,
     WindowId,
@@ -51,7 +50,7 @@ pub(crate) mod team_workspace_settings;
 pub(crate) use team_workspace_settings::TeamContextForOperation;
 #[cfg(test)]
 pub(crate) use team_workspace_settings::TeamlessScopeForTest;
-pub use team_workspace_settings::{TeamContext, TeamContextResolver, TeamScope};
+pub use team_workspace_settings::{ResolvedTeamScope, TeamContext, TeamContextResolver, TeamScope};
 
 const STRIPE_SUBSCRIPTION_INTERVAL_PAGE_PREFIX: &str = "/upgrade";
 
@@ -125,11 +124,11 @@ pub struct UserWorkspaces {
     /// filtered out of `workspaces` — this is the only place their purchase
     /// policy survives.
     user_purchase_policy: Option<PurchaseAddOnCreditsPolicy>,
-    /// The model catalog for a caller with no team and no workspace: currently only ever
-    /// written by the one-release legacy-cache migration in [`Self::new`]. Nothing reads
-    /// this yet -- `LLMPreferences` still resolves its catalog from its own flat
-    /// `models_by_feature`/`MODELS_BY_FEATURE_CACHE_KEY` cache.
-    #[allow(dead_code)]
+    /// The model catalog for a caller with no team and no workspace: the pre-login (public)
+    /// catalog, or the one-off seed from a login response received before the first
+    /// workspaces-metadata poll response lands. Never written to once a real `Workspace`
+    /// exists for the resolved-teamless scope to read instead -- see
+    /// [`Self::feature_model_choice_for_scope`]'s `absent` fallback.
     pre_login_models_by_feature: Option<ModelsByFeature>,
     team_client: Arc<dyn TeamClient>,
     workspace_client: Arc<dyn WorkspaceClient>,
@@ -144,11 +143,6 @@ pub struct WorkspacesMetadataResponse {
     pub joinable_teams: Vec<DiscoverableTeam>,
     /// The list of experiments applicable to the user.
     pub experiments: Option<Vec<ServerExperiment>>,
-    /// TODO(Tyler): Post-workspaces, move this into the workspace object.
-    /// Feature model choices may change from user to user and while the app is open, so we need to periodically update this list.
-    /// It makes most sense to fetch this in workspaces which is queried every 10 minutes.
-    /// This is list of available LLM models for the user.
-    pub feature_model_choices: Option<FeatureModelChoice>,
     /// The server-authoritative AI credit availability decision, piggybacked
     /// on the metadata query so every refresh keeps the shared state fresh.
     pub ai_credit_availability: Option<AICreditAvailability>,
@@ -255,10 +249,8 @@ impl UserWorkspaces {
         // `feature_model_choice` column (or the app hasn't fetched since upgrading), so its
         // catalog is still the bare default. Seed it from the legacy, pre-team-keyed cache so
         // an offline launch right after upgrading shows the user's last-known model list for
-        // the rest of the offline session instead of only the `auto` default. Nothing reads
-        // `feature_model_choice` yet -- this seeds the field for when something does.
-        // TODO: delete once it's safe to assume every client has fetched at least once since
-        // this migration shipped.
+        // the rest of the offline session instead of only the `auto` default. TODO: delete
+        // once it's safe to assume every client has fetched at least once since this rework.
         if me
             .current_workspace()
             .is_some_and(|workspace| workspace.feature_model_choice == ModelsByFeature::default())
@@ -269,6 +261,12 @@ impl UserWorkspaces {
         }
 
         me
+    }
+
+    /// Sets the model catalog for a caller with no team and no workspace: see
+    /// [`Self::pre_login_models_by_feature`].
+    pub(crate) fn set_pre_login_models_by_feature(&mut self, models: ModelsByFeature) {
+        self.pre_login_models_by_feature = Some(models);
     }
 
     pub fn upgrade_link(user_id: UserUid) -> String {
@@ -1733,7 +1731,7 @@ impl UserWorkspaces {
                 pending_email_invites: vec![],
                 invite_link_domain_restrictions: vec![],
                 stripe_customer_id: None,
-                feature_model_choice: Default::default(),
+                feature_model_choice: ModelsByFeature::default(),
                 is_eligible_for_discovery: false,
                 has_billing_history: false,
                 visibility: TeamVisibility::Open,
@@ -1755,7 +1753,7 @@ impl UserWorkspaces {
             billing_cycle_usage: None,
             has_billing_history: false,
             settings: workspace_settings,
-            feature_model_choice: Default::default(),
+            feature_model_choice: ModelsByFeature::default(),
             invite_link_domain_restrictions: vec![],
             pending_email_invites: vec![],
             is_eligible_for_discovery: false,

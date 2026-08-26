@@ -3160,7 +3160,10 @@ impl TerminalView {
             ActiveSession::new(sessions.clone(), model_events_handle.clone(), ctx)
         });
         let ambient_agent_view_model = is_ambient_agent.then(|| {
-            ctx.add_model(|ctx| ambient_agent::AmbientAgentViewModel::new(terminal_view_id, ctx))
+            let terminal_view = terminal_view.clone();
+            ctx.add_model(|ctx| {
+                ambient_agent::AmbientAgentViewModel::new(terminal_view_id, terminal_view, ctx)
+            })
         });
 
         let ephemeral_message_model = ctx.add_model(|_| EphemeralMessageModel::new());
@@ -3503,6 +3506,7 @@ impl TerminalView {
                 &model_events_handle,
                 model.clone(),
                 terminal_view_id,
+                terminal_view.clone(),
                 conversation_selection.clone(),
                 ctx,
             )
@@ -8031,8 +8035,10 @@ impl TerminalView {
             return existing;
         }
         let terminal_view_id = self.view_id;
-        let model =
-            ctx.add_model(|ctx| ambient_agent::AmbientAgentViewModel::new(terminal_view_id, ctx));
+        let terminal_view = ctx.handle();
+        let model = ctx.add_model(|ctx| {
+            ambient_agent::AmbientAgentViewModel::new(terminal_view_id, terminal_view, ctx)
+        });
         self.wire_ambient_agent_view_model(model.clone(), ctx);
         // Notify observers (e.g. `PaneGroup::create_shared_session_viewer`) that the model
         // now exists so they can wire the viewer `TerminalManager` to its session events.
@@ -10796,7 +10802,7 @@ impl TerminalView {
 
         // Check if the model supports AWS Bedrock routing
         let llm_prefs = LLMPreferences::as_ref(ctx);
-        let Some(llm_info) = llm_prefs.get_llm_info(model_id) else {
+        let Some(llm_info) = llm_prefs.get_llm_info(model_id, ctx) else {
             return;
         };
 
