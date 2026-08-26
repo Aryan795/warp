@@ -10,7 +10,9 @@ pub use remote_server::setup::RemoteServerSetupState;
 use warp_util::lazy::Lazy;
 
 use super::history::HistoryEntry;
-use super::model::ansi::{ExternalCtrlRRawKeypressSelectionValue, FinishUpdateValue};
+use super::model::ansi::{
+    ExternalCtrlRRawKeypressSelectionValue, ExternalCtrlRRawKeypressStartedValue, FinishUpdateValue,
+};
 use super::model::block::BlockId;
 use super::model::lifecycle::LifecycleRecoveryRecord;
 use super::model::session::{SessionId, SessionInfo};
@@ -133,14 +135,12 @@ pub enum Event {
     /// Emitted when the shell reports the command selected in its raw-keypress ctrl-r handoff
     /// wrapper widget (a prototype alternative to the foreground-command handoff in PR #15513).
     ExternalCtrlRRawKeypressSelection(ExternalCtrlRRawKeypressSelectionValue),
-    /// Emitted the first time pty output is processed for the active block while a raw-keypress
-    /// ctrl-r handoff (see [`crate::terminal::view::TerminalView::
-    /// maybe_trigger_raw_keypress_ctrl_r_handoff`]) is pending, i.e. once the wrapper widget has
-    /// demonstrably started and is painting. Lets the client cancel the handoff's bail-out timer
-    /// outright instead of merely rescheduling it: the failure mode that timer exists to catch
-    /// -- nothing ever listening for the handoff -- is now ruled out. Never emitted outside an
-    /// active raw-keypress ctrl-r handoff.
-    RawKeypressCtrlRHandoffOutputObserved,
+    /// Emitted the moment the raw-keypress ctrl-r handoff's wrapper widget is actually invoked,
+    /// before it runs the real widget (see [`ExternalCtrlRRawKeypressStartedValue`]). Positive
+    /// evidence the wrapper is alive, sent by the wrapper itself -- unlike inferring liveness
+    /// from pty output, which the handoff's own token-paste echo can produce even when nothing
+    /// is listening for the handoff at all.
+    ExternalCtrlRRawKeypressStarted(ExternalCtrlRRawKeypressStartedValue),
     TextSelectionChanged,
     ShellSpawned(ShellType),
     SendCompletionsPrompt,
@@ -552,8 +552,12 @@ impl Debug for Event {
                     data.buffer.len()
                 )
             }
-            Event::RawKeypressCtrlRHandoffOutputObserved => {
-                write!(f, "RawKeypressCtrlRHandoffOutputObserved")
+            Event::ExternalCtrlRRawKeypressStarted(data) => {
+                write!(
+                    f,
+                    "ExternalCtrlRRawKeypressStarted(session_id: {:?})",
+                    data.session_id
+                )
             }
             Event::TextSelectionChanged => write!(f, "TextSelectionChanged"),
             Event::ShellSpawned(shell_type) => write!(f, "ShellSpawned({shell_type:?})"),

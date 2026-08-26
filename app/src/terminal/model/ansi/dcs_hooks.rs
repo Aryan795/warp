@@ -75,6 +75,14 @@ pub(super) enum DProtoHook {
     ExternalCtrlRRawKeypressSelection {
         value: ExternalCtrlRRawKeypressSelectionValue,
     },
+    /// Reports that the shell's raw-keypress ctrl-r handoff wrapper widget has actually been
+    /// invoked (see [`ExternalCtrlRRawKeypressStartedValue`]), sent the moment the wrapper
+    /// starts, before it runs the real widget. Positive evidence the widget is alive, as
+    /// opposed to inferring liveness from pty output -- which the token paste's own shell echo
+    /// can produce even when nothing is listening for the handoff at all.
+    ExternalCtrlRRawKeypressStarted {
+        value: ExternalCtrlRRawKeypressStartedValue,
+    },
     Clear {
         value: ClearValue,
     },
@@ -103,6 +111,7 @@ const DPROTO_HOOK_VARIANTS: &[&str] = &[
     "InitShell",
     "InputBuffer",
     "ExternalCtrlRRawKeypressSelection",
+    "ExternalCtrlRRawKeypressStarted",
     "Clear",
     "InitSubshell",
     "SourcedRcFileForWarp",
@@ -159,6 +168,9 @@ impl<'de> Deserialize<'de> for DProtoHook {
             "ExternalCtrlRRawKeypressSelection" => DProtoHook::ExternalCtrlRRawKeypressSelection {
                 value: parse_hook_value::<_, D::Error>(raw.value)?,
             },
+            "ExternalCtrlRRawKeypressStarted" => DProtoHook::ExternalCtrlRRawKeypressStarted {
+                value: parse_hook_value::<_, D::Error>(raw.value)?,
+            },
             "Clear" => DProtoHook::Clear {
                 value: parse_hook_value::<_, D::Error>(raw.value)?,
             },
@@ -198,6 +210,7 @@ impl DProtoHook {
             DProtoHook::ExternalCtrlRRawKeypressSelection { .. } => {
                 "ExternalCtrlRRawKeypressSelection"
             }
+            DProtoHook::ExternalCtrlRRawKeypressStarted { .. } => "ExternalCtrlRRawKeypressStarted",
             DProtoHook::Clear { .. } => "Clear",
             DProtoHook::InitSubshell { .. } => "InitSubshell",
             DProtoHook::SourcedRcFileForWarp { .. } => "SourcedRcFileForWarp",
@@ -218,6 +231,9 @@ impl DProtoHook {
             DProtoHook::Bootstrapped { value } => value.session_id.map(SessionId::from),
             DProtoHook::InputBuffer { value } => value.session_id.map(SessionId::from),
             DProtoHook::ExternalCtrlRRawKeypressSelection { value } => {
+                value.session_id.map(SessionId::from)
+            }
+            DProtoHook::ExternalCtrlRRawKeypressStarted { value } => {
                 value.session_id.map(SessionId::from)
             }
             DProtoHook::Clear { value } => value.session_id.map(SessionId::from),
@@ -242,6 +258,7 @@ impl DProtoHook {
             | DProtoHook::InitShell { .. }
             | DProtoHook::InputBuffer { .. }
             | DProtoHook::ExternalCtrlRRawKeypressSelection { .. }
+            | DProtoHook::ExternalCtrlRRawKeypressStarted { .. }
             | DProtoHook::Clear { .. }
             | DProtoHook::InitSubshell { .. }
             | DProtoHook::FinishUpdate { .. }
@@ -1033,6 +1050,24 @@ impl std::fmt::Debug for ExternalCtrlRRawKeypressSelectionValue {
             .field("session_id", &self.session_id)
             .finish()
     }
+}
+
+/// Received from the pty the moment the shell's raw-keypress ctrl-r handoff wrapper widget is
+/// actually invoked, before it runs the real widget (see [`crate::terminal::view::TerminalView::
+/// maybe_trigger_raw_keypress_ctrl_r_handoff`]). Unlike inferring liveness from pty output (which
+/// the token paste's own shell echo can produce even when nothing is listening), this is positive
+/// evidence the wrapper actually ran, sent by the wrapper itself.
+///
+/// `token` echoes back the handoff token Warp pasted (see
+/// [`ExternalCtrlRRawKeypressSelectionValue`]'s doc comment); the client only acts on this hook
+/// if both `session_id` and `token` match the pending handoff, for the same reason the completion
+/// hook does.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ExternalCtrlRRawKeypressStartedValue {
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
+    pub session_id: HookSessionId,
 }
 
 /// Received from the pty when the terminal screen should be cleared (e.g. via

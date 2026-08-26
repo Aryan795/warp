@@ -608,6 +608,9 @@ impl<'a, H: Handler + 'a, W: io::Write> Performer<'a, H, W> {
             Ok(DProtoHook::ExternalCtrlRRawKeypressSelection { value }) => {
                 self.handler.external_ctrl_r_raw_keypress_selection(value)
             }
+            Ok(DProtoHook::ExternalCtrlRRawKeypressStarted { value }) => {
+                self.handler.external_ctrl_r_raw_keypress_started(value)
+            }
             Ok(DProtoHook::Clear { value }) => self.handler.clear(value),
             Ok(DProtoHook::InitSubshell { value }) => self.handler.init_subshell(value),
             Ok(DProtoHook::SourcedRcFileForWarp { .. }) => {

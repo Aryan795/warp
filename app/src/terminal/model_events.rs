@@ -5,7 +5,9 @@ use warpui::{Entity, ModelContext, ModelHandle, SingletonEntity};
 
 use super::event::{BootstrappedEvent, SshLoginStatus};
 use super::model::ansi;
-use super::model::ansi::{ExternalCtrlRRawKeypressSelectionValue, FinishUpdateValue};
+use super::model::ansi::{
+    ExternalCtrlRRawKeypressSelectionValue, ExternalCtrlRRawKeypressStartedValue, FinishUpdateValue,
+};
 use super::model::block::BlockId;
 use super::model::completions::ShellCompletion;
 use super::model::lifecycle::LifecycleTelemetryEvent;
@@ -264,8 +266,8 @@ impl ModelEventDispatcher {
             Event::ExternalCtrlRRawKeypressSelection(data) => {
                 ModelEvent::ExternalCtrlRRawKeypressSelection(data)
             }
-            Event::RawKeypressCtrlRHandoffOutputObserved => {
-                ModelEvent::RawKeypressCtrlRHandoffOutputObserved
+            Event::ExternalCtrlRRawKeypressStarted(data) => {
+                ModelEvent::ExternalCtrlRRawKeypressStarted(data)
             }
             Event::TextSelectionChanged => ModelEvent::SelectedTextChanged,
             Event::ShellSpawned(shell_type) => ModelEvent::ShellSpawned(shell_type),
@@ -455,8 +457,8 @@ pub enum ModelEvent {
     /// Emitted when the shell reports the command selected in its raw-keypress ctrl-r handoff
     /// wrapper widget (a prototype alternative to the foreground-command handoff in PR #15513).
     ExternalCtrlRRawKeypressSelection(ExternalCtrlRRawKeypressSelectionValue),
-    /// See [`crate::terminal::event::Event::RawKeypressCtrlRHandoffOutputObserved`]'s doc comment.
-    RawKeypressCtrlRHandoffOutputObserved,
+    /// See [`crate::terminal::event::Event::ExternalCtrlRRawKeypressStarted`]'s doc comment.
+    ExternalCtrlRRawKeypressStarted(ExternalCtrlRRawKeypressStartedValue),
     SelectedTextChanged,
     ShellSpawned(ShellType),
     CompletionsFinished(Vec<ShellCompletion>),

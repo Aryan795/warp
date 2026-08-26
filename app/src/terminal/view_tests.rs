@@ -10301,12 +10301,15 @@ fn raw_keypress_ctrl_r_handoff_typed_characters_via_real_dispatch_reach_pty_not_
     })
 }
 
-/// Pins the mechanism behind Option 2 of the timeout redesign: once pty output is observed for
-/// the active block during a pending handoff (proving the wrapper widget actually started), the
-/// bail-out timer must be cancelled outright -- not merely rescheduled -- so there is no longer
-/// any deadline for the rest of the handoff, no matter how long the user then reads or thinks.
+/// Pins the mechanism behind the DCS-based "started" signal: once the wrapper widget reports
+/// (via `ExternalCtrlRRawKeypressStarted`) that it has actually been invoked for this handoff,
+/// the bail-out timer must be cancelled outright -- not merely rescheduled -- so there is no
+/// longer any deadline for the rest of the handoff, no matter how long the user then reads or
+/// thinks. Deliberately does *not* test this via raw pty output: that was the flawed prior
+/// design, since the token paste's own shell echo is itself pty output and would cancel the
+/// timer even when nothing is listening for the handoff at all.
 #[test]
-fn raw_keypress_ctrl_r_handoff_output_observed_cancels_bailout_timer_outright() {
+fn raw_keypress_ctrl_r_handoff_started_cancels_bailout_timer_outright() {
     App::test((), |mut app| async move {
         initialize_app_for_terminal_view(&mut app);
         let _flag = FeatureFlag::RawKeypressCtrlRHandoff.override_enabled(true);
@@ -10320,11 +10323,19 @@ fn raw_keypress_ctrl_r_handoff_output_observed_cancels_bailout_timer_outright() 
                 view.pending_raw_keypress_ctrl_r_timeout.is_some(),
                 "a bail-out timer must be armed when the handoff starts"
             );
+            let token = view
+                .pending_raw_keypress_ctrl_r_handoff
+                .as_ref()
+                .expect("handoff should be pending")
+                .id
+                .0
+                .to_string();
 
-            view.note_raw_keypress_ctrl_r_handoff_output_observed();
+            view.note_raw_keypress_ctrl_r_handoff_started(session_id, &token);
             assert!(
                 view.pending_raw_keypress_ctrl_r_timeout.is_none(),
-                "observing pty output must cancel the bail-out timer outright, not reschedule it"
+                "a matching started report must cancel the bail-out timer outright, not \
+                 reschedule it"
             );
 
             // Only the timer was cancelled -- the handoff itself is still pending, exactly as
@@ -10341,6 +10352,45 @@ fn raw_keypress_ctrl_r_handoff_output_observed_cancels_bailout_timer_outright() 
             assert!(
                 view.pending_raw_keypress_ctrl_r_handoff.is_some(),
                 "the pending handoff state must be untouched by cancelling the timer"
+            );
+        });
+    })
+}
+
+/// An unsolicited or stale started report (wrong session or wrong token) must not cancel the
+/// current handoff's timer -- otherwise a leftover report from a superseded handoff could
+/// silently disarm the bail-out for the current one.
+#[test]
+fn raw_keypress_ctrl_r_handoff_started_ignored_for_wrong_session_or_token() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let _flag = FeatureFlag::RawKeypressCtrlRHandoff.override_enabled(true);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let session_id = SessionId::from(0);
+        let other_session_id = SessionId::from(1);
+
+        terminal.update(&mut app, |view, ctx| {
+            setup_raw_keypress_ctrl_r_session(view, ctx, session_id, true);
+            assert!(view.maybe_trigger_raw_keypress_ctrl_r_handoff(ctx));
+            let token = view
+                .pending_raw_keypress_ctrl_r_handoff
+                .as_ref()
+                .expect("handoff should be pending")
+                .id
+                .0
+                .to_string();
+            let wrong_token = format!("{token}0");
+
+            view.note_raw_keypress_ctrl_r_handoff_started(other_session_id, &token);
+            assert!(
+                view.pending_raw_keypress_ctrl_r_timeout.is_some(),
+                "a started report for a different session must not cancel this handoff's timer"
+            );
+
+            view.note_raw_keypress_ctrl_r_handoff_started(session_id, &wrong_token);
+            assert!(
+                view.pending_raw_keypress_ctrl_r_timeout.is_some(),
+                "a started report with a mismatched token must not cancel this handoff's timer"
             );
         });
     })

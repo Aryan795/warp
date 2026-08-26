@@ -712,7 +712,6 @@ default = [
     "orchestration_unified_stack",
     "ime_marked_text",
     "ctrl_c_cancels_third_party_harness",
-    "raw_keypress_ctrl_r_handoff",
 ]
 # Enable this feature to automatically perform heap profiling.  NOTE: This will
 # substantially slow down program execution.

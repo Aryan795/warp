@@ -316,6 +316,14 @@ pub trait Handler {
     ) {
     }
 
+    /// Callback for the terminal when the shell reports that its raw-keypress ctrl-r handoff
+    /// wrapper widget has actually been invoked (see [`ExternalCtrlRRawKeypressStartedValue`]).
+    fn external_ctrl_r_raw_keypress_started(
+        &mut self,
+        _data: ExternalCtrlRRawKeypressStartedValue,
+    ) {
+    }
+
     /// Callback emitted during the initialization process for subshells with where the shell type
     /// is initiall not known.
     fn init_subshell(&mut self, _data: InitSubshellValue) {}

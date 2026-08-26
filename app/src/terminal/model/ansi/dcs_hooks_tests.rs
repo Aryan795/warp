@@ -174,6 +174,10 @@ fn every_hook_tag_dispatches_to_the_matching_variant() {
             "ExternalCtrlRRawKeypressSelection",
             serde_json::json!({"buffer": "echo hi"}),
         ),
+        (
+            "ExternalCtrlRRawKeypressStarted",
+            serde_json::json!({"token": "1"}),
+        ),
         ("Clear", serde_json::json!({})),
         (
             "InitSubshell",

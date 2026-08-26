@@ -1414,6 +1414,16 @@ esac
       warp_send_json_message "{ \"hook\": \"ExternalCtrlRRawKeypressSelection\", \"value\": { \"buffer\": \"$escaped_selection\", \"token\": \"$escaped_token\", \"session_id\": $WARP_SESSION_ID } }"
     }
 
+    # Reports that the real ctrl-r widget is actually about to run for this handoff. Sent
+    # before invoking it, so Warp has positive proof the wrapper is alive and can stop
+    # bounding the handoff by a fixed inactivity timeout -- unlike inferring liveness from pty
+    # output, which this token's own bracketed-paste echo would otherwise produce even when
+    # nothing is bound to the private key sequence at all.
+    __warp_report_raw_keypress_ctrl_r_started() { # token
+      local escaped_token="$(warp_escape_json "$1")"
+      warp_send_json_message "{ \"hook\": \"ExternalCtrlRRawKeypressStarted\", \"value\": { \"token\": \"$escaped_token\", \"session_id\": $WARP_SESSION_ID } }"
+    }
+
     # Fallback binding target for a keymap with no real ctrl-r widget to re-invoke: the pasted
     # token is sitting alone in the line buffer (nothing else runs), so report it immediately
     # with an empty selection.
@@ -1436,6 +1446,7 @@ esac
       local token="$READLINE_LINE"
       READLINE_LINE=''
       READLINE_POINT=0
+      __warp_report_raw_keypress_ctrl_r_started "$token"
       eval "$__warp_raw_keypress_ctrl_r_orig_emacs"
       local selection="$READLINE_LINE"
       READLINE_LINE=''
@@ -1446,6 +1457,7 @@ esac
       local token="$READLINE_LINE"
       READLINE_LINE=''
       READLINE_POINT=0
+      __warp_report_raw_keypress_ctrl_r_started "$token"
       eval "$__warp_raw_keypress_ctrl_r_orig_vi_insert"
       local selection="$READLINE_LINE"
       READLINE_LINE=''
@@ -1456,6 +1468,7 @@ esac
       local token="$READLINE_LINE"
       READLINE_LINE=''
       READLINE_POINT=0
+      __warp_report_raw_keypress_ctrl_r_started "$token"
       eval "$__warp_raw_keypress_ctrl_r_orig_vi_command"
       local selection="$READLINE_LINE"
       READLINE_LINE=''

@@ -568,6 +568,16 @@ function __warp_report_raw_keypress_ctrl_r_selection # token selection
   warp_send_json_message "{ \"hook\": \"ExternalCtrlRRawKeypressSelection\", \"value\": { \"buffer\": \"$escaped_selection\", \"token\": \"$escaped_token\", \"session_id\": $WARP_SESSION_ID } }"
 end
 
+# Reports that the real ctrl-r widget is actually about to run for this handoff. Sent before
+# invoking it, so Warp has positive proof the wrapper is alive and can stop bounding the
+# handoff by a fixed inactivity timeout -- unlike inferring liveness from pty output, which
+# this token's own bracketed-paste echo would otherwise produce even when nothing is bound to
+# the private key sequence at all.
+function __warp_report_raw_keypress_ctrl_r_started # token
+  set -l escaped_token (warp_escape_json "$argv[1]")
+  warp_send_json_message "{ \"hook\": \"ExternalCtrlRRawKeypressStarted\", \"value\": { \"token\": \"$escaped_token\", \"session_id\": $WARP_SESSION_ID } }"
+end
+
 # Fallback binding target for a mode with no real ctrl-r widget to re-invoke: the pasted token
 # is sitting alone in the command line (nothing else runs), so report it immediately with an
 # empty selection.
@@ -589,6 +599,7 @@ if __warp_raw_keypress_ctrl_r_keyseq_free default
     function __warp_run_raw_keypress_ctrl_r_widget_default
       set -l token (commandline)
       commandline ''
+      __warp_report_raw_keypress_ctrl_r_started "$token"
       eval $__warp_raw_keypress_orig_ctrl_r_default
       set -l selection (commandline)
       commandline ''
@@ -609,6 +620,7 @@ if bind -M insert > /dev/null 2>&1; and __warp_raw_keypress_ctrl_r_keyseq_free i
     function __warp_run_raw_keypress_ctrl_r_widget_insert
       set -l token (commandline)
       commandline ''
+      __warp_report_raw_keypress_ctrl_r_started "$token"
       eval $__warp_raw_keypress_orig_ctrl_r_insert
       set -l selection (commandline)
       commandline ''

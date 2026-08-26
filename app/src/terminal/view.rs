@@ -751,22 +751,28 @@ fn raw_keypress_ctrl_r_handoff_payload(id: RawKeypressCtrlRHandoffId) -> Vec<u8>
 /// keystrokes must have a bail-out that does not depend on the wrapper's cooperation. See
 /// `TerminalView::on_raw_keypress_ctrl_r_handoff_timeout`.
 ///
-/// This only bounds time-to-first-output, not the handoff's total duration: it is restarted on
+/// This only bounds time-to-first-*start*, not the handoff's total duration: it is restarted on
 /// every keystroke forwarded to the pty (`TerminalView::note_raw_keypress_ctrl_r_handoff_activity`)
-/// and, more importantly, cancelled outright -- not merely rescheduled -- the moment any pty
-/// output is observed for the active block (`TerminalView::
-/// note_raw_keypress_ctrl_r_handoff_output_observed`), since that proves the wrapper actually
-/// started. Once cancelled, there is no deadline at all for the rest of the handoff, no matter
-/// how long the user then reads the widget's output or thinks before pressing a key -- exactly
-/// like any other real interactive program running in the terminal. A real widget (fzf, atuin)
-/// paints its first frame within milliseconds, so this only ever fires for the failure mode it
+/// and, more importantly, cancelled outright -- not merely rescheduled -- the moment the wrapper
+/// widget itself reports that it has run (`TerminalView::note_raw_keypress_ctrl_r_handoff_started`,
+/// via the `ExternalCtrlRRawKeypressStarted` DCS hook), since that is positive proof the wrapper
+/// actually started. Once cancelled, there is no deadline at all for the rest of the handoff, no
+/// matter how long the user then reads the widget's output or thinks before pressing a key --
+/// exactly like any other real interactive program running in the terminal. A real widget (fzf,
+/// atuin) reports started within milliseconds, so this only ever fires for the failure mode it
 /// exists to catch: nothing was ever listening for the handoff at all (missing/rebound binding,
-/// dead shell). A previous version of this timeout (5s, later 30s) was rescheduled on activity
-/// alone with no output-based cancellation, so it could still fire while a user was legitimately
-/// reading the widget's already-painted output -- restoring focus to the (empty) input editor
-/// and turning the next Enter into a stray empty-command submission. See also `Block::
-/// arm_raw_keypress_bailout_guard`, which independently guards against exactly that submission
-/// regardless of how this timeout is tuned.
+/// dead shell).
+///
+/// This deliberately does *not* infer liveness from raw pty output: the token paste's own shell
+/// echo is output too, and arrives regardless of whether anything is bound to the private key
+/// sequence -- an earlier version of this mechanism that cancelled on any pty output could
+/// therefore disarm itself in exactly the case it exists to catch, leaving the handoff stuck
+/// forever with no automatic recovery. A previous version of this timeout (5s, later 30s) also
+/// had no cancellation signal at all beyond rescheduling on activity, so it could fire while a
+/// user was legitimately reading the widget's already-painted output -- restoring focus to the
+/// (empty) input editor and turning the next Enter into a stray empty-command submission. See
+/// also `Block::arm_raw_keypress_bailout_guard`, which independently guards against exactly that
+/// submission regardless of how this timeout is tuned.
 const RAW_KEYPRESS_CTRL_R_HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// After the timeout bail-out fires, how long a new raw-keypress ctrl-r handoff is refused on
@@ -9429,18 +9435,31 @@ impl TerminalView {
             Some(self.spawn_raw_keypress_ctrl_r_handoff_timeout(handoff.id, ctx));
     }
 
-    /// Called when pty output is observed for the active block while a raw-keypress ctrl-r
-    /// handoff is pending (see [`ModelEvent::RawKeypressCtrlRHandoffOutputObserved`]). Cancels
-    /// the bail-out timer outright, rather than rescheduling it like
+    /// Called when the shell reports that the raw-keypress ctrl-r handoff's wrapper widget has
+    /// actually been invoked (see [`ExternalCtrlRRawKeypressStartedValue`]). Cancels the
+    /// bail-out timer outright, rather than rescheduling it like
     /// [`Self::note_raw_keypress_ctrl_r_handoff_activity`] does: once the wrapper widget has
-    /// demonstrably started and is painting, the failure mode the timer exists to catch --
-    /// nothing ever listening for the handoff -- is ruled out, so there is no longer a deadline
-    /// for the rest of this handoff, no matter how long the user then reads or thinks. If the
-    /// widget later hangs after having started, that's the same as any other frozen interactive
-    /// program in the terminal: not automatically recovered, but still escapable via Ctrl-C
-    /// (still forwarded to the pty) or closing the tab.
-    fn note_raw_keypress_ctrl_r_handoff_output_observed(&mut self) {
-        if self.pending_raw_keypress_ctrl_r_handoff.is_none() {
+    /// demonstrably run, the failure mode the timer exists to catch -- nothing ever listening
+    /// for the handoff -- is ruled out, so there is no longer a deadline for the rest of this
+    /// handoff, no matter how long the user then reads or thinks. If the widget later hangs
+    /// after having started, that's the same as any other frozen interactive program in the
+    /// terminal: not automatically recovered, but still escapable via Ctrl-C (still forwarded to
+    /// the pty) or closing the tab.
+    ///
+    /// Only acts if `session_id` and `token` both match the pending handoff, for the same reason
+    /// [`Self::apply_raw_keypress_ctrl_r_selection`] checks them: an unsolicited or stale report
+    /// must not disarm the timer for a handoff it doesn't belong to. This is positive evidence
+    /// sent by the wrapper itself, unlike inferring liveness from pty output -- which the token
+    /// paste's own shell echo can produce even when nothing is listening for the handoff at all
+    /// (e.g. the private key sequence isn't bound to anything in the active keymap).
+    fn note_raw_keypress_ctrl_r_handoff_started(&mut self, session_id: SessionId, token: &str) {
+        let matches_pending = self
+            .pending_raw_keypress_ctrl_r_handoff
+            .as_ref()
+            .is_some_and(|handoff| {
+                handoff.session_id == session_id && handoff.id.0.to_string() == token
+            });
+        if !matches_pending {
             return;
         }
         if let Some(handle) = self.pending_raw_keypress_ctrl_r_timeout.take() {
@@ -13232,8 +13251,10 @@ impl TerminalView {
                     );
                 }
             }
-            ModelEvent::RawKeypressCtrlRHandoffOutputObserved => {
-                self.note_raw_keypress_ctrl_r_handoff_output_observed();
+            ModelEvent::ExternalCtrlRRawKeypressStarted(data) => {
+                if let Some(session_id) = data.session_id.map(SessionId::from) {
+                    self.note_raw_keypress_ctrl_r_handoff_started(session_id, &data.token);
+                }
             }
             ModelEvent::SelectedTextChanged => {
                 ctx.emit(Event::SelectedTextChanged);

@@ -28,8 +28,8 @@ use warpui::image_cache::ImageType;
 
 use super::super::{AltScreen, BlockList};
 use super::ansi::{
-    BootstrappedValue, ExternalCtrlRRawKeypressSelectionValue, FinishUpdateValue, InputBufferValue,
-    Mode, PendingHook,
+    BootstrappedValue, ExternalCtrlRRawKeypressSelectionValue,
+    ExternalCtrlRRawKeypressStartedValue, FinishUpdateValue, InputBufferValue, Mode, PendingHook,
 };
 use super::block::{
     AgentInteractionMetadata, Block, BlockId, BlockMetadata, BlockSize, BlockState,
@@ -3187,6 +3187,11 @@ impl ansi::Handler for TerminalModel {
             .send_terminal_event(Event::ExternalCtrlRRawKeypressSelection(data));
     }
 
+    fn external_ctrl_r_raw_keypress_started(&mut self, data: ExternalCtrlRRawKeypressStartedValue) {
+        self.event_proxy
+            .send_terminal_event(Event::ExternalCtrlRRawKeypressStarted(data));
+    }
+
     fn init_subshell(&mut self, data: InitSubshellValue) {
         match ShellType::from_name(data.shell.as_str()) {
             Some(shell_type) => {
@@ -3301,20 +3306,6 @@ impl ansi::Handler for TerminalModel {
         }
 
         let bytes = input.bytes();
-
-        // Let the client know the raw-keypress ctrl-r handoff's wrapper widget has
-        // demonstrably started painting, so it can cancel the handoff's bail-out timer
-        // outright instead of merely rescheduling it. See `Event::
-        // RawKeypressCtrlRHandoffOutputObserved`'s doc comment.
-        if !bytes.is_empty()
-            && self
-                .block_list()
-                .active_block()
-                .is_raw_keypress_forward_active()
-        {
-            self.event_proxy
-                .send_terminal_event(Event::RawKeypressCtrlRHandoffOutputObserved);
-        }
 
         // Send a copy of the bytes to subscribers.
         self.event_proxy.send_pty_read_event(bytes);

@@ -46,6 +46,8 @@ BRACKETED_PASTE_SUFFIX = b"\x1b[201~"
 HANDOFF_KEYSEQ = b"\x1b]"
 PLUGIN_TAG = "external_ctrl_r_raw_keypress"
 HOOK_NAME = "ExternalCtrlRRawKeypressSelection"
+STARTED_HOOK_NAME = "ExternalCtrlRRawKeypressStarted"
+ALL_HOOK_NAMES = {HOOK_NAME, STARTED_HOOK_NAME}
 
 DCS_HOOK_RE = re.compile(rb"\x1bP\$d([0-9a-fA-F]+)\x1b\\")
 
@@ -109,8 +111,9 @@ class PtySession:
         os.write(self.fd, data)
         self.drain(wait)
 
-    def hooks(self):
-        """Every ExternalCtrlRRawKeypressSelection hook payload seen so far, decoded."""
+    def all_hooks(self):
+        """Every recognized hook seen so far, as (name, value) tuples in the order
+        they appear in the pty stream."""
         out = []
         for m in DCS_HOOK_RE.finditer(self.buf):
             try:
@@ -118,9 +121,18 @@ class PtySession:
                 payload = json.loads(raw)
             except (ValueError, UnicodeDecodeError):
                 continue
-            if payload.get("hook") == HOOK_NAME:
-                out.append(payload["value"])
+            name = payload.get("hook")
+            if name in ALL_HOOK_NAMES:
+                out.append((name, payload.get("value")))
         return out
+
+    def hooks(self):
+        """Every ExternalCtrlRRawKeypressSelection hook payload seen so far, decoded."""
+        return [v for name, v in self.all_hooks() if name == HOOK_NAME]
+
+    def started_hooks(self):
+        """Every ExternalCtrlRRawKeypressStarted hook payload seen so far, decoded."""
+        return [v for name, v in self.all_hooks() if name == STARTED_HOOK_NAME]
 
     def close(self):
         try:
@@ -137,6 +149,23 @@ def send_handoff(session, token, wait=1.5):
         BRACKETED_PASTE_PREFIX + token.encode() + BRACKETED_PASTE_SUFFIX + HANDOFF_KEYSEQ,
         wait=wait,
     )
+
+
+def check_started_then_selection(session, token, label):
+    """Asserts the started hook for `token` was observed exactly once, before the
+    selection hook for the same token."""
+    seq = [name for name, v in session.all_hooks() if (v or {}).get("token") == token]
+    ok = seq == [STARTED_HOOK_NAME, HOOK_NAME]
+    record(
+        f"{label}: started hook observed before selection (token={token})",
+        ok,
+        detail=str(seq) if not ok else "",
+    )
+
+
+def check_no_started_hook(session, label):
+    """Asserts the fallback (immediate-report) path never emits a started hook."""
+    record(f"{label}: fallback path does not emit a started hook", len(session.started_hooks()) == 0)
 
 
 def base_env(home, session_id):
@@ -209,6 +238,7 @@ def test_bash():
                 ok,
                 detail=str(hooks) if not ok else "",
             )
+            check_started_then_selection(session, "111", "bash")
 
         run_bash_case(
             "real-widget",
@@ -239,6 +269,7 @@ def test_bash():
                 ok,
                 detail=str(hooks) if not ok else "",
             )
+            check_no_started_hook(session, "bash")
 
         run_bash_case("fallback", tmpdir, "", check_fallback)
 
@@ -325,6 +356,7 @@ def test_zsh():
                 ok,
                 detail=str(hooks) if not ok else "",
             )
+            check_started_then_selection(session, "333", "zsh")
 
         run_zsh_case(
             "real-widget",
@@ -370,6 +402,7 @@ def test_zsh():
                 ok,
                 detail=str(hooks) if not ok else "",
             )
+            check_no_started_hook(session, "zsh")
 
         run_zsh_case("builtin-defaults", tmpdir, "", check_builtin_defaults_rejected)
 
@@ -453,6 +486,7 @@ def test_fish():
                 ok,
                 detail=str(hooks) if not ok else "",
             )
+            check_started_then_selection(session, "555", "fish")
 
         run_fish_case(
             "real-widget",
@@ -483,6 +517,7 @@ def test_fish():
                 ok,
                 detail=str(hooks) if not ok else "",
             )
+            check_no_started_hook(session, "fish")
 
         run_fish_case("fallback", tmpdir, "", check_fallback)
 
