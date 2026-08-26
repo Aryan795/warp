@@ -1317,37 +1317,27 @@ esac
   fi
 
   # Prototype (alternative to the foreground-command handoff in PR #15513): whatever ^R resolves
-  # to in each of zsh's three keymaps (emacs, viins, vicmd -- each can bind ^R to a different
-  # widget, e.g. fzf binds the same widget in all three but atuin only binds emacs/viins and uses
-  # a different key in vicmd) after the user's rc has run -- `bindkey -M <keymap> '^R'` prints
-  # `"^R" widget-name` -- install a wrapper in that same keymap on the private key sequence Alt-]
-  # that re-invokes that keymap's widget via `zle`, giving it a genuine zle context (zle builtins
-  # like `vi-fetch-history` only work when a widget is actually bound to a key and invoked
-  # through zle, not when called as a plain function). Warp writes that sequence to the pty
-  # instead of a bare ^R when this session reports the `external_ctrl_r_raw_keypress` tag below.
+  # to in each of zsh's three keymaps (emacs, viins, vicmd) after the user's rc has run --
+  # `bindkey -M <keymap> '^R'` prints `"^R" widget-name` -- install a wrapper in that same keymap
+  # on the private key sequence Alt-] that re-invokes that keymap's widget via `zle`, giving it a
+  # genuine zle context (zle builtins like `vi-fetch-history` only work when a widget is actually
+  # bound to a key and invoked through zle, not when called as a plain function). Warp writes
+  # that sequence to the pty instead of a bare ^R when this session reports the
+  # `external_ctrl_r_raw_keypress` tag below.
   #
-  # Warp cannot tell which keymap is actually active when the user presses ctrl-r, so
-  # `shell_plugins` cannot meaningfully vary per keymap -- it is one session-wide capability
-  # flag. To make that flag's meaning invariant across keymaps, every keymap that lacks a *real*
-  # wrapper (because ^R isn't bound to a re-invokable widget there) still gets an
-  # empty-completion fallback bound to Alt-], so pressing ctrl-r always produces a fast,
-  # deterministic outcome -- a real handoff or an immediate no-op -- rather than a silent
-  # multi-second wait for a key nothing is listening for.
+  # Warp cannot tell which keymap is active when ctrl-r is pressed, so `shell_plugins` cannot
+  # vary per keymap -- it is one session-wide flag. The tag is therefore only set once every
+  # keymap has safely claimed Alt-] (with either a real wrapper or an empty-completion fallback);
+  # if any keymap already has a real binding there, we leave that keymap alone and withhold the
+  # tag entirely, since sending the private sequence into an occupied keymap would invoke the
+  # user's unrelated binding instead.
   #
-  # Alt-] was verified empirically to be unbound in stock zsh (emacs, viins, vicmd), bash (emacs,
-  # vi-insert, vi-command), and fish (default, insert). Still, "unbound in stock configurations"
-  # is not the same as unbound in this user's configuration, so each keymap is inspected
-  # immediately before installing anything there; if the user already has a real binding on
-  # Alt-] in a keymap, we leave it alone entirely (no wrapper, no fallback, no capability
-  # claimed for that keymap).
-  # Each keymap has its own zsh-shipped default for ^R when no tool has rebound it --
-  # `history-incremental-search-backward` in emacs, `redisplay` in viins, `redo` in vicmd --
-  # none of which are a history-search tool to hand off to.
   # `$widgets[<name>]` is zsh's own classification of every widget: `builtin` for anything zsh
-  # ships, `completion:...` for completion widgets, and `user:<function>` only for a widget
-  # actually registered via `zle -N`, which is exactly how fzf, atuin, and every other
-  # third-party ctrl-r tool install themselves. Requiring that classification, rather than
-  # naming individual zsh defaults, correctly rejects all of zsh's own built-in ^R bindings.
+  # ships (including its own ^R defaults, e.g. `redisplay` in viins and `redo` in vicmd), and
+  # `user:<function>` only for a widget actually registered via `zle -N`, which is exactly how
+  # fzf, atuin, and every other third-party ctrl-r tool install themselves. Requiring that
+  # classification, rather than naming individual zsh defaults, correctly rejects all of zsh's
+  # own built-in ^R bindings.
   __warp_classify_raw_keypress_ctrl_r_binding() { # keymap
     local widget=${${(z)$(bindkey -M "$1" '^R' 2>/dev/null)}[2]}
     [[ "${widgets[$widget]:-}" == user:* ]] || return 1
@@ -1437,6 +1427,7 @@ esac
     __warp_report_raw_keypress_ctrl_r_selection "$token" "$selection"
   }
 
+  __warp_raw_keypress_ctrl_r_all_keymaps_safe=1
   if __warp_raw_keypress_ctrl_r_keyseq_free emacs; then
     if __warp_raw_keypress_orig_ctrl_r_widget_emacs=$(__warp_classify_raw_keypress_ctrl_r_binding emacs); then
       zle -N __warp_run_raw_keypress_ctrl_r_widget_emacs
@@ -1444,7 +1435,8 @@ esac
     else
       bindkey -M emacs '\e]' __warp_report_raw_keypress_ctrl_r_selection_immediate
     fi
-    shell_plugins+=(external_ctrl_r_raw_keypress)
+  else
+    __warp_raw_keypress_ctrl_r_all_keymaps_safe=0
   fi
   if __warp_raw_keypress_ctrl_r_keyseq_free viins; then
     if __warp_raw_keypress_orig_ctrl_r_widget_viins=$(__warp_classify_raw_keypress_ctrl_r_binding viins); then
@@ -1453,7 +1445,8 @@ esac
     else
       bindkey -M viins '\e]' __warp_report_raw_keypress_ctrl_r_selection_immediate
     fi
-    shell_plugins+=(external_ctrl_r_raw_keypress)
+  else
+    __warp_raw_keypress_ctrl_r_all_keymaps_safe=0
   fi
   if __warp_raw_keypress_ctrl_r_keyseq_free vicmd; then
     if __warp_raw_keypress_orig_ctrl_r_widget_vicmd=$(__warp_classify_raw_keypress_ctrl_r_binding vicmd); then
@@ -1462,6 +1455,10 @@ esac
     else
       bindkey -M vicmd '\e]' __warp_report_raw_keypress_ctrl_r_selection_immediate
     fi
+  else
+    __warp_raw_keypress_ctrl_r_all_keymaps_safe=0
+  fi
+  if [[ "$__warp_raw_keypress_ctrl_r_all_keymaps_safe" == 1 ]]; then
     shell_plugins+=(external_ctrl_r_raw_keypress)
   fi
 

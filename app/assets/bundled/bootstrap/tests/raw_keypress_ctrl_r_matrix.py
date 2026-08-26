@@ -15,12 +15,15 @@ unit test can't reach because they depend on real shell keybinding state:
     (vicmd) defaults before `$widgets[...]` classification replaced a
     hardcoded name list.
   - the occupied-Alt-] case: a pre-existing user binding on the private key
-    sequence must be left untouched -- no wrapper, no fallback.
+    sequence must be left untouched -- no wrapper, no fallback -- and the
+    session-wide capability tag must be withheld entirely, since a single
+    tag can't tell Warp which keymap/mode is actually active.
   - the fallback path: a keymap/mode with no real widget to re-invoke must
     report the pasted token back immediately, with an empty selection.
   - the full completion-token round trip through a real wrapper: the token
     Warp pastes must be echoed back unchanged, and the reported selection
-    must be exactly what the wrapped widget produced.
+    must be exactly what the wrapped widget produced, with the started hook
+    observed first.
 
 Requires: bash, zsh, fish, and python3 on PATH. No third-party dependencies.
 
@@ -47,7 +50,8 @@ HANDOFF_KEYSEQ = b"\x1b]"
 PLUGIN_TAG = "external_ctrl_r_raw_keypress"
 HOOK_NAME = "ExternalCtrlRRawKeypressSelection"
 STARTED_HOOK_NAME = "ExternalCtrlRRawKeypressStarted"
-ALL_HOOK_NAMES = {HOOK_NAME, STARTED_HOOK_NAME}
+BOOTSTRAPPED_HOOK_NAME = "Bootstrapped"
+ALL_HOOK_NAMES = {HOOK_NAME, STARTED_HOOK_NAME, BOOTSTRAPPED_HOOK_NAME}
 
 DCS_HOOK_RE = re.compile(rb"\x1bP\$d([0-9a-fA-F]+)\x1b\\")
 
@@ -134,6 +138,13 @@ class PtySession:
         """Every ExternalCtrlRRawKeypressStarted hook payload seen so far, decoded."""
         return [v for name, v in self.all_hooks() if name == STARTED_HOOK_NAME]
 
+    def bootstrapped_shell_plugins(self):
+        """The `shell_plugins` tags from the session's Bootstrapped hook, as a list."""
+        for name, v in self.all_hooks():
+            if name == BOOTSTRAPPED_HOOK_NAME:
+                return [tag for tag in (v or {}).get("shell_plugins", "").split("\n") if tag]
+        return []
+
     def close(self):
         try:
             os.kill(self.pid, 9)
@@ -166,6 +177,27 @@ def check_started_then_selection(session, token, label):
 def check_no_started_hook(session, label):
     """Asserts the fallback (immediate-report) path never emits a started hook."""
     record(f"{label}: fallback path does not emit a started hook", len(session.started_hooks()) == 0)
+
+
+def check_plugin_tag(session, expected_present, label):
+    """Asserts whether the session-wide capability tag is present in the Bootstrapped hook."""
+    tags = session.bootstrapped_shell_plugins()
+    present = PLUGIN_TAG in tags
+    ok = present == expected_present
+    verb = "advertised" if expected_present else "withheld"
+    record(f"{label}: capability tag {verb}", ok, detail=str(tags) if not ok else "")
+
+
+def check_no_hooks_for_token(session, token, label):
+    """Asserts no ExternalCtrlRRawKeypress* hook was ever emitted for `token` -- e.g. because the
+    private key sequence invoked an unrelated pre-existing user binding instead of our wrapper or
+    fallback in the active keymap."""
+    hooks_for_token = [name for name, v in session.all_hooks() if (v or {}).get("token") == token]
+    record(
+        f"{label}: occupied keymap ignores the handoff sequence (token={token})",
+        len(hooks_for_token) == 0,
+        detail=str(hooks_for_token) if hooks_for_token else "",
+    )
 
 
 def base_env(home, session_id):
@@ -239,6 +271,7 @@ def test_bash():
                 detail=str(hooks) if not ok else "",
             )
             check_started_then_selection(session, "111", "bash")
+            check_plugin_tag(session, True, "bash")
 
         run_bash_case(
             "real-widget",
@@ -270,6 +303,7 @@ def test_bash():
                 detail=str(hooks) if not ok else "",
             )
             check_no_started_hook(session, "bash")
+            check_plugin_tag(session, True, "bash")
 
         run_bash_case("fallback", tmpdir, "", check_fallback)
 
@@ -297,6 +331,17 @@ def test_bash():
                 "__warp_report_raw_keypress_ctrl_r_selection" in emacs
             )
             record("bash: unaffected keymap still claims Alt-] (emacs)", claimed)
+
+            # Since one keymap is occupied, the session-wide capability tag must be withheld
+            # entirely -- otherwise Warp could send the private sequence into vi-insert while it's
+            # active, invoking the user's unrelated binding there instead of a ctrl-r wrapper.
+            check_plugin_tag(session, False, "bash")
+
+            # Actually attempt a handoff while vi-insert (the occupied keymap) is active: the
+            # private sequence must reach the user's own binding, not report anything to Warp.
+            session.send("set -o vi\n", wait=0.5)
+            send_handoff(session, "777")
+            check_no_hooks_for_token(session, "777", "bash")
 
         run_bash_case(
             "occupied",
@@ -357,6 +402,7 @@ def test_zsh():
                 detail=str(hooks) if not ok else "",
             )
             check_started_then_selection(session, "333", "zsh")
+            check_plugin_tag(session, True, "zsh")
 
         run_zsh_case(
             "real-widget",
@@ -403,6 +449,7 @@ def test_zsh():
                 detail=str(hooks) if not ok else "",
             )
             check_no_started_hook(session, "zsh")
+            check_plugin_tag(session, True, "zsh")
 
         run_zsh_case("builtin-defaults", tmpdir, "", check_builtin_defaults_rejected)
 
@@ -426,6 +473,17 @@ def test_zsh():
                 or "__warp_report_raw_keypress_ctrl_r_selection_immediate" in viins
             )
             record("zsh: unaffected keymap still claims Alt-] (viins)", claimed)
+
+            # Since one keymap is occupied, the session-wide capability tag must be withheld
+            # entirely -- otherwise Warp could send the private sequence into emacs while it's
+            # active, invoking the user's unrelated binding there instead of a ctrl-r wrapper.
+            check_plugin_tag(session, False, "zsh")
+
+            # Actually attempt a handoff while emacs (the occupied keymap, and zsh's default) is
+            # active: the private sequence must reach the user's own binding, not report anything
+            # to Warp.
+            send_handoff(session, "888")
+            check_no_hooks_for_token(session, "888", "zsh")
 
         run_zsh_case(
             "occupied",
@@ -487,6 +545,7 @@ def test_fish():
                 detail=str(hooks) if not ok else "",
             )
             check_started_then_selection(session, "555", "fish")
+            check_plugin_tag(session, True, "fish")
 
         run_fish_case(
             "real-widget",
@@ -518,6 +577,7 @@ def test_fish():
                 detail=str(hooks) if not ok else "",
             )
             check_no_started_hook(session, "fish")
+            check_plugin_tag(session, True, "fish")
 
         run_fish_case("fallback", tmpdir, "", check_fallback)
 
@@ -534,6 +594,16 @@ def test_fish():
                 preserved,
                 detail=f"default binds: {default_binds!r}" if not preserved else "",
             )
+
+            # Since default mode is occupied, the session-wide capability tag must be withheld
+            # entirely -- otherwise Warp could send the private sequence into default mode while
+            # it's active, invoking the user's unrelated binding there instead of a ctrl-r wrapper.
+            check_plugin_tag(session, False, "fish")
+
+            # Actually attempt a handoff in default mode (occupied, and fish's starting mode): the
+            # private sequence must reach the user's own binding, not report anything to Warp.
+            send_handoff(session, "999")
+            check_no_hooks_for_token(session, "999", "fish")
 
         run_fish_case(
             "occupied",

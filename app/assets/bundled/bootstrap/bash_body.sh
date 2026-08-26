@@ -1359,31 +1359,20 @@ esac
 
     # Prototype (alternative to the foreground-command handoff in PR #15513): if the user has
     # rebound ctrl-r to a `bind -x` function in one or more of bash's readline keymaps (as fzf
-    # and atuin both do -- and each keymap can be bound to a different widget, e.g. atuin only
-    # binds ctrl-r in emacs and vi-insert, not vi-command), install a wrapper on the private key
-    # sequence Alt-] in that same keymap that re-invokes that keymap's own binding from inside a
-    # genuine readline key-binding context, giving it access to READLINE_LINE. Warp writes that
-    # sequence to the pty instead of a bare ^R when this session reports the
-    # `external_ctrl_r_raw_keypress` tag below. Not supported under MSYS2, where ctrl-r always
-    # falls through to Warp's own command search.
+    # and atuin both do), install a wrapper on the private key sequence Alt-] in that same keymap
+    # that re-invokes that keymap's own binding from inside a genuine readline key-binding
+    # context, giving it access to READLINE_LINE. Warp writes that sequence to the pty instead of
+    # a bare ^R when this session reports the `external_ctrl_r_raw_keypress` tag below. Not
+    # supported under MSYS2, where ctrl-r always falls through to Warp's own command search.
     #
-    # Warp cannot tell which keymap is actually active when the user presses ctrl-r (bash has no
-    # equivalent of zsh's `zle-keymap-select` hook to report it), so `shell_plugins` cannot
-    # meaningfully vary per keymap -- it is one session-wide capability flag. To make that
-    # flag's meaning invariant across keymaps, every keymap that lacks a *real* wrapper (because
-    # ctrl-r isn't bound to a re-invokable widget there) still gets an empty-completion fallback
-    # bound to Alt-], so pressing ctrl-r always produces a fast, deterministic outcome -- a real
-    # handoff or an immediate no-op -- rather than a silent multi-second wait for a key nothing is
-    # listening for.
-    #
-    # Alt-] was verified empirically to be unbound in stock bash (emacs, vi-insert, vi-command),
-    # zsh (emacs, viins, vicmd), and fish (default, insert) -- unlike bash's own "\C-x\C-r",
-    # which is re-read-init-file. Still, "unbound in stock configurations" is not the same as
-    # unbound in this user's configuration, so each keymap is inspected immediately before
-    # installing anything there; if the user already has a real binding on Alt-] in a keymap, we
-    # leave it alone entirely (no wrapper, no fallback, no capability claimed for that keymap).
-    # An unqualified `bind -x` (no `-m`) only installs into whichever keymap is current at that
-    # moment, so each keymap below is bound explicitly with `-m` rather than relying on that.
+    # Bash has no equivalent of zsh's `zle-keymap-select` hook, so Warp cannot tell which keymap
+    # is active when ctrl-r is pressed and `shell_plugins` cannot vary per keymap -- it is one
+    # session-wide flag. The tag is therefore only set once every relevant keymap has safely
+    # claimed Alt-] (with either a real wrapper or an empty-completion fallback); if any keymap
+    # already has a real binding there, we leave that keymap alone and withhold the tag entirely,
+    # since sending the private sequence into an occupied keymap would invoke the user's unrelated
+    # binding instead. An unqualified `bind -x` (no `-m`) only installs into whichever keymap is
+    # current at that moment, so each keymap below is bound explicitly with `-m`.
     #
     # A readline macro (installed by fzf on bash < 4) or a plain readline function name cannot be
     # re-invoked this way, so those configurations are left undetected and fall back to Warp's own
@@ -1477,13 +1466,15 @@ esac
     }
 
     if [ "$WARP_IN_MSYS2" = false ]; then
+      __warp_raw_keypress_ctrl_r_all_keymaps_safe=1
       if __warp_raw_keypress_ctrl_r_keyseq_free emacs; then
         if __warp_raw_keypress_ctrl_r_orig_emacs=$(__warp_classify_raw_keypress_ctrl_r_binding emacs); then
           bind -m emacs -x '"\e]": __warp_run_raw_keypress_ctrl_r_widget_emacs'
         else
           bind -m emacs -x '"\e]": __warp_report_raw_keypress_ctrl_r_selection_immediate'
         fi
-        shell_plugins+=(external_ctrl_r_raw_keypress)
+      else
+        __warp_raw_keypress_ctrl_r_all_keymaps_safe=0
       fi
       if __warp_raw_keypress_ctrl_r_keyseq_free vi-insert; then
         if __warp_raw_keypress_ctrl_r_orig_vi_insert=$(__warp_classify_raw_keypress_ctrl_r_binding vi-insert); then
@@ -1491,7 +1482,8 @@ esac
         else
           bind -m vi-insert -x '"\e]": __warp_report_raw_keypress_ctrl_r_selection_immediate'
         fi
-        shell_plugins+=(external_ctrl_r_raw_keypress)
+      else
+        __warp_raw_keypress_ctrl_r_all_keymaps_safe=0
       fi
       if __warp_raw_keypress_ctrl_r_keyseq_free vi-command; then
         if __warp_raw_keypress_ctrl_r_orig_vi_command=$(__warp_classify_raw_keypress_ctrl_r_binding vi-command); then
@@ -1499,6 +1491,10 @@ esac
         else
           bind -m vi-command -x '"\e]": __warp_report_raw_keypress_ctrl_r_selection_immediate'
         fi
+      else
+        __warp_raw_keypress_ctrl_r_all_keymaps_safe=0
+      fi
+      if [ "$__warp_raw_keypress_ctrl_r_all_keymaps_safe" = 1 ]; then
         shell_plugins+=(external_ctrl_r_raw_keypress)
       fi
     fi

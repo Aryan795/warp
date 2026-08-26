@@ -728,13 +728,10 @@ const RAW_KEYPRESS_CTRL_R_HANDOFF_PLUGIN_TAG: &str = "external_ctrl_r_raw_keypre
 const RAW_KEYPRESS_CTRL_R_HANDOFF_KEYSEQ: &[u8] = &[escape_sequences::C0::ESC, b']'];
 
 /// Builds the bytes [`TerminalView::maybe_trigger_raw_keypress_ctrl_r_handoff`] writes to the pty
-/// to trigger a handoff: `id`, formatted as decimal digits, wrapped in bracketed-paste markers so
-/// the shell's line editor inserts it into the (otherwise-idle) line buffer as literal text rather
-/// than interpreting the digits as an editing command (e.g. bash/zsh's own Alt-digit numeric
-/// argument, or vi command mode's repeat count) -- followed by the private key sequence itself.
-/// The wrapper widget captures this pasted text as the handoff's token before invoking the user's
-/// real ctrl-r binding, and echoes it back in the `ExternalCtrlRRawKeypressSelection` hook (see
-/// [`TerminalView::apply_raw_keypress_ctrl_r_selection`]).
+/// to trigger a handoff: `id`, wrapped in bracketed-paste markers so the shell's line editor
+/// inserts it into the line buffer as literal text rather than interpreting the digits as an
+/// editing command (e.g. bash/zsh's own Alt-digit numeric argument, or vi command mode's repeat
+/// count), followed by the private key sequence.
 fn raw_keypress_ctrl_r_handoff_payload(id: RawKeypressCtrlRHandoffId) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(BRACKETED_PASTE_PREFIX.as_bytes());
@@ -753,28 +750,20 @@ fn raw_keypress_ctrl_r_handoff_payload(id: RawKeypressCtrlRHandoffId) -> Vec<u8>
 ///
 /// This only bounds time-to-first-*start*, not the handoff's total duration. Before the wrapper
 /// widget has started, it is restarted on every keystroke forwarded to the pty
-/// (`TerminalView::note_raw_keypress_ctrl_r_handoff_activity`), so it only fires after a period
-/// of genuine inactivity rather than a fixed deadline. The moment the wrapper widget itself
-/// reports that it has run (`TerminalView::note_raw_keypress_ctrl_r_handoff_started`, via the
-/// `ExternalCtrlRRawKeypressStarted` DCS hook), the timer is cancelled outright -- not merely
-/// rescheduled -- and `PendingRawKeypressCtrlRHandoff::started` latches that fact so a
-/// subsequently forwarded keystroke can never resurrect it: once cancelled, there is no deadline
-/// at all for the rest of the handoff, no matter how long the user then reads the widget's
-/// output or thinks before pressing a key -- exactly like any other real interactive program
-/// running in the terminal. A real widget (fzf, atuin) reports started within milliseconds, so
-/// this only ever fires for the failure mode it exists to catch: nothing was ever listening for
-/// the handoff at all (missing/rebound binding, dead shell).
+/// (`TerminalView::note_raw_keypress_ctrl_r_handoff_activity`), so it only fires after a period of
+/// genuine inactivity. Once the wrapper reports that it has actually run
+/// (`TerminalView::note_raw_keypress_ctrl_r_handoff_started`), the timer is cancelled outright and
+/// latched via `PendingRawKeypressCtrlRHandoff::started` so a later keystroke can never resurrect
+/// it: from that point on there is no deadline for the rest of the handoff, however long the user
+/// reads the widget's output or thinks before pressing a key. A real widget (fzf, atuin) reports
+/// started within milliseconds, so this only fires for the failure mode it exists to catch:
+/// nothing was ever listening for the handoff (missing/rebound binding, dead shell).
 ///
-/// This deliberately does *not* infer liveness from raw pty output: the token paste's own shell
-/// echo is output too, and arrives regardless of whether anything is bound to the private key
-/// sequence -- an earlier version of this mechanism that cancelled on any pty output could
-/// therefore disarm itself in exactly the case it exists to catch, leaving the handoff stuck
-/// forever with no automatic recovery. A previous version of this timeout (5s, later 30s) also
-/// had no cancellation signal at all beyond rescheduling on activity, so it could fire while a
-/// user was legitimately reading the widget's already-painted output -- restoring focus to the
-/// (empty) input editor and turning the next Enter into a stray empty-command submission. See
-/// also `Block::arm_raw_keypress_bailout_guard`, which independently guards against exactly that
-/// submission regardless of how this timeout is tuned.
+/// Liveness is deliberately reported by the wrapper itself rather than inferred from raw pty
+/// output: the token paste's own shell echo is output too, and arrives even when nothing is bound
+/// to the private key sequence, so it cannot distinguish a live wrapper from an unbound one. See
+/// also `Block::arm_raw_keypress_bailout_guard`, which independently guards against a stray
+/// post-bail-out Enter submitting an empty command.
 const RAW_KEYPRESS_CTRL_R_HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// After the timeout bail-out fires, how long a new raw-keypress ctrl-r handoff is refused on
@@ -2559,10 +2548,10 @@ struct LocalSessionCanonicalPwdCache {
 /// Identifies a single raw-keypress ctrl-r handoff *attempt*, distinct from `session_id`/
 /// `block_id`: a second ctrl-r press on the same block after the first handoff's bail-out timer
 /// fired -- but before its underlying widget actually stopped consuming pty input -- would
-/// otherwise be indistinguishable from the first by session/block alone. Only used to reject a
-/// stale *timer* from tearing down a newer handoff; the shell has no way to echo this back, so a
-/// late completion hook is still applied to whatever handoff is currently pending for its
-/// session (see [`TerminalView::apply_raw_keypress_ctrl_r_selection`]).
+/// otherwise be indistinguishable from the first by session/block alone. The decimal value is
+/// echoed back by the shell as the completion protocol's `token`, and validated against it by
+/// [`TerminalView::note_raw_keypress_ctrl_r_handoff_started`] and
+/// [`TerminalView::apply_raw_keypress_ctrl_r_selection`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RawKeypressCtrlRHandoffId(u64);
 
