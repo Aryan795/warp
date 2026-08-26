@@ -294,9 +294,6 @@ pub(super) fn maybe_start_commit_message_autogen(me: &GitDialog, ctx: &mut ViewC
         _ => return,
     };
     let branch_name = me.branch_name().to_string();
-    // Resolved from the window before the model call loses the view context, so the
-    // request is scoped to the team this window is on rather than the server's
-    // lowest-team-id fallback.
     let team_scope =
         RequestTeamScope::from_scope(&UserWorkspaces::as_ref(ctx).team_context_for_view(ctx));
     me.diff_state_model().update(ctx, |m, ctx| {

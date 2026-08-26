@@ -128,9 +128,6 @@ pub(super) fn start_confirm(me: &mut GitDialog, ctx: &mut ViewContext<GitDialog>
 
     me.set_loading(loading_label_for(), ctx);
 
-    // Resolved from the window before the model call loses the view context, so the
-    // request is scoped to the team this window is on rather than the server's
-    // lowest-team-id fallback.
     let team_scope =
         RequestTeamScope::from_scope(&UserWorkspaces::as_ref(ctx).team_context_for_view(ctx));
     me.diff_state_model().update(ctx, |m, ctx| {

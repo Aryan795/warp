@@ -751,9 +751,6 @@ impl DiffStateModel {
     }
 
     /// Runs a commit chain (commit, then optionally push/create-PR).
-    ///
-    /// `team_scope` only reaches the local backend's AI request: the remote backend RPCs the
-    /// daemon, which has no window to resolve a team from (see `remote_server::server_model`).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn git_commit_chain(
         &self,
@@ -791,8 +788,6 @@ impl DiffStateModel {
     }
 
     /// Issues an AI commit-message generation request.
-    ///
-    /// `team_scope` only reaches the local backend's AI request; see [`Self::git_commit_chain`].
     pub(crate) fn generate_commit_message(
         &self,
         include_unstaged: bool,
@@ -825,8 +820,7 @@ impl DiffStateModel {
     /// Creates a PR for the current branch.
     ///
     /// When `autogenerate_content` is set, the PR title/body are AI-generated,
-    /// otherwise fallback to `gh pr create --fill`. `team_scope` only reaches the local
-    /// backend's AI request; see [`Self::git_commit_chain`].
+    /// otherwise fallback to `gh pr create --fill`.
     pub(crate) fn create_pr(
         &self,
         branch: String,
