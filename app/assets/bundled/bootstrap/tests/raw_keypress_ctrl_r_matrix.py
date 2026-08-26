@@ -397,11 +397,8 @@ def test_zsh():
         # A widget genuinely registered via `zle -N` (exactly how fzf/atuin/etc.
         # install themselves) must be classified as real and wrapped.
         def check_real_widget(session):
-            # A typed command is echoed into session.buf as you type it, whether or not it goes
-            # on to execute -- so "... && echo MARKER" followed by checking MARKER in session.buf
-            # can never fail (the marker text is already there from being typed). Redirecting the
-            # actual listing to a file and checking the file's content is immune to that, matching
-            # the pattern the occupied-keymap checks already use below.
+            # File-redirected rather than checked against session.buf -- see the bash equivalent
+            # above for why.
             session.send(
                 "bindkey -M emacs '\\e]' > /tmp/_zsh_real_widget_emacs.txt 2>&1\n",
                 wait=1.0,
@@ -553,11 +550,8 @@ def test_fish():
         # A real user-installed ctrl-r binding (not a `bind --preset` default) in
         # default mode must be classified and wrapped.
         def check_real_widget(session):
-            # A typed command is echoed into session.buf as you type it, whether or not it goes
-            # on to execute -- so "... && echo MARKER" followed by checking MARKER in session.buf
-            # can never fail (the marker text is already there from being typed). Redirecting the
-            # actual listing to a file and checking the file's content is immune to that, matching
-            # the pattern the occupied-keymap checks already use below.
+            # File-redirected rather than checked against session.buf -- see the bash equivalent
+            # above for why.
             session.send(
                 "bind -M default \\x1b\\x5d > /tmp/_fish_real_widget_default.txt 2>&1\n",
                 wait=1.0,
