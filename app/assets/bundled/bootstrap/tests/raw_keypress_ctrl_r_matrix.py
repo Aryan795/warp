@@ -615,6 +615,39 @@ def test_fish():
             check_occupied,
         )
 
+        # A pre-existing user binding on Alt-] in vi insert mode must also be left
+        # untouched, and must also withhold the session-wide tag.
+        def check_occupied_insert(session):
+            session.send(
+                "bind -M insert \\x1b\\x5d > /tmp/_fish_occ_insert.txt 2>&1\n",
+                wait=1.0,
+            )
+            insert_binds = Path("/tmp/_fish_occ_insert.txt").read_text()
+            preserved = "my_custom_alt_bracket" in insert_binds
+            record(
+                "fish: occupied Alt-] left untouched (vi insert)",
+                preserved,
+                detail=f"insert binds: {insert_binds!r}" if not preserved else "",
+            )
+            check_plugin_tag(session, False, "fish (vi insert occupied)")
+
+            # ESC enters default mode, then 'i' switches to insert for the handoff.
+            session.send("\x1b", wait=0.3)
+            session.send("i", wait=0.3)
+            send_handoff(session, "1010")
+            check_no_hooks_for_token(session, "1010", "fish (vi insert occupied)")
+
+        run_fish_case(
+            "occupied-insert",
+            tmpdir,
+            "function my_custom_alt_bracket\n"
+            "  commandline -r 'CUSTOM'\n"
+            "end\n"
+            "fish_vi_key_bindings\n"
+            "bind -M insert \\x1b\\x5d my_custom_alt_bracket\n",
+            check_occupied_insert,
+        )
+
 
 def main():
     for shell in ("bash", "zsh", "fish"):
