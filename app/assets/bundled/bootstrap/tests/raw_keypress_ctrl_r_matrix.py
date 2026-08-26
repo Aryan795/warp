@@ -252,13 +252,22 @@ def test_bash():
         # keymap must be classified and wrapped, and the full token/selection round
         # trip through it must work.
         def check_real_widget(session):
+            # A typed command is echoed into session.buf as you type it, whether or not it goes
+            # on to execute -- so "... && echo MARKER" followed by checking MARKER in session.buf
+            # can never fail (the marker text is already there from being typed). Redirecting the
+            # actual listing to a file and checking the file's content is immune to that, matching
+            # the pattern the occupied-keymap checks already use below.
             session.send(
-                "bind -m emacs -X | grep -qF __warp_run_raw_keypress_ctrl_r_widget_emacs "
-                "&& echo BASH_EMACS_WRAPPED\n",
+                "bind -m emacs -X > /tmp/_bash_real_widget_emacs.txt 2>&1\n",
                 wait=1.0,
             )
-            wrapped = b"BASH_EMACS_WRAPPED" in session.buf
-            record("bash: real widget classified and wrapped (emacs)", wrapped)
+            emacs_binds = Path("/tmp/_bash_real_widget_emacs.txt").read_text()
+            wrapped = "__warp_run_raw_keypress_ctrl_r_widget_emacs" in emacs_binds
+            record(
+                "bash: real widget classified and wrapped (emacs)",
+                wrapped,
+                detail=f"emacs binds: {emacs_binds!r}" if not wrapped else "",
+            )
 
             send_handoff(session, "111")
             hooks = session.hooks()
@@ -287,11 +296,16 @@ def test_bash():
         # with an empty selection.
         def check_fallback(session):
             session.send(
-                'bind -m vi-command -X | grep -qF "\\"\\\\e]\\"" && echo BASH_VICMD_WRAPPED\n',
+                "bind -m vi-command -X > /tmp/_bash_fallback_vicmd.txt 2>&1\n",
                 wait=1.0,
             )
-            wrapped = b"BASH_VICMD_WRAPPED" in session.buf
-            record("bash: vi-command keyseq claimed (fallback installed)", wrapped)
+            vicmd_binds = Path("/tmp/_bash_fallback_vicmd.txt").read_text()
+            wrapped = '"\\e]"' in vicmd_binds
+            record(
+                "bash: vi-command keyseq claimed (fallback installed)",
+                wrapped,
+                detail=f"vi-command binds: {vicmd_binds!r}" if not wrapped else "",
+            )
 
             session.send("set -o vi\n", wait=0.5)
             send_handoff(session, "222")
@@ -383,13 +397,22 @@ def test_zsh():
         # A widget genuinely registered via `zle -N` (exactly how fzf/atuin/etc.
         # install themselves) must be classified as real and wrapped.
         def check_real_widget(session):
+            # A typed command is echoed into session.buf as you type it, whether or not it goes
+            # on to execute -- so "... && echo MARKER" followed by checking MARKER in session.buf
+            # can never fail (the marker text is already there from being typed). Redirecting the
+            # actual listing to a file and checking the file's content is immune to that, matching
+            # the pattern the occupied-keymap checks already use below.
             session.send(
-                "bindkey -M emacs '\\e]' | grep -qF __warp_run_raw_keypress_ctrl_r_widget_emacs "
-                "&& echo ZSH_EMACS_WRAPPED\n",
+                "bindkey -M emacs '\\e]' > /tmp/_zsh_real_widget_emacs.txt 2>&1\n",
                 wait=1.0,
             )
-            wrapped = b"ZSH_EMACS_WRAPPED" in session.buf
-            record("zsh: user-registered widget classified and wrapped (emacs)", wrapped)
+            emacs_binds = Path("/tmp/_zsh_real_widget_emacs.txt").read_text()
+            wrapped = "__warp_run_raw_keypress_ctrl_r_widget_emacs" in emacs_binds
+            record(
+                "zsh: user-registered widget classified and wrapped (emacs)",
+                wrapped,
+                detail=f"emacs binds: {emacs_binds!r}" if not wrapped else "",
+            )
 
             send_handoff(session, "333")
             hooks = session.hooks()
@@ -433,12 +456,16 @@ def test_zsh():
             )
 
             session.send(
-                "bindkey -M viins '\\e]' | grep -qF __warp_run_raw_keypress_ctrl_r_widget_viins "
-                "&& echo VIINS_WRAPPED || echo VIINS_NOT_WRAPPED\n",
+                "bindkey -M viins '\\e]' > /tmp/_zsh_viins_default.txt 2>&1\n",
                 wait=1.0,
             )
-            not_wrapped = b"VIINS_NOT_WRAPPED" in session.buf
-            record("zsh: viins default (redisplay) does not get a real wrapper", not_wrapped)
+            viins_binds = Path("/tmp/_zsh_viins_default.txt").read_text()
+            not_wrapped = "__warp_run_raw_keypress_ctrl_r_widget_viins" not in viins_binds
+            record(
+                "zsh: viins default (redisplay) does not get a real wrapper",
+                not_wrapped,
+                detail=f"viins binds: {viins_binds!r}" if not not_wrapped else "",
+            )
 
             send_handoff(session, "444")
             hooks = session.hooks()
@@ -526,13 +553,22 @@ def test_fish():
         # A real user-installed ctrl-r binding (not a `bind --preset` default) in
         # default mode must be classified and wrapped.
         def check_real_widget(session):
+            # A typed command is echoed into session.buf as you type it, whether or not it goes
+            # on to execute -- so "... && echo MARKER" followed by checking MARKER in session.buf
+            # can never fail (the marker text is already there from being typed). Redirecting the
+            # actual listing to a file and checking the file's content is immune to that, matching
+            # the pattern the occupied-keymap checks already use below.
             session.send(
-                "bind -M default \\x1b\\x5d | grep -qF __warp_run_raw_keypress_ctrl_r_widget_default "
-                "&& echo FISH_DEFAULT_WRAPPED\n",
+                "bind -M default \\x1b\\x5d > /tmp/_fish_real_widget_default.txt 2>&1\n",
                 wait=1.0,
             )
-            wrapped = b"FISH_DEFAULT_WRAPPED" in session.buf
-            record("fish: user-installed widget classified and wrapped (default)", wrapped)
+            default_binds = Path("/tmp/_fish_real_widget_default.txt").read_text()
+            wrapped = "__warp_run_raw_keypress_ctrl_r_widget_default" in default_binds
+            record(
+                "fish: user-installed widget classified and wrapped (default)",
+                wrapped,
+                detail=f"default binds: {default_binds!r}" if not wrapped else "",
+            )
 
             send_handoff(session, "555")
             hooks = session.hooks()
@@ -561,12 +597,16 @@ def test_fish():
         # search, which must not be classified as a real tool to hand off to.
         def check_fallback(session):
             session.send(
-                "bind -M default \\x1b\\x5d | grep -qF __warp_run_raw_keypress_ctrl_r_widget_default "
-                "&& echo FISH_WRAPPED || echo FISH_NOT_WRAPPED\n",
+                "bind -M default \\x1b\\x5d > /tmp/_fish_fallback_default.txt 2>&1\n",
                 wait=1.0,
             )
-            not_wrapped = b"FISH_NOT_WRAPPED" in session.buf
-            record("fish: preset ctrl-r default does not get a real wrapper", not_wrapped)
+            default_binds = Path("/tmp/_fish_fallback_default.txt").read_text()
+            not_wrapped = "__warp_run_raw_keypress_ctrl_r_widget_default" not in default_binds
+            record(
+                "fish: preset ctrl-r default does not get a real wrapper",
+                not_wrapped,
+                detail=f"default binds: {default_binds!r}" if not not_wrapped else "",
+            )
 
             send_handoff(session, "666")
             hooks = session.hooks()
