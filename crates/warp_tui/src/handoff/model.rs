@@ -110,6 +110,7 @@ pub(crate) struct TuiHandoffModel {
 
 impl TuiHandoffModel {
     /// Prepares a handoff and registers its retained model.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         terminal_surface_id: EntityId,
         terminal_model: Arc<FairMutex<TerminalModel>>,
