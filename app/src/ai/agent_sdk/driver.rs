@@ -94,7 +94,7 @@ use crate::cloud_object::{CloudObject, CloudObjectLookup as _};
 use crate::send_telemetry_from_app_ctx;
 use crate::server::ids::{ServerId, SyncId};
 use crate::server::server_api::ServerApiProvider;
-use crate::server::server_api::ai::{AIClient, TaskGitCredentialsError, TaskStatusUpdate};
+use crate::server::server_api::ai::{AIClient, TaskStatusUpdate};
 use crate::server::server_api::harness_support::{
     HarnessSupportClient, ResolvePromptAttachedSkill, ResolvePromptRequest,
 };
@@ -125,6 +125,7 @@ mod snapshot;
 pub(crate) mod terminal;
 
 use environment::PrepareEnvironmentError;
+use git_credentials::TaskGitCredentialsError;
 pub(crate) use snapshot::upload_snapshot_for_handoff;
 use terminal::TerminalDriverEvent;
 

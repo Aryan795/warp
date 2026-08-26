@@ -49,6 +49,7 @@ use crate::ai::agent::api::convert_conversation::{
     RestorationMode, convert_conversation_data_to_ai_conversation,
 };
 use crate::ai::agent::conversation::AIConversationId;
+use crate::ai::agent_sdk::driver::git_credentials::TaskGitCredentialsError;
 use crate::ai::agent_sdk::driver::harness::{HarnessKind, harness_kind};
 use crate::ai::agent_sdk::driver::{AgentDriverOptions, AgentRunPrompt, Task};
 use crate::ai::agent_sdk::mcp_config::build_mcp_servers_from_specs;
@@ -72,9 +73,7 @@ use crate::cloud_object::model::persistence::CloudModel;
 use crate::send_telemetry_sync_from_app_ctx;
 use crate::server::ids::{ServerId, SyncId};
 use crate::server::server_api::ServerApiProvider;
-use crate::server::server_api::ai::{
-    AIClient, AgentConfigSnapshot, GitCredential, TaskGitCredentialsError,
-};
+use crate::server::server_api::ai::{AIClient, AgentConfigSnapshot, GitCredential};
 use crate::terminal::view::ConversationRestorationInNewPaneType;
 use crate::workflows::workflow::Workflow;
 
@@ -852,15 +851,29 @@ impl AgentDriverRunner {
         task_id_str: String,
         ai_client: Arc<dyn AIClient>,
     ) -> Result<Vec<GitCredential>, TaskGitCredentialsError> {
-        let workload_token = warp_isolation_platform::issue_workload_token(Some(
-            std::time::Duration::from_secs(5 * 60),
-        ))
+        driver::git_credentials::fetch_with_retry(
+            "Git credentials bootstrap",
+            &driver::git_credentials::GIT_CREDENTIALS_BOOTSTRAP_BACKOFF,
+            || {
+                let task_id_str = task_id_str.clone();
+                let ai_client = Arc::clone(&ai_client);
+                async move {
+                    let workload_token = warp_isolation_platform::issue_workload_token(Some(
+                        std::time::Duration::from_secs(5 * 60),
+                    ))
+                    .await
+                    .map_err(|error| TaskGitCredentialsError::Request(error.into()))?
+                    .token;
+                    ai_client
+                        .get_task_git_credentials(task_id_str, workload_token)
+                        .await
+                }
+            },
+            |delay| async move {
+                warpui::r#async::Timer::after(delay).await;
+            },
+        )
         .await
-        .map_err(|error| TaskGitCredentialsError::Request(error.into()))?
-        .token;
-        ai_client
-            .get_task_git_credentials(task_id_str, workload_token)
-            .await
     }
 
     async fn bootstrap_git_credentials_for_task(
@@ -910,31 +923,25 @@ impl AgentDriverRunner {
             })
             .await?;
 
-        let credentials = match driver::git_credentials::fetch_with_retry(
-            "Git credentials bootstrap",
-            &driver::git_credentials::GIT_CREDENTIALS_BOOTSTRAP_BACKOFF,
-            || Self::fetch_task_git_credentials(task_id_str.clone(), Arc::clone(&ai_client)),
-            |delay| async move {
-                warpui::r#async::Timer::after(delay).await;
-            },
-        )
-        .await
-        {
-            Ok(credentials) => credentials,
-            Err(TaskGitCredentialsError::Request(err))
-                if err
-                    .downcast_ref::<IsolationPlatformError>()
-                    .is_some_and(|err| {
-                        matches!(err, IsolationPlatformError::NoIsolationPlatformDetected)
-                    }) =>
+        let credentials =
+            match Self::fetch_task_git_credentials(task_id_str.clone(), Arc::clone(&ai_client))
+                .await
             {
-                log::debug!("Skipping git credentials bootstrap: {err}");
-                return Ok(());
-            }
-            Err(err) => {
-                return Err(AgentDriverError::GitCredentialsFetchFailed(err));
-            }
-        };
+                Ok(credentials) => credentials,
+                Err(TaskGitCredentialsError::Request(err))
+                    if err
+                        .downcast_ref::<IsolationPlatformError>()
+                        .is_some_and(|err| {
+                            matches!(err, IsolationPlatformError::NoIsolationPlatformDetected)
+                        }) =>
+                {
+                    log::debug!("Skipping git credentials bootstrap: {err}");
+                    return Ok(());
+                }
+                Err(err) => {
+                    return Err(AgentDriverError::GitCredentialsFetchFailed(err));
+                }
+            };
         if credentials.is_empty() {
             log::debug!("No git credentials returned before skill resolution");
             return Ok(());

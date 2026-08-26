@@ -5,8 +5,8 @@ use warp_graphql::platform_error::PlatformErrorInfo;
 
 use super::classify_driver_error;
 use crate::ai::agent_sdk::driver::AgentDriverError;
+use crate::ai::agent_sdk::driver::git_credentials::TaskGitCredentialsError;
 use crate::ai::agent_sdk::driver::terminal::{BootstrapError, ShareSessionError};
-use crate::server::server_api::ai::TaskGitCredentialsError;
 
 fn assert_state_and_code(
     error: AgentDriverError,
@@ -89,6 +89,30 @@ fn credential_request_error_redacts_internal_cause_from_status() {
     assert_eq!(update.error_code, Some(PlatformErrorCode::InternalError));
     assert!(update.platform_error.unwrap().retryable);
     assert!(!update.message.contains(internal));
+}
+
+#[test]
+fn dependency_credentials_failure_strips_staging_debug_details() {
+    let (_, update) = classify_driver_error(&AgentDriverError::GitCredentialsFetchFailed(
+        TaskGitCredentialsError::Platform {
+            message: "GitHub is temporarily unavailable.".to_string(),
+            detail: None,
+            info: PlatformErrorInfo {
+                code: PlatformErrorCode::ResourceUnavailable,
+                retryable: true,
+                metadata: BTreeMap::new(),
+                debug: Some("request-id=dogfood-only".to_string()),
+            },
+        },
+    ));
+
+    assert_eq!(
+        update
+            .platform_error
+            .expect("structured platform error")
+            .debug,
+        None
+    );
 }
 
 // --- Infrastructure errors → ERROR ---

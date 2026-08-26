@@ -1,8 +1,62 @@
 use futures::executor::block_on;
 use warp_graphql::ai::PlatformErrorCode;
-use warp_graphql::platform_error::PlatformErrorInfo;
+use warp_graphql::error::{
+    PlatformError as GraphqlPlatformError, UserFacingError, UserFacingErrorInterface,
+};
+use warp_graphql::platform_error::{
+    PlatformErrorInfo, PlatformErrorInfoResponse, PlatformErrorMetadataResponse,
+};
+use warp_graphql::response_context::ResponseContext;
 
 use super::*;
+
+#[test]
+fn from_user_facing_converts_platform_error_preserving_metadata_and_debug() {
+    let error = TaskGitCredentialsError::from_user_facing(UserFacingError {
+        error: UserFacingErrorInterface::PlatformError(GraphqlPlatformError {
+            message: "GitHub is temporarily unavailable.".to_string(),
+            detail: Some("Repository access could not be resolved.".to_string()),
+            info: PlatformErrorInfoResponse {
+                code: PlatformErrorCode::ResourceUnavailable,
+                retryable: true,
+                metadata: vec![
+                    PlatformErrorMetadataResponse {
+                        key: "provider".to_string(),
+                        value: "github".to_string(),
+                    },
+                    PlatformErrorMetadataResponse {
+                        key: "resource".to_string(),
+                        value: "installation".to_string(),
+                    },
+                ],
+                debug: Some("request-id=dogfood-only".to_string()),
+            },
+        }),
+        response_context: ResponseContext {
+            server_version: None,
+        },
+    });
+
+    match error {
+        TaskGitCredentialsError::Platform {
+            message,
+            detail,
+            info,
+        } => {
+            assert_eq!(message, "GitHub is temporarily unavailable.");
+            assert_eq!(info.code, PlatformErrorCode::ResourceUnavailable);
+            assert!(info.retryable);
+            assert_eq!(
+                detail.as_deref(),
+                Some("Repository access could not be resolved.")
+            );
+            assert_eq!(info.metadata["provider"], "github");
+            assert_eq!(info.metadata["resource"], "installation");
+            assert_eq!(info.debug.as_deref(), Some("request-id=dogfood-only"));
+        }
+        error => panic!("expected structured platform error, got {error:?}"),
+    }
+}
 
 fn dependency_error(retryable: bool) -> TaskGitCredentialsError {
     TaskGitCredentialsError::Platform {
@@ -33,7 +87,7 @@ fn fetch_with_retry_retries_request_layer_failures() {
                     "transient request failure"
                 )))
             } else {
-                Ok(Vec::new())
+                Ok(Vec::<GitCredential>::new())
             })
         },
         |_| std::future::ready(()),
@@ -79,7 +133,7 @@ fn fetch_with_retry_succeeds_after_retryable_dependency_failures() {
 #[test]
 fn fetch_with_retry_exhausts_bounded_dependency_attempts() {
     let mut attempts = 0usize;
-    let result = block_on(fetch_with_retry(
+    let result: Result<Vec<GitCredential>, TaskGitCredentialsError> = block_on(fetch_with_retry(
         "test refresh",
         &GIT_CREDENTIALS_BOOTSTRAP_BACKOFF,
         || {
@@ -109,7 +163,7 @@ fn fetch_with_retry_exhausts_bounded_dependency_attempts() {
 #[test]
 fn fetch_with_retry_fails_fast_for_non_retryable_user_error() {
     let mut attempts = 0usize;
-    let result = block_on(fetch_with_retry(
+    let result: Result<Vec<GitCredential>, TaskGitCredentialsError> = block_on(fetch_with_retry(
         "test bootstrap",
         &GIT_CREDENTIALS_BOOTSTRAP_BACKOFF,
         || {
@@ -135,7 +189,7 @@ fn fetch_with_retry_fails_fast_for_non_retryable_user_error() {
 #[test]
 fn fetch_with_retry_fails_fast_without_isolation_platform() {
     let mut attempts = 0usize;
-    let result = block_on(fetch_with_retry(
+    let result: Result<Vec<GitCredential>, TaskGitCredentialsError> = block_on(fetch_with_retry(
         "test bootstrap",
         &GIT_CREDENTIALS_BOOTSTRAP_BACKOFF,
         || {
