@@ -70,11 +70,14 @@ use crate::network::NetworkStatus;
 use crate::send_telemetry_from_ctx;
 #[cfg(feature = "voice_input")]
 use crate::server::server_api::TranscribeError;
+#[cfg(feature = "voice_input")]
+use crate::server::team_scope::RequestTeamScope;
 #[cfg(not(target_family = "wasm"))]
 use crate::server::telemetry::PluginChipTelemetryAction;
 use crate::server::telemetry::{PluginChipTelemetryKind, TelemetryEvent};
 use crate::settings::{
-    AISettings, AISettingsChangedEvent, PrivacySettings, PrivacySettingsChangedEvent,
+    AISettings, AISettingsChangedEvent, CodeSettings, CodeSettingsChangedEvent, PrivacySettings,
+    PrivacySettingsChangedEvent,
 };
 use crate::settings_view::SettingsSection;
 #[cfg(not(target_family = "wasm"))]
@@ -212,8 +215,11 @@ pub struct AgentInputFooter {
 
     terminal_model: Arc<FairMutex<TerminalModel>>,
 
-    // CLI agent-specific buttons (rendered when a CLI agent session is active).
+    /// Opens the file explorer side panel. Available in both footers, but only
+    /// present in the CLI agent toolbar by default.
     file_explorer_button: ViewHandle<ActionButton>,
+
+    // CLI agent-specific buttons (rendered when a CLI agent session is active).
     rich_input_button: ViewHandle<ActionButton>,
     settings_button: ViewHandle<ActionButton>,
     install_plugin_button: ViewHandle<ActionButton>,
@@ -450,7 +456,6 @@ impl AgentInputFooter {
                 })
         });
 
-        // CLI agent-specific buttons (only rendered when a CLI agent session is active).
         let cli_button_size = ButtonSize::AgentInputButton;
         let file_explorer_button = ctx.add_typed_action_view(|ctx| {
             ActionButton::new("File explorer", AgentInputButtonTheme)
@@ -467,6 +472,7 @@ impl AgentInputFooter {
                     ctx.dispatch_typed_action(AgentInputFooterAction::ToggleFileExplorer);
                 })
         });
+        // CLI agent-specific buttons (only rendered when a CLI agent session is active).
         let rich_input_button = ctx.add_typed_action_view(|ctx| {
             ActionButton::new("Rich Input", AgentInputButtonTheme)
                 .with_icon(Icon::TextInput)
@@ -783,6 +789,13 @@ impl AgentInputFooter {
                 event,
                 PrivacySettingsChangedEvent::UpdateIsCloudConversationStorageEnabled { .. }
             ) {
+                ctx.notify()
+            }
+        });
+        // The File explorer item's availability follows this setting, so the footer has to
+        // repaint when it is toggled rather than waiting for an unrelated re-render.
+        ctx.subscribe_to_model(&CodeSettings::handle(ctx), |_, _, event, ctx| {
+            if matches!(event, CodeSettingsChangedEvent::ShowProjectExplorer { .. }) {
                 ctx.notify()
             }
         });
@@ -1402,12 +1415,12 @@ impl AgentInputFooter {
                                 model.record_plugin_auto_failure(agent, remote_host);
                             });
                             log::error!("Failed plugin operation log: {}", err.log);
-                            report_error!(
-                                anyhow::anyhow!("{err}").context("Failed plugin operation"),
-                                extra: { "agent" => ?agent }
-                            );
                             let mut toast =
                                 DismissibleToast::error(format!("{error_label}: {err}"));
+                            report_error!(
+                                anyhow::Error::new(err).context("Failed plugin operation"),
+                                extra: { "agent" => ?agent }
+                            );
                             if let Some(log_path) = log_path {
                                 toast = toast.with_link(
                                     ToastLink::new("See logs for details".to_owned())
@@ -1504,9 +1517,9 @@ impl AgentInputFooter {
             AgentToolbarItemKind::ContextChip(chip_kind) => {
                 self.cli_display_chip(chip_kind.clone(), app)
             }
-            AgentToolbarItemKind::FileExplorer => {
-                Some(ChildView::new(&self.file_explorer_button).finish())
-            }
+            AgentToolbarItemKind::FileExplorer => item
+                .is_available(app)
+                .then(|| ChildView::new(&self.file_explorer_button).finish()),
             AgentToolbarItemKind::RichInput => FeatureFlag::CLIAgentRichInput
                 .is_enabled()
                 .then(|| ChildView::new(&self.rich_input_button).finish()),
@@ -1671,7 +1684,7 @@ impl AgentInputFooter {
             .with_run_spacing(context_chips::spacing::UDI_ROW_RUN_SPACING)
             .finish();
         let content = EventHandler::new(content)
-            .on_right_mouse_down(|ctx, _, position| {
+            .on_right_mouse_down(|ctx, _, position, _| {
                 ctx.dispatch_typed_action(AgentInputFooterAction::ShowContextMenu { position });
                 DispatchEventResult::StopPropagation
             })
@@ -1876,6 +1889,9 @@ impl AgentInputFooter {
                     let language = AISettings::as_ref(ctx)
                         .voice_input_language_code()
                         .map(str::to_owned);
+                    let team_scope = RequestTeamScope::from_scope(
+                        &UserWorkspaces::as_ref(ctx).team_context_for_view(ctx),
+                    );
                     if !self.cli_voice_input_lifecycle.begin_transcribing() {
                         return;
                     }
@@ -1885,7 +1901,11 @@ impl AgentInputFooter {
                     });
 
                     self.cli_transcription_handle = Some(ctx.spawn(
-                        async move { transcriber.transcribe(wav_base64, language).await },
+                        async move {
+                            transcriber
+                                .transcribe(wav_base64, language, team_scope)
+                                .await
+                        },
                         AgentInputFooter::apply_cli_transcribed_voice_input,
                     ));
                 } else {
@@ -2239,10 +2259,11 @@ impl AgentInputFooter {
 
                 Some(ChildView::new(&self.handoff_to_cloud_button).finish())
             }
+            AgentToolbarItemKind::FileExplorer => item
+                .is_available(app)
+                .then(|| ChildView::new(&self.file_explorer_button).finish()),
             // Handled by the available_in() guard above; included for exhaustiveness.
-            AgentToolbarItemKind::FileExplorer
-            | AgentToolbarItemKind::RichInput
-            | AgentToolbarItemKind::Settings => None,
+            AgentToolbarItemKind::RichInput | AgentToolbarItemKind::Settings => None,
         }
     }
 
@@ -2402,7 +2423,7 @@ impl View for AgentInputFooter {
             .with_run_spacing(context_chips::spacing::UDI_ROW_RUN_SPACING)
             .finish();
         let content = EventHandler::new(content)
-            .on_right_mouse_down(|ctx, _, position| {
+            .on_right_mouse_down(|ctx, _, position, _| {
                 ctx.dispatch_typed_action(AgentInputFooterAction::ShowContextMenu { position });
                 DispatchEventResult::StopPropagation
             })
@@ -2495,9 +2516,9 @@ impl TypedActionView for AgentInputFooter {
                 }
             }
             AgentInputFooterAction::ToggleFileExplorer => {
-                if let Some(agent) = self.cli_agent(ctx) {
-                    ctx.emit(AgentInputFooterEvent::ToggleFileExplorer(agent));
-                }
+                ctx.emit(AgentInputFooterEvent::ToggleFileExplorer(
+                    self.cli_agent(ctx),
+                ));
             }
             AgentInputFooterAction::ToggleRichInput => {
                 if self.has_active_cli_agent_input_session(ctx) {
@@ -2662,7 +2683,9 @@ pub enum AgentInputFooterEvent {
     /// Insert text into the CLI agent rich input.
     InsertIntoCLIRichInput(String),
     ToggleCodeReviewPane(CLIAgent),
-    ToggleFileExplorer(CLIAgent),
+    /// Toggle the file explorer side panel. `None` when no CLI agent session is
+    /// attached to this pane.
+    ToggleFileExplorer(Option<CLIAgent>),
     StartRemoteControl,
     StopRemoteControl,
     OpenRichInput,

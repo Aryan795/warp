@@ -42,6 +42,8 @@ fn create_conversation_metadata(
             total_provider_cost_in_cents: None,
             credits_spent_for_last_block: None,
             platform_usage_in_cents_for_last_block: None,
+            charged_usage_for_last_block: None,
+            total_charged_usage: None,
             token_usage: vec![],
             tool_usage_metadata: Default::default(),
             context_window_segments: Vec::new(),

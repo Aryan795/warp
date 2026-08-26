@@ -1339,6 +1339,8 @@ fn create_server_metadata(
         total_provider_cost_in_cents: None,
         credits_spent_for_last_block: None,
         platform_usage_in_cents_for_last_block: None,
+        charged_usage_for_last_block: None,
+        total_charged_usage: None,
         token_usage: vec![],
         tool_usage_metadata: Default::default(),
         context_window_segments: Vec::new(),
@@ -3766,9 +3768,9 @@ fn charges_only_completion_emits_conversation_usage_metadata_updated_event() {
             model.update_conversation_cost_and_usage_for_request(
                 conversation_id,
                 None,
+                Some(request_charges),
                 vec![],
                 None,
-                Some(request_charges),
                 true,
                 ctx,
             );

@@ -521,6 +521,7 @@ impl BlocklistAIController {
                     platform_credits_spent: conversation.platform_credits_spent(),
                     summarized: conversation.was_summarized(),
                     total_input_tokens: 0,
+                    total_charges: None,
                     #[allow(deprecated)]
                     token_usage: conversation
                         .token_usage()
@@ -548,9 +549,6 @@ impl BlocklistAIController {
                         .iter()
                         .map(Into::into)
                         .collect(),
-                    // Synthetic cancellation event: no per-request charge
-                    // breakdown is available (or needed) for this notification.
-                    total_charges: None,
                 })
         });
 

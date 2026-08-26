@@ -7,6 +7,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc::SyncSender;
 
+use instant::Instant;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use markdown_parser::FormattedTextFragment;
@@ -26,11 +27,13 @@ use warp_cli::agent::Harness;
 use warp_core::command::ExitCode;
 use warp_core::context_flag::ContextFlag;
 use warp_errors::report_if_error;
+use warp_terminal::focus_env::add_session_focus_env_vars;
 use warp_terminal::shell::{ShellName, ShellType};
 #[cfg(feature = "local_fs")]
 use warp_util::path::LineAndColumnArg;
 use warp_util::path::convert_wsl_to_windows_host_path;
 use warp_util::remote_path::RemotePath;
+use warpui::r#async::SpawnedFutureHandle;
 use warpui::elements::{
     ChildView, Clipped, CrossAxisAlignment, DispatchEventResult, Element, EventHandler, Flex,
     MainAxisSize, ParentElement, Shrinkable, Stack,
@@ -120,7 +123,6 @@ use crate::shell_indicator::ShellIndicatorType;
 use crate::terminal::available_shells::{AvailableShell, AvailableShells};
 #[cfg(not(target_family = "wasm"))]
 use crate::terminal::cli_agent_sessions::plugin_manager::PluginModalKind;
-use crate::terminal::focus_env::add_session_focus_env_vars;
 use crate::terminal::general_settings::{GeneralSettings, GeneralSettingsChangedEvent};
 #[cfg(feature = "local_tty")]
 use crate::terminal::local_tty::TerminalManager as LocalTtyTerminalManager;
@@ -960,7 +962,13 @@ pub struct PaneGroup {
     /// fully materialized as local child conversations, keyed by the parent's
     /// run id. Re-driven from the shared `TasksUpdated` subscription until
     /// every child in the server-reported list has a local conversation.
-    pending_parent_child_seeds: HashMap<AmbientAgentTaskId, AIConversationId>,
+    pending_parent_child_seeds: HashMap<AmbientAgentTaskId, PendingParentChildSeed>,
+
+    /// Test-only: counts `spawn_ancestor_list_fetch_if_needed` dispatches, so
+    /// tests can assert that a burst of `TasksUpdated` re-drives coalesces
+    /// into a single ancestor-list fetch instead of one per event.
+    #[cfg(test)]
+    parent_child_seed_fetch_dispatch_count: usize,
 
     /// The most recent live session that failed to join for each viewer child.
     /// Re-drive does not retry the same session, but a later execution with a
@@ -987,6 +995,26 @@ pub struct PaneGroup {
 
     /// Tab-level custom title set via the rename-tab flow.
     custom_title: Option<String>,
+}
+
+/// A cloud orchestration parent whose direct children (per the server's
+/// `?ancestor_run_id=` listing) have not yet all materialized as local child
+/// conversations.
+struct PendingParentChildSeed {
+    parent_conversation_id: AIConversationId,
+    /// True while an ancestor-list fetch for this parent is outstanding, so
+    /// a second, overlapping request for the same parent is never dispatched.
+    fetch_in_flight: bool,
+    /// When the currently in-flight fetch (if any) was dispatched. Compared
+    /// against the value captured at dispatch time before a completion is
+    /// applied, so a completion for a seed that was removed and recreated
+    /// for the same `parent_task_id` while the old fetch was still in
+    /// flight can't clobber the new seed's state or feed it stale results.
+    in_flight_fetch_started_at: Option<Instant>,
+    /// Handle for a scheduled one-shot retry after a transient fetch
+    /// failure, so a transient error can't silently strand the parent
+    /// pending forever without ever linking its children.
+    retry_handle: Option<SpawnedFutureHandle>,
 }
 
 /// Origin metadata for a split-off child agent tab; used to re-adopt the
@@ -3187,6 +3215,8 @@ impl PaneGroup {
             pending_remote_child_hydrations: HashMap::new(),
             pending_child_hydrations: HashMap::new(),
             pending_parent_child_seeds: HashMap::new(),
+            #[cfg(test)]
+            parent_child_seed_fetch_dispatch_count: 0,
             failed_viewer_child_sessions: HashMap::new(),
             pending_ambient_restoration_subscription_installed: false,
             child_agent_panes: HashMap::new(),
@@ -4663,13 +4693,21 @@ impl PaneGroup {
             self.panes.remove_hidden_pane(child_pane_id);
             self.discard_pane(child_pane_id, ctx);
         }
-        // Drop any pending parent seed associated with the view being removed
-        // so the re-drive subscription doesn't fire for a closed pane.
-        self.pending_parent_child_seeds.retain(|_, parent_conv_id| {
-            BlocklistAIHistoryModel::as_ref(ctx)
-                .terminal_surface_id_for_conversation(parent_conv_id)
-                .is_some_and(|tv_id| tv_id != parent_terminal_view_id)
-        });
+        // Drop any pending parent seed for the view being removed, aborting
+        // its retry timer so it can't fire after the pane is gone.
+        let parent_task_ids_to_remove: Vec<AmbientAgentTaskId> = self
+            .pending_parent_child_seeds
+            .iter()
+            .filter(|(_, seed)| {
+                BlocklistAIHistoryModel::as_ref(ctx)
+                    .terminal_surface_id_for_conversation(&seed.parent_conversation_id)
+                    .is_some_and(|tv_id| tv_id == parent_terminal_view_id)
+            })
+            .map(|(parent_task_id, _)| *parent_task_id)
+            .collect();
+        for parent_task_id in parent_task_ids_to_remove {
+            self.remove_pending_parent_child_seed(parent_task_id);
+        }
     }
 
     /// Permanently discards the pane backing a child agent conversation.
@@ -5056,6 +5094,7 @@ impl PaneGroup {
         file_pane_id: PaneId,
         path: LocalOrRemotePath,
         source: Option<crate::code::editor_management::CodeSource>,
+        scroll_fraction: Option<f32>,
         ctx: &mut ViewContext<Self>,
     ) {
         use crate::code::editor_management::CodeSource;
@@ -5065,6 +5104,14 @@ impl PaneGroup {
         let source = source.unwrap_or(CodeSource::FileTree { location: path });
 
         let code_pane = CodePane::new(source, None, ctx);
+        // Seed the restored scroll before the pane attaches and lays out. The fraction is consumed
+        // on a later async `ViewportUpdated` (never within this synchronous pass), so setting it
+        // here is strictly before any possible apply.
+        if let Some(fraction) = scroll_fraction {
+            code_pane.file_view(ctx).update(ctx, |code_view, ctx| {
+                code_view.set_pending_scroll_fraction(fraction, ctx);
+            });
+        }
         let success = self.replace_pane(file_pane_id, code_pane, false, ctx);
 
         if !success {
@@ -5081,6 +5128,7 @@ impl PaneGroup {
         code_pane_id: PaneId,
         path: LocalOrRemotePath,
         source: Option<crate::code::editor_management::CodeSource>,
+        scroll_fraction: Option<f32>,
         ctx: &mut ViewContext<Self>,
     ) {
         // Get the active session to pass to the FilePane, if any
@@ -5096,7 +5144,14 @@ impl PaneGroup {
             }
         });
 
-        let file_pane = FilePane::new(Some(path), session, source, ctx);
+        // Construct the pane empty, seed the restored scroll, THEN open the path — so the content
+        // load that triggers `set_content` -> scroll apply can never run before the pending
+        // fraction is set, even if a load were to deliver synchronously.
+        let file_pane = FilePane::new(None, None, source, ctx);
+        file_pane.file_view(ctx).update(ctx, |view, ctx| {
+            view.set_pending_scroll_fraction(scroll_fraction);
+            view.open(path, session, ctx);
+        });
         let success = self.replace_pane(code_pane_id, file_pane, false, ctx);
 
         if !success {
@@ -5151,12 +5206,32 @@ impl PaneGroup {
             }
             PaneEvent::ClearHoveredTabIndex => ctx.emit(Event::ClearHoveredTabIndex),
             #[cfg(feature = "local_fs")]
-            PaneEvent::ReplaceWithCodePane { path, source } => {
-                self.replace_file_pane_with_code_pane(pane_id, path.clone(), source.clone(), ctx);
+            PaneEvent::ReplaceWithCodePane {
+                path,
+                source,
+                scroll_fraction,
+            } => {
+                self.replace_file_pane_with_code_pane(
+                    pane_id,
+                    path.clone(),
+                    source.clone(),
+                    (*scroll_fraction).map(|f| f.into_inner()),
+                    ctx,
+                );
             }
             #[cfg(feature = "local_fs")]
-            PaneEvent::ReplaceWithFilePane { path, source } => {
-                self.replace_code_pane_with_file_pane(pane_id, path.clone(), source.clone(), ctx);
+            PaneEvent::ReplaceWithFilePane {
+                path,
+                source,
+                scroll_fraction,
+            } => {
+                self.replace_code_pane_with_file_pane(
+                    pane_id,
+                    path.clone(),
+                    source.clone(),
+                    (*scroll_fraction).map(|f| f.into_inner()),
+                    ctx,
+                );
             }
             PaneEvent::RepoChanged => {
                 ctx.emit(Event::RepoChanged);

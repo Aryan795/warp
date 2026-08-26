@@ -171,6 +171,7 @@ fn create_finished_event_from_conversation(conversation: &AIConversation) -> Res
             #[allow(deprecated)]
             platform_credits_spent: conversation.platform_credits_spent(),
             summarized: conversation.was_summarized(),
+            total_charges: None,
             #[allow(deprecated)]
             token_usage: conversation
                 .token_usage()
@@ -198,9 +199,6 @@ fn create_finished_event_from_conversation(conversation: &AIConversation) -> Res
                 .iter()
                 .map(Into::into)
                 .collect(),
-            // Replayed shared-session events don't carry a per-request charge
-            // breakdown.
-            total_charges: None,
         },
     );
 

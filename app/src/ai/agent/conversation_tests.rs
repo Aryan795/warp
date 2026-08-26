@@ -18,7 +18,7 @@ use crate::auth::AuthStateProvider;
 use crate::auth::auth_manager::AuthManager;
 use crate::network::NetworkStatus;
 use crate::persistence::model::{
-    AgentConversationData, ConversationUsageMetadata, PersistedModelTokenCost,
+    AgentConversationData, ChargedUsageTotals, ConversationUsageMetadata, PersistedModelTokenCost,
 };
 use crate::server::server_api::ServerApiProvider;
 use crate::test_util::settings::initialize_settings_for_tests;
@@ -308,6 +308,7 @@ fn custom_endpoint_usage_metadata(
         token_usage: vec![],
         tool_usage_metadata: None,
         total_input_tokens: 0,
+        total_charges: None,
         warp_token_usage: HashMap::new(),
         byok_token_usage: HashMap::new(),
         context_window_segments: Vec::new(),
@@ -319,7 +320,6 @@ fn custom_endpoint_usage_metadata(
                 token_usage_by_category: HashMap::from([(category, total_tokens)]),
             },
         )]),
-        total_charges: None,
     }
 }
 
@@ -670,9 +670,9 @@ fn restored_usage_totals_preserve_server_provider_cost_and_add_follow_up() {
                 conversation
                     .update_cost_and_usage_for_request(
                         None,
+                        None,
                         vec![stream_token_usage("model-a", 10, 2, 1.2)],
                         Some(credits_usage_metadata(1.0, 0.0)),
-                        None,
                         false,
                         ctx,
                     )
@@ -744,9 +744,9 @@ fn restored_legacy_conversation_keeps_provider_cost_unavailable_after_follow_up(
             conversation
                 .update_cost_and_usage_for_request(
                     None,
+                    None,
                     vec![stream_token_usage("legacy-model", 10, 2, 1.5)],
                     Some(credits_usage_metadata(1.0, 0.0)),
-                    None,
                     false,
                     ctx,
                 )
@@ -786,9 +786,9 @@ fn update_cost_and_usage_resolves_custom_endpoint_alias_for_footer_usage() {
             conversation
                 .update_cost_and_usage_for_request(
                     None,
+                    None,
                     vec![],
                     Some(custom_endpoint_usage_metadata("config-key", 6)),
-                    None,
                     false,
                     ctx,
                 )
@@ -822,9 +822,9 @@ fn update_cost_and_usage_uses_fallback_label_for_unknown_custom_endpoint() {
             conversation
                 .update_cost_and_usage_for_request(
                     None,
+                    None,
                     vec![],
                     Some(custom_endpoint_usage_metadata("missing-config-key", 9)),
-                    None,
                     false,
                     ctx,
                 )
@@ -876,11 +876,11 @@ fn credits_usage_metadata(
         token_usage: vec![],
         tool_usage_metadata: None,
         total_input_tokens: 0,
+        total_charges: None,
         warp_token_usage: HashMap::new(),
         byok_token_usage: HashMap::new(),
         context_window_segments: Vec::new(),
         custom_endpoint_token_usage: HashMap::new(),
-        total_charges: None,
     }
 }
 
@@ -897,6 +897,7 @@ fn usage_totals_reads_gui_credits_and_accumulates_provider_cost() {
                 credits_spent: 0.0,
                 cost_in_cents: Some(0.0),
                 has_usage: false,
+                charged_usage: None,
             }
         );
 
@@ -904,9 +905,9 @@ fn usage_totals_reads_gui_credits_and_accumulates_provider_cost() {
             conversation
                 .update_cost_and_usage_for_request(
                     None,
+                    None,
                     vec![stream_token_usage("model-a", 100, 20, 1.5)],
                     Some(credits_usage_metadata(2.0, 0.5)),
-                    None,
                     false,
                     ctx,
                 )
@@ -917,9 +918,9 @@ fn usage_totals_reads_gui_credits_and_accumulates_provider_cost() {
             conversation
                 .update_cost_and_usage_for_request(
                     None,
+                    None,
                     vec![stream_token_usage("model-a", 50, 10, 1.2)],
                     Some(credits_usage_metadata(3.0, 0.5)),
-                    None,
                     false,
                     ctx,
                 )
@@ -976,6 +977,93 @@ fn request_charges_for_model(
     }
 }
 
+/// APP-5579 regression: for a single-response conversation, the footer's
+/// "total" dollar figure must come from the same accounting family as its
+/// "last response" figure, even when the older provider-only cost
+/// accumulator has diverged from the charged-usage total (e.g. by a
+/// rounded cent). Both figures must read from charged usage.
+#[test]
+fn usage_totals_dollar_total_matches_last_block_when_provider_cost_diverges() {
+    let mut conversation = AIConversation::new(false, false);
+
+    let charged_usage = ChargedUsageTotals {
+        input_cost_in_cents: 4.0,
+        ..Default::default()
+    };
+    // Deliberately diverge the provider-only baseline from the charged-
+    // usage total, mirroring the reported symptom of a stale/rounded
+    // provider figure sitting alongside an accurate charged-usage figure.
+    conversation.set_cost_in_cents_for_test(Some(5.0));
+    conversation.set_charged_usage_for_test(Some(charged_usage));
+    conversation.set_charged_usage_for_last_block_for_test(Some(charged_usage));
+
+    let totals = conversation.usage_totals();
+    let last_block_cost_in_cents = conversation
+        .charged_usage_for_last_block()
+        .expect("last block charged usage should be set")
+        .total_cost_in_cents();
+
+    assert_eq!(
+        totals.total_cost_in_cents(),
+        Some(last_block_cost_in_cents),
+        "a single-response conversation's total dollar figure must match its \
+         last-response figure, not the divergent provider-only baseline"
+    );
+    assert_eq!(totals.total_cost_in_cents(), Some(4.0));
+}
+
+/// A known-zero baseline is a real value, not an absence, so it must fall
+/// back too rather than reading as unknown.
+#[test]
+fn total_cost_in_cents_falls_back_to_provider_baseline_without_charged_usage() {
+    let known_positive =
+        restored_conversation(Some(conversation_data_with_provider_cost(Some(3.2))));
+    assert_eq!(
+        known_positive.usage_totals().total_cost_in_cents(),
+        Some(3.2)
+    );
+
+    let known_zero = restored_conversation(Some(conversation_data_with_provider_cost(Some(0.0))));
+    assert_eq!(known_zero.usage_totals().total_cost_in_cents(), Some(0.0));
+
+    let unknown = restored_conversation(Some(conversation_data_with_provider_cost(None)));
+    assert_eq!(unknown.usage_totals().total_cost_in_cents(), None);
+}
+
+/// A new user-initiated turn must reset `charged_usage_for_last_block`
+/// even when the request that starts it carries no `RequestCharges` at
+/// all -- otherwise a stale breakdown from a previous (charged) turn
+/// would leak into a subsequent uncharged turn.
+#[test]
+fn update_cost_and_usage_resets_stale_charged_usage_for_last_block_on_new_user_turn() {
+    App::test((), |mut app| async move {
+        initialize_custom_endpoint_usage_test_app(&mut app);
+        app.add_singleton_model(LLMPreferences::new);
+
+        let mut conversation = AIConversation::new(false, false);
+        // Simulate a stale last-block breakdown left over from a previous
+        // response, as would happen if this turn's request carries no
+        // `request_charges` (e.g. the flag is off for it).
+        conversation.set_charged_usage_for_last_block_for_test(Some(ChargedUsageTotals {
+            input_tokens: 500,
+            ..Default::default()
+        }));
+
+        app.read(|ctx| {
+            conversation
+                .update_cost_and_usage_for_request(None, None, vec![], None, true, ctx)
+                .expect("usage should update");
+        });
+
+        assert_eq!(
+            conversation.charged_usage_for_last_block(),
+            None,
+            "a new user-initiated turn must clear the previous block's stale charged usage, \
+             even when this turn's request itself carries no charges"
+        );
+    });
+}
+
 /// Per-model turn-scoped usage is derived from persisted state
 /// (`ConversationUsageMetadata::cumulative_token_cost_by_model` diffed
 /// against `turn_usage_baseline.per_model`), so it must still be correct
@@ -997,9 +1085,9 @@ fn per_model_usage_for_last_block_survives_restore() {
             conversation
                 .update_cost_and_usage_for_request(
                     None,
+                    Some(request_charges_for_model("model-a", 100, 20, 1.5)),
                     vec![],
                     None,
-                    Some(request_charges_for_model("model-a", 100, 20, 1.5)),
                     true,
                     ctx,
                 )
@@ -1008,9 +1096,9 @@ fn per_model_usage_for_last_block_survives_restore() {
             conversation
                 .update_cost_and_usage_for_request(
                     None,
+                    Some(request_charges_for_model("model-a", 50, 10, 2.5)),
                     vec![],
                     None,
-                    Some(request_charges_for_model("model-a", 50, 10, 2.5)),
                     true,
                     ctx,
                 )
@@ -1072,7 +1160,7 @@ fn platform_usage_resets_when_a_new_turn_has_no_charges() {
                 .expect("category should exist")
                 .platform_usage_in_cents = 42.0;
             conversation
-                .update_cost_and_usage_for_request(None, vec![], None, Some(charged), true, ctx)
+                .update_cost_and_usage_for_request(None, Some(charged), vec![], None, true, ctx)
                 .expect("usage should update");
         });
         assert_eq!(
@@ -1082,7 +1170,7 @@ fn platform_usage_resets_when_a_new_turn_has_no_charges() {
 
         app.read(|ctx| {
             conversation
-                .update_cost_and_usage_for_request(None, vec![], None, None, true, ctx)
+                .update_cost_and_usage_for_request(None, None, vec![], None, true, ctx)
                 .expect("usage should update");
         });
 
@@ -1135,9 +1223,9 @@ fn per_model_usage_for_last_block_includes_web_search_only_activity() {
             conversation
                 .update_cost_and_usage_for_request(
                     None,
+                    Some(request_charges_with_web_search_only("model-a", 3, 1.2)),
                     vec![],
                     None,
-                    Some(request_charges_with_web_search_only("model-a", 3, 1.2)),
                     true,
                     ctx,
                 )
@@ -1221,9 +1309,9 @@ fn cumulative_token_cost_by_model_resolves_custom_endpoint_alias() {
             conversation
                 .update_cost_and_usage_for_request(
                     None,
+                    Some(request_charges),
                     vec![],
                     None,
-                    Some(request_charges),
                     true,
                     ctx,
                 )
@@ -1281,9 +1369,9 @@ fn turn_usage_snapshot_for_exchange_preserves_historical_turn_data() {
             conversation
                 .update_cost_and_usage_for_request(
                     None,
+                    Some(request_charges_for_model("model-a", 100, 20, 1.5)),
                     vec![],
                     None,
-                    Some(request_charges_for_model("model-a", 100, 20, 1.5)),
                     true,
                     ctx,
                 )
@@ -1299,9 +1387,9 @@ fn turn_usage_snapshot_for_exchange_preserves_historical_turn_data() {
             conversation
                 .update_cost_and_usage_for_request(
                     None,
+                    Some(request_charges_for_model("model-b", 30, 5, 0.7)),
                     vec![],
                     None,
-                    Some(request_charges_for_model("model-b", 30, 5, 0.7)),
                     true,
                     ctx,
                 )
@@ -1377,6 +1465,7 @@ fn footer_model_token_usage_keeps_custom_endpoint_usage_distinct_from_same_label
             token_usage: vec![],
             tool_usage_metadata: None,
             total_input_tokens: 0,
+            total_charges: None,
             warp_token_usage: HashMap::new(),
             byok_token_usage: HashMap::from([(
                 "Resolved custom".to_string(),
@@ -1395,7 +1484,6 @@ fn footer_model_token_usage_keeps_custom_endpoint_usage_distinct_from_same_label
                 },
             )]),
             context_window_segments: Vec::new(),
-            total_charges: None,
         };
 
         let model_usage =
@@ -1443,6 +1531,7 @@ fn footer_model_token_usage_preserves_unresolved_custom_endpoint_usage_with_fall
             token_usage: vec![],
             tool_usage_metadata: None,
             total_input_tokens: 0,
+            total_charges: None,
             warp_token_usage: HashMap::new(),
             byok_token_usage: HashMap::new(),
             custom_endpoint_token_usage: HashMap::from([(
@@ -1454,7 +1543,6 @@ fn footer_model_token_usage_preserves_unresolved_custom_endpoint_usage_with_fall
                 },
             )]),
             context_window_segments: Vec::new(),
-            total_charges: None,
         };
 
         let model_usage =
