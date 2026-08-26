@@ -13,15 +13,14 @@ use warp_multi_agent_api::response_event;
 use warpui::r#async::Timer;
 use warpui::{Entity, ModelContext, SingletonEntity};
 
-use crate::ai::agent::api::{
-    self, ConvertToAPITypeError, RequestTeamScope, generate_multi_agent_output,
-};
+use crate::ai::agent::api::{self, ConvertToAPITypeError, generate_multi_agent_output};
 use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::agent::{AIIdentifiers, CancellationReason};
 use crate::network::NetworkStatus;
 use crate::send_telemetry_from_ctx;
 use crate::server::retry_strategies::backoff_after_attempts;
 use crate::server::server_api::{AIApiError, ServerApiProvider};
+use crate::server::team_scope::RequestTeamScope;
 #[cfg(test)]
 use crate::workspaces::user_workspaces::TeamlessScopeForTest;
 
@@ -316,6 +315,16 @@ impl ResponseStream {
             event,
         ))));
     }
+
+    /// Emits the natural-completion `AfterStreamFinished` event (no cancellation) through
+    /// the normal controller subscription, mirroring what `on_response_stream_complete`
+    /// emits once the real network stream ends. Lets a test drive the controller's
+    /// post-stream-cleanup pending-events re-check without a real stream.
+    #[cfg(test)]
+    pub fn emit_after_stream_finished_for_test(&mut self, ctx: &mut ModelContext<Self>) {
+        ctx.emit(ResponseStreamEvent::AfterStreamFinished { cancellation: None });
+    }
+
     #[cfg(test)]
     pub fn new_for_test(id: ResponseStreamId) -> Self {
         let (cancellation_tx, _rx) = oneshot::channel();

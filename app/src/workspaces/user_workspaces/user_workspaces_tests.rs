@@ -79,8 +79,9 @@ use crate::workspaces::update_manager::TeamUpdateManager;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::workspaces::workspace::{
     AdminEnablementSetting, ByoFirstPartyKey, EnforceableSetting, HostEnablementSetting,
-    LlmHostSettings, ManagedByokByoePolicy, MultiAdminPolicy, PurchaseAddOnCreditsPolicy,
-    SandboxedAgentSettings, SplitListSetting, TeamByoSettings, Workspace,
+    LinkSharingSettings, LlmHostSettings, ManagedByokByoePolicy, MultiAdminPolicy,
+    PurchaseAddOnCreditsPolicy, SandboxedAgentSettings, SplitListSetting, TeamByoSettings,
+    TeamLinkSharingSettings, Workspace,
 };
 
 #[derive(Default)]
@@ -884,6 +885,7 @@ fn admin_billing_link_for_default_team_targets_the_first_admin_team() {
         uid: user_uid,
         email: email.to_owned(),
         role: MembershipRole::Owner,
+        is_disabled: false,
     });
     let mut second_team = first_team.clone();
     second_team.uid = 456.into();
@@ -916,6 +918,7 @@ fn admin_billing_link_for_default_team_accepts_admin_when_multi_admin_is_enabled
         uid: user_uid,
         email: email.to_owned(),
         role: MembershipRole::Admin,
+        is_disabled: false,
     });
     let team_uid = team.uid;
     let workspace = workspace_for_test(&team);
@@ -944,6 +947,7 @@ fn admin_billing_link_for_default_team_rejects_admin_without_multi_admin_policy(
         uid: user_uid,
         email: email.to_owned(),
         role: MembershipRole::Admin,
+        is_disabled: false,
     });
     let workspace = workspace_for_test(&team);
 
@@ -968,6 +972,7 @@ fn admin_billing_link_for_default_team_rejects_regular_members() {
         uid: user_uid,
         email: email.to_owned(),
         role: MembershipRole::User,
+        is_disabled: false,
     });
     let workspace = workspace_for_test(&team);
 
@@ -2366,6 +2371,118 @@ fn test_sandboxed_agent_denylist_falls_back_to_the_workspace_for_a_user_with_no_
     })
 }
 
+fn two_teams_with_opposing_link_sharing_policy() -> (Team, Team) {
+    fn link_sharing_settings(permitted: bool) -> TeamLinkSharingSettings {
+        let setting = EnforceableSetting {
+            value: permitted,
+            is_enforced_by_workspace: false,
+        };
+        TeamLinkSharingSettings {
+            anyone_with_link_sharing_enabled: setting.clone(),
+            direct_link_sharing_enabled: setting,
+        }
+    }
+
+    let (mut team_a, mut team_b) = two_teams();
+    team_a.settings.link_sharing = link_sharing_settings(true);
+    team_b.settings.link_sharing = link_sharing_settings(false);
+    (team_a, team_b)
+}
+
+#[test]
+fn link_sharing_follows_each_scopes_team() {
+    let (team_a, team_b) = two_teams_with_opposing_link_sharing_policy();
+    let mut workspace = workspace_for_test(&team_a);
+    workspace.teams.push(team_b.clone());
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            let scope_a = TeamContextForOperation::new_for_test(team_a.uid);
+            let scope_b = TeamContextForOperation::new_for_test(team_b.uid);
+
+            assert!(user_workspaces.is_anyone_with_link_sharing_enabled(&scope_a));
+            assert!(user_workspaces.is_direct_link_sharing_enabled(&scope_a));
+            assert!(!user_workspaces.is_anyone_with_link_sharing_enabled(&scope_b));
+            assert!(!user_workspaces.is_direct_link_sharing_enabled(&scope_b));
+        });
+    })
+}
+
+fn assert_teamless_scope_reads_workspace_link_sharing_policy(permitted: bool) {
+    let (_team_a, team_b) = two_teams_with_opposing_link_sharing_policy();
+    let mut workspace = workspace_for_test(&team_b);
+    workspace.teams.clear();
+    workspace.settings.link_sharing_settings = LinkSharingSettings {
+        anyone_with_link_sharing_enabled: permitted,
+        direct_link_sharing_enabled: permitted,
+    };
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            let scope = TeamlessScopeForTest;
+            assert_eq!(
+                user_workspaces.is_anyone_with_link_sharing_enabled(&scope),
+                permitted
+            );
+            assert_eq!(
+                user_workspaces.is_direct_link_sharing_enabled(&scope),
+                permitted
+            );
+        });
+    })
+}
+
+#[test]
+fn link_sharing_for_a_teamless_scope_follows_a_permissive_workspace() {
+    assert_teamless_scope_reads_workspace_link_sharing_policy(true);
+}
+
+#[test]
+fn link_sharing_for_a_teamless_scope_follows_a_restrictive_workspace() {
+    assert_teamless_scope_reads_workspace_link_sharing_policy(false);
+}
+
+#[test]
+fn link_sharing_fails_open_for_an_unresolvable_team() {
+    let (_team_a, team_b) = two_teams_with_opposing_link_sharing_policy();
+    let mut workspace = workspace_for_test(&team_b);
+    workspace.settings.link_sharing_settings = LinkSharingSettings {
+        anyone_with_link_sharing_enabled: false,
+        direct_link_sharing_enabled: false,
+    };
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        let scope = TeamContextForOperation::new_for_test(9999.into());
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert!(user_workspaces.is_anyone_with_link_sharing_enabled(&scope));
+            assert!(user_workspaces.is_direct_link_sharing_enabled(&scope));
+        });
+    })
+}
+
+#[test]
+fn link_sharing_fails_open_without_a_workspace() {
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![]);
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            let scope = TeamlessScopeForTest;
+            assert!(user_workspaces.is_anyone_with_link_sharing_enabled(&scope));
+            assert!(user_workspaces.is_direct_link_sharing_enabled(&scope));
+        });
+    })
+}
+
 #[test]
 fn test_spaces_for_window_orders_selected_team_shared_and_personal() {
     let _flag = FeatureFlag::SharedWithMe.override_enabled(true);
@@ -3273,6 +3390,7 @@ fn test_remove_user_from_team_success_emits_success_event_and_refreshes_members(
         uid: user_uid,
         email: "member@example.com".to_string(),
         role: MembershipRole::User,
+        is_disabled: false,
     });
     let team_uid = team.uid;
     let workspace = workspace_for_test(&team);
@@ -3586,6 +3704,7 @@ fn gql_team(uid: &str, name: &str, member_uids: &[&str]) -> GqlTeam {
                 uid: (*member_uid).into(),
                 email: format!("{member_uid}@example.com"),
                 role: GqlMembershipRole::User,
+                is_disabled: false,
             })
             .collect(),
         settings: gql_team_settings(),

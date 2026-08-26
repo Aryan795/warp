@@ -1,8 +1,9 @@
 use warp_core::channel::{Channel, ChannelState};
 
-use super::{RequestParams, RequestTeamScope, ServerConversationToken};
+use super::{RequestParams, ServerConversationToken};
 use crate::ai::agent::ServerOutputId;
 use crate::server::ids::ServerId;
+use crate::server::team_scope::RequestTeamScope;
 use crate::workspaces::user_workspaces::{TeamContextForOperation, TeamlessScopeForTest};
 
 #[test]
