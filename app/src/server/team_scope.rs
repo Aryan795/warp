@@ -23,6 +23,9 @@ impl RequestTeamScope {
 
     /// No team header, for call sites with no window to resolve one from. Distinct from
     /// guessing a fallback team: this says there is no scope here.
+    ///
+    /// Only called from the remote-server daemon, which never runs on wasm.
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
     pub(crate) fn none_for_headless_context() -> Self {
         Self(None)
     }
