@@ -370,7 +370,11 @@ impl ConversationUsageView {
         {
             let last_block_credits = self.usage_info.credits_spent_for_last_block.unwrap();
             labels.push(render_label_text(
-                &usage_label(UsageLabelKind::LastResponse, usage_display_unit),
+                &usage_label(
+                    UsageLabelKind::LastResponse,
+                    self.usage_info.cost_in_cents_for_last_block,
+                    usage_display_unit,
+                ),
                 appearance,
             ));
             values.push(render_value_text(
@@ -384,7 +388,11 @@ impl ConversationUsageView {
             ));
 
             labels.push(render_label_text(
-                &usage_label(UsageLabelKind::Total, usage_display_unit),
+                &usage_label(
+                    UsageLabelKind::Total,
+                    total_cost_in_cents_value,
+                    usage_display_unit,
+                ),
                 appearance,
             ));
             values.push(self.render_total_usage_value_row(
@@ -397,7 +405,11 @@ impl ConversationUsageView {
             ));
         } else {
             labels.push(render_label_text(
-                &usage_label(UsageLabelKind::Plain, usage_display_unit),
+                &usage_label(
+                    UsageLabelKind::Plain,
+                    total_cost_in_cents_value,
+                    usage_display_unit,
+                ),
                 appearance,
             ));
             values.push(self.render_total_usage_value_row(

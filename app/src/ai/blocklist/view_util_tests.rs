@@ -92,19 +92,27 @@ fn usage_label_uses_dollars_wording_when_unit_is_dollars_and_flag_enabled() {
     let _flag = FeatureFlag::PricingTransparency.override_enabled(true);
 
     assert_eq!(
-        usage_label(UsageLabelKind::Plain, UsageDisplayUnit::Dollars),
+        usage_label(UsageLabelKind::Plain, Some(36.0), UsageDisplayUnit::Dollars),
         "Usage charged"
     );
     assert_eq!(
-        usage_label(UsageLabelKind::LastResponse, UsageDisplayUnit::Dollars),
+        usage_label(
+            UsageLabelKind::LastResponse,
+            Some(36.0),
+            UsageDisplayUnit::Dollars
+        ),
         "Usage charged (last response)"
     );
     assert_eq!(
-        usage_label(UsageLabelKind::Total, UsageDisplayUnit::Dollars),
+        usage_label(UsageLabelKind::Total, Some(36.0), UsageDisplayUnit::Dollars),
         "Usage charged (total)"
     );
     assert_eq!(
-        usage_label(UsageLabelKind::DetailsPanel, UsageDisplayUnit::Dollars),
+        usage_label(
+            UsageLabelKind::DetailsPanel,
+            Some(36.0),
+            UsageDisplayUnit::Dollars
+        ),
         "Usage"
     );
 }
@@ -114,19 +122,27 @@ fn usage_label_uses_credits_wording_when_unit_is_credits() {
     let _flag = FeatureFlag::PricingTransparency.override_enabled(true);
 
     assert_eq!(
-        usage_label(UsageLabelKind::Plain, UsageDisplayUnit::Credits),
+        usage_label(UsageLabelKind::Plain, None, UsageDisplayUnit::Credits),
         "Credits spent"
     );
     assert_eq!(
-        usage_label(UsageLabelKind::LastResponse, UsageDisplayUnit::Credits),
+        usage_label(
+            UsageLabelKind::LastResponse,
+            None,
+            UsageDisplayUnit::Credits
+        ),
         "Credits spent (last response)"
     );
     assert_eq!(
-        usage_label(UsageLabelKind::Total, UsageDisplayUnit::Credits),
+        usage_label(UsageLabelKind::Total, None, UsageDisplayUnit::Credits),
         "Credits spent (total)"
     );
     assert_eq!(
-        usage_label(UsageLabelKind::DetailsPanel, UsageDisplayUnit::Credits),
+        usage_label(
+            UsageLabelKind::DetailsPanel,
+            None,
+            UsageDisplayUnit::Credits
+        ),
         "Credits used"
     );
 }
@@ -136,7 +152,20 @@ fn usage_label_uses_credits_wording_when_flag_disabled_even_if_unit_is_dollars()
     let _flag = FeatureFlag::PricingTransparency.override_enabled(false);
 
     assert_eq!(
-        usage_label(UsageLabelKind::Plain, UsageDisplayUnit::Dollars),
+        usage_label(UsageLabelKind::Plain, Some(36.0), UsageDisplayUnit::Dollars),
+        "Credits spent"
+    );
+}
+
+#[test]
+fn usage_label_uses_credits_wording_when_dollars_requested_but_cost_unavailable() {
+    let _flag = FeatureFlag::PricingTransparency.override_enabled(true);
+
+    // Matches format_usage_falls_back_to_credits_when_dollars_unavailable: when
+    // no cost figure is available, the value falls back to plain credits, so
+    // the label must match rather than saying "Usage charged".
+    assert_eq!(
+        usage_label(UsageLabelKind::Plain, None, UsageDisplayUnit::Dollars),
         "Credits spent"
     );
 }

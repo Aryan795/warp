@@ -299,25 +299,41 @@ pub fn format_credits(credits: f32) -> String {
     }
 }
 
-/// Formats the figure for `unit`. `None` when `unit` is `Dollars` but no
-/// cost figure is available.
+/// Derives the unit actually displayed for a usage figure, accounting for
+/// `FeatureFlag::PricingTransparency` and for cost-data availability.
+/// `format_usage` and [`usage_label`] both derive from this so a label and
+/// its value never disagree: whenever `Dollars` can't actually be shown
+/// (flag disabled, or no cost figure available), both fall back to `Credits`.
+fn effective_usage_unit(unit: UsageDisplayUnit, cost_in_cents: Option<f32>) -> UsageDisplayUnit {
+    if !FeatureFlag::PricingTransparency.is_enabled() {
+        return UsageDisplayUnit::Credits;
+    }
+    match unit {
+        UsageDisplayUnit::Credits => UsageDisplayUnit::Credits,
+        UsageDisplayUnit::Dollars if cost_in_cents.is_some() => UsageDisplayUnit::Dollars,
+        UsageDisplayUnit::Dollars => UsageDisplayUnit::Credits,
+    }
+}
+
+/// Formats the figure for `unit`. Falls back to a plain credits figure if
+/// `unit` is `Dollars` but no cost figure is available.
 fn format_usage_unit_value(
     credits: f32,
     cost_in_cents: Option<f32>,
     unit: UsageDisplayUnit,
-) -> Option<String> {
+) -> String {
     match unit {
-        UsageDisplayUnit::Credits => Some(format_credits(credits)),
-        UsageDisplayUnit::Dollars => {
-            cost_in_cents.map(|cost_in_cents| format!("${:.2}", cost_in_cents / 100.0))
-        }
+        UsageDisplayUnit::Credits => format_credits(credits),
+        UsageDisplayUnit::Dollars => cost_in_cents
+            .map(|cost_in_cents| format!("${:.2}", cost_in_cents / 100.0))
+            .unwrap_or_else(|| format_credits(credits)),
     }
 }
 
 /// Formats a usage figure as its token count plus exactly one of credits or
 /// dollars, e.g. `"12,345 tokens / 20 credits"` or `"12,345 tokens / $0.36"`.
 /// Zero/unknown token counts are omitted. Falls back to a plain credits
-/// figure when no dollar figure is available or
+/// figure (without a token breakdown) when no dollar figure is available or
 /// `FeatureFlag::PricingTransparency` is disabled.
 pub fn format_usage(
     credits: f32,
@@ -325,12 +341,11 @@ pub fn format_usage(
     cost_in_cents: Option<f32>,
     unit: UsageDisplayUnit,
 ) -> String {
-    if !FeatureFlag::PricingTransparency.is_enabled() {
+    let resolved_unit = effective_usage_unit(unit, cost_in_cents);
+    if !FeatureFlag::PricingTransparency.is_enabled() || resolved_unit != unit {
         return format_credits(credits);
     }
-    let Some(unit_text) = format_usage_unit_value(credits, cost_in_cents, unit) else {
-        return format_credits(credits);
-    };
+    let unit_text = format_usage_unit_value(credits, cost_in_cents, resolved_unit);
     let Some(tokens) = tokens.filter(|&tokens| tokens > 0) else {
         return unit_text;
     };
@@ -346,15 +361,15 @@ pub enum UsageLabelKind {
     DetailsPanel,
 }
 
-/// Returns the label for a usage row, worded to match the unit shown by
-/// [`format_usage`] so a label and its value never disagree.
-pub fn usage_label(kind: UsageLabelKind, unit: UsageDisplayUnit) -> String {
-    // The Dollars setting only takes effect once PricingTransparency is on.
-    let unit = if FeatureFlag::PricingTransparency.is_enabled() {
-        unit
-    } else {
-        UsageDisplayUnit::Credits
-    };
+/// Returns the label for a usage row, worded to match the unit [`format_usage`]
+/// would show for the same `cost_in_cents`, so a label and its value never
+/// disagree.
+pub fn usage_label(
+    kind: UsageLabelKind,
+    cost_in_cents: Option<f32>,
+    unit: UsageDisplayUnit,
+) -> String {
+    let unit = effective_usage_unit(unit, cost_in_cents);
     let base = match (kind, unit) {
         (UsageLabelKind::DetailsPanel, UsageDisplayUnit::Credits) => "Credits used",
         (UsageLabelKind::DetailsPanel, UsageDisplayUnit::Dollars) => "Usage",

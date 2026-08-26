@@ -2328,7 +2328,11 @@ impl View for ConversationDetailsPanel {
                 cost_in_cents,
                 usage_display_unit,
             );
-            let label = usage_label(UsageLabelKind::DetailsPanel, usage_display_unit);
+            let label = usage_label(
+                UsageLabelKind::DetailsPanel,
+                cost_in_cents,
+                usage_display_unit,
+            );
             content.add_child(
                 Container::new(self.render_simple_field(&label, &formatted, appearance))
                     .with_margin_bottom(FIELD_SPACING)

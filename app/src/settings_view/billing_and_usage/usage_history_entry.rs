@@ -114,7 +114,15 @@ impl UsageHistoryEntry {
             entry.usage_metadata.credits_spent + entry.usage_metadata.platform_credits_spent;
         let usage_display_unit = AISettings::as_ref(app).usage_display_unit;
         let credits_spent = Text::new_inline(
-            format_usage(total_credits as f32, None, None, usage_display_unit),
+            format_usage(
+                total_credits as f32,
+                None,
+                entry
+                    .usage_metadata
+                    .total_provider_cost_in_cents
+                    .map(|cost_in_cents| cost_in_cents as f32),
+                usage_display_unit,
+            ),
             appearance.ui_font_family(),
             14.,
         )

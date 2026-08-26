@@ -16,6 +16,7 @@ use crate::workspaces::workspace::FtueAccountClass;
 pub(crate) fn apply_account_first_onboarding_settings(
     selected_settings: &SelectedSettings,
     account_class: Option<FtueAccountClass>,
+    is_new_account: bool,
     team_context: TeamContextForOperation,
     app: &mut AppContext,
 ) {
@@ -31,10 +32,13 @@ pub(crate) fn apply_account_first_onboarding_settings(
 
     // Brand-new accounts default the usage-unit display to dollars, rather
     // than the `UsageDisplayUnit` enum's own `Credits` default, which exists
-    // to leave pre-existing users/devices unaffected. `account_class` is
-    // `None` only for `AccountFirstCompletion::AccountSkipped`, which does
-    // not create an account, so this only fires for genuinely new accounts.
-    if account_class.is_some() {
+    // to leave pre-existing users/devices unaffected. Account-first onboarding
+    // can also be reached by an *existing* account signing in (e.g. on a new
+    // device), so this additionally requires `is_new_account` -- captured by
+    // the caller from the account's `is_onboarded` status prior to this
+    // sign-in -- rather than relying on `account_class` alone, which only
+    // reflects the account's current plan tier.
+    if account_class.is_some() && is_new_account {
         AISettings::handle(app).update(app, |settings, ctx| {
             report_if_error!(
                 settings
