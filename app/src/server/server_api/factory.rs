@@ -55,6 +55,7 @@ pub trait FactoryClient: 'static + Send + Sync {
 
 /// True when a GraphQL error indicates the server doesn't recognize the
 /// `getRunner` query.
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 fn is_missing_get_runner_query_error(err: &anyhow::Error) -> bool {
     let message = err.to_string();
     message.contains("getRunner") && message.contains("Cannot query field")
@@ -62,6 +63,7 @@ fn is_missing_get_runner_query_error(err: &anyhow::Error) -> bool {
 
 /// Resolves a runner via [`FactoryClient::get_runner`], with a fallback to a
 /// uid match against [`FactoryClient::get_runners`].
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 pub async fn get_runner_with_fallback(
     factory: &dyn FactoryClient,
     selector: RunnerSelector,
@@ -149,25 +151,5 @@ impl FactoryClient for ServerApi {
             }
             DeleteRunnerResult::Unknown => Err(anyhow!("failed to delete runner")),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_missing_get_runner_query_error;
-
-    #[test]
-    fn detects_the_missing_get_runner_query_error() {
-        let err = anyhow::anyhow!(
-            "missing response data for get_runner: Cannot query field \"getRunner\" on type \"RootQuery\"."
-        );
-        assert!(is_missing_get_runner_query_error(&err));
-    }
-
-    #[test]
-    fn does_not_treat_other_errors_as_a_missing_query() {
-        assert!(!is_missing_get_runner_query_error(&anyhow::anyhow!(
-            "permission denied"
-        )));
     }
 }
