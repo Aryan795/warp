@@ -8,7 +8,7 @@
 //! Per resolved user feedback on the per-turn-usage-panel spec, this panel:
 //! * is triggered independently from (and has no cross-navigation link to)
 //!   the "Conversation" popover (Surface 2);
-//! * has no per-section collapse/expand affordance -- all sections (MODEL
+//! * has no per-section collapse/expand affordance -- all sections (INFERENCE
 //!   USAGE / TOOL CALL SUMMARY / RESPONSE TIME) are always fully expanded;
 //! * aligns the value column across all sections, not just within each
 //!   section;
@@ -87,8 +87,8 @@ pub struct TurnModelInferenceBreakdown {
     pub web_search_cost_in_cents: f32,
 }
 
-/// Turn-scoped usage data backing the "MODEL USAGE" section. All fields are
-/// scoped to a single agent turn (block), not the whole conversation.
+/// Turn-scoped usage data backing the "INFERENCE USAGE" section. All fields
+/// are scoped to a single agent turn (block), not the whole conversation.
 pub struct TurnUsageInfo {
     /// Per-model token/cost usage for this turn. One row is rendered per
     /// entry.
@@ -98,9 +98,10 @@ pub struct TurnUsageInfo {
     /// turn -- but is shown here per the spec, which explicitly calls out
     /// this scope mixing as deliberate.
     pub context_window_usage: f32,
-    /// Platform usage charged (in US cents) over this turn. `None` when no
-    /// request with charge data has completed yet; the row is omitted in
-    /// that case rather than rendered as `$0.00`.
+    /// Platform usage charged (in US cents) over this turn, rendered as its
+    /// own "PLATFORM USAGE" section. `None` when no request with charge
+    /// data has completed yet; also omitted when the charge is truly zero,
+    /// rather than rendered as a noisy `$0.00` section.
     pub platform_usage_in_cents: Option<f32>,
     pub tool_calls: i32,
     pub files_changed: i32,
@@ -352,30 +353,28 @@ impl TurnUsageView {
         rows
     }
 
+    /// Label/value rows for the per-model usage entries only. Context
+    /// window usage and platform usage are rendered as their own items in
+    /// [`Self::build_label_value_columns`] rather than folded into this
+    /// list, so their spacing (and, for platform usage, its section-header
+    /// styling) can be controlled independently.
     fn model_usage_rows(&self, appearance: &Appearance) -> Vec<LabelValueRow> {
+        (0..self.usage_info.models.len())
+            .flat_map(|index| self.model_row(index, appearance))
+            .collect()
+    }
+
+    /// The "Context window usage" row, shown beneath the per-model rows and
+    /// (when present) the "PLATFORM USAGE" section.
+    fn context_window_usage_row(&self, appearance: &Appearance) -> LabelValueRow {
         let font_size = appearance.ui_font_size() + 2.;
         let theme = appearance.theme();
-        let text_color = blended_colors::text_main(theme, theme.surface_2());
-
-        let mut rows: Vec<LabelValueRow> = (0..self.usage_info.models.len())
-            .flat_map(|index| self.model_row(index, appearance))
-            .collect();
-
-        if let Some(platform_usage_in_cents) = self.usage_info.platform_usage_in_cents {
-            rows.push((
-                render_label_text("Platform usage", appearance),
-                render_value_text(
-                    format_dollars(platform_usage_in_cents),
-                    font_size,
-                    appearance,
-                ),
-            ));
-        }
-
         // Matches the model row labels' color (rather than the dimmer
         // `text_sub` used by other section labels) since context window
         // usage is displayed alongside model usage in the same section.
-        let context_window_label = Text::new(
+        let text_color = blended_colors::text_main(theme, theme.surface_2());
+
+        let label = Text::new(
             "Context window usage".to_string(),
             appearance.ui_font_family(),
             font_size,
@@ -383,7 +382,7 @@ impl TurnUsageView {
         .with_color(text_color)
         .finish();
         let context_usage_pct = (self.usage_info.context_window_usage * 100.).round();
-        let context_window_value = Flex::row()
+        let value = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_main_axis_size(MainAxisSize::Min)
             .with_spacing(4.)
@@ -408,9 +407,31 @@ impl TurnUsageView {
             )
             .finish();
 
-        rows.push((context_window_label, context_window_value));
+        (label, value)
+    }
 
-        rows
+    /// The "PLATFORM USAGE" section: styled like the panel's other section
+    /// headers, but with the dollar amount in the value column instead of
+    /// an empty placeholder, since it has no further rows of its own.
+    /// `None` when there's no charge data yet, or the charge is truly zero
+    /// -- a `$0.00` platform usage section would just be noise.
+    fn platform_usage_row(&self, appearance: &Appearance) -> Option<LabelValueRow> {
+        let platform_usage_in_cents = self.usage_info.platform_usage_in_cents?;
+        if platform_usage_in_cents <= 0.0 {
+            return None;
+        }
+        // Matches the header's font size (rather than the body row size)
+        // so this row's label/value heights agree, per the same reasoning
+        // as the empty header/value companions in `build_label_value_columns`.
+        let header_font_size = appearance.overline_font_size() + 2.;
+        Some((
+            Self::render_section_header("PLATFORM USAGE", appearance),
+            render_value_text(
+                format_dollars(platform_usage_in_cents),
+                header_font_size,
+                appearance,
+            ),
+        ))
     }
 
     fn tool_call_summary_rows(&self, appearance: &Appearance) -> Vec<LabelValueRow> {
@@ -557,11 +578,23 @@ impl TurnUsageView {
             };
 
         push_row(
-            Self::render_section_header("MODEL USAGE", appearance),
+            Self::render_section_header("INFERENCE USAGE", appearance),
             Self::render_section_header("", appearance),
             8.,
         );
         push_section_rows(self.model_usage_rows(appearance), &mut push_row);
+
+        if let Some((label, value)) = self.platform_usage_row(appearance) {
+            push_row(label, value, ROW_MARGIN_BOTTOM + SECTION_END_EXTRA_MARGIN);
+        }
+
+        let (context_window_label, context_window_value) =
+            self.context_window_usage_row(appearance);
+        push_row(
+            context_window_label,
+            context_window_value,
+            ROW_MARGIN_BOTTOM + SECTION_END_EXTRA_MARGIN,
+        );
 
         push_row(
             Self::render_section_header("TOOL CALL SUMMARY", appearance),

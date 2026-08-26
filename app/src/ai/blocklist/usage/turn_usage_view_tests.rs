@@ -152,11 +152,11 @@ fn build_label_value_columns_keeps_every_row_aligned_across_sections() {
 
             let model_usage_header_index = label_lines
                 .iter()
-                .position(|line| *line == "MODEL USAGE")
-                .expect("MODEL USAGE header should be present");
+                .position(|line| *line == "INFERENCE USAGE")
+                .expect("INFERENCE USAGE header should be present");
             assert_eq!(
                 value_lines[model_usage_header_index], "",
-                "the MODEL USAGE header's paired value-column row should be an empty \
+                "the INFERENCE USAGE header's paired value-column row should be an empty \
                  placeholder line, not a real value shifted up from the row below"
             );
 
@@ -168,12 +168,12 @@ fn build_label_value_columns_keeps_every_row_aligned_across_sections() {
 
             let platform_usage_index = label_lines
                 .iter()
-                .position(|line| *line == "Platform usage")
-                .expect("Platform usage row should be present");
+                .position(|line| *line == "PLATFORM USAGE")
+                .expect("PLATFORM USAGE section header should be present");
             assert_eq!(value_lines[platform_usage_index], "$0.08");
             assert!(
                 platform_usage_index < context_window_index,
-                "Platform usage should be listed before Context window usage"
+                "PLATFORM USAGE should be listed before Context window usage"
             );
 
             let tool_calls_index = label_lines
@@ -324,4 +324,34 @@ fn format_dollars_shows_less_than_a_cent_for_tiny_nonzero_amounts() {
     assert_eq!(format_dollars(0.999), "<$0.01");
     assert_eq!(format_dollars(1.0), "$0.01");
     assert_eq!(format_dollars(150.0), "$1.50");
+}
+
+/// A `Some(0.0)` platform usage is truly zero (as opposed to `None`, meaning
+/// no charge data has arrived yet) and must be omitted entirely rather than
+/// rendered as a noisy `$0.00` section.
+#[test]
+fn platform_usage_section_omitted_when_truly_zero() {
+    App::test((), |mut app| async move {
+        initialize_test_app(&mut app);
+
+        let mut usage_info = placeholder_usage_info();
+        usage_info.platform_usage_in_cents = Some(0.0);
+        let (_window_id, view) = app.add_window(WindowStyle::NotStealFocus, |_ctx| {
+            TurnUsageView::new(usage_info, None)
+        });
+
+        view.read(&app, |view, ctx| {
+            let appearance = Appearance::as_ref(ctx);
+            let (labels, _values) = view.build_label_value_columns(appearance);
+            let labels_text = Flex::column()
+                .with_children(labels)
+                .finish()
+                .debug_text_content()
+                .unwrap_or_default();
+            assert!(
+                !labels_text.contains("PLATFORM USAGE"),
+                "a truly-zero platform usage should not render a PLATFORM USAGE section:\n{labels_text}"
+            );
+        });
+    });
 }
