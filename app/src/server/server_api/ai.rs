@@ -154,6 +154,7 @@ use crate::ai_assistant::{AIGeneratedCommand, GenerateCommandsFromNaturalLanguag
 use crate::drive::workflows::ai_assist::{GeneratedCommandMetadata, GeneratedCommandMetadataError};
 use crate::persistence::model::ConversationUsageMetadata;
 use crate::server::graphql::{get_request_context, get_user_facing_error_message};
+use crate::server::team_scope::RequestTeamScope;
 use crate::terminal::model::block::SerializedBlock;
 #[cfg(not(feature = "agent_mode_evals"))]
 use crate::{
@@ -1166,6 +1167,7 @@ pub trait AIClient: 'static + Send + Sync {
         &self,
         prompt: String,
         ai_execution_context: Option<WarpAiExecutionContext>,
+        team_scope: RequestTeamScope,
     ) -> Result<Vec<AIGeneratedCommand>, GenerateCommandsFromNaturalLanguageError>;
 
     async fn generate_dialogue_answer(
@@ -1173,11 +1175,13 @@ pub trait AIClient: 'static + Send + Sync {
         transcript: Vec<TranscriptPart>,
         prompt: String,
         ai_execution_context: Option<WarpAiExecutionContext>,
+        team_scope: RequestTeamScope,
     ) -> anyhow::Result<GenerateDialogueResult>;
 
     async fn generate_metadata_for_command(
         &self,
         command: String,
+        team_scope: RequestTeamScope,
     ) -> Result<GeneratedCommandMetadata, GeneratedCommandMetadataError>;
 
     async fn get_request_limit_info(&self) -> Result<RequestUsageInfo, anyhow::Error>;
@@ -1664,6 +1668,7 @@ impl AIClient for ServerApi {
         prompt: String,
         // TODO: use relevant context from RequestContext and deprecate usage of ai_execution_context
         _ai_execution_context: Option<WarpAiExecutionContext>,
+        team_scope: RequestTeamScope,
     ) -> Result<Vec<AIGeneratedCommand>, GenerateCommandsFromNaturalLanguageError> {
         let default_err = GenerateCommandsFromNaturalLanguageError::Other;
 
@@ -1674,9 +1679,10 @@ impl AIClient for ServerApi {
 
         let operation = GenerateCommands::build(variables);
         let response = self
-            .send_graphql_request(
+            .send_team_scoped_graphql_request(
                 operation,
                 Some(Duration::from_secs(AI_ASSISTANT_REQUEST_TIMEOUT_SECONDS)),
+                team_scope,
             )
             .await
             .map_err(|_| default_err)?;
@@ -1703,6 +1709,7 @@ impl AIClient for ServerApi {
         prompt: String,
         // TODO: use relevant context from RequestContext and deprecate usage of ai_execution_context
         _ai_execution_context: Option<WarpAiExecutionContext>,
+        team_scope: RequestTeamScope,
     ) -> anyhow::Result<GenerateDialogueResult> {
         let graphql_transcript: Vec<TranscriptPartGraphql> = transcript
             .into_iter()
@@ -1721,9 +1728,10 @@ impl AIClient for ServerApi {
 
         let operation = GenerateDialogue::build(variables);
         let response = self
-            .send_graphql_request(
+            .send_team_scoped_graphql_request(
                 operation,
                 Some(Duration::from_secs(AI_ASSISTANT_REQUEST_TIMEOUT_SECONDS)),
+                team_scope,
             )
             .await?;
         match response.generate_dialogue {
@@ -1755,6 +1763,7 @@ impl AIClient for ServerApi {
     async fn generate_metadata_for_command(
         &self,
         command: String,
+        team_scope: RequestTeamScope,
     ) -> Result<GeneratedCommandMetadata, GeneratedCommandMetadataError> {
         let default_err = GeneratedCommandMetadataError::Other;
         let variables = GenerateMetadataForCommandVariables {
@@ -1764,9 +1773,10 @@ impl AIClient for ServerApi {
 
         let operation = GenerateMetadataForCommand::build(variables);
         let response = self
-            .send_graphql_request(
+            .send_team_scoped_graphql_request(
                 operation,
                 Some(Duration::from_secs(AI_ASSISTANT_REQUEST_TIMEOUT_SECONDS)),
+                team_scope,
             )
             .await
             .map_err(|_| default_err)?;
