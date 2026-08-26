@@ -352,20 +352,13 @@ pub enum SplitDirection {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PaneFlex(pub f32);
 
-/// Debug-time invariant check: no two workspaces may hold a `TabData`
-/// referencing the same `PaneGroup`. That dual ownership is what lets
-/// `save_app_state` trip a `terminal_panes.uuid` UNIQUE-constraint storm,
-/// surfacing on the next `save_app` call rather than at the mutation that
-/// actually broke the invariant.
-///
-/// Checking here, right before `get_app_state` builds the snapshot that
-/// would encode the duplicate, catches it at the moment of formation
-/// instead. `debug_assert!` panics loudly in dev/dogfood builds, with a
-/// backtrace pointing at whatever mutation just broke the invariant.
-/// Release builds must not crash a user's session over a bookkeeping bug,
-/// so they only report once per run -- the same throttling
-/// `is_terminal_panes_unique_violation` in `persistence::sqlite` applies to
-/// the DB-level symptom this replaces.
+/// Invariant check: no two workspaces may hold a `TabData` referencing the
+/// same `PaneGroup`. That dual ownership is what lets `save_app_state` trip
+/// a `terminal_panes.uuid` UNIQUE-constraint storm, so this catches it here,
+/// at the moment of formation, instead. Release builds must not crash a
+/// user's session over a bookkeeping bug, so they only report once per run
+/// -- the same throttling `is_terminal_panes_unique_violation` in
+/// `persistence::sqlite` applies to the DB-level symptom this replaces.
 fn assert_no_duplicate_pane_group_ownership(app: &AppContext) {
     let mut seen_pane_group_ids = HashSet::new();
     for (_, workspace) in WorkspaceRegistry::as_ref(app).all_workspaces(app) {

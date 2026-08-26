@@ -883,19 +883,14 @@ fn report_db_error(err_kind: &str, err: anyhow::Error, database_path: &Path) {
     }
     log_access("Database", database_path);
 
-    // A residual dual-ownership bug (e.g. two windows both saving a `TabData`
-    // for the same pane group) can otherwise make this specific violation
-    // storm dozens of times within a couple of minutes -- once per
-    // `save_app` -- before the underlying duplicate state is cleared. Report
-    // only the first occurrence per run so a storm produces one Sentry event
-    // instead of dozens; every occurrence is still logged locally, and the
-    // message names the known cause so the report is actionable without
-    // re-deriving it from the raw SQLite error. Other SQLite errors are
-    // unaffected and keep reporting every time.
+    // A residual dual-ownership bug can make this specific violation storm
+    // repeatedly before the underlying duplicate state is cleared. Report
+    // only the first occurrence per run; every occurrence is still logged
+    // locally, and other SQLite errors keep reporting every time.
     let (context, log_mode) = if is_terminal_panes_unique_violation(&err) {
         (
             format!(
-                "SQLite {err_kind} error: duplicate terminal_panes.uuid -- two windows hold the same pane group"
+                "SQLite {err_kind} error: duplicate terminal_panes.uuid -- two windows hold the same pane group (see APP-5285)"
             ),
             ReportErrorLogMode::OncePerRun,
         )
@@ -911,11 +906,9 @@ fn report_db_error(err_kind: &str, err: anyhow::Error, database_path: &Path) {
 /// Returns `true` if `err`'s cause chain contains a `terminal_panes.uuid`
 /// UNIQUE-constraint violation specifically, the DB-level symptom of two
 /// windows both holding ownership of the same pane group when
-/// `save_app_state` runs. Matches on the raw error message
-/// rather than `DatabaseErrorInformation::table_name()`, since SQLite's
-/// UNIQUE-violation messages already embed the table and column (`UNIQUE
-/// constraint failed: terminal_panes.uuid`) and not every backend populates
-/// `table_name()`.
+/// `save_app_state` runs. Matches on the raw message rather than
+/// `DatabaseErrorInformation::table_name()`, since not every backend
+/// populates that field.
 ///
 /// Deliberately checks for the exact `terminal_panes.uuid` column, not just
 /// the `terminal_panes` table: a UNIQUE violation on a different column

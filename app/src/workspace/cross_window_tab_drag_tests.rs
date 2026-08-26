@@ -115,8 +115,7 @@ fn content_transferred_close_is_marked_and_consumed_once() {
     assert!(!drag.take_content_transferred_window_close(window_id));
 
     drag.mark_content_transferred_window_close(window_id);
-    // Consumed exactly once: the top-level `on_window_will_close` handler
-    // only asks this question a single time per close.
+    // Consumed exactly once: a second call must return false.
     assert!(drag.take_content_transferred_window_close(window_id));
     assert!(!drag.take_content_transferred_window_close(window_id));
 }

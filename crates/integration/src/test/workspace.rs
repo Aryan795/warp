@@ -1378,15 +1378,10 @@ pub fn test_single_tab_handoff_continues_drag() -> Builder {
         .with_step(focus_saved_window(TARGET_WINDOW_KEY).add_assertion(assert_tab_count(1)))
 }
 
-/// Regression test: dragging a tab out of a multi-tab window and attaching it
-/// directly into a *different*, existing window closes the temporary preview
-/// window with `TerminationMode::ContentTransferred` (its pane group was
-/// handed off, not destroyed). That close must not be pushed onto
-/// `UndoCloseStack`: the closed preview workspace's own `tabs` list still
-/// references the `PaneGroup` that was just adopted by the target window, so
-/// undo-close (Cmd+Shift+T) resurrecting it would give two windows ownership
-/// of the same pane group again -- the `terminal_panes.uuid` UNIQUE-constraint
-/// race this bug caused.
+/// Regression test: dragging a tab into a different, existing window closes
+/// the temporary preview with `TerminationMode::ContentTransferred`. That
+/// close must not be pushed onto `UndoCloseStack` -- undo-close resurrecting
+/// it would give two windows ownership of the same pane group again.
 pub fn test_undo_close_does_not_resurrect_content_transferred_window() -> Builder {
     new_builder()
         .set_should_run_test(drag_tabs_feature_enabled)
@@ -1494,8 +1489,6 @@ pub fn test_undo_close_does_not_resurrect_content_transferred_window() -> Builde
                         },
                     );
                 })
-                // The preview window closed for real: two windows left, the
-                // target now holding both tabs alongside its own.
                 .add_assertion(assert_num_windows_open(2))
                 .add_assertion(assert_total_tab_count(3)),
         )
@@ -1507,10 +1500,6 @@ pub fn test_undo_close_does_not_resurrect_content_transferred_window() -> Builde
         )
         .with_step(focus_saved_window(SOURCE_WINDOW_KEY).add_assertion(assert_tab_count(1)))
         .with_step(
-            // Undo-close must be a no-op here: the content-transferred close
-            // was never registered on the undo-close stack, so this must not
-            // resurrect the preview window (which would duplicate ownership
-            // of the pane group now living in the target window).
             trigger_undo_close()
                 .add_assertion(assert_num_windows_open(2))
                 .add_assertion(assert_total_tab_count(3)),

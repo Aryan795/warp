@@ -27945,13 +27945,6 @@ impl Workspace {
     pub(crate) fn close_window_for_content_transfer(&mut self, ctx: &mut ViewContext<Self>) {
         self.set_suppress_detach_panes_on_window_close(true);
         let window_id = ctx.window_id();
-        // Mark the close as content-transferred right at the point it is
-        // issued, not by inferring it later from
-        // `suppress_detach_panes_on_window_close` -- that flag is also set
-        // (and not reliably cleared) on windows that stay open after a
-        // handoff or reverse-handoff, so it cannot be trusted as a proxy for
-        // "this specific close is a transfer". See the field doc on
-        // `CrossWindowTabDrag::content_transferred_window_closes`.
         CrossWindowTabDrag::handle(ctx).update(ctx, |drag, _| {
             drag.mark_content_transferred_window_close(window_id);
         });
@@ -28799,11 +28792,6 @@ impl Workspace {
                 if transferred_tab_index < self.tabs.len() {
                     self.remove_tab_without_undo(transferred_tab_index, ctx);
                 }
-                // Mark the close as content-transferred right at the point it
-                // is issued -- see the field doc on
-                // `CrossWindowTabDrag::content_transferred_window_closes` for
-                // why this can't be inferred later from
-                // `suppress_detach_panes_on_window_close`.
                 CrossWindowTabDrag::handle(ctx).update(ctx, |drag, _| {
                     drag.mark_content_transferred_window_close(preview_window_id);
                 });
