@@ -81,9 +81,8 @@ impl TurnModelUsage {
 pub struct TurnModelInferenceBreakdown {
     pub input_cost_in_cents: f32,
     pub output_cost_in_cents: f32,
-    /// Combined cache-read + cache-write cost, matching the row's combined
-    /// "Cache" token count.
-    pub cache_cost_in_cents: f32,
+    pub input_cache_read_cost_in_cents: f32,
+    pub input_cache_write_cost_in_cents: f32,
     pub web_search_count: u64,
     pub web_search_cost_in_cents: f32,
 }
@@ -309,14 +308,26 @@ impl TurnUsageView {
                     appearance,
                 ),
             ));
-            let cache_tokens = model.input_cache_read + model.input_cache_write;
-            if cache_tokens > 0 {
+            if model.input_cache_read > 0 {
                 rows.push((
-                    render_indented_label_text("Cache", breakdown_font_size, appearance),
+                    render_indented_label_text("Cache read", breakdown_font_size, appearance),
                     render_value_text(
                         format_tokens_with_optional_cost(
-                            cache_tokens,
-                            breakdown.map(|b| b.cache_cost_in_cents),
+                            model.input_cache_read,
+                            breakdown.map(|b| b.input_cache_read_cost_in_cents),
+                        ),
+                        breakdown_font_size,
+                        appearance,
+                    ),
+                ));
+            }
+            if model.input_cache_write > 0 {
+                rows.push((
+                    render_indented_label_text("Cache write", breakdown_font_size, appearance),
+                    render_value_text(
+                        format_tokens_with_optional_cost(
+                            model.input_cache_write,
+                            breakdown.map(|b| b.input_cache_write_cost_in_cents),
                         ),
                         breakdown_font_size,
                         appearance,
@@ -349,6 +360,17 @@ impl TurnUsageView {
         let mut rows: Vec<LabelValueRow> = (0..self.usage_info.models.len())
             .flat_map(|index| self.model_row(index, appearance))
             .collect();
+
+        if let Some(platform_usage_in_cents) = self.usage_info.platform_usage_in_cents {
+            rows.push((
+                render_label_text("Platform usage", appearance),
+                render_value_text(
+                    format_dollars(platform_usage_in_cents),
+                    font_size,
+                    appearance,
+                ),
+            ));
+        }
 
         // Matches the model row labels' color (rather than the dimmer
         // `text_sub` used by other section labels) since context window
@@ -387,17 +409,6 @@ impl TurnUsageView {
             .finish();
 
         rows.push((context_window_label, context_window_value));
-
-        if let Some(platform_usage_in_cents) = self.usage_info.platform_usage_in_cents {
-            rows.push((
-                render_label_text("Platform usage", appearance),
-                render_value_text(
-                    format_dollars(platform_usage_in_cents),
-                    font_size,
-                    appearance,
-                ),
-            ));
-        }
 
         rows
     }
@@ -694,8 +705,17 @@ pub(crate) fn format_web_searches(count: u64) -> String {
     format!("{count} search{}", if count == 1 { "" } else { "es" })
 }
 
+/// Formats a US-cent amount as a dollar string. A non-zero amount that
+/// would otherwise round down to `$0.00` (e.g. a fraction of a cent) is
+/// shown as `<$0.01` instead, since rounding it to zero would misleadingly
+/// suggest no cost was incurred.
 pub(crate) fn format_dollars(cost_in_cents: f32) -> String {
-    format!("${:.2}", cost_in_cents / 100.0)
+    let dollars = cost_in_cents / 100.0;
+    if cost_in_cents > 0.0 && dollars < 0.01 {
+        "<$0.01".to_string()
+    } else {
+        format!("${dollars:.2}")
+    }
 }
 
 fn format_seconds(ms: i64) -> String {

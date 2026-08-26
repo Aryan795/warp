@@ -934,7 +934,6 @@ fn create_server_conversation_metadata(
             context_window_segments: Vec::new(),
             turn_usage_baseline: None,
             cumulative_token_cost_by_model: Default::default(),
-            cumulative_inference_usage_by_model: Default::default(),
         },
         metadata: mock_server_metadata(),
         creator: None,

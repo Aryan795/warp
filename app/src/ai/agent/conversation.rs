@@ -67,8 +67,7 @@ use crate::notebooks::NotebookId;
 use crate::persistence::ModelEvent;
 use crate::persistence::model::{
     AgentConversationData, ContextWindowSegment, ConversationUsageMetadata, ModelTokenUsage,
-    PersistedAutoexecuteMode, PersistedModelInferenceUsage, PersistedModelTokenCost,
-    ToolUsageMetadata, TurnUsageBaseline,
+    PersistedAutoexecuteMode, PersistedModelTokenCost, ToolUsageMetadata, TurnUsageBaseline,
 };
 use crate::server::ids::ServerId;
 use crate::terminal::general_settings::GeneralSettings;
@@ -919,12 +918,14 @@ impl AIConversation {
     }
 
     /// Per-model token/cost usage during the last block (turn), broken down
-    /// by input/output/cache read/cache write plus total cost. A turn can
-    /// span multiple models (e.g. if the user or router switched models
+    /// by input/output/cache read/cache write plus per-field cost. A turn
+    /// can span multiple models (e.g. if the user or router switched models
     /// mid-turn), so this returns one entry per model that had any activity
     /// this turn rather than a single aggregate. Empty when there is no
     /// baseline yet or no model has been used this turn -- callers gate the
     /// panel's visibility on [`Self::tool_calls_for_last_block`] instead.
+    /// Keyed by the model's display label as reported by `RequestCharges`
+    /// (see [`ConversationUsageMetadata::cumulative_token_cost_by_model`]).
     ///
     /// Derived as the delta between the persisted
     /// `cumulative_token_cost_by_model` and the baseline snapshotted in
@@ -949,35 +950,7 @@ impl AIConversation {
                     .copied()
                     .unwrap_or_default();
                 let turn = current.saturating_sub(&base);
-                (turn.tokens() > 0 || turn.cost_in_cents > 0.0).then(|| (model_id.clone(), turn))
-            })
-            .collect()
-    }
-
-    /// Per-model inference cost breakdown (input/output/cache cost, web
-    /// search count/cost) during the last block (turn), keyed by model_id.
-    /// See [`Self::per_model_usage_for_last_block`] for the analogous
-    /// token-count-based getter this complements; the two are keyed
-    /// identically so callers can look up a model's breakdown by the same
-    /// `model_id` used there. Empty when there is no baseline yet.
-    pub fn inference_usage_for_last_block(&self) -> HashMap<String, PersistedModelInferenceUsage> {
-        let Some(baseline) = self
-            .conversation_usage_metadata
-            .turn_usage_baseline
-            .as_ref()
-        else {
-            return HashMap::new();
-        };
-        self.conversation_usage_metadata
-            .cumulative_inference_usage_by_model
-            .iter()
-            .map(|(model_id, current)| {
-                let base = baseline
-                    .per_model_inference
-                    .get(model_id)
-                    .copied()
-                    .unwrap_or_default();
-                (model_id.clone(), current.saturating_sub(&base))
+                (turn.tokens() > 0 || turn.cost_in_cents() > 0.0).then(|| (model_id.clone(), turn))
             })
             .collect()
     }
@@ -2398,10 +2371,6 @@ impl AIConversation {
                     .conversation_usage_metadata
                     .cumulative_token_cost_by_model
                     .clone(),
-                per_model_inference: self
-                    .conversation_usage_metadata
-                    .cumulative_inference_usage_by_model
-                    .clone(),
             });
         }
 
@@ -2428,20 +2397,6 @@ impl AIConversation {
             entry.input_cache_read += usage.input_cache_read;
             entry.input_cache_write += usage.input_cache_write;
             entry.cost_in_cents += usage.cost_in_cents;
-
-            // Persisted counterpart of `total_token_usage_by_model`, kept in
-            // lockstep so `per_model_usage_for_last_block` can derive
-            // turn-scoped per-model usage that survives restarts.
-            let persisted_entry = self
-                .conversation_usage_metadata
-                .cumulative_token_cost_by_model
-                .entry(usage.model_id.clone())
-                .or_default();
-            persisted_entry.total_input += usage.total_input as u64;
-            persisted_entry.output += usage.output as u64;
-            persisted_entry.input_cache_read += usage.input_cache_read as u64;
-            persisted_entry.input_cache_write += usage.input_cache_write as u64;
-            persisted_entry.cost_in_cents += usage.cost_in_cents;
         }
 
         if let Some(request_cost) = request_cost {
@@ -2484,16 +2439,16 @@ impl AIConversation {
             *platform_usage_for_last_block += platform_usage_in_cents_this_request;
         }
 
-        // Per-model inference cost breakdown (input/output/cache cost, web
-        // search count/cost), sourced from the same `RequestCharges` used
-        // for platform usage above. Unlike the token-count-based
-        // `cumulative_token_cost_by_model` (which diffs against a baseline
-        // since the server reports conversation-cumulative token totals),
-        // `RequestCharges` is per-request, so these accumulate directly onto
-        // the conversation-cumulative map -- the turn-scoped view is still
-        // derived via baseline diffing in `inference_usage_for_last_block`,
-        // matching `cumulative_token_cost_by_model`'s pattern for
-        // consistency and restart-durability.
+        // Per-model token count and cost breakdown (input/output/cache
+        // read/write, plus web search), sourced entirely from the same
+        // `RequestCharges` used for platform usage above -- `InferenceUsage`
+        // reports token counts and their per-field costs together for the
+        // same model, so both land in `cumulative_token_cost_by_model` in
+        // one pass, with no separate `token_usage`-sourced map to reconcile
+        // later. `RequestCharges` is per-request, so these accumulate
+        // directly onto the conversation-cumulative map; the turn-scoped
+        // view is derived via baseline diffing in
+        // `per_model_usage_for_last_block`.
         if let Some(request_charges) = request_charges {
             for charged_usage in request_charges.usage_by_category.values() {
                 for (model_id, usage) in charged_usage
@@ -2504,9 +2459,15 @@ impl AIConversation {
                 {
                     let entry = self
                         .conversation_usage_metadata
-                        .cumulative_inference_usage_by_model
+                        .cumulative_token_cost_by_model
                         .entry(model_id.clone())
                         .or_default();
+                    if let Some(token_count) = usage.token_count.as_ref() {
+                        entry.total_input += token_count.input as u64;
+                        entry.output += token_count.output as u64;
+                        entry.input_cache_read += token_count.input_cache_read as u64;
+                        entry.input_cache_write += token_count.input_cache_write as u64;
+                    }
                     if let Some(token_cost) = usage.token_cost.as_ref() {
                         entry.input_cost_in_cents += token_cost.input_cost_in_cents;
                         entry.output_cost_in_cents += token_cost.output_cost_in_cents;

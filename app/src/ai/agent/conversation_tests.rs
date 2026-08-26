@@ -937,12 +937,52 @@ fn usage_totals_reads_gui_credits_and_accumulates_provider_cost() {
     });
 }
 
+fn request_charges_for_model(
+    model_id: &str,
+    total_input: u32,
+    output: u32,
+    cost_in_cents: f32,
+) -> api::response_event::stream_finished::RequestCharges {
+    api::response_event::stream_finished::RequestCharges {
+        usage_by_category: HashMap::from([(
+            "primary_agent".to_string(),
+            api::response_event::stream_finished::ChargedUsage {
+                direct_api_inference_usage: HashMap::from([(
+                    model_id.to_string(),
+                    api::response_event::stream_finished::InferenceUsage {
+                        token_count: Some(api::response_event::stream_finished::TokenCount {
+                            input: total_input,
+                            output,
+                            input_cache_read: 0,
+                            input_cache_write: 0,
+                        }),
+                        token_cost: Some(api::response_event::stream_finished::TokenCost {
+                            input_cost_in_cents: cost_in_cents,
+                            output_cost_in_cents: 0.0,
+                            input_cache_read_cost_in_cents: 0.0,
+                            input_cache_write_cost_in_cents: 0.0,
+                        }),
+                        web_search_count: 0,
+                        web_search_cost_in_cents: 0.0,
+                    },
+                )]),
+                byok_inference_usage: HashMap::new(),
+                custom_endpoint_inference_usage: HashMap::new(),
+                platform_usage_in_cents: 0.0,
+            },
+        )]),
+    }
+}
+
 /// Per-model turn-scoped usage is derived from persisted state
 /// (`ConversationUsageMetadata::cumulative_token_cost_by_model` diffed
 /// against `turn_usage_baseline.per_model`), so it must still be correct
 /// after a conversation is torn down and reloaded from persisted data --
 /// unlike the live-only `total_token_usage_by_model` map, which does not
-/// survive a restore.
+/// survive a restore. `cumulative_token_cost_by_model` is sourced
+/// exclusively from `RequestCharges` (see
+/// [`AIConversation::update_cost_and_usage_for_request`]), so this test
+/// drives that field rather than `token_usage`.
 #[test]
 fn per_model_usage_for_last_block_survives_restore() {
     App::test((), |mut app| async move {
@@ -955,9 +995,9 @@ fn per_model_usage_for_last_block_survives_restore() {
             conversation
                 .update_cost_and_usage_for_request(
                     None,
-                    vec![stream_token_usage("model-a", 100, 20, 1.5)],
+                    vec![],
                     None,
-                    None,
+                    Some(request_charges_for_model("model-a", 100, 20, 1.5)),
                     true,
                     ctx,
                 )
@@ -966,9 +1006,9 @@ fn per_model_usage_for_last_block_survives_restore() {
             conversation
                 .update_cost_and_usage_for_request(
                     None,
-                    vec![stream_token_usage("model-a", 50, 10, 2.5)],
+                    vec![],
                     None,
-                    None,
+                    Some(request_charges_for_model("model-a", 50, 10, 2.5)),
                     true,
                     ctx,
                 )
@@ -985,7 +1025,12 @@ fn per_model_usage_for_last_block_survives_restore() {
                     output: 10,
                     input_cache_read: 0,
                     input_cache_write: 0,
-                    cost_in_cents: 2.5,
+                    input_cost_in_cents: 2.5,
+                    output_cost_in_cents: 0.0,
+                    input_cache_read_cost_in_cents: 0.0,
+                    input_cache_write_cost_in_cents: 0.0,
+                    web_search_count: 0,
+                    web_search_cost_in_cents: 0.0,
                 }
             )]
         );

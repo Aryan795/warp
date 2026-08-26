@@ -3874,7 +3874,7 @@ fn render_turn_panel_button(props: Props, app: &AppContext) -> Box<dyn Element> 
         .fold((0u64, 0f32), |(tokens, cost), (_, model_usage)| {
             (
                 tokens + model_usage.tokens(),
-                cost + model_usage.cost_in_cents,
+                cost + model_usage.cost_in_cents(),
             )
         });
     let mut tooltip_parts = vec![format_tokens(turn_tokens)];

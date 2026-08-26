@@ -1647,26 +1647,21 @@ pub struct ConversationUsageMetadata {
     /// credits but only cumulative totals for these other fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_usage_baseline: Option<TurnUsageBaseline>,
-    /// Cumulative token count and provider cost per model, across the whole
-    /// conversation. Updated incrementally on every request (unlike
-    /// `token_usage`, which is fully overwritten on each footer refresh and
-    /// has no per-model cost breakdown). Diffing this against
-    /// `turn_usage_baseline.per_model` yields turn-scoped per-model usage
-    /// that survives restarts/restores, keyed by model_id. Empty until the
-    /// first request completes.
+    /// Cumulative per-model token count and cost breakdown (input/output/
+    /// cache-read/cache-write, plus web search), across the whole
+    /// conversation. Sourced entirely from the server's `RequestCharges`
+    /// (`InferenceUsage`), which reports token counts and their
+    /// corresponding per-field costs together for the same model -- so both
+    /// land in the same map entry in one pass, with no separate source to
+    /// reconcile later. Keyed by the model's display label as reported by
+    /// `RequestCharges` (already human-readable, e.g. "Grok 4.5 (medium
+    /// reasoning)" -- distinct from the machine-readable `LLMId` slug used
+    /// elsewhere). Updated incrementally on every request. Diffing this
+    /// against `turn_usage_baseline.per_model` yields turn-scoped per-model
+    /// usage that survives restarts/restores. Empty until the first request
+    /// with charge data completes.
     #[serde(default)]
     pub cumulative_token_cost_by_model: HashMap<String, PersistedModelTokenCost>,
-    /// Cumulative per-model inference cost breakdown (input/output/cache
-    /// cost, web search count/cost), across the whole conversation. Sourced
-    /// from the server's `RequestCharges` (unlike
-    /// `cumulative_token_cost_by_model`, which is derived from the coarser
-    /// `TokenUsage` message and only carries a single aggregate cost per
-    /// model). Diffing this against `turn_usage_baseline.per_model_inference`
-    /// yields the turn-scoped breakdown shown in the turn panel's expanded
-    /// per-model rows. Empty until the first request with charge data
-    /// completes.
-    #[serde(default)]
-    pub cumulative_inference_usage_by_model: HashMap<String, PersistedModelInferenceUsage>,
 }
 
 impl ConversationUsageMetadata {
@@ -1675,8 +1670,9 @@ impl ConversationUsageMetadata {
     }
 }
 
-/// Cumulative token count (broken down by input/output/cache) and provider
-/// cost for a single model, as of some point in a conversation. See
+/// Cumulative token count and cost breakdown (input/output/cache-read/
+/// cache-write), plus web search count/cost, for a single model, as of some
+/// point in a conversation. See
 /// [`ConversationUsageMetadata::cumulative_token_cost_by_model`] and
 /// [`TurnUsageBaseline::per_model`].
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, Default, PartialEq)]
@@ -1689,61 +1685,6 @@ pub struct PersistedModelTokenCost {
     pub input_cache_read: u64,
     #[serde(default)]
     pub input_cache_write: u64,
-    pub cost_in_cents: f32,
-}
-
-impl PersistedModelTokenCost {
-    /// Billable "headline" token total (input + output). Deliberately
-    /// excludes cache read/write tokens, which are broken out separately in
-    /// the UI and typically priced very differently.
-    pub fn tokens(&self) -> u64 {
-        self.total_input + self.output
-    }
-
-    /// Component-wise delta against an earlier baseline snapshot of the same
-    /// model. Each token field saturates at zero rather than going negative.
-    pub fn saturating_sub(&self, baseline: &Self) -> Self {
-        Self {
-            total_input: self.total_input.saturating_sub(baseline.total_input),
-            output: self.output.saturating_sub(baseline.output),
-            input_cache_read: self
-                .input_cache_read
-                .saturating_sub(baseline.input_cache_read),
-            input_cache_write: self
-                .input_cache_write
-                .saturating_sub(baseline.input_cache_write),
-            cost_in_cents: self.cost_in_cents - baseline.cost_in_cents,
-        }
-    }
-}
-
-/// See [`ConversationUsageMetadata::turn_usage_baseline`].
-#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
-pub struct TurnUsageBaseline {
-    pub tool_calls: i32,
-    pub files_changed: i32,
-    pub lines_added: i32,
-    pub lines_removed: i32,
-    pub commands_executed: i32,
-    /// Per-model token/cost baseline as of the start of the block, keyed by
-    /// model_id. See
-    /// [`ConversationUsageMetadata::cumulative_token_cost_by_model`].
-    #[serde(default)]
-    pub per_model: HashMap<String, PersistedModelTokenCost>,
-    /// Per-model inference cost/web-search baseline as of the start of the
-    /// block, keyed by model_id. See
-    /// [`ConversationUsageMetadata::cumulative_inference_usage_by_model`].
-    #[serde(default)]
-    pub per_model_inference: HashMap<String, PersistedModelInferenceUsage>,
-}
-
-/// Cumulative inference cost breakdown (by input/output/cache-read/
-/// cache-write) plus web search count/cost for a single model, as of some
-/// point in a conversation. See
-/// [`ConversationUsageMetadata::cumulative_inference_usage_by_model`] and
-/// [`TurnUsageBaseline::per_model_inference`].
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, Default, PartialEq)]
-pub struct PersistedModelInferenceUsage {
     #[serde(default)]
     pub input_cost_in_cents: f32,
     #[serde(default)]
@@ -1758,18 +1699,37 @@ pub struct PersistedModelInferenceUsage {
     pub web_search_cost_in_cents: f32,
 }
 
-impl PersistedModelInferenceUsage {
-    /// Combined cache-read + cache-write cost, matching how the turn panel
-    /// displays a single combined "Cache" row.
-    pub fn cache_cost_in_cents(&self) -> f32 {
-        self.input_cache_read_cost_in_cents + self.input_cache_write_cost_in_cents
+impl PersistedModelTokenCost {
+    /// Billable "headline" token total (input + output). Deliberately
+    /// excludes cache read/write tokens, which are broken out separately in
+    /// the UI and typically priced very differently.
+    pub fn tokens(&self) -> u64 {
+        self.total_input + self.output
+    }
+
+    /// Aggregate cost across all token types (input/output/cache), in US
+    /// cents. Computed rather than stored to avoid any risk of double-
+    /// counting against the per-field costs it's derived from.
+    pub fn cost_in_cents(&self) -> f32 {
+        self.input_cost_in_cents
+            + self.output_cost_in_cents
+            + self.input_cache_read_cost_in_cents
+            + self.input_cache_write_cost_in_cents
     }
 
     /// Component-wise delta against an earlier baseline snapshot of the same
-    /// model. `web_search_count` saturates at zero rather than going
+    /// model. Each token/count field saturates at zero rather than going
     /// negative.
     pub fn saturating_sub(&self, baseline: &Self) -> Self {
         Self {
+            total_input: self.total_input.saturating_sub(baseline.total_input),
+            output: self.output.saturating_sub(baseline.output),
+            input_cache_read: self
+                .input_cache_read
+                .saturating_sub(baseline.input_cache_read),
+            input_cache_write: self
+                .input_cache_write
+                .saturating_sub(baseline.input_cache_write),
             input_cost_in_cents: self.input_cost_in_cents - baseline.input_cost_in_cents,
             output_cost_in_cents: self.output_cost_in_cents - baseline.output_cost_in_cents,
             input_cache_read_cost_in_cents: self.input_cache_read_cost_in_cents
@@ -1783,6 +1743,21 @@ impl PersistedModelInferenceUsage {
                 - baseline.web_search_cost_in_cents,
         }
     }
+}
+
+/// See [`ConversationUsageMetadata::turn_usage_baseline`].
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+pub struct TurnUsageBaseline {
+    pub tool_calls: i32,
+    pub files_changed: i32,
+    pub lines_added: i32,
+    pub lines_removed: i32,
+    pub commands_executed: i32,
+    /// Per-model token/cost baseline as of the start of the block, keyed by
+    /// the same model display label used in
+    /// [`ConversationUsageMetadata::cumulative_token_cost_by_model`].
+    #[serde(default)]
+    pub per_model: HashMap<String, PersistedModelTokenCost>,
 }
 
 #[derive(Debug, Insertable)]

@@ -171,6 +171,10 @@ fn build_label_value_columns_keeps_every_row_aligned_across_sections() {
                 .position(|line| *line == "Platform usage")
                 .expect("Platform usage row should be present");
             assert_eq!(value_lines[platform_usage_index], "$0.08");
+            assert!(
+                platform_usage_index < context_window_index,
+                "Platform usage should be listed before Context window usage"
+            );
 
             let tool_calls_index = label_lines
                 .iter()
@@ -200,7 +204,8 @@ fn toggle_model_expanded_shows_and_hides_breakdown_rows() {
                 inference_breakdown: Some(TurnModelInferenceBreakdown {
                     input_cost_in_cents: 100.0,
                     output_cost_in_cents: 200.0,
-                    cache_cost_in_cents: 50.0,
+                    input_cache_read_cost_in_cents: 30.0,
+                    input_cache_write_cost_in_cents: 20.0,
                     web_search_count: 2,
                     web_search_cost_in_cents: 300.0,
                 }),
@@ -256,7 +261,14 @@ fn toggle_model_expanded_shows_and_hides_breakdown_rows() {
             let labels = labels_text(view, ctx);
             assert!(labels.contains("Input"), "expected Input row:\n{labels}");
             assert!(labels.contains("Output"), "expected Output row:\n{labels}");
-            assert!(labels.contains("Cache"), "expected Cache row:\n{labels}");
+            assert!(
+                labels.contains("Cache read"),
+                "expected Cache read row:\n{labels}"
+            );
+            assert!(
+                labels.contains("Cache write"),
+                "expected Cache write row:\n{labels}"
+            );
             assert!(
                 labels.contains("Web search"),
                 "expected Web search row:\n{labels}"
@@ -272,8 +284,12 @@ fn toggle_model_expanded_shows_and_hides_breakdown_rows() {
                 "expected Output row to show tokens and cost:\n{values}"
             );
             assert!(
-                values.contains("8 tokens  /  $0.50"),
-                "expected Cache row to show combined cache tokens and cost:\n{values}"
+                values.contains("5 tokens  /  $0.30"),
+                "expected Cache read row to show its own tokens and cost:\n{values}"
+            );
+            assert!(
+                values.contains("3 tokens  /  $0.20"),
+                "expected Cache write row to show its own tokens and cost:\n{values}"
             );
             assert!(
                 values.contains("2 searches  /  $3.00"),
@@ -296,4 +312,16 @@ fn toggle_model_expanded_shows_and_hides_breakdown_rows() {
             );
         });
     });
+}
+
+/// A non-zero cost that rounds down to `$0.00` at two decimal places must
+/// display as `<$0.01` instead, since rounding it away would misleadingly
+/// suggest no cost was incurred. A true zero cost still shows as `$0.00`.
+#[test]
+fn format_dollars_shows_less_than_a_cent_for_tiny_nonzero_amounts() {
+    assert_eq!(format_dollars(0.0), "$0.00");
+    assert_eq!(format_dollars(0.4), "<$0.01");
+    assert_eq!(format_dollars(0.999), "<$0.01");
+    assert_eq!(format_dollars(1.0), "$0.01");
+    assert_eq!(format_dollars(150.0), "$1.50");
 }
