@@ -48,6 +48,7 @@ use crate::auth::{AuthManager, AuthStateProvider};
 use crate::modal::{Modal, ModalEvent, ModalViewState};
 use crate::pricing::PricingInfoModel;
 use crate::server::ids::ServerId;
+use crate::server::team_scope::RequestTeamScope;
 use crate::server::telemetry::TelemetryEvent;
 use crate::settings::ai::AISettings;
 use crate::ui_components::blended_colors;
@@ -317,7 +318,9 @@ impl BillingAndUsagePageV2View {
         ctx.subscribe_to_model(&usage_history_model, |_, _, _, ctx| {
             ctx.notify();
         });
-        usage_history_model.update(ctx, |m, ctx| m.refresh_usage_history_async(ctx));
+        let team_scope =
+            RequestTeamScope::from_scope(&UserWorkspaces::as_ref(ctx).team_context_for_view(ctx));
+        usage_history_model.update(ctx, |m, ctx| m.refresh_usage_history_async(team_scope, ctx));
 
         let auth_state = AuthStateProvider::as_ref(ctx).get().clone();
 
@@ -1996,9 +1999,11 @@ impl BillingAndUsagePageV2View {
                 .update(ctx, |mgr, ctx| mgr.refresh_workspace_metadata(ctx)),
         );
         AIRequestUsageModel::handle(ctx).update(ctx, |m, ctx| m.refresh_request_usage_async(ctx));
+        let team_scope =
+            RequestTeamScope::from_scope(&UserWorkspaces::as_ref(ctx).team_context_for_view(ctx));
         self.usage_history
             .model
-            .update(ctx, |m, ctx| m.refresh_usage_history_async(ctx));
+            .update(ctx, |m, ctx| m.refresh_usage_history_async(team_scope, ctx));
         self.refresh_addon_credits_settings(ctx);
     }
 }
@@ -2138,9 +2143,12 @@ impl TypedActionView for BillingAndUsagePageV2View {
                 ctx.notify();
             }
             BillingAndUsagePageAction::RenderMoreUsageEntries => {
-                self.usage_history
-                    .model
-                    .update(ctx, |m, ctx| m.load_more_usage_history_async(ctx));
+                let team_scope = RequestTeamScope::from_scope(
+                    &UserWorkspaces::as_ref(ctx).team_context_for_view(ctx),
+                );
+                self.usage_history.model.update(ctx, |m, ctx| {
+                    m.load_more_usage_history_async(team_scope, ctx)
+                });
             }
             BillingAndUsagePageAction::SelectTopupDenomination(i) => {
                 self.addon_credits.selected_denomination = *i;

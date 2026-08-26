@@ -7,6 +7,7 @@ use warpui::{Entity, ModelContext, SingletonEntity};
 use crate::auth::AuthStateProvider;
 use crate::server::server_api::ServerApiProvider;
 use crate::server::server_api::ai::AIClient;
+use crate::server::team_scope::RequestTeamScope;
 
 const PAGE_SIZE: i32 = 20;
 
@@ -50,7 +51,11 @@ impl UsageHistoryModel {
     /// Fetches conversation usage over the past 30 days.
     /// If some usage has already been loaded, this fetches the same number of entries.
     /// If no usage has been loaded, this fetches PAGE_SIZE entries.
-    pub fn refresh_usage_history_async(&mut self, ctx: &mut ModelContext<Self>) {
+    pub fn refresh_usage_history_async(
+        &mut self,
+        team_scope: RequestTeamScope,
+        ctx: &mut ModelContext<Self>,
+    ) {
         if self.is_loading || !AuthStateProvider::as_ref(ctx).get().is_logged_in() {
             return;
         }
@@ -68,11 +73,15 @@ impl UsageHistoryModel {
         self.entries.clear();
         self.has_more_entries = true;
 
-        self.fetch_next_page(num_items_to_fetch, None, ctx);
+        self.fetch_next_page(num_items_to_fetch, None, team_scope, ctx);
     }
 
     /// Fetches the next page of conversation usage entries, appending them to the existing list.
-    pub fn load_more_usage_history_async(&mut self, ctx: &mut ModelContext<Self>) {
+    pub fn load_more_usage_history_async(
+        &mut self,
+        team_scope: RequestTeamScope,
+        ctx: &mut ModelContext<Self>,
+    ) {
         if self.is_loading || !self.has_more_entries {
             return;
         }
@@ -83,7 +92,7 @@ impl UsageHistoryModel {
             return;
         }
 
-        self.fetch_next_page(PAGE_SIZE, last_updated_end_timestamp, ctx);
+        self.fetch_next_page(PAGE_SIZE, last_updated_end_timestamp, team_scope, ctx);
     }
 
     /// Fetches the next page of conversation usage entries, appending them to the existing list.
@@ -93,6 +102,7 @@ impl UsageHistoryModel {
         &mut self,
         limit: i32,
         last_updated_end_timestamp: Option<Time>,
+        team_scope: RequestTeamScope,
         ctx: &mut ModelContext<Self>,
     ) {
         // If no time stamp is provided for pagination, we can assume that this is the first page of results.
@@ -111,6 +121,7 @@ impl UsageHistoryModel {
                         Some(30),
                         Some(limit),
                         last_updated_end_timestamp,
+                        team_scope,
                     )
                     .await
             },

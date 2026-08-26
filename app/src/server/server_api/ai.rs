@@ -154,6 +154,7 @@ use crate::ai_assistant::{AIGeneratedCommand, GenerateCommandsFromNaturalLanguag
 use crate::drive::workflows::ai_assist::{GeneratedCommandMetadata, GeneratedCommandMetadataError};
 use crate::persistence::model::ConversationUsageMetadata;
 use crate::server::graphql::{get_request_context, get_user_facing_error_message};
+use crate::server::team_scope::RequestTeamScope;
 use crate::terminal::model::block::SerializedBlock;
 #[cfg(not(feature = "agent_mode_evals"))]
 use crate::{
@@ -1194,6 +1195,7 @@ pub trait AIClient: 'static + Send + Sync {
         days: Option<i32>,
         limit: Option<i32>,
         last_updated_end_timestamp: Option<warp_graphql::scalars::Time>,
+        team_scope: RequestTeamScope,
     ) -> Result<Vec<ConversationUsage>, anyhow::Error>;
 
     async fn get_feature_model_choices(&self) -> Result<ModelsByFeature, anyhow::Error>;
@@ -1884,6 +1886,7 @@ impl AIClient for ServerApi {
         days: Option<i32>,
         limit: Option<i32>,
         last_updated_end_timestamp: Option<warp_graphql::scalars::Time>,
+        team_scope: RequestTeamScope,
     ) -> Result<Vec<ConversationUsage>, anyhow::Error> {
         let operation = GetConversationUsage::build(GetConversationUsageVariables {
             request_context: get_request_context(),
@@ -1891,7 +1894,9 @@ impl AIClient for ServerApi {
             limit,
             last_updated_end_timestamp,
         });
-        let response = self.send_graphql_request(operation, None).await?;
+        let response = self
+            .send_team_scoped_graphql_request(operation, None, team_scope)
+            .await?;
         match response.user {
             UserResult::UserOutput(output) => Ok(output.user.conversation_usage),
             UserResult::Unknown => Err(anyhow!("Unable to fetch conversation usage")),

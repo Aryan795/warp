@@ -48,6 +48,7 @@ use crate::menu::{Event as MenuEvent, Menu, MenuItem, MenuItemFields};
 use crate::modal::{Modal, ModalEvent, ModalViewState};
 use crate::pricing::{PricingInfoModel, PricingInfoModelEvent};
 use crate::server::ids::ServerId;
+use crate::server::team_scope::RequestTeamScope;
 use crate::server::telemetry::TelemetryEvent;
 use crate::settings::ai::AISettings;
 use crate::settings_view::settings_page::TOGGLE_BUTTON_RIGHT_PADDING;
@@ -318,7 +319,9 @@ impl BillingAndUsagePageView {
             ctx.notify();
         });
         // On page init, fetch the usage history for the current user.
-        usage_history_model.update(ctx, |m, ctx| m.refresh_usage_history_async(ctx));
+        let team_scope =
+            RequestTeamScope::from_scope(&UserWorkspaces::as_ref(ctx).team_context_for_view(ctx));
+        usage_history_model.update(ctx, |m, ctx| m.refresh_usage_history_async(team_scope, ctx));
 
         let auth_state = AuthStateProvider::as_ref(ctx).get().clone();
 
@@ -767,8 +770,10 @@ impl BillingAndUsagePageView {
             ai_request_usage_model.refresh_request_usage_async(ctx)
         });
 
+        let team_scope =
+            RequestTeamScope::from_scope(&UserWorkspaces::as_ref(ctx).team_context_for_view(ctx));
         self.usage_history_model
-            .update(ctx, |m, ctx| m.refresh_usage_history_async(ctx));
+            .update(ctx, |m, ctx| m.refresh_usage_history_async(team_scope, ctx));
 
         self.refresh_addon_credits_settings(ctx);
     }
@@ -971,8 +976,12 @@ impl TypedActionView for BillingAndUsagePageView {
                 ctx.notify();
             }
             BillingAndUsagePageAction::RenderMoreUsageEntries => {
-                self.usage_history_model
-                    .update(ctx, |m, ctx| m.load_more_usage_history_async(ctx));
+                let team_scope = RequestTeamScope::from_scope(
+                    &UserWorkspaces::as_ref(ctx).team_context_for_view(ctx),
+                );
+                self.usage_history_model.update(ctx, |m, ctx| {
+                    m.load_more_usage_history_async(team_scope, ctx)
+                });
             }
             BillingAndUsagePageAction::SelectTopupDenomination(i) => {
                 self.selected_addon_denomination = *i;
