@@ -1348,12 +1348,11 @@ esac
   # safe for us to claim it there. An unbound key still prints a line (ending in
   # "undefined-key"), not empty output, so we must check for that explicitly rather than
   # treating any output as "bound".
-  # The command substitution is quoted: on zsh <5.1 (e.g. 5.0.2, Ubuntu 14.04's
-  # stock build), `local var=$(cmd)` -- unlike plain `var=$(cmd)` -- applies
-  # filename generation to the substituted value, and bindkey's own output
-  # (`"^[]" undefined-key`) crashes that glob attempt with "not valid in this
-  # context", aborting the whole sourced script before it reaches
-  # `warp_bootstrapped`. Quoting suppresses globbing on both old and current zsh.
+  # The command substitution must stay quoted: on zsh <5.1 (e.g. 5.0.2, Ubuntu 14.04's stock
+  # build), `local var=$(cmd)` -- unlike plain `var=$(cmd)` -- word-splits the substituted value
+  # and declares each resulting word, so bindkey's own `"^[]" undefined-key` output makes `local`
+  # attempt to declare `undefined-key`. That is not a valid identifier, so the whole sourced
+  # script aborts before it reaches `warp_bootstrapped`.
   __warp_raw_keypress_ctrl_r_keyseq_free() { # keymap
     local result="$(bindkey -M "$1" '\e]' 2>/dev/null)"
     [[ -z "$result" || "$result" == *undefined-key* ]]
