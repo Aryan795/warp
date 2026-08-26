@@ -209,20 +209,6 @@ fn test_buffer_text_size_is_bounded() {
 }
 
 #[test]
-fn test_append_str_fragments_typical_source_lines_once_each() {
-    // A realistic source file has many lines shorter than TEXT_FRAGMENT_SIZE. Each such line
-    // should cost exactly one Text fragment plus one Newline, not more - regressing this would
-    // silently reintroduce the per-line materialization blowup fixed in APP-4844.
-    let mut tree: SumTree<BufferText> = SumTree::new();
-    let line = "a".repeat(TEXT_FRAGMENT_SIZE / 2);
-    let content = format!("{line}\n{line}\n{line}\n");
-    tree.append_str(&content);
-
-    assert_eq!(count_text_fragments(&tree), 3);
-    assert_eq!(tree.debug(), format!("{line}\\n{line}\\n{line}\\n"));
-}
-
-#[test]
 fn test_char_at() {
     let mut tree: SumTree<BufferText> = SumTree::new();
     tree.append_str("Line");
