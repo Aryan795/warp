@@ -126,6 +126,57 @@ fn braille_dot_rect(cell_bounds: RectF, bit: usize) -> Option<RectF> {
     ))
 }
 
+fn braille_cell_bounds(cell_bounds: RectF, baseline_position: Vector2F, font_size: f32) -> RectF {
+    let line_height = (font_size * DEFAULT_UI_LINE_HEIGHT_RATIO).min(cell_bounds.height());
+    if line_height <= 0. {
+        return cell_bounds;
+    }
+
+    let top = (baseline_position.y() - line_height * DEFAULT_TOP_BOTTOM_RATIO)
+        .clamp(0., cell_bounds.height() - line_height);
+    RectF::new(
+        cell_bounds.origin() + vec2f(0., top),
+        vec2f(cell_bounds.width(), line_height),
+    )
+}
+
+fn native_glyph_cell_bounds(
+    glyph_type: &NativeGlyphType,
+    cell_bounds: RectF,
+    baseline_position: Vector2F,
+    font_size: f32,
+) -> RectF {
+    match glyph_type {
+        NativeGlyphType::Braille { .. } => {
+            braille_cell_bounds(cell_bounds, baseline_position, font_size)
+        }
+        NativeGlyphType::BoxDrawing(_)
+        | NativeGlyphType::UpperHalfBlock
+        | NativeGlyphType::PowerlineLeftHardDivider
+        | NativeGlyphType::PowerlineRightHardDivider
+        | NativeGlyphType::BottomAlignedFractionalBlock { .. }
+        | NativeGlyphType::LeftAlignedFractionalBlock { .. }
+        | NativeGlyphType::RightHalfBlock
+        | NativeGlyphType::Shade { .. }
+        | NativeGlyphType::UpperOneEighthBlock
+        | NativeGlyphType::RightOneEighthBlock
+        | NativeGlyphType::Quadrant { .. }
+        | NativeGlyphType::QuadrantUpperLeftUpperRightLowerLeft
+        | NativeGlyphType::QuadrantUpperLeftUpperRightLowerRight
+        | NativeGlyphType::QuadrantUpperLeftLowerLeftLowerRight
+        | NativeGlyphType::QuadrantUpperRightLowerLeftLowerRight
+        | NativeGlyphType::NFHalfCircleLeftThin
+        | NativeGlyphType::NFHalfCircleRightThin
+        | NativeGlyphType::NFHalfCircleLeft
+        | NativeGlyphType::NFHalfCircleLeftThick
+        | NativeGlyphType::NFHalfCircleRightThick
+        | NativeGlyphType::NFSlantTriangleTopLeft
+        | NativeGlyphType::NFSlantTriangleBottomLeft
+        | NativeGlyphType::NFSlantTriangleTopRight
+        | NativeGlyphType::NFSlantTriangleBottomRight => cell_bounds,
+    }
+}
+
 lazy_static! {
     pub static ref MATCH_COLOR: ColorU = ColorU::new(255, 254, 61, 255);
     pub static ref URL_COLOR: ColorU = ColorU::new(103, 171, 250, 255);
@@ -1483,8 +1534,14 @@ fn render_grid_with_ligatures<'a>(
                 ) {
                     string_builder.append_content(secret_content, col);
                 } else if let Some(glyph_type) = native_glyph_for_cell(cell) {
+                    let cell_bounds = RectF::new(grid_origin + glyph_offset, actual_cell_size);
                     native_glyphs_to_render.push(NativeGlyph {
-                        cell_bounds: RectF::new(grid_origin + glyph_offset, actual_cell_size),
+                        cell_bounds: native_glyph_cell_bounds(
+                            &glyph_type,
+                            cell_bounds,
+                            baseline_position,
+                            font_size,
+                        ),
                         foreground_color: cell_colors.foreground_color,
                         glyph_type,
                     });
@@ -1824,8 +1881,14 @@ fn render_cell_glyph(
     // rendering instead of using glyphs from the font.
     match native_glyph_for_cell(cell) {
         Some(glyph_type) => {
+            let cell_bounds = RectF::new(grid_origin + glyph_offset, cell_size);
             native_glyphs_to_render.push(NativeGlyph {
-                cell_bounds: RectF::new(grid_origin + glyph_offset, cell_size),
+                cell_bounds: native_glyph_cell_bounds(
+                    &glyph_type,
+                    cell_bounds,
+                    baseline_position,
+                    font_size,
+                ),
                 foreground_color,
                 glyph_type,
             });

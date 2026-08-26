@@ -5,7 +5,7 @@ use warpui::units::{IntoLines, Lines, Pixels};
 
 use super::{
     CachedBackgroundColor, NativeGlyphType, active_or_next_match, braille_dot_rect,
-    braille_pattern_for_char, native_glyph_for_cell,
+    braille_pattern_for_char, native_glyph_cell_bounds, native_glyph_for_cell,
 };
 use crate::terminal::grid_size_util::calculate_grid_baseline_position;
 use crate::terminal::model::cell::Cell;
@@ -15,6 +15,15 @@ use crate::terminal::{SizeInfo, grid_renderer};
 
 fn rect_from_points(min_x: f32, min_y: f32, max_x: f32, max_y: f32) -> RectF {
     RectF::from_points(vec2f(min_x, min_y), vec2f(max_x, max_y))
+}
+
+fn assert_rect_approx_eq(actual: RectF, expected: RectF) {
+    const EPSILON: f32 = 0.0001;
+
+    assert!((actual.origin().x() - expected.origin().x()).abs() < EPSILON);
+    assert!((actual.origin().y() - expected.origin().y()).abs() < EPSILON);
+    assert!((actual.width() - expected.width()).abs() < EPSILON);
+    assert!((actual.height() - expected.height()).abs() < EPSILON);
 }
 
 // TODO(CORE-2002): Make test non-Mac specific by switching to using bundled Roboto font.
@@ -100,6 +109,31 @@ fn test_braille_dot_rect_uses_octant_positions() {
     assert_eq!(
         braille_dot_rect(cell_bounds, 7),
         Some(rect_from_points(20., 50., 24., 54.))
+    );
+}
+
+#[test]
+fn test_braille_cell_bounds_uses_text_line_box() {
+    let cell_bounds = rect_from_points(10., 20., 26., 68.);
+    let baseline_position = vec2f(0., 30.);
+
+    assert_rect_approx_eq(
+        native_glyph_cell_bounds(
+            &NativeGlyphType::Braille { pattern: 0xff },
+            cell_bounds,
+            baseline_position,
+            20.,
+        ),
+        rect_from_points(10., 30.8, 26., 54.8),
+    );
+    assert_eq!(
+        native_glyph_cell_bounds(
+            &NativeGlyphType::UpperHalfBlock,
+            cell_bounds,
+            baseline_position,
+            20.
+        ),
+        cell_bounds
     );
 }
 
