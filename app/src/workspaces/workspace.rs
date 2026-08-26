@@ -49,10 +49,7 @@ pub struct Workspace {
     pub billing_cycle_usage: Option<BillingCycleUsageData>,
     pub has_billing_history: bool,
     pub settings: WorkspaceSettings,
-    /// The resolved-teamless model catalog, sourced from the server's
-    /// `Workspace.featureModelChoice`. A window with no team selected reads models through
-    /// here (see `UserWorkspaces::feature_model_choice_for_scope`) rather than through a
-    /// separate cache.
+    /// The resolved-teamless model catalog -- fallback to this when teams[x].feature_model_choice isn't available
     pub feature_model_choice: ModelsByFeature,
     pub invite_link_domain_restrictions: Vec<InviteLinkDomainRestriction>,
     pub pending_email_invites: Vec<EmailInvite>,

@@ -106,10 +106,6 @@ pub struct Team {
     pub stripe_customer_id: Option<String>,
     /// The team's effective settings, sourced from the server's `Team.settings`.
     pub settings: TeamSettings,
-    /// The model catalog for this team, sourced from the server's `Team.featureModelChoice`.
-    /// A window scoped to this team reads models through here (see
-    /// `UserWorkspaces::feature_model_choice_for_scope`) rather than through a separate,
-    /// team-keyed cache.
     pub feature_model_choice: ModelsByFeature,
     /// If the team is eligible for discovery, then show toggle for setting discoverability to the team's admin
     pub is_eligible_for_discovery: bool,

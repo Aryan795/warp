@@ -245,12 +245,12 @@ impl UserWorkspaces {
             workspace_client,
         };
 
-        // One-release migration: a `Workspace` restored from the SQLite cache predates the
-        // `feature_model_choice` column (or the app hasn't fetched since upgrading), so its
-        // catalog is still the bare default. Seed it from the legacy, pre-team-keyed cache so
-        // an offline launch right after upgrading shows the user's last-known model list for
-        // the rest of the offline session instead of only the `auto` default. TODO: delete
-        // once it's safe to assume every client has fetched at least once since this rework.
+        // One-release migration: moving feature_model_choices off of `LLMPreferences` to `Workspace`.
+        // This means that on the first time the user opens a version of warp without a
+        // Workspace.feature_model_choice saved in their sqlite db, we can fall back to reading feature
+        // model choices from the old LLMPreferences cache.
+        // TODO: delete once it's safe to assume every client has fetched at least once since
+        // this migration shipped.
         if me
             .current_workspace()
             .is_some_and(|workspace| workspace.feature_model_choice == ModelsByFeature::default())
