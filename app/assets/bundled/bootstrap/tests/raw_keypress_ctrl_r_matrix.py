@@ -664,16 +664,10 @@ def test_fish():
                 detail=f"insert binds: {insert_binds!r}" if not preserved else "",
             )
 
-            # default mode is left free here, so it must still have claimed Alt-] (with a real
-            # wrapper or the fallback) despite insert being occupied. Asserting that is what makes
-            # this the *partial* collision the tag gate exists for, rather than a case where every
-            # mode happens to be occupied. Checked via a file-redirected `bind` listing rather than
-            # session.buf: an interactive shell echoes back a typed command as you type it
-            # regardless of whether it goes on to execute, so a `... && echo MARKER` sent straight
-            # into the pty leaves MARKER in the transcript even when the command never runs --
-            # session.buf can't distinguish "the check ran and passed" from "the check was merely
-            # typed". The pre-existing occupied-mode checks in this file already avoid that trap by
-            # redirecting to a file and reading the file back; this does the same.
+            # default mode is left free here, so it must still have claimed Alt-] despite insert
+            # being occupied -- that is what makes this the *partial* collision the tag gate exists
+            # for, rather than a case where every mode happens to be occupied. Read from a file
+            # rather than session.buf, for the reason given in the bash equivalent above.
             session.send(
                 "bind -M default \\x1b\\x5d > /tmp/_fish_occ_insert_default.txt 2>&1\n",
                 wait=1.0,
@@ -691,11 +685,8 @@ def test_fish():
 
             check_plugin_tag(session, False, "fish (vi insert occupied)")
 
-            # Drive an actual handoff in default mode (free, with no real widget rebound in this
-            # test) while insert is occupied: the fallback must still report the token immediately
-            # with an empty selection, proving default mode keeps working, not just that it looks
-            # bound. This assertion is immune to the buf/echo trap above since it checks a real DCS
-            # hook, not typed-command text.
+            # Drive a real handoff in the free mode: the fallback must still report the token,
+            # proving default mode keeps working rather than merely looking bound.
             send_handoff(session, "2020")
             hooks = session.hooks()
             default_hooks = [h for h in hooks if h.get("token") == "2020"]
