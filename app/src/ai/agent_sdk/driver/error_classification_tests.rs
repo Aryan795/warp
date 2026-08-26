@@ -115,6 +115,22 @@ fn dependency_credentials_failure_strips_staging_debug_details() {
     );
 }
 
+#[test]
+fn unstructured_credentials_failure_is_failed_with_invalid_request() {
+    let (state, update) = classify_driver_error(&AgentDriverError::GitCredentialsFetchFailed(
+        TaskGitCredentialsError::Unstructured {
+            message: "Unable to access task git credentials".to_string(),
+        },
+    ));
+
+    assert_eq!(state, AgentTaskState::Failed);
+    assert_eq!(update.error_code, Some(PlatformErrorCode::InvalidRequest));
+    let platform_error = update.platform_error.expect("structured platform error");
+    assert!(!platform_error.retryable);
+    assert!(platform_error.metadata.is_empty());
+    assert_eq!(platform_error.debug, None);
+}
+
 // --- Infrastructure errors → ERROR ---
 
 #[test]
