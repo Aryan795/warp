@@ -207,6 +207,9 @@ impl From<&ConversationUsageMetadata> for persistence::model::ConversationUsageM
             // The server doesn't report a per-model cost breakdown; this is
             // only ever populated client-side as requests complete.
             cumulative_token_cost_by_model: Default::default(),
+            // Same as above: archived per-turn snapshots are only ever
+            // populated client-side.
+            turn_usage_by_exchange: Default::default(),
         }
     }
 }

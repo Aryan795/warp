@@ -92,13 +92,13 @@ use crate::ai::agent::redaction::redact_secrets;
 use crate::ai::agent::telemetry::ForTelemetry as _;
 use crate::ai::agent::{
     AIAgentAction, AIAgentActionId, AIAgentActionResultType, AIAgentActionType, AIAgentAttachment,
-    AIAgentCitation, AIAgentContext, AIAgentInput, AIAgentOutput, AIAgentOutputMessage,
-    AIAgentOutputMessageType, AIAgentTextSection, AIIdentifiers, CancellationReason,
-    CreateDocumentsRequest, CreateDocumentsResult, DocumentToCreate, EditDocumentsResult,
-    MessageId, PassiveSuggestionTrigger, ProgrammingLanguage, RenderableAIError,
-    RequestCommandOutputResult, RequestFileEditsResult, SearchCodebaseResult, ServerOutputId,
-    SubagentCall, SubagentType, SuggestPromptRequest, SuggestPromptResult, SuggestedLoggingId,
-    SummarizationType, TodoOperation,
+    AIAgentCitation, AIAgentContext, AIAgentExchangeId, AIAgentInput, AIAgentOutput,
+    AIAgentOutputMessage, AIAgentOutputMessageType, AIAgentTextSection, AIIdentifiers,
+    CancellationReason, CreateDocumentsRequest, CreateDocumentsResult, DocumentToCreate,
+    EditDocumentsResult, MessageId, PassiveSuggestionTrigger, ProgrammingLanguage,
+    RenderableAIError, RequestCommandOutputResult, RequestFileEditsResult, SearchCodebaseResult,
+    ServerOutputId, SubagentCall, SubagentType, SuggestPromptRequest, SuggestPromptResult,
+    SuggestedLoggingId, SummarizationType, TodoOperation,
 };
 use crate::ai::agent_conversations_model::{AgentConversationsModel, AgentConversationsModelEvent};
 use crate::ai::ambient_agents::AmbientAgentTaskId;
@@ -6146,6 +6146,10 @@ pub enum AIBlockEvent {
     /// (Surface 3 of the pricing-transparency usage surfaces).
     TurnPanelToggled {
         conversation_id: AIConversationId,
+        /// The exchange this block renders, used to look up that specific
+        /// turn's archived usage snapshot rather than whatever the
+        /// conversation's current turn happens to be.
+        exchange_id: AIAgentExchangeId,
         is_expanded: bool,
     },
 
@@ -6660,6 +6664,7 @@ impl TypedActionView for AIBlock {
                 self.is_turn_panel_expanded = !self.is_turn_panel_expanded;
                 ctx.emit(AIBlockEvent::TurnPanelToggled {
                     conversation_id: self.client_ids.conversation_id,
+                    exchange_id: self.client_ids.client_exchange_id,
                     is_expanded: self.is_turn_panel_expanded,
                 });
             }

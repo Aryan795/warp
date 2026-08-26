@@ -1662,12 +1662,47 @@ pub struct ConversationUsageMetadata {
     /// with charge data completes.
     #[serde(default)]
     pub cumulative_token_cost_by_model: HashMap<String, PersistedModelTokenCost>,
+    /// Archived per-turn usage snapshots, keyed by the string form of the id
+    /// of the most recent exchange updated by that turn's requests as of
+    /// the snapshot. Powers the docked "Turn" panel: a panel opened for an
+    /// older response must show that response's own turn data, not
+    /// whatever the conversation's current "last block" happens to be by
+    /// the time the panel is opened. See [`TurnUsageSnapshot`].
+    #[serde(default)]
+    pub turn_usage_by_exchange: HashMap<String, TurnUsageSnapshot>,
 }
 
 impl ConversationUsageMetadata {
     pub fn total_tool_calls(&self) -> i32 {
         self.tool_usage_metadata.total_tool_calls()
     }
+}
+
+/// A point-in-time snapshot of a single turn's usage, captured at the end of
+/// each request that contributes to it. See
+/// [`ConversationUsageMetadata::turn_usage_by_exchange`].
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+pub struct TurnUsageSnapshot {
+    pub tool_calls: i32,
+    pub files_changed: i32,
+    pub lines_added: i32,
+    pub lines_removed: i32,
+    pub commands_executed: i32,
+    /// Per-model token/cost usage for this turn, keyed by the model's
+    /// display label. See
+    /// [`ConversationUsageMetadata::cumulative_token_cost_by_model`].
+    #[serde(default)]
+    pub per_model: Vec<(String, PersistedModelTokenCost)>,
+    /// The conversation's cumulative context window usage (0.0-1.0) as of
+    /// this turn. Context window usage is inherently conversation-level
+    /// (it cannot be scoped to a single turn), so this is captured as a
+    /// point-in-time value rather than a delta, letting a historical turn
+    /// show the usage as it stood at the time rather than the
+    /// conversation's current value.
+    pub context_window_usage: f32,
+    /// Platform usage charged (in US cents) over this turn. `None` when no
+    /// request with charge data completed during this turn.
+    pub platform_usage_in_cents: Option<f32>,
 }
 
 /// Cumulative token count and cost breakdown (input/output/cache-read/
@@ -1705,6 +1740,17 @@ impl PersistedModelTokenCost {
     /// the UI and typically priced very differently.
     pub fn tokens(&self) -> u64 {
         self.total_input + self.output
+    }
+
+    /// Whether this model recorded any billable activity at all, including
+    /// web search -- unlike `tokens() > 0 || cost_in_cents() > 0.0`, which
+    /// both exclude web search, so a model with only web-search usage and no
+    /// token/cost activity would otherwise be treated as inactive.
+    pub fn has_activity(&self) -> bool {
+        self.tokens() > 0
+            || self.cost_in_cents() > 0.0
+            || self.web_search_count > 0
+            || self.web_search_cost_in_cents > 0.0
     }
 
     /// Aggregate cost across all token types (input/output/cache), in US

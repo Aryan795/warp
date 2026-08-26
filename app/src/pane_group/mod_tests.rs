@@ -373,6 +373,7 @@ fn test_server_conversation_metadata(
             context_window_segments: Vec::new(),
             turn_usage_baseline: None,
             cumulative_token_cost_by_model: Default::default(),
+            turn_usage_by_exchange: Default::default(),
         },
         metadata: mock_server_metadata(),
         creator: None,

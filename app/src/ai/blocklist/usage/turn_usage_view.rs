@@ -1,9 +1,13 @@
 //! The docked, closeable "Turn" panel (Surface 3 of the pricing-transparency
 //! usage surfaces). Unlike [`super::conversation_usage_view::ConversationUsageView`]
 //! (which shows conversation-cumulative totals, optionally alongside a
-//! "last response" annotation), every numeric value in this view is scoped
-//! to a single agent turn ("block") -- see the turn-scoped getters on
-//! `AIConversation` (e.g. `tool_calls_for_last_block`).
+//! "last response" annotation), the tool-call/diff/command/token/cost
+//! values in this view are scoped to a single agent turn ("block") -- see
+//! the turn-scoped getters on `AIConversation` (e.g.
+//! `tool_calls_for_last_block`). `context_window_usage` is the one
+//! exception: it is inherently conversation-level, captured here as the
+//! conversation's cumulative value as of that turn (see
+//! [`TurnUsageInfo::context_window_usage`]).
 //!
 //! Per resolved user feedback on the per-turn-usage-panel spec, this panel:
 //! * is triggered independently from (and has no cross-navigation link to)
@@ -93,10 +97,12 @@ pub struct TurnUsageInfo {
     /// Per-model token/cost usage for this turn. One row is rendered per
     /// entry.
     pub models: Vec<TurnModelUsage>,
-    /// Context window usage (0.0-1.0). This is inherently a
-    /// conversation-level running total -- it cannot be scoped to a single
-    /// turn -- but is shown here per the spec, which explicitly calls out
-    /// this scope mixing as deliberate.
+    /// The conversation's cumulative context window usage (0.0-1.0) as of
+    /// this turn. Context window usage is inherently conversation-level --
+    /// it cannot be scoped to a single turn -- so this is a point-in-time
+    /// value (the conversation's running total as of this turn) rather than
+    /// a per-turn delta, per the spec, which explicitly calls out this
+    /// scope mixing as deliberate.
     pub context_window_usage: f32,
     /// Platform usage charged (in US cents) over this turn, rendered as its
     /// own "PLATFORM USAGE" section. `None` when no request with charge
@@ -164,6 +170,10 @@ impl TurnUsageView {
         let font_size = appearance.ui_font_size() + 2.;
 
         let title = Text::new("Turn".to_string(), appearance.ui_font_family(), font_size)
+            .with_style(warpui::fonts::Properties {
+                weight: warpui::fonts::Weight::Bold,
+                ..Default::default()
+            })
             .with_color(blended_colors::text_main(theme, background))
             .finish();
 
@@ -203,14 +213,14 @@ impl TurnUsageView {
 
     /// Renders a section's small-caps label as a standalone row, to be
     /// followed by that section's data rows in the shared label/value
-    /// columns. Unlike the original mockup, this is purely decorative (no
-    /// chevron, not clickable): all sections are always fully expanded.
+    /// columns. Purely decorative (no chevron, not clickable): all sections
+    /// are always fully expanded.
     fn render_section_header(label: &str, appearance: &Appearance) -> Box<dyn Element> {
         let theme = appearance.theme();
         let background = theme.surface_2();
-        // A couple of points larger than the base overline size so the
+        // A few points larger than the base overline size so the
         // section headers read clearly against the smaller body text.
-        let header_font_size = appearance.overline_font_size() + 2.;
+        let header_font_size = appearance.overline_font_size() + 3.;
         Text::new(
             label.to_string(),
             appearance.overline_font_family(),
@@ -226,7 +236,7 @@ impl TurnUsageView {
     /// immediately following it.
     fn model_row(&self, index: usize, appearance: &Appearance) -> Vec<LabelValueRow> {
         let model = &self.usage_info.models[index];
-        let font_size = appearance.ui_font_size() + 2.;
+        let font_size = appearance.ui_font_size() + 1.;
         let theme = appearance.theme();
         let background = theme.surface_2();
         let text_color = blended_colors::text_main(theme, background);
@@ -284,7 +294,7 @@ impl TurnUsageView {
         if expanded {
             // Smaller than the rest of the panel's body text, per feedback,
             // to visually distinguish the breakdown as a nested detail.
-            let breakdown_font_size = appearance.ui_font_size();
+            let breakdown_font_size = appearance.ui_font_size() - 1.;
             let breakdown = model.inference_breakdown.as_ref();
 
             rows.push((
@@ -372,7 +382,7 @@ impl TurnUsageView {
     /// used yet), matching how per-model rows omit an unknown cost rather
     /// than showing `$0.00`.
     fn inference_usage_header_row(&self, appearance: &Appearance) -> LabelValueRow {
-        let header_font_size = appearance.overline_font_size() + 2.;
+        let header_font_size = appearance.overline_font_size() + 3.;
         let total_tokens: u64 = self.usage_info.models.iter().map(|m| m.tokens()).sum();
         let total_cost_in_cents = self
             .usage_info
@@ -386,14 +396,22 @@ impl TurnUsageView {
                     .filter_map(|m| m.cost_in_cents)
                     .sum()
             });
+        let theme = appearance.theme();
+        let value = Text::new(
+            format_tokens_with_optional_cost(total_tokens, total_cost_in_cents),
+            appearance.ui_font_family(),
+            header_font_size,
+        )
+        .with_style(warpui::fonts::Properties {
+            weight: warpui::fonts::Weight::Bold,
+            ..Default::default()
+        })
+        .with_color(blended_colors::text_main(theme, theme.surface_2()))
+        .finish();
 
         (
             Self::render_section_header("INFERENCE USAGE", appearance),
-            render_value_text(
-                format_tokens_with_optional_cost(total_tokens, total_cost_in_cents),
-                header_font_size,
-                appearance,
-            ),
+            value,
         )
     }
 
@@ -456,7 +474,7 @@ impl TurnUsageView {
         // Matches the header's font size (rather than the body row size)
         // so this row's label/value heights agree, per the same reasoning
         // as the empty header/value companions in `build_label_value_columns`.
-        let header_font_size = appearance.overline_font_size() + 2.;
+        let header_font_size = appearance.overline_font_size() + 3.;
         Some((
             Self::render_section_header("PLATFORM USAGE", appearance),
             render_value_text(
@@ -656,10 +674,6 @@ impl View for TurnUsageView {
         let appearance = Appearance::as_ref(app);
         let theme = appearance.theme();
 
-        // All rows across all three sections share one pair of label/value
-        // columns, so the value column stays vertically aligned across
-        // section boundaries (not just within a single section). See
-        // `build_label_value_columns` for how row pairing is maintained.
         let (labels, values) = self.build_label_value_columns(appearance);
 
         let content = Flex::column()

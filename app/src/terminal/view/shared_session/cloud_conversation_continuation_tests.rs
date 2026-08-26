@@ -311,6 +311,7 @@ fn server_conversation_metadata(
             context_window_segments: Vec::new(),
             turn_usage_baseline: None,
             cumulative_token_cost_by_model: Default::default(),
+            turn_usage_by_exchange: Default::default(),
         },
         metadata: server_metadata(creator_uid),
         creator: None,

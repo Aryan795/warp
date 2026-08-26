@@ -7079,6 +7079,7 @@ impl TerminalView {
         &mut self,
         source_ai_block_view_id: EntityId,
         conversation_id: AIConversationId,
+        exchange_id: AIAgentExchangeId,
         is_expanded: bool,
         ctx: &mut ViewContext<Self>,
     ) {
@@ -7103,23 +7104,50 @@ impl TerminalView {
             return;
         };
 
-        // Turn-scoped tool-call/diff/command stats, per the spec's resolved
-        // decision to invest in genuine per-turn data rather than relabeling
-        // conversation-cumulative values. Fall back to 0 when no baseline
-        // has been captured yet (shouldn't normally happen, since the
-        // trigger icon itself is gated on this being `Some`).
-        let tool_calls = conversation.tool_calls_for_last_block().unwrap_or(0);
-        let files_changed = conversation.files_changed_for_last_block().unwrap_or(0);
-        let lines_added = conversation.lines_added_for_last_block().unwrap_or(0);
-        let lines_removed = conversation.lines_removed_for_last_block().unwrap_or(0);
-        let commands_executed = conversation.commands_executed_for_last_block().unwrap_or(0);
+        // Prefer the turn's own archived snapshot (see
+        // `AIConversation::turn_usage_snapshot_for_exchange`) so a panel
+        // opened on an older response shows that response's own turn data,
+        // not whatever the conversation's current turn happens to be by the
+        // time the panel is opened. The `*_for_last_block` getters are only
+        // a fallback for conversations that predate the snapshot archive.
+        let snapshot = conversation.turn_usage_snapshot_for_exchange(exchange_id);
+        let (
+            tool_calls,
+            files_changed,
+            lines_added,
+            lines_removed,
+            commands_executed,
+            per_model_usage,
+            context_window_usage,
+            platform_usage_in_cents,
+        ) = match snapshot {
+            Some(snapshot) => (
+                snapshot.tool_calls,
+                snapshot.files_changed,
+                snapshot.lines_added,
+                snapshot.lines_removed,
+                snapshot.commands_executed,
+                snapshot.per_model.clone(),
+                snapshot.context_window_usage,
+                snapshot.platform_usage_in_cents,
+            ),
+            None => (
+                conversation.tool_calls_for_last_block().unwrap_or(0),
+                conversation.files_changed_for_last_block().unwrap_or(0),
+                conversation.lines_added_for_last_block().unwrap_or(0),
+                conversation.lines_removed_for_last_block().unwrap_or(0),
+                conversation.commands_executed_for_last_block().unwrap_or(0),
+                conversation.per_model_usage_for_last_block(),
+                conversation.context_window_usage(),
+                conversation.platform_usage_in_cents_for_last_block(),
+            ),
+        };
 
         // Multiple models can be used within a single turn (e.g. if the
         // router switched models mid-turn), so this is a list of rows
         // rather than a single aggregate. Sorted by descending token usage
         // (then model_id) for a stable, usage-ranked display order.
-        let mut models: Vec<TurnModelUsage> = conversation
-            .per_model_usage_for_last_block()
+        let mut models: Vec<TurnModelUsage> = per_model_usage
             .into_iter()
             .map(|(model_id, usage)| TurnModelUsage {
                 model_id,
@@ -7157,8 +7185,8 @@ impl TerminalView {
 
         let turn_usage_info = TurnUsageInfo {
             models,
-            context_window_usage: conversation.context_window_usage(),
-            platform_usage_in_cents: conversation.platform_usage_in_cents_for_last_block(),
+            context_window_usage,
+            platform_usage_in_cents,
             tool_calls,
             files_changed,
             lines_added,
@@ -20916,9 +20944,16 @@ impl TerminalView {
             }
             AIBlockEvent::TurnPanelToggled {
                 conversation_id,
+                exchange_id,
                 is_expanded,
             } => {
-                self.handle_turn_panel_toggled(block.id(), *conversation_id, *is_expanded, ctx);
+                self.handle_turn_panel_toggled(
+                    block.id(),
+                    *conversation_id,
+                    *exchange_id,
+                    *is_expanded,
+                    ctx,
+                );
             }
             AIBlockEvent::OpenSettings => {
                 ctx.emit(Event::OpenSettings(SettingsSection::WarpAgent));
