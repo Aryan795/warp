@@ -9,6 +9,8 @@ use std::sync::Arc;
 #[cfg(feature = "local_tty")]
 use settings::Setting as _;
 #[cfg(feature = "local_tty")]
+use warp_core::SessionId;
+#[cfg(feature = "local_tty")]
 use warpui::{AppContext, ModelContext};
 use warpui::{Entity, SingletonEntity};
 
@@ -93,6 +95,9 @@ enum Config {
         /// Sandbox ID picked when the container was brought up (see
         /// [`crate::terminal::local_tty::dev_container::generate_sandbox_id`]).
         sandbox_id: String,
+        /// Session ID generated before the container was brought up; see
+        /// [`ShellLaunchData::DevContainer::session_id`].
+        session_id: SessionId,
     },
 }
 
@@ -302,6 +307,7 @@ impl AvailableShell {
                 remote_user,
                 remote_workspace_folder,
                 sandbox_id,
+                session_id,
             } => Some(ShellLaunchData::DevContainer {
                 workspace_folder: workspace_folder.clone(),
                 docker_path: docker_path.clone(),
@@ -309,6 +315,7 @@ impl AvailableShell {
                 remote_user: remote_user.clone(),
                 remote_workspace_folder: remote_workspace_folder.clone(),
                 sandbox_id: sandbox_id.clone(),
+                session_id: *session_id,
             }),
         }
     }
@@ -385,6 +392,7 @@ impl AvailableShell {
         remote_user: Option<String>,
         remote_workspace_folder: String,
         sandbox_id: String,
+        session_id: SessionId,
     ) -> Self {
         Self {
             id: None,
@@ -395,6 +403,7 @@ impl AvailableShell {
                 remote_user,
                 remote_workspace_folder,
                 sandbox_id,
+                session_id,
             }),
         }
     }

@@ -171,12 +171,17 @@ impl ShellStarter {
                     remote_user,
                     remote_workspace_folder,
                     sandbox_id,
+                    session_id,
                 } => {
-                    // `docker_path`, `container_id`, `remote_user`, and
-                    // `remote_workspace_folder` are resolved/picked by the
-                    // caller (`crate::terminal::view::dev_container`) before
-                    // this starter is constructed, mirroring how `sbx_path`
-                    // is resolved for the Docker sandbox.
+                    // `docker_path`, `container_id`, `remote_user`,
+                    // `remote_workspace_folder`, and `session_id` are
+                    // resolved/picked by the caller
+                    // (`crate::terminal::view::dev_container`) before this
+                    // starter is constructed, mirroring how `sbx_path` is
+                    // resolved for the Docker sandbox. `session_id` in
+                    // particular must be reused rather than regenerated
+                    // here: it's already baked into the init/bootstrap
+                    // scripts staged into the container during preflight.
                     return Some(
                         ShellStarterSource::Override(ShellStarter::DevContainer(
                             DevContainerShellStarter::new(
@@ -184,7 +189,7 @@ impl ShellStarter {
                                     args: Vec::new(),
                                     shell_path: docker_path,
                                     shell_type: ShellType::Bash,
-                                    session_id: generate_session_id(),
+                                    session_id,
                                 },
                                 workspace_folder,
                                 container_id,

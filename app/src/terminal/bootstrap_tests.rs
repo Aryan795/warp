@@ -120,6 +120,7 @@ fn dev_container_top_level_session_is_container_exec_relayed() {
             remote_user: None,
             remote_workspace_folder: "/workspaces/project".to_owned(),
             sandbox_id: "deadbeef".to_owned(),
+            session_id: SessionId::from(1),
         }),
         None,
     );

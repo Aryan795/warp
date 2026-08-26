@@ -619,6 +619,7 @@ fn on_shell_determined<S: TerminalSurface>(
             remote_user: dev_container_starter.remote_user.clone(),
             remote_workspace_folder: dev_container_starter.remote_workspace_folder.clone(),
             sandbox_id: dev_container_starter.sandbox_id.clone(),
+            session_id: dev_container_starter.session_id(),
         },
         ShellStarter::Wsl(shell_starter) => ShellLaunchData::WSL {
             distro: shell_starter.distribution().to_owned(),

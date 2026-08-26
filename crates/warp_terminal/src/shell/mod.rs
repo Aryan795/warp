@@ -17,6 +17,7 @@ use warp_completer::completer::{CommandExitStatus, CommandOutput};
 #[cfg(windows)]
 use warp_core::paths::base_config_dir;
 use warp_core::platform::SessionPlatform;
+use warp_core::session_id::SessionId;
 use warp_errors::report_error;
 use warp_util::path::{
     convert_msys2_to_windows_native_path, convert_wsl_to_windows_host_path, msys2_exe_to_root,
@@ -830,6 +831,11 @@ pub enum ShellLaunchData {
         /// Sandbox ID picked when the container was brought up; determines
         /// the host-side init-script bind-mount path.
         sandbox_id: String,
+        /// Session ID generated before the container was brought up and
+        /// already baked into the init/bootstrap scripts staged into the
+        /// container; must match what the bootstrap's `InitShell` hook
+        /// reports back.
+        session_id: SessionId,
     },
 }
 

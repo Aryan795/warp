@@ -1,13 +1,19 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use parking_lot::{FairMutex, Mutex};
+use warp_core::SessionId;
 use warpui::App;
 
 use super::*;
+use crate::terminal::ShellLaunchData;
 use crate::terminal::event_listener::ChannelEventListener;
 use crate::terminal::model::StartCommandOutcome;
 use crate::terminal::model::ansi::{Handler, PreexecValue};
-use crate::terminal::model::session::Sessions;
+use crate::terminal::model::session::{
+    BootstrapSessionType, HostInfo, IsSSHWrapperSession, Sessions,
+};
+use crate::terminal::shell::Shell;
 
 #[derive(Clone, Default)]
 struct TestEventLoopSender {
@@ -26,6 +32,115 @@ fn terminal_model() -> Arc<FairMutex<TerminalModel>> {
         None,
         Some(ChannelEventListener::new_for_test()),
     )))
+}
+
+fn session_info_with_launch_data(launch_data: Option<ShellLaunchData>) -> SessionInfo {
+    SessionInfo {
+        session_id: SessionId::from(1),
+        shell: Shell::new(ShellType::Bash, None, None, HashSet::new(), None),
+        launch_data,
+        histfile: None,
+        user: "test-user".to_owned(),
+        hostname: "test-host".to_owned(),
+        subshell_info: None,
+        path: None,
+        environment_variable_names: HashSet::new(),
+        aliases: HashMap::new(),
+        abbreviations: HashMap::new(),
+        function_names: HashSet::new(),
+        builtins: HashSet::new(),
+        keywords: Vec::new(),
+        is_ssh_wrapper_session: IsSSHWrapperSession::No,
+        home_dir: None,
+        cdpath: None,
+        editor: None,
+        session_type: BootstrapSessionType::Local,
+        host_info: HostInfo::default(),
+        wsl_name: None,
+        spawning_session_id: None,
+    }
+}
+
+/// Sets up a `PtyController` with a fake event loop sender, returning both so
+/// tests can drive `initialize_shell` and inspect what it sent.
+fn controller_with_test_sender(
+    app: &mut App,
+) -> (
+    ModelHandle<PtyController<TestEventLoopSender>>,
+    TestEventLoopSender,
+) {
+    let model = terminal_model();
+    let (_model_events_tx, model_events_rx) = async_channel::unbounded();
+    let (_executor_command_tx, executor_command_rx) = async_channel::unbounded();
+    let sessions = app.add_model(|_| Sessions::new_for_test());
+    let model_events =
+        app.add_model(|ctx| ModelEventDispatcher::new(model_events_rx, sessions.clone(), ctx));
+    let line_editor_status =
+        app.add_model(|ctx| LineEditorStatus::new(model_events.clone(), sessions.clone(), ctx));
+    let sender = TestEventLoopSender::default();
+    let controller = app.add_model(|ctx| {
+        PtyController::new(
+            sender.clone(),
+            model_events,
+            line_editor_status,
+            sessions,
+            executor_command_rx,
+            model,
+            ctx,
+        )
+    });
+    (controller, sender)
+}
+
+#[test]
+fn initialize_shell_is_noop_for_dev_container_session() {
+    App::test((), |mut app| async move {
+        let (controller, sender) = controller_with_test_sender(&mut app);
+        let session_info = session_info_with_launch_data(Some(ShellLaunchData::DevContainer {
+            workspace_folder: "/home/user/project".into(),
+            docker_path: "/usr/bin/docker".into(),
+            container_id: "abc123".to_owned(),
+            remote_user: None,
+            remote_workspace_folder: "/workspaces/project".to_owned(),
+            sandbox_id: "deadbeef".to_owned(),
+            session_id: SessionId::from(1),
+        }));
+
+        controller.update(&mut app, |controller, ctx| {
+            controller.initialize_shell(&session_info, ctx);
+        });
+
+        assert!(
+            sender.messages.lock().is_empty(),
+            "Dev Container sessions bootstrap from files already staged into the container, so \
+             Warp must not also type the bootstrap script into the pty."
+        );
+    });
+}
+
+#[test]
+fn initialize_shell_writes_bootstrap_bytes_for_local_session() {
+    App::test((), |mut app| async move {
+        let (controller, sender) = controller_with_test_sender(&mut app);
+        let session_info = session_info_with_launch_data(Some(ShellLaunchData::Executable {
+            executable_path: "/bin/bash".into(),
+            shell_type: ShellType::Bash,
+        }));
+
+        controller.update(&mut app, |controller, ctx| {
+            controller.initialize_shell(&session_info, ctx);
+        });
+
+        assert!(
+            sender
+                .messages
+                .lock()
+                .iter()
+                .any(|message| matches!(message, Message::Input(_))),
+            "A local (non-Dev-Container) session should still have its bootstrap script written \
+             to the pty."
+        );
+    });
 }
 
 #[test]

@@ -20,6 +20,8 @@ use command::r#async::Command;
 #[cfg(feature = "local_tty")]
 use serde::Deserialize;
 #[cfg(feature = "local_tty")]
+use warp_core::SessionId;
+#[cfg(feature = "local_tty")]
 use warpui::ModelHandle;
 use warpui::ViewContext;
 #[cfg(feature = "local_tty")]
@@ -40,6 +42,8 @@ use crate::server::server_api::ServerApiProvider;
 use crate::terminal::TerminalManager;
 #[cfg(all(feature = "local_tty", not(feature = "remote_tty")))]
 use crate::terminal::available_shells::AvailableShell;
+#[cfg(feature = "local_tty")]
+use crate::terminal::bootstrap::generate_session_id;
 #[cfg(feature = "local_tty")]
 use crate::terminal::local_tty::dev_container::{
     generate_sandbox_id, resolve_devcontainer_cli_path, resolve_docker_cli_path,
@@ -101,6 +105,7 @@ fn create_dev_container_view(
     #[allow(dead_code)] remote_user: Option<String>,
     #[allow(dead_code)] remote_workspace_folder: String,
     #[allow(dead_code)] sandbox_id: String,
+    #[allow(dead_code)] session_id: SessionId,
     ctx: &mut ViewContext<TerminalView>,
 ) -> (
     ViewHandle<TerminalView>,
@@ -129,6 +134,7 @@ fn create_dev_container_view(
                 remote_user,
                 remote_workspace_folder,
                 sandbox_id,
+                session_id,
             ));
 
             let model_event_sender_for_surface = model_event_sender.clone();
@@ -253,14 +259,10 @@ impl TerminalView {
     }
 
     /// Runs `devcontainer up` for `workspace_folder`. Only opens a pane once
-    /// `up` reports success *and* the container passes
-    /// [`Self::preflight_and_attach_dev_container`]'s check; shows an error
-    /// toast (never a pane) otherwise.
-    ///
-    /// The init script that the eventual `bash --rcfile` session (see
-    /// `crate::terminal::local_tty::dev_container`) sources to integrate with
-    /// Warp is delivered separately, via `docker cp`, right before that PTY
-    /// is spawned — it doesn't need to be wired up here.
+    /// `up` reports success *and* [`Self::preflight_and_attach_dev_container`]
+    /// has both verified the container is attachable and staged the
+    /// init/bootstrap scripts into it; shows an error toast (never a pane)
+    /// otherwise.
     #[cfg(feature = "local_tty")]
     fn bring_up_dev_container(
         &self,
@@ -270,6 +272,13 @@ impl TerminalView {
         ctx: &mut ViewContext<Self>,
     ) {
         let sandbox_id = generate_sandbox_id();
+        // Generated here, before the container is even confirmed attachable,
+        // so the same ID can be baked into the init/bootstrap scripts staged
+        // by the preflight step below *and* into the `DevContainerShellStarter`
+        // eventually constructed for the pane; the terminal model validates
+        // the `InitShell` hook's session ID against the one it's told to
+        // expect, so the two must match.
+        let session_id = generate_session_id();
 
         let up_future = {
             let devcontainer_path = devcontainer_path.clone();
@@ -302,6 +311,7 @@ impl TerminalView {
                         remote_user,
                         remote_workspace_folder,
                         sandbox_id,
+                        session_id,
                         ctx,
                     );
                 }
@@ -319,17 +329,24 @@ impl TerminalView {
         });
     }
 
-    /// Checks that the container is actually attachable — that it has both
-    /// `script` and `bash`
-    /// ([`crate::terminal::local_tty::unix::dev_container_exec_args`]'s
+    /// Checks that the container is actually attachable, then stages the
+    /// init and bootstrap scripts into it — *before* creating a pane.
+    /// Without this, either failure would only surface once `bash --rcfile`
+    /// is already running inside a freshly created pane that then
+    /// immediately exits, well past the point where an error toast with no
+    /// pane is still possible.
+    ///
+    /// The attachability check verifies the container has both `script` and
+    /// `bash` ([`crate::terminal::local_tty::unix::dev_container_exec_args`]'s
     /// attach mechanism depends on both, and neither is guaranteed present
     /// in every image), and that `remote_user`/`remote_workspace_folder`
     /// (using the exact same `-u`/`-w` the real attach uses) are actually
-    /// valid in the container — *before* creating a pane. Without this, any
-    /// of those failures would only surface once `bash --rcfile` is already
-    /// running inside a freshly created pane that then immediately exits,
-    /// well past the point where an error toast with no pane is still
-    /// possible.
+    /// valid in the container.
+    ///
+    /// Staging (see [`crate::terminal::local_tty::prepare_dev_container`])
+    /// copies both scripts in with `docker cp` and secures their
+    /// permissions; the eventual `bash --rcfile` session sources them
+    /// directly from the container, so nothing is typed into the live pty.
     #[cfg(feature = "local_tty")]
     #[allow(clippy::too_many_arguments)]
     fn preflight_and_attach_dev_container(
@@ -340,6 +357,7 @@ impl TerminalView {
         remote_user: Option<String>,
         remote_workspace_folder: String,
         sandbox_id: String,
+        session_id: SessionId,
         ctx: &mut ViewContext<Self>,
     ) {
         let preflight_future = {
@@ -359,25 +377,57 @@ impl TerminalView {
             }
         };
 
+        // The new pane doesn't exist yet, so seed its init script with this
+        // pane's own row/column count; the new pane inherits this pane's
+        // pixel size (see `create_and_push_dev_container`), and both derive
+        // the same grid size from the same font metrics.
+        let size = *self.size_info();
+
         ctx.spawn(preflight_future, move |me, result, ctx| match result {
             Ok(output) if output.status.success() => {
-                me.show_dev_container_toast(
-                    format!(
-                        "Dev container ready — opening session in {}…",
-                        workspace_folder.display()
-                    ),
-                    ToastFlavor::Success,
-                    ctx,
+                #[cfg(unix)]
+                let staging_result = crate::terminal::local_tty::prepare_dev_container(
+                    &docker_path,
+                    &container_id,
+                    remote_user.as_deref(),
+                    &sandbox_id,
+                    session_id,
+                    &size,
                 );
-                me.create_and_push_dev_container(
-                    workspace_folder,
-                    docker_path,
-                    container_id,
-                    remote_user,
-                    remote_workspace_folder,
-                    sandbox_id,
-                    ctx,
-                );
+                #[cfg(not(unix))]
+                let staging_result: anyhow::Result<()> = Err(anyhow::Error::msg(
+                    "Dev Container sessions are only supported on Linux and macOS",
+                ));
+
+                match staging_result {
+                    Ok(()) => {
+                        me.show_dev_container_toast(
+                            format!(
+                                "Dev container ready — opening session in {}…",
+                                workspace_folder.display()
+                            ),
+                            ToastFlavor::Success,
+                            ctx,
+                        );
+                        me.create_and_push_dev_container(
+                            workspace_folder,
+                            docker_path,
+                            container_id,
+                            remote_user,
+                            remote_workspace_folder,
+                            sandbox_id,
+                            session_id,
+                            ctx,
+                        );
+                    }
+                    Err(e) => {
+                        me.show_dev_container_toast(
+                            format!("Failed to prepare the Dev Container session: {e:#}"),
+                            ToastFlavor::Error,
+                            ctx,
+                        );
+                    }
+                }
             }
             Ok(output) => {
                 let detail = tail_lines(&String::from_utf8_lossy(&output.stderr), 5);
@@ -411,6 +461,7 @@ impl TerminalView {
         remote_user: Option<String>,
         remote_workspace_folder: String,
         sandbox_id: String,
+        session_id: SessionId,
         ctx: &mut ViewContext<Self>,
     ) {
         let Some(pane_stack) = self
@@ -439,6 +490,7 @@ impl TerminalView {
             remote_user,
             remote_workspace_folder,
             sandbox_id,
+            session_id,
             ctx,
         );
 
