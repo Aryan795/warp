@@ -751,17 +751,19 @@ fn raw_keypress_ctrl_r_handoff_payload(id: RawKeypressCtrlRHandoffId) -> Vec<u8>
 /// keystrokes must have a bail-out that does not depend on the wrapper's cooperation. See
 /// `TerminalView::on_raw_keypress_ctrl_r_handoff_timeout`.
 ///
-/// This only bounds time-to-first-*start*, not the handoff's total duration: it is restarted on
-/// every keystroke forwarded to the pty (`TerminalView::note_raw_keypress_ctrl_r_handoff_activity`)
-/// and, more importantly, cancelled outright -- not merely rescheduled -- the moment the wrapper
-/// widget itself reports that it has run (`TerminalView::note_raw_keypress_ctrl_r_handoff_started`,
-/// via the `ExternalCtrlRRawKeypressStarted` DCS hook), since that is positive proof the wrapper
-/// actually started. Once cancelled, there is no deadline at all for the rest of the handoff, no
-/// matter how long the user then reads the widget's output or thinks before pressing a key --
-/// exactly like any other real interactive program running in the terminal. A real widget (fzf,
-/// atuin) reports started within milliseconds, so this only ever fires for the failure mode it
-/// exists to catch: nothing was ever listening for the handoff at all (missing/rebound binding,
-/// dead shell).
+/// This only bounds time-to-first-*start*, not the handoff's total duration. Before the wrapper
+/// widget has started, it is restarted on every keystroke forwarded to the pty
+/// (`TerminalView::note_raw_keypress_ctrl_r_handoff_activity`), so it only fires after a period
+/// of genuine inactivity rather than a fixed deadline. The moment the wrapper widget itself
+/// reports that it has run (`TerminalView::note_raw_keypress_ctrl_r_handoff_started`, via the
+/// `ExternalCtrlRRawKeypressStarted` DCS hook), the timer is cancelled outright -- not merely
+/// rescheduled -- and `PendingRawKeypressCtrlRHandoff::started` latches that fact so a
+/// subsequently forwarded keystroke can never resurrect it: once cancelled, there is no deadline
+/// at all for the rest of the handoff, no matter how long the user then reads the widget's
+/// output or thinks before pressing a key -- exactly like any other real interactive program
+/// running in the terminal. A real widget (fzf, atuin) reports started within milliseconds, so
+/// this only ever fires for the failure mode it exists to catch: nothing was ever listening for
+/// the handoff at all (missing/rebound binding, dead shell).
 ///
 /// This deliberately does *not* infer liveness from raw pty output: the token paste's own shell
 /// echo is output too, and arrives regardless of whether anything is bound to the private key
@@ -2574,6 +2576,13 @@ struct PendingRawKeypressCtrlRHandoff {
     id: RawKeypressCtrlRHandoffId,
     session_id: SessionId,
     block_id: BlockId,
+    /// Set once [`TerminalView::note_raw_keypress_ctrl_r_handoff_started`] validates the wrapper
+    /// widget's `ExternalCtrlRRawKeypressStarted` report for this handoff. Once set, the bail-out
+    /// timer has been cancelled outright and must stay cancelled:
+    /// [`TerminalView::note_raw_keypress_ctrl_r_handoff_activity`] checks this before restarting
+    /// it, so ordinary interaction (forwarded keystrokes) can no longer resurrect a deadline that
+    /// the started signal already proved unnecessary.
+    started: bool,
 }
 
 pub struct TerminalView {
@@ -9373,6 +9382,7 @@ impl TerminalView {
             id,
             session_id,
             block_id,
+            started: false,
         });
         // This mechanism runs whatever the user has bound to ctrl-r, so it cannot assume the
         // wrapper widget is present in the shell's active keymap, gets invoked, or ever returns.
@@ -9417,17 +9427,20 @@ impl TerminalView {
     /// Restarts the bail-out timeout for an in-flight raw-keypress ctrl-r handoff, if any. Call
     /// this whenever a keystroke is forwarded to the pty while the handoff is pending.
     ///
-    /// The wrapper widget is a real interactive TUI (fzf, atuin) that a user can legitimately
-    /// keep browsing or typing into for far longer than the timeout -- a fixed one-shot timer
-    /// would eventually cut off that session mid-interaction indistinguishably from the wrapper
-    /// actually having hung. Restarting on every keystroke means the timeout only fires after a
+    /// A no-op once [`Self::note_raw_keypress_ctrl_r_handoff_started`] has already cancelled the
+    /// timer outright for this handoff: the wrapper widget is a real interactive TUI (fzf, atuin)
+    /// that a user can legitimately keep browsing or typing into for far longer than the timeout,
+    /// and once the widget has proven it started, there is no deadline left to restart. Before
+    /// that signal arrives, restarting on every keystroke means the timeout only fires after a
     /// period of genuine inactivity (no user input *and* no completion hook), which still catches
-    /// the failure modes it exists for: the wrapper never starting, or hanging after the user
-    /// stops interacting with it.
+    /// the failure modes it exists for: the wrapper never starting, or hanging before it does.
     fn note_raw_keypress_ctrl_r_handoff_activity(&mut self, ctx: &mut ViewContext<Self>) {
         let Some(handoff) = self.pending_raw_keypress_ctrl_r_handoff.clone() else {
             return;
         };
+        if handoff.started {
+            return;
+        }
         if let Some(handle) = self.pending_raw_keypress_ctrl_r_timeout.take() {
             handle.abort();
         }
@@ -9461,6 +9474,9 @@ impl TerminalView {
             });
         if !matches_pending {
             return;
+        }
+        if let Some(handoff) = self.pending_raw_keypress_ctrl_r_handoff.as_mut() {
+            handoff.started = true;
         }
         if let Some(handle) = self.pending_raw_keypress_ctrl_r_timeout.take() {
             handle.abort();

@@ -10396,6 +10396,51 @@ fn raw_keypress_ctrl_r_handoff_started_ignored_for_wrong_session_or_token() {
     })
 }
 
+/// Regression test for the gap found in a live pass on `d18b3886`: once a matching started
+/// report has cancelled the bail-out timer outright, a subsequently forwarded keystroke (the
+/// same path a real filter character or arrow key takes while the wrapper widget is up) must
+/// not resurrect it. Before `PendingRawKeypressCtrlRHandoff::started` existed,
+/// `note_raw_keypress_ctrl_r_handoff_activity` unconditionally re-armed a fresh timer on every
+/// forwarded keystroke, so typing a filter query after the widget had already proven it was
+/// alive would still tear the handoff down five seconds later.
+#[test]
+fn raw_keypress_ctrl_r_handoff_started_is_durable_against_activity() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let _flag = FeatureFlag::RawKeypressCtrlRHandoff.override_enabled(true);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let session_id = SessionId::from(0);
+
+        terminal.update(&mut app, |view, ctx| {
+            setup_raw_keypress_ctrl_r_session(view, ctx, session_id, true);
+            assert!(view.maybe_trigger_raw_keypress_ctrl_r_handoff(ctx));
+            let token = view
+                .pending_raw_keypress_ctrl_r_handoff
+                .as_ref()
+                .expect("handoff should be pending")
+                .id
+                .0
+                .to_string();
+
+            view.note_raw_keypress_ctrl_r_handoff_started(session_id, &token);
+            assert!(
+                view.pending_raw_keypress_ctrl_r_timeout.is_none(),
+                "a matching started report must cancel the bail-out timer outright"
+            );
+
+            // Simulate a filter keystroke forwarded to the pty after the widget has started --
+            // exactly what happens when a user types to filter, then pauses before pressing
+            // Enter.
+            view.note_raw_keypress_ctrl_r_handoff_activity(ctx);
+            assert!(
+                view.pending_raw_keypress_ctrl_r_timeout.is_none(),
+                "activity after the started signal must not resurrect the bail-out timer -- \
+                 once cancelled, there is no deadline left for the rest of the handoff"
+            );
+        });
+    })
+}
+
 #[test]
 fn raw_keypress_ctrl_r_handoff_stale_timeout_is_ignored() {
     App::test((), |mut app| async move {
