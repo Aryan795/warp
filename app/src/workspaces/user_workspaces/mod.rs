@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use warp_core::features::FeatureFlag;
 use warp_core::settings::{ChangeEventReason, Setting};
+use warp_core::user_preferences::GetUserPreferences;
 use warp_errors::report_error;
 use warp_graphql::workspace::FeatureModelChoice;
 use warpui::{
@@ -21,7 +22,7 @@ use super::workspace::{
     UgcCollectionEnablementSetting, Workspace, WorkspaceUid,
 };
 use crate::ai::credit_availability::AICreditAvailability;
-use crate::ai::llms::LLMModelHost;
+use crate::ai::llms::{AvailableLLMs, LLMModelHost, MODELS_BY_FEATURE_CACHE_KEY, ModelsByFeature};
 use crate::ai::request_usage_model::AIRequestUsageModel;
 use crate::auth::{AuthStateProvider, UserUid};
 use crate::channel::ChannelState;
@@ -124,6 +125,12 @@ pub struct UserWorkspaces {
     /// filtered out of `workspaces` — this is the only place their purchase
     /// policy survives.
     user_purchase_policy: Option<PurchaseAddOnCreditsPolicy>,
+    /// The model catalog for a caller with no team and no workspace: currently only ever
+    /// written by the one-release legacy-cache migration in [`Self::new`]. Nothing reads
+    /// this yet -- `LLMPreferences` still resolves its catalog from its own flat
+    /// `models_by_feature`/`MODELS_BY_FEATURE_CACHE_KEY` cache.
+    #[allow(dead_code)]
+    pre_login_models_by_feature: Option<ModelsByFeature>,
     team_client: Arc<dyn TeamClient>,
     workspace_client: Arc<dyn WorkspaceClient>,
 }
@@ -188,6 +195,7 @@ impl UserWorkspaces {
             window_team_uids: Default::default(),
             joinable_teams: Default::default(),
             user_purchase_policy: None,
+            pre_login_models_by_feature: None,
             team_client,
             workspace_client,
         }
@@ -232,15 +240,35 @@ impl UserWorkspaces {
             }
         });
 
-        Self {
+        let mut me = Self {
             current_workspace_uid: current_workspace_uid.into(),
             workspaces: cached_workspaces.into(),
             window_team_uids: Default::default(),
             joinable_teams: Default::default(),
             user_purchase_policy: None,
+            pre_login_models_by_feature: None,
             team_client,
             workspace_client,
+        };
+
+        // One-release migration: a `Workspace` restored from the SQLite cache predates the
+        // `feature_model_choice` column (or the app hasn't fetched since upgrading), so its
+        // catalog is still the bare default. Seed it from the legacy, pre-team-keyed cache so
+        // an offline launch right after upgrading shows the user's last-known model list for
+        // the rest of the offline session instead of only the `auto` default. Nothing reads
+        // `feature_model_choice` yet -- this seeds the field for when something does.
+        // TODO: delete once it's safe to assume every client has fetched at least once since
+        // this migration shipped.
+        if me
+            .current_workspace()
+            .is_some_and(|workspace| workspace.feature_model_choice == ModelsByFeature::default())
+            && let Some(legacy_catalog) = migrate_legacy_feature_model_choices_cache(ctx)
+            && let Some(workspace) = me.current_workspace_mut()
+        {
+            workspace.feature_model_choice = legacy_catalog;
         }
+
+        me
     }
 
     pub fn upgrade_link(user_id: UserUid) -> String {
@@ -1819,6 +1847,32 @@ impl UserWorkspaces {
             },
             ctx,
         );
+    }
+}
+
+/// Reads the legacy, pre-team-keyed model catalog cache (`MODELS_BY_FEATURE_CACHE_KEY`), for
+/// the one-release migration in [`UserWorkspaces::new`]. Understands both real shapes an older
+/// client could have written: the (more recent) single `ModelsByFeature`, and (older still) a
+/// bare `AvailableLLMs`, which becomes the `agent_mode` field.
+fn migrate_legacy_feature_model_choices_cache(app: &mut AppContext) -> Option<ModelsByFeature> {
+    let value = app
+        .private_user_preferences()
+        .read_value(MODELS_BY_FEATURE_CACHE_KEY)
+        .ok()
+        .flatten()?;
+
+    match serde_json::from_str::<ModelsByFeature>(&value) {
+        Ok(models) => Some(models),
+        Err(e1) => match serde_json::from_str::<AvailableLLMs>(&value) {
+            Ok(agent_mode) => Some(ModelsByFeature {
+                agent_mode,
+                ..Default::default()
+            }),
+            Err(e2) => {
+                log::warn!("Failed to deserialize legacy cached LLMs: {e1}\n{e2}");
+                None
+            }
+        },
     }
 }
 

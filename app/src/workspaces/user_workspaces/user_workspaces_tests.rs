@@ -55,7 +55,7 @@ use warpui_extras::user_preferences;
 use super::*;
 use crate::ai::blocklist::is_agent_mode_autonomy_allowed;
 use crate::ai::execution_profiles::ActionPermission;
-use crate::ai::llms::{LLMModelHost, LLMProvider};
+use crate::ai::llms::{LLMInfo, LLMModelHost, LLMProvider, MODELS_BY_FEATURE_CACHE_KEY};
 use crate::auth::AuthManager;
 use crate::cloud_object::model::persistence::CloudModel;
 use crate::cloud_object::{CloudObject, CloudObjectGuest};
@@ -4105,4 +4105,51 @@ fn team_feature_model_choices_conversion_keeps_each_teams_choice_distinct() {
         choice_b.info_for_id(&"team-a-only".into()).is_none(),
         "team B's uid must not resolve team A's choice"
     );
+}
+
+#[test]
+fn legacy_cache_migration_yields_a_usable_teamless_catalog() {
+    // The older, pre-`ModelsByFeature` cache shape was a bare `AvailableLLMs`, written when
+    // all available LLMs were solely for Agent Mode. Migrating it must still produce a
+    // catalog whose `agent_mode` bucket resolves the cached model -- a "usable teamless
+    // catalog" -- not an empty or default one.
+    warpui::App::test((), |mut app| async move {
+        app.update(|ctx| {
+            ctx.add_singleton_model(|_| {
+                PrivatePreferences::new(
+                    Box::<user_preferences::in_memory::InMemoryPreferences>::default(),
+                )
+            });
+        });
+
+        let legacy_agent_mode = AvailableLLMs::new(
+            "legacy-model".into(),
+            vec![LLMInfo::new_for_test("legacy-model")],
+            None,
+        )
+        .expect("legacy AvailableLLMs fixture should be valid");
+
+        app.update(|ctx| {
+            ctx.private_user_preferences()
+                .write_value(
+                    MODELS_BY_FEATURE_CACHE_KEY,
+                    serde_json::to_string(&legacy_agent_mode)
+                        .expect("legacy fixture should serialize"),
+                )
+                .expect("legacy cache should be writable");
+        });
+
+        app.update(|ctx| {
+            let migrated = migrate_legacy_feature_model_choices_cache(ctx)
+                .expect("a legacy bare-AvailableLLMs cache should still migrate");
+            assert!(
+                migrated
+                    .agent_mode
+                    .info_for_id(&"legacy-model".into())
+                    .is_some(),
+                "the older bare-AvailableLLMs cache shape should become a usable teamless \
+                 agent_mode catalog"
+            );
+        });
+    });
 }
