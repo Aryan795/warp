@@ -132,9 +132,7 @@ pub struct CrossWindowTabDrag {
     /// `PaneGroup` that was already adopted by another, still-open window.
     /// If that stale `Workspace` were pushed onto `UndoCloseStack` like an
     /// ordinary user-initiated window close, `Cmd+Shift+T` would resurrect a
-    /// window that duplicates ownership of a live pane group, corrupting the
-    /// tab-drag invariant that a pane group is owned by exactly one window
-    /// (see APP-5285).
+    /// window that duplicates ownership of a live pane group.
     ///
     /// Entries are added via [`mark_content_transferred_window_close`] at
     /// each call site that issues a `close_window(_, ContentTransferred)`
@@ -151,8 +149,7 @@ pub struct CrossWindowTabDrag {
     /// set (and not reliably cleared) on windows that stay open after a
     /// handoff or reverse-handoff, so treating it as a proxy for "this close
     /// is a transfer" would wrongly suppress the undo-close and pane-detach
-    /// of a later, ordinary close of that same window (see APP-5285 review
-    /// discussion).
+    /// of a later, ordinary close of that same window.
     ///
     /// [`mark_content_transferred_window_close`]: Self::mark_content_transferred_window_close
     /// [`take_content_transferred_window_close`]: Self::take_content_transferred_window_close

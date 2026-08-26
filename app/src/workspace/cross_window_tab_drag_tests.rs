@@ -101,9 +101,9 @@ fn single_tab_drag_never_collapses_a_slot() {
     assert_eq!(drag.collapsed_source_placeholder_index(source), None);
 }
 
-// Regression coverage for APP-5285: a cross-window content transfer must not
-// let the closing window's stale `TabData` get pushed onto the undo-close
-// stack, since it still references a `PaneGroup` already adopted by another,
+// Regression coverage: a cross-window content transfer must not let the
+// closing window's stale `TabData` get pushed onto the undo-close stack,
+// since it still references a `PaneGroup` already adopted by another,
 // still-open window.
 #[test]
 fn content_transferred_close_is_marked_and_consumed_once() {

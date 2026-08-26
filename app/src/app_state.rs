@@ -352,24 +352,20 @@ pub enum SplitDirection {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PaneFlex(pub f32);
 
-/// Debug-time invariant check for APP-5285: no two workspaces may hold a
-/// `TabData` referencing the same `PaneGroup`. That dual ownership is what
-/// let `save_app_state` trip a `terminal_panes.uuid` UNIQUE-constraint
-/// storm; until now, that downstream DB error -- surfacing on the next
-/// `save_app` call, an arbitrary amount of time after the mutation that
-/// actually broke the invariant -- was the only symptom.
+/// Debug-time invariant check: no two workspaces may hold a `TabData`
+/// referencing the same `PaneGroup`. That dual ownership is what lets
+/// `save_app_state` trip a `terminal_panes.uuid` UNIQUE-constraint storm,
+/// surfacing on the next `save_app` call rather than at the mutation that
+/// actually broke the invariant.
 ///
 /// Checking here, right before `get_app_state` builds the snapshot that
 /// would encode the duplicate, catches it at the moment of formation
 /// instead. `debug_assert!` panics loudly in dev/dogfood builds, with a
 /// backtrace pointing at whatever mutation just broke the invariant.
 /// Release builds must not crash a user's session over a bookkeeping bug,
-/// so they only report once per run -- `report_error!`'s `OncePerRun` mode
-/// guarantees a single Sentry event even if this fires on every `save_app`
-/// call for the rest of the session, unlike the DB-level symptom it
-/// replaces (see `is_terminal_panes_unique_violation` in
-/// `persistence::sqlite`, which has to throttle the same way for the same
-/// reason).
+/// so they only report once per run -- the same throttling
+/// `is_terminal_panes_unique_violation` in `persistence::sqlite` applies to
+/// the DB-level symptom this replaces.
 fn assert_no_duplicate_pane_group_ownership(app: &AppContext) {
     let mut seen_pane_group_ids = HashSet::new();
     for (_, workspace) in WorkspaceRegistry::as_ref(app).all_workspaces(app) {
@@ -379,7 +375,7 @@ fn assert_no_duplicate_pane_group_ownership(app: &AppContext) {
                 debug_assert!(
                     false,
                     "pane group {pane_group_id:?} is referenced by tabs in more than one \
-                     window -- dual ownership, see APP-5285"
+                     window -- dual ownership"
                 );
                 report_error!(
                     "Duplicate pane group ownership detected across workspaces",

@@ -895,7 +895,7 @@ fn report_db_error(err_kind: &str, err: anyhow::Error, database_path: &Path) {
     let (context, log_mode) = if is_terminal_panes_unique_violation(&err) {
         (
             format!(
-                "SQLite {err_kind} error: duplicate terminal_panes.uuid -- two windows hold the same pane group (see APP-5285)"
+                "SQLite {err_kind} error: duplicate terminal_panes.uuid -- two windows hold the same pane group"
             ),
             ReportErrorLogMode::OncePerRun,
         )
@@ -911,7 +911,7 @@ fn report_db_error(err_kind: &str, err: anyhow::Error, database_path: &Path) {
 /// Returns `true` if `err`'s cause chain contains a `terminal_panes.uuid`
 /// UNIQUE-constraint violation specifically, the DB-level symptom of two
 /// windows both holding ownership of the same pane group when
-/// `save_app_state` runs (see APP-5285). Matches on the raw error message
+/// `save_app_state` runs. Matches on the raw error message
 /// rather than `DatabaseErrorInformation::table_name()`, since SQLite's
 /// UNIQUE-violation messages already embed the table and column (`UNIQUE
 /// constraint failed: terminal_panes.uuid`) and not every backend populates

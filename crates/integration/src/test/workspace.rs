@@ -1378,15 +1378,15 @@ pub fn test_single_tab_handoff_continues_drag() -> Builder {
         .with_step(focus_saved_window(TARGET_WINDOW_KEY).add_assertion(assert_tab_count(1)))
 }
 
-/// Regression test for APP-5285: dragging a tab out of a multi-tab window and
-/// attaching it directly into a *different*, existing window closes the
-/// temporary preview window with `TerminationMode::ContentTransferred` (its
-/// pane group was handed off, not destroyed). That close must not be pushed
-/// onto `UndoCloseStack`: the closed preview workspace's own `tabs` list
-/// still references the `PaneGroup` that was just adopted by the target
-/// window, so undo-close (Cmd+Shift+T) resurrecting it would give two windows
-/// ownership of the same pane group again -- the `terminal_panes.uuid`
-/// UNIQUE-constraint race this bug caused.
+/// Regression test: dragging a tab out of a multi-tab window and attaching it
+/// directly into a *different*, existing window closes the temporary preview
+/// window with `TerminationMode::ContentTransferred` (its pane group was
+/// handed off, not destroyed). That close must not be pushed onto
+/// `UndoCloseStack`: the closed preview workspace's own `tabs` list still
+/// references the `PaneGroup` that was just adopted by the target window, so
+/// undo-close (Cmd+Shift+T) resurrecting it would give two windows ownership
+/// of the same pane group again -- the `terminal_panes.uuid` UNIQUE-constraint
+/// race this bug caused.
 pub fn test_undo_close_does_not_resurrect_content_transferred_window() -> Builder {
     new_builder()
         .set_should_run_test(drag_tabs_feature_enabled)

@@ -1058,8 +1058,8 @@ fn test_sqlite_drops_too_small_bounds_on_save() {
     );
 }
 
-// Regression for APP-5285: two windows both holding a `TabData` for the same
-// pane group (the residual cross-window tab-drag dual-ownership bug) makes
+// Regression test: two windows both holding a `TabData` for the same pane
+// group (the residual cross-window tab-drag dual-ownership bug) makes
 // `save_app_state`'s delete-then-insert transaction violate the
 // `terminal_panes.uuid` UNIQUE constraint. The save must fail atomically
 // (leaving the previously-saved snapshot intact, not a half-written one), and

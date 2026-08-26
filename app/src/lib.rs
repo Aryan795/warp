@@ -2918,11 +2918,10 @@ pub(crate) fn app_callbacks(
                 // it handed off to another, still-open window. Pushing it onto
                 // the undo-close stack like an ordinary close would let
                 // Cmd+Shift+T resurrect a window that duplicates ownership of
-                // that live pane group (see APP-5285). Nothing was lost in such
-                // a close, so never recording it -- rather than recording and
-                // filtering it at pop time -- leaves the top of the stack at
-                // the user's last real close, which is what Cmd+Shift+T then
-                // restores.
+                // that live pane group. Nothing was lost in such a close, so
+                // never recording it -- rather than recording and filtering it
+                // at pop time -- leaves the top of the stack at the user's
+                // last real close, which is what Cmd+Shift+T then restores.
                 let is_content_transferred = CrossWindowTabDrag::handle(ctx)
                     .update(ctx, |drag, _| {
                         drag.take_content_transferred_window_close(window_data.window_id)
