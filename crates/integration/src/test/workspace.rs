@@ -1378,10 +1378,9 @@ pub fn test_single_tab_handoff_continues_drag() -> Builder {
         .with_step(focus_saved_window(TARGET_WINDOW_KEY).add_assertion(assert_tab_count(1)))
 }
 
-/// Regression test: dragging a tab into a different, existing window closes
-/// the temporary preview with `TerminationMode::ContentTransferred`. That
-/// close must not be pushed onto `UndoCloseStack` -- undo-close resurrecting
-/// it would give two windows ownership of the same pane group again.
+/// Regression test: dragging a tab into a different, existing window closes the temporary preview
+/// with `TerminationMode::ContentTransferred`. That close must not be pushed onto `UndoCloseStack`
+/// -- undo-close resurrecting it would give two windows ownership of the same pane group again.
 pub fn test_undo_close_does_not_resurrect_content_transferred_window() -> Builder {
     new_builder()
         .set_should_run_test(drag_tabs_feature_enabled)

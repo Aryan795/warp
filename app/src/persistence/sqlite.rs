@@ -883,10 +883,9 @@ fn report_db_error(err_kind: &str, err: anyhow::Error, database_path: &Path) {
     }
     log_access("Database", database_path);
 
-    // A residual dual-ownership bug can make this specific violation storm
-    // repeatedly before the underlying duplicate state is cleared. Report
-    // only the first occurrence per run; every occurrence is still logged
-    // locally, and other SQLite errors keep reporting every time.
+    // A residual dual-ownership bug can make this specific violation storm repeatedly before the
+    // underlying duplicate state is cleared. Report only the first occurrence per run; every
+    // occurrence is still logged locally, and other SQLite errors keep reporting every time.
     let (context, log_mode) = if is_terminal_panes_unique_violation(&err) {
         (
             format!(
@@ -903,17 +902,14 @@ fn report_db_error(err_kind: &str, err: anyhow::Error, database_path: &Path) {
     report_error!(err.context(context), log_mode);
 }
 
-/// Returns `true` if `err`'s cause chain contains a `terminal_panes.uuid`
-/// UNIQUE-constraint violation specifically, the DB-level symptom of two
-/// windows both holding ownership of the same pane group when
-/// `save_app_state` runs. Matches on the raw message rather than
-/// `DatabaseErrorInformation::table_name()`, since not every backend
-/// populates that field.
+/// Returns `true` if `err`'s cause chain contains a `terminal_panes.uuid` UNIQUE-constraint
+/// violation specifically, the DB-level symptom of two windows both holding ownership of the same
+/// pane group when `save_app_state` runs. Matches on the raw message rather than
+/// `DatabaseErrorInformation::table_name()`, since not every backend populates that field.
 ///
-/// Deliberately checks for the exact `terminal_panes.uuid` column, not just
-/// the `terminal_panes` table: a UNIQUE violation on a different column
-/// (e.g. `terminal_panes.id`, the primary key) is a distinct corruption
-/// signal that must keep reporting every time, not get silently folded into
+/// Deliberately checks for the exact `terminal_panes.uuid` column, not just the `terminal_panes`
+/// table: a UNIQUE violation on a different column (e.g. `terminal_panes.id`, the primary key) is a
+/// distinct corruption signal that must keep reporting every time, not get silently folded into
 /// this throttle.
 fn is_terminal_panes_unique_violation(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {

@@ -1058,9 +1058,9 @@ fn test_sqlite_drops_too_small_bounds_on_save() {
     );
 }
 
-// Two windows both holding a `TabData` for the same pane group produce
-// identical `terminal_panes.uuid` values, which must fail the save
-// atomically rather than partially overwrite the database.
+// Two windows both holding a `TabData` for the same pane group produce identical
+// `terminal_panes.uuid` values, which must fail the save atomically rather than partially overwrite
+// the database.
 #[test]
 fn test_sqlite_save_app_state_rolls_back_on_duplicate_terminal_uuid() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
@@ -1098,9 +1098,8 @@ fn test_sqlite_save_app_state_rolls_back_on_duplicate_terminal_uuid() {
     assert_eq!(restored.windows.len(), 1);
 }
 
-// A UNIQUE violation on a different `terminal_panes` column (`id`, the
-// primary key) must not be classified as the `terminal_panes.uuid`
-// violation the throttle above targets.
+// A UNIQUE violation on a different `terminal_panes` column (`id`, the primary key) must not be
+// classified as the `terminal_panes.uuid` violation the throttle above targets.
 #[test]
 fn test_terminal_panes_unique_violation_classifier_matches_uuid_column_only() {
     use diesel::prelude::*;
@@ -1117,10 +1116,9 @@ fn test_terminal_panes_unique_violation_classifier_matches_uuid_column_only() {
     };
     save_app_state(&mut conn, &app_state).expect("app state should save");
 
-    // Reuse the id of the terminal pane just saved (which already has a
-    // matching `pane_nodes` / `pane_leaves` row to satisfy the foreign key)
-    // so a second insert collides on the `terminal_panes.id` primary key
-    // instead of the `uuid` column.
+    // Reuse the id of the terminal pane just saved (which already has a matching `pane_nodes` /
+    // `pane_leaves` row to satisfy the foreign key) so a second insert collides on the
+    // `terminal_panes.id` primary key instead of the `uuid` column.
     let existing_id: i32 = schema::terminal_panes::dsl::terminal_panes
         .select(schema::terminal_panes::columns::id)
         .first(&mut conn)
