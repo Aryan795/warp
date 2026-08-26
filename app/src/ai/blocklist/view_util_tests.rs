@@ -86,3 +86,33 @@ fn format_credits_with_cost_credits_unit_omits_tokens_when_tokens_is_zero() {
         format_credits(20.0)
     );
 }
+
+#[test]
+fn usage_label_uses_dollars_label_when_unit_is_dollars_and_flag_enabled() {
+    let _flag = FeatureFlag::PricingTransparency.override_enabled(true);
+
+    assert_eq!(
+        usage_label("Credits spent", "Usage charged", UsageDisplayUnit::Dollars),
+        "Usage charged"
+    );
+}
+
+#[test]
+fn usage_label_uses_credits_label_when_unit_is_credits() {
+    let _flag = FeatureFlag::PricingTransparency.override_enabled(true);
+
+    assert_eq!(
+        usage_label("Credits spent", "Usage charged", UsageDisplayUnit::Credits),
+        "Credits spent"
+    );
+}
+
+#[test]
+fn usage_label_uses_credits_label_when_flag_disabled_even_if_unit_is_dollars() {
+    let _flag = FeatureFlag::PricingTransparency.override_enabled(false);
+
+    assert_eq!(
+        usage_label("Credits spent", "Usage charged", UsageDisplayUnit::Dollars),
+        "Credits spent"
+    );
+}

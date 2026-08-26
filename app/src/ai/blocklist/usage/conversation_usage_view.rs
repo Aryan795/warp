@@ -25,7 +25,7 @@ use crate::ai::blocklist::usage::render_context_window_usage_icon;
 use crate::ai::blocklist::usage::rollup::{
     AgentAvatar, OrchestrationCreditRollup, PerAgentCreditEntry, compute_orchestration_rollup,
 };
-use crate::ai::blocklist::view_util::{format_credits, format_credits_with_cost};
+use crate::ai::blocklist::view_util::{format_credits, format_credits_with_cost, usage_label};
 use crate::ai::blocklist::{BlocklistAIHistoryEvent, BlocklistAIHistoryModel};
 use crate::appearance::Appearance;
 use crate::persistence::model::{
@@ -373,7 +373,11 @@ impl ConversationUsageView {
         {
             let last_block_credits = self.usage_info.credits_spent_for_last_block.unwrap();
             labels.push(render_label_text(
-                "Credits spent (last response)",
+                usage_label(
+                    "Credits spent (last response)",
+                    "Usage charged (last response)",
+                    usage_display_unit,
+                ),
                 appearance,
             ));
             values.push(render_value_text(
@@ -386,7 +390,14 @@ impl ConversationUsageView {
                 appearance,
             ));
 
-            labels.push(render_label_text("Credits spent (total)", appearance));
+            labels.push(render_label_text(
+                usage_label(
+                    "Credits spent (total)",
+                    "Usage charged (total)",
+                    usage_display_unit,
+                ),
+                appearance,
+            ));
             values.push(self.render_total_credits_value_row(
                 total_credits_value,
                 total_tokens_value,
@@ -396,7 +407,10 @@ impl ConversationUsageView {
                 appearance,
             ));
         } else {
-            labels.push(render_label_text("Credits spent", appearance));
+            labels.push(render_label_text(
+                usage_label("Credits spent", "Usage charged", usage_display_unit),
+                appearance,
+            ));
             values.push(self.render_total_credits_value_row(
                 total_credits_value,
                 total_tokens_value,

@@ -49,7 +49,7 @@ use crate::ai::ambient_agents::task::TaskPrincipalInfo;
 use crate::ai::ambient_agents::{AmbientAgentTaskId, cancel_task_with_toast};
 use crate::ai::artifacts::{Artifact, ArtifactButtonsRow, ArtifactButtonsRowEvent};
 use crate::ai::blocklist::BlocklistAIHistoryModel;
-use crate::ai::blocklist::view_util::format_credits_with_cost;
+use crate::ai::blocklist::view_util::{format_credits_with_cost, usage_label};
 use crate::ai::cloud_environments::{AmbientAgentEnvironment, CloudAmbientAgentEnvironment};
 use crate::ai::harness_availability::HarnessAvailabilityModel;
 use crate::ai::harness_display;
@@ -2328,8 +2328,9 @@ impl View for ConversationDetailsPanel {
                 cost_in_cents,
                 usage_display_unit,
             );
+            let label = usage_label("Credits used", "Usage", usage_display_unit);
             content.add_child(
-                Container::new(self.render_simple_field("Credits used", &formatted, appearance))
+                Container::new(self.render_simple_field(label, &formatted, appearance))
                     .with_margin_bottom(FIELD_SPACING)
                     .finish(),
             );

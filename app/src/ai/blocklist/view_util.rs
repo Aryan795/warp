@@ -348,6 +348,24 @@ pub fn format_credits_with_cost(
     format!("{} tokens / {unit_text}", tokens.separate_with_commas())
 }
 
+/// Returns `dollars_label` when `unit` is `Dollars` and
+/// `FeatureFlag::PricingTransparency` is enabled, otherwise returns
+/// `credits_label`. Used to swap usage-row labels (e.g. "Credits spent" ->
+/// "Usage charged") to match the unit shown by [`format_credits_with_cost`]
+/// -- gated the same way so a row's label and its formatted value never
+/// disagree (e.g. a "Usage" label next to a plain credits fallback figure).
+pub fn usage_label(
+    credits_label: &'static str,
+    dollars_label: &'static str,
+    unit: UsageDisplayUnit,
+) -> &'static str {
+    if matches!(unit, UsageDisplayUnit::Dollars) && FeatureFlag::PricingTransparency.is_enabled() {
+        dollars_label
+    } else {
+        credits_label
+    }
+}
+
 /// Renders a secondary button with an MCP/skill provider icon and a text label.
 pub(crate) fn render_provider_icon_button<F>(
     button_label: &str,
