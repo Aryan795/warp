@@ -71,6 +71,12 @@ use crate::terminal::{BlockPadding, ShellHost, SizeInfo};
 pub const LONG_RUNNING_COMMAND_DURATION_MS: u64 = 50;
 pub const LONG_RUNNING_BOTTOM_PADDING_LINES: f32 = 0.2;
 
+/// How long after a raw-keypress ctrl-r handoff's bail-out timeout fires that an Enter on an
+/// empty input buffer is treated as a stray keystroke rather than a deliberate submission. See
+/// [`Block::raw_keypress_bailout_guard_until`].
+const RAW_KEYPRESS_CTRL_R_HANDOFF_BAILOUT_GUARD_DURATION: std::time::Duration =
+    std::time::Duration::from_secs(2);
+
 /// We don't consider commands that were killed via Ctrl-C (error code 130) or that were killed
 /// by SIGPIPE (error code 141) to have failed. We also don't consider the exit code for any
 /// commands that didn't start execution (i.e. `preexec` was never called), as the exit code is
@@ -330,6 +336,15 @@ pub struct Block {
     /// so [`Self::is_active_and_long_running`] would otherwise stay `false` and the input editor
     /// would keep intercepting keystrokes meant for the shell's history widget.
     raw_keypress_forward_active: bool,
+
+    /// Set by `TerminalView::on_raw_keypress_ctrl_r_handoff_timeout` when a raw-keypress ctrl-r
+    /// handoff's bail-out timer fires, guarding against a stray Enter -- meant for the
+    /// just-torn-down wrapper widget, e.g. the user selecting an entry believing the widget is
+    /// still up -- landing on the now-refocused, empty input editor and submitting an empty
+    /// command. Consumed (and cleared) by the first Enter on an empty buffer; expires on its own
+    /// otherwise, so a later, deliberate empty Enter is unaffected. Never set on the normal
+    /// completion path, since a successful completion means the widget worked correctly.
+    raw_keypress_bailout_guard_until: Option<Instant>,
 
     show_bootstrap_block: bool,
     show_in_band_command_blocks: bool,
@@ -986,6 +1001,7 @@ impl Block {
             render_delay_complete: Arc::new(AtomicBool::new(false)),
             was_long_running: AtomicBool::new(false),
             raw_keypress_forward_active: false,
+            raw_keypress_bailout_guard_until: None,
             state: BlockState::BeforeExecution,
             precmd_state: PrecmdState::BeforePrecmd,
             exit_code: ExitCode::from(0),
@@ -1718,6 +1734,22 @@ impl Block {
     /// See [`Self::raw_keypress_forward_active`]'s field doc comment.
     pub fn set_raw_keypress_forward_active(&mut self, active: bool) {
         self.raw_keypress_forward_active = active;
+    }
+
+    /// See [`Self::raw_keypress_bailout_guard_until`]'s field doc comment.
+    pub fn arm_raw_keypress_bailout_guard(&mut self) {
+        self.raw_keypress_bailout_guard_until =
+            Some(Instant::now() + RAW_KEYPRESS_CTRL_R_HANDOFF_BAILOUT_GUARD_DURATION);
+    }
+
+    /// Consumes the guard armed by [`Self::arm_raw_keypress_bailout_guard`], returning `true` if
+    /// it was active (armed and not yet expired). Always clears the guard, so a single check --
+    /// whether or not it was active -- prevents it from lingering and affecting a later,
+    /// unrelated empty Enter.
+    pub fn consume_raw_keypress_bailout_guard(&mut self) -> bool {
+        self.raw_keypress_bailout_guard_until
+            .take()
+            .is_some_and(|deadline| Instant::now() < deadline)
     }
 
     /// Whether a command is long running.

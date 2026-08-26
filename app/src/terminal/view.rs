@@ -9481,6 +9481,19 @@ impl TerminalView {
             RAW_KEYPRESS_CTRL_R_HANDOFF_TIMEOUT
         );
         self.write_user_bytes_to_pty(vec![escape_sequences::C0::ETX], ctx);
+        // A user who believed they were still selecting an entry in the wrapper widget may
+        // press Enter immediately after this bail-out restores focus to the (empty) input
+        // editor; without this guard, that stray Enter would submit an empty command and leave
+        // a stray block behind. Not armed on the normal completion path (`apply_raw_keypress_
+        // ctrl_r_selection`), since a successful completion means the widget worked correctly.
+        if let Some(block) = self
+            .model
+            .lock()
+            .block_list_mut()
+            .mut_block_from_id(&handoff.block_id)
+        {
+            block.arm_raw_keypress_bailout_guard();
+        }
         self.end_raw_keypress_ctrl_r_handoff(handoff.session_id, ctx);
         self.raw_keypress_ctrl_r_handoff_cooldown_until =
             Some(Instant::now() + RAW_KEYPRESS_CTRL_R_HANDOFF_COOLDOWN);

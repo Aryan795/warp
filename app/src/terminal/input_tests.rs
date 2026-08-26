@@ -2906,6 +2906,64 @@ fn test_histignorespace_support_in_zsh() {
     });
 }
 
+/// Regression test for the mechanism behind a real-world symptom: a wrapper widget (e.g. fzf)
+/// left open past the raw-keypress ctrl-r handoff's inactivity bail-out, then "accepted" with
+/// Enter, left a stray empty block behind because that Enter no longer reached the pty at all --
+/// it landed on the newly refocused, empty input editor and submitted it as a command. The
+/// bail-out arms a short guard (see `Block::arm_raw_keypress_bailout_guard`) that this test
+/// exercises directly, without needing a real handoff or timer.
+#[test]
+fn raw_keypress_bailout_guard_suppresses_stray_empty_enter() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let terminal = add_window_with_bootstrapped_terminal(
+            &mut app, None, /* history_file_commands */
+            None,
+        )
+        .await;
+        let input = terminal.read(&app, |view, _| view.input().clone());
+
+        let pty_writes: Rc<RefCell<Vec<Vec<u8>>>> = Rc::new(RefCell::new(Vec::new()));
+        let writes = pty_writes.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_view(&terminal, move |_, event, _| {
+                if let crate::terminal::view::Event::WriteBytesToPty { bytes } = event {
+                    writes.borrow_mut().push(bytes.to_vec());
+                }
+            });
+        });
+
+        terminal.update(&mut app, |view, _ctx| {
+            view.model
+                .lock()
+                .block_list_mut()
+                .active_block_mut()
+                .arm_raw_keypress_bailout_guard();
+        });
+
+        let executed = input.update(&mut app, |input, ctx| input.try_execute_command("", ctx));
+        assert!(
+            !executed,
+            "an empty Enter within the raw-keypress bail-out guard window must not execute"
+        );
+        assert!(
+            pty_writes.borrow().is_empty(),
+            "a suppressed empty Enter must not write to the pty, got {:?}",
+            pty_writes.borrow()
+        );
+
+        // The guard is one-shot: a later, unguarded empty Enter proceeds normally, exactly as
+        // it would have before the handoff ever started.
+        let executed_again =
+            input.update(&mut app, |input, ctx| input.try_execute_command("", ctx));
+        assert!(
+            executed_again,
+            "a later, unguarded empty Enter must execute normally"
+        );
+    });
+}
+
 fn build_suggestion_results<S: Into<Span>>(
     suggestions: Vec<MatchedSuggestion>,
     replacement_span: S,

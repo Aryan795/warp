@@ -7613,6 +7613,26 @@ impl Input {
             return false;
         }
 
+        // A raw-keypress ctrl-r handoff bail-out (see `TerminalView::
+        // on_raw_keypress_ctrl_r_handoff_timeout`) arms this guard when it force-restores focus
+        // to the input editor: an Enter on an empty buffer immediately afterward is more likely
+        // a stray keystroke meant for the just-torn-down wrapper widget than a deliberate
+        // submission. The guard self-expires, so a later, genuinely empty Enter is unaffected.
+        if command.is_empty()
+            && self
+                .model
+                .lock()
+                .block_list_mut()
+                .active_block_mut()
+                .consume_raw_keypress_bailout_guard()
+        {
+            log::info!(
+                "Ignoring Enter on an empty input buffer immediately after a raw-keypress \
+                 ctrl-r handoff bail-out"
+            );
+            return false;
+        }
+
         // Save the zero state next command state before clearing it.
         let zerostate_next_command_suggestion_info = self
             .next_command_model
