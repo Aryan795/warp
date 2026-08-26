@@ -1328,17 +1328,12 @@ pub(crate) fn team_settings_from_gql(team_settings: GqlTeamSettings) -> TeamSett
     team_settings.into()
 }
 
-/// Converts the server's per-team/workspace model catalog. A malformed catalog is reported
-/// and falls back to [`ModelsByFeature::default`] (a single working `auto` choice per
-/// feature) rather than failing the whole `Team`/`Workspace` conversion over it.
-///
-/// Nothing reads this yet -- `LLMPreferences` still resolves its catalog from the legacy
-/// `models_by_feature`/`MODELS_BY_FEATURE_CACHE_KEY` cache. This just parses and stores the
-/// per-team/workspace payload onto `Team`/`Workspace.feature_model_choice` so a later change
-/// can read it.
 fn feature_model_choice_from_gql(choice: FeatureModelChoice) -> ModelsByFeature {
     choice.try_into().unwrap_or_else(|e: anyhow::Error| {
-        report_error!(e.context("Failed to convert FeatureModelChoice from server"));
+        report_error!(
+            e.context("Failed to convert FeatureModelChoice from server"),
+            ReportErrorLogMode::OncePerRun
+        );
         ModelsByFeature::default()
     })
 }
