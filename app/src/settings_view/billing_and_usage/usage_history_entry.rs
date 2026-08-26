@@ -12,7 +12,7 @@ use warpui::{AppContext, Element, SingletonEntity, View};
 use crate::ai::blocklist::usage::conversation_usage_view::{
     ConversationUsageInfo, ConversationUsageView, DisplayMode,
 };
-use crate::ai::blocklist::view_util::format_credits_with_cost;
+use crate::ai::blocklist::view_util::format_usage;
 use crate::settings::AISettings;
 use crate::settings_view::billing_and_usage_page::BillingAndUsagePageAction;
 use crate::ui_components::blended_colors;
@@ -114,7 +114,7 @@ impl UsageHistoryEntry {
             entry.usage_metadata.credits_spent + entry.usage_metadata.platform_credits_spent;
         let usage_display_unit = AISettings::as_ref(app).usage_display_unit;
         let credits_spent = Text::new_inline(
-            format_credits_with_cost(total_credits as f32, None, None, usage_display_unit),
+            format_usage(total_credits as f32, None, None, usage_display_unit),
             appearance.ui_font_family(),
             14.,
         )

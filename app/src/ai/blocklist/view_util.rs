@@ -299,10 +299,8 @@ pub fn format_credits(credits: f32) -> String {
     }
 }
 
-/// Formats the single-unit figure (credits or dollars) selected by `unit`.
-/// Returns `None` when `unit` is `Dollars` but no cost figure is available
-/// -- there is no meaningful fallback within the dollar figure itself, so
-/// [`format_credits_with_cost`] falls back to a plain credits total instead.
+/// Formats the figure for `unit`. `None` when `unit` is `Dollars` but no
+/// cost figure is available.
 fn format_usage_unit_value(
     credits: f32,
     cost_in_cents: Option<f32>,
@@ -316,21 +314,12 @@ fn format_usage_unit_value(
     }
 }
 
-/// Formats a credit count together with its total token count and real
-/// dollar cost, showing tokens plus exactly one of credits or dollars
-/// (never both) depending on `unit` -- e.g. `"12,345 tokens / 20 credits"`
-/// (Credits) or `"12,345 tokens / $0.36"` (Dollars).
-///
-/// A `tokens` value of `0` is treated the same as `None` (omitted) since a
-/// "0 tokens" figure next to a non-zero credit/cost figure would be
-/// confusing rather than informative (e.g. a purely platform-cost request
-/// like a paid web search).
-///
-/// Falls back to a plain credits-only figure (no tokens) when `unit` is
-/// `Dollars` but no cost figure is available, or when
-/// `FeatureFlag::PricingTransparency` is disabled (today's pre-breakdown
-/// behavior).
-pub fn format_credits_with_cost(
+/// Formats a usage figure as its token count plus exactly one of credits or
+/// dollars, e.g. `"12,345 tokens / 20 credits"` or `"12,345 tokens / $0.36"`.
+/// Zero/unknown token counts are omitted. Falls back to a plain credits
+/// figure when no dollar figure is available or
+/// `FeatureFlag::PricingTransparency` is disabled.
+pub fn format_usage(
     credits: f32,
     tokens: Option<u32>,
     cost_in_cents: Option<f32>,
@@ -348,22 +337,42 @@ pub fn format_credits_with_cost(
     format!("{} tokens / {unit_text}", tokens.separate_with_commas())
 }
 
-/// Returns `dollars_label` when `unit` is `Dollars` and
-/// `FeatureFlag::PricingTransparency` is enabled, otherwise returns
-/// `credits_label`. Used to swap usage-row labels (e.g. "Credits spent" ->
-/// "Usage charged") to match the unit shown by [`format_credits_with_cost`]
-/// -- gated the same way so a row's label and its formatted value never
-/// disagree (e.g. a "Usage" label next to a plain credits fallback figure).
-pub fn usage_label(
-    credits_label: &'static str,
-    dollars_label: &'static str,
-    unit: UsageDisplayUnit,
-) -> &'static str {
-    if matches!(unit, UsageDisplayUnit::Dollars) && FeatureFlag::PricingTransparency.is_enabled() {
-        dollars_label
+/// The usage surface a label is rendered on, which determines its wording.
+#[derive(Clone, Copy)]
+pub enum UsageLabelKind {
+    LastResponse,
+    Total,
+    Plain,
+    DetailsPanel,
+}
+
+/// Returns the label for a usage row, worded to match the unit shown by
+/// [`format_usage`] so a label and its value never disagree.
+pub fn usage_label(kind: UsageLabelKind, unit: UsageDisplayUnit) -> String {
+    // The Dollars setting only takes effect once PricingTransparency is on.
+    let unit = if FeatureFlag::PricingTransparency.is_enabled() {
+        unit
     } else {
-        credits_label
-    }
+        UsageDisplayUnit::Credits
+    };
+    let base = match (kind, unit) {
+        (UsageLabelKind::DetailsPanel, UsageDisplayUnit::Credits) => "Credits used",
+        (UsageLabelKind::DetailsPanel, UsageDisplayUnit::Dollars) => "Usage",
+        (
+            UsageLabelKind::LastResponse | UsageLabelKind::Total | UsageLabelKind::Plain,
+            UsageDisplayUnit::Credits,
+        ) => "Credits spent",
+        (
+            UsageLabelKind::LastResponse | UsageLabelKind::Total | UsageLabelKind::Plain,
+            UsageDisplayUnit::Dollars,
+        ) => "Usage charged",
+    };
+    let suffix = match kind {
+        UsageLabelKind::LastResponse => " (last response)",
+        UsageLabelKind::Total => " (total)",
+        UsageLabelKind::Plain | UsageLabelKind::DetailsPanel => "",
+    };
+    format!("{base}{suffix}")
 }
 
 /// Renders a secondary button with an MCP/skill provider icon and a text label.

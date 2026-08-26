@@ -25,7 +25,7 @@ use crate::ai::blocklist::usage::render_context_window_usage_icon;
 use crate::ai::blocklist::usage::rollup::{
     AgentAvatar, OrchestrationCreditRollup, PerAgentCreditEntry, compute_orchestration_rollup,
 };
-use crate::ai::blocklist::view_util::{format_credits, format_credits_with_cost, usage_label};
+use crate::ai::blocklist::view_util::{UsageLabelKind, format_credits, format_usage, usage_label};
 use crate::ai::blocklist::{BlocklistAIHistoryEvent, BlocklistAIHistoryModel};
 use crate::appearance::Appearance;
 use crate::persistence::model::{
@@ -349,16 +349,13 @@ impl ConversationUsageView {
         ));
         values.push(render_section_header("".to_string(), appearance));
 
-        // "Credits spent (total)" value: use the rollup total when available,
-        // otherwise the orchestrator's own self total (today's behavior).
-        // PRODUCT invariants 2a, 11.
+        // Total usage value: the rollup total when available, otherwise the
+        // orchestrator's own self total. PRODUCT invariants 2a, 11.
         let total_credits_value = rollup
             .as_ref()
             .map(|r| r.total_credits)
             .unwrap_or(self.usage_info.credits_spent + self.usage_info.platform_credits_spent);
 
-        // Rollup-vs-own-totals split mirrors `total_credits_value` above,
-        // for the token/cost figures shown alongside it.
         let total_tokens_value = rollup
             .as_ref()
             .map(|r| r.total_tokens)
@@ -373,15 +370,11 @@ impl ConversationUsageView {
         {
             let last_block_credits = self.usage_info.credits_spent_for_last_block.unwrap();
             labels.push(render_label_text(
-                usage_label(
-                    "Credits spent (last response)",
-                    "Usage charged (last response)",
-                    usage_display_unit,
-                ),
+                &usage_label(UsageLabelKind::LastResponse, usage_display_unit),
                 appearance,
             ));
             values.push(render_value_text(
-                format_credits_with_cost(
+                format_usage(
                     last_block_credits,
                     self.usage_info.tokens_for_last_block,
                     self.usage_info.cost_in_cents_for_last_block,
@@ -391,14 +384,10 @@ impl ConversationUsageView {
             ));
 
             labels.push(render_label_text(
-                usage_label(
-                    "Credits spent (total)",
-                    "Usage charged (total)",
-                    usage_display_unit,
-                ),
+                &usage_label(UsageLabelKind::Total, usage_display_unit),
                 appearance,
             ));
-            values.push(self.render_total_credits_value_row(
+            values.push(self.render_total_usage_value_row(
                 total_credits_value,
                 total_tokens_value,
                 total_cost_in_cents_value,
@@ -408,10 +397,10 @@ impl ConversationUsageView {
             ));
         } else {
             labels.push(render_label_text(
-                usage_label("Credits spent", "Usage charged", usage_display_unit),
+                &usage_label(UsageLabelKind::Plain, usage_display_unit),
                 appearance,
             ));
-            values.push(self.render_total_credits_value_row(
+            values.push(self.render_total_usage_value_row(
                 total_credits_value,
                 total_tokens_value,
                 total_cost_in_cents_value,
@@ -421,12 +410,9 @@ impl ConversationUsageView {
             ));
         }
 
-        // Per-agent breakdown rows render immediately beneath the
-        // "Credits spent (total)" row so they read as a drill-down of
-        // that value, not as a separate section appended at the bottom
-        // of the card. The rows are pushed into the same two-column
-        // label/value layout as the rest of the usage summary; the
-        // existing flex spacing handles indentation.
+        // Per-agent breakdown rows render immediately beneath the total
+        // usage row so they read as a drill-down of that value rather than
+        // a separate section.
         self.append_per_agent_rows(&mut labels, &mut values, rollup.as_ref(), appearance);
 
         labels.push(render_label_text("Tool calls", appearance));
@@ -756,10 +742,10 @@ impl ConversationUsageView {
         }
     }
 
-    /// Renders the "Credits spent (total)" value cell. When a rollup
-    /// applies, the cell is a row with the value followed by a
-    /// "View details ▾" / "Hide details ▴" toggle.
-    fn render_total_credits_value_row(
+    /// Renders the total usage value cell. When a rollup applies, the cell
+    /// is a row with the value followed by a "View details" / "Hide
+    /// details" toggle.
+    fn render_total_usage_value_row(
         &self,
         total_credits: f32,
         total_tokens: Option<u32>,
@@ -768,13 +754,13 @@ impl ConversationUsageView {
         rollup: Option<&OrchestrationCreditRollup>,
         appearance: &Appearance,
     ) -> Box<dyn Element> {
-        let credits_text = format_credits_with_cost(
+        let usage_text = format_usage(
             total_credits,
             total_tokens,
             total_cost_in_cents,
             usage_display_unit,
         );
-        let value_text = render_value_text(credits_text, appearance);
+        let value_text = render_value_text(usage_text, appearance);
         if rollup.is_none() {
             return value_text;
         }

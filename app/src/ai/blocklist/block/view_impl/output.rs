@@ -104,8 +104,7 @@ use crate::ai::blocklist::keyboard_navigable_buttons::KeyboardNavigableButtons;
 use crate::ai::blocklist::secret_redaction::SecretRedactionState;
 use crate::ai::blocklist::usage::rollup::compute_orchestration_rollup;
 use crate::ai::blocklist::view_util::{
-    FAILED_OUTPUT_USAGE_NOTICE_TEXT, format_credits_with_cost,
-    should_show_failed_output_usage_notice,
+    FAILED_OUTPUT_USAGE_NOTICE_TEXT, format_usage, should_show_failed_output_usage_notice,
 };
 use crate::ai::blocklist::{AIBlockResponseRating, BlocklistAIActionModel, SuggestionChipView};
 use crate::ai::paths::shell_native_absolute_path;
@@ -3725,7 +3724,7 @@ fn render_usage_button(props: Props, app: &AppContext) -> Box<dyn Element> {
 
     let usage_display_unit = AISettings::as_ref(app).usage_display_unit;
     let total_credits_spent = headline_credits;
-    let mut usage_text = format_credits_with_cost(
+    let mut usage_text = format_usage(
         total_credits_spent,
         headline_tokens,
         headline_cost_in_cents,
@@ -3744,7 +3743,7 @@ fn render_usage_button(props: Props, app: &AppContext) -> Box<dyn Element> {
             // bound to the orchestrator's own last block, same as
             // `credits_spent_for_last_block` above.
             let last_block_charged_usage = conversation.charged_usage_for_last_block();
-            let last_block_text = format_credits_with_cost(
+            let last_block_text = format_usage(
                 credits_spent_for_last_block,
                 last_block_charged_usage.map(|usage| usage.total_tokens()),
                 last_block_charged_usage.map(|usage| usage.total_cost_in_cents()),
