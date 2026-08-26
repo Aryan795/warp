@@ -1318,3 +1318,54 @@ fn build_tree_fail_fast_succeeds_within_budget() {
     ));
     assert!(result.is_ok(), "FailFast must succeed when within budget");
 }
+
+/// `evaluate_entry` gates every gitignore match through a semaphore sized to
+/// [`super::GITIGNORE_MATCH_CONCURRENCY_LIMIT`] so that a shared, long-lived
+/// `Gitignore`'s `regex_automata` pool never has to hand out more caches than
+/// that limit at once (see the constant's doc comment). This exercises that
+/// exact mechanism directly — a fresh semaphore of the same size — instead of
+/// asserting on `regex_automata`'s private, implementation-defined retained
+/// byte counts, which would make the test brittle to upstream internals
+/// rather than to the bound this crate actually controls.
+#[test]
+fn gitignore_match_semaphore_caps_concurrent_holders() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tokio::sync::Semaphore;
+
+    const WORKERS: usize = super::GITIGNORE_MATCH_CONCURRENCY_LIMIT * 4;
+
+    let semaphore = Arc::new(Semaphore::new(super::GITIGNORE_MATCH_CONCURRENCY_LIMIT));
+    let concurrent_holders = Arc::new(AtomicUsize::new(0));
+    let max_observed = Arc::new(AtomicUsize::new(0));
+
+    let workers = (0..WORKERS).map(|_| {
+        let semaphore = semaphore.clone();
+        let concurrent_holders = concurrent_holders.clone();
+        let max_observed = max_observed.clone();
+        async move {
+            let _permit = semaphore
+                .acquire()
+                .await
+                .expect("semaphore is never closed");
+            let held = concurrent_holders.fetch_add(1, Ordering::SeqCst) + 1;
+            max_observed.fetch_max(held, Ordering::SeqCst);
+            // Yield while still holding the permit so sibling workers waiting on
+            // the same semaphore are polled and can observe (or attempt to
+            // exceed) the current holder count before this one releases.
+            futures_lite::future::yield_now().await;
+            concurrent_holders.fetch_sub(1, Ordering::SeqCst);
+        }
+    });
+
+    run(futures::future::join_all(workers));
+
+    assert_eq!(
+        max_observed.load(Ordering::SeqCst),
+        super::GITIGNORE_MATCH_CONCURRENCY_LIMIT,
+        "the semaphore must let exactly GITIGNORE_MATCH_CONCURRENCY_LIMIT workers hold a permit \
+         at once out of {WORKERS} contenders — never fewer (the bound would be too aggressive) \
+         and, by the semaphore's own contract, never more"
+    );
+}

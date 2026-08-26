@@ -3,14 +3,15 @@
 use std::collections::VecDeque;
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use futures_lite::StreamExt;
 use ignore::gitignore::Gitignore;
 #[cfg(feature = "local_fs")]
 use notify_debouncer_full::notify::WatchFilter;
 use thiserror::Error;
+use tokio::sync::Semaphore;
 use warp_errors::{ErrorExt, register_error, report_error};
 use warp_util::standardized_path::StandardizedPath;
 
@@ -22,6 +23,22 @@ const MAX_FILE_SIZE: usize = 3 * 1000 * 1000;
 
 /// Maximum number of files to load when lazy-loading a directory
 pub const LAZY_LOAD_FILE_LIMIT: usize = 5000;
+
+/// Caps how many `evaluate_entry` calls may be inside a gitignore match at once.
+///
+/// Each distinct, cached `Gitignore` (see `gitignore_cache`) owns its own
+/// `regex_automata` `Pool` of match caches, and that pool hands out one cache per
+/// concurrent caller and never shrinks. Tree builds run on the shared background
+/// executor, so without a cap, matching concurrency against any one `Gitignore`
+/// scales with the number of background worker threads and stays there for the
+/// life of the process, even during a single momentary burst. Matching is a fast,
+/// CPU-only check relative to the directory reads a build also does, so
+/// serializing it to a small constant bounds that retained memory per matcher
+/// without meaningfully slowing down the (I/O-bound) rest of the build.
+pub(crate) const GITIGNORE_MATCH_CONCURRENCY_LIMIT: usize = 4;
+
+static GITIGNORE_MATCH_SEMAPHORE: LazyLock<Semaphore> =
+    LazyLock::new(|| Semaphore::new(GITIGNORE_MATCH_CONCURRENCY_LIMIT));
 
 #[derive(Debug, Error)]
 pub enum BuildTreeError {
@@ -282,7 +299,9 @@ impl Entry {
             &options,
             options.current_depth,
             ancestor_is_ignored,
-        )? {
+        )
+        .await?
+        {
             EvaluatedEntry::File { ignored } => {
                 if quota == Some(0)
                     && options.budget_exceeded_behavior == BudgetExceededBehavior::FailFast
@@ -388,7 +407,9 @@ impl Entry {
                             &options,
                             child_depth,
                             job.ignored,
-                        ) {
+                        )
+                        .await
+                        {
                             Ok(EvaluatedEntry::File { ignored }) => {
                                 if quota == Some(0)
                                     && options.budget_exceeded_behavior
@@ -579,7 +600,7 @@ enum EvaluatedEntry {
 /// `.gitignore`, computes gitignore status, and applies the ignored-path
 /// strategy. Returns `Err(Ignored)`/`Err(Symlink)` for entries that should be
 /// omitted; callers decide whether that is fatal (root) or a skip (child).
-fn evaluate_entry(
+async fn evaluate_entry(
     curr_path: &Path,
     gitignores: &mut Vec<Arc<Gitignore>>,
     options: &BuildTreeOptions<'_>,
@@ -598,14 +619,18 @@ fn evaluate_entry(
         gitignores.push(gitignore_cache::get_or_parse(&gitignore_path));
     }
 
-    let path_is_ignored = ancestor_is_ignored
-        || is_git_internal_path(curr_path)
-        || matches_gitignores(
+    let path_is_ignored = ancestor_is_ignored || is_git_internal_path(curr_path) || {
+        let _permit = GITIGNORE_MATCH_SEMAPHORE
+            .acquire()
+            .await
+            .expect("GITIGNORE_MATCH_SEMAPHORE is never closed");
+        matches_gitignores(
             curr_path,
             is_dir,
             &*gitignores,
             false, /* check_ancestors */
-        );
+        )
+    };
 
     let force_included = matches_force_included_path(curr_path, options.force_included_paths);
 
