@@ -320,7 +320,6 @@ impl BillingAndUsagePageView {
         // On page init, fetch the usage history for the current user.
         usage_history_model.update(ctx, |m, ctx| m.refresh_usage_history_async(ctx));
 
-        // Re-render usage-history rows immediately when the usage display unit changes.
         ctx.subscribe_to_model(&AISettings::handle(ctx), |_, _, event, ctx| {
             if matches!(event, AISettingsChangedEvent::UsageDisplayUnit { .. }) {
                 ctx.notify();

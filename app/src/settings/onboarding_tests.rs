@@ -246,12 +246,6 @@ fn account_first_settings_enable_agent_for_authenticated_users_and_apply_ui_choi
     });
 }
 
-/// New accounts default the usage-display unit to dollars, but skipping
-/// account creation (`account_class: None`) must leave the enum's own
-/// `Credits` default untouched so existing users/devices are unaffected.
-/// Likewise, an existing account signing in through account-first onboarding
-/// (e.g. on a new device) must not have its synced choice overwritten, even
-/// though `account_class` is populated in that case too.
 #[test]
 fn apply_account_first_onboarding_settings_sets_dollars_for_new_accounts_only() {
     let _account_first = FeatureFlag::AccountFirstOnboarding.override_enabled(true);
@@ -276,7 +270,6 @@ fn apply_account_first_onboarding_settings_sets_dollars_for_new_accounts_only() 
             show_agent_notifications: true,
         };
 
-        // Skipping account creation must not touch the default.
         app.update(|ctx| {
             apply_account_first_onboarding_settings(
                 &selected_settings,
@@ -294,9 +287,6 @@ fn apply_account_first_onboarding_settings_sets_dollars_for_new_accounts_only() 
             );
         });
 
-        // An existing account signing in (is_new_account: false) must not
-        // have its synced Credits choice overwritten, even with a populated
-        // account_class.
         app.update(|ctx| {
             apply_account_first_onboarding_settings(
                 &selected_settings,
@@ -314,7 +304,6 @@ fn apply_account_first_onboarding_settings_sets_dollars_for_new_accounts_only() 
             );
         });
 
-        // A genuinely new account explicitly defaults to Dollars.
         app.update(|ctx| {
             apply_account_first_onboarding_settings(
                 &selected_settings,

@@ -52,10 +52,7 @@ fn placeholder_usage_info() -> ConversationUsageInfo {
     }
 }
 
-/// Registers the singletons that the view touches when constructed and
-/// when `ctx.notify()` runs (theme lookups, settings, etc.). Keep this
-/// minimal: the goal is to satisfy the runtime, not to mirror the full
-/// production app.
+/// Registers the singletons required by the view.
 fn initialize_test_app(app: &mut App) {
     initialize_settings_for_tests(app);
     app.add_singleton_model(|_| Appearance::mock());

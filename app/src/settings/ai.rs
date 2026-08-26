@@ -673,7 +673,7 @@ settings::macros::implement_setting_for_enum!(
     description: "Which unit the usage entry displays in Warp Agent CLI: credits or provider cost.",
 );
 
-/// Which unit the GUI's usage/spend displays show (credits or dollars).
+/// Unit for GUI usage and spend displays.
 #[derive(
     Default,
     Debug,
@@ -691,10 +691,8 @@ settings::macros::implement_setting_for_enum!(
     rename_all = "snake_case"
 )]
 pub enum UsageDisplayUnit {
-    /// Credits spent (default).
     #[default]
     Credits,
-    /// Real dollar cost.
     Dollars,
 }
 
@@ -711,7 +709,6 @@ settings::macros::implement_setting_for_enum!(
 );
 
 impl UsageDisplayUnit {
-    /// Display name for the settings dropdown.
     pub fn display_name(&self) -> &'static str {
         match self {
             UsageDisplayUnit::Credits => "Credits",
@@ -1520,8 +1517,6 @@ define_settings_group!(AISettings, settings: [
     //
     // TUI-only and file-backed so the choice persists across TUI sessions.
     usage_display_mode: TuiUsageDisplayMode,
-    // Which unit the GUI's usage/spend displays show (credits or dollars).
-    // Gated by FeatureFlag::PricingTransparency.
     usage_display_unit: UsageDisplayUnit,
     // Ordered visibility configuration for the TUI's bottom statusline.
     // TUI-only and local so separate devices can use different terminal layouts.

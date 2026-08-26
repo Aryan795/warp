@@ -2312,11 +2312,6 @@ impl View for ConversationDetailsPanel {
         }
 
         if let Some(credits) = self.data.credits {
-            // A single compact "tokens / unit" line rather than separate rows
-            // for credits/tokens/per-category cost: for now this inline figure
-            // is enough (though the deeper per-category breakdown is still
-            // computed and available on `self.data.charged_usage` for a future
-            // expandable treatment).
             let cost_in_cents = self
                 .data
                 .charged_usage

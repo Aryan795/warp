@@ -177,8 +177,6 @@ impl ConversationUsageView {
         parent_conversation_id: AIConversationId,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
-        // Re-render immediately when the usage display unit changes, since
-        // `render_unified_layout` reads it directly at render time.
         ctx.subscribe_to_model(&AISettings::handle(ctx), |_, _, event, ctx| {
             if matches!(event, AISettingsChangedEvent::UsageDisplayUnit { .. }) {
                 ctx.notify();
@@ -349,8 +347,6 @@ impl ConversationUsageView {
         ));
         values.push(render_section_header("".to_string(), appearance));
 
-        // Total usage value: the rollup total when available, otherwise the
-        // orchestrator's own self total. PRODUCT invariants 2a, 11.
         let total_credits_value = rollup
             .as_ref()
             .map(|r| r.total_credits)
@@ -422,9 +418,6 @@ impl ConversationUsageView {
             ));
         }
 
-        // Per-agent breakdown rows render immediately beneath the total
-        // usage row so they read as a drill-down of that value rather than
-        // a separate section.
         self.append_per_agent_rows(&mut labels, &mut values, rollup.as_ref(), appearance);
 
         labels.push(render_label_text("Tool calls", appearance));
@@ -754,9 +747,6 @@ impl ConversationUsageView {
         }
     }
 
-    /// Renders the total usage value cell. When a rollup applies, the cell
-    /// is a row with the value followed by a "View details" / "Hide
-    /// details" toggle.
     fn render_total_usage_value_row(
         &self,
         total_credits: f32,

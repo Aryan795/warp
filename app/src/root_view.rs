@@ -1836,11 +1836,7 @@ pub struct RootView {
     /// settings to apply after a new user login / initial cloud load completes
     pending_post_auth_onboarding_settings: Option<SelectedSettings>,
     pending_account_first_settings_class: Option<FtueAccountClass>,
-    /// Whether the account had not yet completed onboarding (i.e. `AuthState::is_onboarded()`
-    /// was `false`) at the time `pending_account_first_settings_class` was captured, before
-    /// `set_user_onboarded` flips it locally. Threaded through to
-    /// `apply_account_first_onboarding_settings` so an existing, already-onboarded account
-    /// signing in on a new device doesn't have its synced usage-unit choice overwritten.
+    /// Prevents onboarding on a new device from overwriting an existing preference.
     pending_account_first_is_new_account: bool,
     pending_account_first_tutorial_after_settings: bool,
     pending_account_first_sso_login: Option<AccountFirstLoginContext>,
@@ -2462,10 +2458,6 @@ impl RootView {
         if FeatureFlag::HOAOnboardingFlow.is_enabled() {
             mark_hoa_onboarding_completed(ctx);
         }
-        // Captured before `set_user_onboarded` flips this locally: account-first
-        // onboarding can also be reached by an existing, already-onboarded account
-        // signing in (e.g. on a new device), and only genuinely new accounts should
-        // get account-first defaults like the usage-unit display.
         let is_new_account = !AuthStateProvider::as_ref(ctx)
             .get()
             .is_onboarded()

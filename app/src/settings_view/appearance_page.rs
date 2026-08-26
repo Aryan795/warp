@@ -4686,7 +4686,7 @@ impl SettingsWidget for UsageDisplayUnitWidget {
         render_dropdown_item(
             appearance,
             "Usage display unit",
-            Some("Which unit usage and spend amounts are shown in."),
+            Some("Select the unit for usage and spend amounts."),
             None,
             LocalOnlyIconState::for_setting(
                 UsageDisplayUnit::storage_key(),

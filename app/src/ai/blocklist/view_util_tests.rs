@@ -161,9 +161,6 @@ fn usage_label_uses_credits_wording_when_flag_disabled_even_if_unit_is_dollars()
 fn usage_label_uses_credits_wording_when_dollars_requested_but_cost_unavailable() {
     let _flag = FeatureFlag::PricingTransparency.override_enabled(true);
 
-    // Matches format_usage_falls_back_to_credits_when_dollars_unavailable: when
-    // no cost figure is available, the value falls back to plain credits, so
-    // the label must match rather than saying "Usage charged".
     assert_eq!(
         usage_label(UsageLabelKind::Plain, None, UsageDisplayUnit::Dollars),
         "Credits spent"

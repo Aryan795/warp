@@ -299,11 +299,6 @@ pub fn format_credits(credits: f32) -> String {
     }
 }
 
-/// Derives the unit actually displayed for a usage figure, accounting for
-/// `FeatureFlag::PricingTransparency` and for cost-data availability.
-/// `format_usage` and [`usage_label`] both derive from this so a label and
-/// its value never disagree: whenever `Dollars` can't actually be shown
-/// (flag disabled, or no cost figure available), both fall back to `Credits`.
 fn effective_usage_unit(unit: UsageDisplayUnit, cost_in_cents: Option<f32>) -> UsageDisplayUnit {
     if !FeatureFlag::PricingTransparency.is_enabled() {
         return UsageDisplayUnit::Credits;
@@ -315,8 +310,6 @@ fn effective_usage_unit(unit: UsageDisplayUnit, cost_in_cents: Option<f32>) -> U
     }
 }
 
-/// Formats the figure for `unit`. Falls back to a plain credits figure if
-/// `unit` is `Dollars` but no cost figure is available.
 fn format_usage_unit_value(
     credits: f32,
     cost_in_cents: Option<f32>,
@@ -330,11 +323,7 @@ fn format_usage_unit_value(
     }
 }
 
-/// Formats a usage figure as its token count plus exactly one of credits or
-/// dollars, e.g. `"12,345 tokens / 20 credits"` or `"12,345 tokens / $0.36"`.
-/// Zero/unknown token counts are omitted. Falls back to a plain credits
-/// figure (without a token breakdown) when no dollar figure is available or
-/// `FeatureFlag::PricingTransparency` is disabled.
+/// Formats tokens with the selected unit, falling back to credits when dollars are unavailable.
 pub fn format_usage(
     credits: f32,
     tokens: Option<u32>,
@@ -352,7 +341,6 @@ pub fn format_usage(
     format!("{} tokens / {unit_text}", tokens.separate_with_commas())
 }
 
-/// The usage surface a label is rendered on, which determines its wording.
 #[derive(Clone, Copy)]
 pub enum UsageLabelKind {
     LastResponse,
@@ -361,9 +349,7 @@ pub enum UsageLabelKind {
     DetailsPanel,
 }
 
-/// Returns the label for a usage row, worded to match the unit [`format_usage`]
-/// would show for the same `cost_in_cents`, so a label and its value never
-/// disagree.
+/// Matches the label to the unit [`format_usage`] will render.
 pub fn usage_label(
     kind: UsageLabelKind,
     cost_in_cents: Option<f32>,
