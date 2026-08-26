@@ -715,6 +715,23 @@ def test_fish():
         )
 
 
+def test_zsh_static_checks():
+    # A live PTY run only exercises whatever zsh is installed here, which won't reproduce
+    # this: on zsh <5.1 (e.g. 5.0.2, Ubuntu 14.04's stock build -- still the SSH test VM's
+    # actual version), an unquoted `local x=$(cmd)` word-splits `cmd`'s output before `local`
+    # sees it. bindkey's "unbound key" output is two words (`"^[]" undefined-key`), and
+    # `local` then tries to declare a second local named `undefined-key` -- not a valid
+    # identifier -- aborting the rest of bootstrap on every zsh session, since Alt-] starts
+    # out unbound. Guard statically against the unquoted form regressing, since no zsh
+    # available in this matrix reproduces the failure at runtime.
+    body = (BOOTSTRAP_DIR / "zsh_body.sh").read_text()
+    quoted = 'local result="$(bindkey -M "$1" \'\\e]\' 2>/dev/null)"' in body
+    record(
+        "zsh: Alt-] free-check command substitution stays quoted (old-zsh word-split guard)",
+        quoted,
+    )
+
+
 def main():
     for shell in ("bash", "zsh", "fish"):
         if not shutil.which(shell):
@@ -725,6 +742,7 @@ def main():
     test_bash()
     print("== zsh ==")
     test_zsh()
+    test_zsh_static_checks()
     print("== fish ==")
     test_fish()
 
