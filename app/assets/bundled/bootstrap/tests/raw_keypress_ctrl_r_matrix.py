@@ -630,20 +630,47 @@ def test_fish():
                 detail=f"insert binds: {insert_binds!r}" if not preserved else "",
             )
 
-            # default mode is left free here, so it still gets a real wrapper. Asserting that is
-            # what makes this the *partial* collision the tag gate exists for, rather than a case
-            # where every mode happens to be occupied.
+            # default mode is left free here, so it must still have claimed Alt-] (with a real
+            # wrapper or the fallback) despite insert being occupied. Asserting that is what makes
+            # this the *partial* collision the tag gate exists for, rather than a case where every
+            # mode happens to be occupied. Checked via a file-redirected `bind` listing rather than
+            # session.buf: an interactive shell echoes back a typed command as you type it
+            # regardless of whether it goes on to execute, so a `... && echo MARKER` sent straight
+            # into the pty leaves MARKER in the transcript even when the command never runs --
+            # session.buf can't distinguish "the check ran and passed" from "the check was merely
+            # typed". The pre-existing occupied-mode checks in this file already avoid that trap by
+            # redirecting to a file and reading the file back; this does the same.
             session.send(
-                "bind -M default \\x1b\\x5d | grep -qF __warp_run_raw_keypress_ctrl_r_widget_default "
-                "&& echo FISH_DEFAULT_STILL_WRAPPED\n",
+                "bind -M default \\x1b\\x5d > /tmp/_fish_occ_insert_default.txt 2>&1\n",
                 wait=1.0,
+            )
+            default_binds = Path("/tmp/_fish_occ_insert_default.txt").read_text()
+            claimed = (
+                "__warp_run_raw_keypress_ctrl_r_widget_default" in default_binds
+                or "__warp_report_raw_keypress_ctrl_r_selection_immediate" in default_binds
             )
             record(
                 "fish: unoccupied mode still claims Alt-] (default)",
-                b"FISH_DEFAULT_STILL_WRAPPED" in session.buf,
+                claimed,
+                detail=f"default binds: {default_binds!r}" if not claimed else "",
             )
 
             check_plugin_tag(session, False, "fish (vi insert occupied)")
+
+            # Drive an actual handoff in default mode (free, with no real widget rebound in this
+            # test) while insert is occupied: the fallback must still report the token immediately
+            # with an empty selection, proving default mode keeps working, not just that it looks
+            # bound. This assertion is immune to the buf/echo trap above since it checks a real DCS
+            # hook, not typed-command text.
+            send_handoff(session, "2020")
+            hooks = session.hooks()
+            default_hooks = [h for h in hooks if h.get("token") == "2020"]
+            ok = len(default_hooks) == 1 and default_hooks[0].get("buffer") == ""
+            record(
+                "fish: unoccupied mode (default) still completes a handoff while insert is occupied",
+                ok,
+                detail=str(default_hooks) if not ok else "",
+            )
 
             # ESC enters default mode, then 'i' switches to insert for the handoff.
             session.send("\x1b", wait=0.3)
