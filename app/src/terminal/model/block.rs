@@ -1612,7 +1612,7 @@ impl Block {
 
         let block_type: BlockType = self.into();
         self.event_proxy
-            .send_terminal_event(Event::BlockCompleted(BlockCompletedEvent {
+            .send_app_event(Event::BlockCompleted(BlockCompletedEvent {
                 block_type,
                 num_secrets_obfuscated: self.num_secrets_obfuscated(),
                 block_index: self.block_index,
@@ -3027,7 +3027,7 @@ impl Block {
 
         self.precmd_state = PrecmdState::AfterPrecmd;
         self.event_proxy
-            .send_terminal_event(Event::BlockMetadataReceived(BlockMetadataReceivedEvent {
+            .send_app_event(Event::BlockMetadataReceived(BlockMetadataReceivedEvent {
                 block_metadata: self.metadata(),
                 block_index: self.block_index,
                 is_after_in_band_command,
@@ -3046,12 +3046,11 @@ impl Block {
 
         let is_for_in_band_command = command_executor::is_in_band_command(data.command.as_str());
         if self.bootstrap_stage() == BootstrapStage::PostBootstrapPrecmd {
-            self.event_proxy
-                .send_terminal_event(Event::AfterBlockStarted {
-                    block_id: self.id.clone(),
-                    command: self.command_to_string(),
-                    is_for_in_band_command,
-                });
+            self.event_proxy.send_app_event(Event::AfterBlockStarted {
+                block_id: self.id.clone(),
+                command: self.command_to_string(),
+                is_for_in_band_command,
+            });
         }
 
         self.leading_linefeeds_ignored = 0;
@@ -3456,7 +3455,7 @@ impl ansi::Handler for Block {
                 }
                 // Reset the indicator for receiving prompt characters.
                 self.header_grid.receiving_chars_for_prompt = None;
-                self.event_proxy.send_terminal_event(Event::PromptUpdated);
+                self.event_proxy.send_app_event(Event::PromptUpdated);
             }
         }
     }
@@ -3482,7 +3481,7 @@ impl ansi::Handler for Block {
         // that genuinely care about CWD changes opt in by also listening to
         // `BlockWorkingDirectoryUpdated`.
         self.event_proxy
-            .send_terminal_event(Event::BlockWorkingDirectoryUpdated(
+            .send_app_event(Event::BlockWorkingDirectoryUpdated(
                 BlockWorkingDirectoryUpdatedEvent {
                     block_metadata: self.metadata(),
                     block_index: self.block_index,
