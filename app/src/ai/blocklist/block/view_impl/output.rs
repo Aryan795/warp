@@ -3857,14 +3857,6 @@ fn render_turn_panel_button(props: Props, app: &AppContext) -> Box<dyn Element> 
 
     let appearance = Appearance::as_ref(app);
     let ui_builder = appearance.ui_builder().clone();
-    // Scaled down from the standard action-row icon size so the pie chart
-    // visually matches its sibling icons (fork, continue, etc.), which are
-    // rendered via `icon_button` at a smaller effective glyph size than this
-    // row's raw line-height-based `icon_size`.
-    let icon_size = icon_size(app) * 0.7;
-    let icon_color = appearance
-        .theme()
-        .sub_text_color(appearance.theme().background());
 
     // Sum turn-scoped per-model usage for the tooltip, so it reads as the
     // same total the panel's per-model rows add up to.
@@ -3881,57 +3873,44 @@ fn render_turn_panel_button(props: Props, app: &AppContext) -> Box<dyn Element> 
     if turn_cost_in_cents > 0.0 {
         tooltip_parts.push(format_dollars(turn_cost_in_cents));
     }
-    let tooltip_text = tooltip_parts.join("  /  ");
+    let tooltip_text = format!("Turn: {}", tooltip_parts.join("  /  "));
 
-    let is_turn_panel_expanded = props.is_turn_panel_expanded;
-    Hoverable::new(
+    // Matches the sizing/hover-background/corner-radius of the sibling
+    // action-row buttons (thumbs up/down, continue, fork) below, so the
+    // pie-chart trigger reads as part of the same button group.
+    let style_override = UiComponentStyles {
+        font_color: Some(
+            appearance
+                .theme()
+                .sub_text_color(appearance.theme().background())
+                .into(),
+        ),
+        width: Some(icon_size(app) + 4.),
+        height: Some(icon_size(app) + 4.),
+        ..Default::default()
+    };
+    let style_override_with_background = UiComponentStyles {
+        background: Some(blended_colors::neutral_4(appearance.theme()).into()),
+        ..style_override
+    };
+
+    icon_button(
+        appearance,
+        Icon::TurnUsagePie,
+        // Keep the trigger visibly "active" while the panel is open, not
+        // just while hovered/clicked, so the icon stays legible as the
+        // panel's open/closed toggle.
+        props.is_turn_panel_expanded,
         props.state_handles.turn_panel_button_handle.clone(),
-        move |mouse_state| {
-            let icon_element =
-                ConstrainedBox::new(Icon::TurnUsagePie.to_warpui_icon(icon_color).finish())
-                    .with_width(icon_size)
-                    .with_height(icon_size)
-                    .finish();
-            let mut content = Container::new(icon_element).with_uniform_padding(2.);
-
-            // Keep the trigger visibly "active" while the panel is open, not
-            // just while hovered/clicked, so the icon stays legible as the
-            // panel's open/closed toggle.
-            if is_turn_panel_expanded || mouse_state.is_hovered() || mouse_state.is_clicked() {
-                let background = if is_turn_panel_expanded || mouse_state.is_clicked() {
-                    appearance.theme().background()
-                } else {
-                    blended_colors::neutral_4(appearance.theme()).into()
-                };
-
-                content = content
-                    .with_background(background)
-                    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)));
-
-                let mut stack = Stack::new().with_child(content.finish());
-                let tooltip = ui_builder.tool_tip(tooltip_text.clone()).build().finish();
-                if mouse_state.is_hovered() {
-                    stack.add_positioned_overlay_child(
-                        tooltip,
-                        OffsetPositioning::offset_from_parent(
-                            vec2f(0., 8.),
-                            ParentOffsetBounds::WindowByPosition,
-                            ParentAnchor::BottomMiddle,
-                            ChildAnchor::TopMiddle,
-                        ),
-                    );
-                }
-
-                stack.finish()
-            } else {
-                content.finish()
-            }
-        },
     )
+    .with_tooltip(move || ui_builder.tool_tip(tooltip_text.clone()).build().finish())
+    .with_style(style_override)
+    .with_hovered_styles(style_override_with_background)
+    .with_active_styles(style_override_with_background)
+    .build()
     .on_click(|ctx, _, _| {
         ctx.dispatch_typed_action(AIBlockAction::ToggleIsTurnPanelExpanded);
     })
-    .with_cursor(Cursor::PointingHand)
     .finish()
 }
 
