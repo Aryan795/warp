@@ -2615,6 +2615,196 @@ fn register_parent_on_wait_flag_off_is_noop() {
     });
 }
 
+// ---- Stalled-message hydration retry (QUALITY-1904) -----------------------
+//
+// Regression coverage for the orchestrator-parked-in-wait_for_events bug: a
+// `new_message` event whose body fetch failed must not let the cursor skip
+// past it, and a later retry must resolve it instead of leaving it (and
+// anything blocked on it, like `wait_for_events`) parked forever.
+
+#[test]
+fn hydration_failure_stalls_event_without_skipping_cursor_past_it() {
+    // A batch containing a failed-hydration `new_message` (sequence 5) and a
+    // fully-processed later event (sequence 6) must not advance the cursor
+    // past 4: otherwise a reconnect would ask the server for events "since"
+    // a sequence past the failed message, and it would never be redelivered.
+    App::test((), |mut app| async move {
+        initialize_settings_for_tests(&mut app);
+        let (sender, _receiver) = std::sync::mpsc::sync_channel::<ModelEvent>(4);
+        let mut global_resource_handles = GlobalResourceHandles::mock(&mut app);
+        global_resource_handles.model_event_sender = Some(sender);
+        app.add_singleton_model(|_| GlobalResourceHandlesProvider::new(global_resource_handles));
+
+        let history_model =
+            app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
+        let event_service = app.add_singleton_model(|_| OrchestrationEventService::default());
+
+        let self_run_id = "self-run";
+        let mut conversation = AIConversation::new(false, false);
+        conversation.set_run_id(self_run_id.to_string());
+        let conversation_id = conversation.id();
+        let terminal_view_id = warpui::EntityId::new();
+        history_model.update(&mut app, |model, ctx| {
+            model.restore_conversations(terminal_view_id, vec![conversation], ctx);
+        });
+
+        let mut mock = MockAIClient::new();
+        mock.expect_update_event_sequence_on_server()
+            .returning(|_, _| Ok(()));
+        let ai_client: Arc<dyn AIClient> = Arc::new(mock);
+        let server_api = ServerApiProvider::new_for_test().get();
+        let streamer = app.add_singleton_model(|ctx| {
+            OrchestrationEventStreamer::new_with_clients_for_test(ai_client, server_api, ctx)
+        });
+
+        let stalled_event = make_seq_event("new_message", self_run_id, Some("msg-stalled"), 5);
+        let resolved_event = make_seq_event("run_in_progress", "child-run", None, 6);
+
+        let (tx, rx) = mpsc::unbounded::<SseStreamItem>();
+        tx.unbounded_send(SseStreamItem {
+            event: stalled_event.clone(),
+            fetched_message: None,
+            hydration_failed: true,
+        })
+        .unwrap();
+        tx.unbounded_send(SseStreamItem {
+            event: resolved_event,
+            fetched_message: None,
+            hydration_failed: false,
+        })
+        .unwrap();
+
+        streamer.update(&mut app, |me, ctx| {
+            let (abort_handle, _) = futures::future::AbortHandle::new_pair();
+            let stream = me.streams.entry(conversation_id).or_default();
+            stream.sse_connection = Some(SseConnectionState {
+                event_receiver: rx,
+                generation: 0,
+                abort_handle,
+                connected_filter: AgentEventFilter::RunIds(vec![self_run_id.to_string()]),
+            });
+            me.drain_sse_events(conversation_id, ctx);
+        });
+
+        streamer.read(&app, |me, _| {
+            let stalled = &me
+                .streams
+                .get(&conversation_id)
+                .expect("stream exists")
+                .stalled_messages;
+            assert_eq!(
+                stalled.len(),
+                1,
+                "the failed-hydration event must be queued for retry"
+            );
+            assert_eq!(stalled[0].event.sequence, 5);
+        });
+        history_model.read(&app, |model, _| {
+            assert_eq!(
+                model
+                    .conversation(&conversation_id)
+                    .and_then(|c| c.last_event_sequence()),
+                Some(4),
+                "cursor must not skip past the stalled sequence, even though a later \
+                 event (sequence 6) was fully processed"
+            );
+        });
+
+        // The retry succeeds: the message is delivered and the cursor advances
+        // past it.
+        let received_message = ReceivedMessageInput {
+            message_id: "msg-stalled".to_string(),
+            sender_agent_id: "child-run".to_string(),
+            addresses: vec![self_run_id.to_string()],
+            subject: "hello".to_string(),
+            message_body: "body".to_string(),
+        };
+        streamer.update(&mut app, |me, ctx| {
+            me.finish_stalled_message_retry(
+                conversation_id,
+                stalled_event,
+                Some(received_message),
+                ctx,
+            );
+        });
+
+        streamer.read(&app, |me, _| {
+            assert!(
+                me.streams
+                    .get(&conversation_id)
+                    .is_some_and(|s| s.stalled_messages.is_empty()),
+                "a resolved retry must clear the stalled queue"
+            );
+        });
+        history_model.read(&app, |model, _| {
+            assert_eq!(
+                model
+                    .conversation(&conversation_id)
+                    .and_then(|c| c.last_event_sequence()),
+                Some(5),
+                "cursor must advance now that the stall is resolved"
+            );
+        });
+        event_service.read(&app, |service, _| {
+            assert!(
+                service.has_pending_events(conversation_id),
+                "the recovered message must be delivered through the normal batch path"
+            );
+        });
+    });
+}
+
+#[test]
+fn hydration_failure_retry_gives_up_after_max_attempts() {
+    // A message that keeps failing to hydrate must not stall the cursor
+    // forever: after the retry budget is exhausted, the entry is dropped so
+    // the cursor is free to advance again.
+    App::test((), |mut app| async move {
+        let history_model =
+            app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
+
+        let self_run_id = "self-run-2";
+        let mut conversation = AIConversation::new(false, false);
+        conversation.set_run_id(self_run_id.to_string());
+        let conversation_id = conversation.id();
+        let terminal_view_id = warpui::EntityId::new();
+        history_model.update(&mut app, |model, ctx| {
+            model.restore_conversations(terminal_view_id, vec![conversation], ctx);
+        });
+
+        let ai_client: Arc<dyn AIClient> = Arc::new(MockAIClient::new());
+        let server_api = ServerApiProvider::new_for_test().get();
+        let streamer = app.add_singleton_model(|ctx| {
+            OrchestrationEventStreamer::new_with_clients_for_test(ai_client, server_api, ctx)
+        });
+
+        let stalled_event = make_seq_event("new_message", self_run_id, Some("msg-gone"), 5);
+        streamer.update(&mut app, |me, _| {
+            me.streams
+                .entry(conversation_id)
+                .or_default()
+                .stalled_messages
+                .push(StalledMessageEvent {
+                    event: stalled_event.clone(),
+                    attempts: MAX_STALLED_MESSAGE_RETRY_ATTEMPTS - 1,
+                });
+        });
+
+        streamer.update(&mut app, |me, ctx| {
+            me.finish_stalled_message_retry(conversation_id, stalled_event, None, ctx);
+        });
+
+        streamer.read(&app, |me, _| {
+            assert!(
+                me.streams
+                    .get(&conversation_id)
+                    .is_some_and(|s| s.stalled_messages.is_empty()),
+                "exhausting the retry budget must drop the entry instead of retrying forever"
+            );
+        });
+    });
+}
+
 // ---- classify_family_event ----------------------------------------------
 
 #[test]

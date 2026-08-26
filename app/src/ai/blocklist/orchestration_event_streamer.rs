@@ -41,6 +41,12 @@ const RESTORE_FETCH_BACKOFF_STEPS: &[u64] = &[1, 2, 5, 10];
 const RESTORE_FETCH_PERMANENT_BACKOFF_STEPS: &[u64] = &[30];
 /// How often (milliseconds) the drain timer checks for SSE events.
 const SSE_DRAIN_INTERVAL_MS: u64 = 500;
+/// Cap on hydration retry attempts for a stalled `new_message` event (see
+/// [`StalledMessageEvent`]) before giving up and letting the cursor advance past
+/// it. At one retry per `SSE_DRAIN_INTERVAL_MS` tick this is a ~20s retry budget
+/// per event — generous enough to ride out a transient body-fetch failure
+/// without queuing a truly unrecoverable message forever (QUALITY-1904).
+const MAX_STALLED_MESSAGE_RETRY_ATTEMPTS: u32 = 40;
 /// Cap killed-run tombstones while keeping normal sessions well below the limit.
 const MAX_KILLED_RUN_IDS: usize = 1024;
 /// Max child runs fetched per cold-start `?ancestor_run_id=` REST seed in
@@ -60,6 +66,25 @@ const EVENT_RUN_SESSION_LINKED: &str = "run_session_linked";
 struct SseStreamItem {
     event: AgentRunEvent,
     fetched_message: Option<ReceivedMessageInput>,
+    /// True iff `event` required message hydration (a `new_message` event
+    /// addressed to the connection's own `self_run_id`) and the body fetch
+    /// failed. Distinguishes a genuine failure from events that never needed
+    /// hydration, so the drain loop can queue the former for retry instead of
+    /// silently advancing the cursor past it (QUALITY-1904).
+    hydration_failed: bool,
+}
+
+/// A `new_message` event whose hydration attempt failed, queued for retry.
+/// While an entry for a given `AIConversationId` exists, [`persist_event_cursor`]
+/// refuses to advance that conversation's cursor past the entry's sequence: a
+/// client only ever asks the server for events "since" its cursor, so letting
+/// the cursor cross an unresolved sequence would make the event permanently
+/// unrecoverable, silently dropping the message and leaving anything blocked
+/// on it (e.g. `wait_for_events`) parked forever (QUALITY-1904).
+#[derive(Clone)]
+struct StalledMessageEvent {
+    event: AgentRunEvent,
+    attempts: u32,
 }
 
 /// State for a single active SSE connection.
@@ -164,18 +189,29 @@ impl AgentEventConsumer for SseForwardingConsumer {
         &mut self,
         event: AgentRunEvent,
     ) -> anyhow::Result<AgentEventConsumerControlFlow> {
-        let fetched_message = if self.hydrate_new_messages {
+        // Only a `new_message` event addressed to this connection's own
+        // `self_run_id` requires hydration; everything else (lifecycle events,
+        // messages for other runs on a family stream) never attempts a fetch and
+        // so can never be "failed" hydration — this distinction lets the drain
+        // loop tell a genuine fetch failure apart from an event that was simply
+        // never a hydration candidate (QUALITY-1904).
+        let needs_hydration = self.hydrate_new_messages
+            && event.event_type == "new_message"
+            && event.run_id == self.self_run_id;
+        let fetched_message = if needs_hydration {
             self.hydrator
                 .hydrate_event_for_recipient(&event, &self.self_run_id)
                 .await
         } else {
             None
         };
+        let hydration_failed = needs_hydration && fetched_message.is_none();
 
         self.tx
             .unbounded_send(SseStreamItem {
                 event,
                 fetched_message,
+                hydration_failed,
             })
             .map_err(|_| anyhow!("SSE event receiver dropped"))?;
 
@@ -223,6 +259,14 @@ struct ConversationStreamState {
     /// Primary-mode child tracker for this orchestrator family. `None` until
     /// the family drain creates one on the first batch it handles.
     tracker: Option<OrchestrationChildTracker>,
+    /// `new_message` events whose hydration failed, awaiting retry. Non-empty
+    /// entries here cap how far [`OrchestrationEventStreamer::persist_event_cursor`]
+    /// may advance this conversation's cursor (QUALITY-1904).
+    stalled_messages: Vec<StalledMessageEvent>,
+    /// True while a hydration retry for this conversation's oldest
+    /// `stalled_messages` entry is in flight, so the periodic drain timer
+    /// doesn't pile up concurrent retries for the same event.
+    stalled_retry_in_flight: bool,
 }
 
 /// Per-orchestrator SSE stream state. Parallels [`ConversationStreamState`]
@@ -450,7 +494,26 @@ impl OrchestrationEventStreamer {
             .get(&conversation_id)
             .map(|stream| stream.event_cursor)
             .unwrap_or(0);
-        let effective_sequence = sequence.max(existing_stream_cursor).max(persisted_sequence);
+        let mut effective_sequence = sequence.max(existing_stream_cursor).max(persisted_sequence);
+
+        // Never advance past a `new_message` event that is still stalled awaiting
+        // a hydration retry: the server is only ever asked for events "since"
+        // this cursor, so advancing past a stalled sequence would make that
+        // message permanently unrecoverable on the next reconnect, silently and
+        // irrecoverably dropping it (QUALITY-1904). `.max(existing_stream_cursor)`
+        // keeps this monotonic even if a caller somehow passes a `sequence` below
+        // the current cursor.
+        if let Some(earliest_stalled) = self.streams.get(&conversation_id).and_then(|stream| {
+            stream
+                .stalled_messages
+                .iter()
+                .map(|stalled| stalled.event.sequence)
+                .min()
+        }) {
+            effective_sequence = effective_sequence
+                .min(earliest_stalled.saturating_sub(1))
+                .max(existing_stream_cursor);
+        }
 
         // Always persist to SQLite. For owner-side conversations this is the
         // resume cursor for the per-run SSE; for viewer-mode placeholders it
@@ -839,6 +902,7 @@ impl OrchestrationEventStreamer {
         let cursor;
         let mut events = Vec::new();
         let mut messages = Vec::new();
+        let mut newly_stalled = Vec::new();
         {
             let Some(stream) = self.streams.get_mut(&conversation_id) else {
                 return;
@@ -849,6 +913,10 @@ impl OrchestrationEventStreamer {
             };
             while let Ok(Some(item)) = sse.event_receiver.try_next() {
                 if item.event.sequence > cursor {
+                    if item.hydration_failed {
+                        newly_stalled.push(item.event);
+                        continue;
+                    }
                     if let Some(message) = item.fetched_message {
                         messages.push(message);
                     }
@@ -856,6 +924,7 @@ impl OrchestrationEventStreamer {
                 }
             }
         }
+        self.enqueue_stalled_messages(conversation_id, newly_stalled);
         if events.is_empty() {
             return;
         }
@@ -2576,9 +2645,146 @@ impl OrchestrationEventStreamer {
                     return;
                 }
                 me.drain_owner_events(conversation_id, ctx);
+                me.retry_stalled_message(conversation_id, ctx);
                 me.start_sse_drain_timer(conversation_id, generation, ctx);
             },
         );
+    }
+
+    /// Queues `new_message` events whose hydration attempt failed so a later
+    /// retry (see [`Self::retry_stalled_message`]) can resolve them, and so
+    /// [`Self::persist_event_cursor`] never advances the cursor past them.
+    /// Deduplicates by sequence: a reconnect can legitimately redeliver the
+    /// same still-unresolved event (its sequence is still above the pinned
+    /// cursor), which must not create a second retry entry.
+    fn enqueue_stalled_messages(
+        &mut self,
+        conversation_id: AIConversationId,
+        events: Vec<AgentRunEvent>,
+    ) {
+        if events.is_empty() {
+            return;
+        }
+        let stream = self.streams.entry(conversation_id).or_default();
+        for event in events {
+            if stream
+                .stalled_messages
+                .iter()
+                .any(|stalled| stalled.event.sequence == event.sequence)
+            {
+                continue;
+            }
+            log::warn!(
+                "Message hydration failed; queuing for retry instead of skipping past it: \
+                 conversation_id={conversation_id:?} sequence={}",
+                event.sequence
+            );
+            stream
+                .stalled_messages
+                .push(StalledMessageEvent { event, attempts: 0 });
+        }
+    }
+
+    /// Retries hydration for the oldest still-stalled `new_message` event for
+    /// `conversation_id`, one at a time. Called every SSE drain tick so a
+    /// transient body-fetch failure is retried instead of leaving the event
+    /// (and the cursor pinned behind it, per [`Self::persist_event_cursor`])
+    /// unresolved forever (QUALITY-1904).
+    fn retry_stalled_message(
+        &mut self,
+        conversation_id: AIConversationId,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let Some(stream) = self.streams.get_mut(&conversation_id) else {
+            return;
+        };
+        if stream.stalled_retry_in_flight {
+            return;
+        }
+        let Some(stalled) = stream.stalled_messages.first().cloned() else {
+            return;
+        };
+        stream.stalled_retry_in_flight = true;
+
+        let self_run_id = self.self_run_id(conversation_id, ctx).unwrap_or_default();
+        let hydrator = self.message_hydrator_for_run_id(&self_run_id);
+        let event = stalled.event;
+        ctx.spawn(
+            async move {
+                let message = hydrator
+                    .hydrate_event_for_recipient(&event, &self_run_id)
+                    .await;
+                (event, message)
+            },
+            move |me, (event, message), ctx| {
+                me.finish_stalled_message_retry(conversation_id, event, message, ctx);
+            },
+        );
+    }
+
+    /// Completion callback for [`Self::retry_stalled_message`]. On success,
+    /// removes the entry and delivers the message through the normal batch
+    /// path, which lets the cursor advance now that the gap is resolved. On
+    /// failure, increments the attempt count and, past
+    /// `MAX_STALLED_MESSAGE_RETRY_ATTEMPTS`, gives up (logging loudly) so a
+    /// truly unrecoverable message cannot stall the cursor forever.
+    fn finish_stalled_message_retry(
+        &mut self,
+        conversation_id: AIConversationId,
+        event: AgentRunEvent,
+        message: Option<ReceivedMessageInput>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let Some(stream) = self.streams.get_mut(&conversation_id) else {
+            return;
+        };
+        stream.stalled_retry_in_flight = false;
+        let Some(index) = stream
+            .stalled_messages
+            .iter()
+            .position(|stalled| stalled.event.sequence == event.sequence)
+        else {
+            // Already resolved (e.g. a fresh SSE delivery on reconnect beat the
+            // retry to it) or the conversation was reset in the meantime.
+            return;
+        };
+
+        if let Some(message) = message {
+            stream.stalled_messages.remove(index);
+            log::info!(
+                "Recovered stalled message via hydration retry: \
+                 conversation_id={conversation_id:?} sequence={}",
+                event.sequence
+            );
+            let self_run_id = self.self_run_id(conversation_id, ctx).unwrap_or_default();
+            let cursor = self
+                .streams
+                .get(&conversation_id)
+                .map(|s| s.event_cursor)
+                .unwrap_or(0);
+            self.handle_event_batch(
+                conversation_id,
+                &self_run_id,
+                cursor,
+                vec![event],
+                vec![message],
+                ctx,
+            );
+            return;
+        }
+
+        let stalled = &mut stream.stalled_messages[index];
+        stalled.attempts += 1;
+        if stalled.attempts >= MAX_STALLED_MESSAGE_RETRY_ATTEMPTS {
+            log::error!(
+                "Giving up on stalled message after {} hydration retries; it will not be \
+                 delivered and the cursor will skip past it: conversation_id={conversation_id:?} \
+                 sequence={}",
+                stalled.attempts,
+                event.sequence
+            );
+            stream.stalled_messages.remove(index);
+        }
     }
 
     /// Drains all buffered SSE events and feeds them through the
@@ -2591,6 +2797,7 @@ impl OrchestrationEventStreamer {
         let cursor;
         let mut events = Vec::new();
         let mut messages = Vec::new();
+        let mut newly_stalled = Vec::new();
         {
             let Some(stream) = self.streams.get_mut(&conversation_id) else {
                 return;
@@ -2603,6 +2810,10 @@ impl OrchestrationEventStreamer {
             while let Ok(Some(item)) = sse.event_receiver.try_next() {
                 // Deduplicate: discard events at or below the cursor.
                 if item.event.sequence > cursor {
+                    if item.hydration_failed {
+                        newly_stalled.push(item.event);
+                        continue;
+                    }
                     if let Some(msg) = item.fetched_message {
                         messages.push(msg);
                     }
@@ -2610,6 +2821,7 @@ impl OrchestrationEventStreamer {
                 }
             }
         }
+        self.enqueue_stalled_messages(conversation_id, newly_stalled);
 
         if events.is_empty() {
             return;
