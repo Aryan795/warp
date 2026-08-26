@@ -136,9 +136,7 @@ fn docker_sandbox_run_args(starter: &DockerSandboxShellStarter) -> Vec<std::ffi:
 /// which here is the plain pipe `docker exec -i` gives it, not a real
 /// terminal — confirmed by hand (`stty -a` on the inner pty) that `auto`
 /// leaves echo on because it can't detect otherwise. `never` sets it
-/// explicitly instead of relying on that detection. This does not by
-/// itself fix the escape-sequence noise some blocks show (see the PR
-/// description); that noise persists even with echo forced off.
+/// explicitly instead of relying on that detection.
 fn dev_container_exec_args(starter: &DevContainerShellStarter) -> Vec<std::ffi::OsString> {
     let mut args = vec![
         std::ffi::OsString::from("exec"),
