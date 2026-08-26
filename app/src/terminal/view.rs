@@ -753,7 +753,16 @@ fn raw_keypress_ctrl_r_handoff_payload(id: RawKeypressCtrlRHandoffId) -> Vec<u8>
 /// ever returns, so the flag that hides the input editor and forwards keystrokes must have a
 /// bail-out that does not depend on the wrapper's cooperation. See
 /// `TerminalView::on_raw_keypress_ctrl_r_handoff_timeout`.
-const RAW_KEYPRESS_CTRL_R_HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
+///
+/// Originally 5 seconds, which turned out to be far too short: a user who pauses to read the
+/// wrapper widget's filtered list before pressing Enter -- ordinary interactive behavior, not
+/// inactivity -- can easily exceed 5 seconds without pressing a key. When the bail-out fires
+/// mid-read, it force-clears the forwarding flag and restores focus to the (empty) input editor;
+/// the Enter the user then presses to select an entry no longer reaches the pty at all -- it
+/// submits the empty input editor buffer as a command instead, leaving a stray empty block
+/// behind. 30 seconds comfortably covers normal think time while still recovering in a
+/// reasonable window if the wrapper widget is genuinely absent or hung.
+const RAW_KEYPRESS_CTRL_R_HANDOFF_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// After the timeout bail-out fires, how long a new raw-keypress ctrl-r handoff is refused on
 /// this session. The timeout sends a best-effort Ctrl-C to the pty but cannot confirm the old

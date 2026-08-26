@@ -1373,7 +1373,7 @@ esac
     # flag's meaning invariant across keymaps, every keymap that lacks a *real* wrapper (because
     # ctrl-r isn't bound to a re-invokable widget there) still gets an empty-completion fallback
     # bound to Alt-], so pressing ctrl-r always produces a fast, deterministic outcome -- a real
-    # handoff or an immediate no-op -- rather than a silent 5-second wait for a key nothing is
+    # handoff or an immediate no-op -- rather than a silent multi-second wait for a key nothing is
     # listening for.
     #
     # Alt-] was verified empirically to be unbound in stock bash (emacs, vi-insert, vi-command),

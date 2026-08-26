@@ -10204,6 +10204,103 @@ fn raw_keypress_ctrl_r_handoff_moves_focus_off_input_so_typed_chars_reach_pty() 
     })
 }
 
+/// Regression/diagnostic test: unlike `raw_keypress_ctrl_r_handoff_moves_focus_off_input_so_typed_chars_reach_pty`
+/// (which calls `typed_characters_on_terminal` directly, bypassing the framework's own event
+/// dispatch), this drives a real `warpui::Event::TypedCharacters` through the actual
+/// `Presenter`/element-tree dispatch pipeline -- the same path a real keystroke takes in the GUI.
+/// It exists to answer, empirically, whether omitting the input editor from `TerminalView`'s
+/// rendered element tree (see `is_input_box_visible` / `TerminalView::render`) is sufficient by
+/// itself to stop a `TypedCharacters` event from being consumed by the input editor's own
+/// `RichTextElement`, or whether some other mechanism (e.g. a stale cached tree, or a
+/// focus-keyed dispatch shortcut) still routes it there.
+#[test]
+fn raw_keypress_ctrl_r_handoff_typed_characters_via_real_dispatch_reach_pty_not_input() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let _flag = FeatureFlag::RawKeypressCtrlRHandoff.override_enabled(true);
+        let (window_id, terminal) = add_window_with_id_and_terminal(&mut app, None);
+        let session_id = SessionId::from(0);
+
+        let pty_writes: Rc<RefCell<Vec<Vec<u8>>>> = Rc::new(RefCell::new(Vec::new()));
+        let writes = pty_writes.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_view(&terminal, move |_, event, _| {
+                if let Event::WriteBytesToPty { bytes } = event {
+                    writes.borrow_mut().push(bytes.to_vec());
+                }
+            });
+        });
+
+        terminal.update(&mut app, |view, ctx| {
+            setup_raw_keypress_ctrl_r_session(view, ctx, session_id, true);
+            view.focus_input_box(ctx);
+        });
+
+        terminal.update(&mut app, |view, ctx| {
+            assert!(view.maybe_trigger_raw_keypress_ctrl_r_handoff(ctx));
+        });
+        terminal.update(&mut app, |view, ctx| {
+            assert!(
+                !view.is_input_box_visible(&view.model.lock(), ctx),
+                "the input editor must be omitted from the render tree once the handoff starts"
+            );
+        });
+
+        let mut updated = EntityIdSet::default();
+        updated.insert(app.root_view_id(window_id).unwrap());
+        let invalidation = WindowInvalidation {
+            updated,
+            ..Default::default()
+        };
+        let presenter = Rc::new(RefCell::new(Presenter::new(window_id)));
+
+        let size_info = terminal.update(&mut app, |view, _ctx| *view.size_info);
+
+        // Drive a real render/layout/paint cycle through the presenter, exactly as the real GUI
+        // does after `ctx.notify()`, so the current (input-omitting) tree is what's actually
+        // stored for dispatch -- not relying on a stale tree from before the handoff started.
+        app.update(enclose!((presenter, invalidation) move |ctx| {
+            presenter.borrow_mut().invalidate(invalidation, ctx);
+            presenter.borrow_mut().build_scene(
+                vec2f(size_info.pane_width_px, size_info.pane_height_px),
+                1.,
+                None,
+                ctx,
+            );
+        }));
+
+        pty_writes.borrow_mut().clear();
+        app.update(enclose!((presenter) move |ctx| {
+            ctx.simulate_window_event(
+                warpui::Event::TypedCharacters {
+                    chars: "x".to_string(),
+                },
+                window_id,
+                presenter.clone(),
+            );
+        }));
+
+        assert_eq!(
+            *pty_writes.borrow(),
+            vec![b"x".to_vec()],
+            "a real TypedCharacters event dispatched through the presenter's element tree must \
+             reach the pty during the handoff, not be swallowed by some other mechanism"
+        );
+        terminal.read(&app, |view, ctx| {
+            assert_eq!(
+                view.input()
+                    .as_ref(ctx)
+                    .editor()
+                    .as_ref(ctx)
+                    .buffer_text(ctx),
+                "",
+                "the input editor's own buffer must not receive the typed character, since its \
+                 ChildView is omitted from the render tree during the handoff"
+            );
+        });
+    })
+}
+
 #[test]
 fn raw_keypress_ctrl_r_handoff_stale_timeout_is_ignored() {
     App::test((), |mut app| async move {
@@ -10264,6 +10361,80 @@ fn raw_keypress_ctrl_r_handoff_stale_timeout_is_ignored() {
             assert!(
                 view.raw_keypress_ctrl_r_handoff_cooldown_until.is_some(),
                 "the matching timeout must start a cooldown"
+            );
+        });
+    })
+}
+
+/// Regression test for the mechanism behind a real-world symptom: a wrapper widget (e.g. fzf)
+/// left open past the inactivity timeout, then accepted with Enter, left a stray empty block
+/// behind because that Enter no longer reached the pty at all -- it landed on the newly
+/// refocused, empty input editor and submitted it as a command. Once the (matching) timeout
+/// fires, forwarding must stop completely: subsequent typed characters must go to the input
+/// editor's buffer, not the pty, exactly as before the handoff ever started.
+#[test]
+fn raw_keypress_ctrl_r_handoff_timeout_restores_normal_typed_character_routing() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let _flag = FeatureFlag::RawKeypressCtrlRHandoff.override_enabled(true);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let session_id = SessionId::from(0);
+
+        let pty_writes: Rc<RefCell<Vec<Vec<u8>>>> = Rc::new(RefCell::new(Vec::new()));
+        let writes = pty_writes.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_view(&terminal, move |_, event, _| {
+                if let Event::WriteBytesToPty { bytes } = event {
+                    writes.borrow_mut().push(bytes.to_vec());
+                }
+            });
+        });
+
+        let current_id = terminal.update(&mut app, |view, ctx| {
+            setup_raw_keypress_ctrl_r_session(view, ctx, session_id, true);
+            view.focus_input_box(ctx);
+            assert!(view.maybe_trigger_raw_keypress_ctrl_r_handoff(ctx));
+            view.pending_raw_keypress_ctrl_r_handoff
+                .as_ref()
+                .expect("handoff should be pending")
+                .id
+        });
+
+        terminal.update(&mut app, |view, ctx| {
+            // Simulate the bail-out firing, e.g. because the user paused to read the wrapper
+            // widget's filtered list for longer than the inactivity timeout. This legitimately
+            // writes a best-effort Ctrl-C to the pty, so pty_writes is cleared afterward to
+            // isolate the *next* keystroke, which is what this test is actually about.
+            view.on_raw_keypress_ctrl_r_handoff_timeout(current_id, ctx);
+            assert!(
+                view.is_input_box_visible(&view.model.lock(), ctx),
+                "the input editor must be visible again once the bail-out has fired"
+            );
+        });
+
+        pty_writes.borrow_mut().clear();
+        terminal.update(&mut app, |view, ctx| {
+            // A stray keystroke meant for the (now torn-down) wrapper widget -- e.g. the Enter
+            // the user presses believing they're still selecting a fzf entry -- must land in
+            // the input editor's buffer, not be forwarded to the pty as if the handoff were
+            // still active.
+            view.typed_characters_on_terminal("x", ctx);
+        });
+
+        assert!(
+            pty_writes.borrow().is_empty(),
+            "a keystroke after the bail-out must not be forwarded to the pty, got {:?}",
+            pty_writes.borrow()
+        );
+        terminal.read(&app, |view, ctx| {
+            assert_eq!(
+                view.input()
+                    .as_ref(ctx)
+                    .editor()
+                    .as_ref(ctx)
+                    .buffer_text(ctx),
+                "x",
+                "a keystroke after the bail-out must land in the input editor's buffer"
             );
         });
     })
