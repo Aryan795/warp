@@ -155,9 +155,9 @@ fn build_label_value_columns_keeps_every_row_aligned_across_sections() {
                 .position(|line| *line == "INFERENCE USAGE")
                 .expect("INFERENCE USAGE header should be present");
             assert_eq!(
-                value_lines[model_usage_header_index], "",
-                "the INFERENCE USAGE header's paired value-column row should be an empty \
-                 placeholder line, not a real value shifted up from the row below"
+                value_lines[model_usage_header_index], "150 tokens  /  $0.18",
+                "the INFERENCE USAGE header's value should be the turn's total tokens \
+                 and cost, summed across all models"
             );
 
             let context_window_index = label_lines

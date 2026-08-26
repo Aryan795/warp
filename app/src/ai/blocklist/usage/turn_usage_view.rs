@@ -364,6 +364,39 @@ impl TurnUsageView {
             .collect()
     }
 
+    /// The "INFERENCE USAGE" section header, with the turn's total tokens
+    /// (and cost, when known) in the value column instead of an empty
+    /// placeholder, so the total lines up with the other numeric amounts in
+    /// the value column. The cost is omitted if no model reports one (e.g.
+    /// the synthetic "auto" placeholder row used when no model has been
+    /// used yet), matching how per-model rows omit an unknown cost rather
+    /// than showing `$0.00`.
+    fn inference_usage_header_row(&self, appearance: &Appearance) -> LabelValueRow {
+        let header_font_size = appearance.overline_font_size() + 2.;
+        let total_tokens: u64 = self.usage_info.models.iter().map(|m| m.tokens()).sum();
+        let total_cost_in_cents = self
+            .usage_info
+            .models
+            .iter()
+            .any(|m| m.cost_in_cents.is_some())
+            .then(|| {
+                self.usage_info
+                    .models
+                    .iter()
+                    .filter_map(|m| m.cost_in_cents)
+                    .sum()
+            });
+
+        (
+            Self::render_section_header("INFERENCE USAGE", appearance),
+            render_value_text(
+                format_tokens_with_optional_cost(total_tokens, total_cost_in_cents),
+                header_font_size,
+                appearance,
+            ),
+        )
+    }
+
     /// The "Context window usage" row, shown beneath the per-model rows and
     /// (when present) the "PLATFORM USAGE" section.
     fn context_window_usage_row(&self, appearance: &Appearance) -> LabelValueRow {
@@ -577,11 +610,9 @@ impl TurnUsageView {
                 }
             };
 
-        push_row(
-            Self::render_section_header("INFERENCE USAGE", appearance),
-            Self::render_section_header("", appearance),
-            8.,
-        );
+        let (inference_usage_label, inference_usage_value) =
+            self.inference_usage_header_row(appearance);
+        push_row(inference_usage_label, inference_usage_value, 8.);
         push_section_rows(self.model_usage_rows(appearance), &mut push_row);
 
         if let Some((label, value)) = self.platform_usage_row(appearance) {
