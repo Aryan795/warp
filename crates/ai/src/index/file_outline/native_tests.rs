@@ -1,8 +1,8 @@
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
-use std::time::Duration;
 
+use instant::Instant;
 use tempfile::TempDir;
 
 use super::*;
@@ -196,12 +196,9 @@ fmt.Println("Helper function")
     assert_eq!(symbols[4].type_prefix, Some("func".to_owned()));
 }
 
-/// Dense, deeply nested, syntactically-invalid SQL. The unmatched parens force tree-sitter's
-/// error-recovery machinery (`ts_parser__recover`) to repeatedly fork and merge stack versions.
-/// At this size (~1.8MB, under `repo_metadata::entry::MAX_FILE_SIZE`'s 3MB cap so the size guard
-/// isn't what's being tested), local benchmarking of an unbounded parse of this exact input took
-/// several seconds -- comfortably past `PARSE_BUDGET` -- confirming this input reliably exercises
-/// the budget rather than racing it.
+/// Dense, deeply nested, syntactically-invalid SQL: unmatched parens force tree-sitter's
+/// error-recovery machinery to repeatedly fork and merge stack versions, guaranteeing its
+/// progress callback (checked roughly every 100 parse actions) fires at least once.
 fn build_pathological_sql(repeat: usize) -> String {
     let mut source = String::from("SELECT * FROM t WHERE ");
     for _ in 0..repeat {
@@ -213,19 +210,19 @@ fn build_pathological_sql(repeat: usize) -> String {
 #[test]
 fn test_parse_file_outline_gives_up_once_parse_budget_is_exceeded() {
     let temp_dir = TempDir::new().unwrap();
-    let content = build_pathological_sql(80_000);
+    let content = build_pathological_sql(2_000);
     let file_path = create_test_file(&temp_dir, "pathological.sql", &content);
 
-    let start = Instant::now();
-    let result = parse_file_outline(&file_path);
-    let elapsed = start.elapsed();
+    // An already-elapsed deadline deterministically trips on the first progress-callback check,
+    // regardless of machine speed, instead of racing a real multi-second parse against a fixed
+    // wall-clock bound.
+    let result = parse_file_outline_with_deadline(&file_path, Instant::now());
 
-    assert!(
-        result.is_err(),
-        "a parse that runs past its budget should give up instead of running to completion"
-    );
-    assert!(
-        elapsed < Duration::from_secs(5),
-        "the parse budget should bound wall-clock time regardless of input size, took {elapsed:?}"
-    );
+    match result {
+        Err(err) => assert!(
+            err.to_string().contains("parse budget"),
+            "expected the budget-specific error, got: {err}"
+        ),
+        Ok(_) => panic!("a parse past its deadline should give up instead of completing"),
+    }
 }

@@ -15,6 +15,7 @@ use repo_metadata::RepositoryUpdate;
 use repo_metadata::entry::{BudgetExceededBehavior, IgnoredPathStrategy, is_file_parsable};
 use streaming_iterator::StreamingIterator;
 use syntax_tree::TextSlice;
+use warp_core::safe_warn;
 use warp_errors::report_error;
 use warp_util::standardized_path::StandardizedPath;
 
@@ -236,21 +237,21 @@ async fn parse_symbols_for_files(files: Vec<FileMetadata>) -> Option<HashMap<Fil
 }
 
 /// Wall-clock budget for a single tree-sitter parse of one file's outline. Tree-sitter's
-/// error-recovery pass (`ts_parser__recover`) can allocate memory super-linearly on dense-error
-/// input regardless of file size, so a single pathological file well under
-/// `repo_metadata::entry::MAX_FILE_SIZE` can still drive a multi-GB memory spike (Sentry
-/// 7259255054) when this function is fanned out over every repo file via `par_iter`. Enforced via
-/// a progress callback, which tree-sitter polls roughly every 100 parse actions, so a runaway
-/// parse only overshoots the deadline by the time it takes to run one more such batch, not by an
-/// amount that scales with input size. This parser is always given a valid language and never
-/// given a deprecated cancellation flag, so the callback below is the only way
-/// `parse_with_options` can return `None` here -- a `None` result unambiguously means the budget
-/// was exceeded. 750ms matches the budget already validated against this same failure mode on the
-/// editor's syntax-highlighting parse path (`syntax_tree::PARSE_BUDGET`).
+/// error-recovery pass can allocate memory super-linearly on dense-error input regardless of
+/// file size; enforced through `parse_with_options`'s progress callback. 750ms matches the
+/// budget proposed for this same failure mode on the editor's syntax-highlighting parse path in
+/// #15150.
 const PARSE_BUDGET: Duration = Duration::from_millis(750);
 
 /// Given the path of a file, try to construct its outline.
 fn parse_file_outline(path: &Path) -> anyhow::Result<FileOutline> {
+    parse_file_outline_with_deadline(path, Instant::now() + PARSE_BUDGET)
+}
+
+/// Core of [`parse_file_outline`], with the parse deadline taken as a parameter so tests can pass
+/// an already-elapsed deadline to deterministically exercise the budget-exceeded path without
+/// waiting on wall-clock time.
+fn parse_file_outline_with_deadline(path: &Path, deadline: Instant) -> anyhow::Result<FileOutline> {
     if !is_file_parsable(path)? {
         return Err(anyhow!("File exceeds max file size limit for parsing"));
     }
@@ -263,10 +264,15 @@ fn parse_file_outline(path: &Path) -> anyhow::Result<FileOutline> {
     let mut parser = Parser::new();
     parser.set_language(&language.grammar)?;
 
-    let deadline = Instant::now() + PARSE_BUDGET;
+    // Set only when the deadline itself trips the callback below, so a `None` parse result can be
+    // told apart from any other reason `parse_with_options` might fail (e.g. a scanner error).
+    let mut deadline_exceeded = false;
     // The progress callback must return `true` to cancel parsing -- tree-sitter's polarity here
     // is easy to get backwards (see https://github.com/tree-sitter/tree-sitter/discussions/4312).
-    let mut progress_callback = |_state: &ParseState| Instant::now() >= deadline;
+    let mut progress_callback = |_state: &ParseState| {
+        deadline_exceeded = Instant::now() >= deadline;
+        deadline_exceeded
+    };
     let options = ParseOptions::new().progress_callback(&mut progress_callback);
 
     let bytes = content.as_bytes();
@@ -278,29 +284,42 @@ fn parse_file_outline(path: &Path) -> anyhow::Result<FileOutline> {
             Default::default()
         }
     };
-    let Some(tree) = parser.parse_with_options(&mut read_callback, None, Some(options)) else {
-        log::warn!(
-            "[ai] tree-sitter parse of {path:?} exceeded the {PARSE_BUDGET:?} parse budget; treating as unparseable"
-        );
-        return Err(anyhow!(
-            "Couldn't parse AST within the {PARSE_BUDGET:?} parse budget"
-        ));
+    let tree = parser.parse_with_options(&mut read_callback, None, Some(options));
+
+    let result = match &tree {
+        Some(tree) => {
+            let symbols = language.symbols_query.as_ref().map(|query| {
+                get_symbols(query, tree, &content)
+                    .into_iter()
+                    .map(|(fn_name, type_prefix, comments, line_number)| Symbol {
+                        name: fn_name.to_owned(),
+                        type_prefix: type_prefix.map(String::from),
+                        comment: if comments.is_empty() {
+                            None
+                        } else {
+                            Some(comments.into_iter().map(String::from).collect())
+                        },
+                        line_number,
+                    })
+                    .collect_vec()
+            });
+            Ok(FileOutline { symbols })
+        }
+        None if deadline_exceeded => {
+            safe_warn!(
+                safe: (
+                    "[ai] tree-sitter parse exceeded the {PARSE_BUDGET:?} parse budget; treating as unparseable"
+                ),
+                full: (
+                    "[ai] tree-sitter parse of {path:?} exceeded the {PARSE_BUDGET:?} parse budget; treating as unparseable"
+                )
+            );
+            Err(anyhow!(
+                "Couldn't parse AST within the {PARSE_BUDGET:?} parse budget"
+            ))
+        }
+        None => Err(anyhow!("Couldn't parse AST")),
     };
-    let symbols = language.symbols_query.as_ref().map(|query| {
-        get_symbols(query, &tree, &content)
-            .into_iter()
-            .map(|(fn_name, type_prefix, comments, line_number)| Symbol {
-                name: fn_name.to_owned(),
-                type_prefix: type_prefix.map(String::from),
-                comment: if comments.is_empty() {
-                    None
-                } else {
-                    Some(comments.into_iter().map(String::from).collect())
-                },
-                line_number,
-            })
-            .collect_vec()
-    });
 
     drop(tree);
     drop(parser);
@@ -321,7 +340,7 @@ fn parse_file_outline(path: &Path) -> anyhow::Result<FileOutline> {
         nix::libc::malloc_trim(0);
     }
 
-    Ok(FileOutline { symbols })
+    result
 }
 
 /// Given the content of a file, return all the symbols of interest.
