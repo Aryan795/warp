@@ -4334,3 +4334,52 @@ fn legacy_cache_migration_yields_a_usable_teamless_catalog() {
         });
     });
 }
+
+#[test]
+fn factories_launch_cta_url_accepts_a_real_booking_destination() {
+    assert!(is_valid_non_fallback_cta_url(
+        "https://cal.com/warp/factories"
+    ));
+}
+
+#[test]
+fn factories_launch_cta_url_rejects_contact_sales_regardless_of_query_or_fragment() {
+    for url in [
+        links::FACTORIES_CONTACT_SALES_URL,
+        "https://www.warp.dev/contact-sales/",
+        "https://www.warp.dev/contact-sales?campaign=x",
+        "https://www.warp.dev/contact-sales#pricing",
+        "https://www.warp.dev/Contact-Sales",
+    ] {
+        assert!(
+            !is_valid_non_fallback_cta_url(url),
+            "{url} should be rejected as the reserved Contact Sales destination"
+        );
+    }
+}
+
+#[test]
+fn factories_launch_cta_url_rejects_request_access_regardless_of_query_or_fragment() {
+    for url in [
+        "https://www.warp.dev/request-access",
+        "https://www.warp.dev/request-access/",
+        "https://www.warp.dev/request-access?campaign=x",
+        "https://www.warp.dev/request-access#top",
+        "https://www.warp.dev/Request-Access",
+    ] {
+        assert!(
+            !is_valid_non_fallback_cta_url(url),
+            "{url} should be rejected as the reserved /request-access waitlist destination"
+        );
+    }
+}
+
+#[test]
+fn factories_launch_cta_url_rejects_malformed_or_non_https_urls() {
+    for url in ["", "not a url", "http://cal.com/warp", "ftp://cal.com/warp"] {
+        assert!(
+            !is_valid_non_fallback_cta_url(url),
+            "{url:?} should be rejected"
+        );
+    }
+}
