@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use cynic::{MutationBuilder, QueryBuilder};
 #[cfg(test)]
@@ -53,40 +53,6 @@ pub trait FactoryClient: 'static + Send + Sync {
     async fn delete_runner(&self, uid: String) -> Result<String>;
 }
 
-/// True when a GraphQL error indicates the server doesn't recognize the
-/// `getRunner` query.
-#[cfg_attr(target_family = "wasm", allow(dead_code))]
-fn is_missing_get_runner_query_error(err: &anyhow::Error) -> bool {
-    let message = err.to_string();
-    message.contains("getRunner") && message.contains("Cannot query field")
-}
-
-/// Resolves a runner via [`FactoryClient::get_runner`], with a fallback to a
-/// uid match against [`FactoryClient::get_runners`].
-#[cfg_attr(target_family = "wasm", allow(dead_code))]
-pub async fn get_runner_with_fallback(
-    factory: &dyn FactoryClient,
-    selector: RunnerSelector,
-) -> Result<Runner> {
-    let uid = selector.uid.clone();
-    match factory.get_runner(selector).await {
-        Ok(runner) => Ok(runner),
-        Err(err) if is_missing_get_runner_query_error(&err) => {
-            let Some(uid) = uid else {
-                return Err(err);
-            };
-            let uid = uid.inner().to_string();
-            factory
-                .get_runners(None)
-                .await?
-                .into_iter()
-                .find(|runner| runner.uid.inner() == uid)
-                .ok_or_else(|| anyhow!("runner {uid} not found"))
-        }
-        Err(err) => Err(err),
-    }
-}
-
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
 impl FactoryClient for ServerApi {
@@ -108,11 +74,16 @@ impl FactoryClient for ServerApi {
             request_context: get_request_context(),
             selector,
         });
-        let response = self.send_graphql_request(operation, None).await?;
+        let response = self
+            .send_graphql_request(operation, None)
+            .await
+            .context("could not retrieve runner")?;
         match response.get_runner {
             GetRunnerResult::GetRunnerOutput(output) => Ok(output.runner),
             GetRunnerResult::UserFacingError(e) => Err(anyhow!(get_user_facing_error_message(e))),
-            GetRunnerResult::Unknown => Err(anyhow!("failed to resolve runner")),
+            GetRunnerResult::Unknown => Err(anyhow!(
+                "could not retrieve runner: unexpected response from the server"
+            )),
         }
     }
 
