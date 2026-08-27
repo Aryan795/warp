@@ -262,6 +262,17 @@ struct ConversationStreamState {
     /// `stalled_messages` entry is in flight, so the periodic drain timer
     /// doesn't pile up concurrent retries for the same event.
     stalled_retry_in_flight: bool,
+    /// Highest sequence the owner drain has actually delivered, or dropped
+    /// at give-up. Never persisted or sent to the server as `since` — only
+    /// `event_cursor` is, and it stays capped behind any outstanding stall
+    /// so the server keeps replaying from a safe point. This field additionally
+    /// tracks what the local drain has already handled, so a reconnect's
+    /// replay of that same range (sent because `event_cursor` is still
+    /// pinned behind a stall) isn't processed a second time. It only ever
+    /// advances for sequences that were delivered or given up on, never for
+    /// one still sitting in `stalled_messages`, whose replay must keep
+    /// reaching that queue.
+    handled_sequence: i64,
 }
 
 /// Per-orchestrator SSE stream state. Parallels [`ConversationStreamState`]
@@ -502,6 +513,32 @@ impl OrchestrationEventStreamer {
         capped
     }
 
+    /// Monotonically advances `ConversationStreamState::handled_sequence`.
+    /// Callers must only pass a sequence that was actually delivered or, in
+    /// [`Self::finish_stalled_message_retry`]'s give-up branch, abandoned —
+    /// never one still sitting in `stalled_messages`, since that queue's
+    /// entries rely on staying reachable through [`Self::owner_drain_floor`]'s
+    /// stalled-sequence bypass.
+    fn advance_handled_sequence(&mut self, conversation_id: AIConversationId, sequence: i64) {
+        let stream = self.streams.entry(conversation_id).or_default();
+        stream.handled_sequence = stream.handled_sequence.max(sequence);
+    }
+
+    /// Local dedup floor for the owner drain loops: `event_cursor` (the safe,
+    /// persisted resume point handed to the server as `since`, capped behind
+    /// any outstanding stall) joined with `handled_sequence` (what the drain
+    /// has additionally handled locally beyond that point). A reconnect asks
+    /// the server for events since `event_cursor`, which can replay a range
+    /// the drain already finished with while a stall keeps the cursor pinned
+    /// behind it; comparing against this floor instead discards that replay
+    /// instead of reprocessing it.
+    fn owner_drain_floor(&self, conversation_id: AIConversationId) -> i64 {
+        self.streams
+            .get(&conversation_id)
+            .map(|stream| stream.event_cursor.max(stream.handled_sequence))
+            .unwrap_or(0)
+    }
+
     fn persist_event_cursor(
         &mut self,
         conversation_id: AIConversationId,
@@ -734,6 +771,10 @@ impl OrchestrationEventStreamer {
                 }
                 // Ensure a child-only batch still advances the Primary cursor.
                 self.persist_cursor_local_and_server(cursor_conversation_id, max_seq, ctx);
+                // `events` here excludes anything still in `stalled_messages`
+                // (that split happens before `drain_family_events` is called),
+                // so every sequence folded into `max_seq` was actually handled.
+                self.advance_handled_sequence(cursor_conversation_id, max_seq);
             }
             FamilyDrainMode::Observer => {
                 // Observer drops parent-self events and persists the cursor
@@ -908,6 +949,7 @@ impl OrchestrationEventStreamer {
         };
 
         let cursor;
+        let handled_floor = self.owner_drain_floor(conversation_id);
         let mut events = Vec::new();
         let mut messages = Vec::new();
         let mut newly_stalled = Vec::new();
@@ -920,7 +962,11 @@ impl OrchestrationEventStreamer {
                 return;
             };
             while let Ok(Some(item)) = sse.event_receiver.try_next() {
-                if item.event.sequence > cursor {
+                let is_outstanding_stall = stream
+                    .stalled_messages
+                    .iter()
+                    .any(|stalled| stalled.event.sequence == item.event.sequence);
+                if item.event.sequence > handled_floor || is_outstanding_stall {
                     if item.hydration_failed {
                         newly_stalled.push(item.event);
                         continue;
@@ -2820,6 +2866,7 @@ impl OrchestrationEventStreamer {
                 event.sequence
             );
             self.set_owner_event_cursor(conversation_id, event.sequence);
+            self.advance_handled_sequence(conversation_id, event.sequence);
         }
     }
 
@@ -2831,6 +2878,7 @@ impl OrchestrationEventStreamer {
         ctx: &mut ModelContext<Self>,
     ) {
         let cursor;
+        let handled_floor = self.owner_drain_floor(conversation_id);
         let mut events = Vec::new();
         let mut messages = Vec::new();
         let mut newly_stalled = Vec::new();
@@ -2844,8 +2892,14 @@ impl OrchestrationEventStreamer {
             };
 
             while let Ok(Some(item)) = sse.event_receiver.try_next() {
-                // Deduplicate: discard events at or below the cursor.
-                if item.event.sequence > cursor {
+                // Deduplicate against what the drain has handled, but always
+                // let a still-outstanding stall back through so its replay
+                // keeps reaching `enqueue_stalled_messages`.
+                let is_outstanding_stall = stream
+                    .stalled_messages
+                    .iter()
+                    .any(|stalled| stalled.event.sequence == item.event.sequence);
+                if item.event.sequence > handled_floor || is_outstanding_stall {
                     if item.hydration_failed {
                         newly_stalled.push(item.event);
                         continue;
@@ -2888,6 +2942,9 @@ impl OrchestrationEventStreamer {
         // Advance the cursor before filtering so dropped killed-run events
         // are not replayed later.
         self.persist_event_cursor(conversation_id, max_seq, ctx);
+        // `events` is never a still-outstanding stall (those are split off
+        // before this is called), so every sequence in it was handled here.
+        self.advance_handled_sequence(conversation_id, max_seq);
 
         if !self.killed_run_ids.is_empty() {
             let dropped_message_ids: HashSet<String> = events
