@@ -983,22 +983,15 @@ impl OrchestrationEventStreamer {
                             newly_stalled.push(item.event);
                             continue;
                         }
-                        // A fresh delivery can resolve a still-outstanding
-                        // stall (e.g. a reconnect replay whose hydration
-                        // succeeds this time); drop its retry-queue entry so
-                        // it isn't also delivered again by
-                        // `retry_stalled_message`.
-                        Hydration::Hydrated(message) => {
-                            if is_outstanding_stall {
-                                resolved_stalls.push(item.event.sequence);
-                            }
-                            messages.push(message);
-                        }
-                        Hydration::NotRequired => {
-                            if is_outstanding_stall {
-                                resolved_stalls.push(item.event.sequence);
-                            }
-                        }
+                        Hydration::Hydrated(message) => messages.push(message),
+                        Hydration::NotRequired => {}
+                    }
+                    // A fresh delivery can resolve a still-outstanding stall
+                    // (e.g. a reconnect replay whose hydration succeeds this
+                    // time); drop its retry-queue entry so it isn't also
+                    // delivered again by `retry_stalled_message`.
+                    if is_outstanding_stall {
+                        resolved_stalls.push(item.event.sequence);
                     }
                     events.push(item.event);
                 }
@@ -2937,22 +2930,15 @@ impl OrchestrationEventStreamer {
                             newly_stalled.push(item.event);
                             continue;
                         }
-                        // A fresh delivery can resolve a still-outstanding
-                        // stall (e.g. a reconnect replay whose hydration
-                        // succeeds this time); drop its retry-queue entry so
-                        // it isn't also delivered again by
-                        // `retry_stalled_message`.
-                        Hydration::Hydrated(message) => {
-                            if is_outstanding_stall {
-                                resolved_stalls.push(item.event.sequence);
-                            }
-                            messages.push(message);
-                        }
-                        Hydration::NotRequired => {
-                            if is_outstanding_stall {
-                                resolved_stalls.push(item.event.sequence);
-                            }
-                        }
+                        Hydration::Hydrated(message) => messages.push(message),
+                        Hydration::NotRequired => {}
+                    }
+                    // A fresh delivery can resolve a still-outstanding stall
+                    // (e.g. a reconnect replay whose hydration succeeds this
+                    // time); drop its retry-queue entry so it isn't also
+                    // delivered again by `retry_stalled_message`.
+                    if is_outstanding_stall {
+                        resolved_stalls.push(item.event.sequence);
                     }
                     events.push(item.event);
                 }
