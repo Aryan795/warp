@@ -63,6 +63,8 @@ pub struct FeatureIntro {
     /// Optional metadata label rendered above the title (e.g. "NEW").
     pub badge: Option<&'static str>,
     pub title: &'static str,
+    /// `\n` breaks onto a new line without a full paragraph-sized gap; see
+    /// [`FeatureIntroModal::render_description`].
     pub description: &'static str,
     /// Optional icon rendered to the left of the description.
     pub description_icon: Option<Icon>,
@@ -108,7 +110,7 @@ pub const FEATURE_INTROS: &[FeatureIntro] = &[
         hero_image_path: "async/png/onboarding/factories_launch_intro_banner.png",
         badge: Some("NEW"),
         title: "Build your software factory on Warp",
-        description: "Build cloud software factories around your team's existing workflow. Early Access includes hands-on implementation support and up to $10K in Factory usage.",
+        description: "Build cloud software factories around your team's existing workflow.\nEarly Access includes hands-on implementation support and up to $10K in Factory usage.",
         description_icon: None,
         cta_label: "Get Early Access",
         cta_target: Some(FeatureIntroCtaTarget::FactoriesLaunchModalBooking),
@@ -285,10 +287,20 @@ impl FeatureIntroModal {
             .finish()
     }
 
+    /// Splits `intro.description` on `\n`, rendering each line as its own
+    /// `Text` element in a tightly-spaced column. This gives explicit control
+    /// over where a multi-line description breaks, without the larger
+    /// vertical gap of a full paragraph break.
     fn render_description(intro: &FeatureIntro, appearance: &Appearance) -> Box<dyn Element> {
-        let description = Text::new(intro.description, appearance.ui_font_family(), 14.)
-            .with_color(modal_text_sub(appearance))
-            .finish();
+        let mut lines = Flex::column().with_spacing(4.);
+        for line in intro.description.split('\n') {
+            lines.add_child(
+                Text::new(line, appearance.ui_font_family(), 14.)
+                    .with_color(modal_text_sub(appearance))
+                    .finish(),
+            );
+        }
+        let description = lines.finish();
 
         if let Some(icon) = intro.description_icon {
             Flex::row()
