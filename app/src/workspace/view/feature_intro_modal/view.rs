@@ -151,11 +151,14 @@ pub fn feature_intro_by_id(id: FeatureIntroId) -> Option<&'static FeatureIntro> 
     FEATURE_INTROS.iter().find(|intro| intro.id == id)
 }
 
-/// Appends the signed-in user's `email` to `cta_url` as an `id` query
+/// Sets the signed-in user's `email` on `cta_url` as its `id` query
 /// parameter, Chili Piper's documented smart parameter for identifying and
-/// prefilling a guest on a Round-Robin scheduling link. Leaves `cta_url`
-/// unchanged when `email` is `None`, empty (an anonymous user), or when
-/// `cta_url` doesn't parse as an absolute URL.
+/// prefilling a guest on a Round-Robin scheduling link, replacing rather
+/// than duplicating an `id` pair the configured URL already carries so
+/// there's exactly one and its value is unambiguous. Every other query
+/// pair is preserved. Leaves `cta_url` unchanged when `email` is `None`,
+/// empty (an anonymous user), or when `cta_url` doesn't parse as an
+/// absolute URL.
 pub fn with_email_id_prefill(cta_url: &str, email: Option<&str>) -> String {
     let Some(email) = email.filter(|email| !email.is_empty()) else {
         return cta_url.to_string();
@@ -163,7 +166,22 @@ pub fn with_email_id_prefill(cta_url: &str, email: Option<&str>) -> String {
     let Ok(mut parsed) = url::Url::parse(cta_url) else {
         return cta_url.to_string();
     };
-    parsed.query_pairs_mut().append_pair("id", email);
+
+    let other_pairs: Vec<(String, String)> = parsed
+        .query_pairs()
+        .filter(|(key, _)| key != "id")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+
+    {
+        let mut query = parsed.query_pairs_mut();
+        query.clear();
+        for (key, value) in &other_pairs {
+            query.append_pair(key, value);
+        }
+        query.append_pair("id", email);
+    }
+
     parsed.to_string()
 }
 
