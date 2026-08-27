@@ -79,6 +79,9 @@ impl Drop for SoleInstance {
     /// This runs only where the claim is dropped explicitly. A process exiting normally never gets
     /// here, because the claim lives in a `static`, and the OS reclaims both objects in an order
     /// this code does not control.
+    ///
+    /// Waiting is blocking, so it must not run on the listener's own single-threaded executor: that
+    /// worker would be parked here instead of polling the tasks it just aborted.
     fn drop(&mut self) {
         if let Some(server) = self.server.take() {
             warpui::r#async::block_on(server.shutdown());
