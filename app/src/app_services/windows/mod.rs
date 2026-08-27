@@ -37,7 +37,7 @@ pub fn pass_startup_args_to_existing_instance(
     if args.finish_update {
         return Err(StartupArgsForwardingError::IgnoredAfterAutoUpdate);
     }
-    if SingleInstanceManager::is_sole_running_instance()? {
+    if !SingleInstanceManager::has_existing_instance()? {
         return Err(StartupArgsForwardingError::NoExistingInstance);
     }
 
