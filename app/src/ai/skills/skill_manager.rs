@@ -14,11 +14,11 @@ use warp_util::host_id::HostId;
 use warp_util::local_or_remote_path::LocalOrRemotePath;
 use warpui::{AppContext, Entity, ModelContext, ModelHandle, SingletonEntity};
 
-use super::bundled::{BundledSkill, BundledSkills};
+use super::bundled::{BundledSkill, BundledSkills, is_user_interactive_only_bundled_skill};
 #[cfg(test)]
 use super::bundled::{
-    BundledSkillActivation, activation_for_bundled_skill, build_bundled_skill_context,
-    read_bundled_skills,
+    BundledSkillActivation, USER_INTERACTIVE_ONLY_BUNDLED_SKILL_IDS, activation_for_bundled_skill,
+    build_bundled_skill_context, read_bundled_skills,
 };
 use super::{ActiveSkillLookupError, SkillDescriptor, SkillManagerEvent, SkillPathQuery};
 use crate::ai::skills::skill_utils::SkillDeduplicator;
@@ -196,7 +196,14 @@ impl SkillManager {
         // by their remote paths so invocation resolves back to the same host's
         // catalog, while direct `BundledSkillId` lookups use `path_origin`.
         if FeatureFlag::BundledSkills.is_enabled() {
-            skills.extend(self.bundled_skills.active_descriptors(path_origin, ctx));
+            skills.extend(
+                self.bundled_skills
+                    .active_descriptors(path_origin, ctx)
+                    .into_iter()
+                    .filter(|skill| {
+                        include_bundled_skill_in_listing(self.is_cloud_environment, skill)
+                    }),
+            );
         }
 
         skills
@@ -676,6 +683,15 @@ impl Entity for SkillManager {
 }
 
 impl SingletonEntity for SkillManager {}
+
+fn include_bundled_skill_in_listing(is_cloud_environment: bool, skill: &SkillDescriptor) -> bool {
+    match &skill.reference {
+        SkillReference::BundledSkillId(id) if is_cloud_environment => {
+            !is_user_interactive_only_bundled_skill(id)
+        }
+        SkillReference::BundledSkillId(_) | SkillReference::Path(_) => true,
+    }
+}
 
 fn path_matches_reference_location(path: &LocalOrRemotePath, reference: &SkillReference) -> bool {
     match (path, reference) {
