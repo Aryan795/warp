@@ -807,7 +807,7 @@ async fn sse_forwarding_consumer_skips_message_hydration_when_disabled() {
 
     let item = rx.next().await.expect("expected forwarded event");
     assert_eq!(item.event.ref_id.as_deref(), Some("message-123"));
-    assert!(item.fetched_message.is_none());
+    assert!(matches!(item.hydration, Hydration::NotRequired));
 }
 #[test]
 fn finish_restore_fetch_uses_server_cursor_when_sqlite_is_absent() {
@@ -2663,14 +2663,12 @@ fn hydration_failure_stalls_event_without_skipping_cursor_past_it() {
         let (tx, rx) = mpsc::unbounded::<SseStreamItem>();
         tx.unbounded_send(SseStreamItem {
             event: stalled_event.clone(),
-            fetched_message: None,
-            hydration_failed: true,
+            hydration: Hydration::Failed,
         })
         .unwrap();
         tx.unbounded_send(SseStreamItem {
             event: resolved_event,
-            fetched_message: None,
-            hydration_failed: false,
+            hydration: Hydration::NotRequired,
         })
         .unwrap();
 
@@ -2804,14 +2802,12 @@ fn reconnect_replay_does_not_redeliver_an_already_handled_message_while_one_is_s
         let (tx, rx) = mpsc::unbounded::<SseStreamItem>();
         tx.unbounded_send(SseStreamItem {
             event: stalled_event.clone(),
-            fetched_message: None,
-            hydration_failed: true,
+            hydration: Hydration::Failed,
         })
         .unwrap();
         tx.unbounded_send(SseStreamItem {
             event: handled_event.clone(),
-            fetched_message: Some(handled_message.clone()),
-            hydration_failed: false,
+            hydration: Hydration::Hydrated(handled_message.clone()),
         })
         .unwrap();
         streamer.update(&mut app, |me, ctx| {
@@ -2853,14 +2849,12 @@ fn reconnect_replay_does_not_redeliver_an_already_handled_message_while_one_is_s
         let (tx2, rx2) = mpsc::unbounded::<SseStreamItem>();
         tx2.unbounded_send(SseStreamItem {
             event: stalled_event.clone(),
-            fetched_message: None,
-            hydration_failed: true,
+            hydration: Hydration::Failed,
         })
         .unwrap();
         tx2.unbounded_send(SseStreamItem {
             event: handled_event,
-            fetched_message: Some(handled_message),
-            hydration_failed: false,
+            hydration: Hydration::Hydrated(handled_message),
         })
         .unwrap();
         streamer.update(&mut app, |me, ctx| {
@@ -2972,8 +2966,7 @@ fn replayed_stall_resolved_by_fresh_hydration_is_delivered_exactly_once() {
         let (tx, rx) = mpsc::unbounded::<SseStreamItem>();
         tx.unbounded_send(SseStreamItem {
             event: stalled_event.clone(),
-            fetched_message: None,
-            hydration_failed: true,
+            hydration: Hydration::Failed,
         })
         .unwrap();
         streamer.update(&mut app, |me, ctx| {
@@ -3011,8 +3004,7 @@ fn replayed_stall_resolved_by_fresh_hydration_is_delivered_exactly_once() {
         let (tx2, rx2) = mpsc::unbounded::<SseStreamItem>();
         tx2.unbounded_send(SseStreamItem {
             event: stalled_event,
-            fetched_message: Some(recovered_message),
-            hydration_failed: false,
+            hydration: Hydration::Hydrated(recovered_message),
         })
         .unwrap();
         streamer.update(&mut app, |me, ctx| {

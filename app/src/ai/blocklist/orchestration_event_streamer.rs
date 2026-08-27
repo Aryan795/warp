@@ -63,14 +63,24 @@ const EVENT_CHILD_AGENT_STARTED: &str = "child_agent_started";
 /// the session UUID is carried in `ref_id`.
 const EVENT_RUN_SESSION_LINKED: &str = "run_session_linked";
 
+/// Outcome of attempting to hydrate a `new_message` event's body. Replaces a
+/// separate `Option<ReceivedMessageInput>` plus `bool` pair, which could
+/// represent a meaningless "hydrated but also failed" combination.
+enum Hydration {
+    /// Not a `new_message` event addressed to this connection's own
+    /// `self_run_id` (or hydration is disabled for this connection), so no
+    /// fetch was attempted.
+    NotRequired,
+    /// Hydration was attempted and returned the message body.
+    Hydrated(ReceivedMessageInput),
+    /// Hydration was attempted and the fetch failed.
+    Failed,
+}
+
 /// Per-event item delivered from the SSE background task to the entity.
 struct SseStreamItem {
     event: AgentRunEvent,
-    fetched_message: Option<ReceivedMessageInput>,
-    /// True iff `event` required message hydration (a `new_message` event
-    /// addressed to the connection's own `self_run_id`) and the body fetch
-    /// failed, as opposed to an event that never needed hydration at all.
-    hydration_failed: bool,
+    hydration: Hydration,
 }
 
 /// A `new_message` event whose hydration attempt failed, queued for retry.
@@ -192,23 +202,23 @@ impl AgentEventConsumer for SseForwardingConsumer {
         // loop tell a genuine fetch failure apart from an event that was simply
         // never a hydration candidate.
         let needs_hydration = self.hydrate_new_messages
-            && event.event_type == "new_message"
+            && event.event_type == EVENT_NEW_MESSAGE
             && event.run_id == self.self_run_id;
-        let fetched_message = if needs_hydration {
-            self.hydrator
+        let hydration = if needs_hydration {
+            match self
+                .hydrator
                 .hydrate_event_for_recipient(&event, &self.self_run_id)
                 .await
+            {
+                Some(message) => Hydration::Hydrated(message),
+                None => Hydration::Failed,
+            }
         } else {
-            None
+            Hydration::NotRequired
         };
-        let hydration_failed = needs_hydration && fetched_message.is_none();
 
         self.tx
-            .unbounded_send(SseStreamItem {
-                event,
-                fetched_message,
-                hydration_failed,
-            })
+            .unbounded_send(SseStreamItem { event, hydration })
             .map_err(|_| anyhow!("SSE event receiver dropped"))?;
 
         Ok(AgentEventConsumerControlFlow::Continue)
@@ -968,19 +978,27 @@ impl OrchestrationEventStreamer {
                     .iter()
                     .any(|stalled| stalled.event.sequence == item.event.sequence);
                 if item.event.sequence > handled_floor || is_outstanding_stall {
-                    if item.hydration_failed {
-                        newly_stalled.push(item.event);
-                        continue;
-                    }
-                    // A fresh delivery can resolve a still-outstanding stall
-                    // (e.g. a reconnect replay whose hydration succeeds this
-                    // time); drop its retry-queue entry so it isn't also
-                    // delivered again by `retry_stalled_message`.
-                    if is_outstanding_stall {
-                        resolved_stalls.push(item.event.sequence);
-                    }
-                    if let Some(message) = item.fetched_message {
-                        messages.push(message);
+                    match item.hydration {
+                        Hydration::Failed => {
+                            newly_stalled.push(item.event);
+                            continue;
+                        }
+                        // A fresh delivery can resolve a still-outstanding
+                        // stall (e.g. a reconnect replay whose hydration
+                        // succeeds this time); drop its retry-queue entry so
+                        // it isn't also delivered again by
+                        // `retry_stalled_message`.
+                        Hydration::Hydrated(message) => {
+                            if is_outstanding_stall {
+                                resolved_stalls.push(item.event.sequence);
+                            }
+                            messages.push(message);
+                        }
+                        Hydration::NotRequired => {
+                            if is_outstanding_stall {
+                                resolved_stalls.push(item.event.sequence);
+                            }
+                        }
                     }
                     events.push(item.event);
                 }
@@ -2914,19 +2932,27 @@ impl OrchestrationEventStreamer {
                     .iter()
                     .any(|stalled| stalled.event.sequence == item.event.sequence);
                 if item.event.sequence > handled_floor || is_outstanding_stall {
-                    if item.hydration_failed {
-                        newly_stalled.push(item.event);
-                        continue;
-                    }
-                    // A fresh delivery can resolve a still-outstanding stall
-                    // (e.g. a reconnect replay whose hydration succeeds this
-                    // time); drop its retry-queue entry so it isn't also
-                    // delivered again by `retry_stalled_message`.
-                    if is_outstanding_stall {
-                        resolved_stalls.push(item.event.sequence);
-                    }
-                    if let Some(msg) = item.fetched_message {
-                        messages.push(msg);
+                    match item.hydration {
+                        Hydration::Failed => {
+                            newly_stalled.push(item.event);
+                            continue;
+                        }
+                        // A fresh delivery can resolve a still-outstanding
+                        // stall (e.g. a reconnect replay whose hydration
+                        // succeeds this time); drop its retry-queue entry so
+                        // it isn't also delivered again by
+                        // `retry_stalled_message`.
+                        Hydration::Hydrated(message) => {
+                            if is_outstanding_stall {
+                                resolved_stalls.push(item.event.sequence);
+                            }
+                            messages.push(message);
+                        }
+                        Hydration::NotRequired => {
+                            if is_outstanding_stall {
+                                resolved_stalls.push(item.event.sequence);
+                            }
+                        }
                     }
                     events.push(item.event);
                 }
