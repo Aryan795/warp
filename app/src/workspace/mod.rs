@@ -92,6 +92,10 @@ pub fn init(app: &mut AppContext) {
     view::openwarp_launch_modal::init(app);
     view::orchestration_launch_modal::init(app);
     view::agent_cli_launch_modal::init(app);
+    #[cfg(debug_assertions)]
+    view::factories_launch_centered_modal_a::init(app);
+    #[cfg(debug_assertions)]
+    view::factories_launch_centered_modal_b::init(app);
     view::feature_intro_modal::init(app);
     view::auto_handoff_sleep_modal::init(app);
     view::cloud_agent_capacity_modal::init(app);
@@ -243,6 +247,18 @@ pub fn init(app: &mut AppContext) {
                     "workspace:open_feature_intro_modal",
                     "[Debug] Open Feature Intro Modal",
                     WorkspaceAction::OpenFeatureIntroModal,
+                )
+                .with_context_predicate(id!("Workspace")),
+                EditableBinding::new(
+                    "workspace:open_factories_launch_centered_modal_a",
+                    "[Debug] Open Factories Launch Centered Modal (Option A)",
+                    WorkspaceAction::OpenFactoriesLaunchCenteredModalA,
+                )
+                .with_context_predicate(id!("Workspace")),
+                EditableBinding::new(
+                    "workspace:open_factories_launch_centered_modal_b",
+                    "[Debug] Open Factories Launch Centered Modal (Option B)",
+                    WorkspaceAction::OpenFactoriesLaunchCenteredModalB,
                 )
                 .with_context_predicate(id!("Workspace")),
                 EditableBinding::new(

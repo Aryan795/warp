@@ -762,6 +762,14 @@ pub enum WorkspaceAction {
     /// Reset the feature intro seen state (for debugging)
     #[cfg(debug_assertions)]
     ResetFeatureIntroModalState,
+    /// Open the Factories Launch Centered Modal mockup, option A (for debugging;
+    /// exploration only, not part of the shipped feature)
+    #[cfg(debug_assertions)]
+    OpenFactoriesLaunchCenteredModalA,
+    /// Open the Factories Launch Centered Modal mockup, option B (for debugging;
+    /// exploration only, not part of the shipped feature)
+    #[cfg(debug_assertions)]
+    OpenFactoriesLaunchCenteredModalB,
     /// Open the auto-handoff sleep modal (for debugging)
     #[cfg(debug_assertions)]
     OpenAutoHandoffSleepModal,
@@ -1237,6 +1245,8 @@ impl WorkspaceAction {
             | ResetAgentCliLaunchModalState
             | OpenFeatureIntroModal
             | ResetFeatureIntroModalState
+            | OpenFactoriesLaunchCenteredModalA
+            | OpenFactoriesLaunchCenteredModalB
             | OpenAutoHandoffSleepModal
             | ResetAutoHandoffSleepModalState
             | TriggerAutoHandoffToCloud

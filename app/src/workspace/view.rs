@@ -6,6 +6,10 @@ pub(crate) mod codex_modal;
 pub mod conversation_list;
 #[cfg(enable_crash_recovery)]
 mod crash_recovery;
+#[cfg(debug_assertions)]
+pub(crate) mod factories_launch_centered_modal_a;
+#[cfg(debug_assertions)]
+pub(crate) mod factories_launch_centered_modal_b;
 pub(crate) mod feature_intro_modal;
 pub(crate) mod free_ai_removal_modal;
 pub mod global_search;
@@ -518,6 +522,14 @@ use crate::workspace::view::cloud_agent_capacity_modal::{
     CloudAgentCapacityModal, CloudAgentCapacityModalEvent, CloudAgentCapacityModalVariant,
 };
 use crate::workspace::view::codex_modal::{CodexModal, CodexModalEvent};
+#[cfg(debug_assertions)]
+use crate::workspace::view::factories_launch_centered_modal_a::{
+    FactoriesLaunchCenteredModalA, FactoriesLaunchCenteredModalAEvent,
+};
+#[cfg(debug_assertions)]
+use crate::workspace::view::factories_launch_centered_modal_b::{
+    FactoriesLaunchCenteredModalB, FactoriesLaunchCenteredModalBEvent,
+};
 use crate::workspace::view::feature_intro_modal::{
     FeatureIntroCtaTarget, FeatureIntroId, FeatureIntroModal, FeatureIntroModalEvent,
     FeatureIntroModalTelemetryEvent, feature_intro_by_id, with_email_id_prefill,
@@ -1118,6 +1130,14 @@ pub struct Workspace {
     openwarp_launch_modal: ViewHandle<OpenWarpLaunchModal>,
     orchestration_launch_modal: ViewHandle<OrchestrationLaunchModal>,
     agent_cli_launch_modal: ViewHandle<AgentCliLaunchModal>,
+    #[cfg(debug_assertions)]
+    factories_launch_centered_modal_a: ViewHandle<FactoriesLaunchCenteredModalA>,
+    #[cfg(debug_assertions)]
+    is_factories_launch_centered_modal_a_open: bool,
+    #[cfg(debug_assertions)]
+    factories_launch_centered_modal_b: ViewHandle<FactoriesLaunchCenteredModalB>,
+    #[cfg(debug_assertions)]
+    is_factories_launch_centered_modal_b_open: bool,
     feature_intro_modal: ViewHandle<FeatureIntroModal>,
     /// Tab that first received the feature-intro popover. The popover stays
     /// pinned to this tab for the rest of its lifetime so switching tabs does
@@ -3042,6 +3062,22 @@ impl Workspace {
             me.handle_agent_cli_launch_modal_event(event, ctx);
         });
 
+        #[cfg(debug_assertions)]
+        let factories_launch_centered_modal_a_view =
+            ctx.add_typed_action_view(FactoriesLaunchCenteredModalA::new);
+        #[cfg(debug_assertions)]
+        ctx.subscribe_to_view(&factories_launch_centered_modal_a_view, |me, _, event, ctx| {
+            me.handle_factories_launch_centered_modal_a_event(event, ctx);
+        });
+
+        #[cfg(debug_assertions)]
+        let factories_launch_centered_modal_b_view =
+            ctx.add_typed_action_view(FactoriesLaunchCenteredModalB::new);
+        #[cfg(debug_assertions)]
+        ctx.subscribe_to_view(&factories_launch_centered_modal_b_view, |me, _, event, ctx| {
+            me.handle_factories_launch_centered_modal_b_event(event, ctx);
+        });
+
         let feature_intro_view = ctx.add_typed_action_view(FeatureIntroModal::new);
         ctx.subscribe_to_view(&feature_intro_view, |me, _, event, ctx| {
             me.handle_feature_intro_modal_event(event, ctx);
@@ -3525,6 +3561,14 @@ impl Workspace {
             openwarp_launch_modal: openwarp_launch_view,
             orchestration_launch_modal: orchestration_launch_view,
             agent_cli_launch_modal: agent_cli_launch_view,
+            #[cfg(debug_assertions)]
+            factories_launch_centered_modal_a: factories_launch_centered_modal_a_view,
+            #[cfg(debug_assertions)]
+            is_factories_launch_centered_modal_a_open: false,
+            #[cfg(debug_assertions)]
+            factories_launch_centered_modal_b: factories_launch_centered_modal_b_view,
+            #[cfg(debug_assertions)]
+            is_factories_launch_centered_modal_b_open: false,
             feature_intro_modal: feature_intro_view,
             feature_intro_tab_pane_group_id: None,
             auto_handoff_sleep_modal: auto_handoff_sleep_view,
@@ -19063,6 +19107,38 @@ impl Workspace {
         }
     }
 
+    #[cfg(debug_assertions)]
+    fn handle_factories_launch_centered_modal_a_event(
+        &mut self,
+        event: &FactoriesLaunchCenteredModalAEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match event {
+            FactoriesLaunchCenteredModalAEvent::Close
+            | FactoriesLaunchCenteredModalAEvent::GetEarlyAccess => {
+                self.is_factories_launch_centered_modal_a_open = false;
+                self.focus_active_tab(ctx);
+                ctx.notify();
+            }
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    fn handle_factories_launch_centered_modal_b_event(
+        &mut self,
+        event: &FactoriesLaunchCenteredModalBEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match event {
+            FactoriesLaunchCenteredModalBEvent::Close
+            | FactoriesLaunchCenteredModalBEvent::GetEarlyAccess => {
+                self.is_factories_launch_centered_modal_b_open = false;
+                self.focus_active_tab(ctx);
+                ctx.notify();
+            }
+        }
+    }
+
     fn handle_feature_intro_modal_event(
         &mut self,
         event: &FeatureIntroModalEvent,
@@ -23620,6 +23696,16 @@ impl Workspace {
         ctx.focus(&self.agent_cli_launch_modal);
     }
 
+    #[cfg(debug_assertions)]
+    fn focus_factories_launch_centered_modal_a(&mut self, ctx: &mut ViewContext<Self>) {
+        ctx.focus(&self.factories_launch_centered_modal_a);
+    }
+
+    #[cfg(debug_assertions)]
+    fn focus_factories_launch_centered_modal_b(&mut self, ctx: &mut ViewContext<Self>) {
+        ctx.focus(&self.factories_launch_centered_modal_b);
+    }
+
     fn show_feature_intro_modal(&mut self, id: FeatureIntroId, ctx: &mut ViewContext<Self>) {
         // Non-blocking popover: set the descriptor but intentionally do NOT focus it,
         // so the terminal and input stay usable while it is visible. Pin to the
@@ -25925,6 +26011,18 @@ impl TypedActionView for Workspace {
                 log::info!("Feature intro seen state has been reset");
             }
             #[cfg(debug_assertions)]
+            OpenFactoriesLaunchCenteredModalA => {
+                self.is_factories_launch_centered_modal_a_open = true;
+                self.focus_factories_launch_centered_modal_a(ctx);
+                ctx.notify();
+            }
+            #[cfg(debug_assertions)]
+            OpenFactoriesLaunchCenteredModalB => {
+                self.is_factories_launch_centered_modal_b_open = true;
+                self.focus_factories_launch_centered_modal_b(ctx);
+                ctx.notify();
+            }
+            #[cfg(debug_assertions)]
             InstallOpenCodeWarpPlugin => {
                 let message = set_opencode_warp_plugin("github:warpdotdev/opencode-warp-internal");
                 self.toast_stack.update(ctx, |view, ctx| {
@@ -27313,6 +27411,16 @@ impl View for Workspace {
 
         if should_show_modal && one_time_modal_model.is_agent_cli_launch_modal_open() {
             stack.add_child(ChildView::new(&self.agent_cli_launch_modal).finish());
+        }
+
+        #[cfg(debug_assertions)]
+        if self.is_factories_launch_centered_modal_a_open {
+            stack.add_child(ChildView::new(&self.factories_launch_centered_modal_a).finish());
+        }
+
+        #[cfg(debug_assertions)]
+        if self.is_factories_launch_centered_modal_b_open {
+            stack.add_child(ChildView::new(&self.factories_launch_centered_modal_b).finish());
         }
 
         if should_show_modal && one_time_modal_model.is_auto_handoff_sleep_modal_open() {
