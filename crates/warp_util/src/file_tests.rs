@@ -1,7 +1,9 @@
 use tempfile::TempDir;
 use warpui_core::r#async::block_on;
 
-use super::{FileLoadError, read_capped, read_to_string_capped};
+#[cfg(unix)]
+use super::read_capped;
+use super::{FileLoadError, read_to_string_capped};
 
 fn write_file(dir: &TempDir, name: &str, contents: &[u8]) -> std::path::PathBuf {
     let path = dir.path().join(name);
