@@ -3109,10 +3109,29 @@ type DeleteRunnerOutput implements Response {
 
 union DeleteRunnerResult = DeleteRunnerOutput | UserFacingError
 
+"""
+Atomically claims (or confirms an existing claim of) a one-time,
+cross-device feature-intro impression identified by introKey (e.g.
+"factories_launch"). Returns claimed=true only for the call that performs
+the claim, so a concurrent claim from another device for the same user
+cannot both win.
+"""
+input ClaimFeatureIntroImpressionInput {
+  introKey: String!
+}
+
+type ClaimFeatureIntroImpressionOutput implements Response {
+  claimed: Boolean!
+  responseContext: ResponseContext!
+}
+
+union ClaimFeatureIntroImpressionResult = ClaimFeatureIntroImpressionOutput | UserFacingError
+
 type RootMutation {
   addInviteLinkDomainRestriction(input: AddInviteLinkDomainRestrictionInput!, requestContext: RequestContext!): AddInviteLinkDomainRestrictionResult!
   addObjectGuests(input: AddObjectGuestsInput!, requestContext: RequestContext!): AddObjectGuestsResult!
   bulkCreateObjects(input: BulkCreateObjectsInput!, requestContext: RequestContext!): BulkCreateObjectsResult!
+  claimFeatureIntroImpression(input: ClaimFeatureIntroImpressionInput!, requestContext: RequestContext!): ClaimFeatureIntroImpressionResult!
   confirmFileArtifactUpload(input: ConfirmFileArtifactUploadInput!, requestContext: RequestContext!): ConfirmFileArtifactUploadResult!
 
   """

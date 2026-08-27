@@ -1,12 +1,19 @@
+use std::sync::Arc;
+
 use futures::FutureExt;
+use settings::Setting as _;
 use warp_core::features::FeatureFlag;
 use warpui::{App, SingletonEntity};
 
 use super::{
     AISettings, AuthManager, AuthManagerEvent, AuthStateProvider, FEATURE_INTROS, FeatureIntroId,
-    FreeAiRemovalModalDecision, OneTimeModalModel, free_ai_removal_modal_decision,
+    FreeAiRemovalModalDecision, OneTimeModalModel, ServerApiProvider,
+    free_ai_removal_modal_decision,
 };
+use crate::server::experiments::ServerExperiments;
+use crate::server::server_api::auth::MockAuthClient;
 use crate::test_util::terminal::{add_window_with_terminal, initialize_app_for_terminal_view};
+use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::workspaces::workspace::CustomerType;
 
 #[test]
@@ -428,6 +435,276 @@ fn feature_intro_skipped_when_all_seen() {
                 assert!(!model.check_and_trigger_feature_intro_modal(ctx));
                 assert_eq!(model.active_feature_intro, None);
             });
+        });
+    });
+}
+
+#[test]
+fn maybe_check_and_trigger_feature_intro_modal_respects_guards() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+
+        terminal.update(&mut app, |_, ctx| {
+            let key = FeatureIntroId::CustomModelRouter.as_key();
+            let window_id = ctx.window_id();
+
+            OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
+                // `is_any_modal_open` also requires a target window; bind one so
+                // opening a modal below is actually observed as "open".
+                model.update_target_window_id(window_id, ctx);
+
+                // Before the initial modal-check pass has completed, a recheck
+                // must not act on the (possibly stale) seen markers.
+                model.maybe_check_and_trigger_feature_intro_modal(ctx);
+                assert!(!AISettings::as_ref(ctx).is_feature_intro_seen(key));
+
+                model.has_completed_initial_modal_checks = true;
+
+                // While a higher-priority modal is open, a recheck is deferred.
+                model.set_oz_launch_modal_open(true, ctx);
+                model.maybe_check_and_trigger_feature_intro_modal(ctx);
+                assert!(!AISettings::as_ref(ctx).is_feature_intro_seen(key));
+
+                // Once it closes and both guards are satisfied, the recheck runs.
+                model.set_oz_launch_modal_open(false, ctx);
+                model.maybe_check_and_trigger_feature_intro_modal(ctx);
+                assert!(AISettings::as_ref(ctx).is_feature_intro_seen(key));
+            });
+        });
+    });
+}
+
+#[test]
+fn higher_priority_modal_dismissal_rechecks_feature_intro() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+
+        terminal.update(&mut app, |_, ctx| {
+            let key = FeatureIntroId::CustomModelRouter.as_key();
+            let window_id = ctx.window_id();
+
+            OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
+                model.update_target_window_id(window_id, ctx);
+                model.has_completed_initial_modal_checks = true;
+                model.set_oz_launch_modal_open(true, ctx);
+                assert!(model.is_any_modal_open());
+                assert!(!AISettings::as_ref(ctx).is_feature_intro_seen(key));
+
+                // Dismissing a modal that sits ahead of feature intros in
+                // `check_and_trigger_all_modals` must give them a chance to show,
+                // rather than waiting for the next full app-level check.
+                model.mark_oz_launch_modal_dismissed(ctx);
+
+                assert!(!model.is_oz_launch_modal_open);
+                assert!(AISettings::as_ref(ctx).is_feature_intro_seen(key));
+            });
+        });
+    });
+}
+
+#[test]
+fn factories_launch_modal_requires_validated_cta_url() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+
+        terminal.update(&mut app, |_, ctx| {
+            let _flag = FeatureFlag::FactoriesLaunchModal.override_enabled(true);
+            let intro = FEATURE_INTROS
+                .iter()
+                .find(|intro| intro.id == FeatureIntroId::FactoriesLaunch)
+                .unwrap();
+
+            // No server-configured CTA URL yet: the eligibility check must fail
+            // closed rather than fall back to the generic Contact Sales link.
+            assert!(!UserWorkspaces::as_ref(ctx).has_validated_factories_launch_modal_cta_url());
+            assert!(!(intro.eligible)(ctx));
+
+            UserWorkspaces::handle(ctx).update(ctx, |workspaces, _ctx| {
+                workspaces
+                    .set_factories_launch_modal_cta_url(Some("https://cal.com/warp".to_string()));
+            });
+
+            assert!(UserWorkspaces::as_ref(ctx).has_validated_factories_launch_modal_cta_url());
+            assert!((intro.eligible)(ctx));
+        });
+    });
+}
+
+#[test]
+fn custom_model_router_requires_ai_enabled_but_factories_launch_does_not() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+
+        terminal.update(&mut app, |_, ctx| {
+            let _flag = FeatureFlag::FactoriesLaunchModal.override_enabled(true);
+            UserWorkspaces::handle(ctx).update(ctx, |workspaces, _ctx| {
+                workspaces
+                    .set_factories_launch_modal_cta_url(Some("https://cal.com/warp".to_string()));
+            });
+            AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                let _ = settings.is_any_ai_enabled.set_value(false, ctx);
+            });
+
+            let custom_model_router = FEATURE_INTROS
+                .iter()
+                .find(|intro| intro.id == FeatureIntroId::CustomModelRouter)
+                .unwrap();
+            let factories_launch = FEATURE_INTROS
+                .iter()
+                .find(|intro| intro.id == FeatureIntroId::FactoriesLaunch)
+                .unwrap();
+
+            // The generic AI-enabled gate now lives only on CustomModelRouter's
+            // own eligibility; FactoriesLaunch's eligibility is purely server-driven.
+            assert!(!(custom_model_router.eligible)(ctx));
+            assert!((factories_launch.eligible)(ctx));
+        });
+    });
+}
+
+#[test]
+fn factories_launch_feature_intro_requires_winning_the_server_claim() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+
+        terminal.update(&mut app, |_, ctx| {
+            let _flag = FeatureFlag::FactoriesLaunchModal.override_enabled(true);
+            UserWorkspaces::handle(ctx).update(ctx, |workspaces, _ctx| {
+                workspaces
+                    .set_factories_launch_modal_cta_url(Some("https://cal.com/warp".to_string()));
+            });
+
+            // Mark every intro ahead of FactoriesLaunch as seen so it's next in line.
+            AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                for intro in FEATURE_INTROS {
+                    if intro.id == FeatureIntroId::FactoriesLaunch {
+                        break;
+                    }
+                    settings.mark_feature_intro_seen(intro.id.as_key(), ctx);
+                }
+            });
+
+            // Simulate another device having already claimed the impression.
+            let mut auth_client = MockAuthClient::new();
+            auth_client
+                .expect_claim_feature_intro_impression()
+                .withf(|intro_key| intro_key == FeatureIntroId::FactoriesLaunch.as_key())
+                .times(1)
+                .return_once(|_| Ok(false));
+            ServerApiProvider::handle(ctx).update(ctx, |provider, _ctx| {
+                provider.set_auth_client_for_test(Arc::new(auth_client));
+            });
+
+            OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
+                let handled = model.check_and_trigger_feature_intro_modal(ctx);
+
+                // The one-time seen marker is set synchronously regardless of
+                // whether the claim ultimately succeeds.
+                assert!(
+                    AISettings::as_ref(ctx)
+                        .is_feature_intro_seen(FeatureIntroId::FactoriesLaunch.as_key())
+                );
+                assert!(handled);
+                // The popover must not open until the claim resolves.
+                assert_eq!(model.active_feature_intro, None);
+            });
+        });
+
+        // Let the spawned claim future resolve.
+        warpui::r#async::Timer::after(std::time::Duration::from_millis(100)).await;
+
+        terminal.update(&mut app, |_, ctx| {
+            OneTimeModalModel::handle(ctx).update(ctx, |model, _ctx| {
+                assert_eq!(
+                    model.active_feature_intro, None,
+                    "a lost claim must not show the popover on this device"
+                );
+            });
+        });
+    });
+}
+
+#[test]
+fn factories_launch_feature_intro_shows_after_winning_the_server_claim() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+
+        terminal.update(&mut app, |_, ctx| {
+            let _flag = FeatureFlag::FactoriesLaunchModal.override_enabled(true);
+            UserWorkspaces::handle(ctx).update(ctx, |workspaces, _ctx| {
+                workspaces
+                    .set_factories_launch_modal_cta_url(Some("https://cal.com/warp".to_string()));
+            });
+            AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                for intro in FEATURE_INTROS {
+                    if intro.id == FeatureIntroId::FactoriesLaunch {
+                        break;
+                    }
+                    settings.mark_feature_intro_seen(intro.id.as_key(), ctx);
+                }
+            });
+
+            let mut auth_client = MockAuthClient::new();
+            auth_client
+                .expect_claim_feature_intro_impression()
+                .withf(|intro_key| intro_key == FeatureIntroId::FactoriesLaunch.as_key())
+                .times(1)
+                .return_once(|_| Ok(true));
+            ServerApiProvider::handle(ctx).update(ctx, |provider, _ctx| {
+                provider.set_auth_client_for_test(Arc::new(auth_client));
+            });
+
+            OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
+                assert!(model.check_and_trigger_feature_intro_modal(ctx));
+                assert_eq!(model.active_feature_intro, None, "still awaiting the claim");
+            });
+        });
+
+        warpui::r#async::Timer::after(std::time::Duration::from_millis(100)).await;
+
+        terminal.update(&mut app, |_, ctx| {
+            OneTimeModalModel::handle(ctx).update(ctx, |model, _ctx| {
+                assert_eq!(
+                    model.active_feature_intro,
+                    Some(FeatureIntroId::FactoriesLaunch)
+                );
+            });
+        });
+    });
+}
+
+#[test]
+fn feature_intro_recheck_on_experiments_updated() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let key = FeatureIntroId::CustomModelRouter.as_key();
+
+        terminal.update(&mut app, |_, ctx| {
+            OneTimeModalModel::handle(ctx).update(ctx, |model, _ctx| {
+                model.has_completed_initial_modal_checks = true;
+            });
+        });
+        app.read(|ctx| {
+            assert!(!AISettings::as_ref(ctx).is_feature_intro_seen(key));
+        });
+
+        // A fresh experiments fetch (e.g. after the initial modal-check
+        // pass already ran) must re-trigger the feature-intro check.
+        terminal.update(&mut app, |_, ctx| {
+            ServerExperiments::handle(ctx).update(ctx, |experiments, ctx| {
+                experiments.apply_latest_state(vec![], ctx);
+            });
+        });
+
+        app.read(|ctx| {
+            assert!(AISettings::as_ref(ctx).is_feature_intro_seen(key));
         });
     });
 }

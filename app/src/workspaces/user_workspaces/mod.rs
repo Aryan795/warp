@@ -645,6 +645,17 @@ impl UserWorkspaces {
             .unwrap_or_else(|| links::FACTORIES_CONTACT_SALES_URL.to_string())
     }
 
+    /// Whether a real, server-configured Factories launch modal CTA URL has
+    /// been fetched. Fails closed: until the server delivers a URL that
+    /// differs from the generic Contact Sales fallback, the Factories launch
+    /// modal must not show, since its whole purpose is directing qualified
+    /// users to a specific booking destination.
+    pub fn has_validated_factories_launch_modal_cta_url(&self) -> bool {
+        self.factories_launch_modal_cta_url
+            .as_deref()
+            .is_some_and(|url| url != links::FACTORIES_CONTACT_SALES_URL)
+    }
+
     pub fn current_workspace_mut(&mut self) -> Option<&mut Workspace> {
         self.current_workspace_uid
             .and_then(|workspace_uid| self.workspace_from_uid_mut(workspace_uid))

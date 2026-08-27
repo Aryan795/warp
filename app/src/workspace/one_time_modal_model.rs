@@ -9,7 +9,7 @@ use warpui::{AppContext, Entity, ModelContext, SingletonEntity, WindowId};
 
 use super::hoa_onboarding;
 use super::view::feature_intro_modal::{
-    FEATURE_INTROS, FeatureIntroId, FeatureIntroModalTelemetryEvent,
+    FEATURE_INTROS, FeatureIntro, FeatureIntroId, FeatureIntroModalTelemetryEvent,
 };
 use super::view::free_ai_removal_modal::{
     FreeAiRemovalModalTelemetryEvent, FreeAiRemovalModalVariant,
@@ -20,6 +20,8 @@ use crate::auth::auth_manager::AuthManagerEvent;
 use crate::auth::{AuthManager, AuthStateProvider};
 use crate::channel::{Channel, ChannelState};
 use crate::root_view::has_completed_local_onboarding;
+use crate::server::experiments::{ServerExperiments, ServerExperimentsEvent};
+use crate::server::server_api::ServerApiProvider;
 use crate::settings::cloud_preferences_syncer::{
     CloudPreferencesSyncer, CloudPreferencesSyncerEvent,
 };
@@ -93,6 +95,19 @@ impl OneTimeModalModel {
                 }
             },
         );
+
+        // The Factories launch modal's eligibility (feature flag + validated CTA
+        // URL) and other server-targeted intros only become true once a fresh
+        // `Experiments`/user fetch arrives, which can land after the initial
+        // modal-check pass already ran. Re-check so the intro isn't stuck unseen.
+        // Some lightweight test harnesses don't register `ServerExperiments`
+        // (see its `UserWorkspaces` subscription comment), so guard against that.
+        if ctx.has_singleton_model::<ServerExperiments>() {
+            ctx.subscribe_to_model(&ServerExperiments::handle(ctx), |me, _, event, ctx| {
+                let ServerExperimentsEvent::ExperimentsUpdated = event;
+                me.maybe_check_and_trigger_feature_intro_modal(ctx);
+            });
+        }
 
         // The base-credit allowance that gates the free-AI-removal notice loads
         // asynchronously, so re-evaluate the notice whenever request usage updates.
@@ -198,6 +213,7 @@ impl OneTimeModalModel {
 
     pub fn mark_oz_launch_modal_dismissed(&mut self, ctx: &mut ModelContext<Self>) {
         self.set_oz_launch_modal_open(false, ctx);
+        self.maybe_check_and_trigger_feature_intro_modal(ctx);
     }
 
     /// Returns whether the OpenWarp launch modal is currently open.
@@ -207,6 +223,7 @@ impl OneTimeModalModel {
 
     pub fn mark_openwarp_launch_modal_dismissed(&mut self, ctx: &mut ModelContext<Self>) {
         self.set_openwarp_launch_modal_open(false, ctx);
+        self.maybe_check_and_trigger_feature_intro_modal(ctx);
     }
 
     pub fn is_orchestration_launch_modal_open(&self) -> bool {
@@ -215,6 +232,7 @@ impl OneTimeModalModel {
 
     pub fn mark_orchestration_launch_modal_dismissed(&mut self, ctx: &mut ModelContext<Self>) {
         self.set_orchestration_launch_modal_open(false, ctx);
+        self.maybe_check_and_trigger_feature_intro_modal(ctx);
     }
 
     pub fn is_agent_cli_launch_modal_open(&self) -> bool {
@@ -223,6 +241,7 @@ impl OneTimeModalModel {
 
     pub fn mark_agent_cli_launch_modal_dismissed(&mut self, ctx: &mut ModelContext<Self>) {
         self.set_agent_cli_launch_modal_open(false, ctx);
+        self.maybe_check_and_trigger_feature_intro_modal(ctx);
     }
 
     /// Returns the feature-intro popover currently being shown, if any.
@@ -517,6 +536,7 @@ impl OneTimeModalModel {
 
     pub fn mark_free_ai_removal_modal_dismissed(&mut self, ctx: &mut ModelContext<Self>) {
         self.set_free_ai_removal_modal_open(false, ctx);
+        self.maybe_check_and_trigger_feature_intro_modal(ctx);
     }
 
     #[cfg(debug_assertions)]
@@ -754,36 +774,85 @@ impl OneTimeModalModel {
         should_show
     }
 
-    fn check_and_trigger_feature_intro_modal(&mut self, ctx: &mut ModelContext<Self>) -> bool {
-        if !AISettings::as_ref(ctx).is_any_ai_enabled(ctx) {
-            return false;
+    /// Re-runs `check_and_trigger_feature_intro_modal` outside the initial startup
+    /// check, e.g. when a fresh experiments fetch makes a server-targeted intro
+    /// newly eligible, or when a higher-priority modal ahead of it in
+    /// `check_and_trigger_all_modals` is dismissed.
+    fn maybe_check_and_trigger_feature_intro_modal(&mut self, ctx: &mut ModelContext<Self>) {
+        if !self.has_completed_initial_modal_checks
+            || self.is_any_modal_open()
+            || self.active_feature_intro.is_some()
+        {
+            return;
         }
+        self.check_and_trigger_feature_intro_modal(ctx);
+    }
+
+    fn check_and_trigger_feature_intro_modal(&mut self, ctx: &mut ModelContext<Self>) -> bool {
         // Show the first registered, unseen feature intro that the user is currently
         // eligible for (see `FEATURE_INTROS`). An unseen but ineligible intro (e.g. a
         // server-targeted launch the user isn't enrolled in yet) is left unseen rather
         // than consumed, so it can still show once the user becomes eligible.
-        let next_id = FEATURE_INTROS
-            .iter()
-            .find(|intro| {
-                !AISettings::as_ref(ctx).is_feature_intro_seen(intro.id.as_key())
-                    && (intro.eligible)(ctx)
-            })
-            .map(|intro| intro.id);
-        let Some(id) = next_id else {
+        let next = FEATURE_INTROS.iter().find(|intro| {
+            !AISettings::as_ref(ctx).is_feature_intro_seen(intro.id.as_key())
+                && (intro.eligible)(ctx)
+        });
+        let Some(intro) = next else {
             return false;
         };
+        let id = intro.id;
 
-        // Mark it seen up front so it shows at most once, even if suppressed below.
+        // Mark it seen up front so it shows at most once per device, even if
+        // suppressed below (e.g. `Channel::Integration`, or a lost server claim).
         AISettings::handle(ctx).update(ctx, |settings, ctx| {
             settings.mark_feature_intro_seen(id.as_key(), ctx);
         });
 
-        let should_show = !matches!(ChannelState::channel(), Channel::Integration);
-        if should_show {
+        if matches!(ChannelState::channel(), Channel::Integration) {
+            return false;
+        }
+
+        if intro.requires_server_claim {
+            self.claim_and_show_feature_intro(intro, ctx);
+        } else {
             self.set_active_feature_intro(Some(id), ctx);
             send_telemetry_from_ctx!(FeatureIntroModalTelemetryEvent::Shown { feature: id }, ctx);
         }
-        should_show
+        true
+    }
+
+    /// Wins the atomic, cross-device impression claim before actually showing a
+    /// `requires_server_claim` intro (see `AuthClient::claim_feature_intro_impression`).
+    /// The intro's one-time seen marker is already set by the caller, so a lost
+    /// claim (another device already showed it, or the request failed) simply
+    /// leaves this device without the popover; lower-priority modals are then
+    /// given a chance to show instead.
+    fn claim_and_show_feature_intro(
+        &mut self,
+        intro: &'static FeatureIntro,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let auth_client = ServerApiProvider::as_ref(ctx).get_auth_client();
+        let intro_key = intro.id.as_key();
+        ctx.spawn(
+            async move { auth_client.claim_feature_intro_impression(intro_key).await },
+            move |me, result, ctx| match result {
+                Ok(true) => {
+                    me.set_active_feature_intro(Some(intro.id), ctx);
+                    send_telemetry_from_ctx!(
+                        FeatureIntroModalTelemetryEvent::Shown { feature: intro.id },
+                        ctx
+                    );
+                }
+                Ok(false) => {
+                    me.resume_modal_checks_after_feature_intro(ctx);
+                }
+                Err(e) => {
+                    log::warn!("Failed to claim feature intro impression for {intro_key}: {e:#}");
+                    me.resume_modal_checks_after_feature_intro(ctx);
+                }
+            },
+        );
     }
 
     pub fn is_build_plan_migration_modal_open(&self) -> bool {

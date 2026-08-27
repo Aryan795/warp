@@ -76,6 +76,11 @@ pub struct FeatureIntro {
     /// ineligible intro is skipped without consuming its one-time slot, so it
     /// can still show later once the user becomes eligible.
     pub eligible: fn(&AppContext) -> bool,
+    /// Whether showing this intro requires first winning an atomic,
+    /// server-side claim (see `AuthClient::claim_feature_intro_impression`).
+    /// Used for intros whose one-time impression must be consistent across a
+    /// user's devices, rather than merely once per device.
+    pub requires_server_claim: bool,
 }
 
 /// The registry of feature-intro popovers, in priority order. On startup the
@@ -93,7 +98,10 @@ pub const FEATURE_INTROS: &[FeatureIntro] = &[
             page: SettingsSection::WarpAgent,
             widget_id: custom_model_routers_widget_id,
         }),
-        eligible: |_app| true,
+        // This intro has no server-driven targeting of its own, so it reuses the
+        // general "has AI enabled at all" gate that used to apply to every intro.
+        eligible: |app| crate::settings::AISettings::as_ref(app).is_any_ai_enabled(app),
+        requires_server_claim: false,
     },
     FeatureIntro {
         id: FeatureIntroId::FactoriesLaunch,
@@ -104,7 +112,15 @@ pub const FEATURE_INTROS: &[FeatureIntro] = &[
         description_icon: None,
         cta_label: "Get Early Access",
         cta_target: Some(FeatureIntroCtaTarget::FactoriesLaunchModalBooking),
-        eligible: |_app| FeatureFlag::FactoriesLaunchModal.is_enabled(),
+        // Purely server-driven: the feature flag reflects cohort membership, and a
+        // validated CTA URL (see `UserWorkspaces::has_validated_factories_launch_modal_cta_url`)
+        // ensures the modal never shows before a real booking link is configured.
+        eligible: |app| {
+            FeatureFlag::FactoriesLaunchModal.is_enabled()
+                && crate::workspaces::user_workspaces::UserWorkspaces::as_ref(app)
+                    .has_validated_factories_launch_modal_cta_url()
+        },
+        requires_server_claim: true,
     },
 ];
 
