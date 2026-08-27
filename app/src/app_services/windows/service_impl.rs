@@ -4,9 +4,8 @@ use std::time::{Duration, Instant};
 use async_channel::{Sender, TrySendError};
 use async_trait::async_trait;
 use ipc::{Client, ConnectionAddress};
-use serde::{Deserialize, Serialize};
 use url::Url;
-use warp_errors::report_error;
+use warp_errors::{ReportErrorLogMode, report_error};
 use warpui::r#async::executor::Background;
 use warpui::r#async::{FutureExt as _, Timer};
 use windows::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow};
@@ -28,18 +27,9 @@ const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 /// IPC Service to respond to URIs sent to the active Warp instance.
 pub(super) struct UriService {}
 
-/// Whether the running instance took responsibility for the forwarded URIs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) enum UriHandoff {
-    Accepted,
-    /// The instance cannot take them, because its queue is full or it is shutting down. The sender
-    /// has to handle its own startup arguments instead.
-    Declined,
-}
-
 impl ipc::Service for UriService {
     type Request = Vec<Url>;
-    type Response = UriHandoff;
+    type Response = ();
 }
 
 #[derive(Clone)]
@@ -57,16 +47,23 @@ impl UriServiceImpl {
 impl ipc::ServiceImpl for UriServiceImpl {
     type Service = UriService;
 
-    async fn handle_request(&self, request: Vec<Url>) -> UriHandoff {
+    async fn handle_request(&self, request: Vec<Url>) -> Result<(), String> {
         // Never awaits on a full queue: blocking here would leave the sender waiting on an
         // instance that is not draining, which is a worse outcome than it opening its own window.
         match self.tx.try_send(request) {
-            Ok(()) => UriHandoff::Accepted,
+            Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => {
-                report_error!("Declined a URI hand-off because the pending queue is full");
-                UriHandoff::Declined
+                // Throttled because a stalled instance can refuse every hand-off it is sent, and
+                // the first one already says everything the rest would.
+                report_error!(
+                    anyhow::anyhow!("Refused a URI hand-off because the pending queue is full"),
+                    ReportErrorLogMode::OncePerRun
+                );
+                Err("the running instance has too many pending hand-offs".to_owned())
             }
-            Err(TrySendError::Closed(_)) => UriHandoff::Declined,
+            Err(TrySendError::Closed(_)) => {
+                Err("the running instance is no longer accepting hand-offs".to_owned())
+            }
         }
     }
 }
@@ -134,8 +131,6 @@ pub(super) async fn forward_uri_to_sole_running_instance(
         connect_to_sole_running_instance(&uri_named_pipe_name(), background_executor).await?;
     allow_existing_instance_to_take_foreground();
     let uri_service_caller = ipc::service_caller::<UriService>(Arc::new(client));
-    match uri_service_caller.call(urls).await? {
-        UriHandoff::Accepted => Ok(()),
-        UriHandoff::Declined => Err(StartupArgsForwardingError::HandoffDeclined),
-    }
+    uri_service_caller.call(urls).await?;
+    Ok(())
 }

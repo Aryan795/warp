@@ -34,8 +34,6 @@ pub enum StartupArgsForwardingError {
     IpcError(#[from] ipc::ClientError),
     #[error("timed out reaching the running instance of Warp")]
     TimedOut,
-    #[error("the running instance of Warp declined the hand-off")]
-    HandoffDeclined,
     #[error("Win32 error")]
     WindowsError(#[from] windows::core::Error),
 }

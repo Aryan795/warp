@@ -124,8 +124,8 @@ fn try_acquire_mutex(name: &str) -> Result<Option<MutexHandle>, Error> {
         })
 }
 
-/// Tests whether the single-instance mutex exists without acquiring it, so that a process which
-/// cannot serve hand-offs never creates the mutex just to answer the question.
+/// Tests whether the single-instance mutex exists without acquiring it.
+#[cfg(test)]
 fn mutex_exists(name: &str) -> bool {
     let name = to_nul_terminated_utf16(name);
     let handle = unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, PCWSTR(name.as_ptr())) };
@@ -141,17 +141,14 @@ fn mutex_exists(name: &str) -> bool {
 }
 
 /// Binds the URI pipe and starts accepting on it.
-///
-/// The bind is exclusive: `interprocess` passes `FILE_FLAG_FIRST_PIPE_INSTANCE`, so this fails
-/// while any other process owns a pipe of the same name. That exclusivity is what
-/// [`claim_instance`] relies on to order the claim behind a working listener.
-fn bind_uri_listener(pipe_name: &str) -> Result<UriListener, ipc::ServerError> {
+fn bind_uri_listener(pipe_name: &str) -> anyhow::Result<UriListener> {
     let executor = Arc::new(Background::new(1, |_| "uri-server".to_owned()));
     let (tx, forwarded_uris) = async_channel::bounded(MAX_BUFFERED_HANDOFFS);
     let (server, _) = ServerBuilder::default()
         .with_fixed_address(pipe_name.to_owned())
         .with_service(UriServiceImpl::new(tx))
-        .build_and_run(executor.clone())?;
+        .build_and_run(executor.clone())
+        .map_err(anyhow::Error::new)?;
     Ok(UriListener {
         server,
         executor,
@@ -163,41 +160,35 @@ fn claim_sole_instance() -> Result<InstanceRole, Error> {
     claim_instance(&single_instance_mutex_name(), &uri_named_pipe_name())
 }
 
-/// Determines this process's [`InstanceRole`], binding the URI pipe before acquiring the mutex.
+/// Determines this process's [`InstanceRole`] by acquiring the mutex and then binding the pipe.
 ///
-/// The ordering is the contract. Other launches test the mutex to decide whether to hand their
-/// startup arguments over, so the mutex must never become observable before there is a listener
-/// behind it: a claim that is visible but unreachable strands the launch that finds it. Acquiring
-/// the mutex only after a successful bind, and leaving it untouched when the bind fails, makes
-/// "the mutex exists" imply "a listener is bound".
+/// The two are not one atomic step, and no ordering of two kernel objects can make them one. What
+/// this ordering buys is that every state a concurrent launch can observe resolves safely:
+/// acquiring the mutex first means a launch that arrives mid-claim concludes "an instance exists"
+/// and waits out its connect budget, rather than concluding "no instance" and immediately starting
+/// a duplicate. Binding immediately after, rather than later during GUI initialization, is what
+/// shrinks that wait from seconds to the few instructions between these two statements.
+///
+/// Releasing the mutex when the bind fails keeps the same property: the claim never outlives this
+/// process's ability to serve it.
 fn claim_instance(mutex_name: &str, pipe_name: &str) -> Result<InstanceRole, Error> {
-    let listener = match bind_uri_listener(pipe_name) {
-        Ok(listener) => listener,
-        Err(err) => {
-            // An instance that already owns the pipe is the ordinary reason to fail the bind, and
-            // is not worth reporting.
-            if mutex_exists(mutex_name) {
-                return Ok(InstanceRole::Secondary);
-            }
-            report_error!(
-                anyhow::Error::new(err).context("Failed to initialize UriService Server")
-            );
-            return Ok(InstanceRole::Undiscoverable);
-        }
-    };
-
     let Some(mutex) = try_acquire_mutex(mutex_name)? else {
-        // Owning the pipe while another process still holds the mutex means that process is
-        // shutting down. Hand off anyway; the forwarding path falls open if it has already gone.
         return Ok(InstanceRole::Secondary);
     };
 
-    Ok(InstanceRole::Sole(SoleInstance {
-        _mutex: mutex,
-        _server: listener.server,
-        _executor: listener.executor,
-        forwarded_uris: listener.forwarded_uris,
-    }))
+    match bind_uri_listener(pipe_name) {
+        Ok(listener) => Ok(InstanceRole::Sole(SoleInstance {
+            _mutex: mutex,
+            _server: listener.server,
+            _executor: listener.executor,
+            forwarded_uris: listener.forwarded_uris,
+        })),
+        Err(err) => {
+            report_error!(err.context("Failed to initialize UriService Server"));
+            drop(mutex);
+            Ok(InstanceRole::Undiscoverable)
+        }
+    }
 }
 
 /// A singleton model that is responsible for ensuring there is only one instance of Warp running.

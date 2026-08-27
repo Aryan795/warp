@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use warpui::r#async::block_on;
 use warpui::r#async::executor::Background;
 
-use super::{InstanceRole, claim_instance};
-use crate::app_services::windows::service_impl::connect_to_sole_running_instance;
+use super::super::service_impl::connect_to_sole_running_instance;
+use super::{InstanceRole, bind_uri_listener, claim_instance, mutex_exists, try_acquire_mutex};
 
 /// Names unique to this process and call, so a test never collides with another test or with a
 /// Warp instance running on the same machine.
@@ -29,11 +29,9 @@ fn listener_is_reachable(pipe_name: &str) -> bool {
     block_on(connect_to_sole_running_instance(pipe_name, executor)).is_ok()
 }
 
-/// The contract the claim exists to provide: a launch is only ever told that another instance owns
-/// the claim when that instance already has a listener the launch can hand off to. Getting this
-/// wrong is what let a second launch fail its connect and start a duplicate instance.
+/// A launch told that another instance owns the claim must be able to reach that instance.
 #[test]
-fn a_secondary_claim_always_has_a_listener_to_reach() {
+fn a_secondary_claim_has_a_listener_to_reach() {
     let (mutex_name, pipe_name) = unique_object_names();
 
     let sole = claim_instance(&mutex_name, &pipe_name).expect("first claim should succeed");
@@ -55,28 +53,57 @@ fn a_secondary_claim_always_has_a_listener_to_reach() {
     drop(sole);
 }
 
+/// The interleaving that decides whether the ordering is safe: a claimant that has taken the mutex
+/// but has not yet bound its listener must still be reported as an existing instance. Concluding
+/// "no instance" here is what starts a duplicate, and it is why the mutex is acquired before the
+/// pipe is bound rather than after.
+#[test]
+fn a_claim_caught_before_its_listener_binds_still_reports_an_existing_instance() {
+    let (mutex_name, pipe_name) = unique_object_names();
+
+    // Stop the first claimant exactly between its two steps by taking the mutex without binding.
+    let mid_claim = try_acquire_mutex(&mutex_name)
+        .expect("acquiring the mutex should not fail")
+        .expect("the mutex should be unheld");
+
+    let concurrent = claim_instance(&mutex_name, &pipe_name)
+        .expect("claiming while another process is mid-claim should not fail");
+    assert!(
+        matches!(concurrent, InstanceRole::Secondary),
+        "a launch arriving mid-claim must defer to the claimant, not start its own instance"
+    );
+
+    // Completing the first claimant's second step makes the listener reachable, which is what the
+    // deferring launch's connect budget is there to wait for.
+    let listener = bind_uri_listener(&pipe_name).expect("binding should succeed");
+    assert!(listener_is_reachable(&pipe_name));
+
+    drop(listener);
+    drop(mid_claim);
+}
+
 /// A process that cannot listen must not leave a claim behind, or the next launch would defer to
 /// something it can never reach.
 #[test]
 fn a_process_that_cannot_listen_leaves_no_claim() {
-    let (mutex_name, pipe_name) = unique_object_names();
+    let (blocking_mutex_name, pipe_name) = unique_object_names();
+    let (mutex_name, _) = unique_object_names();
 
-    let sole = claim_instance(&mutex_name, &pipe_name).expect("first claim should succeed");
-    assert!(matches!(sole, InstanceRole::Sole(_)));
+    // Hold the pipe under a different mutex so the next claim takes its mutex and then fails to
+    // bind, which is the shape of a process whose listener could not be created.
+    let blocking = claim_instance(&blocking_mutex_name, &pipe_name).expect("claim should succeed");
+    assert!(matches!(blocking, InstanceRole::Sole(_)));
 
-    // A distinct mutex with the pipe already taken is the shape of a process whose listener could
-    // not be created.
-    let (unclaimed_mutex_name, _) = unique_object_names();
-    let undiscoverable = claim_instance(&unclaimed_mutex_name, &pipe_name)
+    let undiscoverable = claim_instance(&mutex_name, &pipe_name)
         .expect("claiming without a listener should not fail");
     assert!(
         matches!(undiscoverable, InstanceRole::Undiscoverable),
-        "failing to listen with no other instance present should not take the role"
+        "failing to bind should not leave this process holding the role"
     );
     assert!(
-        !super::mutex_exists(&unclaimed_mutex_name),
-        "a process that cannot listen must leave the mutex untouched"
+        !mutex_exists(&mutex_name),
+        "a process that cannot listen must release the mutex it took"
     );
 
-    drop(sole);
+    drop(blocking);
 }
