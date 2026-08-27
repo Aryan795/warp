@@ -1210,6 +1210,22 @@ impl OrchestrationEventStreamer {
         self.reevaluate_eligibility(conversation_id, ctx);
     }
 
+    /// Defensive self-heal for `wait_for_events`: (re)confirms the
+    /// conversation's own inbox is watched and re-checks eligibility, so a
+    /// conversation that somehow entered the wait with no `sse_connection` at
+    /// all (e.g. a role transition raced with a missed reevaluation) does not
+    /// sit parked until the watchdog fires. Idempotent and effectively free
+    /// when a connection is already open and correctly filtered
+    /// (QUALITY-1904).
+    pub fn ensure_owner_stream_open(
+        &mut self,
+        conversation_id: AIConversationId,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.ensure_self_run_id_watched(conversation_id, ctx);
+        self.reevaluate_eligibility(conversation_id, ctx);
+    }
+
     // ---- Viewer-mode consumer registry --------------------------------
 
     /// Registers a viewer-mode consumer (a shared-session viewer pane) for
@@ -1762,16 +1778,27 @@ impl OrchestrationEventStreamer {
         );
     }
 
-    /// Inserts `self_run_id` into the conversation's watched set if the
-    /// conversation has any orchestration role (child or parent) and is
-    /// not a passive remote-run view. Returns whether anything was
-    /// inserted; callers reevaluate eligibility on `true`. Idempotent.
+    /// Inserts `self_run_id` into the conversation's watched set for any
+    /// non-passive ambient conversation (one with a resolvable `run_id`).
+    /// Returns whether anything was inserted; callers reevaluate eligibility
+    /// on `true`. Idempotent.
+    ///
+    /// Previously this required the conversation to already be a known child
+    /// or parent before it would watch its own inbox at all — but any ambient
+    /// conversation can receive a `new_message` addressed to itself (from a
+    /// `run_agents` child it hasn't rediscovered yet, or from any other agent
+    /// that knows its run id) regardless of whether its own orchestration
+    /// role has been established locally. Gating self-watching on that role
+    /// created a chicken-and-egg failure: a bare root orchestrator with no
+    /// yet-known children could never watch even its own inbox, so it had no
+    /// way to receive the very messages that would have told it about those
+    /// children (QUALITY-1904).
     fn ensure_self_run_id_watched(
         &mut self,
         conversation_id: AIConversationId,
         ctx: &warpui::AppContext,
     ) -> bool {
-        let (run_id, is_child) = {
+        let run_id = {
             let history = BlocklistAIHistoryModel::as_ref(ctx);
             let Some(conversation) = history.conversation(&conversation_id) else {
                 return false;
@@ -1785,19 +1812,8 @@ impl OrchestrationEventStreamer {
             let Some(run_id) = conversation.run_id() else {
                 return false;
             };
-            (run_id, conversation.is_child_agent_conversation())
+            run_id
         };
-
-        // Parent role: any watched run_id that isn't this conversation's
-        // own self_run_id (i.e. a registered child).
-        let is_parent = self
-            .streams
-            .get(&conversation_id)
-            .is_some_and(|s| s.watched_run_ids.iter().any(|id| id != &run_id));
-
-        if !is_child && !is_parent {
-            return false;
-        }
 
         self.streams
             .entry(conversation_id)
@@ -1963,19 +1979,26 @@ impl OrchestrationEventStreamer {
                 stream.watched_run_ids.insert(own.clone());
             }
 
+            // Re-evaluate eligibility now, before the children-discovery
+            // fetch below even starts: watching self is already enough to
+            // open a baseline self-only stream (`RunIds([self_run_id])`),
+            // so the conversation's own inbox is never left dark while
+            // waiting on that fetch to resolve. Once it does resolve (or a
+            // later `wait_for_events` triggers `register_parent_on_wait`),
+            // `apply_task_children` upgrades the connection to the richer
+            // parent-family filter (QUALITY-1904).
+            self.reevaluate_eligibility(conv_id, ctx);
+
             // No run_id means we can't query the server for children or
-            // for the canonical cursor. Re-evaluate eligibility based on
-            // current state; a run_id assigned later flows through
-            // `on_server_token_assigned`.
+            // for the canonical cursor; nothing further to do here. A
+            // run_id assigned later flows through `on_server_token_assigned`.
             let Some(run_id) = run_id else {
-                self.reevaluate_eligibility(conv_id, ctx);
                 continue;
             };
 
             let Ok(task_id) = run_id.parse::<crate::ai::ambient_agents::AmbientAgentTaskId>()
             else {
                 log::warn!("could not parse run_id {run_id:?} for {conv_id:?}");
-                self.reevaluate_eligibility(conv_id, ctx);
                 continue;
             };
 
@@ -2197,9 +2220,20 @@ impl OrchestrationEventStreamer {
 
     /// True iff this conversation should currently hold an SSE connection.
     /// A subscription is needed only when there is an active consumer in
-    /// this process (an open agent view or an agent_sdk driver) AND the
-    /// conversation has a real role to consume events for. Passive views
-    /// of agent runs hosted elsewhere are excluded regardless of state.
+    /// this process (an open agent view or an agent_sdk driver) AND there is
+    /// something to watch — at minimum the conversation's own inbox once
+    /// `ensure_self_run_id_watched` has resolved a `run_id` for it. Passive
+    /// views of agent runs hosted elsewhere are excluded regardless of state.
+    ///
+    /// This deliberately does not require the conversation to already be a
+    /// known child or a known parent (i.e. to already have a discovered
+    /// non-self watched run id): requiring that role up front meant a bare
+    /// root orchestrator with no yet-known children had no stream at all and
+    /// so no way to ever discover those children from their `new_message`
+    /// events — the owner-stream outage in QUALITY-1904. Once a role *is*
+    /// discovered (a child appears in `watched_run_ids`), `desired_sse_filter`
+    /// upgrades the connection to the richer parent-family `AncestorRunId`
+    /// filter on its own.
     fn is_eligible(&self, conversation_id: AIConversationId, ctx: &warpui::AppContext) -> bool {
         if !self.has_active_consumer(conversation_id) {
             return false;
@@ -2213,10 +2247,7 @@ impl OrchestrationEventStreamer {
             );
             return false;
         }
-        let has_parent = BlocklistAIHistoryModel::as_ref(ctx)
-            .conversation(&conversation_id)
-            .is_some_and(|c| c.is_child_agent_conversation());
-        has_parent || self.is_parent_agent_conversation(conversation_id, ctx)
+        !self.run_ids_for_sse(conversation_id).is_empty()
     }
 
     /// True iff this conversation should hold the wake-only listener used for

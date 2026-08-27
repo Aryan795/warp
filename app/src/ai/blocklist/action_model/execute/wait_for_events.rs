@@ -107,8 +107,15 @@ impl WaitForEventsExecutor {
         // Blocking on descendants is the trigger to confirm parent status
         // against the server and register for the owner-side ancestor stream,
         // so children created out-of-band (Oz CLI / web API) are delivered.
+        //
+        // `ensure_owner_stream_open` is a defensive self-heal: it re-confirms
+        // the conversation's own inbox is watched and eligibility is
+        // re-checked every time a wait begins, so a conversation that
+        // somehow entered `WaitingForEvents` with no `sse_connection` at all
+        // is not left parked until the watchdog fires (QUALITY-1904).
         OrchestrationEventStreamer::handle(ctx).update(ctx, |streamer, ctx| {
             streamer.register_parent_on_wait(conversation_id, ctx);
+            streamer.ensure_owner_stream_open(conversation_id, ctx);
         });
 
         // Bump the counter so any prior watchdog closure observes a
